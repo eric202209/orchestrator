@@ -3,18 +3,11 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    
-    <!-- Optional: For voice input -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    
-    <!-- Optional: For notifications -->
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:allowBackup="true"
-        android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
-        android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.OpenClawMobileAssistant"
         android:usesCleartextTraffic="true">
@@ -28,6 +21,10 @@
             </intent-filter>
         </activity>
 
+        <activity android:name=".SettingsActivity" android:exported="false" />
+        <activity android:name=".SessionsActivity" android:exported="false" />
+
     </application>
 
 </manifest>
+
