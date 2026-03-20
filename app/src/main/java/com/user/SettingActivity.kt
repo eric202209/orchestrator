@@ -21,23 +21,28 @@ class SettingsActivity : AppCompatActivity() {
 
         prefs = PrefsManager(this)
         binding.serverUrlInput.setText(prefs.serverUrl)
+        binding.gatewayTokenInput.setText(prefs.gatewayToken)
 
         binding.saveButton.setOnClickListener {
-            val url = binding.serverUrlInput.text.toString().trim()
-            if (url.isEmpty()) {
-                Toast.makeText(this, "URL cannot be empty", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
+            val url   = binding.serverUrlInput.text.toString().trim()
+            val token = binding.gatewayTokenInput.text.toString().trim()
+            when {
+                url.isEmpty()   -> Toast.makeText(this,
+                    "Server URL cannot be empty", Toast.LENGTH_SHORT).show()
+                token.isEmpty() -> Toast.makeText(this,
+                    "Gateway Token cannot be empty", Toast.LENGTH_SHORT).show()
+                else -> {
+                    prefs.serverUrl    = url
+                    prefs.gatewayToken = token
+                    Toast.makeText(this,
+                        "Saved! Restart app to reconnect.", Toast.LENGTH_LONG).show()
+                    finish()
+                }
             }
-            prefs.serverUrl = url
-            Toast.makeText(this, "Saved! Restart the app to apply.", Toast.LENGTH_LONG).show()
-            finish()
         }
     }
 
-    override fun onSupportNavigateUp(): Boolean {
-        finish()
-        return true
-    }
+    override fun onSupportNavigateUp(): Boolean { finish(); return true }
 }
 
 

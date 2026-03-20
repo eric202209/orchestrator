@@ -99,8 +99,11 @@ lint/tmp/
 
 # Environment variables
 .env
+*.env
 .env.local
 .env.*.local
+server/.env
+gradle.properties
 
 # Privacy: Don't store API keys or credentials
 # Add your sensitive config files here if needed

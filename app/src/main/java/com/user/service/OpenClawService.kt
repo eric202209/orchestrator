@@ -9,12 +9,16 @@ import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.Body
+import retrofit2.http.Header
 import retrofit2.http.POST
 import java.util.concurrent.TimeUnit
 
 interface OpenClawApi {
     @POST("api/messages/send")
-    suspend fun sendMessage(@Body request: SendMessageRequest): SendMessageResponse
+    suspend fun sendMessage(
+        @Header("Authorization") auth: String,
+        @Body request: SendMessageRequest
+    ): SendMessageResponse
 }
 
 data class SendMessageRequest(
@@ -29,14 +33,17 @@ data class SendMessageResponse(
     val error: String? = null
 )
 
-class OpenClawService(private val chatDao: ChatDao, baseUrl: String) {
-
+class OpenClawService(
+    private val chatDao: ChatDao,
+    private val baseUrl: String,
+    private val gatewayToken: String
+) {
     private val client = OkHttpClient.Builder()
         .addInterceptor(HttpLoggingInterceptor().apply {
             level = HttpLoggingInterceptor.Level.BODY
         })
         .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
         .build()
 
     private val retrofit = Retrofit.Builder()
@@ -50,16 +57,25 @@ class OpenClawService(private val chatDao: ChatDao, baseUrl: String) {
     suspend fun sendMessage(sessionId: String, message: String): SendMessageResponse {
         return withContext(Dispatchers.IO) {
             try {
-                api.sendMessage(SendMessageRequest(sessionId, message, System.currentTimeMillis()))
+                api.sendMessage(
+                    "Bearer $gatewayToken",
+                    SendMessageRequest(sessionId, message, System.currentTimeMillis())
+                )
             } catch (e: Exception) {
                 SendMessageResponse(false, error = e.message ?: "Unknown error")
             }
         }
     }
 
-    suspend fun saveMessageToLocal(message: ChatMessage) {
-        withContext(Dispatchers.IO) {
+    suspend fun saveMessageToLocal(message: ChatMessage): Long {
+        return withContext(Dispatchers.IO) {
             chatDao.insertMessage(message)
+        }
+    }
+
+    suspend fun updateMessageContent(id: Long, content: String) {
+        return withContext(Dispatchers.IO) {
+            chatDao.updateMessageContent(id, content)
         }
     }
 }
