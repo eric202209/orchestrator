@@ -3,23 +3,26 @@ package com.user.service
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import okhttp3.*
-import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
-// ── Events emitted to MainActivity ──────────────────────────
+data class AgentInfo(
+    val agentId: String,
+    val name: String
+)
+
 sealed class GatewayEvent {
-    object Connecting           : GatewayEvent()
-    object HandshakeStarted     : GatewayEvent()
-    object Ready                : GatewayEvent()  // fully connected, can chat
-    object Disconnected         : GatewayEvent()
-    data class StreamDelta(val text: String)          : GatewayEvent()
-    data class StreamFinal(val fullText: String)      : GatewayEvent()
+    object Connecting                                        : GatewayEvent()
+    object HandshakeStarted                                  : GatewayEvent()
+    data class Ready(val agents: List<AgentInfo>)            : GatewayEvent()
+    object Disconnected                                      : GatewayEvent()
+    data class StreamDelta(val text: String)                 : GatewayEvent()
+    data class StreamFinal(val fullText: String)             : GatewayEvent()
     data class ToolCall(val name: String, val done: Boolean) : GatewayEvent()
-    data class Error(val message: String)             : GatewayEvent()
-    data class AuthError(val message: String)         : GatewayEvent()
-    data class PairingRequired(val deviceId: String)  : GatewayEvent()
+    data class Error(val message: String)                    : GatewayEvent()
+    data class AuthError(val message: String)                : GatewayEvent()
+    data class PairingRequired(val deviceId: String)         : GatewayEvent()
 }
 
 class GatewayClient(
@@ -29,31 +32,35 @@ class GatewayClient(
 ) {
     companion object {
         private val SCOPES = listOf(
-            "operator.admin",
-            "operator.approvals",
-            "operator.pairing",
-            "operator.read",
-            "operator.write"
+            "operator.admin", "operator.approvals", "operator.pairing",
+            "operator.read", "operator.write"
         )
     }
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.SECONDS)   // no timeout for streaming
+        .readTimeout(0, TimeUnit.SECONDS)
         .build()
 
     private var webSocket: WebSocket? = null
     private var state = State.DISCONNECTED
-    private var sessionKey: String = ""
+    private var shouldReconnect = true
+    private var reconnectAttempts = 0
 
-    // Accumulate streaming delta tokens
+    // Default sessionKey — updated when user picks an agent
+    var sessionKey: String = ""
+        private set
+
+    // Available agents from snapshot
+    var availableAgents: List<AgentInfo> = emptyList()
+        private set
+
     private val streamBuffer = StringBuilder()
+    private var connectFallbackTimer: android.os.Handler? = null
+    private var connectFallbackRunnable: Runnable? = null
 
     private val _events = MutableSharedFlow<GatewayEvent>(extraBufferCapacity = 128)
     val events: SharedFlow<GatewayEvent> = _events
-
-    private var connectFallbackTimer: android.os.Handler? = null
-    private var connectFallbackRunnable: Runnable? = null
 
     enum class State { DISCONNECTED, CONNECTING, HANDSHAKING, READY }
 
@@ -67,10 +74,21 @@ class GatewayClient(
         val wsUrl = serverUrl
             .replace("http://", "ws://")
             .replace("https://", "wss://")
-            .trimEnd('/')  // no path — connect directly to Gateway root
+            .trimEnd('/')
 
         val request = Request.Builder().url(wsUrl).build()
         webSocket = client.newWebSocket(request, Listener())
+    }
+
+    /**
+     * Switch to a different agent.
+     * sessionKey format: agent:<agentId>:main
+     */
+    fun switchAgent(agentId: String) {
+        sessionKey = "agent:$agentId:main"
+        streamBuffer.clear()
+        // Automatically trigger agent self-introduction
+        // sendMessage("Briefly introduce yourself based on your role")
     }
 
     fun sendMessage(message: String) {
@@ -95,12 +113,33 @@ class GatewayClient(
     }
 
     fun disconnect() {
+        shouldReconnect = false
+        reconnectAttempts = 0
         state = State.DISCONNECTED
+        connectFallbackRunnable?.let { connectFallbackTimer?.removeCallbacks(it) }
         webSocket?.close(1000, "User closed")
         webSocket = null
     }
 
+    private fun scheduleReconnect() {
+        if (!shouldReconnect || reconnectAttempts >= 5) return
+        val delay = (reconnectAttempts + 1) * 3000L
+        reconnectAttempts++
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            if (shouldReconnect) {
+                state = State.DISCONNECTED
+                webSocket = null
+                connect()
+            }
+        }, delay)
+    }
+
+    private fun resetReconnect() {
+        reconnectAttempts = 0
+    }
+
     fun isReady() = state == State.READY
+
 
     // ── WebSocket Listener ───────────────────────────────────
 
@@ -110,10 +149,11 @@ class GatewayClient(
             state = State.HANDSHAKING
             _events.tryEmit(GatewayEvent.HandshakeStarted)
 
+            // 500ms fallback if no challenge arrives
             val handler = android.os.Handler(android.os.Looper.getMainLooper())
             val runnable = Runnable {
                 if (state == State.HANDSHAKING) {
-                    sendConnectFrame(ws, java.util.UUID.randomUUID().toString())
+                    sendConnectFrame(ws, UUID.randomUUID().toString())
                 }
             }
             connectFallbackTimer = handler
@@ -124,23 +164,14 @@ class GatewayClient(
         override fun onMessage(ws: WebSocket, text: String) {
             if (text == "pong" || text.isBlank()) return
             try {
-                val msg = JSONObject(text)
-                handleMessage(ws, msg)
-            } catch (e: Exception) {
-                // ignore non-JSON
-            }
+                handleMessage(ws, JSONObject(text))
+            } catch (e: Exception) { }
         }
 
         override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
             state = State.DISCONNECTED
-            val code = response?.code
-            val msg = when {
-                code == 4001           -> "Auth failed — check your token"
-                t.message?.contains("ECONNREFUSED") == true ->
-                    "Cannot reach OpenClaw — is it running?"
-                else -> t.message ?: "Connection failed"
-            }
-            _events.tryEmit(GatewayEvent.Error(msg))
+            _events.tryEmit(GatewayEvent.Error(t.message ?: "Connection failed"))
+            scheduleReconnect()
         }
 
         override fun onClosing(ws: WebSocket, code: Int, reason: String) {
@@ -152,26 +183,24 @@ class GatewayClient(
         override fun onClosed(ws: WebSocket, code: Int, reason: String) {
             state = State.DISCONNECTED
             _events.tryEmit(GatewayEvent.Disconnected)
+            if (code != 1000) scheduleReconnect() // 1000 = 正常關閉，不重連
         }
     }
 
     // ── Message Handler ──────────────────────────────────────
 
     private fun handleMessage(ws: WebSocket, msg: JSONObject) {
-        android.util.Log.d("GatewayClient", "RAW: $msg")
         val type  = msg.optString("type")
         val event = msg.optString("event")
         val msgId = msg.optString("id")
 
         when {
 
-            // ── connect.challenge → send connect frame ─────────
+            // ── connect.challenge ──────────────────────────────
             type == "event" && event == "connect.challenge" -> {
-                // cancel fallback timer
                 connectFallbackRunnable?.let { connectFallbackTimer?.removeCallbacks(it) }
                 connectFallbackTimer = null
                 connectFallbackRunnable = null
-
                 val nonce = msg.optJSONObject("payload")?.optString("nonce") ?: ""
                 sendConnectFrame(ws, nonce)
             }
@@ -181,41 +210,56 @@ class GatewayClient(
                 if (!msg.optBoolean("ok", false)) {
                     val errCode = msg.optJSONObject("error")?.optString("code") ?: ""
                     val errMsg  = msg.optJSONObject("error")?.optString("message") ?: "Handshake failed"
-
                     when {
                         errCode.contains("UNPAIRED") || errCode.contains("NOT_PAIRED") ||
-                                errMsg.lowercase().contains("pair") -> {
+                                errMsg.lowercase().contains("pair") ->
                             _events.tryEmit(GatewayEvent.PairingRequired(ed25519.deviceId))
-                        }
-                        errCode.contains("AUTH") || errCode.contains("TOKEN") -> {
-                            _events.tryEmit(GatewayEvent.AuthError(errMsg))
-                        }
-                        else -> {
+                        else ->
                             _events.tryEmit(GatewayEvent.Error("Handshake failed: $errMsg"))
-                        }
                     }
                     state = State.DISCONNECTED
                     return
                 }
 
-                // ── Handshake success ──────────────────────────
+                // ── Parse agents from snapshot ─────────────────
                 val payload  = msg.optJSONObject("payload")
                 val snapshot = payload?.optJSONObject("snapshot")
                 val defaults = snapshot?.optJSONObject("sessionDefaults")
-                val mainKey  = defaults?.optString("mainSessionKey")
 
+                // Build agent list from snapshot.agents
+                val agentsJson = snapshot?.optJSONObject("health")?.optJSONArray("agents")
+                val agents = mutableListOf<AgentInfo>()
+                if (agentsJson != null) {
+                    for (i in 0 until agentsJson.length()) {
+                        val a = agentsJson.getJSONObject(i)
+                        agents.add(AgentInfo(
+                            agentId = a.optString("agentId", "main"),
+                            name    = a.optString("name", "Main")
+                        ))
+                    }
+                }
+
+                // Fallback if no agents in snapshot
+                if (agents.isEmpty()) {
+                    agents.add(AgentInfo("main", "Main"))
+                }
+                availableAgents = agents
+
+                // Set default sessionKey
+                val mainKey = defaults?.optString("mainSessionKey")
                 sessionKey = if (!mainKey.isNullOrEmpty()) {
                     mainKey
                 } else {
-                    val agentId = defaults?.optString("defaultAgentId") ?: "main"
-                    "agent:$agentId:main"
+                    val defaultAgentId = defaults?.optString("defaultAgentId") ?: "main"
+                    "agent:$defaultAgentId:main"
                 }
 
                 state = State.READY
-                _events.tryEmit(GatewayEvent.Ready)
+                resetReconnect()
+                _events.tryEmit(GatewayEvent.Ready(agents))
             }
 
-            // ── agent event (tool calls) ───────────────────────
+            // ── agent streaming ────────────────────────────────
             type == "event" && event == "agent" -> {
                 val payload = msg.optJSONObject("payload") ?: return
                 val stream  = payload.optString("stream")
@@ -223,8 +267,6 @@ class GatewayClient(
 
                 when (stream) {
                     "assistant" -> {
-                        // data.text 是累積全文，data.delta 是這次新增的字
-                        // 用 delta 做打字機效果
                         val delta = data?.optString("delta") ?: ""
                         if (delta.isNotEmpty()) {
                             streamBuffer.append(delta)
@@ -232,13 +274,10 @@ class GatewayClient(
                         }
                     }
                     "lifecycle" -> {
-                        when (data?.optString("phase")) {
-                            "end" -> {
-                                // 串流結束，發出完整文字
-                                val full = streamBuffer.toString().also { streamBuffer.clear() }
-                                if (full.isNotEmpty()) {
-                                    _events.tryEmit(GatewayEvent.StreamFinal(full))
-                                }
+                        if (data?.optString("phase") == "end") {
+                            val full = streamBuffer.toString().also { streamBuffer.clear() }
+                            if (full.isNotEmpty()) {
+                                _events.tryEmit(GatewayEvent.StreamFinal(full))
                             }
                         }
                     }
@@ -255,14 +294,11 @@ class GatewayClient(
         }
     }
 
-    // ── Build & Send Connect Frame ───────────────────────────
-    // Mirrors clawapp createConnectFrame() exactly
+    // ── Connect Frame ────────────────────────────────────────
 
     private fun sendConnectFrame(ws: WebSocket, nonce: String) {
-        val signedAt   = System.currentTimeMillis()
-        val credential = gatewayToken
-        val signature  = ed25519.buildSignature(signedAt, credential, nonce)
-        val scopesStr  = SCOPES.joinToString(",")
+        val signedAt  = System.currentTimeMillis()
+        val signature = ed25519.buildSignature(signedAt, gatewayToken, nonce)
 
         val frame = JSONObject().apply {
             put("type",   "req")
@@ -278,20 +314,18 @@ class GatewayClient(
                     put("mode",     "backend")
                 })
                 put("role",   "operator")
-                put("scopes", JSONArray(SCOPES))
-                put("caps",   JSONArray())
-                put("auth",   JSONObject().apply {
-                    put("token", gatewayToken)
-                })
+                put("scopes", org.json.JSONArray(SCOPES))
+                put("caps",   org.json.JSONArray())
+                put("auth",   JSONObject().apply { put("token", gatewayToken) })
                 put("device", JSONObject().apply {
                     put("id",        ed25519.deviceId)
                     put("publicKey", ed25519.publicKeyBase64url)
                     put("signedAt",  signedAt)
-                    put("nonce", nonce.ifEmpty { java.util.UUID.randomUUID().toString() })
+                    put("nonce",     nonce)
                     put("signature", signature)
                 })
                 put("locale",    "en-US")
-                put("userAgent", "ClawMobile-Android/1.3.0")
+                put("userAgent", "ClawMobile-Android/1.5.0")
             })
         }
         ws.send(frame.toString())

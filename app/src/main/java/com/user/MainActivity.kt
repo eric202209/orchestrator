@@ -44,8 +44,7 @@ class MainActivity : AppCompatActivity() {
     // Track streaming bot message row
     private var streamingMsgId: Long = -1L
 
-    // For historical mode
-    private var isHistoryMode = false
+    private var currentAgentId = "main"
 
     companion object {
         private const val VOICE_REQUEST_CODE = 100
@@ -147,6 +146,37 @@ class MainActivity : AppCompatActivity() {
                     is GatewayEvent.Ready -> {
                         binding.statusText.text = "● Connected"
                         binding.sendButton.isEnabled = true
+
+                        // Populate agent spinner
+                        val agentNames = event.agents.map { it.name }
+                        val spinnerAdapter = android.widget.ArrayAdapter(
+                            this@MainActivity,
+                            android.R.layout.simple_spinner_item,
+                            agentNames
+                        ).also {
+                            it.setDropDownViewResource(
+                                android.R.layout.simple_spinner_dropdown_item
+                            )
+                        }
+                        binding.agentSpinner.adapter = spinnerAdapter
+                        binding.agentSpinner.onItemSelectedListener =
+                            object : android.widget.AdapterView.OnItemSelectedListener {
+                                override fun onItemSelected(
+                                    parent: android.widget.AdapterView<*>?,
+                                    view: android.view.View?,
+                                    position: Int,
+                                    id: Long
+                                ) {
+                                    val agent = event.agents[position]
+                                    currentAgentId = agent.agentId
+                                    gatewayClient.switchAgent(agent.agentId)
+                                    binding.statusText.text =
+                                        "● ${agent.name}"
+                                }
+                                override fun onNothingSelected(
+                                    parent: android.widget.AdapterView<*>?
+                                ) {}
+                            }
                     }
 
                     is GatewayEvent.PairingRequired ->
@@ -158,7 +188,6 @@ class MainActivity : AppCompatActivity() {
                             event.message, Toast.LENGTH_LONG).show()
                     }
 
-                    // ── Streaming: first delta → create placeholder ──
                     is GatewayEvent.StreamDelta -> {
                         binding.typingIndicator.visibility = View.GONE
                         if (streamingMsgId == -1L) {
@@ -180,7 +209,6 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
 
-                    // ── Stream complete ──────────────────────────────
                     is GatewayEvent.StreamFinal -> {
                         if (streamingMsgId != -1L) {
                             openClawService.updateMessageContent(

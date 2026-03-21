@@ -23,20 +23,39 @@
         android:background="@color/background"
         app:layout_behavior="@string/appbar_scrolling_view_behavior">
 
-        <!-- Status bar -->
-        <TextView
-            android:id="@+id/statusText"
+        <!-- Status + Agent row -->
+        <LinearLayout
+            android:id="@+id/topBar"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:text="○ Disconnected"
-            android:textSize="12sp"
-            android:textColor="@color/status_disconnected"
-            android:gravity="center"
-            android:padding="4dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
             android:background="@color/toolbar_color"
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="4dp"
             app:layout_constraintTop_toTopOf="parent"
             app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintEnd_toEndOf="parent" />
+            app:layout_constraintEnd_toEndOf="parent">
+
+            <!-- Status dot + text -->
+            <TextView
+                android:id="@+id/statusText"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="○ Disconnected"
+                android:textSize="12sp"
+                android:textColor="@color/status_disconnected" />
+
+            <!-- Agent selector spinner -->
+            <Spinner
+                android:id="@+id/agentSpinner"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minWidth="120dp"
+                android:popupBackground="@color/ai_bubble" />
+
+        </LinearLayout>
 
         <!-- Message list -->
         <androidx.recyclerview.widget.RecyclerView
@@ -46,7 +65,7 @@
             android:paddingVertical="8dp"
             android:clipToPadding="false"
             android:background="@color/background"
-            app:layout_constraintTop_toBottomOf="@id/statusText"
+            app:layout_constraintTop_toBottomOf="@id/topBar"
             app:layout_constraintBottom_toTopOf="@id/typingIndicator"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent" />
@@ -64,7 +83,7 @@
             app:layout_constraintBottom_toTopOf="@id/inputDivider"
             app:layout_constraintStart_toStartOf="parent" />
 
-        <!-- Divider above input -->
+        <!-- Divider -->
         <View
             android:id="@+id/inputDivider"
             android:layout_width="0dp"
