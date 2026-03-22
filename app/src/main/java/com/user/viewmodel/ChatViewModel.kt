@@ -64,6 +64,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // ── Streaming state ───────────────────────────────────────
     private var streamingMsgId: Long = -1L
 
+    // Using a separate buffer in the ViewModel, without reading from LiveData.
+    private val streamBuffer = StringBuilder()
+
+    // Fix two GatewayClients connect simultaneously
+    private var lastProcessedFullText: String = ""
+
     // ── Init ──────────────────────────────────────────────────
     init {
         // Ensure device ID exists
@@ -147,27 +153,27 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                     is GatewayEvent.StreamDelta -> {
                         _showTyping.postValue(false)
+                        streamBuffer.append(event.text)
                         if (streamingMsgId == -1L) {
                             val placeholder = ChatMessage(
                                 sessionId = _sessionId,
-                                message   = event.text,
+                                message   = streamBuffer.toString(),
                                 isUser    = false,
                                 status    = MessageStatus.STREAMING
                             )
                             streamingMsgId = repository.insertMessage(placeholder)
                         } else {
-                            val current = _messages.value
-                                ?.firstOrNull { it.id == streamingMsgId }
-                            if (current != null) {
-                                repository.updateMessageContent(
-                                    streamingMsgId,
-                                    current.message + event.text
-                                )
-                            }
+                            repository.updateMessageContent(
+                                streamingMsgId,
+                                streamBuffer.toString()
+                            )
                         }
                     }
 
                     is GatewayEvent.StreamFinal -> {
+                        if (event.fullText == lastProcessedFullText) return@collect
+                        lastProcessedFullText = event.fullText
+                        streamBuffer.clear()
                         if (streamingMsgId != -1L) {
                             repository.updateMessageContent(
                                 streamingMsgId, event.fullText

@@ -28,7 +28,8 @@ sealed class GatewayEvent {
 class GatewayClient(
     private val serverUrl: String,
     private val gatewayToken: String,
-    private val ed25519: Ed25519Manager
+    private val ed25519: Ed25519Manager,
+    private var currentRunId: String = ""
 ) {
     companion object {
         private val SCOPES = listOf(
@@ -264,18 +265,23 @@ class GatewayClient(
                 val payload = msg.optJSONObject("payload") ?: return
                 val stream  = payload.optString("stream")
                 val data    = payload.optJSONObject("data")
+                val runId   = payload.optString("runId")
 
                 when (stream) {
                     "assistant" -> {
                         val delta = data?.optString("delta") ?: ""
                         if (delta.isNotEmpty()) {
+                            currentRunId = payload.optString("runId")
                             streamBuffer.append(delta)
                             _events.tryEmit(GatewayEvent.StreamDelta(delta))
                         }
                     }
                     "lifecycle" -> {
                         if (data?.optString("phase") == "end") {
+                            val runId = payload.optString("runId")
+                            if (runId != currentRunId) return
                             val full = streamBuffer.toString().also { streamBuffer.clear() }
+                            currentRunId = ""
                             if (full.isNotEmpty()) {
                                 _events.tryEmit(GatewayEvent.StreamFinal(full))
                             }
