@@ -4,6 +4,7 @@ import com.user.data.ChatDao
 import com.user.data.ChatMessage
 import com.user.data.ChatSession
 import com.user.data.PrefsManager
+import com.user.data.MessageStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
@@ -25,6 +26,9 @@ class ChatRepository(
 
     suspend fun updateMessageContent(id: Long, content: String) =
         withContext(Dispatchers.IO) { chatDao.updateMessageContent(id, content) }
+
+    suspend fun updateMessageStatus(id: Long, status: MessageStatus) =
+        withContext(Dispatchers.IO) { chatDao.updateMessageStatus(id, status) }
 
     // ── Sessions ─────────────────────────────────────────────
     fun getSessions(): Flow<List<ChatSession>> =

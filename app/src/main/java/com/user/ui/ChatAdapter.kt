@@ -4,6 +4,8 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.BitmapFactory
+import android.util.Base64
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -13,6 +15,7 @@ import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.user.data.ChatMessage
+import com.user.data.MessageStatus
 import com.user.databinding.ItemMessageBinding
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -51,16 +54,160 @@ class ChatAdapter : ListAdapter<ChatMessage, ChatAdapter.MessageViewHolder>(Diff
             } else {
                 binding.aiRow.visibility   = View.VISIBLE
                 binding.userRow.visibility = View.GONE
-                binding.messageText.text = MarkdownRenderer.render(
-                    binding.root.context, message.message
-                )
                 binding.timestampText.text = time
+
+                when {
+                    // Markdown image format: ![alt](data:image/... or https://...)
+                    hasMarkdownImage(message.message) -> {
+                        val base64   = extractBase64(message.message)
+                        val textOnly = message.message
+                            .substringBefore("![")
+                            .trim()
+
+                        if (textOnly.isNotEmpty()) {
+                            binding.messageText.text = MarkdownRenderer.render(
+                                binding.root.context, textOnly
+                            )
+                            binding.messageText.visibility = View.VISIBLE
+                        } else {
+                            binding.messageText.visibility = View.GONE
+                        }
+
+                        if (base64 != null) {
+                            showBase64Image(base64)
+                        } else {
+                            // Try URL image
+                            val imageUrl = extractImageUrl(message.message)
+                            if (imageUrl != null) {
+                                binding.messageImage.visibility = View.VISIBLE
+                                loadImageFromUrl(imageUrl)
+                            } else {
+                                binding.messageImage.visibility = View.GONE
+                            }
+                        }
+                    }
+
+                    // Raw base64 image (StreamFinal only)
+                    isBase64Image(message.message) &&
+                            message.status == MessageStatus.FINAL -> {
+                        val textOnly = message.message
+                            .substringBefore("data:image/")
+                            .trim()
+
+                        if (textOnly.isNotEmpty()) {
+                            binding.messageText.text = MarkdownRenderer.render(
+                                binding.root.context, textOnly
+                            )
+                            binding.messageText.visibility = View.VISIBLE
+                        } else {
+                            binding.messageText.visibility = View.GONE
+                        }
+
+                        showBase64Image(
+                            message.message.substring(
+                                message.message.indexOf("data:image/")
+                            )
+                        )
+                    }
+
+                    // Plain text
+                    else -> {
+                        binding.messageImage.visibility = View.GONE
+                        binding.messageText.visibility  = View.VISIBLE
+                        binding.messageText.text = MarkdownRenderer.render(
+                            binding.root.context, message.message
+                        )
+                    }
+                }
+
                 binding.messageText.setOnLongClickListener {
+                    showActionDialog(binding.root.context, message.message)
+                    true
+                }
+                binding.messageImage.setOnLongClickListener {
                     showActionDialog(binding.root.context, message.message)
                     true
                 }
             }
         }
+
+        // ── Image detection ───────────────────────────────────────
+
+        private fun hasMarkdownImage(text: String): Boolean {
+            return Regex("""!\[.*?]\((data:image/|https?://).*?""").containsMatchIn(text)
+        }
+
+        private fun isBase64Image(text: String): Boolean {
+            return text.contains("data:image/")
+        }
+
+        // ── Image extraction ──────────────────────────────────────
+
+        private fun extractBase64(text: String): String? {
+            // From markdown: ![alt](data:image/jpeg;base64,...)
+            val mdMatch = Regex("""!\[.*?]\((data:image/[^)]+)\)""").find(text)
+            if (mdMatch != null) return mdMatch.groupValues[1]
+            // Raw in text
+            val idx = text.indexOf("data:image/")
+            if (idx >= 0) return text.substring(idx)
+            return null
+        }
+
+        private fun extractImageUrl(text: String): String? {
+            val match = Regex("""!\[.*?]\((https?://[^)]+)\)""").find(text)
+            return match?.groupValues?.get(1)
+        }
+
+        // ── Image rendering ───────────────────────────────────────
+
+        private fun showBase64Image(base64: String) {
+            try {
+                val data = if (base64.contains(",")) {
+                    base64.substringAfter(",")
+                } else base64
+
+                val bytes  = Base64.decode(data, Base64.DEFAULT)
+                val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+
+                if (bitmap != null) {
+                    binding.messageImage.setImageBitmap(bitmap)
+                    binding.messageImage.visibility = View.VISIBLE
+                } else {
+                    binding.messageText.text = "[Image could not be decoded]"
+                    binding.messageText.visibility  = View.VISIBLE
+                    binding.messageImage.visibility = View.GONE
+                }
+            } catch (e: Exception) {
+                binding.messageText.text = "[Image error: ${e.message}]"
+                binding.messageText.visibility  = View.VISIBLE
+                binding.messageImage.visibility = View.GONE
+            }
+        }
+
+        private fun loadImageFromUrl(url: String) {
+            Thread {
+                try {
+                    val connection = java.net.URL(url).openConnection()
+                    connection.connectTimeout = 10000
+                    connection.readTimeout    = 10000
+                    connection.connect()
+                    val bitmap = BitmapFactory.decodeStream(connection.getInputStream())
+                    binding.root.post {
+                        if (bitmap != null) {
+                            binding.messageImage.setImageBitmap(bitmap)
+                        } else {
+                            binding.messageImage.visibility = View.GONE
+                        }
+                    }
+                } catch (e: Exception) {
+                    binding.root.post {
+                        binding.messageImage.visibility = View.GONE
+                    }
+                }
+            }.start()
+        }
+
+        // ── Long press actions ────────────────────────────────────
 
         private fun showActionDialog(context: Context, text: String) {
             AlertDialog.Builder(context)

@@ -24,6 +24,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import com.user.service.GatewayConnectionService
+import com.user.data.MessageStatus
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -141,7 +142,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         _pairingRequired.postValue(event.deviceId)
 
                     is GatewayEvent.AuthError -> {
-                        _status.postValue("✕ Auth failed")
+                        _toast.postValue("✕ Auth failed")
                     }
 
                     is GatewayEvent.StreamDelta -> {
@@ -150,7 +151,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             val placeholder = ChatMessage(
                                 sessionId = _sessionId,
                                 message   = event.text,
-                                isUser    = false
+                                isUser    = false,
+                                status    = MessageStatus.STREAMING
                             )
                             streamingMsgId = repository.insertMessage(placeholder)
                         } else {
@@ -170,6 +172,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             repository.updateMessageContent(
                                 streamingMsgId, event.fullText
                             )
+                            repository.updateMessageStatus(streamingMsgId, MessageStatus.FINAL)
                             streamingMsgId = -1L
                         } else {
                             repository.insertMessage(
@@ -194,7 +197,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         _status.postValue("○ Disconnected")
 
                     is GatewayEvent.Error -> {
-                        _status.postValue("✕ ${event.message}")
+                        _toast.postValue("✕ ${event.message}")
                         _showTyping.postValue(false)
                         _isSending.postValue(false)
                     }

@@ -15,5 +15,5 @@ data class ChatMessage(
 )
 
 enum class MessageStatus {
-    SENT, DELIVERED, READ, FAILED
+    SENT, DELIVERED, READ, FAILED, STREAMING, FINAL
 }
