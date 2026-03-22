@@ -20,6 +20,10 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import com.user.service.GatewayConnectionService
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -37,6 +41,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // ── LiveData exposed to UI ────────────────────────────────
     private val _status = MutableLiveData("○ Disconnected")
     val status: LiveData<String> = _status
+
+    private val _toast = MutableLiveData<String?>()
+    val toast: LiveData<String?> = _toast
 
     private val _agents = MutableLiveData<List<AgentInfo>>(emptyList())
     val agents: LiveData<List<AgentInfo>> = _agents
@@ -94,6 +101,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun startService(context: Context) {
+        val intent = Intent(context, GatewayConnectionService::class.java)
+        context.startForegroundService(intent)
+        // The ViewModel's own GatewayClient continues to handle UI updates.
+        connect()
+    }
+
     // ── Gateway ───────────────────────────────────────────────
 
     fun connect() {
@@ -111,16 +125,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             gateway.events.collect { event ->
                 when (event) {
                     is GatewayEvent.Connecting ->
-                        _status.postValue("○ Connecting…")
+                        _toast.postValue("○ Connecting…")
 
                     is GatewayEvent.HandshakeStarted ->
-                        _status.postValue("● Handshaking…")
+                        _toast.postValue("● Handshaking…")
 
                     is GatewayEvent.Ready -> {
-                        _status.postValue("● Connected")
+                        _toast.postValue("● Connected")  // Briefly display
                         _agents.postValue(event.agents)
                         _isSending.postValue(false)
-                        // Start observing messages now that we're connected
                         observeMessages()
                     }
 
@@ -174,7 +187,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                     is GatewayEvent.ToolCall -> {
                         val icon = if (event.done) "✅" else "⚙️"
-                        _status.postValue("$icon ${event.name}")
+                        _toast.postValue("$icon ${event.name}")
                     }
 
                     is GatewayEvent.Disconnected ->
@@ -189,6 +202,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
+
+    fun clearToast() { _toast.postValue(null) }
 
     // ── Send message ──────────────────────────────────────────
 

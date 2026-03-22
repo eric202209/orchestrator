@@ -1,23 +1,30 @@
 package com.user
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.speech.RecognizerIntent
+import android.text.SpannableString
 import android.view.KeyEvent
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
-import android.widget.ArrayAdapter
 import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Toast
 import androidx.activity.viewModels
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.LinearLayoutManager
+import com.user.data.PrefsManager
 import com.user.databinding.ActivityMainBinding
+import com.user.service.AgentInfo
 import com.user.ui.ChatAdapter
 import com.user.viewmodel.ChatViewModel
-import android.text.SpannableString
 
 class MainActivity : AppCompatActivity() {
 
@@ -35,9 +42,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
         setSupportActionBar(binding.toolbar)
 
-        // Check token
-        val prefs = com.user.data.PrefsManager(this)
-        if (prefs.gatewayToken.isEmpty()) {
+        if (PrefsManager(this).gatewayToken.isEmpty()) {
             Toast.makeText(this, "Please enter your Gateway Token", Toast.LENGTH_LONG).show()
             startActivity(Intent(this, SettingsActivity::class.java))
             return
@@ -47,19 +52,24 @@ class MainActivity : AppCompatActivity() {
         setupObservers()
         setupInputHandlers()
 
-        // Load session from intent (history) or start new
         val sessionId    = intent.getStringExtra("session_id")
         val sessionTitle = intent.getStringExtra("session_title")
         if (sessionId != null) {
             title = sessionTitle ?: "Chat"
             supportActionBar?.setDisplayHomeAsUpEnabled(true)
             viewModel.loadSession(sessionId, sessionTitle)
+            // When you open Chat History mode, it does not initiate new connections
         } else {
             viewModel.startNewSession()
+            requestNotificationPermission()
+            viewModel.startService(this)
         }
 
-        viewModel.connect()
+        requestNotificationPermission()
+        viewModel.startService(this)
     }
+
+    // ── Setup ─────────────────────────────────────────────────
 
     private fun setupRecyclerView() {
         chatAdapter = ChatAdapter()
@@ -71,59 +81,61 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupObservers() {
-        viewModel.status.observe(this) { binding.statusText.text = it }
-
+        viewModel.status.observe(this) { status ->
+            when {
+                status.startsWith("✕") || status.startsWith("○") -> {
+                    // Display only when there is a disconnection or error.
+                    binding.statusText.text = status
+                    binding.statusText.visibility = View.VISIBLE
+                }
+                status.startsWith("●") -> {
+                    // Connection successful → Hide in 1.5 seconds
+                    binding.statusText.text = status
+                    binding.statusText.visibility = View.VISIBLE
+                    binding.statusText.postDelayed({
+                        binding.statusText.visibility = View.GONE
+                    }, 1500)
+                }
+                else -> {
+                    // Connecting / Handshaking → Displayed but not persistent.
+                    binding.statusText.text = status
+                    binding.statusText.visibility = View.VISIBLE
+                }
+            }
+        }
         viewModel.messages.observe(this) { messages ->
             chatAdapter.submitList(messages.toList())
-            if (messages.isNotEmpty()) {
+            if (messages.isNotEmpty())
                 binding.recyclerView.scrollToPosition(messages.size - 1)
-            }
         }
-
-        viewModel.agents.observe(this) { agents ->
-            if (agents.isEmpty()) return@observe
-            val names = agents.map { it.name }
-            val adapter = ArrayAdapter(this,
-                android.R.layout.simple_spinner_item, names).also {
-                it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-            }
-            binding.agentSpinner.adapter = adapter
-            binding.agentSpinner.onItemSelectedListener =
-                object : AdapterView.OnItemSelectedListener {
-                    override fun onItemSelected(
-                        parent: AdapterView<*>?, view: View?, position: Int, id: Long
-                    ) { viewModel.switchAgent(agents[position].agentId) }
-                    override fun onNothingSelected(parent: AdapterView<*>?) {}
-                }
-        }
-
-        viewModel.isSending.observe(this) { sending ->
-            binding.sendButton.isEnabled = !sending
-        }
-
-        viewModel.showTyping.observe(this) { show ->
+        viewModel.agents.observe(this)          { setupAgentSpinner(it) }
+        viewModel.isSending.observe(this)        { binding.sendButton.isEnabled = !it }
+        viewModel.showTyping.observe(this)       { show ->
             binding.typingIndicator.visibility = if (show) View.VISIBLE else View.GONE
         }
+        viewModel.pairingRequired.observe(this)  { showPairingDialog(it) }
 
-        viewModel.pairingRequired.observe(this) { deviceId ->
-            deviceId ?: return@observe
-            AlertDialog.Builder(this)
-                .setTitle("Device Pairing Required")
-                .setMessage(
-                    "Run on GX10:\n\n" +
-                            "1. openclaw gateway call device.pair.list --json\n\n" +
-                            "2. openclaw gateway call device.pair.approve \\\n" +
-                            "   --params '{\"requestId\":\"<id>\"}' --json\n\n" +
-                            "Device ID:\n${deviceId.take(12)}…\n\nThen restart the app."
-                )
-                .setPositiveButton("OK", null)
-                .show()
+        binding.statusText.visibility = View.GONE
+
+        viewModel.status.observe(this) { status ->
+            if (status.isNullOrEmpty()) {
+                binding.statusText.visibility = View.GONE
+            } else {
+                binding.statusText.text = status
+                binding.statusText.visibility = View.VISIBLE
+            }
+        }
+
+        viewModel.toast.observe(this) { message ->
+            message ?: return@observe
+            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+            viewModel.clearToast()
         }
     }
 
     private fun setupInputHandlers() {
-        binding.sendButton.setOnClickListener { sendMessage() }
-        binding.voiceButton.setOnClickListener { startVoiceInput() }
+        binding.sendButton.setOnClickListener    { sendMessage() }
+        binding.voiceButton.setOnClickListener   { startVoiceInput() }
         binding.historyButton.setOnClickListener {
             startActivity(Intent(this, SessionsActivity::class.java))
         }
@@ -132,6 +144,40 @@ class MainActivity : AppCompatActivity() {
                 sendMessage(); true
             } else false
         }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────
+
+    private fun setupAgentSpinner(agents: List<AgentInfo>) {
+        if (agents.isEmpty()) return
+        val adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_item,
+            agents.map { it.name }
+        ).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
+
+        binding.agentSpinner.adapter = adapter
+        binding.agentSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(
+                parent: AdapterView<*>?, view: View?, position: Int, id: Long
+            ) { viewModel.switchAgent(agents[position].agentId) }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+    }
+
+    private fun showPairingDialog(deviceId: String?) {
+        deviceId ?: return
+        AlertDialog.Builder(this)
+            .setTitle("Device Pairing Required")
+            .setMessage(
+                "Run on GX10:\n\n" +
+                        "1. openclaw gateway call device.pair.list --json\n\n" +
+                        "2. openclaw gateway call device.pair.approve \\\n" +
+                        "   --params '{\"requestId\":\"<id>\"}' --json\n\n" +
+                        "Device ID:\n${deviceId.take(12)}…\n\nThen restart the app."
+            )
+            .setPositiveButton("OK", null)
+            .show()
     }
 
     private fun sendMessage() {
@@ -152,6 +198,19 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Voice input not available", Toast.LENGTH_SHORT).show()
         }
     }
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(
+                    this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 200
+                )
+            }
+        }
+    }
+
+    // ── Overrides ─────────────────────────────────────────────
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
@@ -177,15 +236,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
-            R.id.action_new_chat -> {
-                startActivity(Intent(this, MainActivity::class.java)); true
-            }
-            R.id.action_history -> {
-                startActivity(Intent(this, SessionsActivity::class.java)); true
-            }
-            R.id.action_settings -> {
-                startActivity(Intent(this, SettingsActivity::class.java)); true
-            }
+            R.id.action_new_chat  -> { startActivity(Intent(this, MainActivity::class.java)); true }
+            R.id.action_history   -> { startActivity(Intent(this, SessionsActivity::class.java)); true }
+            R.id.action_settings  -> { startActivity(Intent(this, SettingsActivity::class.java)); true }
             else -> super.onOptionsItemSelected(item)
         }
     }
@@ -194,5 +247,4 @@ class MainActivity : AppCompatActivity() {
         finish()
         return true
     }
-
 }

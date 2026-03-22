@@ -10,7 +10,7 @@ android {
 
     defaultConfig {
         applicationId = "com.user"
-        minSdk = 24
+        minSdk = 26
         targetSdk = 34
         versionCode = 3
         versionName = "1.2.0"

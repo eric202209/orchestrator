@@ -1,8 +1,14 @@
 package com.user.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
@@ -34,20 +40,52 @@ class ChatAdapter : ListAdapter<ChatMessage, ChatAdapter.MessageViewHolder>(Diff
                 .format(Date(message.timestamp))
 
             if (message.isUser) {
-                // User message — right aligned
                 binding.userRow.visibility = View.VISIBLE
                 binding.aiRow.visibility   = View.GONE
                 binding.userMessageText.text = message.message
                 binding.userTimestampText.text = time
+                binding.userMessageText.setOnLongClickListener {
+                    showActionDialog(binding.root.context, message.message)
+                    true
+                }
             } else {
-                // AI message — left aligned with Markdown
                 binding.aiRow.visibility   = View.VISIBLE
                 binding.userRow.visibility = View.GONE
                 binding.messageText.text = MarkdownRenderer.render(
                     binding.root.context, message.message
                 )
                 binding.timestampText.text = time
+                binding.messageText.setOnLongClickListener {
+                    showActionDialog(binding.root.context, message.message)
+                    true
+                }
             }
+        }
+
+        private fun showActionDialog(context: Context, text: String) {
+            AlertDialog.Builder(context)
+                .setItems(arrayOf("📋  Copy", "↗  Share")) { _, which ->
+                    when (which) {
+                        0 -> copyToClipboard(context, text)
+                        1 -> shareText(context, text)
+                    }
+                }
+                .show()
+        }
+
+        private fun copyToClipboard(context: Context, text: String) {
+            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE)
+                    as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("OpenClaw", text))
+            Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+        }
+
+        private fun shareText(context: Context, text: String) {
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, text)
+            }
+            context.startActivity(Intent.createChooser(intent, "Share via"))
         }
     }
 
