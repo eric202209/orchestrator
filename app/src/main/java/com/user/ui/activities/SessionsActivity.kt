@@ -1,4 +1,4 @@
-package com.user
+package com.user.ui.activities
 
 import android.content.Intent
 import android.os.Bundle
@@ -11,6 +11,9 @@ import com.user.databinding.ActivitySessionsBinding
 import com.user.ui.SessionAdapter
 import com.user.viewmodel.SessionViewModel
 
+/**
+ * Chat history activity showing all chat sessions
+ */
 class SessionsActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivitySessionsBinding

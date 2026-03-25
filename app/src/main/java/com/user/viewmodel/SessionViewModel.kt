@@ -5,19 +5,16 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.viewModelScope
-import com.user.data.ChatDatabase
+import com.user.ClawMobileApplication
 import com.user.data.ChatSession
-import com.user.data.PrefsManager
 import com.user.repository.ChatRepository
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 class SessionViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val repository = ChatRepository(
-        ChatDatabase.getDatabase(application).chatDao(),
-        PrefsManager(application)
-    )
+    private val app = application as ClawMobileApplication
+    private val repository = app.repository
 
     private val _sessions = MutableLiveData<List<ChatSession>>(emptyList())
     val sessions: LiveData<List<ChatSession>> = _sessions
@@ -69,4 +66,5 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         _sessions.postValue(sorted)
     }
 }
+
 

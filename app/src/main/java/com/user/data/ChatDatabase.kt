@@ -5,9 +5,29 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 
-@Database(entities = [ChatMessage::class, ChatSession::class], version = 4, exportSchema = false)
+/**
+ * Updated database with developer tools integration entities
+ */
+@Database(
+    entities = [
+        ChatMessage::class,
+        ChatSession::class,
+        GitConnection::class,
+        ProjectContext::class,
+        ProjectFile::class,
+        Task::class,
+        ApiRequest::class,
+        ApiResponse::class
+    ],
+    version = 8,
+    exportSchema = false
+)
 abstract class ChatDatabase : RoomDatabase() {
     abstract fun chatDao(): ChatDao
+    abstract fun gitConnectionDao(): GitConnectionDao
+    abstract fun projectContextDao(): ProjectContextDao
+    abstract fun taskDao(): TaskDao
+    abstract fun apiRequestDao(): ApiRequestDao
 
     companion object {
         @Volatile
@@ -28,5 +48,6 @@ abstract class ChatDatabase : RoomDatabase() {
         }
     }
 }
+
 
 

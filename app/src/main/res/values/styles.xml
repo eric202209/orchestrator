@@ -1,12 +1,35 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="DarkPopupMenu" parent="Widget.AppCompat.PopupMenu">
+
+    <!-- App Theme -->
+    <style name="AppTheme" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/primary</item>
+        <item name="colorPrimaryVariant">@color/primary_dark</item>
+        <item name="colorSecondary">@color/accent</item>
+
+        <item name="android:colorBackground">@color/background</item>
+        <item name="colorSurface">@color/surface</item>
+
+        <item name="android:textColorPrimary">@color/text_primary</item>
+        <item name="android:textColorSecondary">@color/text_secondary</item>
+    </style>
+
+    <!-- Toolbar -->
+    <style name="AppToolbar" parent="Widget.MaterialComponents.Toolbar">
+        <item name="android:background">@color/toolbar_color</item>
+        <item name="titleTextColor">@color/text_primary</item>
+    </style>
+
+    <!-- Popup Menu -->
+    <style name="DarkPopupMenu" parent="Widget.MaterialComponents.PopupMenu">
         <item name="android:textColor">@color/ai_bubble_text</item>
         <item name="android:background">@color/ai_bubble</item>
     </style>
 
+    <!-- Rounded Shape -->
     <style name="RoundedCorners">
         <item name="cornerFamily">rounded</item>
         <item name="cornerSize">12dp</item>
     </style>
+
 </resources>

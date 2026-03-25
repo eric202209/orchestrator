@@ -23,6 +23,17 @@
             android:orientation="vertical"
             android:padding="16dp">
 
+            <!-- Server Settings -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="OpenClaw Gateway"
+                android:textColor="@color/ai_bubble_text"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp" />
+
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -45,11 +56,11 @@
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="• Emulator → http://10.0.2.2:18789\n• Phone (same WiFi) → http://GX10_IP:18789\n• ngrok → https://xxxx.ngrok-free.app"
+                android:text="• Emulator → http://10.0.2.2:18789\n• Phone (same WiFi) → http://DEVICE_IP:18789\n• ngrok → https://xxxx.ngrok-free.app"
                 android:textColor="@color/timestamp_text"
                 android:textSize="12sp"
                 android:paddingTop="4dp"
-                android:paddingBottom="24dp" />
+                android:paddingBottom="16dp" />
 
             <TextView
                 android:layout_width="match_parent"
@@ -77,13 +88,100 @@
                 android:textColor="@color/timestamp_text"
                 android:textSize="12sp"
                 android:paddingTop="4dp"
-                android:paddingBottom="32dp" />
+                android:paddingBottom="24dp" />
+
+            <!-- GitHub Integration -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="GitHub Integration (Optional)"
+                android:textColor="@color/ai_bubble_text"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Personal Access Token"
+                android:textColor="@color/timestamp_text"
+                android:textSize="12sp"
+                android:paddingBottom="4dp" />
+
+            <EditText
+                android:id="@+id/githubTokenInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="ghp_xxxxxxxxxxxx"
+                android:textColorHint="@color/timestamp_text"
+                android:textColor="@color/ai_bubble_text"
+                android:inputType="textPassword"
+                android:singleLine="true"
+                android:backgroundTint="@color/timestamp_text" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Generate at: github.com/settings/tokens"
+                android:textColor="@color/timestamp_text"
+                android:textSize="12sp"
+                android:paddingTop="4dp"
+                android:paddingBottom="16dp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="API URL (Optional)"
+                android:textColor="@color/timestamp_text"
+                android:textSize="12sp"
+                android:paddingBottom="4dp" />
+
+            <EditText
+                android:id="@+id/githubApiUrlInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="https://api.github.com"
+                android:textColorHint="@color/timestamp_text"
+                android:textColor="@color/ai_bubble_text"
+                android:inputType="textUri"
+                android:singleLine="true"
+                android:backgroundTint="@color/timestamp_text" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Default Repository (Optional)"
+                android:textColor="@color/timestamp_text"
+                android:textSize="12sp"
+                android:paddingTop="16dp"
+                android:paddingBottom="4dp" />
+
+            <EditText
+                android:id="@+id/githubDefaultRepoInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="owner/repo"
+                android:textColorHint="@color/timestamp_text"
+                android:textColor="@color/ai_bubble_text"
+                android:inputType="text"
+                android:singleLine="true"
+                android:backgroundTint="@color/timestamp_text" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="• @github show PRs - List open PRs\n• @github issue #123 - Show issue\n• @github commit abc123 - Show commit"
+                android:textColor="@color/timestamp_text"
+                android:textSize="12sp"
+                android:paddingTop="8dp"
+                android:paddingBottom="24dp" />
 
             <Button
                 android:id="@+id/saveButton"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Save"
+                android:text="Save Settings"
                 android:backgroundTint="@color/send_button"
                 android:textColor="@color/white" />
 

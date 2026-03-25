@@ -23,6 +23,10 @@ sealed class GatewayEvent {
     data class Error(val message: String)                    : GatewayEvent()
     data class AuthError(val message: String)                : GatewayEvent()
     data class PairingRequired(val deviceId: String)         : GatewayEvent()
+
+    // Developer Tools Events
+    data class ProjectContextUpdate(val sessionId: String, val projectPath: String, val files: List<String>) : GatewayEvent()
+    data class TerminalResult(val sessionId: String, val command: String, val status: String, val output: String?, val error: String?) : GatewayEvent()
 }
 
 class GatewayClient(
@@ -220,13 +224,13 @@ class GatewayClient(
                 if (!msg.optBoolean("ok", false)) {
                     val errCode = msg.optJSONObject("error")?.optString("code") ?: ""
                     val errMsg  = msg.optJSONObject("error")?.optString("message") ?: "Handshake failed"
-                    
+
                     // Fixed: More specific pairing check to avoid false positives with "repair"
-                    val isPairingError = errCode == "UNPAIRED" || 
-                                       errCode == "NOT_PAIRED" || 
-                                       errCode == "PAIRING_REQUIRED" ||
-                                       errMsg.lowercase().contains("pairing required") ||
-                                       errMsg.lowercase().contains("not paired")
+                    val isPairingError = errCode == "UNPAIRED" ||
+                            errCode == "NOT_PAIRED" ||
+                            errCode == "PAIRING_REQUIRED" ||
+                            errMsg.lowercase().contains("pairing required") ||
+                            errMsg.lowercase().contains("not paired")
 
                     if (isPairingError) {
                         _events.tryEmit(GatewayEvent.PairingRequired(ed25519.deviceId))

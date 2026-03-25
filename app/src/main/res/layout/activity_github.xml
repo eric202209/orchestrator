@@ -1,0 +1,224 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/background">
+
+    <androidx.appcompat.widget.Toolbar
+        android:id="@+id/toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="?attr/actionBarSize"
+        android:background="@color/toolbar_color"
+        android:theme="@style/ThemeOverlay.AppCompat.Dark.ActionBar" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <!-- Repository Selection -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Repository"
+                android:textColor="@color/ai_bubble_text"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:paddingBottom="8dp" />
+
+            <TextView
+                android:id="@+id/repoInfo"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="No repository selected"
+                android:textColor="@color/timestamp_text"
+                android:paddingBottom="8dp" />
+
+            <Button
+                android:id="@+id/refreshButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Refresh Repos"
+                android:backgroundTint="@color/ai_bubble"
+                android:textColor="@color/white" />
+
+            <!-- Pull Requests -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Pull Requests"
+                android:textColor="@color/ai_bubble_text"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:paddingTop="24dp"
+                android:paddingBottom="8dp" />
+
+            <Button
+                android:id="@+id/showPrsButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Show Open PRs"
+                android:backgroundTint="@color/ai_bubble"
+                android:textColor="@color/white" />
+
+            <ScrollView
+                android:layout_width="match_parent"
+                android:layout_height="150dp"
+                android:paddingTop="8dp">
+
+                <EditText
+                    android:id="@+id/prList"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="PRs will appear here..."
+                    android:textColorHint="@color/timestamp_text"
+                    android:textColor="@color/ai_bubble_text"
+                    android:gravity="top"
+                    android:background="@android:drawable/edit_text"
+                    android:inputType="textMultiLine"
+                    android:scrollbars="vertical"
+                    android:focusable="false"
+                    android:clickable="false" />
+            </ScrollView>
+
+            <!-- Issues -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Issues"
+                android:textColor="@color/ai_bubble_text"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:paddingTop="24dp"
+                android:paddingBottom="8dp" />
+
+            <Button
+                android:id="@+id/showIssuesButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Show Open Issues"
+                android:backgroundTint="@color/ai_bubble"
+                android:textColor="@color/white" />
+
+            <ScrollView
+                android:layout_width="match_parent"
+                android:layout_height="150dp"
+                android:paddingTop="8dp">
+
+                <EditText
+                    android:id="@+id/issueList"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="Issues will appear here..."
+                    android:textColorHint="@color/timestamp_text"
+                    android:textColor="@color/ai_bubble_text"
+                    android:gravity="top"
+                    android:background="@android:drawable/edit_text"
+                    android:inputType="textMultiLine"
+                    android:scrollbars="vertical"
+                    android:focusable="false"
+                    android:clickable="false" />
+            </ScrollView>
+
+            <!-- Commit Lookup -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Commit Lookup"
+                android:textColor="@color/ai_bubble_text"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:paddingTop="24dp"
+                android:paddingBottom="8dp" />
+
+            <EditText
+                android:id="@+id/commitIdInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="abc123def"
+                android:textColorHint="@color/timestamp_text"
+                android:textColor="@color/ai_bubble_text"
+                android:inputType="text"
+                android:backgroundTint="@color/timestamp_text" />
+
+            <Button
+                android:id="@+id/showCommitButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Show Commit"
+                android:backgroundTint="@color/ai_bubble"
+                android:textColor="@color/white" />
+
+            <ScrollView
+                android:layout_width="match_parent"
+                android:layout_height="150dp"
+                android:paddingTop="8dp">
+
+                <EditText
+                    android:id="@+id/commitInfo"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="Commit details will appear here..."
+                    android:textColorHint="@color/timestamp_text"
+                    android:textColor="@color/ai_bubble_text"
+                    android:gravity="top"
+                    android:background="@android:drawable/edit_text"
+                    android:inputType="textMultiLine"
+                    android:scrollbars="vertical"
+                    android:focusable="false"
+                    android:clickable="false" />
+            </ScrollView>
+
+            <!-- Loading Indicator -->
+            <ProgressBar
+                android:id="@+id/loadingIndicator"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:visibility="gone" />
+
+        </LinearLayout>
+    </ScrollView>
+
+    <!-- Connection List -->
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="@color/timestamp_text" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Saved Connections"
+        android:textColor="@color/ai_bubble_text"
+        android:textSize="14sp"
+        android:textStyle="bold"
+        android:padding="12dp" />
+
+    <TextView
+        android:id="@+id/emptyView"
+        android:layout_width="match_parent"
+        android:layout_height="40dp"
+        android:gravity="center"
+        android:text="No connections"
+        android:textColor="@color/timestamp_text"
+        android:textSize="12sp"
+        android:visibility="gone" />
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/repo_recycler_view"
+        android:layout_width="match_parent"
+        android:layout_height="200dp"
+        android:padding="8dp" />
+
+</LinearLayout>

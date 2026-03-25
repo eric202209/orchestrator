@@ -267,3 +267,4 @@ class ChatAdapter : ListAdapter<ChatMessage, ChatAdapter.MessageViewHolder>(Diff
     }
 }
 
+

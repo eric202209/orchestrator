@@ -1,18 +1,48 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Same as light — always dark -->
-    <color name="background">#111B21</color>
-    <color name="toolbar_color">#1F2C34</color>
-    <color name="user_bubble">#005C4B</color>
-    <color name="user_bubble_text">#E9EDEF</color>
-    <color name="ai_bubble">#1F2C34</color>
-    <color name="ai_bubble_text">#E9EDEF</color>
-    <color name="code_background">#2A3942</color>
-    <color name="code_text">#25D366</color>
-    <color name="timestamp_text">#8696A0</color>
-    <color name="input_background">#1F2C34</color>
-    <color name="input_text">#E9EDEF</color>
-    <color name="send_button">#00A884</color>
-    <color name="status_connected">#25D366</color>
-    <color name="status_disconnected">#8696A0</color>
+
+    <!-- Brand -->
+    <color name="primary">#FF7043</color>
+    <color name="primary_dark">#D84315</color>
+    <color name="accent">#FFB74D</color>
+
+    <!-- Background -->
+    <color name="background">#121212</color>
+    <color name="surface">#1E1E1E</color>
+    <color name="toolbar_color">#1F1F1F</color>
+
+    <!-- Chat -->
+    <color name="user_bubble">#FF7043</color>
+    <color name="user_bubble_text">#FFFFFF</color>
+
+    <color name="ai_bubble">#1E1E1E</color>
+    <color name="ai_bubble_text">#EAEAEA</color>
+
+    <!-- Input -->
+    <color name="input_background">#1A1A1A</color>
+    <color name="input_text">#FFFFFF</color>
+
+    <!-- Code -->
+    <color name="code_background">#1E1E1E</color>
+    <color name="code_text">#FFAB91</color>
+
+    <!-- Text -->
+    <color name="text_primary">#FFFFFF</color>
+    <color name="text_secondary">#B0B0B0</color>
+    <color name="timestamp_text">#9E9E9E</color>
+
+    <!-- Buttons -->
+    <color name="send_button">#FF7043</color>
+
+    <!-- Divider -->
+    <color name="divider">#2A2A2A</color>
+    <color name="border">#2A2A2A</color>
+
+    <!-- Status -->
+    <color name="status_connected">#66BB6A</color>
+    <color name="status_disconnected">#757575</color>
+
+    <color name="white">#FFFFFF</color>
+    <color name="black">#000000</color>
+
 </resources>

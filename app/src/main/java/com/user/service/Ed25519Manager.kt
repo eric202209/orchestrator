@@ -142,13 +142,13 @@ class Ed25519Manager(context: Context) {
             // as it often returns a KeyStore generator that requires complex initialization.
             throw e
         }
-        
+
         // Save to prefs for persistence
         prefs.edit()
             .putString("priv", Base64.encodeToString(kp.private.encoded, Base64.DEFAULT))
             .putString("pub",  Base64.encodeToString(kp.public.encoded,  Base64.DEFAULT))
             .apply()
-        
+
         return kp
     }
 }

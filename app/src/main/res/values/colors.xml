@@ -1,28 +1,58 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Brand -->
-    <color name="purple_300">#BB86FC</color>
-    <color name="purple_500">#075E54</color>
-    <color name="purple_700">#054D44</color>
-    <color name="teal_200">#25D366</color>
-    <color name="teal_700">#128C7E</color>
-    <color name="black">#FF000000</color>
-    <color name="white">#FFFFFFFF</color>
-    <color name="message_text">#E0E0E0</color>
 
-    <!-- Dark theme (always dark, like WhatsApp dark mode) -->
-    <color name="background">#111B21</color>
-    <color name="toolbar_color">#1F2C34</color>
-    <color name="user_bubble">#005C4B</color>
-    <color name="user_bubble_text">#E9EDEF</color>
-    <color name="ai_bubble">#1F2C34</color>
-    <color name="ai_bubble_text">#E9EDEF</color>
-    <color name="code_background">#2A3942</color>
-    <color name="code_text">#25D366</color>
-    <color name="timestamp_text">#8696A0</color>
+    <!-- Brand -->
+    <color name="primary">#FF7043</color>
+    <color name="primary_dark">#E64A19</color>
+    <color name="accent">#FFB74D</color>
+
+    <!-- Background -->
+    <color name="background">#111B21</color> <!-- slightly darker -->
+    <color name="surface">#1E1E1E</color>
+    <color name="toolbar_color">#1F2C34</color> <!-- not pure white -->
+
+    <!-- Chat -->
+    <color name="user_bubble">#C0C0C0</color>
+    <color name="user_bubble_text">#333333</color>
+
+    <!-- KEY FIX: stronger separation -->
+    <color name="ai_bubble">#C0C0C0</color>
+    <color name="ai_bubble_text">#333333</color>
+
+    <!-- Input -->
     <color name="input_background">#1F2C34</color>
-    <color name="input_text">#E9EDEF</color>
-    <color name="send_button">#00A884</color>
-    <color name="status_connected">#25D366</color>
-    <color name="status_disconnected">#8696A0</color>
+    <color name="input_text">#C0C0C0</color>
+
+    <!-- Code -->
+    <color name="code_background">#7C7A7A</color>
+    <color name="code_text">#1FAB53</color>
+
+    <!-- Text -->
+    <color name="text_primary">#1A1A1A</color>
+    <color name="text_secondary">#616161</color>
+    <color name="timestamp_text">#8A8A8A</color>
+    <color name="message_text">#1A1A1A</color>
+
+    <!-- Buttons -->
+    <color name="send_button">#C17FCC</color>
+
+    <!-- Divider -->
+    <color name="divider">#DADADA</color>
+    <color name="border">#E0E0E0</color>
+
+    <!-- Status (slightly toned down) -->
+    <color name="status_connected">#43A047</color>
+    <color name="status_disconnected">#9E9E9E</color>
+    <color name="status_approved">#43A047</color>
+    <color name="status_completed">#43A047</color>
+    <color name="status_failed">#E53935</color>
+    <color name="status_pending">#FFB300</color>
+    <color name="status_rejected">#D32F2F</color>
+    <color name="status_running">#1E88E5</color>
+    <color name="status_timeout">#FF8B00</color>
+
+    <!-- Base -->
+    <color name="white">#FFFFFF</color>
+    <color name="black">#000000</color>
+
 </resources>
