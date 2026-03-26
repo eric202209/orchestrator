@@ -1,0 +1,910 @@
+import { useState, useEffect, useRef } from 'react';
+import { useParams, Link } from 'react-router-dom';
+import { sessionsAPI, tasksAPI } from '../api/client';
+import type { Session, LogEntry, Task } from '../types/api';
+import { 
+  ArrowLeft, 
+  Play, 
+  Pause, 
+  Square, 
+  RotateCcw, 
+  Activity, 
+  Clock, 
+  Calendar,
+  Terminal,
+  RefreshCw,
+  Settings,
+  Wind,
+  Zap,
+  Trash2,
+  ArrowUp,
+  ArrowDown,
+  Filter
+} from 'lucide-react';
+
+function SessionDashboard() {
+  const { id } = useParams<{ id: string }>();
+  const [session, setSession] = useState<Session | null>(null);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [statusWs, setStatusWs] = useState<WebSocket | null>(null);
+  const [logsWs, setLogsWs] = useState<WebSocket | null>(null);
+  const [isConnected, setIsConnected] = useState(false);
+  const [isLogsConnected, setIsLogsConnected] = useState(false);
+  const [inputTask, setInputTask] = useState('');
+  const [executing, setExecuting] = useState(false);
+  const [isLoadingTasks, setIsLoadingTasks] = useState(false);
+  const logsEndRef = useRef<HTMLDivElement>(null);
+  const [showSettings, setShowSettings] = useState(false);
+  
+  // Track reconnect attempts and timeouts
+  const reconnectCountRef = useRef(0);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const isConnectingRef = useRef(false);
+  
+  // Limit logs in memory to prevent performance issues
+  const MAX_LOGS_IN_MEMORY = 500;
+  
+  // Sorting and filtering state
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc'); // Newest first by default
+  const [deduplicate, setDeduplicate] = useState(true);
+  const [filterLevel, setFilterLevel] = useState<string | undefined>(undefined);
+  const [isLoadingLogs, setIsLoadingLogs] = useState(false);
+  const [isFetching, setIsFetching] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // Helper function to format dates in local time
+  const formatLocalTime = (dateString: string | null) => {
+    if (!dateString) return 'N/A';
+    // Force UTC parsing by replacing 'T' with ' ' and adding 'Z' if missing
+    const cleanDate = dateString.replace('T', ' ').replace(/\.?\d+Z?$/, 'Z');
+    const date = new Date(cleanDate);
+    return date.toLocaleString();
+  };
+
+  // Fetch sorted logs from API
+  const fetchSortedLogs = async () => {
+    console.log('fetchSortedLogs called, id:', id);
+    if (!id) {
+      console.log('No id, returning early');
+      return;
+    }
+    
+    setIsLoadingLogs(true);
+    try {
+      const response = await sessionsAPI.getSortedLogs(
+        Number(id),
+        sortOrder,
+        deduplicate,
+        filterLevel
+      );
+      
+      console.log('Sorted logs response:', response);
+      console.log('Response data:', response?.data);
+      
+      // Axios wraps response in .data property
+      const apiResponse = response?.data || response;
+      const logsArray = Array.isArray(apiResponse) ? apiResponse : (apiResponse?.logs || []);
+      
+      console.log('logsArray:', logsArray);
+      console.log('logsArray length:', logsArray.length);
+      
+      // Transform logs to use created_at
+      const transformedLogs = logsArray.map((log: any) => ({
+        ...log,
+        created_at: log.timestamp
+      }));
+      
+      setLogs(transformedLogs);
+    } catch (error: any) {
+      console.error('Failed to fetch sorted logs:', error);
+      console.error('Response structure:', error?.response?.data);
+      alert(`Failed to load logs: ${error?.response?.data?.detail || error?.message || 'Unknown error'}. Please try again.`);
+    } finally {
+      setIsLoadingLogs(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!id) return;
+    fetchSession();
+    connectStatusWebSocket();
+    connectLogsWebSocket();
+    fetchSortedLogs(); // Load sorted logs on mount
+    
+    return () => {
+      if (statusWs) statusWs.close();
+      if (logsWs) logsWs.close();
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Fetch tasks when session is loaded
+  useEffect(() => {
+    if (session?.project_id) {
+      fetchProjectTasks();
+    }
+  }, [session?.project_id]);
+
+// Re-fetch logs when sorting/filtering changes (debounced)
+  useEffect(() => {
+    if (!id || isFetching) return;
+    
+    setIsFetching(true);
+    const timer = setTimeout(() => {
+      fetchSortedLogs();
+      setIsFetching(false);
+    }, 100); // Debounce by 100ms
+    
+    return () => clearTimeout(timer);
+  }, [sortOrder, deduplicate, filterLevel, id]);
+
+  // Debounced scroll to bottom
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, 50);
+    
+    return () => clearTimeout(timer);
+  }, [logs]);
+
+  const fetchSession = async () => {
+    if (!id) return;
+    try {
+      const response = await sessionsAPI.getById(Number(id));
+      console.log('Session response:', response);
+      console.log('Session data:', response.data);
+      setSession(response.data);
+    } catch (error) {
+      console.error('Failed to fetch session:', error);
+    }
+  };
+
+  const fetchProjectTasks = async () => {
+    if (!session?.project_id) return;
+    
+    setIsLoadingTasks(true);
+    try {
+      const response = await tasksAPI.getByProject(session.project_id);
+      console.log('Tasks response:', response);
+      setTasks(response.data || []);
+    } catch (error) {
+      console.error('Failed to fetch tasks:', error);
+    } finally {
+      setIsLoadingTasks(false);
+    }
+  };
+
+  const connectStatusWebSocket = () => {
+    if (!id || isConnectingRef.current) return;
+    
+    isConnectingRef.current = true;
+    const webSocket = sessionsAPI.getStatusStream(Number(id));
+    
+    webSocket.onopen = () => {
+      setIsConnected(true);
+      isConnectingRef.current = false;
+      console.log('Connected to session status stream');
+    };
+
+    webSocket.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type === 'status_update') {
+        setSession(prev => prev ? { ...prev, ...data.status } : null);
+      }
+    };
+
+    webSocket.onerror = (error) => {
+      console.error('Status WebSocket error:', error);
+      setIsConnected(false);
+    };
+
+    webSocket.onclose = (event) => {
+      setIsConnected(false);
+      // Only reconnect if we're still on the page
+      // Use exponential backoff
+      const reconnectDelay = Math.min(3000 * Math.pow(1.5, reconnectCountRef.current), 30000);
+      console.log(`Status WebSocket closed, reconnecting in ${reconnectDelay}ms...`);
+      
+      // Track reconnect attempts
+      if (!reconnectCountRef.current) {
+        reconnectCountRef.current = 0;
+      }
+      reconnectCountRef.current++;
+      
+      reconnectTimeoutRef.current = setTimeout(() => {
+        if (document.visibilityState === 'visible') {
+          connectStatusWebSocket();
+        }
+      }, reconnectDelay);
+    };
+
+    setStatusWs(webSocket);
+  };
+
+  const connectLogsWebSocket = () => {
+    console.log('connectLogsWebSocket called, id:', id);
+    if (!id || isConnectingRef.current) {
+      console.log('Not connecting - missing id or already connecting');
+      return;
+    }
+    
+    isConnectingRef.current = true;
+    const webSocket = sessionsAPI.getLogsStream(Number(id));
+    console.log('WebSocket URL:', webSocket.url);
+    
+    webSocket.onopen = () => {
+      console.log('Logs WebSocket opened!');
+      setIsLogsConnected(true);
+      isConnectingRef.current = false;
+      console.log('Connected to logs stream');
+    };
+
+    webSocket.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type === 'log') {
+        const logEntry = {
+          ...data,
+          created_at: data.timestamp || new Date().toISOString()
+        };
+        setLogs(prev => {
+          const updated = [...prev, logEntry];
+          // Limit logs in memory to prevent performance issues
+          if (updated.length > MAX_LOGS_IN_MEMORY) {
+            return updated.slice(-MAX_LOGS_IN_MEMORY);
+          }
+          return updated;
+        });
+      } else if (data.type === 'connected') {
+        console.log('Logs WebSocket connected, receiving recent logs...');
+      }
+    };
+
+    webSocket.onerror = (error) => {
+      console.error('Logs WebSocket error:', error);
+      console.error('WebSocket readyState:', webSocket.readyState);
+      setIsLogsConnected(false);
+      isConnectingRef.current = false;
+    };
+
+    webSocket.onclose = (event) => {
+      console.log('Logs WebSocket closed, code:', event.code, 'reason:', event.reason);
+      setIsLogsConnected(false);
+      isConnectingRef.current = false;
+      console.log('Logs WebSocket closed, reconnecting in 3 seconds...');
+      setTimeout(() => connectLogsWebSocket(), 3000);
+    };
+
+    setLogsWs(webSocket);
+  };
+
+  const handleRefreshLogs = () => {
+    fetchSortedLogs();
+  };
+
+  const handleRefreshWebSocket = async () => {
+    if (isRefreshing) return; // Prevent multiple simultaneous refreshes
+    
+    setIsRefreshing(true);
+    try {
+      if (statusWs) {
+        statusWs.close();
+      }
+      if (logsWs) {
+        logsWs.close();
+      }
+      
+      // Reconnect WebSockets
+      connectStatusWebSocket();
+      connectLogsWebSocket();
+      
+      // Also fetch fresh data from API
+      await fetchSession();
+      await fetchSortedLogs();
+      
+      // Show success feedback
+      console.log('Session data refreshed successfully');
+    } catch (error) {
+      console.error('Failed to refresh session data:', error);
+      alert('Failed to refresh data. Please try again.');
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  const handleDeleteSession = async () => {
+    if (!id || !session) return;
+    
+    if (!window.confirm('Are you sure you want to delete this session? This action cannot be undone.')) {
+      return;
+    }
+
+    try {
+      await sessionsAPI.delete(Number(id));
+      window.location.href = `/projects/${session.project_id}`;
+    } catch (error) {
+      console.error('Failed to delete session:', error);
+      alert('Failed to delete session. Please try again.');
+    }
+  };
+
+  const handleStart = async () => {
+    if (!id) return;
+    try {
+      await sessionsAPI.start(Number(id));
+      await fetchSession();
+    } catch (error) {
+      console.error('Failed to start session:', error);
+      alert('Failed to start session. Please try again.');
+    }
+  };
+
+  const handlePause = async () => {
+    if (!id) return;
+    try {
+      await sessionsAPI.pause(Number(id));
+      await fetchSession();
+    } catch (error) {
+      console.error('Failed to pause session:', error);
+      alert('Failed to pause session. Please try again.');
+    }
+  };
+
+  const handleResume = async () => {
+    if (!id) return;
+    try {
+      await sessionsAPI.resume(Number(id));
+      await fetchSession();
+    } catch (error) {
+      console.error('Failed to resume session:', error);
+      alert('Failed to resume session. Please try again.');
+    }
+  };
+
+  const handleStop = async () => {
+    if (!id) return;
+    try {
+      await sessionsAPI.stop(Number(id));
+      await fetchSession();
+    } catch (error) {
+      console.error('Failed to stop session:', error);
+      alert('Failed to stop session. Please try again.');
+    }
+  };
+
+  const handleExecute = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!id || !inputTask.trim() || executing) return;
+
+    setExecuting(true);
+    try {
+      const response = await tasksAPI.execute(Number(id), {
+        task: inputTask,
+        timeout_seconds: 300,
+        use_demo_mode: false
+      });
+
+      setInputTask('');
+      await fetchSession();
+      
+      // Show notification
+      alert('Task executed successfully!');
+    } catch (error: any) {
+      console.error('Failed to execute task:', error);
+      alert(error.response?.data?.detail || 'Failed to execute task. Please try again.');
+    } finally {
+      setExecuting(false);
+    }
+  };
+
+  const getFilteredLogs = () => {
+    if (!filterLevel) return logs;
+    return logs.filter(log => log.level === filterLevel);
+  };
+
+  const getSortedLogs = () => {
+    const filtered = getFilteredLogs();
+    const sorted = [...filtered].sort((a, b) => {
+      const dateA = new Date(a.created_at || 0);
+      const dateB = new Date(b.created_at || 0);
+      return sortOrder === 'asc' ? dateA.getTime() - dateB.getTime() : dateB.getTime() - dateA.getTime();
+    });
+    
+    if (deduplicate) {
+      const seen = new Set();
+      return sorted.filter(log => {
+        const key = `${log.created_at}-${log.message}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+    
+    return sorted;
+  };
+
+  const displayLogs = getSortedLogs();
+
+  const getLogCount = () => {
+    if (!filterLevel) return logs.length;
+    return logs.filter(log => log.level === filterLevel).length;
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
+      {/* Header */}
+      <div className="bg-slate-900/80 backdrop-blur border-b border-slate-800 sticky top-0 z-10">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <Link to={`/projects/${session?.project_id}`}>
+                <ArrowLeft className="h-5 w-5 text-slate-400 hover:text-white transition-colors" />
+              </Link>
+              <div>
+                <h1 className="text-2xl font-bold text-white">
+                  {session?.name || 'Session'}
+                </h1>
+                <p className="text-sm text-slate-400">
+                  Project ID: {session?.project_id}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setShowSettings(!showSettings)}
+                className="p-2 text-slate-400 hover:text-white transition-colors"
+                title="Log settings"
+              >
+                <Settings className="h-5 w-5" />
+              </button>
+              <Link
+                to={`/projects/${session?.project_id}`}
+                className="px-4 py-2 text-slate-300 hover:text-white transition-colors"
+              >
+                Back to Project
+              </Link>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Settings Panel */}
+      {showSettings && (
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+          <div className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-6">
+            <h3 className="text-lg font-semibold text-white mb-4">Log Settings</h3>
+            
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              {/* Sort Order */}
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Sort Order
+                </label>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setSortOrder('asc')}
+                    className={`flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg transition-all ${
+                      sortOrder === 'asc'
+                        ? 'bg-primary-500 text-white'
+                        : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                    }`}
+                  >
+                    <ArrowUp className="h-4 w-4" />
+                    Oldest First
+                  </button>
+                  <button
+                    onClick={() => setSortOrder('desc')}
+                    className={`flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg transition-all ${
+                      sortOrder === 'desc'
+                        ? 'bg-primary-500 text-white'
+                        : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                    }`}
+                  >
+                    <ArrowDown className="h-4 w-4" />
+                    Newest First
+                  </button>
+                </div>
+              </div>
+
+              {/* Deduplicate */}
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Deduplicate Logs
+                </label>
+                <button
+                  onClick={() => setDeduplicate(!deduplicate)}
+                  className={`w-full px-4 py-2 rounded-lg transition-all ${
+                    deduplicate
+                      ? 'bg-primary-500 text-white'
+                      : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                  }`}
+                >
+                  {deduplicate ? 'Enabled' : 'Disabled'}
+                </button>
+              </div>
+
+              {/* Filter by Level */}
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Filter by Level
+                </label>
+                <select
+                  value={filterLevel || ''}
+                  onChange={(e) => setFilterLevel(e.target.value || undefined)}
+                  className="w-full px-4 py-2 bg-slate-700 text-slate-300 rounded-lg border border-slate-600 focus:outline-none focus:ring-2 focus:ring-primary-500"
+                >
+                  <option value="">All Levels</option>
+                  <option value="INFO">INFO</option>
+                  <option value="WARNING">WARNING</option>
+                  <option value="ERROR">ERROR</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Info */}
+            <div className="mt-4 p-3 bg-slate-700/50 rounded-lg">
+              <p className="text-sm text-slate-300">
+                Showing {displayLogs.length} of {getLogCount()} logs 
+                {filterLevel && <span> (filtered: {filterLevel})</span>}
+                {deduplicate && <span> (deduplicated)</span>}
+                <span> (sorted: {sortOrder === 'asc' ? 'oldest first' : 'newest first'})</span>
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Main Content */}
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Left Column - Session Info & Controls */}
+          <div className="lg:col-span-1 space-y-6">
+            {/* Session Status */}
+            <div className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-6">
+              <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                <Activity className="h-5 w-5" />
+                Session Status
+              </h2>
+              
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400">Status:</span>
+                  <span className={`font-medium ${
+                    session?.status === 'running' ? 'text-green-400' :
+                    session?.status === 'paused' ? 'text-yellow-400' :
+                    session?.status === 'stopped' ? 'text-red-400' :
+                    'text-slate-300'
+                  }`}>
+                    {session?.status || 'unknown'}
+                  </span>
+                </div>
+                
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400">Active:</span>
+                  <span className={`font-medium ${
+                    session?.is_active ? 'text-green-400' : 'text-slate-300'
+                  }`}>
+                    {session?.is_active ? 'Yes' : 'No'}
+                  </span>
+                </div>
+                
+                {session?.started_at && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400">Started:</span>
+                    <span className="text-slate-300 text-sm">{formatLocalTime(session.started_at)}</span>
+                  </div>
+                )}
+                
+                {session?.stopped_at && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400">Stopped:</span>
+                    <span className="text-slate-300 text-sm">{formatLocalTime(session.stopped_at)}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Session Controls */}
+            <div className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-6">
+              <h2 className="text-lg font-semibold text-white mb-4">Controls</h2>
+              
+              <div className="grid grid-cols-2 gap-3">
+                {session?.status === 'stopped' && (
+                  <button
+                    onClick={handleStart}
+                    disabled={executing}
+                    className="flex items-center justify-center gap-2 px-4 py-3 bg-green-500 hover:bg-green-600 text-white rounded-lg transition-all font-medium disabled:opacity-50"
+                  >
+                    <Play className="h-5 w-5" />
+                    Start
+                  </button>
+                )}
+                
+                {session?.status === 'pending' && (
+                  <button
+                    onClick={handleStart}
+                    disabled={executing}
+                    className="flex items-center justify-center gap-2 px-4 py-3 bg-green-500 hover:bg-green-600 text-white rounded-lg transition-all font-medium disabled:opacity-50"
+                  >
+                    <Play className="h-5 w-5" />
+                    Start Session
+                  </button>
+                )}
+                
+                {session?.status === 'running' && (
+                  <>
+                    <button
+                      onClick={handlePause}
+                      disabled={executing}
+                      className="flex items-center justify-center gap-2 px-4 py-3 bg-yellow-500 hover:bg-yellow-600 text-white rounded-lg transition-all font-medium disabled:opacity-50"
+                    >
+                      <Pause className="h-5 w-5" />
+                      Pause
+                    </button>
+                    <button
+                      onClick={handleStop}
+                      disabled={executing}
+                      className="flex items-center justify-center gap-2 px-4 py-3 bg-red-500 hover:bg-red-600 text-white rounded-lg transition-all font-medium disabled:opacity-50"
+                    >
+                      <Square className="h-5 w-5" />
+                      Stop
+                    </button>
+                  </>
+                )}
+                
+                {session?.status === 'paused' && (
+                  <button
+                    onClick={handleResume}
+                    disabled={executing}
+                    className="flex items-center justify-center gap-2 px-4 py-3 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-all font-medium disabled:opacity-50 col-span-2"
+                  >
+                    <Play className="h-5 w-5" />
+                    Resume Session
+                  </button>
+                )}
+                
+                <button
+                  onClick={handleRefreshWebSocket}
+                  disabled={executing || isRefreshing}
+                  className="flex items-center justify-center gap-2 px-4 py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-all font-medium disabled:opacity-50"
+                >
+                  {isRefreshing ? (
+                    <>
+                      <RefreshCw className="h-5 w-5 animate-spin" />
+                      Refreshing...
+                    </>
+                  ) : (
+                    <>
+                      <RefreshCw className="h-5 w-5" />
+                      Refresh
+                    </>
+                  )}
+                </button>
+                
+                <button
+                  onClick={handleDeleteSession}
+                  disabled={executing}
+                  className="flex items-center justify-center gap-2 px-4 py-3 bg-red-600/20 hover:bg-red-600/30 text-red-400 hover:text-red-300 rounded-lg transition-all font-medium disabled:opacity-50 col-span-2"
+                >
+                  <Trash2 className="h-5 w-5" />
+                  Delete Session
+                </button>
+              </div>
+            </div>
+
+            {/* Connection Status */}
+            <div className={`bg-slate-800/50 backdrop-blur rounded-xl border p-6 ${
+              isConnected 
+                ? 'border-green-400/20 bg-green-400/5' 
+                : 'border-red-400/20 bg-red-400/5'
+            }`}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className={`h-3 w-3 rounded-full ${
+                    isConnected ? 'bg-green-400 animate-pulse' : 'bg-red-400'
+                  }`} />
+                  <span className="font-medium text-white">WebSocket</span>
+                </div>
+                <span className={`text-sm ${
+                  isConnected ? 'text-green-400' : 'text-red-400'
+                }`}>
+                  {isConnected ? 'Connected' : 'Disconnected'}
+                </span>
+              </div>
+              {!isConnected && (
+                <p className="text-xs text-slate-400 mt-2">
+                  Reconnecting in 3 seconds...
+                </p>
+              )}
+            </div>
+          </div>
+
+          {/* Right Column - Logs & Execution */}
+          <div className="lg:col-span-2 space-y-6">
+            {/* Logs Connection Status */}
+            <div className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className={`h-3 w-3 rounded-full ${
+                    isLogsConnected ? 'bg-green-400 animate-pulse' : 'bg-red-400'
+                  }`} />
+                  <span className="font-medium text-white">Logs Stream</span>
+                </div>
+                <span className={`text-sm ${
+                  isLogsConnected ? 'text-green-400' : 'text-red-400'
+                }`}>
+                  {isLogsConnected ? 'Connected' : 'Disconnected'}
+                </span>
+              </div>
+            </div>
+
+            {/* Available Tasks */}
+            <div className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-6">
+              <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                <Zap className="h-5 w-5" />
+                Available Tasks
+              </h2>
+              
+              {isLoadingTasks ? (
+                <div className="text-center py-8 text-slate-400">
+                  <div className="inline-block h-6 w-6 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
+                  <p className="mt-2 text-sm">Loading tasks...</p>
+                </div>
+              ) : tasks.length === 0 ? (
+                <div className="text-center py-8 text-slate-400">
+                  <p className="text-sm">No tasks in this project yet.</p>
+                  <Link to={`/projects/${session?.project_id}`} className="mt-2 text-primary-400 hover:text-primary-300 text-sm">
+                    Go to project to add tasks
+                  </Link>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {tasks.map((task) => (
+                    <button
+                      key={task.id}
+                      onClick={() => {
+                        setInputTask(`${task.title}\n\n${task.description || ''}`);
+                        // Scroll to execution box
+                        setTimeout(() => {
+                          document.querySelector('textarea')?.focus();
+                        }, 100);
+                      }}
+                      disabled={executing || session?.status !== 'running'}
+                      className="w-full text-left bg-slate-700/50 hover:bg-slate-700 border border-slate-600 hover:border-primary-500 rounded-lg p-4 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1">
+                          <h3 className="font-medium text-white mb-1">{task.title}</h3>
+                          {task.description && (
+                            <p className="text-sm text-slate-400 line-clamp-2">
+                              {task.description}
+                            </p>
+                          )}
+                          {task.steps && (
+                            <p className="text-xs text-slate-500 mt-2">
+                              {task.steps}
+                            </p>
+                          )}
+                        </div>
+                        <div className={`ml-4 px-2 py-1 rounded text-xs font-medium ${
+                          task.status === 'done' ? 'bg-green-500/20 text-green-400' :
+                          task.status === 'running' ? 'bg-blue-500/20 text-blue-400' :
+                          task.status === 'failed' ? 'bg-red-500/20 text-red-400' :
+                          'bg-slate-600/20 text-slate-400'
+                        }`}>
+                          {task.status}
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Task Execution */}
+            <div className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-6">
+              <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                <Terminal className="h-5 w-5" />
+                Execute Task
+              </h2>
+              
+              <form onSubmit={handleExecute}>
+                <div className="space-y-3">
+                  <textarea
+                    value={inputTask}
+                    onChange={(e) => setInputTask(e.target.value)}
+                    placeholder="Enter a task for the AI session to execute..."
+                    rows={4}
+                    className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500 resize-none"
+                    disabled={session?.status !== 'running'}
+                  />
+                  <button
+                    type="submit"
+                    disabled={!inputTask.trim() || executing || session?.status !== 'running'}
+                    className="w-full bg-primary-500 hover:bg-primary-600 text-white px-4 py-3 rounded-lg transition-all font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                  >
+                    {executing ? (
+                      <>
+                        <div className="h-5 w-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                        Executing...
+                      </>
+                    ) : (
+                      <>
+                        <Zap className="h-5 w-5" />
+                        Execute Task
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            {/* Live Logs */}
+            <div className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                  <Terminal className="h-5 w-5" />
+                  Live Logs
+                </h2>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-slate-400">
+                    {displayLogs.length} logs
+                  </span>
+                  <button
+                    onClick={handleRefreshLogs}
+                    disabled={isLoadingLogs}
+                    className="p-2 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
+                    title="Refresh logs"
+                  >
+                    <RefreshCw className={`h-4 w-4 ${isLoadingLogs ? 'animate-spin' : ''}`} />
+                  </button>
+                </div>
+              </div>
+              
+              <div className="bg-slate-950 rounded-lg border border-slate-800 p-4 h-96 overflow-y-auto font-mono text-sm">
+                {isLoadingLogs ? (
+                  <div className="h-full flex items-center justify-center text-slate-500">
+                    <RefreshCw className="h-8 w-8 animate-spin mb-2" />
+                    <p>Loading logs...</p>
+                  </div>
+                ) : displayLogs.length === 0 ? (
+                  <div className="h-full flex items-center justify-center text-slate-500">
+                    <Terminal className="h-12 w-12 mb-2 opacity-50" />
+                    <p>No logs yet. Start the session to see activity.</p>
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    {displayLogs.map((log, index) => (
+                      <div key={`${log.created_at || index}-${index}`} className="flex gap-3">
+                        <span className="text-slate-500 whitespace-nowrap">
+                          {formatLocalTime(log.created_at)}
+                        </span>
+                        <span className={`font-medium whitespace-nowrap ${
+                          log.level === 'ERROR' ? 'text-red-400' :
+                          log.level === 'WARNING' ? 'text-yellow-400' :
+                          log.level === 'INFO' ? 'text-blue-400' :
+                          'text-slate-300'
+                        }`}>
+                          [{log.level}]
+                        </span>
+                        <span className="text-slate-300 break-all">
+                          {log.message}
+                        </span>
+                      </div>
+                    ))}
+                    <div ref={logsEndRef} />
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default SessionDashboard;

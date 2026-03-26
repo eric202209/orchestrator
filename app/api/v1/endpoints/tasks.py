@@ -1,0 +1,218 @@
+"""Tasks API endpoints"""
+
+from fastapi import APIRouter, Depends, HTTPException, status, Request
+from sqlalchemy.orm import Session
+from typing import List, Dict, Any, Optional
+from datetime import datetime
+import json
+from app.database import get_db
+from app.models import Task, TaskStatus, Project, LogEntry
+from app.schemas import TaskCreate, TaskUpdate, TaskResponse
+from app.services.openclaw_service import OpenClawSessionService
+from app.services.log_utils import sort_logs, deduplicate_logs
+
+router = APIRouter()
+
+
+@router.post("/tasks", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
+def create_task(task: TaskCreate, db: Session = Depends(get_db)):
+    """Create a new task"""
+    # Verify project exists
+    project = db.query(Project).filter(Project.id == task.project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    db_task = Task(
+        **task.model_dump(),
+        status=TaskStatus.PENDING
+    )
+    db.add(db_task)
+    db.commit()
+    db.refresh(db_task)
+    return db_task
+
+
+@router.get("/projects/{project_id}/tasks", response_model=List[TaskResponse])
+def get_project_tasks(project_id: int, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    """Get all tasks for a project"""
+    # Verify project exists
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    tasks = db.query(Task).filter(Task.project_id == project_id).offset(skip).limit(limit).all()
+    return tasks
+
+
+# Define this BEFORE /tasks/{task_id} to avoid route collision
+@router.post("/tasks/{task_id}/execute")
+async def execute_task_with_openclaw(task_id: int, request: Request, db: Session = Depends(get_db)):
+    """
+    Execute a task using OpenClaw AI agent
+
+    Args:
+        task_id: Task ID to execute
+        request: HTTP request with prompt data
+        db: Database session
+
+    Returns:
+        Execution result with logs
+    """
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Get prompt from request body or use task description
+    try:
+        prompt_data = await request.json()
+        prompt = prompt_data.get("prompt") if prompt_data else task.description
+    except json.JSONDecodeError:
+        prompt = task.description
+    
+    try:
+        # Start OpenClaw session
+        session_service = OpenClawSessionService(db, None, task_id)
+        openclaw_key = await session_service.start_session(prompt)
+        
+        # Build prompt using templates
+        from app.services import PromptTemplates
+        
+        # Get session context
+        session_context = await session_service.get_session_context()
+        
+        # Build enhanced prompt with templates
+        prompt_text = PromptTemplates.build_task_prompt(
+            task_description=prompt,
+            project_context=session_context.get("project_context", "No additional context"),
+            recent_logs=session_context.get("recent_logs", []),
+            available_tools=["File operations", "Git operations", "Code execution", "API calls", "Terminal commands"]
+        )
+        
+        # Log the prompt that will be used
+        session_service._log_entry("INFO", f"Using template-built prompt: {prompt_text[:100]}...")
+        
+        # Execute the task with the enhanced prompt
+        result = await session_service.execute_task(
+            prompt=prompt_text,
+            timeout_seconds=300  # 5 minutes timeout
+        )
+        
+        # Update task with result
+        task.status = TaskStatus.DONE if result.get("status") == "completed" else TaskStatus.FAILED
+        task.output = result.get("output", "")[:5000]  # Truncate long outputs
+        task.completed_at = datetime.utcnow()
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "task_id": task_id,
+            "status": result.get("status"),
+            "output": result.get("output", ""),
+            "mode": result.get("mode", "unknown"),
+            "session_key": openclaw_key,
+            "logs": result.get("logs", [])
+        }
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to execute task: {str(e)}"
+        )
+
+
+@router.get("/tasks/{task_id}")
+def get_task(task_id: int, db: Session = Depends(get_db)):
+    """Get a task by ID"""
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
+
+
+@router.put("/tasks/{task_id}", response_model=TaskResponse)
+def update_task(task_id: int, task_update: TaskUpdate, db: Session = Depends(get_db)):
+    """Update a task"""
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    update_data = task_update.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(task, field, value)
+    
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+@router.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_task(task_id: int, db: Session = Depends(get_db)):
+    """Delete a task"""
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    db.delete(task)
+    db.commit()
+    return None
+
+
+@router.get("/tasks/{task_id}/logs/sorted")
+def get_sorted_task_logs(
+    task_id: int,
+    db: Session = Depends(get_db),
+    order: str = "asc",
+    deduplicate: bool = True,
+    level: Optional[str] = None,
+    limit: Optional[int] = None
+):
+    """
+    Get sorted and optionally deduplicated logs for a task
+    
+    Args:
+        task_id: Task ID
+        order: "asc" for oldest first, "desc" for newest first
+        deduplicate: Remove duplicate log entries
+        level: Optional log level filter
+        limit: Optional limit on number of logs
+        
+    Returns:
+        Sorted list of log entries
+    """
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    logs_entries = db.query(LogEntry).filter(LogEntry.task_id == task_id).all()
+    
+    if level:
+        logs_entries = [log for log in logs_entries if log.level == level]
+    
+    logs = [
+        {
+            "id": log.id,
+            "task_id": log.task_id,
+            "session_id": log.session_id,
+            "level": log.level,
+            "message": log.message,
+            "timestamp": log.created_at.isoformat(),
+            "metadata": json.loads(log.log_metadata) if log.log_metadata else {}
+        }
+        for log in logs_entries
+    ]
+    
+    sorted_logs = sort_logs(logs, order=order, deduplicate=deduplicate)
+    
+    if limit:
+        sorted_logs = sorted_logs[:limit]
+    
+    return {
+        "task_id": task_id,
+        "total_logs": len(logs),
+        "returned_logs": len(sorted_logs),
+        "sort_order": order,
+        "deduplicated": deduplicate,
+        "logs": sorted_logs
+    }
