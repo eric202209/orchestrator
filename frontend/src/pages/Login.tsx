@@ -23,17 +23,18 @@ function Login() {
       localStorage.setItem('refresh_token', refresh_token);
       
       navigate('/');
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: unknown } };
       // Handle different error response formats
-      const detail = err.response?.data?.detail;
+      const detail = error.response?.data?.detail;
       if (Array.isArray(detail)) {
         setError(detail[0]?.msg || detail[0] || 'Login failed');
-      } else if (typeof detail === 'object') {
+      } else if (typeof detail === 'object' && detail !== null) {
         setError(JSON.stringify(detail) || 'Login failed');
       } else if (detail) {
         setError(String(detail));
       } else {
-        setError(err.message || 'Login failed');
+        setError(error.message || 'Login failed');
       }
     } finally {
       setLoading(false);

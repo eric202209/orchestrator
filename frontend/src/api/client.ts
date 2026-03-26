@@ -130,7 +130,7 @@ export const tasksAPI = {
       returned_logs: number;
       sort_order: string;
       deduplicated: boolean;
-      logs: any[];
+      logs: Array<unknown>;
     }>(`/tasks/${id}/logs/sorted?${params.toString()}`);
   },
 };
@@ -217,7 +217,7 @@ export const sessionsAPI = {
       returned_logs: number;
       sort_order: string;
       deduplicated: boolean;
-      logs: any[];
+      logs: Array<unknown>;
     }>(`/sessions/${id}/logs/sorted?${params.toString()}`);
   },
 

@@ -55,9 +55,10 @@ function NewSession() {
       
       // Redirect to the new session
       navigate(`/sessions/${response.data.id}`);
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: { detail?: unknown } } };
       console.error('Failed to create session:', error);
-      alert(error.response?.data?.detail || 'Failed to create session. Please try again.');
+      alert(err.response?.data?.detail || 'Failed to create session. Please try again.');
     } finally {
       setSubmitting(false);
     }

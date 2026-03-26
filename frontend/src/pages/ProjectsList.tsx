@@ -87,9 +87,10 @@ function ProjectsList() {
       await projectsAPI.update(projectId, { name: editingName });
       setEditingProjectId(null);
       fetchProjects();
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: { detail?: unknown } } };
       console.error('Failed to update project:', error);
-      alert(`Failed to update project: ${error.response?.data?.detail || error.message}`);
+      alert(`Failed to update project: ${err.response?.data?.detail || error.message}`);
     } finally {
       setUpdatingProject(false);
     }

@@ -83,16 +83,17 @@ function SessionDashboard() {
       console.log('logsArray length:', logsArray.length);
       
       // Transform logs to use created_at
-      const transformedLogs = logsArray.map((log: any) => ({
+      const transformedLogs = logsArray.map((log: unknown) => ({
         ...log,
-        created_at: log.timestamp
+        created_at: (log as { timestamp?: string }).timestamp
       }));
       
       setLogs(transformedLogs);
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: { detail?: unknown } } };
       console.error('Failed to fetch sorted logs:', error);
-      console.error('Response structure:', error?.response?.data);
-      alert(`Failed to load logs: ${error?.response?.data?.detail || error?.message || 'Unknown error'}. Please try again.`);
+      console.error('Response structure:', err?.response?.data);
+      alert(`Failed to load logs: ${err.response?.data?.detail || error.message || 'Unknown error'}. Please try again.`);
     } finally {
       setIsLoadingLogs(false);
     }
@@ -120,6 +121,7 @@ function SessionDashboard() {
     if (session?.project_id) {
       fetchProjectTasks();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.project_id]);
 
 // Re-fetch logs when sorting/filtering changes (debounced)
@@ -133,6 +135,7 @@ function SessionDashboard() {
     }, 100); // Debounce by 100ms
     
     return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sortOrder, deduplicate, filterLevel, id]);
 
   // Debounced scroll to bottom
@@ -384,9 +387,10 @@ function SessionDashboard() {
       
       // Show notification
       alert('Task executed successfully!');
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: { detail?: unknown } } };
       console.error('Failed to execute task:', error);
-      alert(error.response?.data?.detail || 'Failed to execute task. Please try again.');
+      alert(err.response?.data?.detail || 'Failed to execute task. Please try again.');
     } finally {
       setExecuting(false);
     }

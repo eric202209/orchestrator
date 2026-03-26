@@ -33,18 +33,19 @@ function Register() {
     try {
       await authAPI.register(email, password);
       setSuccess(true);
-    } catch (err: any) {
-      console.error('Registration error:', err);
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: unknown } };
+      console.error('Registration error:', error);
       // Handle different error response formats
-      const detail = err.response?.data?.detail;
+      const detail = error.response?.data?.detail;
       if (Array.isArray(detail)) {
         setError(detail[0]?.msg || detail[0] || 'Registration failed. Please check your email format and try again.');
-      } else if (typeof detail === 'object') {
+      } else if (typeof detail === 'object' && detail !== null) {
         setError(JSON.stringify(detail) || 'Registration failed. Please check your email format and try again.');
       } else if (detail) {
         setError(String(detail));
       } else {
-        setError(err.message || 'Registration failed. Please check your email format and try again.');
+        setError(error.message || 'Registration failed. Please check your email format and try again.');
       }
     } finally {
       setLoading(false);
