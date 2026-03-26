@@ -49,6 +49,10 @@ jobs:
         cache: 'pnpm'
         cache-dependency-path: frontend/pnpm-lock.yaml
 
+    - name: Install pnpm
+      run: |
+        npm install -g pnpm
+
     - name: Install frontend dependencies
       run: |
         cd frontend
@@ -106,6 +110,10 @@ jobs:
         node-version: ${{ env.NODE_VERSION }}
         cache: 'pnpm'
         cache-dependency-path: frontend/pnpm-lock.yaml
+
+    - name: Install pnpm
+      run: |
+        npm install -g pnpm
 
     - name: Install frontend dependencies
       run: |
