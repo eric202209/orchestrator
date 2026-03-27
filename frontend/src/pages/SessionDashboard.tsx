@@ -50,7 +50,6 @@ function SessionDashboard() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [polling, setPolling] = useState(false);
 
   // Helper function to format dates in local time
   const formatLocalTime = (dateString: string | null) => {

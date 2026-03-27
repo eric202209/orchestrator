@@ -273,9 +273,7 @@ async def execute_task(
 
     try:
         # Always use real execution mode (no demo mode)
-        openclaw_service = OpenClawSessionService(
-            db, session_id, use_demo_mode=False
-        )
+        openclaw_service = OpenClawSessionService(db, session_id, use_demo_mode=False)
 
         # Create OpenClaw session (generates session key)
         task_description = session.description or session.name
@@ -284,8 +282,7 @@ async def execute_task(
         # Execute task with multi-step orchestration (PLANNING -> EXECUTING -> DEBUGGING)
         # Pass raw task description - orchestration handles prompt building internally
         result = await openclaw_service.execute_task_with_orchestration(
-            prompt, 
-            timeout_seconds
+            prompt, timeout_seconds
         )
 
         return {
@@ -296,6 +293,7 @@ async def execute_task(
 
     except Exception as e:
         import traceback
+
         error_detail = f"Task execution failed: {str(e)}\n{traceback.format_exc()}"
         print(f"ERROR: {error_detail}")
         db.add(
@@ -889,7 +887,9 @@ async def websocket_session_status(
                 )
 
     except WebSocketDisconnect:
-        logger.info(f"Status WebSocket disconnected gracefully for session {session_id}")
+        logger.info(
+            f"Status WebSocket disconnected gracefully for session {session_id}"
+        )
         active_websockets[session_id].remove(websocket)
         if not active_websockets[session_id]:
             del active_websockets[session_id]
@@ -994,10 +994,10 @@ async def generate_steps_from_description(
 ):
     """Generate task steps using OpenClaw AI"""
     from app.services.openclaw_service import OpenClawSessionService
-    
+
     task_name = body.get("task_name", "Task")
     description = body.get("description", "")
-    
+
     # Create prompt for step generation
     prompt_template = PromptTemplates.get_template("generate_steps")
     if not prompt_template:
@@ -1011,53 +1011,103 @@ Return ONLY a JSON array of step objects with 'title' and 'description' fields. 
   {{ "title": "Step 1", "description": "First thing to do" }},
   {{ "title": "Step 2", "description": "Second thing to do" }}
 ]"""
-    
-    formatted_prompt = prompt_template.format(task_name=task_name, description=description)
-    
+
+    formatted_prompt = prompt_template.format(
+        task_name=task_name, description=description
+    )
+
     # Use a simple heuristic-based step generator as fallback
     # This creates basic steps based on common patterns
     import re
-    
+
     # Common patterns for different task types
     patterns = {
         "authentication|login|register": [
-            {"title": "Create Authentication Routes", "description": "Set up /login and /register endpoints"},
-            {"title": "Implement Password Hashing", "description": "Add bcrypt or similar for secure password storage"},
-            {"title": "Create JWT Token Generation", "description": "Generate and validate JWT tokens for authentication"},
-            {"title": "Build Login/Register Forms", "description": "Create frontend forms with validation"},
-            {"title": "Add Protected Routes", "description": "Implement route guards for authenticated users"}
+            {
+                "title": "Create Authentication Routes",
+                "description": "Set up /login and /register endpoints",
+            },
+            {
+                "title": "Implement Password Hashing",
+                "description": "Add bcrypt or similar for secure password storage",
+            },
+            {
+                "title": "Create JWT Token Generation",
+                "description": "Generate and validate JWT tokens for authentication",
+            },
+            {
+                "title": "Build Login/Register Forms",
+                "description": "Create frontend forms with validation",
+            },
+            {
+                "title": "Add Protected Routes",
+                "description": "Implement route guards for authenticated users",
+            },
         ],
         "database|sql|model": [
-            {"title": "Design Database Schema", "description": "Create tables and relationships"},
-            {"title": "Implement ORM Models", "description": "Define SQLAlchemy models"},
-            {"title": "Create Migrations", "description": "Set up Alembic for database migrations"},
-            {"title": "Add Database Connection", "description": "Configure database connection pooling"}
+            {
+                "title": "Design Database Schema",
+                "description": "Create tables and relationships",
+            },
+            {
+                "title": "Implement ORM Models",
+                "description": "Define SQLAlchemy models",
+            },
+            {
+                "title": "Create Migrations",
+                "description": "Set up Alembic for database migrations",
+            },
+            {
+                "title": "Add Database Connection",
+                "description": "Configure database connection pooling",
+            },
         ],
         "frontend|ui|react": [
-            {"title": "Setup Component Structure", "description": "Organize React components folder"},
-            {"title": "Create UI Components", "description": "Build reusable UI components"},
+            {
+                "title": "Setup Component Structure",
+                "description": "Organize React components folder",
+            },
+            {
+                "title": "Create UI Components",
+                "description": "Build reusable UI components",
+            },
             {"title": "Add Styling", "description": "Implement CSS/Tailwind styling"},
-            {"title": "Add State Management", "description": "Setup React Context or Redux"}
-        ]
+            {
+                "title": "Add State Management",
+                "description": "Setup React Context or Redux",
+            },
+        ],
     }
-    
+
     desc_lower = description.lower()
     detected_pattern = None
     for pattern, steps in patterns.items():
         if re.search(pattern, desc_lower):
             detected_pattern = pattern
             break
-    
+
     if detected_pattern:
         return {"steps": patterns[detected_pattern], "task_name": task_name}
-    
+
     # Default generic steps
     default_steps = [
-        {"title": "Analyze Requirements", "description": "Understand the task scope and requirements"},
-        {"title": "Plan Implementation", "description": "Create a step-by-step implementation plan"},
-        {"title": "Write Code", "description": "Implement the feature following best practices"},
-        {"title": "Test Implementation", "description": "Write and run tests to verify functionality"},
-        {"title": "Document Changes", "description": "Update documentation and README"}
+        {
+            "title": "Analyze Requirements",
+            "description": "Understand the task scope and requirements",
+        },
+        {
+            "title": "Plan Implementation",
+            "description": "Create a step-by-step implementation plan",
+        },
+        {
+            "title": "Write Code",
+            "description": "Implement the feature following best practices",
+        },
+        {
+            "title": "Test Implementation",
+            "description": "Write and run tests to verify functionality",
+        },
+        {"title": "Document Changes", "description": "Update documentation and README"},
     ]
-    
+
     return {"steps": default_steps, "task_name": task_name}

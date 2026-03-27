@@ -103,13 +103,13 @@ function ProjectDetail() {
     }
   };
 
-  const fetchSessions = async () => {
-    if (!id) return;
-    try {
-      const response = await sessionsAPI.getByProject(Number(id));
-      setSessions(response.data || []);
-    } catch (error) {
-      console.error('Failed to fetch sessions:', error);
+  // const fetchSessions = async () => {
+  //   if (!id) return;
+  //   try {
+  //     const response = await sessionsAPI.getByProject(Number(id));
+  //     setSessions(response.data || []);
+  //   } catch (error) {
+  //     console.error('Failed to fetch sessions:', error);
     }
   };
 

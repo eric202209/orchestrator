@@ -190,8 +190,10 @@ class OpenClawSessionService:
             Execution result with orchestration state
         """
         try:
-            self._log_entry("INFO", f"[ORCHESTRATION] Starting with prompt: {prompt[:100]}...")
-            
+            self._log_entry(
+                "INFO", f"[ORCHESTRATION] Starting with prompt: {prompt[:100]}..."
+            )
+
             if orchestration_state is None:
                 orchestration_state = OrchestrationState(
                     session_id=str(self.session_id),
@@ -218,7 +220,7 @@ class OpenClawSessionService:
             # Parse plan from result
             try:
                 output_text = planning_result.get("output", "[]")
-                
+
                 # OpenClaw returns: { "payloads": [ { "text": "..." } ] }
                 # Extract the actual text content
                 if isinstance(output_text, str):
@@ -233,15 +235,19 @@ class OpenClawSessionService:
                                     output_text = first_payload.get("text", output_text)
                     except json.JSONDecodeError:
                         pass  # Not OpenClaw format, use as-is
-                
+
                 # Strip Markdown code fences if present
                 if isinstance(output_text, str):
                     import re
+
                     # Remove ```json or ``` wrappers
-                    markdown_pattern = r'^\s*```(?:json)?\s*|\s*```$'
-                    output_text = re.sub(markdown_pattern, '', output_text.strip())
-                
-                self._log_entry("INFO", f"[PLANNING] Output type: {type(output_text)}, content: {output_text[:200]}...")
+                    markdown_pattern = r"^\s*```(?:json)?\s*|\s*```$"
+                    output_text = re.sub(markdown_pattern, "", output_text.strip())
+
+                self._log_entry(
+                    "INFO",
+                    f"[PLANNING] Output type: {type(output_text)}, content: {output_text[:200]}...",
+                )
                 plan = json.loads(output_text)
                 if isinstance(plan, list):
                     orchestration_state.plan = plan
@@ -330,16 +336,23 @@ class OpenClawSessionService:
                 execution_results_summary=execution_results_summary,
                 changed_files=orchestration_state.changed_files,
                 num_debug_attempts=len(orchestration_state.debug_attempts),
-                final_status="completed"
+                final_status="completed",
             )
 
             self._log_entry("INFO", "[ORCHESTRATION] Generating summary...")
             summary_result = await self.execute_task(summary_prompt, timeout_seconds=60)
 
-            self._log_entry("INFO", f"[ORCHESTRATION] Summary result type: {type(summary_result)}")
+            self._log_entry(
+                "INFO", f"[ORCHESTRATION] Summary result type: {type(summary_result)}"
+            )
             if isinstance(summary_result, str):
-                self._log_entry("ERROR", f"[ORCHESTRATION] Summary result is string, not dict! Content: {summary_result[:200]}")
-                raise OpenClawSessionError(f"Summary result is not a dict: {type(summary_result)}")
+                self._log_entry(
+                    "ERROR",
+                    f"[ORCHESTRATION] Summary result is string, not dict! Content: {summary_result[:200]}",
+                )
+                raise OpenClawSessionError(
+                    f"Summary result is not a dict: {type(summary_result)}"
+                )
 
             return {
                 "status": "completed",
@@ -487,14 +500,14 @@ class OpenClawSessionService:
             StepResult(
                 step_number=orchestration_state.current_step_index + 1,
                 status="failed",
-                error_message=debug_result.get("analysis", "Unknown error")
+                error_message=debug_result.get("analysis", "Unknown error"),
             )
         ]
         revision_prompt = PromptTemplates.build_plan_revision_prompt(
             original_plan=orchestration_state.plan,
             failed_steps=failed_steps,
             debug_analysis=debug_result.get("analysis", "Unknown error"),
-            completed_steps=orchestration_state.completed_steps
+            completed_steps=orchestration_state.completed_steps,
         )
 
         # Execute revision

@@ -20,7 +20,7 @@ function Dashboard() {
   const [user, setUser] = useState<User | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [sessions, setSessions] = useState<Session[]>([]);
+  // const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'overview' | 'projects' | 'tasks'>('overview');
   const [showCreateProject, setShowCreateProject] = useState(false);

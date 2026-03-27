@@ -109,13 +109,14 @@ class OrchestrationState:
         - Strip leading/trailing hyphens
         """
         import re
+
         text = text.lower().strip()
         # Replace any non-alphanumeric char (except hyphens) with hyphen
-        text = re.sub(r'[^a-z0-9-]', '-', text)
+        text = re.sub(r"[^a-z0-9-]", "-", text)
         # Replace multiple hyphens with single hyphen
-        text = re.sub(r'-+', '-', text)
+        text = re.sub(r"-+", "-", text)
         # Strip leading/trailing hyphens
-        text = text.strip('-')
+        text = text.strip("-")
         return text or f"session-{self.session_id}"
 
     @property
@@ -125,7 +126,11 @@ class OrchestrationState:
         Falls back to workspace_root/<session_id> when project_name is not set.
         Creates a dedicated subfolder for each project with a slugified name.
         """
-        slug = self._slugify(self.project_name.strip()) if self.project_name.strip() else f"session-{self.session_id}"
+        slug = (
+            self._slugify(self.project_name.strip())
+            if self.project_name.strip()
+            else f"session-{self.session_id}"
+        )
         return self.workspace_root / slug
 
     @property
@@ -583,17 +588,18 @@ A clear status report covering current state, progress percentage, blockers, and
             Planning prompt string ready for LLM call.
         """
         ws_root = workspace_root or str(OPENCLAW_WORKSPACE_ROOT)
-        
+
         # Create a slug from project context (remove spaces, special chars)
         import re
+
         if project_context:
             # Extract project name from description, convert to slug
             project_name = project_context.split()[0]  # Get first word
             # Create slug: lowercase, replace spaces/special chars with hyphens
-            slug = re.sub(r'[^a-zA-Z0-9]+', '-', project_name.lower()).strip('-')
+            slug = re.sub(r"[^a-zA-Z0-9]+", "-", project_name.lower()).strip("-")
         else:
-            slug = 'project'
-        
+            slug = "project"
+
         proj_dir = project_dir or f"{ws_root}/{slug}"
 
         context = {
@@ -782,10 +788,14 @@ A clear status report covering current state, progress percentage, blockers, and
 
         # Truncate long strings for the template
         truncated_original_plan = (
-            original_plan_text[:500] + "..." if len(original_plan_text) > 500 else original_plan_text
+            original_plan_text[:500] + "..."
+            if len(original_plan_text) > 500
+            else original_plan_text
         )
         truncated_debug_analysis = (
-            debug_analysis[:300] + "..." if len(debug_analysis) > 300 else debug_analysis
+            debug_analysis[:300] + "..."
+            if len(debug_analysis) > 300
+            else debug_analysis
         )
 
         context = {

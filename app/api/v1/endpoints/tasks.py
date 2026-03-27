@@ -75,7 +75,9 @@ async def execute_task_with_openclaw(
         prompt_data = await request.json()
         prompt = prompt_data.get("prompt") if prompt_data else task.description
         # Get timeout settings from request
-        log_timeout_minutes = prompt_data.get("log_timeout_minutes", 5)  # Default 5 minutes
+        log_timeout_minutes = prompt_data.get(
+            "log_timeout_minutes", 5
+        )  # Default 5 minutes
         monitor_logs = prompt_data.get("monitor_logs", False)
     except json.JSONDecodeError:
         prompt = task.description
@@ -126,7 +128,7 @@ async def execute_task_with_openclaw(
             monitor_logs=monitor_logs,
             task=task,
             db=db,
-            openclaw_key=openclaw_key
+            openclaw_key=openclaw_key,
         )
 
         # Update task with result
@@ -163,11 +165,11 @@ async def execute_task_with_timeout_monitoring(
     monitor_logs: bool,
     task: Task,
     db: Session,
-    openclaw_key: str
+    openclaw_key: str,
 ) -> Dict[str, Any]:
     """
     Execute task with timeout and log monitoring
-    
+
     Args:
         session_service: OpenClaw session service
         prompt: Task prompt
@@ -177,38 +179,41 @@ async def execute_task_with_timeout_monitoring(
         task: Task model
         db: Database session
         openclaw_key: OpenClaw session key
-        
+
     Returns:
         Execution result
     """
     import subprocess
     import json
     import uuid
-    
+
     # Check prompt length to avoid context window overflow
     MAX_PROMPT_LENGTH = 50000
-    
+
     if len(prompt) > MAX_PROMPT_LENGTH:
         session_service._log_entry(
             "WARN",
             f"Prompt too long ({len(prompt)} chars), truncating to {MAX_PROMPT_LENGTH}",
         )
-        prompt = (
-            prompt[:MAX_PROMPT_LENGTH] + "\n\n[TRUNCATED - prompt was too long]"
-        )
-    
-    session_service._log_entry("INFO", f"Starting task execution with timeout monitoring")
-    session_service._log_entry("INFO", f"Max execution time: {timeout_seconds}s, Log timeout: {log_timeout_minutes}min")
-    
+        prompt = prompt[:MAX_PROMPT_LENGTH] + "\n\n[TRUNCATED - prompt was too long]"
+
+    session_service._log_entry(
+        "INFO", f"Starting task execution with timeout monitoring"
+    )
+    session_service._log_entry(
+        "INFO",
+        f"Max execution time: {timeout_seconds}s, Log timeout: {log_timeout_minutes}min",
+    )
+
     # Track last log time
     last_log_time = datetime.utcnow()
-    
+
     # Generate unique session ID
     new_session_id = f"orchestrator-task-{task_id}-{uuid.uuid4().hex[:8]}"
-    
+
     # Escape single quotes in prompt for bash command
     escaped_prompt = prompt.replace("'", "'\\''")
-    
+
     # Start the OpenClaw process
     process = subprocess.Popen(
         [
@@ -221,21 +226,21 @@ async def execute_task_with_timeout_monitoring(
         text=True,
         executable="/usr/bin/bash",
     )
-    
+
     # Monitor the process and logs
     try:
         # Set up timeout
         start_time = datetime.utcnow()
         timeout_delta = timedelta(seconds=timeout_seconds)
-        
+
         while True:
             # Check if process is still running
             return_code = process.poll()
-            
+
             if return_code is not None:
                 # Process finished
                 stdout, stderr = process.communicate()
-                
+
                 # Check if successful
                 if return_code == 0:
                     try:
@@ -245,11 +250,11 @@ async def execute_task_with_timeout_monitoring(
                             or output_data.get("text", "")
                             or stdout
                         )
-                        
+
                         session_service._log_entry(
                             "INFO", f"Task execution completed: {output_text[:300]}"
                         )
-                        
+
                         return {
                             "status": "completed",
                             "mode": "real",
@@ -266,12 +271,16 @@ async def execute_task_with_timeout_monitoring(
                                     "timestamp": datetime.utcnow().isoformat(),
                                 },
                             ],
-                            "execution_time": (datetime.utcnow() - start_time).total_seconds(),
+                            "execution_time": (
+                                datetime.utcnow() - start_time
+                            ).total_seconds(),
                             "session_key": openclaw_key,
                             "note": "Real execution completed via OpenClaw CLI",
                         }
                     except json.JSONDecodeError:
-                        session_service._log_entry("INFO", f"OpenClaw output: {stdout[:500]}")
+                        session_service._log_entry(
+                            "INFO", f"OpenClaw output: {stdout[:500]}"
+                        )
                         return {
                             "status": "completed",
                             "mode": "real",
@@ -283,37 +292,39 @@ async def execute_task_with_timeout_monitoring(
                                     "timestamp": datetime.utcnow().isoformat(),
                                 }
                             ],
-                            "execution_time": (datetime.utcnow() - start_time).total_seconds(),
+                            "execution_time": (
+                                datetime.utcnow() - start_time
+                            ).total_seconds(),
                             "session_key": openclaw_key,
                             "note": "Real execution completed via OpenClaw CLI",
                         }
                 else:
                     raise Exception(f"OpenClaw CLI failed: {stderr}")
-            
+
             # Check for log timeout (if monitoring enabled)
             if monitor_logs:
                 current_time = datetime.utcnow()
                 time_since_last_log = current_time - last_log_time
-                
+
                 # Convert to minutes
                 minutes_since_last_log = time_since_last_log.total_seconds() / 60
-                
+
                 session_service._log_entry(
-                    "DEBUG", 
-                    f"Monitoring: {minutes_since_last_log:.1f} minutes since last log"
+                    "DEBUG",
+                    f"Monitoring: {minutes_since_last_log:.1f} minutes since last log",
                 )
-                
+
                 # If no new logs for configured timeout, kill the process
                 if minutes_since_last_log >= log_timeout_minutes:
                     session_service._log_entry(
-                        "ERROR", 
-                        f"⚠️ TIMEOUT: No new logs for {log_timeout_minutes} minutes. Killing process."
+                        "ERROR",
+                        f"⚠️ TIMEOUT: No new logs for {log_timeout_minutes} minutes. Killing process.",
                     )
-                    
+
                     # Kill the process
                     process.kill()
                     process.wait()
-                    
+
                     return {
                         "status": "failed",
                         "mode": "real",
@@ -325,18 +336,22 @@ async def execute_task_with_timeout_monitoring(
                                 "timestamp": datetime.utcnow().isoformat(),
                             }
                         ],
-                        "execution_time": (datetime.utcnow() - start_time).total_seconds(),
+                        "execution_time": (
+                            datetime.utcnow() - start_time
+                        ).total_seconds(),
                         "error": "Log timeout",
                     }
-            
+
             # Wait a bit before checking again
             await asyncio.sleep(10)
-            
+
     except subprocess.TimeoutExpired:
-        session_service._log_entry("ERROR", f"Task execution timed out: {timeout_seconds}s")
+        session_service._log_entry(
+            "ERROR", f"Task execution timed out: {timeout_seconds}s"
+        )
         process.kill()
         process.wait()
-        
+
         return {
             "status": "failed",
             "mode": "real",
@@ -354,12 +369,12 @@ async def execute_task_with_timeout_monitoring(
     except Exception as e:
         error_str = str(e)
         session_service._log_entry("ERROR", f"Error executing task: {error_str}")
-        
+
         # Kill process if it's still running
         if process.poll() is None:
             process.kill()
             process.wait()
-        
+
         # Handle specific error types
         if "context" in error_str.lower() and "token" in error_str.lower():
             session_service._log_entry("ERROR", f"Context window exceeded: {error_str}")
