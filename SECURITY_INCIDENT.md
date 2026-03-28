@@ -36,23 +36,53 @@ If anyone forked this repository **AFTER** you committed `key.pem`, their fork s
 
 ## 🔒 Next Steps
 
-### 1. Regenerate Certificates (RECOMMENDED)
-Even though we removed it from history, there's a small chance:
-- Someone already downloaded it
-- GitHub's backup might still have it temporarily
+### 1. Certificates Should NOT Be in Repo (Best Practice)
 
-**Best practice: Generate new certificates!**
+**Both cert.pem and key.pem have been removed from Git history.**
 
-```bash
-cd frontend/certs/
+#### How to Handle Certificates Properly:
 
-# Remove old certificates
-rm -f cert.pem key.pem
-
-# Generate new self-signed certificates (for development)
-openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem \
-  -days 365 -nodes -subj "/CN=localhost"
+**Option A: Generate in Docker (Recommended for Dev)**
+```dockerfile
+# In Dockerfile
+RUN openssl req -x509 -newkey rsa:4096 \
+    -keyout /app/frontend/certs/key.pem \
+    -out /app/frontend/certs/cert.pem \
+    -days 365 -nodes -subj "/CN=localhost"
 ```
+
+**Option B: Generate at Runtime**
+```bash
+#!/bin/bash
+# start.sh
+if [ ! -f frontend/certs/key.pem ]; then
+    openssl req -x509 -newkey rsa:4096 \
+        -keyout frontend/certs/key.pem \
+        -out frontend/certs/cert.pem \
+        -days 365 -nodes -subj "/CN=localhost"
+fi
+```
+
+**Option C: External Volume (Production)**
+```yaml
+# docker-compose.yml
+volumes:
+  - ./certs:/app/frontend/certs:ro  # Mount from outside repo
+```
+
+**Option D: Let's Encrypt (Production)**
+```bash
+# Use certbot for production certificates
+apt-get install certbot
+certbot --nginx -d yourdomain.com
+```
+
+#### Why Remove cert.pem Too?
+- **Even though cert.pem is public**, best practice is to:
+  - Never commit any SSL/TLS files to version control
+  - Generate them dynamically in CI/CD
+  - Use secrets management in production
+  - Keep your repo clean and focused on code
 
 ### 2. Update Any Config Files That Reference the Old Key
 If any configuration files reference the old key, update them.
