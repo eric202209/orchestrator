@@ -1010,7 +1010,6 @@ class OpenClawSessionService:
         """
         import subprocess
         import json
-        import asyncio
 
         if len(prompt) > MAX_PROMPT_LENGTH:
             self._log_entry(
