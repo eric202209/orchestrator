@@ -51,3 +51,22 @@ coverage/
 *.bak
 *.tmp
 .cache/
+
+# Development files (NEVER COMMIT)
+.notes/
+.tests/
+*.note
+*.test
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+dump.rdb
+*.rdb
+
+# Scripts to stop services (should be run locally)
+stop_all.sh
+start_all.sh
+restart_all.sh
