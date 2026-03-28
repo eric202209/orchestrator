@@ -1251,7 +1251,11 @@ class OpenClawSessionService:
 
         return {
             "session_id": self.session_id,
-            "session_name": self.session_model.name,
+            "session_name": (
+                self.session_model.name
+                if self.session_model
+                else (self.task_model.project.name if self.task_model and self.task_model.project else "Unknown")
+            ),
             "task": task_context,
             "recent_logs": logs_data,
             "openclaw_session_key": self.openclaw_session_key,
