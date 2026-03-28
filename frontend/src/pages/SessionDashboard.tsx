@@ -39,7 +39,6 @@ function SessionDashboard() {
   const reconnectCountRef = useRef(0);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isConnectingRef = useRef(false);
-  const connectedRef = useRef(false);
   
   // Refs for WebSocket connection functions to avoid forward reference issues
   const connectStatusWebSocketRef = useRef<(() => void) | null>(null);
@@ -448,7 +447,7 @@ function SessionDashboard() {
     };
 
     setLogsWs(webSocket);
-  }, [id, project?.id, session?.status]);
+  }, [id, project?.id, session?.status, isLogsConnected]);
 
   // Assign to refs after definition for use in useEffects
   connectLogsWebSocketRef.current = connectLogsWebSocket;
