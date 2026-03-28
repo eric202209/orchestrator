@@ -2,7 +2,7 @@
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from app.config import settings
 from app.api.v1.router import api_router
 from app.api.v1.endpoints import auth
@@ -10,6 +10,70 @@ from app.celery_app import celery_app
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Custom CORS middleware to handle OPTIONS before router
+class CORSMiddlewareBeforeRouter:
+    def __init__(self, app):
+        self.app = app
+    
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["method"] == "OPTIONS":
+            # Get the origin from the request
+            origin = scope.get("headers", [])
+            request_origin = None
+            for name, value in origin:
+                if name == b"origin":
+                    request_origin = value.decode("utf-8")
+                    break
+            
+            # Determine allowed origin
+            # If origin is null or empty, allow * (for console/test requests)
+            # Otherwise, validate against allowed origins
+            allowed_origin = "*"
+            if request_origin and request_origin not in ["null", ""]:
+                # Check if origin is in allowed list
+                allowed_origins = settings.CORS_ORIGINS
+                if "*" in allowed_origins:
+                    allowed_origin = "*"
+                elif request_origin in allowed_origins:
+                    allowed_origin = request_origin
+                else:
+                    allowed_origin = None  # Block this origin
+            
+            # Build response headers
+            headers = {
+                "Access-Control-Allow-Methods": "*",
+                "Access-Control-Allow-Headers": "*",
+                "Access-Control-Max-Age": "86400",
+                "Access-Control-Allow-Credentials": "true",  # Always include credentials
+            }
+            
+            if allowed_origin:
+                headers["Access-Control-Allow-Origin"] = allowed_origin
+            
+            response = Response(
+                status_code=200,
+                headers=headers,
+            )
+            await send({
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [
+                    (b"access-control-allow-origin", allowed_origin.encode()),
+                    (b"access-control-allow-methods", b"*"),
+                    (b"access-control-allow-headers", b"*"),
+                    (b"access-control-max-age", b"86400"),
+                    (b"access-control-allow-credentials", b"true"),
+                ],
+            })
+            
+            await send({
+                "type": "http.response.body",
+                "body": b"",
+            })
+            return
+        
+        await self.app(scope, receive, send)
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -19,14 +83,14 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# CORS
+# Add standard FastAPI CORS middleware (handles all requests including POST)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],  # Expose all headers to frontend
+    expose_headers=["*"],
 )
 
 

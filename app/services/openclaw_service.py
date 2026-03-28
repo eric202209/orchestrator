@@ -642,13 +642,19 @@ class OpenClawSessionService:
             except Exception as e:
                 # Extract meaningful error message
                 error_msg = str(e)
+                error_msg_stripped = error_msg.strip()
 
                 # If error message contains garbled output, try to extract actual error
-                if (
-                    error_msg.strip() in ["\"'"]
-                    or error_msg.strip().startswith('"), "')
-                    or error_msg.strip().startswith('"), "')
-                ):
+                # Check for common garbled error patterns from OpenClaw CLI
+                is_garbled = False
+                # Simple check for obviously broken error messages
+                if error_msg_stripped in ['"', "'"]:
+                    is_garbled = True
+                elif error_msg_stripped.startswith('"), "'):
+                    is_garbled = True
+                elif error_msg_stripped == "', '":
+                    is_garbled = True
+                if is_garbled:
                     # Try to get error from stderr if available
                     # This handles cases where OpenClaw CLI returned garbled error
                     self._log_entry(

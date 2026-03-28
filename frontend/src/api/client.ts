@@ -176,16 +176,18 @@ export const tasksAPI = {
     order: 'asc' | 'desc' = 'desc',
     deduplicate: boolean = true,
     level?: string,
-    limit?: number
+    limit?: number,
+    offset: number = 0
   ) => {
     const params = new URLSearchParams();
     params.append('order', order);
     params.append('deduplicate', deduplicate.toString());
     if (level) params.append('level', level);
     if (limit) params.append('limit', limit.toString());
+    params.append('offset', offset.toString());
     
     return apiClient.get<TaskSortedLogsResponse>(`/tasks/${id}/logs/sorted?${params.toString()}`, {
-      timeout: 300000, // 5 minutes for fetching task logs (can be slow for large logs)
+      timeout: 60000, // 1 minute - much faster with database sorting + pagination
     });
   },
 };
@@ -265,16 +267,18 @@ export const sessionsAPI = {
     order: 'asc' | 'desc' = 'desc',
     deduplicate: boolean = true,
     level?: string,
-    limit?: number
+    limit?: number,
+    offset: number = 0
   ) => {
     const params = new URLSearchParams();
     params.append('order', order);
     params.append('deduplicate', deduplicate.toString());
     if (level) params.append('level', level);
     if (limit) params.append('limit', limit.toString());
+    params.append('offset', offset.toString());
     
     return apiClient.get<SortedLogsResponse>(`/sessions/${id}/logs/sorted?${params.toString()}`, {
-      timeout: 300000, // 5 minutes for fetching session logs (can be slow for large logs)
+      timeout: 60000, // 1 minute - much faster with database sorting + pagination
     });
   },
 
