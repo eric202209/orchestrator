@@ -27,7 +27,7 @@ def get_sorted_task_logs(
     Get sorted and optionally deduplicated logs for a task
 
     OPTIMIZED: Uses database-level sorting and pagination to avoid timeout issues
-    
+
     Args:
         task_id: Task ID
         order: Sort order - "asc" (oldest first) or "desc" (newest first)
@@ -47,7 +47,7 @@ def get_sorted_task_logs(
     # Default limit to prevent timeouts
     default_limit = 100
     effective_limit = limit if limit else default_limit
-    
+
     # Cap limit at 1000 to prevent abuse
     if effective_limit > 1000:
         effective_limit = 1000

@@ -11,11 +11,12 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 # Custom CORS middleware to handle OPTIONS before router
 class CORSMiddlewareBeforeRouter:
     def __init__(self, app):
         self.app = app
-    
+
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http" and scope["method"] == "OPTIONS":
             # Get the origin from the request
@@ -25,7 +26,7 @@ class CORSMiddlewareBeforeRouter:
                 if name == b"origin":
                     request_origin = value.decode("utf-8")
                     break
-            
+
             # Determine allowed origin
             # If origin is null or empty, allow * (for console/test requests)
             # Otherwise, validate against allowed origins
@@ -39,7 +40,7 @@ class CORSMiddlewareBeforeRouter:
                     allowed_origin = request_origin
                 else:
                     allowed_origin = None  # Block this origin
-            
+
             # Build response headers
             headers = {
                 "Access-Control-Allow-Methods": "*",
@@ -47,33 +48,38 @@ class CORSMiddlewareBeforeRouter:
                 "Access-Control-Max-Age": "86400",
                 "Access-Control-Allow-Credentials": "true",  # Always include credentials
             }
-            
+
             if allowed_origin:
                 headers["Access-Control-Allow-Origin"] = allowed_origin
-            
+
             response = Response(
                 status_code=200,
                 headers=headers,
             )
-            await send({
-                "type": "http.response.start",
-                "status": 200,
-                "headers": [
-                    (b"access-control-allow-origin", allowed_origin.encode()),
-                    (b"access-control-allow-methods", b"*"),
-                    (b"access-control-allow-headers", b"*"),
-                    (b"access-control-max-age", b"86400"),
-                    (b"access-control-allow-credentials", b"true"),
-                ],
-            })
-            
-            await send({
-                "type": "http.response.body",
-                "body": b"",
-            })
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [
+                        (b"access-control-allow-origin", allowed_origin.encode()),
+                        (b"access-control-allow-methods", b"*"),
+                        (b"access-control-allow-headers", b"*"),
+                        (b"access-control-max-age", b"86400"),
+                        (b"access-control-allow-credentials", b"true"),
+                    ],
+                }
+            )
+
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": b"",
+                }
+            )
             return
-        
+
         await self.app(scope, receive, send)
+
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
