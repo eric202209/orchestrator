@@ -107,7 +107,7 @@ class OpenClawSessionService:
             raise OpenClawSessionError(error_msg)
 
     async def execute_task(
-        self, prompt: str, timeout_seconds: int = 300
+        self, prompt: str, timeout_seconds: int = 300, log_callback: callable = None
     ) -> Dict[str, Any]:
         """
         Execute a task via OpenClaw session (legacy single-mode)
@@ -115,6 +115,7 @@ class OpenClawSessionService:
         Args:
             prompt: The prompt/task to execute
             timeout_seconds: Maximum execution time
+            log_callback: Optional callback for real-time log streaming
 
         Returns:
             Execution result with logs and status
@@ -131,7 +132,11 @@ class OpenClawSessionService:
                 result["status"] = "completed"
             else:
                 # REAL MODE: Execute task via OpenClaw HTTP API
-                result = await self._execute_real_mode(prompt, timeout_seconds)
+                # Use streaming version if log_callback is provided
+                if log_callback:
+                    result = await self.execute_task_with_streaming(prompt, timeout_seconds, log_callback)
+                else:
+                    result = await self._execute_real_mode(prompt, timeout_seconds)
 
             # Update task completion based on result status
             if self.task_model:
@@ -988,6 +993,177 @@ class OpenClawSessionService:
         except Exception as e:
             self._log_entry("ERROR", f"Log streaming failed: {str(e)}")
             raise
+
+    async def execute_task_with_streaming(
+        self, prompt: str, timeout_seconds: int = 300, log_callback: callable = None
+    ) -> Dict[str, Any]:
+        """
+        Execute task via OpenClaw CLI with real-time log streaming
+
+        Args:
+            prompt: Task prompt
+            timeout_seconds: Maximum execution time
+            log_callback: Optional callback for real-time log entries
+
+        Returns:
+            Execution result with logs
+        """
+        import subprocess
+        import json
+        import asyncio
+
+        if len(prompt) > MAX_PROMPT_LENGTH:
+            self._log_entry(
+                "WARN",
+                f"Prompt too long ({len(prompt)} chars), truncating to {MAX_PROMPT_LENGTH}",
+            )
+            prompt = (
+                prompt[:MAX_PROMPT_LENGTH] + "\n\n[TRUNCATED - prompt was too long]"
+            )
+
+        self._log_entry("INFO", f"Running in REAL MODE - executing via OpenClaw CLI")
+        self._log_entry("INFO", f"Starting task execution with prompt template:")
+        self._log_entry(
+            "INFO", f"Prompt length: {len(prompt)} chars, preview: {prompt[:200]}..."
+        )
+
+        try:
+            import uuid
+
+            if self.task_id is None:
+                self._log_entry(
+                    "WARN",
+                    f"task_id is None! Using session_id instead: {self.session_id}",
+                )
+                task_id_str = str(self.session_id)
+            else:
+                task_id_str = str(self.task_id)
+
+            new_session_id = f"orchestrator-task-{task_id_str}-{uuid.uuid4().hex[:8]}"
+
+            self._log_entry(
+                "INFO",
+                f"Prompt contains: {('EXECUTE THIS TASK DIRECTLY' in prompt and 'EXECUTE' or 'Standard')}",
+            )
+
+            # Use Popen for streaming instead of run()
+            escaped_prompt = prompt.replace("'", "'\\''")
+            process = await asyncio.create_subprocess_shell(
+                f"openclaw agent --local --session-id {new_session_id} --message '{escaped_prompt}' --json --timeout {timeout_seconds}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=8192,
+            )
+
+            # Stream stdout and stderr in real-time
+            async def stream_output(stream, level):
+                """Stream output from a subprocess pipe"""
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        break
+                    line_text = line.decode('utf-8', errors='replace').strip()
+                    if line_text:
+                        # Log to database
+                        self._log_entry(level, line_text)
+                        # Call callback if provided
+                        if log_callback:
+                            await log_callback(level, line_text)
+
+            try:
+                # Stream both stdout and stderr concurrently
+                await asyncio.gather(
+                    stream_output(process.stdout, "INFO"),
+                    stream_output(process.stderr, "WARN"),
+                )
+
+                # Wait for process to complete
+                await process.wait()
+
+                # Get final output
+                stdout, stderr = await process.communicate()
+                stdout_text = stdout.decode('utf-8', errors='replace')
+                stderr_text = stderr.decode('utf-8', errors='replace')
+
+                self._log_entry(
+                    "INFO",
+                    f"[OPENCLAW] Return code: {process.returncode}, stdout_len: {len(stdout_text)}, stderr_len: {len(stderr_text)}",
+                )
+
+                if process.returncode == 0:
+                    try:
+                        output_data = json.loads(stdout_text.strip())
+
+                        # Extract text from payloads array
+                        output_text = ""
+                        if isinstance(output_data, dict) and "payloads" in output_data:
+                            payloads = output_data.get("payloads", [])
+                            if isinstance(payloads, list) and len(payloads) > 0:
+                                first_payload = payloads[0]
+                                if isinstance(first_payload, dict):
+                                    output_text = first_payload.get("text", "")
+
+                        self._log_entry(
+                            "INFO", f"Task execution completed: {output_text[:300]}"
+                        )
+
+                        return {
+                            "status": "completed",
+                            "mode": "real",
+                            "output": output_text,
+                            "logs": [],  # Logs already streamed via callback
+                            "execution_time": 0.0,
+                            "session_key": new_session_id,
+                            "note": "Real execution completed via OpenClaw CLI with streaming",
+                        }
+                    except json.JSONDecodeError:
+                        self._log_entry("INFO", f"OpenClaw output: {stdout_text[:500]}")
+                        return {
+                            "status": "completed",
+                            "mode": "real",
+                            "output": stdout_text,
+                            "logs": [],
+                            "execution_time": 0.0,
+                            "session_key": new_session_id,
+                            "note": "Real execution completed via OpenClaw CLI with streaming",
+                        }
+                else:
+                    raise Exception(f"OpenClaw CLI failed: {stderr_text}")
+
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                self._log_entry("ERROR", f"Task execution timed out: {timeout_seconds}s")
+                return {
+                    "status": "failed",
+                    "mode": "real",
+                    "output": f"Task timed out after {timeout_seconds} seconds",
+                    "logs": [],
+                    "execution_time": timeout_seconds,
+                    "error": "Timeout",
+                }
+
+        except subprocess.TimeoutExpired as e:
+            self._log_entry("ERROR", f"Task execution timed out: {str(e)}")
+            return {
+                "status": "failed",
+                "mode": "real",
+                "output": f"Task timed out after {timeout_seconds} seconds",
+                "logs": [],
+                "execution_time": timeout_seconds,
+                "error": "Timeout",
+            }
+        except Exception as e:
+            error_str = str(e)
+            self._log_entry("ERROR", f"Error executing task via OpenClaw: {error_str}")
+            return {
+                "status": "failed",
+                "mode": "real",
+                "output": f"Execution error: {error_str}",
+                "logs": [],
+                "execution_time": 0.0,
+                "error": error_str,
+            }
 
     async def track_tool_execution(
         self, tool_name: str, params: Dict[str, Any], result: Any, success: bool
