@@ -339,7 +339,11 @@ class OpenClawSessionService:
                 orchestration_state = OrchestrationState(
                     session_id=str(self.session_id),
                     task_description=prompt,
-                    project_name=self.session_model.name if self.session_model else "",
+                    project_name=(
+                        self.session_model.name
+                        if self.session_model
+                        else (self.task_model.project.name if self.task_model and self.task_model.project else "Unknown")
+                    ),
                     project_context="",
                 )
 
@@ -1271,6 +1275,9 @@ class OpenClawSessionService:
         session_instance_id = None
         if self.session_model:
             session_instance_id = self.session_model.instance_id
+        elif self.task_model and self.task_model.project:
+            # Fallback: try to get project info from task
+            session_instance_id = None  # Will be set by session later
 
         log_entry = LogEntry(
             session_id=self.session_id,
