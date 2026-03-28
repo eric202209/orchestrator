@@ -2,9 +2,11 @@
 
 ## ✅ Actions Taken
 1. ✅ Removed `key.pem` from all Git history using `git filter-branch`
-2. ✅ Force pushed cleaned history to GitHub
-3. ✅ Added `.gitignore` to prevent future commits
-4. ✅ Cleaned local Git cache with `git gc --aggressive`
+2. ✅ Removed `cert.pem` from all Git history (best practice)
+3. ✅ Force pushed cleaned history to GitHub
+4. ✅ Added `.gitignore` to prevent future commits
+5. ✅ Cleaned local Git cache with `git gc --aggressive`
+6. ✅ Generated new development certificates
 
 ## ⚠️ Important: Check for Forks
 
