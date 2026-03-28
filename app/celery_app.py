@@ -6,9 +6,9 @@ from celery import Celery
 from .services.openclaw_executor import OpenClawExecutor, OpenClawConfig
 
 celery_app = Celery(
-    'orchestrator',
-    broker='redis://localhost:6379/0',
-    backend='redis://localhost:6379/0'
+    "orchestrator",
+    broker="redis://localhost:6379/0",
+    backend="redis://localhost:6379/0",
 )
 
 
@@ -26,16 +26,13 @@ async def execute_task_in_openclaw(
 
         # Spawn session
         session_info = await executor.execute_task(
-            task_id=str(task_id),
-            description=description,
-            requirements=requirements
+            task_id=str(task_id), description=description, requirements=requirements
         )
 
         # Monitor session (blocking, but in background worker)
         # NOTE: For long-running tasks, use async + websockets instead
         result = await executor.monitor_session(
-            session_key=session_info["sessionKey"],
-            task_id=str(task_id)
+            session_key=session_info["sessionKey"], task_id=str(task_id)
         )
 
         # Get final output
@@ -52,12 +49,12 @@ async def execute_task_in_openclaw(
             "success": True,
             "task_id": task_id,
             "session_key": session_info["sessionKey"],
-            "output": output
+            "output": output,
         }
 
     except Exception as exc:
         # Retry with exponential backoff
-        raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
+        raise self.retry(exc=exc, countdown=60 * (2**self.request.retries))
     finally:
         await executor.close()
 

@@ -19,8 +19,7 @@ class OpenClawExecutor:
     def __init__(self, config: Optional[OpenClawConfig] = None):
         self.config = config or OpenClawConfig()
         self.client = httpx.AsyncClient(
-            base_url=self.config.base_url,
-            timeout=self.config.timeout
+            base_url=self.config.base_url, timeout=self.config.timeout
         )
 
     async def execute_task(
@@ -50,13 +49,10 @@ class OpenClawExecutor:
             "agentId": "qwen",  # Your default model
             "timeoutSeconds": 3600,  # 1 hour max
             "mode": "run",  # One-shot execution
-            "cleanup": "delete"  # Auto-cleanup after completion
+            "cleanup": "delete",  # Auto-cleanup after completion
         }
 
-        response = await self.client.post(
-            "/api/v1/sessions/spawn",
-            json=payload
-        )
+        response = await self.client.post("/api/v1/sessions/spawn", json=payload)
 
         if response.status_code != 200:
             raise Exception(f"Failed to spawn session: {response.text}")
@@ -100,7 +96,7 @@ class OpenClawExecutor:
                     task_id,
                     output=status.get("lastMessage", ""),
                     usage=status.get("usage", {}),
-                    model=status.get("model", "")
+                    model=status.get("model", ""),
                 )
 
                 # Check if completed
@@ -123,7 +119,9 @@ class OpenClawExecutor:
         #     "status": "In Progress",
         #     "started_at": datetime.utcnow()
         # })
-        print(f"Would update task {task_id} with session {session_info.get('sessionKey')}")
+        print(
+            f"Would update task {task_id} with session {session_info.get('sessionKey')}"
+        )
 
     async def _update_task_progress(
         self, task_id: str, output: str, usage: Dict, model: str
@@ -139,9 +137,7 @@ class OpenClawExecutor:
 
     async def get_session_output(self, session_key: str) -> str:
         """Get final output from a completed session"""
-        response = await self.client.get(
-            f"/api/v1/sessions/{session_key}/history"
-        )
+        response = await self.client.get(f"/api/v1/sessions/{session_key}/history")
 
         if response.status_code != 200:
             raise Exception(f"Failed to get session history: {response.text}")
@@ -151,9 +147,7 @@ class OpenClawExecutor:
 
     async def cancel_session(self, session_key: str) -> bool:
         """Cancel a running session"""
-        response = await self.client.post(
-            f"/api/v1/sessions/{session_key}/cancel"
-        )
+        response = await self.client.post(f"/api/v1/sessions/{session_key}/cancel")
         return response.status_code == 200
 
     async def close(self):
