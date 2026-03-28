@@ -223,8 +223,11 @@ function SessionDashboard() {
             await fetchProjectTasks();
           }
         }
-      } catch (error) {
-        console.error('Failed to poll session status:', error);
+      } catch (error: any) {
+        // Only log non-abort errors to avoid spam
+        if (error.code !== 'ERR_BAD_RESPONSE' && error.code !== 'ECONNABORTED') {
+          console.error('Failed to poll session status:', error.message || error);
+        }
       }
     }, 5000); // Poll every 5 seconds
     
@@ -544,9 +547,16 @@ function SessionDashboard() {
     try {
       await sessionsAPI.stop(Number(id));
       await fetchSession();
-    } catch (error) {
+      alert('✅ Session stopped successfully!');
+    } catch (error: any) {
       console.error('Failed to stop session:', error);
-      alert('Failed to stop session. Please try again.');
+      // Suppress timeout errors - session stop might take a moment
+      if (error.code !== 'ECONNABORTED' && error.code !== 'ERR_BAD_RESPONSE') {
+        alert('Failed to stop session. Please try again.');
+      } else {
+        // Request timed out but session might be stopping in background
+        alert('Stopping session... (may take a moment)');
+      }
     }
   };
 
@@ -559,6 +569,7 @@ function SessionDashboard() {
     
     setExecuting(true);
     try {
+      // Note: tasksAPI.execute already has 5 minute timeout in client.ts
       await tasksAPI.execute(Number(id), {
         task: inputTask,
         timeout_seconds: 300,
@@ -572,9 +583,14 @@ function SessionDashboard() {
       // Remove redundant notification - already shown at start
       // alert('Task executed successfully!');
     } catch (error: unknown) {
-      const err = error as { response?: { data?: { detail?: unknown } } };
+      const err = error as { response?: { data?: { detail?: unknown } }; message?: string };
       console.error('Failed to execute task:', error);
-      alert(err.response?.data?.detail || 'Failed to execute task. Please try again.');
+      // Show more helpful error message for timeouts
+      if (err.message?.includes('timeout')) {
+        alert('⚠️ Task execution timed out after 10 minutes. The task may still be running in the background. Check the logs for status or wait for it to complete.');
+      } else {
+        alert(err.response?.data?.detail || 'Failed to execute task. Please try again.');
+      }
     } finally {
       setExecuting(false);
     }

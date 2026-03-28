@@ -38,6 +38,8 @@ class OpenClawSessionError(Exception):
 class OpenClawSessionService:
     """Service for managing OpenClaw session orchestration"""
 
+    MAX_PROMPT_LENGTH = 50000  # Leave room for model overhead
+
     def __init__(
         self,
         db: Session,
@@ -342,7 +344,11 @@ class OpenClawSessionService:
                     project_name=(
                         self.session_model.name
                         if self.session_model
-                        else (self.task_model.project.name if self.task_model and self.task_model.project else "Unknown")
+                        else (
+                            self.task_model.project.name
+                            if self.task_model and self.task_model.project
+                            else "Unknown"
+                        )
                     ),
                     project_context="",
                 )
@@ -746,9 +752,7 @@ class OpenClawSessionService:
 
         # Check prompt length to avoid context window overflow
         # The model has 65,536 token limit, so we need to be conservative
-        MAX_PROMPT_LENGTH = 50000  # Leave room for model overhead
-
-        if len(prompt) > MAX_PROMPT_LENGTH:
+        if len(prompt) > self.MAX_PROMPT_LENGTH:
             self._log_entry(
                 "WARN",
                 f"Prompt too long ({len(prompt)} chars), truncating to {MAX_PROMPT_LENGTH}",
@@ -1017,7 +1021,7 @@ class OpenClawSessionService:
         import subprocess
         import json
 
-        if len(prompt) > MAX_PROMPT_LENGTH:
+        if len(prompt) > self.MAX_PROMPT_LENGTH:
             self._log_entry(
                 "WARN",
                 f"Prompt too long ({len(prompt)} chars), truncating to {MAX_PROMPT_LENGTH}",
@@ -1096,7 +1100,7 @@ class OpenClawSessionService:
                 self._log_entry(
                     "INFO",
                     f"[OPENCLAW] Return code: {process.returncode}, stdout_len: {len(stdout_text)}, stderr_len: {len(stderr_text)}",
-                    commit=True
+                    commit=True,
                 )
 
                 if process.returncode == 0:
@@ -1254,7 +1258,11 @@ class OpenClawSessionService:
             "session_name": (
                 self.session_model.name
                 if self.session_model
-                else (self.task_model.project.name if self.task_model and self.task_model.project else "Unknown")
+                else (
+                    self.task_model.project.name
+                    if self.task_model and self.task_model.project
+                    else "Unknown"
+                )
             ),
             "task": task_context,
             "recent_logs": logs_data,
@@ -1262,7 +1270,11 @@ class OpenClawSessionService:
         }
 
     def _log_entry(
-        self, level: str, message: str, metadata: Optional[str] = None, commit: bool = False
+        self,
+        level: str,
+        message: str,
+        metadata: Optional[str] = None,
+        commit: bool = False,
     ) -> LogEntry:
         """Create database log entry with instance tracking
 

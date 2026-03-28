@@ -19,6 +19,7 @@ const apiClient = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
+  timeout: 60000, // 60 second timeout for initial requests (page load, auth)
 });
 
 // Request interceptor for auth tokens
@@ -165,7 +166,9 @@ export const tasksAPI = {
   complete: (id: number) => apiClient.post(`/tasks/${id}/complete`),
 
   execute: (sessionId: number, data: { task: string; timeout_seconds?: number; use_demo_mode?: boolean }) =>
-    apiClient.post(`/sessions/${sessionId}/execute`, data),
+    apiClient.post(`/sessions/${sessionId}/execute`, data, {
+      timeout: 600000, // 10 minutes for task execution (OpenClaw CLI can take a while for complex tasks)
+    }),
 
   // Get sorted logs for a task
   getSortedLogs: (
@@ -203,7 +206,10 @@ export const sessionsAPI = {
   start: (id: number) => apiClient.post(`/sessions/${id}/start`),
 
   stop: (id: number, force?: boolean) => 
-    apiClient.post(`/sessions/${id}/stop`, undefined, { params: { force } }),
+    apiClient.post(`/sessions/${id}/stop`, undefined, { 
+      params: { force },
+      timeout: 120000, // 2 minutes for session stop (may take time to terminate OpenClaw CLI)
+    }),
 
   pause: (id: number) => apiClient.post(`/sessions/${id}/pause`),
 

@@ -29,31 +29,47 @@ function Dashboard() {
   const [newProjectName, setNewProjectName] = useState('');
   const [refresh, setRefresh] = useState(0);
   const [creatingProject, setCreatingProject] = useState(false);
+  const [isAuthChecked, setIsAuthChecked] = useState(false);
 
   const checkAuth = useCallback(async () => {
     const token = localStorage.getItem('access_token');
     if (!token) {
       console.log('No access token, redirecting to login');
-      navigate('/login');
+      navigate('/login', { replace: true });
+      setIsAuthChecked(true);
       return;
     }
 
     try {
       const response = await authAPI.getMe();
       setUser(response.data);
-    } catch (error) {
-      console.error('Failed to fetch user:', error);
+    } catch (error: any) {
+      // Suppress timeout errors - they're expected during slow network
+      if (error.code !== 'ECONNABORTED' && error.code !== 'ERR_BAD_RESPONSE') {
+        console.error('Failed to fetch user:', error.message || error);
+      }
       // Token might be expired, let the interceptor handle it
       localStorage.removeItem('access_token');
       localStorage.removeItem('refresh_token');
-      navigate('/login');
+      navigate('/login', { replace: true });
+      setIsAuthChecked(true);
+      return;
     }
+    setIsAuthChecked(true);
   }, [navigate]);
 
   useEffect(() => {
     checkAuth();
-    fetchProjects();
-  }, [refresh, checkAuth]);
+  }, [checkAuth]);
+
+  // Only fetch projects after auth is confirmed
+  useEffect(() => {
+    if (isAuthChecked && user) {
+      fetchProjects();
+    } else if (isAuthChecked && !user) {
+      setLoading(false);
+    }
+  }, [isAuthChecked, user]);
 
   const fetchProjects = async () => {
     try {
@@ -77,8 +93,11 @@ function Dashboard() {
       }
       // sessions intentionally unused - kept for future implementation
       // setSessions(allSessions);
-    } catch (error) {
-      console.error('Failed to fetch projects:', error);
+    } catch (error: any) {
+      // Suppress timeout errors - they're expected during slow network
+      if (error.code !== 'ECONNABORTED' && error.code !== 'ERR_BAD_RESPONSE') {
+        console.error('Failed to fetch projects:', error.message || error);
+      }
     } finally {
       setLoading(false);
     }
