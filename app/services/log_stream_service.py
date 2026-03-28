@@ -21,7 +21,7 @@ class LogStreamService:
     def __init__(self, db: Session):
         """
         Initialize log stream service
-        
+
         Args:
             db: Database session
         """
@@ -41,7 +41,7 @@ class LogStreamService:
     ) -> Generator[Dict[str, Any], None, None]:
         """
         Stream logs from the database
-        
+
         Args:
             session_id: Filter by session ID (optional)
             session_instance_id: Filter by session instance UUID (optional, prevents ID reuse)
@@ -52,7 +52,7 @@ class LogStreamService:
             since: Only return logs after this timestamp
             level: Optional log level filter
             search: Optional text search in log messages
-        
+
         Yields:
             Log entries as dictionaries
         """
@@ -62,14 +62,14 @@ class LogStreamService:
         # Apply filters
         if session_id:
             query = query.filter(LogEntry.session_id == session_id)
-        
+
         # Critical: Filter by instance_id to prevent ID reuse issues
         if session_instance_id:
             query = query.filter(LogEntry.session_instance_id == session_instance_id)
-        
+
         if task_id:
             query = query.filter(LogEntry.task_id == task_id)
-        
+
         if project_id:
             # Filter logs by project through sessions
             session_ids = (
@@ -79,7 +79,7 @@ class LogStreamService:
             )
             session_id_list = [s[0] for s in session_ids]
             query = query.filter(LogEntry.session_id.in_(session_id_list))
-        
+
         if since:
             query = query.filter(LogEntry.created_at > since)
 
@@ -115,10 +115,10 @@ class LogStreamService:
     def get_project_logs_summary(self, project_id: int) -> Dict[str, Any]:
         """
         Get summary statistics for a project's logs
-        
+
         Args:
             project_id: Project ID
-        
+
         Returns:
             Summary statistics
         """
@@ -143,7 +143,7 @@ class LogStreamService:
             .filter(LogEntry.session_id.in_(session_id_list))
             .all()
         )
-        
+
         level_counts = {}
         for level, count in logs_by_level:
             level_counts[level] = count
@@ -171,25 +171,27 @@ class LogStreamService:
             ],
         }
 
-    def get_recent_logs(self, session_id: int, instance_id: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    def get_recent_logs(
+        self, session_id: int, instance_id: Optional[str] = None, limit: int = 100
+    ) -> List[Dict[str, Any]]:
         """
         Get recent logs for a session (filtered by instance_id)
-        
+
         Args:
             session_id: Session ID
             instance_id: Instance UUID to filter by (prevents ID reuse issues)
             limit: Maximum logs to return
-        
+
         Returns:
             List of recent log entries
         """
         # Build query
         query = self.db.query(LogEntry).filter(LogEntry.session_id == session_id)
-        
+
         # Filter by instance_id if provided (critical for preventing ID reuse)
         if instance_id:
             query = query.filter(LogEntry.session_instance_id == instance_id)
-        
+
         # Order by timestamp descending
         logs = query.order_by(LogEntry.created_at.desc()).limit(limit).all()
 
@@ -219,19 +221,17 @@ def get_db_session():
 def get_project_logs_summary_for_db(db: Session, project_id: int) -> Dict[str, Any]:
     """
     Get summary statistics for a project's logs (uses provided db session)
-    
+
     Args:
         db: Database session
         project_id: Project ID
-    
+
     Returns:
         Summary statistics
     """
     # Get all session IDs for this project
     session_ids = (
-        db.query(SessionModel.id)
-        .filter(SessionModel.project_id == project_id)
-        .all()
+        db.query(SessionModel.id).filter(SessionModel.project_id == project_id).all()
     )
     session_id_list = [s[0] for s in session_ids]
 
@@ -248,7 +248,7 @@ def get_project_logs_summary_for_db(db: Session, project_id: int) -> Dict[str, A
         .filter(LogEntry.session_id.in_(session_id_list))
         .all()
     )
-    
+
     level_counts = {}
     for level, count in logs_by_level:
         level_counts[level] = count
@@ -287,7 +287,7 @@ def stream_logs(
 ) -> Generator[Dict[str, Any], None, None]:
     """
     Stream logs from the database (backward compatibility)
-    
+
     Args:
         session_id: Filter by session ID (optional)
         project_id: Filter by project ID (optional)
@@ -295,7 +295,7 @@ def stream_logs(
         limit: Maximum number of logs to return
         follow: If True, continue reading (for WebSocket)
         since: Only return logs after this timestamp
-    
+
     Yields:
         Log entries as dictionaries
     """
@@ -308,10 +308,10 @@ def stream_logs(
         # Apply filters
         if session_id:
             query = query.filter(LogEntry.session_id == session_id)
-        
+
         if task_id:
             query = query.filter(LogEntry.task_id == task_id)
-        
+
         if project_id:
             # Filter logs by project through sessions
             session_ids = (
@@ -321,7 +321,7 @@ def stream_logs(
             )
             session_id_list = [s[0] for s in session_ids]
             query = query.filter(LogEntry.session_id.in_(session_id_list))
-        
+
         if since:
             query = query.filter(LogEntry.created_at > since)
 
@@ -350,10 +350,10 @@ def stream_logs(
 def get_project_logs_summary(project_id: int) -> Dict[str, Any]:
     """
     Get summary statistics for a project's logs (backward compatibility)
-    
+
     Args:
         project_id: Project ID
-    
+
     Returns:
         Summary statistics
     """
@@ -381,7 +381,7 @@ def get_project_logs_summary(project_id: int) -> Dict[str, Any]:
             .filter(LogEntry.session_id.in_(session_id_list))
             .all()
         )
-        
+
         level_counts = {}
         for level, count in logs_by_level:
             level_counts[level] = count

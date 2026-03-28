@@ -96,7 +96,9 @@ class Session(Base):
     # Soft delete tracking to prevent ID reuse issues
     deleted_at = Column(DateTime(timezone=True), nullable=True)
     # Unique session instance identifier (changes on recreation)
-    instance_id = Column(String(36), nullable=True, index=True)  # UUID for session versioning
+    instance_id = Column(
+        String(36), nullable=True, index=True
+    )  # UUID for session versioning
 
     project = relationship("Project", back_populates="sessions")
     tasks = relationship(
@@ -107,7 +109,10 @@ class Session(Base):
     )
     # Context preservation relationships
     session_state = relationship(
-        "SessionState", back_populates="session", uselist=False, cascade="all, delete-orphan"
+        "SessionState",
+        back_populates="session",
+        uselist=False,
+        cascade="all, delete-orphan",
     )
     conversation_history = relationship(
         "ConversationHistory", back_populates="session", cascade="all, delete-orphan"
@@ -233,7 +238,9 @@ class LogEntry(Base):
     )  # JSON string (renamed from metadata to avoid SQLAlchemy reserved name)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     # Session instance tracking to prevent ID reuse issues
-    session_instance_id = Column(String(36), nullable=True, index=True)  # UUID matching session.instance_id
+    session_instance_id = Column(
+        String(36), nullable=True, index=True
+    )  # UUID matching session.instance_id
 
 
 class User(Base):

@@ -13,13 +13,19 @@ from sqlalchemy.orm import Session as DBSession
 from sqlalchemy import func
 
 from app.database import SessionLocal
-from app.models import Session as SessionModel, SessionState, ConversationHistory, TaskCheckpoint
+from app.models import (
+    Session as SessionModel,
+    SessionState,
+    ConversationHistory,
+    TaskCheckpoint,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # Models moved to models.py to avoid circular imports
 # SessionState, TaskCheckpoint, ConversationHistory are now defined in app.models
+
 
 class ContextPreservationService:
     """Service for managing context preservation"""
@@ -81,7 +87,9 @@ class ContextPreservationService:
         state.current_step = current_step
         state.total_steps = total_steps
         state.plan = json.dumps(plan) if plan else None
-        state.execution_results = json.dumps(execution_results) if execution_results else None
+        state.execution_results = (
+            json.dumps(execution_results) if execution_results else None
+        )
         state.debug_attempts = json.dumps(debug_attempts) if debug_attempts else None
         state.changed_files = json.dumps(changed_files) if changed_files else None
 
@@ -134,13 +142,15 @@ class ContextPreservationService:
         return {
             "current_step": state.current_step,
             "total_steps": state.total_steps,
-            "completion_percent": (state.current_step / state.total_steps * 100)
-            if state.total_steps > 0
-            else 0,
+            "completion_percent": (
+                (state.current_step / state.total_steps * 100)
+                if state.total_steps > 0
+                else 0
+            ),
             "state_version": state.state_version,
-            "last_snapshot_at": state.last_snapshot_at.isoformat()
-            if state.last_snapshot_at
-            else None,
+            "last_snapshot_at": (
+                state.last_snapshot_at.isoformat() if state.last_snapshot_at else None
+            ),
             "has_debug_attempts": bool(state.debug_attempts),
             "has_changed_files": bool(state.changed_files),
         }
@@ -322,23 +332,17 @@ class ContextPreservationService:
         if not checkpoint_id:
             checkpoint = checkpoints[-1]
         else:
-            checkpoint = next(
-                (c for c in checkpoints if c.id == checkpoint_id), None
-            )
+            checkpoint = next((c for c in checkpoints if c.id == checkpoint_id), None)
 
         if not checkpoint:
             return None
 
         # Parse checkpoint data
         state_snapshot = (
-            json.loads(checkpoint.state_snapshot)
-            if checkpoint.state_snapshot
-            else None
+            json.loads(checkpoint.state_snapshot) if checkpoint.state_snapshot else None
         )
         logs_snapshot = (
-            json.loads(checkpoint.logs_snapshot)
-            if checkpoint.logs_snapshot
-            else None
+            json.loads(checkpoint.logs_snapshot) if checkpoint.logs_snapshot else None
         )
         error_info = (
             json.loads(checkpoint.error_info) if checkpoint.error_info else None
@@ -408,15 +412,15 @@ class ContextPreservationService:
             "current_step": state.current_step,
             "total_steps": state.total_steps,
             "plan": json.loads(state.plan) if state.plan else [],
-            "execution_results": json.loads(state.execution_results)
-            if state.execution_results
-            else [],
-            "debug_attempts": json.loads(state.debug_attempts)
-            if state.debug_attempts
-            else [],
-            "changed_files": json.loads(state.changed_files)
-            if state.changed_files
-            else [],
+            "execution_results": (
+                json.loads(state.execution_results) if state.execution_results else []
+            ),
+            "debug_attempts": (
+                json.loads(state.debug_attempts) if state.debug_attempts else []
+            ),
+            "changed_files": (
+                json.loads(state.changed_files) if state.changed_files else []
+            ),
             "conversation_history": [
                 {
                     "role": msg.role,
@@ -460,7 +464,7 @@ class ContextPreservationService:
                 changed_files=changed_files,
             )
 
-             # Restore conversation history
+            # Restore conversation history
             for msg_data in context_data.get("conversation_history", []):
                 self.add_conversation_message(
                     session_id=session_id,

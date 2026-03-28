@@ -64,7 +64,7 @@ def create_session(
     db_session = SessionModel(**session.model_dump())
     db_session.is_active = True  # Session is active when created
     db.add(db_session)
-    
+
     # Commit session creation
     db.commit()
     db.refresh(db_session)
@@ -171,7 +171,11 @@ def update_session(
     return db_session
 
 
-@router.delete("/sessions/{session_id}", response_model=None, status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/sessions/{session_id}",
+    response_model=None,
+    status_code=status.HTTP_204_NO_CONTENT,
+)
 def delete_session(
     session_id: int,
     db: Session = Depends(get_db),
@@ -180,9 +184,9 @@ def delete_session(
     """Delete a session"""
     import json
     from app.models import Session as SessionModel, LogEntry
-    
+
     logger.info(f"DELETE /sessions/{session_id} - Starting deletion")
-    
+
     db_session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not db_session:
         logger.warning(f"DELETE /sessions/{session_id} - Session not found")
@@ -202,7 +206,7 @@ def delete_session(
     # Delete the session
     db.delete(db_session)
     db.commit()
-    
+
     logger.info(f"DELETE /sessions/{session_id} - Session deleted successfully")
     return None
 
@@ -351,7 +355,9 @@ async def websocket_log_stream(
 
     # Accept connection
     await websocket.accept()
-    logger.info(f"WebSocket connected for session {session_id}, instance: {session.instance_id}")
+    logger.info(
+        f"WebSocket connected for session {session_id}, instance: {session.instance_id}"
+    )
 
     # Register WebSocket
     if session_id not in active_websockets:
@@ -370,8 +376,12 @@ async def websocket_log_stream(
 
     # Send recent logs filtered by instance_id
     log_service = LogStreamService(db)
-    recent_logs = log_service.get_recent_logs(session_id, instance_id=session.instance_id, limit=20)
-    logger.info(f"Sending {len(recent_logs)} recent logs to WebSocket (filtered by instance)")
+    recent_logs = log_service.get_recent_logs(
+        session_id, instance_id=session.instance_id, limit=20
+    )
+    logger.info(
+        f"Sending {len(recent_logs)} recent logs to WebSocket (filtered by instance)"
+    )
 
     for log in recent_logs:
         await websocket.send_json({"type": "log", **log})
@@ -411,11 +421,11 @@ def get_session_logs(
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
     # Filter logs by both session_id and instance_id to prevent ID reuse issues
     query = db.query(LogEntry).filter(
         LogEntry.session_id == session_id,
-        LogEntry.session_instance_id == session.instance_id
+        LogEntry.session_instance_id == session.instance_id,
     )
 
     if level:
@@ -501,7 +511,7 @@ def track_tool_execution(
     session_instance_id: Optional[str] = None,  # NEW: For log isolation
 ):
     """Manually track a tool execution with instance tracking
-    
+
     Args:
         session_id: Session ID
         execution_id: Unique execution identifier
@@ -512,7 +522,7 @@ def track_tool_execution(
         db: Database session
         task_id: Optional task ID
         session_instance_id: Instance UUID for log isolation (NEW)
-    
+
     Returns:
         Tracked execution result
     """
@@ -553,21 +563,25 @@ async def start_session(
     # Check if already running (includes 'active' as equivalent to 'running')
     if session.status in ["running", "paused", "active"]:
         raise HTTPException(
-            status_code=400, 
-            detail=f"Session is already {session.status}. Use stop or resume instead."
+            status_code=400,
+            detail=f"Session is already {session.status}. Use stop or resume instead.",
         )
-    
+
     # Handle sessions stuck in "pending" or other non-running states
     if session.status == "pending" and session.is_active:
-        logger.warning(f"Session {session_id} is stuck in pending state with is_active=True. Resetting...")
+        logger.warning(
+            f"Session {session_id} is stuck in pending state with is_active=True. Resetting..."
+        )
         # Reset the session state to allow starting
         session.is_active = False
         session.status = "stopped"
         db.commit()
-    
+
     # Handle sessions stuck in "active" status
     if session.status == "active":
-        logger.warning(f"Session {session_id} has 'active' status. Treating as stopped and resetting...")
+        logger.warning(
+            f"Session {session_id} has 'active' status. Treating as stopped and resetting..."
+        )
         session.is_active = False
         session.status = "stopped"
         db.commit()
@@ -575,13 +589,15 @@ async def start_session(
     try:
         # Generate unique instance ID for this session (prevents ID reuse issues)
         session_instance_id = str(uuid.uuid4())
-        
+
         # Initialize OpenClaw service
         openclaw_service = OpenClawSessionService(db, session_id, use_demo_mode=False)
 
         # Create OpenClaw session using session description or name
         task_description = session.description or session.name
-        logger.info(f"Starting session {session_id} with description: {task_description[:50]}, instance: {session_instance_id}")
+        logger.info(
+            f"Starting session {session_id} with description: {task_description[:50]}, instance: {session_instance_id}"
+        )
         session_key = await openclaw_service.create_openclaw_session(task_description)
 
         # If session is linked to a project, queue all pending tasks
@@ -652,7 +668,11 @@ async def start_session(
                 level="INFO",
                 message=f"Session started: {session.name}",
                 metadata=json.dumps(
-                    {"session_key": session_key, "task_description": task_description, "instance_id": session_instance_id}
+                    {
+                        "session_key": session_key,
+                        "task_description": task_description,
+                        "instance_id": session_instance_id,
+                    }
                 ),
             )
         )
@@ -1027,7 +1047,7 @@ def get_sorted_logs(
     # Get all logs for the session, filtering by instance_id to prevent ID reuse issues
     logs_query = db.query(LogEntry).filter(
         LogEntry.session_id == session_id,
-        LogEntry.session_instance_id == session.instance_id
+        LogEntry.session_instance_id == session.instance_id,
     )
 
     # Apply level filter if specified
@@ -1143,7 +1163,6 @@ Return ONLY a JSON array of step objects with 'title' and 'description' fields. 
             {
                 "title": "Add Database Connection",
                 "description": "Configure database connection pooling",
-
             },
         ],
         "frontend|ui|react": [
@@ -1195,4 +1214,3 @@ Return ONLY a JSON array of step objects with 'title' and 'description' fields. 
     ]
 
     return {"steps": default_steps, "task_name": task_name}
-

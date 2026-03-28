@@ -94,7 +94,7 @@ class OrchestrationState:
     status: OrchestrationStatus = OrchestrationStatus.PLANNING
     abort_reason: str = ""
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
-    
+
     # Optional: Override workspace path (for database-configured paths)
     _workspace_path_override: Optional[str] = None
     # Optional: Override task subfolder
@@ -134,8 +134,12 @@ class OrchestrationState:
         """
         if self._workspace_path_override:
             return Path(self._workspace_path_override)
-        
-        slug = self._slugify(self.project_name.strip()) if self.project_name.strip() else f"project-{self.session_id}"
+
+        slug = (
+            self._slugify(self.project_name.strip())
+            if self.project_name.strip()
+            else f"project-{self.session_id}"
+        )
         return self.workspace_root / slug
 
     @property
@@ -146,7 +150,7 @@ class OrchestrationState:
         """
         if self._task_subfolder_override:
             return self._task_subfolder_override
-        
+
         if self.task_id:
             return f"task_{self.task_id}"
         elif self.project_name:

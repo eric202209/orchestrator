@@ -68,12 +68,6 @@ def slugify_project_name(name: str) -> str:
     return slug
 
 
-def get_db_session():
-    """Get database session for Celery tasks"""
-    engine = create_engine("sqlite:///./orchestrator.db")
-    return Session(bind=engine)
-
-
 @celery_app.task(
     bind=True,
     max_retries=3,
@@ -126,7 +120,7 @@ def execute_openclaw_task(
 
         # Initialize orchestration state with new workspace architecture
         # Structure: workspace_root / project_workspace / task_subfolder
-        
+
         orchestration_state = OrchestrationState(
             session_id=str(session_id),
             task_description=prompt,
@@ -134,7 +128,7 @@ def execute_openclaw_task(
             project_context=context.get("project_context", "") if context else "",
             task_id=task_id,  # Pass task ID for subfolder generation
         )
-        
+
         # If project has workspace_path configured, use it
         if project and project.workspace_path:
             # workspace_path should be relative (e.g., "TalentBridge"), not absolute
@@ -142,28 +136,36 @@ def execute_openclaw_task(
             if not workspace_path.startswith("/"):
                 # Make it absolute
                 workspace_path = str(OPENCLAW_WORKSPACE_ROOT / workspace_path)
-            
+
             orchestration_state._workspace_path_override = workspace_path
-            
+
             # Also set task subfolder if not already in database
             if task.task_subfolder:
                 orchestration_state._task_subfolder_override = task.task_subfolder
             else:
                 # Generate task subfolder from task title (slugified)
                 # Use task title if available, otherwise fall back to task_id
-                task_title_slug = slugify_project_name(task.title) if task.title else f"task_{task_id}"
-                
+                task_title_slug = (
+                    slugify_project_name(task.title)
+                    if task.title
+                    else f"task_{task_id}"
+                )
+
                 # Ensure unique subfolder name (append counter if needed)
                 counter = 1
                 subfolder_name = task_title_slug
                 while True:
                     subfolder_path = f"{workspace_path}/{subfolder_name}"
                     # Check if this subfolder already exists
-                    existing_tasks = db.query(Task).filter(
-                        Task.project_id == session.project_id,
-                        Task.task_subfolder == subfolder_name
-                    ).all()
-                    
+                    existing_tasks = (
+                        db.query(Task)
+                        .filter(
+                            Task.project_id == session.project_id,
+                            Task.task_subfolder == subfolder_name,
+                        )
+                        .all()
+                    )
+
                     # If this is the first task with this name, or it's our current task
                     if len(existing_tasks) == 1 and existing_tasks[0].id == task_id:
                         break
@@ -173,14 +175,14 @@ def execute_openclaw_task(
                         # Another task already uses this name, append counter
                         subfolder_name = f"{task_title_slug}-{counter}"
                         counter += 1
-                
+
                 task.task_subfolder = subfolder_name
                 db.commit()
                 orchestration_state._task_subfolder_override = subfolder_name
         else:
             # Fallback: use slugified project name
             pass
-        
+
         # Create the task workspace directory if it doesn't exist
         task_workspace = orchestration_state.project_dir
         if not os.path.exists(task_workspace):
@@ -237,7 +239,7 @@ def execute_openclaw_task(
         # Parse planning result to get steps
         try:
             output_result = planning_result.get("output", {})
-            
+
             # Debug: Log raw output
             logger.info(
                 f"[ORCHESTRATION] Raw planning output type: {type(output_result)}, content preview: {str(output_result)[:200]}"
@@ -283,7 +285,9 @@ def execute_openclaw_task(
                 output_text = str(output_result)
                 logger.info(f"[ORCHESTRATION] Unknown type, converted to string")
 
-            logger.info(f"[ORCHESTRATION] Final extracted text length: {len(output_text)}")
+            logger.info(
+                f"[ORCHESTRATION] Final extracted text length: {len(output_text)}"
+            )
 
             # Strip Markdown code fences if present
             import re
@@ -492,20 +496,21 @@ def execute_openclaw_task(
             if report_result and "report" in report_result:
                 report_content = report_result["report"]
                 report_filename = f"task_report_{task_id}.md"
-                
+
                 # Save report to task subfolder
                 if task.task_subfolder:
                     subfolder_path = os.path.join(
-                        os.path.dirname(project.workspace_path),
-                        task.task_subfolder
+                        os.path.dirname(project.workspace_path), task.task_subfolder
                     )
                     report_path = os.path.join(subfolder_path, report_filename)
                     os.makedirs(subfolder_path, exist_ok=True)
-                    with open(report_path, 'w', encoding='utf-8') as f:
+                    with open(report_path, "w", encoding="utf-8") as f:
                         f.write(report_content)
                     logger.info(f"[REPORT] Task report saved to: {report_path}")
         except Exception as report_error:
-            logger.error(f"[REPORT] Failed to generate task report: {str(report_error)}")
+            logger.error(
+                f"[REPORT] Failed to generate task report: {str(report_error)}"
+            )
 
         return {
             "status": "completed",

@@ -145,7 +145,7 @@ class ToolTrackingService:
         self, level: str, message: str, metadata: Dict[str, Any]
     ) -> None:
         """Create database log entry for tool execution with instance tracking
-        
+
         Args:
             level: Log level
             message: Log message
@@ -153,7 +153,9 @@ class ToolTrackingService:
         """
         log_entry = LogEntry(
             session_id=metadata.get("session_id"),
-            session_instance_id=metadata.get("session_instance_id"),  # ✅ Critical for isolation
+            session_instance_id=metadata.get(
+                "session_instance_id"
+            ),  # ✅ Critical for isolation
             task_id=metadata.get("task_id"),
             level=level,
             message=message,

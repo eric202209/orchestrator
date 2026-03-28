@@ -21,7 +21,10 @@ from app.services.prompt_templates import (
     PromptTemplates,
 )
 from app.services.project_isolation_service import ProjectIsolationService
-from app.services.permission_service import PermissionApprovalService, PermissionOperationType
+from app.services.permission_service import (
+    PermissionApprovalService,
+    PermissionOperationType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -193,8 +196,12 @@ class OpenClawSessionService:
             permission_service = PermissionApprovalService(self.db)
 
             # Check if permission is required
-            if not permission_service.check_permission_required(operation_type, target_path):
-                self._log_entry("INFO", f"Permission not required for: {operation_type}")
+            if not permission_service.check_permission_required(
+                operation_type, target_path
+            ):
+                self._log_entry(
+                    "INFO", f"Permission not required for: {operation_type}"
+                )
                 return True
 
             # Check if already granted
@@ -204,7 +211,9 @@ class OpenClawSessionService:
                 target_path or "",
                 self.session_model.id,
             ):
-                self._log_entry("INFO", f"Permission already granted for: {operation_type}")
+                self._log_entry(
+                    "INFO", f"Permission already granted for: {operation_type}"
+                )
                 return True
 
             # Request permission
@@ -311,13 +320,9 @@ class OpenClawSessionService:
                         self.session_model.project_id
                     )
                     prompt = f"{safety_prompt}\n\n{prompt}"
-                    self._log_entry(
-                        "INFO", "Project isolation safety prompt injected"
-                    )
+                    self._log_entry("INFO", "Project isolation safety prompt injected")
                 except Exception as e:
-                    self._log_entry(
-                        "WARN", f"Failed to inject safety prompt: {str(e)}"
-                    )
+                    self._log_entry("WARN", f"Failed to inject safety prompt: {str(e)}")
 
             self._log_entry(
                 "INFO", f"[ORCHESTRATION] Starting with prompt: {prompt[:100]}..."
@@ -560,20 +565,24 @@ class OpenClawSessionService:
             except Exception as e:
                 # Extract meaningful error message
                 error_msg = str(e)
-                
+
                 # If error message contains garbled output, try to extract actual error
-                if error_msg.strip() in ['"\''] or error_msg.strip().startswith('"), "') or error_msg.strip().startswith('"), "'):
+                if (
+                    error_msg.strip() in ["\"'"]
+                    or error_msg.strip().startswith('"), "')
+                    or error_msg.strip().startswith('"), "')
+                ):
                     # Try to get error from stderr if available
                     # This handles cases where OpenClaw CLI returned garbled error
                     self._log_entry(
-                        "WARN", 
-                        f"[STEP] Garbled error detected: {repr(error_msg)}. Checking for better error message..."
+                        "WARN",
+                        f"[STEP] Garbled error detected: {repr(error_msg)}. Checking for better error message...",
                     )
-                    
+
                     # If we have access to the result object, check its stderr
                     # For now, provide a more helpful error message
                     error_msg = f"Execution failed with unclear error. See logs for details. Original error: {str(e)[:200]}"
-                
+
                 step_result = StepResult(
                     step_number=step_index + 1,
                     status="failed",
@@ -804,16 +813,16 @@ class OpenClawSessionService:
                         "INFO",
                         f"[OPENCLAW] Raw stdout: {repr(result.stdout[:500])}...",
                     )
-                    
+
                     # Debug: Try parsing with debug
                     stdout_stripped = result.stdout.strip()
                     self._log_entry(
                         "INFO",
                         f"[OPENCLAW] Stripped length: {len(stdout_stripped)}, first 100 chars: {repr(stdout_stripped[:100])}",
                     )
-                    
+
                     output_data = json.loads(stdout_stripped)
-                    
+
                     # Debug log
                     self._log_entry(
                         "INFO",
@@ -1069,7 +1078,7 @@ class OpenClawSessionService:
         session_instance_id = None
         if self.session_model:
             session_instance_id = self.session_model.instance_id
-        
+
         log_entry = LogEntry(
             session_id=self.session_id,
             session_instance_id=session_instance_id,

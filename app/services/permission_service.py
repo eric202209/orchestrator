@@ -99,9 +99,8 @@ class PermissionApprovalService:
             operation_type=operation_type,
             target_path=target_path,
             command=command,
-            description=description or self._generate_description(
-                operation_type, target_path, command
-            ),
+            description=description
+            or self._generate_description(operation_type, target_path, command),
             status=PermissionStatus.PENDING.value,
             expires_at=expires_at,
         )
@@ -126,7 +125,11 @@ class PermissionApprovalService:
         elif operation_type == PermissionOperationType.FILE_DELETE:
             return f"Delete file: {target_path}"
         elif operation_type == PermissionOperationType.SHELL_COMMAND:
-            return f"Execute command: {command[:100]}..." if command else "Execute shell command"
+            return (
+                f"Execute command: {command[:100]}..."
+                if command
+                else "Execute shell command"
+            )
         elif operation_type == PermissionOperationType.EXTERNAL_API:
             return "Make external API call"
         elif operation_type == PermissionOperationType.INSTALL_DEPENDENCIES:
@@ -157,9 +160,11 @@ class PermissionApprovalService:
         from app.models import PermissionRequest
         from datetime import datetime
 
-        request = self.db.query(PermissionRequest).filter(
-            PermissionRequest.id == request_id
-        ).first()
+        request = (
+            self.db.query(PermissionRequest)
+            .filter(PermissionRequest.id == request_id)
+            .first()
+        )
 
         if not request:
             raise ValueError(f"Permission request {request_id} not found")
@@ -182,9 +187,7 @@ class PermissionApprovalService:
 
         return request
 
-    def deny_permission(
-        self, request_id: int, reason: Optional[str] = None
-    ):
+    def deny_permission(self, request_id: int, reason: Optional[str] = None):
         """
         Deny a permission request
 
@@ -197,9 +200,11 @@ class PermissionApprovalService:
         """
         from app.models import PermissionRequest
 
-        request = self.db.query(PermissionRequest).filter(
-            PermissionRequest.id == request_id
-        ).first()
+        request = (
+            self.db.query(PermissionRequest)
+            .filter(PermissionRequest.id == request_id)
+            .first()
+        )
 
         if not request:
             raise ValueError(f"Permission request {request_id} not found")
@@ -328,12 +333,16 @@ class PermissionApprovalService:
         from app.models import PermissionRequest
         from datetime import datetime
 
-        expired_count = self.db.query(PermissionRequest).filter(
-            PermissionRequest.status == PermissionStatus.PENDING.value,
-            PermissionRequest.expires_at < datetime.utcnow(),
-        ).update(
-            {"status": PermissionStatus.EXPIRED.value},
-            synchronize_session=False,
+        expired_count = (
+            self.db.query(PermissionRequest)
+            .filter(
+                PermissionRequest.status == PermissionStatus.PENDING.value,
+                PermissionRequest.expires_at < datetime.utcnow(),
+            )
+            .update(
+                {"status": PermissionStatus.EXPIRED.value},
+                synchronize_session=False,
+            )
         )
 
         self.db.commit()
@@ -341,9 +350,7 @@ class PermissionApprovalService:
 
         return expired_count
 
-    def get_permission_history(
-        self, project_id: int, limit: int = 100
-    ) -> List:
+    def get_permission_history(self, project_id: int, limit: int = 100) -> List:
         """
         Get permission history for a project
 

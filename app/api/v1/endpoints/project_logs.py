@@ -4,7 +4,14 @@ Log streaming with project-level filtering.
 Supports showing logs from all sessions within a project.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from typing import Optional, AsyncGenerator, Dict, Any
@@ -26,13 +33,13 @@ def get_project_logs(
 ):
     """
     Get logs for all sessions in a project
-    
+
     Args:
         project_id: Project ID
         limit: Maximum logs to return
         level: Optional log level filter
         search: Optional text search in log messages
-    
+
     Returns:
         List of log entries from all sessions in the project
     """
@@ -43,17 +50,19 @@ def get_project_logs(
 
     # Create log service instance
     log_service = LogStreamService(db)
-    
+
     # Get summary
     summary = log_service.get_project_logs_summary(project_id)
-    
+
     # Get logs using service
-    logs = list(log_service.stream_logs(
-        project_id=project_id,
-        limit=limit,
-        level=level,
-        search=search,
-    ))
+    logs = list(
+        log_service.stream_logs(
+            project_id=project_id,
+            limit=limit,
+            level=level,
+            search=search,
+        )
+    )
 
     return {
         "project_id": project_id,
@@ -75,13 +84,13 @@ async def stream_project_logs(
 ):
     """
     Stream logs for a project (for SSE)
-    
+
     Args:
         project_id: Project ID
         limit: Maximum logs to return
         follow: Continue streaming new logs
         since: Only return logs after this timestamp (ISO format)
-    
+
     Returns:
         Streaming response of log entries
     """
@@ -92,12 +101,15 @@ async def stream_project_logs(
 
     # Parse since timestamp
     from datetime import datetime
+
     since_dt = None
     if since:
         try:
             since_dt = datetime.fromisoformat(since)
         except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid since timestamp format")
+            raise HTTPException(
+                status_code=400, detail="Invalid since timestamp format"
+            )
 
     async def log_generator() -> AsyncGenerator[str, None]:
         """Generate log entries as JSON lines"""
@@ -124,10 +136,10 @@ async def stream_project_logs(
 def get_project_logs_summary(project_id: int, db: Session = Depends(get_db)):
     """
     Get summary statistics for a project's logs
-    
+
     Args:
         project_id: Project ID
-    
+
     Returns:
         Summary statistics
     """
@@ -152,7 +164,7 @@ async def websocket_project_logs(
 ):
     """
     WebSocket endpoint for real-time project logs
-    
+
     Args:
         websocket: WebSocket connection
         project_id: Project ID
@@ -168,17 +180,21 @@ async def websocket_project_logs(
 
     try:
         log_service = LogStreamService(db)
-        
-        # Send initial logs
-        initial_logs = list(log_service.stream_logs(
-            project_id=project_id,
-            limit=100,
-        ))
 
-        await websocket.send_json({
-            "type": "initial",
-            "logs": initial_logs,
-        })
+        # Send initial logs
+        initial_logs = list(
+            log_service.stream_logs(
+                project_id=project_id,
+                limit=100,
+            )
+        )
+
+        await websocket.send_json(
+            {
+                "type": "initial",
+                "logs": initial_logs,
+            }
+        )
 
         # Stream new logs
         async for log in log_service.stream_logs(
@@ -186,10 +202,12 @@ async def websocket_project_logs(
             follow=True,
             limit=10,
         ):
-            await websocket.send_json({
-                "type": "new",
-                "log": log,
-            })
+            await websocket.send_json(
+                {
+                    "type": "new",
+                    "log": log,
+                }
+            )
 
     except WebSocketDisconnect:
         logging.info(f"WebSocket disconnected for project {project_id}")

@@ -45,7 +45,9 @@ async def save_session_state(
             "current_step": state.current_step,
             "total_steps": state.total_steps,
             "state_version": state.state_version,
-            "saved_at": state.last_snapshot_at.isoformat() if state.last_snapshot_at else None,
+            "saved_at": (
+                state.last_snapshot_at.isoformat() if state.last_snapshot_at else None
+            ),
         }
 
     except KeyError as e:
@@ -65,7 +67,7 @@ async def get_session_state(
     try:
         context_service = ContextPreservationService(db)
         state = context_service.load_session_state(session_id)
-        
+
         if not state:
             return {"exists": False}
 
@@ -75,9 +77,15 @@ async def get_session_state(
             "project_id": state.project_id,
             "current_step": state.current_step,
             "total_steps": state.total_steps,
-            "completion_percent": (state.current_step / state.total_steps * 100) if state.total_steps > 0 else 0,
+            "completion_percent": (
+                (state.current_step / state.total_steps * 100)
+                if state.total_steps > 0
+                else 0
+            ),
             "state_version": state.state_version,
-            "last_snapshot_at": state.last_snapshot_at.isoformat() if state.last_snapshot_at else None,
+            "last_snapshot_at": (
+                state.last_snapshot_at.isoformat() if state.last_snapshot_at else None
+            ),
         }
 
     except Exception as e:
@@ -95,7 +103,7 @@ async def get_state_progress(
     try:
         context_service = ContextPreservationService(db)
         progress = context_service.get_state_progress(session_id)
-        
+
         if not progress:
             raise HTTPException(status_code=404, detail="Session state not found")
 

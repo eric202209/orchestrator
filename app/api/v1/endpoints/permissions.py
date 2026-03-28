@@ -66,7 +66,9 @@ async def create_permission_request(
             "description": permission.description,
             "status": permission.status,
             "created_at": permission.created_at.isoformat(),
-            "expires_at": permission.expires_at.isoformat() if permission.expires_at else None,
+            "expires_at": (
+                permission.expires_at.isoformat() if permission.expires_at else None
+            ),
         }
 
     except KeyError as e:
@@ -102,7 +104,9 @@ async def approve_permission(
 
         permission = permission_service.approve_permission(
             request_id=request_id,
-            approved_by=current_user.email if hasattr(current_user, "email") else "user",
+            approved_by=(
+                current_user.email if hasattr(current_user, "email") else "user"
+            ),
             auto_approve_same=auto_approve,
         )
 
@@ -111,7 +115,9 @@ async def approve_permission(
             "request_id": permission.id,
             "status": permission.status,
             "approved_by": permission.approved_by,
-            "approved_at": permission.approved_at.isoformat() if permission.approved_at else None,
+            "approved_at": (
+                permission.approved_at.isoformat() if permission.approved_at else None
+            ),
             "auto_approve_same": auto_approve,
         }
 

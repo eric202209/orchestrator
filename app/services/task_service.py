@@ -75,10 +75,16 @@ class TaskService:
         return task
 
     def log_task_event(
-        self, task_id: int, session_id: int, session_instance_id: str, level: str, message: str, metadata: dict = None
+        self,
+        task_id: int,
+        session_id: int,
+        session_instance_id: str,
+        level: str,
+        message: str,
+        metadata: dict = None,
     ):
         """Log an event for a task with proper instance isolation
-        
+
         Args:
             task_id: Task ID
             session_id: Session ID (new parameter for proper isolation)
@@ -88,7 +94,7 @@ class TaskService:
             metadata: Optional metadata dict
         """
         from app.models import LogEntry
-        
+
         # Insert log entry with instance tracking
         log = LogEntry(
             session_id=session_id,

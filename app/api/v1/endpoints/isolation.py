@@ -12,7 +12,10 @@ from typing import Dict, Any, Optional
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models import Project
-from app.services.project_isolation_service import ProjectIsolationService, ProjectIsolationError
+from app.services.project_isolation_service import (
+    ProjectIsolationService,
+    ProjectIsolationError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +186,8 @@ async def update_project_workspace(
 
         if not full_path.is_dir():
             raise HTTPException(
-                status_code=400, detail=f"Workspace path is not a directory: {full_path}"
+                status_code=400,
+                detail=f"Workspace path is not a directory: {full_path}",
             )
 
         # Update the project
