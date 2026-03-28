@@ -39,7 +39,6 @@ function SessionDashboard() {
   const reconnectCountRef = useRef(0);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isConnectingRef = useRef(false);
-  const connectedRef = useRef(false);
   
   // Refs for WebSocket connection functions to avoid forward reference issues
   const connectStatusWebSocketRef = useRef<(() => void) | null>(null);
@@ -75,10 +74,10 @@ function SessionDashboard() {
   }, [session?.status]);
 
   const fetchProjectTasks = useCallback(async () => {
-    if (!id || !projectLoaded || tasksFetched) return;
+    if (!project?.id || !projectLoaded || tasksFetched) return;
     setIsLoadingTasks(true);
     try {
-      const response = await tasksAPI.getTasks(Number(id));
+      const response = await tasksAPI.getByProject(project.id);
       setTasks(response.data || []);
     } catch (error) {
       console.error('Failed to fetch tasks:', error);
@@ -86,7 +85,7 @@ function SessionDashboard() {
       setIsLoadingTasks(false);
       setTasksFetched(true);
     }
-  }, [id, projectLoaded, tasksFetched]);
+  }, [project?.id, projectLoaded, tasksFetched]);
 
   const fetchProject = useCallback(async () => {
     if (!id || projectLoaded) return;
@@ -178,16 +177,14 @@ function SessionDashboard() {
 
   // Initialize WebSockets after functions are defined
   useEffect(() => {
-    if (!id || connectedRef.current) return;
+    if (!id) return;
     
     // Delay WebSocket connection to ensure functions are available
     const initTimeout = setTimeout(() => {
-      if (id) {
-        connectStatusWebSocket();
-        connectLogsWebSocket();
-        connectedRef.current = true;
-      }
-    }, 100);
+      console.log('Initializing WebSockets for session:', id);
+      connectStatusWebSocket();
+      connectLogsWebSocket();
+    }, 500);
     
     return () => clearTimeout(initTimeout);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -371,22 +368,38 @@ function SessionDashboard() {
   connectStatusWebSocketRef.current = connectStatusWebSocket;
 
   const connectLogsWebSocket = useCallback(() => {
-    console.log('connectLogsWebSocket called, session id:', id, 'project:', project?.id);
-    if (!id || isConnectingRef.current) {
-      console.log('Not connecting - missing id or already connecting');
+    console.log('=== connectLogsWebSocket START ===');
+    console.log('Session ID:', id);
+    console.log('Project:', project?.id);
+    console.log('isConnectingRef.current:', isConnectingRef.current);
+    console.log('isLogsConnected:', isLogsConnected);
+    
+    if (!id) {
+      console.log('❌ No session ID, cannot connect');
       return;
     }
     
+    if (isLogsConnected) {
+      console.log('Already connected, skipping');
+      return;
+    }
+    
+    if (isConnectingRef.current) {
+      console.log('Already connecting, waiting...');
+      return;
+    }
+    
+    console.log('✅ Connecting to logs WebSocket...');
     isConnectingRef.current = true;
     // Use session-specific WebSocket endpoint instead of project-level
     const webSocket = sessionsAPI.getLogsStream(Number(id));
     console.log('WebSocket URL:', webSocket.url);
     
     webSocket.onopen = () => {
-      console.log('Logs WebSocket opened!');
+      console.log('✅ Logs WebSocket opened!');
       setIsLogsConnected(true);
       isConnectingRef.current = false;
-      console.log('Connected to logs stream ✅');
+      console.log('✅ Connected to logs stream ✅');
     };
 
     webSocket.onmessage = (event) => {
@@ -434,7 +447,7 @@ function SessionDashboard() {
     };
 
     setLogsWs(webSocket);
-  }, [id, project?.id, session?.status]);
+  }, [id, project?.id, session?.status, isLogsConnected]);
 
   // Assign to refs after definition for use in useEffects
   connectLogsWebSocketRef.current = connectLogsWebSocket;
