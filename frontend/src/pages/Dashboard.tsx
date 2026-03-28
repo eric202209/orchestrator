@@ -27,7 +27,6 @@ function Dashboard() {
   const [activeTab, setActiveTab] = useState<'overview' | 'projects' | 'tasks'>('overview');
   const [showCreateProject, setShowCreateProject] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
-  const [refresh, setRefresh] = useState(0);
   const [creatingProject, setCreatingProject] = useState(false);
   const [isAuthChecked, setIsAuthChecked] = useState(false);
 
@@ -43,10 +42,11 @@ function Dashboard() {
     try {
       const response = await authAPI.getMe();
       setUser(response.data);
-    } catch (error: any) {
+    } catch (error) {
+      const axiosError = error as { code?: string; message?: string };
       // Suppress timeout errors - they're expected during slow network
-      if (error.code !== 'ECONNABORTED' && error.code !== 'ERR_BAD_RESPONSE') {
-        console.error('Failed to fetch user:', error.message || error);
+      if (axiosError.code !== 'ECONNABORTED' && axiosError.code !== 'ERR_BAD_RESPONSE') {
+        console.error('Failed to fetch user:', axiosError.message || error);
       }
       // Token might be expired, let the interceptor handle it
       localStorage.removeItem('access_token');
@@ -93,10 +93,11 @@ function Dashboard() {
       }
       // sessions intentionally unused - kept for future implementation
       // setSessions(allSessions);
-    } catch (error: any) {
+    } catch (error) {
+      const axiosError = error as { code?: string; message?: string };
       // Suppress timeout errors - they're expected during slow network
-      if (error.code !== 'ECONNABORTED' && error.code !== 'ERR_BAD_RESPONSE') {
-        console.error('Failed to fetch projects:', error.message || error);
+      if (axiosError.code !== 'ECONNABORTED' && axiosError.code !== 'ERR_BAD_RESPONSE') {
+        console.error('Failed to fetch projects:', axiosError.message || error);
       }
     } finally {
       setLoading(false);

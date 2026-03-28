@@ -223,10 +223,11 @@ function SessionDashboard() {
             await fetchProjectTasks();
           }
         }
-      } catch (error: any) {
+      } catch (error) {
+        const axiosError = error as { code?: string; message?: string };
         // Only log non-abort errors to avoid spam
-        if (error.code !== 'ERR_BAD_RESPONSE' && error.code !== 'ECONNABORTED') {
-          console.error('Failed to poll session status:', error.message || error);
+        if (axiosError.code !== 'ERR_BAD_RESPONSE' && axiosError.code !== 'ECONNABORTED') {
+          console.error('Failed to poll session status:', axiosError.message || error);
         }
       }
     }, 5000); // Poll every 5 seconds
@@ -548,10 +549,11 @@ function SessionDashboard() {
       await sessionsAPI.stop(Number(id));
       await fetchSession();
       alert('✅ Session stopped successfully!');
-    } catch (error: any) {
+    } catch (error) {
+      const axiosError = error as { code?: string; message?: string };
       console.error('Failed to stop session:', error);
       // Suppress timeout errors - session stop might take a moment
-      if (error.code !== 'ECONNABORTED' && error.code !== 'ERR_BAD_RESPONSE') {
+      if (axiosError.code !== 'ECONNABORTED' && axiosError.code !== 'ERR_BAD_RESPONSE') {
         alert('Failed to stop session. Please try again.');
       } else {
         // Request timed out but session might be stopping in background
