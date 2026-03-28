@@ -1059,14 +1059,17 @@ class OpenClawSessionService:
             # Stream stdout and stderr in real-time
             async def stream_output(stream, level):
                 """Stream output from a subprocess pipe"""
+                log_count = 0
                 while True:
                     line = await stream.readline()
                     if not line:
                         break
                     line_text = line.decode("utf-8", errors="replace").strip()
                     if line_text:
-                        # Log to database
-                        self._log_entry(level, line_text)
+                        # Log to database (batch commits every 10 logs for performance)
+                        commit = (log_count + 1) % 10 == 0
+                        self._log_entry(level, line_text, commit=commit)
+                        log_count += 1
                         # Call callback if provided
                         if log_callback:
                             await log_callback(level, line_text)
@@ -1089,6 +1092,7 @@ class OpenClawSessionService:
                 self._log_entry(
                     "INFO",
                     f"[OPENCLAW] Return code: {process.returncode}, stdout_len: {len(stdout_text)}, stderr_len: {len(stderr_text)}",
+                    commit=True
                 )
 
                 if process.returncode == 0:
@@ -1250,9 +1254,19 @@ class OpenClawSessionService:
         }
 
     def _log_entry(
-        self, level: str, message: str, metadata: Optional[str] = None
+        self, level: str, message: str, metadata: Optional[str] = None, commit: bool = False
     ) -> LogEntry:
-        """Create database log entry with instance tracking"""
+        """Create database log entry with instance tracking
+
+        Args:
+            level: Log level (INFO, WARN, ERROR, etc.)
+            message: Log message
+            metadata: Optional metadata
+            commit: If True, commit immediately. If False, batch commit (default False)
+
+        Returns:
+            LogEntry object
+        """
         # Get instance_id from session if available
         session_instance_id = None
         if self.session_model:
@@ -1267,7 +1281,9 @@ class OpenClawSessionService:
             log_metadata=metadata,
         )
         self.db.add(log_entry)
-        self.db.commit()
+        # Only commit if explicitly requested (for performance)
+        if commit:
+            self.db.commit()
         return log_entry
 
     async def start_session(self, task_description: str) -> str:
