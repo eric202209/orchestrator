@@ -4,72 +4,50 @@ __pycache__/
 *$py.class
 *.so
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-.pnpm-store.v10/files
-
-# Virtual Environment
 venv/
 ENV/
-env/
+.env
+*.egg-info/
+dist/
+build/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
 
 # IDE
-.vscode/
 .idea/
+.vscode/
 *.swp
 *.swo
 *~
-
-# Environment
-.env
-.env.local
-.env.*.local
-.env.development
-
-# Logs
-*.log
-logs/
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Database
-*.db
-*.sqlite
-*.sqlite3
-dump.rdb
+# SSL/TLS Certificates (SECURITY - NEVER COMMIT)
+*.pem
+*.key
+cert.pem
+key.pem
+certs/
 
-# Temporary files
-tmp/
-temp/
+# Logs
+*.log
+logs/
+
+# Testing
+coverage/
+.nyc_output/
+
+# Misc
+*.tar.gz
+*.zip
+*.bak
 *.tmp
-
-# Test coverage
-.coverage
-htmlcov/
-.pytest_cache/
-
-# Hidden test suite (excluded from public repos)
-.tests/
-
-# Internal notes and documentation (not for public)
-.notes/
-
-# Startup scripts
-start.sh
-start_all.sh
-stop_all.sh
+.cache/
