@@ -70,6 +70,9 @@ coverage/
 dump.rdb
 *.rdb
 
+# Documentation (moved to .notes/)
+docs/
+
 # Scripts to stop services (should be run locally)
 stop_all.sh
 start_all.sh
