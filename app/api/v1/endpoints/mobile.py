@@ -242,7 +242,7 @@ def get_dashboard(db: Session = Depends(get_db)):
                 "running": running_tasks,
                 "failed": failed_tasks,
                 "completion_rate": (
-                    f"{(done_tasks/total_tasks*100):.1f}%" if total_tasks > 0 else "N/A"
+                    f"{(done_tasks / total_tasks * 100):.1f}%" if total_tasks > 0 else "N/A"
                 ),
             },
         },
