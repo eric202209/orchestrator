@@ -18,6 +18,7 @@ from app.celery_app import celery_app
 from app.models import Session as SessionModel, Task, TaskStatus, LogEntry, Project
 from app.database import get_db, get_db_session
 from app.services import OpenClawSessionService, PromptTemplates
+from app.services.error_handler import error_handler
 from app.services.prompt_templates import (
     OrchestrationStatus,
     OrchestrationState,
@@ -240,6 +241,14 @@ def execute_openclaw_task(
         try:
             output_result = planning_result.get("output", {})
 
+            # Debug: Log raw result to diagnose JSON parsing issues
+            logger.info(
+                f"[ORCHESTRATION] Planning result keys: {list(planning_result.keys()) if isinstance(planning_result, dict) else 'Not a dict'}"
+            )
+            logger.info(
+                f"[ORCHESTRATION] Planning output type: {type(output_result)}, preview: {str(output_result)[:300]}"
+            )
+
             # Debug: Log raw output
             logger.info(
                 f"[ORCHESTRATION] Raw planning output type: {type(output_result)}, content preview: {str(output_result)[:200]}"
@@ -300,12 +309,32 @@ def execute_openclaw_task(
                     f"[ORCHESTRATION] After stripping markdown, length: {len(output_text)}"
                 )
 
-            plan_data = json.loads(output_text)
-            if isinstance(plan_data, list):
-                orchestration_state.plan = plan_data
-                logger.info(f"[ORCHESTRATION] Generated {len(plan_data)} steps in plan")
+            # Use enhanced JSON parsing with multiple recovery strategies
+            success, plan_data, strategy_info = error_handler.attempt_json_parsing(
+                output_text, context="planning"
+            )
+
+            if success:
+                if isinstance(plan_data, list):
+                    orchestration_state.plan = plan_data
+                    logger.info(
+                        f"[ORCHESTRATION] Generated {len(plan_data)} steps in plan (using {strategy_info})"
+                    )
+                else:
+                    raise ValueError("Planning result is not a list of steps")
             else:
-                raise ValueError("Planning result is not a list of steps")
+                # Failed to parse after all strategies
+                orchestration_state.status = OrchestrationStatus.ABORTED
+                orchestration_state.abort_reason = (
+                    f"Planning JSON parse failed: {strategy_info}"
+                )
+                task.status = TaskStatus.FAILED
+                task.error_message = (
+                    f"Planning JSON parse failed: {strategy_info}. "
+                    f"Raw output: {output_text[:500]}"
+                )
+                db.commit()
+                return {"status": "failed", "reason": "planning_json_error"}
         except Exception as e:
             logger.error(f"[ORCHESTRATION] Failed to parse planning result: {e}")
             orchestration_state.status = OrchestrationStatus.ABORTED
@@ -406,10 +435,22 @@ def execute_openclaw_task(
                     openclaw_service.execute_task(debug_prompt, timeout_seconds=120)
                 )
 
-                # Parse debug result
+                # Parse debug result with enhanced error handling
                 try:
-                    debug_data = json.loads(debug_result.get("output", "{}"))
+                    debug_output = debug_result.get("output", "{}")
+                    success, debug_data, strategy_info = (
+                        error_handler.attempt_json_parsing(
+                            debug_output, context="debug"
+                        )
+                    )
+
+                    if not success:
+                        raise ValueError(
+                            f"Failed to parse debug result: {strategy_info}"
+                        )
+
                     fix_type = debug_data.get("fix_type", "code_fix")
+                    logger.info(f"[DEBUG-PARSE] Using strategy: {strategy_info}")
 
                     if fix_type == "revise_plan":
                         # PHASE 4: PLAN_REVISION
@@ -430,10 +471,22 @@ def execute_openclaw_task(
                         )
 
                         # Update plan with revised version
-                        revise_data = json.loads(revise_result.get("output", "{}"))
+                        revise_output = revise_result.get("output", "{}")
+                        success, revise_data, strategy_info = (
+                            error_handler.attempt_json_parsing(
+                                revise_output, context="revision"
+                            )
+                        )
+
+                        if not success:
+                            raise ValueError(
+                                f"Failed to parse revision: {strategy_info}"
+                            )
+
                         orchestration_state.plan = revise_data.get(
                             "revised_plan", orchestration_state.plan
                         )
+                        logger.info(f"[REVISION-PARSE] Using strategy: {strategy_info}")
                         logger.info(
                             f"[ORCHESTRATION] Plan revised, {len(orchestration_state.plan)} steps"
                         )
@@ -522,12 +575,24 @@ def execute_openclaw_task(
         }
 
     except Exception as exc:
+        # Use enhanced error handler to determine retry behavior
+        should_retry = error_handler.should_retry(exc, "task_execution")
+
         # Check if this is a timeout error
         is_timeout = "time limit" in str(exc).lower() or "timeout" in str(exc).lower()
 
-        # Update task failure
+        # Update task failure with enhanced error information
         task.status = TaskStatus.FAILED
         task.error_message = str(exc)
+
+        # Add diagnostic information
+        error_str = str(exc).lower()
+        if "json" in error_str or "parse" in error_str:
+            task.error_message += "\nDiagnosis: JSON parsing error detected"
+            task.error_message += "\nSuggested fix: Check AI agent response format"
+        elif "empty" in error_str:
+            task.error_message += "\nDiagnosis: Empty response from AI agent"
+            task.error_message += "\nSuggested fix: Retry with more specific prompt"
 
         # Update session status to stopped when task fails
         if session:
@@ -537,6 +602,8 @@ def execute_openclaw_task(
 
         if is_timeout:
             task.error_message += " (Task timed out after 5 minutes)"
+            task.error_message += "\nSuggested fix: Break task into smaller steps"
+
         db.commit()
 
         logger.error(f"[ORCHESTRATION] Task {task_id} failed: {str(exc)}")

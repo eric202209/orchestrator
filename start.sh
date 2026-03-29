@@ -57,8 +57,9 @@ start_redis() {
     echo -e "${BLUE}📦 Starting Redis...${NC}"
     
     if ! check_process "redis-server"; then
-        redis-server --daemonize yes
-        echo -e "${GREEN}✅ Redis started${NC}"
+        # Start Redis with specific working directory to prevent dump.rdb in workspace
+        redis-server --daemonize yes --dir /tmp
+        echo -e "${GREEN}✅ Redis started (working dir: /tmp)${NC}"
     else
         echo -e "${GREEN}✅ Redis already running${NC}"
     fi

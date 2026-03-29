@@ -62,7 +62,7 @@ coverage/
 *.md
 !README.md
 
-# Database files
+# Database files (NEVER COMMIT - contains sensitive data)
 *.db
 *.sqlite
 *.sqlite3

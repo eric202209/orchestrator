@@ -10,6 +10,7 @@ from app.database import get_db
 from app.models import Task, TaskStatus, Project, LogEntry
 from app.schemas import TaskCreate, TaskUpdate, TaskResponse
 from app.services.openclaw_service import OpenClawSessionService
+from app.services.error_handler import EnhancedErrorHandler
 from app.services.log_utils import sort_logs, deduplicate_logs
 
 router = APIRouter()
@@ -121,12 +122,23 @@ async def execute_task_with_openclaw(
         return result
 
     except Exception as e:
+        # Use enhanced error handler
+        error_handler = EnhancedErrorHandler()
+        recovery_plan = error_handler.create_error_recovery_plan(e, "task_execution")
+
         error_msg = f"Task execution failed: {str(e)}"
         import traceback
 
         error_details = traceback.format_exc()
         print(f"Error executing task: {error_msg}")
         print(f"Details: {error_details}")
+
+        # Update task with enhanced error information
+        if task:
+            task.status = TaskStatus.FAILED
+            task.error = error_msg
+            task.error_message = f"{error_msg}\nRecommended action: {recovery_plan.get('recommended_action', 'manual_intervention')}"
+            db.commit()
         task.status = TaskStatus.FAILED
         task.error = error_msg
         db.commit()
