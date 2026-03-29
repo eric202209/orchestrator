@@ -9,6 +9,8 @@ OPTIMIZATIONS:
 - Reduced execution time by minimizing logging overhead
 - Added streaming for better user experience
 - Implemented request compression
+- Enhanced error handling with intelligent recovery
+
 """
 
 import json
@@ -18,6 +20,7 @@ import asyncio
 import time
 from typing import Optional, Dict, Any, List
 from datetime import datetime
+from app.services.error_handler import EnhancedErrorHandler
 from sqlalchemy.orm import Session
 from app.models import Session as SessionModel, Task, TaskStatus, LogEntry
 from app.config import settings
@@ -929,12 +932,42 @@ class OpenClawSessionService:
                             "note": "Real execution failed - empty response",
                         }
 
-                    output_data = json.loads(stdout_stripped)
+                    # Use enhanced JSON parsing with multiple recovery strategies
+                    error_handler = EnhancedErrorHandler()
+                    success, output_data, strategy = error_handler.attempt_json_parsing(
+                        stdout_stripped, context="OpenClaw response"
+                    )
+
+                    if not success:
+                        self._log_entry(
+                            "ERROR",
+                            f"[OPENCLAW] Failed to parse response: {strategy}",
+                        )
+                        self._log_entry(
+                            "ERROR",
+                            f"[OPENCLAW] Raw output: {result.stdout[:500]}",
+                        )
+                        return {
+                            "status": "failed",
+                            "mode": "real",
+                            "output": result.stdout,
+                            "error": f"Failed to parse OpenClaw response: {strategy}",
+                            "logs": [
+                                {
+                                    "level": "ERROR",
+                                    "message": f"OpenClaw response parsing failed: {strategy}",
+                                    "timestamp": datetime.utcnow().isoformat(),
+                                }
+                            ],
+                            "execution_time": 0.0,
+                            "session_key": "orchestrator-session",
+                            "note": f"Real execution failed - parsing error: {strategy}",
+                        }
 
                     # Debug log
                     self._log_entry(
                         "INFO",
-                        f"[OPENCLAW] Full response received, type: {type(output_data)}, keys: {list(output_data.keys()) if isinstance(output_data, dict) else 'N/A'}",
+                        f"[OPENCLAW] Full response received, type: {type(output_data)}, parsing strategy: {strategy}",
                     )
 
                     # Extract text from payloads array
