@@ -54,7 +54,13 @@ coverage/
 
 # Development files (NEVER COMMIT)
 .notes/
-.tests/
+!notes/DEBUG_HISTORY.md
+!notes/PHASES_PROGRESS.md
+!notes/CORS_FIXES.md
+!notes/TASK_TIMEOUT_FIX.md
+!notes/HISTORICAL_DOCS_CLEANUP_SUMMARY.md
+!tests/ERROR_HANDLER_FIX_SUMMARY.md
+!tests/*.md
 *.note
 *.test
 
@@ -74,3 +80,16 @@ dump.rdb
 stop_all.sh
 start_all.sh
 restart_all.sh
+
+# Configuration files in config/ directory (tracked)
+config/*.conf
+config/*.ini
+config/*.cfg
+config/README.md
+
+# Ignore config directory except README.md and config files
+!config/
+!config/*.conf
+!config/*.ini
+!config/*.cfg
+!config/README.md
