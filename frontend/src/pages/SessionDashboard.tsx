@@ -593,8 +593,6 @@ function SessionDashboard() {
     if (!id) return;
     
     // Step 1: Check for overwrites first (same as before)
-    setIsCheckingOverwrites(true);
-    
     try {
       console.log('🛡️ Checking for potential overwrites before resume...');
       
@@ -631,8 +629,6 @@ function SessionDashboard() {
     } catch (error) {
       console.warn('⚠️  Overwrite check failed, proceeding anyway:', error);
       // Continue with resume even if check fails
-    } finally {
-      setIsCheckingOverwrites(false);
     }
     
     // Step 2: Proceed with actual resume
