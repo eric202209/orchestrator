@@ -1,18 +1,29 @@
-"""Services package init"""
+"""
+Orchestrator services package
+All services and utilities are available from this package
+"""
 
-from app.services.task_service import TaskService
-from app.services.github_service import GitHubService
-from app.services.openclaw_service import OpenClawSessionService, OpenClawSessionError
-from app.services.log_stream_service import LogStreamService
-from app.services.tool_tracking_service import ToolTrackingService
-from app.services.prompt_templates import PromptTemplates
+from .openclaw_executor import OpenClawExecutor, OpenClawConfig
+from .openclaw_service import OpenClawSessionService
+from .task_service import TaskService
+from .context_service import ContextPreservationService
+from .permission_service import PermissionApprovalService
+from .project_isolation_service import ProjectIsolationService
+from .log_stream_service import LogStreamService
+from .github_service import GitHubService
+from .tool_tracking_service import ToolTrackingService
+from .prompt_templates import PromptTemplates
 
 __all__ = [
-    "TaskService",
-    "GitHubService",
+    "OpenClawExecutor",
+    "OpenClawConfig",
     "OpenClawSessionService",
-    "OpenClawSessionError",
+    "TaskService",
+    "ContextPreservationService",
+    "PermissionApprovalService",
+    "ProjectIsolationService",
     "LogStreamService",
+    "GitHubService",
     "ToolTrackingService",
     "PromptTemplates",
 ]

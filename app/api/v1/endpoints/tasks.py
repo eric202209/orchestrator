@@ -88,14 +88,12 @@ async def execute_task_with_openclaw(
         openclaw_key = await session_service.start_session(prompt)
 
         # Build prompt using templates
-        from app.services import PromptTemplates
+        from app.services.prompt_templates import PromptTemplates
 
-        # Get session context
-        session_context = await session_service.get_session_context()
-
-        # Build enhanced prompt with templates
-        prompt_text = PromptTemplates.format_task_execution(
-            task=task, prompt=prompt, session_context=session_context
+        # Build enhanced prompt - use build_task_prompt for simple task execution
+        prompt_text = PromptTemplates.build_task_prompt(
+            task_description=prompt,
+            project_context=f"Project: {task.project.name if task.project else 'Unknown'} at {task.project.workspace_path if task.project and task.project.workspace_path else '/workspace'}",
         )
 
         # Increase timeout for complex tasks - default to 600 seconds (10 minutes)
@@ -110,7 +108,7 @@ async def execute_task_with_openclaw(
 
         # Update task status
         if result["status"] == "completed":
-            task.status = TaskStatus.COMPLETED
+            task.status = TaskStatus.DONE
             task.output = result.get("output", "")[:10000]  # Limit output size
         else:
             task.status = TaskStatus.FAILED
@@ -124,6 +122,11 @@ async def execute_task_with_openclaw(
 
     except Exception as e:
         error_msg = f"Task execution failed: {str(e)}"
+        import traceback
+
+        error_details = traceback.format_exc()
+        print(f"Error executing task: {error_msg}")
+        print(f"Details: {error_details}")
         task.status = TaskStatus.FAILED
         task.error = error_msg
         db.commit()

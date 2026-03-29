@@ -764,7 +764,7 @@ def generate_task_report(self, task_id: int, output_format: str = "json"):
 
         db.close()
 
-        if format == "markdown":
+        if output_format == "markdown":
             # Convert to markdown
             report_text = f"# Task Report: {task.title}\n\n"
             report_text += f"**Status:** {task.status.value}\n\n"

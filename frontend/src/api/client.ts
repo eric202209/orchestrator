@@ -19,6 +19,7 @@ const apiClient = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
+  timeout: 60000, // 60 second timeout for initial requests (page load, auth)
 });
 
 // Request interceptor for auth tokens
@@ -165,7 +166,9 @@ export const tasksAPI = {
   complete: (id: number) => apiClient.post(`/tasks/${id}/complete`),
 
   execute: (sessionId: number, data: { task: string; timeout_seconds?: number; use_demo_mode?: boolean }) =>
-    apiClient.post(`/sessions/${sessionId}/execute`, data),
+    apiClient.post(`/sessions/${sessionId}/execute`, data, {
+      timeout: 600000, // 10 minutes for task execution (OpenClaw CLI can take a while for complex tasks)
+    }),
 
   // Get sorted logs for a task
   getSortedLogs: (
@@ -173,15 +176,19 @@ export const tasksAPI = {
     order: 'asc' | 'desc' = 'desc',
     deduplicate: boolean = true,
     level?: string,
-    limit?: number
+    limit?: number,
+    offset: number = 0
   ) => {
     const params = new URLSearchParams();
     params.append('order', order);
     params.append('deduplicate', deduplicate.toString());
     if (level) params.append('level', level);
     if (limit) params.append('limit', limit.toString());
+    params.append('offset', offset.toString());
     
-    return apiClient.get<TaskSortedLogsResponse>(`/tasks/${id}/logs/sorted?${params.toString()}`);
+    return apiClient.get<TaskSortedLogsResponse>(`/tasks/${id}/logs/sorted?${params.toString()}`, {
+      timeout: 60000, // 1 minute - much faster with database sorting + pagination
+    });
   },
 };
 
@@ -203,7 +210,10 @@ export const sessionsAPI = {
   start: (id: number) => apiClient.post(`/sessions/${id}/start`),
 
   stop: (id: number, force?: boolean) => 
-    apiClient.post(`/sessions/${id}/stop`, undefined, { params: { force } }),
+    apiClient.post(`/sessions/${id}/stop`, undefined, { 
+      params: { force },
+      timeout: 120000, // 2 minutes for session stop (may take time to terminate OpenClaw CLI)
+    }),
 
   pause: (id: number) => apiClient.post(`/sessions/${id}/pause`),
 
@@ -257,15 +267,19 @@ export const sessionsAPI = {
     order: 'asc' | 'desc' = 'desc',
     deduplicate: boolean = true,
     level?: string,
-    limit?: number
+    limit?: number,
+    offset: number = 0
   ) => {
     const params = new URLSearchParams();
     params.append('order', order);
     params.append('deduplicate', deduplicate.toString());
     if (level) params.append('level', level);
     if (limit) params.append('limit', limit.toString());
+    params.append('offset', offset.toString());
     
-    return apiClient.get<SortedLogsResponse>(`/sessions/${id}/logs/sorted?${params.toString()}`);
+    return apiClient.get<SortedLogsResponse>(`/sessions/${id}/logs/sorted?${params.toString()}`, {
+      timeout: 60000, // 1 minute - much faster with database sorting + pagination
+    });
   },
 
   delete: (id: number) => apiClient.delete(`/sessions/${id}`),

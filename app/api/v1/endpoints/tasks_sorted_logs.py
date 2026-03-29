@@ -21,16 +21,20 @@ def get_sorted_task_logs(
     deduplicate: bool = True,  # Remove duplicate entries
     level: Optional[str] = None,  # Optional filter by log level
     limit: Optional[int] = None,  # Optional limit on number of logs
+    offset: int = 0,  # NEW: For pagination
 ):
     """
     Get sorted and optionally deduplicated logs for a task
 
+    OPTIMIZED: Uses database-level sorting and pagination to avoid timeout issues
+
     Args:
         task_id: Task ID
         order: Sort order - "asc" (oldest first) or "desc" (newest first)
-        deduplicate: Remove duplicate log entries
+        deduplicate: Remove duplicate log entries (note: expensive for large datasets)
         level: Optional log level filter (INFO, WARNING, ERROR)
-        limit: Optional limit on number of logs to return
+        limit: Optional limit on number of logs to return (default: 100)
+        offset: Offset for pagination (default: 0)
 
     Returns:
         Sorted list of log entries
@@ -40,12 +44,32 @@ def get_sorted_task_logs(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    # Get all logs for the task
-    logs_entries = db.query(LogEntry).filter(LogEntry.task_id == task_id).all()
+    # Default limit to prevent timeouts
+    default_limit = 100
+    effective_limit = limit if limit else default_limit
+
+    # Cap limit at 1000 to prevent abuse
+    if effective_limit > 1000:
+        effective_limit = 1000
+
+    # OPTIMIZATION: Use database-level sorting instead of Python sorting
+    logs_query = db.query(LogEntry).filter(LogEntry.task_id == task_id)
 
     # Apply level filter if specified
     if level:
-        logs_entries = [log for log in logs_entries if log.level == level]
+        logs_query = logs_query.filter(LogEntry.level == level)
+
+    # Get total count BEFORE pagination
+    total_logs = logs_query.count()
+
+    # Apply database-level sorting (ORDER BY) - this is fast!
+    if order == "desc":
+        logs_query = logs_query.order_by(LogEntry.created_at.desc())
+    else:
+        logs_query = logs_query.order_by(LogEntry.created_at.asc())
+
+    # Apply pagination (LIMIT + OFFSET) - this is fast!
+    logs_entries = logs_query.offset(offset).limit(effective_limit).all()
 
     # Convert to list of dicts
     logs = [
@@ -61,18 +85,18 @@ def get_sorted_task_logs(
         for log in logs_entries
     ]
 
-    # Sort and deduplicate
-    sorted_logs = sort_logs(logs, order=order, deduplicate=deduplicate)
-
-    # Apply limit if specified
-    if limit:
-        sorted_logs = sorted_logs[:limit]
+    # Only deduplicate if requested (this is expensive, so make it optional)
+    if deduplicate:
+        logs = deduplicate_logs(logs)
 
     return {
         "task_id": task_id,
-        "total_logs": len(logs),
-        "returned_logs": len(sorted_logs),
+        "total_logs": total_logs,
+        "returned_logs": len(logs),
+        "offset": offset,
+        "limit": effective_limit,
         "sort_order": order,
         "deduplicated": deduplicate,
-        "logs": sorted_logs,
+        "logs": logs,
+        "has_more": (offset + len(logs)) < total_logs,
     }

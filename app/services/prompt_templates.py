@@ -395,6 +395,26 @@ class PromptTemplates:
 Provide complete code changes with file paths. Briefly explain your approach.
 """
 
+    # ── TASK EXECUTION (Simple single-call mode) ─────────────────────────────────
+
+    TASK_EXECUTION = """You are an AI development agent. Execute this task.
+
+**Task:** {task_description}
+
+**Project Context:** {project_context}
+**Recent Activity:** {recent_activity}
+**Available Tools:**
+{available_tools}
+
+**Instructions:**
+1. Complete the task efficiently
+2. Use appropriate tools for the job
+3. Provide clear output explaining what you did
+4. Handle errors gracefully
+
+**Output:** Explain your actions and results
+"""
+
     CODE_REVIEW = """You are a senior code reviewer. Review the following changes.
 
 **Code Changes:**
@@ -576,6 +596,7 @@ A clear status report covering current state, progress percentage, blockers, and
             "error_recovery": cls.ERROR_RECOVERY,
             "tool_usage": cls.TOOL_USAGE_GUIDE,
             "status_report": cls.STATUS_REPORT,
+            "task_execution": cls.TASK_EXECUTION,
         }
         return templates.get(template_name.lower())
 

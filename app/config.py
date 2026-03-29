@@ -31,10 +31,10 @@ class Settings(BaseSettings):
             self.OPENCLAW_GATEWAY_URL,
             "http://172.17.0.1:3000",  # Gateway IP for external browser access
             "http://172.17.0.2:3000",  # Container IP for frontend
-            "*",  # Allow all for development
         ]
 
     # Database
+    # Located in root directory (relative to where app is started)
     DATABASE_URL: str = "sqlite:///./orchestrator.db"
 
     # Auth
@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     OPENCLAW_API_KEY: str = ""
 
     # Demo mode flag - set to True for testing, False for real execution
-    DEMO_MODE: bool = False
+    DEMO_MODE: bool = True  # Enabled for testing (no API keys configured)
 
     # Orchestrator URL (for OpenClaw dashboard)
     ORCHESTRATOR_URL: str = "http://localhost:8080"

@@ -166,336 +166,35 @@ This script automatically:
 
 ---
 
-## 📋 Startup Script Template
-
-If you need a production-ready startup script template, here's a clean version you can customize:
-
-### `start_all.sh` Template
-
-```bash
-#!/bin/bash
-
-# AI Dev Agent Orchestrator - Startup Script
-# Customize the LOCALHOST variable for your network
-
-set -e
-
-echo "🚀 Starting AI Dev Agent Orchestrator..."
-echo ""
-
-# Configuration - CHANGE THIS FOR YOUR NETWORK
-# Use 'localhost' for local development only
-# Use your actual IP (e.g., '192.168.1.100') for network access
-LOCALHOST="${LOCALHOST:-localhost}"
-
-# Colors
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-# Check if port is in use
-check_port() {
-    lsof -i :$1 > /dev/null 2>&1
-}
-
-# Ensure Redis is running
-ensure_redis() {
-    echo -e "${BLUE}📦 Checking Redis...${NC}"
-    if ! check_port 6379; then
-        echo -e "${YELLOW}⚠️  Redis not running, starting...${NC}"
-        redis-server --daemonize yes
-    else
-        echo -e "${GREEN}✅ Redis running${NC}"
-    fi
-}
-
-# Ensure virtual environment exists
-ensure_venv() {
-    echo -e "${BLUE}🔧 Checking Python environment...${NC}"
-    if [ ! -d "venv" ]; then
-        echo -e "${YELLOW}⚠️  Creating virtual environment...${NC}"
-        python3 -m venv venv
-        source venv/bin/activate
-        pip install -r requirements.txt
-    else
-        echo -e "${GREEN}✅ Virtual environment exists${NC}"
-    fi
-}
-
-# Install frontend dependencies
-ensure_frontend_deps() {
-    echo -e "${BLUE}📦 Checking frontend...${NC}"
-    cd frontend
-    if [ ! -d "node_modules" ]; then
-        echo -e "${YELLOW}⚠️  Installing frontend dependencies...${NC}"
-        pnpm install
-    else
-        echo -e "${GREEN}✅ Frontend dependencies exist${NC}"
-    fi
-    cd ..
-}
-
-# Initialize database
-run_migrations() {
-    echo -e "${BLUE}🗄️  Checking database...${NC}"
-    if [ ! -f "orchestrator.db" ]; then
-        echo -e "${YELLOW}⚠️  Creating database...${NC}"
-        source venv/bin/activate
-        python3 -c "from app.database import init_db; init_db()"
-    else
-        echo -e "${GREEN}✅ Database exists${NC}"
-    fi
-}
-
-# Start backend
-start_backend() {
-    echo -e "${BLUE}🔧 Starting Backend...${NC}"
-    if check_port 8080; then
-        echo -e "${YELLOW}⚠️  Backend already running, stopping first...${NC}"
-        pkill -f "uvicorn app.main:app" 2>/dev/null || true
-        sleep 1
-    fi
-    
-    source venv/bin/activate
-    nohup uvicorn app.main:app --host 0.0.0.0 --port 8080 > /tmp/backend.log 2>&1 &
-    sleep 3
-    
-    if check_port 8080; then
-        echo -e "${GREEN}✅ Backend started on port 8080${NC}"
-    else
-        echo -e "${RED}❌ Backend failed to start${NC}"
-        echo "Check: tail -20 /tmp/backend.log"
-        exit 1
-    fi
-}
-
-# Start Celery workers
-start_workers() {
-    echo -e "${BLUE}👷 Starting Celery Workers...${NC}"
-    if pgrep -f "celery -A app.celery_app worker" > /dev/null; then
-        pkill -f "celery -A app.celery_app worker" 2>/dev/null || true
-        sleep 1
-    fi
-    
-    source venv/bin/activate
-    nohup celery -A app.celery_app worker --loglevel=info > /tmp/worker.log 2>&1 &
-    sleep 5
-    
-    if pgrep -f "celery -A app.celery_app worker" > /dev/null; then
-        echo -e "${GREEN}✅ Workers started${NC}"
-    else
-        echo -e "${RED}❌ Workers failed to start${NC}"
-        echo "Check: tail -50 /tmp/worker.log"
-        exit 1
-    fi
-}
-
-# Start frontend
-start_frontend() {
-    echo -e "${BLUE}🎨 Starting Frontend...${NC}"
-    if check_port 3000; then
-        pkill -f "vite" 2>/dev/null || true
-        pkill -f "pnpm dev" 2>/dev/null || true
-        sleep 2
-    fi
-    
-    cd frontend
-    nohup pnpm dev > /tmp/frontend.log 2>&1 &
-    cd ..
-    
-    sleep 5
-    
-    if check_port 3000; then
-        echo -e "${GREEN}✅ Frontend started on port 3000${NC}"
-    else
-        echo -e "${RED}❌ Frontend failed to start${NC}"
-        echo "Check: tail -20 /tmp/frontend.log"
-        exit 1
-    fi
-}
-
-# Verify services
-verify() {
-    echo -e "${BLUE}🏥 Verifying services...${NC}"
-    sleep 2
-    
-    local success=true
-    
-    if curl -s http://127.0.0.1:8080/health > /dev/null 2>&1; then
-        echo -e "${GREEN}✅ Backend healthy${NC}"
-    else
-        echo -e "${RED}❌ Backend not responding${NC}"
-        success=false
-    fi
-    
-    if curl -s http://127.0.0.1:3000 > /dev/null 2>&1; then
-        echo -e "${GREEN}✅ Frontend healthy${NC}"
-    else
-        echo -e "${RED}❌ Frontend not responding${NC}"
-        success=false
-    fi
-    
-    echo ""
-    
-    if [ "$success" = true ]; then
-        echo -e "${GREEN}🎉 All services running!${NC}"
-        echo ""
-        echo "📱 Dashboard: http://${LOCALHOST}:3000"
-        echo "🔧 API Docs: http://${LOCALHOST}:8080/docs"
-        echo ""
-        echo "📝 Logs:"
-        echo "  Backend:  tail -f /tmp/backend.log"
-        echo "  Workers:  tail -f /tmp/worker.log"
-        echo "  Frontend: tail -f /tmp/frontend.log"
-    else
-        echo -e "${RED}⚠️  Some services failed${NC}"
-    fi
-}
-
-# Main
-echo "========================================"
-echo "  AI Dev Agent Orchestrator"
-echo "========================================"
-echo ""
-
-ensure_redis
-ensure_venv
-ensure_frontend_deps
-run_migrations
-start_backend
-start_workers
-start_frontend
-verify
-```
-
-### Usage
-
-1. **Save the script** as `start_all.sh`
-2. **Make it executable:**
-   ```bash
-   chmod +x start_all.sh
-   ```
-3. **Customize the `LOCALHOST` variable** on line 13:
-   - `localhost` - For local development only
-   - `192.168.x.x` - For network access (your machine's LAN IP)
-   - `0.0.0.0` - For all interfaces (be careful with security!)
-4. **Run it:**
-   ```bash
-   ./start_all.sh
-   ```
-
-### Environment Configuration
-
-Create a `.env` file in the project root to customize settings:
-
-```bash
-# Network Configuration
-LOCALHOST=localhost  # Change this to your network IP
-
-# Optional: Override default settings
-REDIS_HOST=localhost
-REDIS_PORT=6379
-BACKEND_PORT=8080
-FRONTEND_PORT=3000
-```
-
-Then reference it in your script:
-```bash
-source .env
-LOCALHOST="${LOCALHOST:-localhost}"
-```
-
-### Security Notes
-
-- **Local Development:** Use `localhost` - only accessible from your machine
-- **Internal Network:** Use your LAN IP (e.g., `192.168.1.100`) - accessible on your network
-- **Production:** Use a domain name with HTTPS, never expose raw IP addresses
-- **Firewall:** Configure firewall rules to restrict access as needed
-
-### Manual Startup
-
-**Terminal 1 - Backend:**
-```bash
-cd ~/.openclaw/workspace/projects/orchestrator
-source venv/bin/activate
-uvicorn app.main:app --host 0.0.0.0 --port 8080
-```
-
-**Terminal 2 - Celery Workers:**
-```bash
-cd ~/.openclaw/workspace/projects/orchestrator
-source venv/bin/activate
-celery -A app.celery_app worker --loglevel=info -Q default,openclaw,github
-```
-
-**Terminal 3 - Frontend:**
-```bash
-cd ~/.openclaw/workspace/projects/orchestrator/frontend
-pnpm install  # First time only
-pnpm dev
-```
-
-### Access the Dashboard
-Open your browser to: **http://localhost:3000**
-
----
-
-## 🎯 How It Works
-
-### Development Workflow
-
-1. **Create a Project**
-   - Click "New Project" in dashboard
-   - Enter project name and description
-   - Optional: Add GitHub repository URL
-
-2. **Add Tasks**
-   - Open project from dashboard
-   - Click "Add Task"
-   - Enter task title and description
-   - Tasks are queued in Celery
-
-3. **Start AI Session**
-   - Click "Start Session" in project
-   - OpenClaw agent is spawned
-   - Real-time logs stream to dashboard
-
-4. **Monitor Progress**
-   - Watch live logs in terminal view
-   - See tool executions as they happen
-   - Track task status in real-time
-
-5. **Complete**
-   - Agent finishes task
-   - Status updates to "Completed"
-   - View logs and tool usage history
-
----
-
 ## 📁 Project Structure
 
 ```
 orchestrator/
-├── app/                          # Backend application
+├── app/                          # Backend application (unified structure)
 │   ├── api/v1/
 │   │   ├── endpoints/
 │   │   │   ├── auth.py          # Authentication endpoints
-│   │   │   └── sessions.py      # Session management
+│   │   │   ├── sessions.py      # Session management
+│   │   │   ├── tasks.py         # Task management
+│   │   │   ├── projects.py      # Project management
+│   │   │   └── orchestrator.py  # Orchestrator endpoints
 │   │   └── router.py            # API router
 │   ├── services/
 │   │   ├── openclaw_service.py  # OpenClaw integration
 │   │   ├── log_stream_service.py # Real-time logging
 │   │   ├── tool_tracking_service.py # Tool audit trail
-│   │   └── prompt_templates.py  # LLM prompt templates
-│   ├── tasks/                    # Celery tasks
-│   │   ├── worker.py            # Core task execution
-│   │   ├── retry_logic.py       # Retry decorator
-│   │   └── scheduler.py         # Job scheduling
+│   │   ├── prompt_templates.py  # LLM prompt templates
+│   │   ├── task_service.py      # Task operations
+│   │   ├── context_service.py   # Context preservation
+│   │   ├── permission_service.py # Permission approval
+│   │   ├── project_isolation_service.py # Workspace isolation
+│   │   ├── github_service.py    # GitHub integration
+│   │   ├── openclaw_executor.py # OpenClaw task executor
+│   │   └── __init__.py          # Service exports
 │   ├── celery_app.py            # Celery configuration
 │   ├── main.py                  # FastAPI app
-│   └── models.py                # Database models
+│   ├── models.py                # Database models
+│   └── database.py              # DB initialization
 ├── frontend/                     # React frontend
 │   ├── src/
 │   │   ├── api/
@@ -508,13 +207,12 @@ orchestrator/
 │   │       └── api.ts           # TypeScript types
 │   ├── .env                     # Frontend config
 │   └── package.json
-├── .notes/                      # Internal documentation
-│   ├── PHASE1-6_IMPLEMENTATION.md
-│   ├── BUGFIXES-2026-03-26.md
-│   └── ...
+├── orchestrator.db              # SQLite database (root level)
+├── logs/                        # Log files
 ├── start_all.sh                 # Comprehensive startup
+├── start.sh                     # Basic startup
 ├── requirements.txt             # Python dependencies
-└── orchestrator.db              # SQLite database
+└── .env                         # Environment configuration
 ```
 
 ---
@@ -675,7 +373,7 @@ tail -100 /tmp/celery_worker.log
 # Check if prompts are too verbose
 tail -100 /tmp/celery_worker.log | grep -i "token\|context"
 
-# Fix: Prompts were optimized in v2.0 (see BUGFIXES-2026-03-26.md)
+# Fix: Prompts were optimized in v2.0 (see .notes/BUGFIXES-2026-03-26.md)
 ```
 
 ---
@@ -713,27 +411,7 @@ rm orchestrator.db
 python3 -c "from app.database import init_db; init_db()"
 ```
 
----
-
-### Browser Can't Access Dashboard (Containerized Frontend)
-
-If frontend runs in Docker container but you access from host browser:
-
-**1. Get container IP:**
-```bash
-docker inspect orchestrator-frontend-1 | grep IPAddress
-```
-
-**2. Update frontend/.env:**
-```bash
-echo "VITE_API_URL=http://<CONTAINER_IP>:8080/api/v1" > frontend/.env
-```
-
-**3. Restart frontend:**
-```bash
-cd frontend
-pnpm dev
-```
+**Note:** Database is located in the **root directory** (where you run `./start.sh`), not in `app/`. If you see two databases, delete the one in `app/` and keep the root-level one.
 
 ---
 
@@ -876,6 +554,7 @@ sudo systemctl restart nginx
 
 - **API Documentation:** http://localhost:8080/docs (Swagger UI)
 - **Celery Flower (Monitoring):** http://localhost:5555 (if configured)
+- **Internal Documentation:** `.notes/` folder (detailed implementation notes)
 
 ---
 
@@ -888,7 +567,7 @@ sudo systemctl restart nginx
 
 # Option 2: Manual stop
 pkill -f "uvicorn app.main:app"
-pkill -f "celery -A app.tasks worker"
+pkill -f "celery -A app.celery_app worker"
 pkill -f "vite"
 ```
 
@@ -898,7 +577,7 @@ pkill -f "vite"
 pkill -f "uvicorn app.main:app"
 
 # Stop workers
-pkill -f "celery -A app.tasks worker"
+pkill -f "celery -A app.celery_app worker"
 
 # Stop frontend
 pkill -f "vite"
@@ -916,4 +595,4 @@ pkill -f "vite"
 
 ---
 
-*Built with ❤️ by Claw 🦅 | Last updated: 2026-03-26*
+**Last updated: 2026-03-28**

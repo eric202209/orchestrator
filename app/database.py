@@ -5,11 +5,17 @@ from sqlalchemy.orm import sessionmaker
 from app.config import settings
 from app.models import Base
 
-# Create database engine
+# Create database engine with optimized pool settings
 engine = create_engine(
     settings.DATABASE_URL,
+    pool_size=5,  # Keep 5 connections in pool
+    max_overflow=10,  # Allow up to 10 additional connections
+    pool_recycle=3600,  # Recycle connections after 1 hour
+    pool_pre_ping=True,  # Verify connection before use
     connect_args=(
-        {"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {}
+        {"check_same_thread": False, "timeout": 30}
+        if "sqlite" in settings.DATABASE_URL
+        else {}
     ),
 )
 

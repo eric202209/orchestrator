@@ -1025,16 +1025,20 @@ def get_sorted_logs(
     deduplicate: bool = True,  # Remove duplicate entries
     level: Optional[str] = None,  # Optional filter by log level
     limit: Optional[int] = None,  # Optional limit on number of logs
+    offset: int = 0,  # NEW: For pagination
 ):
     """
     Get sorted and optionally deduplicated logs for a session
 
+    OPTIMIZED: Uses database-level sorting and pagination to avoid timeout issues
+
     Args:
         session_id: Session ID
         order: Sort order - "asc" (oldest first) or "desc" (newest first)
-        deduplicate: Remove duplicate log entries
+        deduplicate: Remove duplicate log entries (note: expensive for large datasets)
         level: Optional log level filter (INFO, WARNING, ERROR)
-        limit: Optional limit on number of logs to return
+        limit: Optional limit on number of logs to return (default: 100)
+        offset: Offset for pagination (default: 0)
 
     Returns:
         Sorted list of log entries
@@ -1044,7 +1048,16 @@ def get_sorted_logs(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Get all logs for the session, filtering by instance_id to prevent ID reuse issues
+    # Default limit to prevent timeouts
+    default_limit = 100
+    effective_limit = limit if limit else default_limit
+
+    # Cap limit at 1000 to prevent abuse
+    if effective_limit > 1000:
+        effective_limit = 1000
+
+    # OPTIMIZATION: Use database-level sorting instead of Python sorting
+    # This is MUCH faster for large datasets
     logs_query = db.query(LogEntry).filter(
         LogEntry.session_id == session_id,
         LogEntry.session_instance_id == session.instance_id,
@@ -1054,8 +1067,17 @@ def get_sorted_logs(
     if level:
         logs_query = logs_query.filter(LogEntry.level == level)
 
-    # Get logs
-    logs_entries = logs_query.all()
+    # Get total count BEFORE pagination
+    total_logs = logs_query.count()
+
+    # Apply database-level sorting (ORDER BY) - this is fast!
+    if order == "desc":
+        logs_query = logs_query.order_by(LogEntry.created_at.desc())
+    else:
+        logs_query = logs_query.order_by(LogEntry.created_at.asc())
+
+    # Apply pagination (LIMIT + OFFSET) - this is fast!
+    logs_entries = logs_query.offset(offset).limit(effective_limit).all()
 
     # Convert to list of dicts
     logs = [
@@ -1071,21 +1093,21 @@ def get_sorted_logs(
         for log in logs_entries
     ]
 
-    # Sort and deduplicate
-    sorted_logs = sort_logs(logs, order=order, deduplicate=deduplicate)
-
-    # Apply limit if specified
-    if limit:
-        sorted_logs = sorted_logs[:limit]
+    # Only deduplicate if requested (this is expensive, so make it optional)
+    if deduplicate:
+        logs = deduplicate_logs(logs)
 
     return {
         "session_id": session_id,
         "session_instance_id": session.instance_id,
-        "total_logs": len(logs),
-        "returned_logs": len(sorted_logs),
+        "total_logs": total_logs,
+        "returned_logs": len(logs),
+        "offset": offset,
+        "limit": effective_limit,
         "sort_order": order,
         "deduplicated": deduplicate,
-        "logs": sorted_logs,
+        "logs": logs,
+        "has_more": (offset + len(logs)) < total_logs,
     }
 
 

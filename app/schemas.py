@@ -134,7 +134,9 @@ class LogEntryResponse(LogEntryBase):
 # Task Execute Schema
 class TaskExecuteRequest(BaseModel):
     task: str
-    timeout_seconds: int = 300
+    timeout_seconds: int = (
+        600  # Increased from 300 to 600 (10 minutes) for complex tasks
+    )
     session_id: Optional[int] = None
     task_id: Optional[int] = None
     created_at: Optional[datetime] = None
@@ -171,6 +173,7 @@ class UserResponse(BaseModel):
     name: Optional[str] = None
     is_active: bool = True
     created_at: datetime
+    updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True

@@ -58,6 +58,10 @@ coverage/
 *.note
 *.test
 
+# All markdown files except README.md
+*.md
+!README.md
+
 # Database files
 *.db
 *.sqlite

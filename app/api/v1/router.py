@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends
 from fastapi import HTTPException
-from app.api.v1.endpoints import tasks, github, sessions, projects
+from app.api.v1.endpoints import tasks, github, sessions, projects, users
 from app.api.v1.endpoints.tasks_sorted_logs import router as tasks_sorted_logs_router
 from app.api.v1.endpoints import isolation, permissions, context
 from app.api.v1.endpoints.project_logs import router as project_logs_router
@@ -36,6 +36,12 @@ api_router.include_router(
     auth_router,
     prefix="/auth",
     tags=["authentication"],
+)
+
+# Users (management endpoints)
+api_router.include_router(
+    users.router,
+    tags=["users"],
 )
 
 # Add other routers
