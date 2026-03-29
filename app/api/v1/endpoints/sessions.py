@@ -10,7 +10,7 @@ from fastapi import (
 )
 from fastapi.requests import Request
 from sqlalchemy.orm import Session
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Dict
 from datetime import datetime, timezone
 import json
 import asyncio
@@ -342,9 +342,12 @@ async def websocket_log_stream(
     websocket: WebSocket, session_id: int, db: Session = Depends(get_db)
 ):
     """
-    WebSocket endpoint for real-time log streaming
+    WebSocket endpoint for real-time log streaming with heartbeat mechanism
 
-    Clients can connect to receive live logs from an OpenClaw session
+    Clients can connect to receive live logs from an OpenClaw session.
+    Implements heartbeat (ping/pong) every 30 seconds to prevent timeout disconnects.
+    
+    TIMEOUT FIX: Prevents 5-minute disconnect by maintaining connection activity
     """
     # Verify session exists
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
@@ -359,18 +362,22 @@ async def websocket_log_stream(
         f"WebSocket connected for session {session_id}, instance: {session.instance_id}"
     )
 
-    # Register WebSocket
+    # Register WebSocket with heartbeat tracking
     if session_id not in active_websockets:
         active_websockets[session_id] = []
-    active_websockets[session_id].append(websocket)
+    active_websockets[session_id].append({
+        'websocket': websocket,
+        'last_activity': datetime.utcnow()
+    })
 
-    # Send initial connection confirmation
+    # Send initial connection confirmation with heartbeat interval info
     await websocket.send_json(
         {
             "type": "connected",
             "session_id": session_id,
             "session_instance_id": session.instance_id,
             "timestamp": datetime.utcnow().isoformat(),
+            "heartbeat_interval": 30,  # Ping every 30 seconds to prevent timeout
         }
     )
 
@@ -386,26 +393,71 @@ async def websocket_log_stream(
     for log in recent_logs:
         await websocket.send_json({"type": "log", **log})
 
+    # Background task to send periodic heartbeats (prevents 5-minute timeout)
+    async def heartbeat_sender():
+        """Send ping every 30 seconds to keep WebSocket connection alive"""
+        try:
+            while True:
+                await asyncio.sleep(30)  # Ping every 30 seconds
+                await websocket.send_text("ping")
+                logger.debug(f"Sent heartbeat ping to session {session_id}")
+        except Exception as e:
+            logger.error(f"Heartbeat sender error for session {session_id}: {str(e)}")
+
     try:
-        # Keep connection alive
+        # Start heartbeat task
+        heartbeat_task = asyncio.create_task(heartbeat_sender())
+
+        # Keep connection alive and handle client messages
         while True:
             data = await websocket.receive_text()
-            # Handle client messages (could be commands, heartbeats, etc.)
+            
+            # Update last activity timestamp
+            for ws_info in active_websockets.get(session_id, []):
+                if ws_info.get('websocket') == websocket:
+                    ws_info['last_activity'] = datetime.utcnow()
+                    break
+            
+            # Handle heartbeat responses and client messages
             if data == "ping":
                 await websocket.send_text("pong")
+                logger.debug(f"Received ping from session {session_id}, sent pong")
+            elif data.lower() == "pong":
+                # Client responded to our ping, connection is alive
+                logger.debug(f"Client pong received for session {session_id}")
             else:
                 logger.debug(f"Received message from WebSocket: {data[:100]}...")
 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected gracefully for session {session_id}")
-        active_websockets[session_id].remove(websocket)
-        if not active_websockets[session_id]:
-            del active_websockets[session_id]
+        heartbeat_task.cancel()
+        try:
+            active_websockets[session_id] = [
+                w for w in active_websockets.get(session_id, [])
+                if w.get('websocket') != websocket
+            ]
+            if not active_websockets[session_id]:
+                del active_websockets[session_id]
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"WebSocket error for session {session_id}: {str(e)}")
-        active_websockets[session_id].remove(websocket)
-        if not active_websockets[session_id]:
-            del active_websockets[session_id]
+        heartbeat_task.cancel()
+        try:
+            active_websockets[session_id] = [
+                w for w in active_websockets.get(session_id, [])
+                if w.get('websocket') != websocket
+            ]
+            if not active_websockets[session_id]:
+                del active_websockets[session_id]
+        except Exception:
+            pass
+
+
+@router.websocket("/sessions/{session_id}/status")
+async def websocket_session_status(
+    websocket: WebSocket, session_id: int, db: Session = Depends(get_db)
+):
 
 
 @router.get("/sessions/{session_id}/logs")
@@ -892,9 +944,12 @@ async def websocket_session_status(
     websocket: WebSocket, session_id: int, db: Session = Depends(get_db)
 ):
     """
-    WebSocket endpoint for real-time session status updates
+    WebSocket endpoint for real-time session status updates with heartbeat
 
-    Clients can connect to receive live status updates from a session
+    Clients can connect to receive live status updates from a session.
+    Implements heartbeat mechanism to prevent 5-minute timeout disconnects.
+    
+    TIMEOUT FIX: Same heartbeat pattern as log streaming WebSocket
     """
     # Extract token from WebSocket query params if provided
     # For now, accept all connections (auth is handled by frontend routing)
@@ -910,10 +965,13 @@ async def websocket_session_status(
     await websocket.accept()
     logger.info(f"Status WebSocket connected for session {session_id}")
 
-    # Register WebSocket
+    # Register WebSocket with heartbeat tracking
     if session_id not in active_websockets:
         active_websockets[session_id] = []
-    active_websockets[session_id].append(websocket)
+    active_websockets[session_id].append({
+        'websocket': websocket,
+        'last_activity': datetime.utcnow()
+    })
 
     # Send initial status
     await websocket.send_json(
@@ -940,14 +998,37 @@ async def websocket_session_status(
         }
     )
 
+    # Background task to send periodic heartbeats
+    async def heartbeat_sender():
+        """Send ping every 30 seconds to keep connection alive"""
+        try:
+            while True:
+                await asyncio.sleep(30)
+                await websocket.send_text("ping")
+                logger.debug(f"Status WS heartbeat ping sent for session {session_id}")
+        except Exception as e:
+            logger.error(f"Status WS heartbeat error: {str(e)}")
+
     try:
-        # Keep connection alive
+        # Start heartbeat task
+        heartbeat_task = asyncio.create_task(heartbeat_sender())
+
+        # Keep connection alive and handle client messages
         while True:
             data = await websocket.receive_text()
-
+            
+            # Update last activity timestamp
+            for ws_info in active_websockets.get(session_id, []):
+                if ws_info.get('websocket') == websocket:
+                    ws_info['last_activity'] = datetime.utcnow()
+                    break
+            
             # Handle client messages
             if data == "ping":
                 await websocket.send_text("pong")
+                logger.debug(f"Status WS: Received ping from session {session_id}")
+            elif data.lower() == "pong":
+                logger.debug(f"Status WS: Client pong received for session {session_id}")
             elif data == "status":
                 # Send current status on demand
                 session = (
@@ -989,14 +1070,28 @@ async def websocket_session_status(
         logger.info(
             f"Status WebSocket disconnected gracefully for session {session_id}"
         )
-        active_websockets[session_id].remove(websocket)
-        if not active_websockets[session_id]:
-            del active_websockets[session_id]
+        heartbeat_task.cancel()
+        try:
+            active_websockets[session_id] = [
+                w for w in active_websockets.get(session_id, [])
+                if w.get('websocket') != websocket
+            ]
+            if not active_websockets[session_id]:
+                del active_websockets[session_id]
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"Status WebSocket error for session {session_id}: {str(e)}")
-        active_websockets[session_id].remove(websocket)
-        if not active_websockets[session_id]:
-            del active_websockets[session_id]
+        heartbeat_task.cancel()
+        try:
+            active_websockets[session_id] = [
+                w for w in active_websockets.get(session_id, [])
+                if w.get('websocket') != websocket
+            ]
+            if not active_websockets[session_id]:
+                del active_websockets[session_id]
+        except Exception:
+            pass
 
 
 @router.get("/sessions/{session_id}/prompts/{template_name}")
@@ -1236,3 +1331,444 @@ Return ONLY a JSON array of step objects with 'title' and 'description' fields. 
     ]
 
     return {"steps": default_steps, "task_name": task_name}
+
+
+# ============================================================================
+# OVERWRITE PROTECTION ENDPOINTS (Session-scoped)
+# ============================================================================
+
+from pydantic import BaseModel
+from typing import List, Optional
+
+
+class OverwriteCheckRequest(BaseModel):
+    """Request model for overwrite check"""
+    project_id: int
+    task_subfolder: str
+    planned_files: Optional[List[str]] = []
+
+
+@router.post("/sessions/{session_id}/check-overwrites")
+async def check_session_overwrites(
+    session_id: int,
+    request: OverwriteCheckRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    Check for potential overwrites before executing a task in this session
+    
+    Args:
+        session_id: Session ID to check
+        request: Overwrite check request with project info and planned files
+        db: Database session
+
+    Returns:
+        Overwrite protection result with safety status and warnings
+    """
+    # Verify session exists
+    from app.models import Session as SessionModel
+    
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    try:
+        from app.services.overwrite_protection_service import (
+            OverwriteProtectionService,
+            OverwriteProtectionError
+        )
+
+        protection = OverwriteProtectionService(db)
+
+        result = protection.check_and_warn(
+            project_id=request.project_id,
+            task_subfolder=request.task_subfolder,
+            planned_files=request.planned_files,
+            action="warn"  # Show warning but allow proceed
+        )
+
+        return {
+            "safe_to_proceed": result["safe_to_proceed"],
+            "workspace_exists": result.get("workspace_exists", False),
+            "file_count": result.get("file_count", 0),
+            "would_overwrite": result.get("has_conflicts", False),
+            "warning_message": result.get("warning_message"),
+            "conflicting_files": result.get("conflict_info", {}).get("conflicting_files", []),
+        }
+
+    except OverwriteProtectionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post("/sessions/{session_id}/create-backup")
+async def create_session_backup(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    Create a backup of existing workspace before proceeding
+    
+    Args:
+        session_id: Session ID to backup
+        db: Database session
+
+    Returns:
+        Backup result with path and file count
+    """
+    # Verify session exists
+    from app.models import Session as SessionModel, Project
+    
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    try:
+        from app.services.overwrite_protection_service import OverwriteProtectionService
+
+        protection = OverwriteProtectionService(db)
+
+        project_id = session.project_id or 1
+        
+        backup_result = protection.create_backup_of_existing(
+            project_id=project_id,
+            task_subfolder=f"task_{session_id}",
+        )
+
+        return {
+            "success": backup_result["success"],
+            "backup_path": backup_result.get("backup_path"),
+            "files_backed_up": backup_result.get("file_count", 0),
+            "error": backup_result.get("error"),
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Backup failed: {str(e)}")
+
+
+@router.get("/sessions/{session_id}/workspace-info")
+async def get_session_workspace_info(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    Get workspace information for a session
+    
+    Args:
+        session_id: Session ID to check
+        db: Database session
+
+    Returns:
+        Workspace details including file count and last modified date
+    """
+    # Verify session exists
+    from app.models import Session as SessionModel, Project
+    
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    try:
+        from app.services.overwrite_protection_service import OverwriteProtectionService
+
+        protection = OverwriteProtectionService(db)
+
+        project_id = session.project_id or 1
+        
+        workspace_info = protection.check_workspace_exists(
+            project_id=project_id,
+            task_subfolder=f"task_{session_id}",
+        )
+
+        return {
+            "exists": workspace_info.get("exists", False),
+            "path": workspace_info.get("path"),
+            "file_count": workspace_info.get("file_count", 0),
+            "last_modified": workspace_info.get("last_modified"),
+            "would_overwrite": workspace_info.get("would_overwrite", False),
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Workspace info failed: {str(e)}")
+
+
+# ============================================================================
+# CHECKPOINT MANAGEMENT ENDPOINTS (For Pause/Resume Functionality)
+# ============================================================================
+
+from pydantic import BaseModel
+from typing import List, Optional
+
+
+class CheckpointListResponse(BaseModel):
+    """Response model for checkpoint listing"""
+    checkpoints: List[Dict[str, Any]]
+    total_count: int
+
+
+@router.post("/sessions/{session_id}/checkpoint/save")
+async def save_session_checkpoint(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    Save a manual checkpoint for a paused session
+    
+    Args:
+        session_id: Session ID to checkpoint
+        db: Database session
+
+    Returns:
+        Checkpoint metadata including path and timestamp
+    """
+    # Verify session exists
+    from app.models import Session as SessionModel
+    
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    try:
+        openclaw_service = OpenClawSessionService(db, session_id)
+        
+        # Save checkpoint using the service
+        await openclaw_service.pause_session()  # This includes checkpoint saving
+        
+        return {
+            "success": True,
+            "message": "Checkpoint saved successfully",
+            "session_id": session_id,
+        }
+
+    except OpenClawSessionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.get("/sessions/{session_id}/checkpoints")
+async def list_session_checkpoints(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    List all checkpoints for a session
+    
+    Args:
+        session_id: Session ID to check
+        db: Database session
+
+    Returns:
+        List of checkpoint metadata (oldest first)
+    """
+    # Verify session exists
+    from app.models import Session as SessionModel
+    
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    try:
+        from app.services.checkpoint_service import CheckpointService
+        
+        checkpoint_service = CheckpointService(db)
+        
+        checkpoints = checkpoint_service.list_checkpoints(session_id)
+        
+        return {
+            "session_id": session_id,
+            "total_count": len(checkpoints),
+            "checkpoints": checkpoints,
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list checkpoints: {str(e)}")
+
+
+@router.post("/sessions/{session_id}/checkpoint/load")
+async def load_session_checkpoint(
+    session_id: int,
+    checkpoint_name: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    Load a specific checkpoint for resuming execution
+    
+    Args:
+        session_id: Session ID to resume
+        checkpoint_name: Name of the checkpoint to load
+        db: Database session
+
+    Returns:
+        Resume result with new session key
+    """
+    # Verify session exists
+    from app.models import Session as SessionModel
+    
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    try:
+        openclaw_service = OpenClawSessionService(db, session_id)
+        
+        # Resume from checkpoint
+        session_key = await openclaw_service.resume_session(checkpoint_name=checkpoint_name)
+        
+        return {
+            "success": True,
+            "session_key": session_key,
+            "message": f"Session resumed from checkpoint: {checkpoint_name}",
+            "session_id": session_id,
+        }
+
+    except OpenClawSessionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.delete("/sessions/{session_id}/checkpoints/{checkpoint_name}")
+async def delete_session_checkpoint(
+    session_id: int,
+    checkpoint_name: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    Delete a specific checkpoint
+    
+    Args:
+        session_id: Session ID
+        checkpoint_name: Name of the checkpoint to delete
+        db: Database session
+
+    Returns:
+        Deletion result
+    """
+    # Verify session exists
+    from app.models import Session as SessionModel
+    
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    try:
+        from app.services.checkpoint_service import CheckpointService
+        
+        checkpoint_service = CheckpointService(db)
+        
+        deleted = checkpoint_service.delete_checkpoint(session_id, checkpoint_name)
+        
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Checkpoint not found")
+        
+        return {
+            "success": True,
+            "message": f"Checkpoint '{checkpoint_name}' deleted successfully",
+            "session_id": session_id,
+            "checkpoint_name": checkpoint_name,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete checkpoint: {str(e)}")
+
+
+@router.post("/sessions/{session_id}/checkpoint/cleanup")
+async def cleanup_session_checkpoints(
+    session_id: int,
+    keep_latest: int = 3,
+    max_age_hours: int = 24,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    Clean up old checkpoints, keeping only the latest N
+    
+    Args:
+        session_id: Session ID to cleanup
+        keep_latest: Number of most recent checkpoints to keep
+        max_age_hours: Delete checkpoints older than this (hours)
+        db: Database session
+
+    Returns:
+        Cleanup statistics
+    """
+    # Verify session exists
+    from app.models import Session as SessionModel
+    
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    try:
+        from app.services.checkpoint_service import CheckpointService
+        
+        checkpoint_service = CheckpointService(db)
+        
+        result = checkpoint_service.cleanup_old_checkpoints(
+            session_id=session_id,
+            keep_latest=keep_latest,
+            max_age_hours=max_age_hours
+        )
+        
+        return {
+            "success": True,
+            "deleted_count": result.get("deleted", 0),
+            "kept_count": result.get("kept", 0),
+            "error": result.get("error"),
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to cleanup checkpoints: {str(e)}")
+
+
+@router.post("/sessions/{session_id}/resume")
+async def resume_session(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    Resume a paused session from the latest checkpoint
+
+    This is the main resume endpoint that uses the checkpoint system.
+    
+    Args:
+        session_id: Session ID to resume
+        db: Database session
+
+    Returns:
+        Resume result with new session key
+    """
+    # Verify session exists
+    from app.models import Session as SessionModel
+    
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    try:
+        openclaw_service = OpenClawSessionService(db, session_id, use_demo_mode=False)
+        
+        # Resume from latest checkpoint (no specific checkpoint name needed)
+        session_key = await openclaw_service.resume_session()
+        
+        # Update database state
+        session.status = "running"
+        session.is_active = True
+        
+        db.commit()
+
+        return {
+            "status": "resumed",
+            "session_id": session_id,
+            "session_key": session_key,
+            "message": f"Session '{session.name}' resumed successfully from checkpoint",
+        }
+
+    except OpenClawSessionError as e:
+        raise HTTPException(status_code=409, detail=str(e))

@@ -4,6 +4,8 @@ Log streaming with project-level filtering.
 Supports showing logs from all sessions within a project.
 """
 
+import logging
+
 from fastapi import (
     APIRouter,
     Depends,

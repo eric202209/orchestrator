@@ -6,12 +6,28 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 import json
 import asyncio
+from pydantic import BaseModel
 from app.database import get_db
 from app.models import Task, TaskStatus, Project, LogEntry
 from app.schemas import TaskCreate, TaskUpdate, TaskResponse
 from app.services.openclaw_service import OpenClawSessionService
 from app.services.error_handler import EnhancedErrorHandler
 from app.services.log_utils import sort_logs, deduplicate_logs
+
+# Pydantic models for overwrite protection
+class OverwriteCheckRequest(BaseModel):
+    """Request model for overwrite check"""
+    project_id: int
+    task_subfolder: str
+    planned_files: Optional[List[str]] = []
+
+
+class BackupResponse(BaseModel):
+    """Response model for backup creation"""
+    success: bool
+    backup_path: Optional[str] = None
+    files_backed_up: Optional[int] = None
+    error: Optional[str] = None
 
 router = APIRouter()
 
@@ -84,6 +100,33 @@ async def execute_task_with_openclaw(
         timeout_seconds = 600
 
     try:
+        # NEW: Check for potential overwrites BEFORE executing task
+        from app.services.overwrite_protection_service import (
+            OverwriteProtectionService,
+            OverwriteProtectionError
+        )
+
+        protection = OverwriteProtectionService(db)
+        
+        # Get project info to check workspace
+        if not task.project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        
+        try:
+            overwrite_result = protection.check_and_warn(
+                project_id=task.project.id,
+                task_subfolder=f"task_{task_id}",  # Task subfolder format
+                planned_files=[],  # We don't know planned files yet
+                action="warn"  # Show warning but allow proceed
+            )
+
+            if not overwrite_result["safe_to_proceed"]:
+                # Log the warning for audit trail
+                print(f"⚠️  Overwrite detected: {overwrite_result.get('warning_message', '')[:200]}")
+        except Exception as e:
+            # If check fails, log warning but don't block execution
+            print(f"⚠️  Overwrite check failed (continuing anyway): {str(e)[:100]}")
+
         # Start OpenClaw session
         session_service = OpenClawSessionService(db, None, task_id)
         openclaw_key = await session_service.start_session(prompt)
@@ -91,9 +134,24 @@ async def execute_task_with_openclaw(
         # Build prompt using templates
         from app.services.prompt_templates import PromptTemplates
 
+        # Add overwrite warning to prompt if detected
+        overwrite_warning = ""
+        try:
+            protection = OverwriteProtectionService(db)
+            result = protection.check_and_warn(
+                project_id=task.project.id,
+                task_subfolder=f"task_{task_id}",
+                action="warn"
+            )
+            
+            if not result["safe_to_proceed"] and result.get("warning_message"):
+                overwrite_warning = f"\n\n### ⚠️  EXISTING WORKSPACE WARNING:\n{result['warning_message']}"
+        except:
+            pass
+
         # Build enhanced prompt - use build_task_prompt for simple task execution
         prompt_text = PromptTemplates.build_task_prompt(
-            task_description=prompt,
+            task_description=prompt + overwrite_warning,
             project_context=f"Project: {task.project.name if task.project else 'Unknown'} at {task.project.workspace_path if task.project and task.project.workspace_path else '/workspace'}",
         )
 
@@ -239,3 +297,131 @@ def get_sorted_task_logs(
         "deduplicated": deduplicate,
         "logs": sorted_logs,
     }
+
+
+# ============================================================================
+# OVERWRITE PROTECTION ENDPOINTS
+# ============================================================================
+
+@router.post("/tasks/{task_id}/check-overwrites")
+async def check_task_overwrites(
+    task_id: int, request: OverwriteCheckRequest, db: Session = Depends(get_db)
+):
+    """
+    Check for potential overwrites before executing a task
+    
+    Args:
+        task_id: Task ID to check
+        request: Overwrite check request with project info and planned files
+        db: Database session
+
+    Returns:
+        Overwrite protection result with safety status and warnings
+    """
+    # Verify task exists
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    try:
+        from app.services.overwrite_protection_service import (
+            OverwriteProtectionService,
+            OverwriteProtectionError
+        )
+
+        protection = OverwriteProtectionService(db)
+
+        result = protection.check_and_warn(
+            project_id=request.project_id,
+            task_subfolder=request.task_subfolder,
+            planned_files=request.planned_files,
+            action="warn"  # Show warning but allow proceed
+        )
+
+        return {
+            "safe_to_proceed": result["safe_to_proceed"],
+            "workspace_exists": result.get("workspace_exists", False),
+            "file_count": result.get("file_count", 0),
+            "would_overwrite": result.get("has_conflicts", False),
+            "warning_message": result.get("warning_message"),
+            "conflicting_files": result.get("conflict_info", {}).get("conflicting_files", []),
+        }
+
+    except OverwriteProtectionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post("/tasks/{task_id}/create-backup")
+async def create_task_backup(
+    task_id: int, db: Session = Depends(get_db)
+):
+    """
+    Create a backup of existing workspace before proceeding
+    
+    Args:
+        task_id: Task ID to backup
+        db: Database session
+
+    Returns:
+        Backup result with path and file count
+    """
+    # Verify task exists
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    try:
+        from app.services.overwrite_protection_service import OverwriteProtectionService
+
+        protection = OverwriteProtectionService(db)
+
+        backup_result = protection.create_backup_of_existing(
+            project_id=task.project.id if task.project else 1,
+            task_subfolder=f"task_{task_id}",
+        )
+
+        return BackupResponse(**backup_result).model_dump()
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Backup failed: {str(e)}")
+
+
+@router.get("/tasks/{task_id}/workspace-info")
+async def get_workspace_info(
+    task_id: int, db: Session = Depends(get_db)
+):
+    """
+    Get workspace information for a task
+    
+    Args:
+        task_id: Task ID to check
+        db: Database session
+
+    Returns:
+        Workspace details including file count and last modified date
+    """
+    # Verify task exists
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    try:
+        from app.services.overwrite_protection_service import OverwriteProtectionService
+
+        protection = OverwriteProtectionService(db)
+
+        workspace_info = protection.check_workspace_exists(
+            project_id=task.project.id if task.project else 1,
+            task_subfolder=f"task_{task_id}",
+        )
+
+        return {
+            "exists": workspace_info.get("exists", False),
+            "path": workspace_info.get("path"),
+            "file_count": workspace_info.get("file_count", 0),
+            "last_modified": workspace_info.get("last_modified"),
+            "would_overwrite": workspace_info.get("would_overwrite", False),
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Workspace info failed: {str(e)}")

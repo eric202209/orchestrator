@@ -109,3 +109,29 @@ export interface ProjectLogsResponse {
   by_level: Record<string, number>;
   logs: LogEntry[];
 }
+
+// Overwrite Protection Types
+export interface WorkspaceInfo {
+  exists: boolean;
+  path?: string;
+  file_count: number;
+  last_modified?: string;
+  would_overwrite: boolean;
+}
+
+export interface OverwriteCheckResult {
+  safe_to_proceed: boolean;
+  workspace_exists: boolean;
+  file_count: number;
+  would_overwrite: boolean;
+  warning_message?: string;
+  conflicting_files: string[];
+}
+
+// Checkpoint Types
+export interface Checkpoint {
+  name: string;
+  created_at: string | null;
+  step_index?: number;
+  completed_steps?: number;
+}

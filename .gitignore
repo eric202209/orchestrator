@@ -58,10 +58,6 @@ coverage/
 *.note
 *.test
 
-# All markdown files except README.md
-*.md
-!README.md
-
 # Database files (NEVER COMMIT - contains sensitive data)
 *.db
 *.sqlite
@@ -69,6 +65,9 @@ coverage/
 *.db-journal
 dump.rdb
 *.rdb
+
+# Checkpoint files (runtime state - NEVER COMMIT)
+checkpoints/
 
 # Documentation (moved to .notes/)
 docs/
@@ -84,9 +83,7 @@ config/*.ini
 config/*.cfg
 config/README.md
 
-# Ignore config directory except README.md and config files
-!config/
-!config/*.conf
-!config/*.ini
-!config/*.cfg
-!config/README.md
+# Scripts to stop services (should be run locally)
+stop_all.sh
+start_all.sh
+restart_all.sh
