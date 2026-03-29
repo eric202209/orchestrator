@@ -449,22 +449,32 @@ function SessionDashboard() {
     };
 
     webSocket.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === 'log') {
-        const logEntry = {
-          ...data,
-          created_at: data.timestamp || new Date().toISOString()
-        };
-        setLogs(prev => {
-          const updated = [...prev, logEntry];
-          // Limit logs in memory to prevent performance issues
-          if (updated.length > MAX_LOGS_IN_MEMORY) {
-            return updated.slice(-MAX_LOGS_IN_MEMORY);
-          }
-          return updated;
-        });
-      } else if (data.type === 'connected') {
-        console.log('Logs WebSocket connected, receiving recent logs...');
+      // Handle ping/pong heartbeat messages from backend
+      if (event.data === 'ping' || event.data === 'pong') {
+        return; // Skip heartbeat messages
+      }
+      
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'log') {
+          const logEntry = {
+            ...data,
+            created_at: data.timestamp || new Date().toISOString()
+          };
+          setLogs(prev => {
+            const updated = [...prev, logEntry];
+            // Limit logs in memory to prevent performance issues
+            if (updated.length > MAX_LOGS_IN_MEMORY) {
+              return updated.slice(-MAX_LOGS_IN_MEMORY);
+            }
+            return updated;
+          });
+        } else if (data.type === 'connected') {
+          console.log('Logs WebSocket connected, receiving recent logs...');
+        }
+      } catch (error) {
+        // Log parsing error - might be connection issue or invalid data
+        console.error('Failed to parse WebSocket message:', error, 'Data:', event.data);
       }
     };
 

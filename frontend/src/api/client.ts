@@ -111,7 +111,7 @@ export const projectsAPI = {
     apiClient.post<Project>('/projects', data),
 
   update: (id: number, data: Partial<Project>) =>
-    apiClient.patch<Project>(`/projects/${id}`, data),
+    apiClient.put<Project>(`/projects/${id}`, data),
 
   delete: (id: number) => apiClient.delete(`/projects/${id}`),
 

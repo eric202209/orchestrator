@@ -22,6 +22,7 @@ function ProjectsList() {
   const [editingName, setEditingName] = useState('');
   const [newProjectName, setNewProjectName] = useState('');
   const [creatingProject, setCreatingProject] = useState(false);
+  const [updatingProject, setUpdatingProject] = useState(false);
 
   useEffect(() => {
     fetchUser();
@@ -255,21 +256,24 @@ function ProjectsList() {
                   </div>
                 </div>
                 {editingProjectId === project.id ? (
-                  <input
-                    type="text"
-                    value={editingName}
-                    onChange={(e) => setEditingName(e.target.value)}
-                    className="w-full bg-slate-900/50 border border-primary-500 rounded-lg px-3 py-1 text-white mb-2"
-                    autoFocus
-                    onBlur={() => handleUpdateProject(project.id)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        handleUpdateProject(project.id);
-                      } else if (e.key === 'Escape') {
-                        setEditingProjectId(null);
-                      }
-                    }}
-                  />
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={editingName}
+                      onChange={(e) => setEditingName(e.target.value)}
+                      className="w-full bg-slate-900/50 border border-primary-500 rounded-lg px-3 py-1 text-white mb-2 focus:outline-none focus:ring-2 focus:ring-primary-500"
+                      autoFocus
+                      onClick={(e) => e.stopPropagation()}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleUpdateProject(project.id);
+                        } else if (e.key === 'Escape') {
+                          setEditingProjectId(null);
+                        }
+                      }}
+                    />
+                  </div>
                 ) : (
                   <h3 className="text-lg font-semibold text-white mb-2 group-hover:text-primary-400 transition-colors">
                     {project.name}
