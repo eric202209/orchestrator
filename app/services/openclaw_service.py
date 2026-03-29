@@ -934,7 +934,6 @@ class OpenClawSessionService:
                         }
 
                     # Use enhanced JSON parsing with multiple recovery strategies
-                    error_handler = EnhancedErrorHandler()
                     success, output_data, strategy = error_handler.attempt_json_parsing(
                         stdout_stripped, context="OpenClaw response"
                     )

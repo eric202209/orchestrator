@@ -70,7 +70,7 @@ class EnhancedErrorHandler:
                 return True, json.loads(found), "Found JSON in text"
             except json.JSONDecodeError as e:
                 logger.debug(f"[JSON-PARSE] Strategy 5 direct failed: {e}")
-            
+
             # If failed, try fixing errors in found JSON
             fixed = self._fix_common_json_errors(found)
             if fixed != found:

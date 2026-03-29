@@ -310,7 +310,6 @@ def execute_openclaw_task(
                 )
 
             # Use enhanced JSON parsing with multiple recovery strategies
-            error_handler = EnhancedErrorHandler(max_retries=3)
             success, plan_data, strategy_info = error_handler.attempt_json_parsing(
                 output_text, context="planning"
             )
