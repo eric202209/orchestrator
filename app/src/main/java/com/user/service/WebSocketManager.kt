@@ -49,7 +49,7 @@ class WebSocketManager(
 
             override fun onClosing(ws: WebSocket, code: Int, reason: String) {
                 if (code == 4001) {
-                    _events.tryEmit(WsEvent.AuthFailed("Token 錯誤，請檢查 Settings"))
+                    _events.tryEmit(WsEvent.AuthFailed("Token error，Please check the Settings"))
                 }
             }
 
