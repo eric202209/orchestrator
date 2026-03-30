@@ -35,6 +35,8 @@ from app.services import (
     ToolTrackingService,
     PromptTemplates,
 )
+from app.services.prompt_templates import OrchestrationState, OPENCLAW_WORKSPACE_ROOT
+from app.services.project_isolation_service import resolve_project_workspace_path
 from app.services.log_utils import sort_logs, deduplicate_logs, format_logs_batch
 from app.services.log_stream_service import stream_logs, get_project_logs_summary
 from app.dependencies import get_current_active_user, get_current_user
@@ -59,15 +61,18 @@ def _slugify_task_name(name: str) -> str:
     return slug or "task"
 
 
+def _build_task_subfolder_name(title: str, task_id: int) -> str:
+    slug = _slugify_task_name(title)
+    return f"task-{slug}" if slug else f"task-{task_id}"
+
+
 def _ensure_task_workspace(
     db: Session, session: SessionModel, task_id: int
 ) -> Dict[str, str]:
     """Ensure a selected task has a subfolder and workspace on disk."""
     from app.models import Project, Task
-    from app.services.prompt_templates import (
-        OrchestrationState,
-        OPENCLAW_WORKSPACE_ROOT,
-    )
+
+    # OrchestrationState and OPENCLAW_WORKSPACE_ROOT already imported at top of file
 
     task = (
         db.query(Task)
@@ -89,15 +94,15 @@ def _ensure_task_workspace(
     )
 
     if project.workspace_path:
-        workspace_path = project.workspace_path
-        if not workspace_path.startswith("/"):
-            workspace_path = str(OPENCLAW_WORKSPACE_ROOT / workspace_path)
+        workspace_path = str(
+            resolve_project_workspace_path(project.workspace_path, project.name)
+        )
         orchestration_state._workspace_path_override = workspace_path
 
     if task.task_subfolder:
         orchestration_state._task_subfolder_override = task.task_subfolder
     else:
-        base_subfolder = _slugify_task_name(task.title) or f"task-{task.id}"
+        base_subfolder = _build_task_subfolder_name(task.title, task.id)
         candidate = base_subfolder
         suffix = 2
 
@@ -514,10 +519,34 @@ async def execute_task(
         )
         await openclaw_service.create_openclaw_session(task_description)
 
+        orchestration_state = None
+        if selected_task and task_workspace:
+            project_name = session.project.name if session.project else ""
+            orchestration_state = OrchestrationState(
+                session_id=str(session_id),
+                task_description=prompt,
+                project_name=project_name,
+                project_context=session.description or "",
+                task_id=selected_task.id,
+            )
+
+            if session.project and session.project.workspace_path:
+                workspace_path = str(
+                    resolve_project_workspace_path(
+                        session.project.workspace_path, session.project.name
+                    )
+                )
+                orchestration_state._workspace_path_override = workspace_path
+
+            if selected_task.task_subfolder:
+                orchestration_state._task_subfolder_override = (
+                    selected_task.task_subfolder
+                )
+
         # Execute task with multi-step orchestration (PLANNING -> EXECUTING -> DEBUGGING)
         # Pass raw task description - orchestration handles prompt building internally
         result = await openclaw_service.execute_task_with_orchestration(
-            prompt, timeout_seconds
+            prompt, timeout_seconds, orchestration_state=orchestration_state
         )
 
         return {

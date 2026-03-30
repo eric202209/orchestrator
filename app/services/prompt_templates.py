@@ -152,11 +152,11 @@ class OrchestrationState:
             return self._task_subfolder_override
 
         if self.task_id:
-            return f"task_{self.task_id}"
+            return f"task-{self.task_id}"
         elif self.project_name:
-            return f"task_{self._slugify(self.project_name)}"
+            return f"task-{self._slugify(self.project_name)}"
         else:
-            return f"task_{self.session_id}"
+            return f"task-{self.session_id}"
 
     @property
     def project_dir(self) -> Path:
@@ -274,6 +274,8 @@ class PromptTemplates:
 1. Create 3-8 sequential steps
 2. Each step: atomic, verifiable, rollback-safe
 3. Output JSON array with: step_number, description, commands[], verification?, rollback?, expected_files[]
+4. Do NOT create documentation files unless the task explicitly asks for them
+5. Avoid README files, notes files, summaries, or explanation documents unless required by the task
 
 **Output (JSON ONLY):**
 [
@@ -313,6 +315,8 @@ class PromptTemplates:
 2. Treat all file paths as relative to `{project_dir}`
 3. Do NOT use `..`, `~`, or absolute paths
 4. Do NOT create files or folders outside `{project_dir}`
+5. Do NOT create documentation files unless the task explicitly requires them
+6. Avoid README files, notes files, summaries, or explanation documents unless required by the task
 
 **Output:** status, output, verification_output, files_changed, error_message
 """
@@ -341,6 +345,8 @@ class PromptTemplates:
 2. Use relative paths only
 3. Do NOT use `..`, `~`, or absolute paths
 4. Do NOT suggest creating or modifying files outside `{project_dir}`
+5. Do NOT propose documentation files unless the task explicitly requires them
+6. Avoid README files, notes files, summaries, or explanation documents unless required by the task
 
 **Output (JSON):**
 {{
@@ -370,6 +376,8 @@ class PromptTemplates:
 2. Use relative paths only
 3. Do NOT use `..`, `~`, or absolute paths
 4. Do NOT create sibling folders under `{workspace_root}`
+5. Do NOT add documentation-only steps unless the task explicitly requires them
+6. Avoid README files, notes files, summaries, or explanation documents unless required by the task
 
 **Output (JSON):**
 {{

@@ -21,6 +21,7 @@ from app.database import get_db, get_db_session
 from app.services import OpenClawSessionService, PromptTemplates
 from app.services.error_handler import error_handler
 from app.services.checkpoint_service import CheckpointService
+from app.services.project_isolation_service import resolve_project_workspace_path
 from app.services.prompt_templates import (
     OrchestrationStatus,
     OrchestrationState,
@@ -201,7 +202,15 @@ def _normalize_expected_files(
 ) -> List[str]:
     normalized_files: List[str] = []
     for file_path in expected_files or []:
-        normalized = _normalize_path_reference(str(file_path), project_dir)
+        raw_file_path = str(file_path).strip()
+        if not raw_file_path:
+            continue
+        if any(char in raw_file_path for char in "<>"):
+            logger.warning(
+                f"[ISOLATION] Skipping suspicious expected_files entry that looks like markup: {raw_file_path}"
+            )
+            continue
+        normalized = _normalize_path_reference(raw_file_path, project_dir)
         normalized_files.append("." if normalized == "." else normalized)
     return normalized_files
 
@@ -319,6 +328,11 @@ def slugify_project_name(name: str) -> str:
     return slug
 
 
+def build_task_subfolder_name(title: str, task_id: int) -> str:
+    slug = slugify_project_name(title)
+    return f"task-{slug}" if slug else f"task-{task_id}"
+
+
 @celery_app.task(
     bind=True,
     max_retries=3,
@@ -383,11 +397,9 @@ def execute_openclaw_task(
 
         # If project has workspace_path configured, use it
         if project and project.workspace_path:
-            # workspace_path should be relative (e.g., "TalentBridge"), not absolute
-            workspace_path = project.workspace_path
-            if not workspace_path.startswith("/"):
-                # Make it absolute
-                workspace_path = str(OPENCLAW_WORKSPACE_ROOT / workspace_path)
+            workspace_path = str(
+                resolve_project_workspace_path(project.workspace_path, project.name)
+            )
 
             orchestration_state._workspace_path_override = workspace_path
 
@@ -397,11 +409,7 @@ def execute_openclaw_task(
             else:
                 # Generate task subfolder from task title (slugified)
                 # Use task title if available, otherwise fall back to task_id
-                task_title_slug = (
-                    slugify_project_name(task.title)
-                    if task.title
-                    else f"task_{task_id}"
-                )
+                task_title_slug = build_task_subfolder_name(task.title, task_id)
 
                 # Ensure unique subfolder name (append counter if needed)
                 counter = 1

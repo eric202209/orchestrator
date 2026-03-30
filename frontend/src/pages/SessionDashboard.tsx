@@ -111,6 +111,20 @@ function SessionDashboard() {
     }
   }, [id, projectLoaded]);
 
+  const loadCheckpoints = useCallback(async () => {
+    if (!id) return;
+    
+    try {
+      const response = await sessionsAPI.listCheckpoints(Number(id));
+      // Ensure we always set an array, even if API returns undefined/null
+      setCheckpoints(response?.data?.checkpoints || []);
+    } catch (error) {
+      console.error('Failed to load checkpoints:', error);
+      // On error, keep existing checkpoints or reset to empty array
+      setCheckpoints([]);
+    }
+  }, [id]);
+
   useEffect(() => {
     fetchProject();
     fetchProjectTasks();
@@ -679,21 +693,6 @@ function SessionDashboard() {
       alert('Failed to resume session. Please try again.');
     }
   };
-
-  // Checkpoint management functions
-  const loadCheckpoints = useCallback(async () => {
-    if (!id) return;
-    
-    try {
-      const response = await sessionsAPI.listCheckpoints(Number(id));
-      // Ensure we always set an array, even if API returns undefined/null
-      setCheckpoints(response?.data?.checkpoints || []);
-    } catch (error) {
-      console.error('Failed to load checkpoints:', error);
-      // On error, keep existing checkpoints or reset to empty array
-      setCheckpoints([]);
-    }
-  }, [id]);
 
   const handleDeleteCheckpoint = async (checkpointName: string) => {
     if (!id) return;

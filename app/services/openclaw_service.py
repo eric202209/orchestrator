@@ -21,7 +21,7 @@ import time
 from typing import Optional, Dict, Any, List, Callable
 from datetime import datetime
 from sqlalchemy.orm import Session
-from app.models import Session as SessionModel, Task, TaskStatus, LogEntry
+from app.models import Session as SessionModel, Task, TaskStatus, LogEntry, Project
 from app.config import settings
 from app.services.prompt_templates import (
     OrchestrationStatus,
@@ -29,7 +29,10 @@ from app.services.prompt_templates import (
     StepResult,
     PromptTemplates,
 )
-from app.services.project_isolation_service import ProjectIsolationService
+from app.services.project_isolation_service import (
+    ProjectIsolationService,
+    resolve_project_workspace_path,
+)
 from app.services.permission_service import PermissionApprovalService
 from app.services.performance_optimizations import (
     optimize_prompt,
@@ -372,6 +375,20 @@ class OpenClawSessionService:
                 "INFO", f"[ORCHESTRATION] Starting optimization: {prompt[:80]}..."
             )
 
+            project_model = None
+            if self.session_model and self.session_model.project_id:
+                project_model = (
+                    self.db.query(Project)
+                    .filter(Project.id == self.session_model.project_id)
+                    .first()
+                )
+            elif self.task_model and self.task_model.project_id:
+                project_model = (
+                    self.db.query(Project)
+                    .filter(Project.id == self.task_model.project_id)
+                    .first()
+                )
+
             if orchestration_state is None:
                 # OPTIMIZATION: Compress project context
                 project_context = (
@@ -392,15 +409,26 @@ class OpenClawSessionService:
                     session_id=str(self.session_id),
                     task_description=prompt,
                     project_name=(
-                        self.session_model.name
-                        if self.session_model
+                        project_model.name
+                        if project_model
                         else (
-                            self.task_model.project.name
-                            if self.task_model and self.task_model.project
-                            else "Unknown"
+                            self.session_model.name if self.session_model else "Unknown"
                         )
                     ),
                     project_context=project_context,
+                    task_id=self.task_model.id if self.task_model else None,
+                )
+
+            if project_model and project_model.workspace_path:
+                orchestration_state._workspace_path_override = str(
+                    resolve_project_workspace_path(
+                        project_model.workspace_path, project_model.name
+                    )
+                )
+
+            if self.task_model and self.task_model.task_subfolder:
+                orchestration_state._task_subfolder_override = (
+                    self.task_model.task_subfolder
                 )
 
             # Phase 1: PLANNING (OPTIMIZED)
@@ -700,7 +728,11 @@ class OpenClawSessionService:
             attempt_number=failed_result.attempt,
             max_attempts=3,
             prior_debug_attempts=orchestration_state.debug_attempts,
-            project_name=self.session_model.name if self.session_model else "",
+            project_name=(
+                self.task_model.project.name
+                if self.task_model and self.task_model.project
+                else (self.session_model.name if self.session_model else "")
+            ),
             workspace_root=str(orchestration_state.workspace_root),
             project_dir=str(orchestration_state.project_dir),
         )
