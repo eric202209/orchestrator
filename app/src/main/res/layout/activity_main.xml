@@ -2,38 +2,48 @@
 <androidx.coordinatorlayout.widget.CoordinatorLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/background"
-    android:fitsSystemWindows="true">
+    android:background="@color/background">
 
     <com.google.android.material.appbar.AppBarLayout
+        android:id="@+id/appBar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:background="@color/toolbar_color"
+        android:elevation="0dp"
         app:elevation="0dp">
 
         <androidx.appcompat.widget.Toolbar
             android:id="@+id/toolbar"
+            style="@style/AppToolbar"
             android:layout_width="match_parent"
             android:layout_height="?attr/actionBarSize"
-            app:titleTextColor="@color/white" />
+            android:minHeight="56dp"
+            app:popupTheme="@style/ThemeOverlay.OpenClaw.PopupMenu"
+            app:title="@string/toolbar_title"
+            app:titleTextAppearance="@style/TextAppearance.OpenClaw.ToolbarTitle"
+            app:titleTextColor="@color/text_primary" />
 
         <LinearLayout
+            android:id="@+id/headerStatusRow"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:gravity="center_vertical"
             android:orientation="horizontal"
-            android:paddingHorizontal="16dp"
-            android:paddingBottom="12dp"
-            android:gravity="center_vertical">
+            android:paddingLeft="16dp"
+            android:paddingTop="4dp"
+            android:paddingRight="16dp"
+            android:paddingBottom="12dp">
 
             <TextView
                 android:id="@+id/statusText"
+                style="@style/TextAppearance.OpenClaw.Status"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="○ Disconnected"
-                android:textColor="@color/status_disconnected"
-                android:textSize="13sp" />
+                android:text="@string/chat_status_disconnected"
+                android:textColor="@color/status_disconnected" />
 
             <View
                 android:layout_width="0dp"
@@ -43,13 +53,16 @@
             <Spinner
                 android:id="@+id/agentSpinner"
                 android:layout_width="wrap_content"
-                android:layout_height="24dp"
-                android:backgroundTint="@color/status_disconnected"
-                android:gravity="end" />
+                android:layout_height="wrap_content"
+                android:minHeight="48dp"
+                android:backgroundTint="@color/divider"
+                android:gravity="center_vertical|end"
+                android:popupBackground="@color/ai_bubble" />
         </LinearLayout>
     </com.google.android.material.appbar.AppBarLayout>
 
     <androidx.constraintlayout.widget.ConstraintLayout
+        android:id="@+id/contentContainer"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         app:layout_behavior="@string/appbar_scrolling_view_behavior">
@@ -59,6 +72,10 @@
             android:layout_width="0dp"
             android:layout_height="0dp"
             android:clipToPadding="false"
+            android:paddingLeft="12dp"
+            android:paddingTop="8dp"
+            android:paddingRight="12dp"
+            android:paddingBottom="8dp"
             app:layout_constraintTop_toTopOf="parent"
             app:layout_constraintBottom_toTopOf="@id/typingIndicator"
             app:layout_constraintStart_toStartOf="parent"
@@ -66,13 +83,17 @@
 
         <TextView
             android:id="@+id/typingIndicator"
+            style="@style/TextAppearance.OpenClaw.Status"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Agent is typing..."
-            android:textColor="@color/status_disconnected"
-            android:textSize="12sp"
-            android:paddingHorizontal="16dp"
-            android:paddingVertical="4dp"
+            android:layout_marginLeft="16dp"
+            android:layout_marginBottom="6dp"
+            android:paddingLeft="4dp"
+            android:paddingTop="2dp"
+            android:paddingRight="4dp"
+            android:paddingBottom="2dp"
+            android:text="@string/typing_indicator"
+            android:textColor="@color/text_secondary"
             android:visibility="gone"
             app:layout_constraintBottom_toTopOf="@id/bottomBar"
             app:layout_constraintStart_toStartOf="parent" />
@@ -81,8 +102,12 @@
             android:id="@+id/bottomBar"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
+            android:background="@color/background"
             android:orientation="vertical"
-            android:background="@color/toolbar_color"
+            android:paddingLeft="8dp"
+            android:paddingTop="8dp"
+            android:paddingRight="8dp"
+            android:paddingBottom="8dp"
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent">
@@ -91,93 +116,117 @@
                 android:id="@+id/imagePreviewLayout"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:visibility="gone"
-                android:padding="8dp">
+                android:layout_marginBottom="8dp"
+                android:background="@drawable/bg_chat_input"
+                android:padding="8dp"
+                android:visibility="gone">
 
                 <com.google.android.material.imageview.ShapeableImageView
                     android:id="@+id/imagePreviewImage"
-                    android:layout_width="80dp"
-                    android:layout_height="80dp"
+                    android:layout_width="64dp"
+                    android:layout_height="64dp"
                     android:scaleType="centerCrop"
-                    app:shapeAppearanceOverlay="@style/RoundedCorners"
+                    app:layout_constraintBottom_toBottomOf="parent"
+                    app:layout_constraintStart_toStartOf="parent"
                     app:layout_constraintTop_toTopOf="parent"
-                    app:layout_constraintStart_toStartOf="parent" />
+                    app:shapeAppearanceOverlay="@style/RoundedCorners" />
 
                 <TextView
                     android:id="@+id/imagePreviewText"
+                    style="@style/TextAppearance.OpenClaw.Status"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
-                    android:text="Image attached"
-                    android:textColor="@color/input_text"
-                    android:textSize="12sp"
-                    android:layout_marginStart="12dp"
-                    app:layout_constraintTop_toTopOf="@id/imagePreviewImage"
+                    android:layout_marginLeft="12dp"
+                    android:text="@string/image_attached"
+                    android:textColor="@color/text_primary"
                     app:layout_constraintBottom_toBottomOf="@id/imagePreviewImage"
+                    app:layout_constraintEnd_toStartOf="@id/removePreviewButton"
                     app:layout_constraintStart_toEndOf="@id/imagePreviewImage"
-                    app:layout_constraintEnd_toEndOf="parent" />
+                    app:layout_constraintTop_toTopOf="@id/imagePreviewImage" />
+
+                <ImageButton
+                    android:id="@+id/removePreviewButton"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="@string/remove_preview"
+                    android:padding="12dp"
+                    android:src="@android:drawable/ic_menu_close_clear_cancel"
+                    app:layout_constraintBottom_toBottomOf="@id/imagePreviewImage"
+                    app:layout_constraintEnd_toEndOf="parent"
+                    app:layout_constraintTop_toTopOf="@id/imagePreviewImage"
+                    app:tint="@color/text_secondary" />
             </androidx.constraintlayout.widget.ConstraintLayout>
 
             <LinearLayout
+                android:id="@+id/inputContainer"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal"
+                android:background="@drawable/bg_chat_input"
                 android:gravity="center_vertical"
-                android:padding="8dp">
+                android:minHeight="56dp"
+                android:orientation="horizontal"
+                android:paddingLeft="8dp"
+                android:paddingTop="4dp"
+                android:paddingRight="8dp"
+                android:paddingBottom="4dp">
 
                 <ImageButton
                     android:id="@+id/attachButton"
-                    android:layout_width="40dp"
-                    android:layout_height="40dp"
-                    android:src="@android:drawable/ic_input_add"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
                     android:background="?attr/selectableItemBackgroundBorderless"
-                    app:tint="@color/status_disconnected"
-                    android:contentDescription="Attach" />
+                    android:contentDescription="@string/more_options"
+                    android:padding="12dp"
+                    android:src="@drawable/ic_add"
+                    app:tint="@color/text_secondary" />
 
                 <ImageButton
                     android:id="@+id/voiceButton"
-                    android:layout_width="40dp"
-                    android:layout_height="40dp"
-                    android:src="@android:drawable/ic_btn_speak_now"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
                     android:background="?attr/selectableItemBackgroundBorderless"
-                    app:tint="@color/status_disconnected"
-                    android:contentDescription="Voice" />
+                    android:contentDescription="@string/voice_input"
+                    android:padding="12dp"
+                    android:src="@android:drawable/ic_btn_speak_now"
+                    app:tint="@color/text_secondary" />
 
                 <EditText
                     android:id="@+id/messageEditText"
+                    style="@style/TextAppearance.OpenClaw.Message"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:hint="Message"
-                    android:textColorHint="@color/status_disconnected"
-                    android:textColor="@color/input_text"
                     android:background="@null"
-                    android:paddingHorizontal="8dp"
-                    android:textSize="16sp"
+                    android:gravity="center_vertical|start"
+                    android:hint="@string/message_hint"
                     android:inputType="textCapSentences|textMultiLine"
-                    android:maxLines="4" />
-
-                <ImageButton
-                    android:id="@+id/historyButton"
-                    android:layout_width="40dp"
-                    android:layout_height="40dp"
-                    android:src="@android:drawable/ic_menu_recent_history"
-                    android:background="?attr/selectableItemBackgroundBorderless"
-                    app:tint="@color/status_disconnected"
-                    android:contentDescription="History" />
+                    android:maxLines="4"
+                    android:minHeight="48dp"
+                    android:paddingLeft="4dp"
+                    android:paddingTop="10dp"
+                    android:paddingRight="8dp"
+                    android:paddingBottom="10dp"
+                    android:scrollbars="vertical"
+                    android:textColor="@color/input_text"
+                    android:textColorHint="@color/text_secondary" />
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/sendButton"
                     android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="SEND"
-                    android:textColor="@color/white"
-                    android:backgroundTint="@color/send_button"
-                    app:cornerRadius="4dp"
+                    android:layout_height="48dp"
                     android:insetTop="0dp"
                     android:insetBottom="0dp"
-                    android:layout_marginStart="4dp" />
+                    android:minWidth="48dp"
+                    android:minHeight="48dp"
+                    android:text="@string/send_message"
+                    android:textAllCaps="false"
+                    android:textColor="@color/white"
+                    app:backgroundTint="@color/send_button"
+                    app:cornerRadius="16dp" />
             </LinearLayout>
         </LinearLayout>
     </androidx.constraintlayout.widget.ConstraintLayout>
 </androidx.coordinatorlayout.widget.CoordinatorLayout>
+
 

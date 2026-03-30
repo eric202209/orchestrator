@@ -21,12 +21,18 @@ import com.user.service.Ed25519Manager
 import com.user.service.GatewayClient
 import com.user.service.GatewayConnectionService
 import com.user.service.GatewayEvent
+import com.tom_roush.pdfbox.pdmodel.PDDocument
+import com.tom_roush.pdfbox.text.PDFTextStripper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import java.nio.charset.StandardCharsets
 import java.util.UUID
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
+    companion object {
+        private const val MAX_ATTACHMENT_TEXT_CHARS = 20_000
+    }
 
     private val app = application as ClawMobileApplication
     private val prefs = PrefsManager(application)
@@ -169,8 +175,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * Sends a file to the gateway.
      * Images are sent using the native Base64 format.
-     * Text files have their content embedded in the message.
-     * Other files are mentioned by name.
+     * Text files and PDFs have their content embedded in the message.
+     * Other binary files are rejected until a real upload path exists.
      */
     fun sendFile(context: Context, uri: Uri, text: String) {
         val sessionId = _currentSessionId.value ?: return
@@ -179,6 +185,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val contentResolver = context.contentResolver
                 val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
                 val fileName = getFileName(context, uri) ?: "file"
+                val lowerFileName = fileName.lowercase()
 
                 val bytes = contentResolver.openInputStream(uri)?.use {
                     it.readBytes()
@@ -199,12 +206,30 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     repository.insertMessage(message)
                     gateway.sendMessage(text, base64, mimeType)
                 } else {
-                    val finalMessage = if (isTextFile(mimeType)) {
-                        val fileContent = String(bytes)
-                        val attachmentInfo = "\n\n--- Attached File: $fileName ---\n```\n$fileContent\n```"
-                        "$text$attachmentInfo"
-                    } else {
-                        "$text\n\n[Attached File: $fileName ($mimeType)]"
+                    val finalMessage = when {
+                        isPdfFile(mimeType, lowerFileName) -> {
+                            val fileContent = extractPdfText(bytes)
+                            buildAttachmentMessage(
+                                prompt = text,
+                                fileName = fileName,
+                                fileContent = fileContent,
+                                label = "Attached PDF"
+                            )
+                        }
+                        isTextFile(mimeType) || isTextLikeFileName(lowerFileName) -> {
+                            val fileContent = String(bytes, StandardCharsets.UTF_8)
+                            buildAttachmentMessage(
+                                prompt = text,
+                                fileName = fileName,
+                                fileContent = fileContent,
+                                label = "Attached File"
+                            )
+                        }
+                        else -> {
+                            throw IllegalArgumentException(
+                                "This file type is not supported yet. Use PDF, TXT, MD, JSON, CSV, or XML."
+                            )
+                        }
                     }
 
                     val message = ChatMessage(
@@ -231,6 +256,66 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             "text/csv", "text/tab-separated-values", "application/xml", "text/xml"
         )
         return mimeType in textMimeTypes || mimeType.startsWith("text/")
+    }
+
+    private fun isTextLikeFileName(fileName: String): Boolean {
+        return fileName.endsWith(".txt") ||
+                fileName.endsWith(".md") ||
+                fileName.endsWith(".json") ||
+                fileName.endsWith(".csv") ||
+                fileName.endsWith(".xml")
+    }
+
+    private fun isPdfFile(mimeType: String, fileName: String): Boolean {
+        return mimeType == "application/pdf" || fileName.endsWith(".pdf")
+    }
+
+    private fun extractPdfText(bytes: ByteArray): String {
+        PDDocument.load(bytes).use { document ->
+            if (document.isEncrypted) {
+                throw IllegalArgumentException("Password-protected PDFs are not supported yet.")
+            }
+
+            val extracted = PDFTextStripper().getText(document).trim()
+            if (extracted.isBlank()) {
+                throw IllegalArgumentException("Could not extract readable text from this PDF.")
+            }
+            return extracted
+        }
+    }
+
+    private fun buildAttachmentMessage(
+        prompt: String,
+        fileName: String,
+        fileContent: String,
+        label: String
+    ): String {
+        val trimmedContent = fileContent.trim()
+        if (trimmedContent.isBlank()) {
+            throw IllegalArgumentException("The selected file did not contain readable text.")
+        }
+
+        val wasTruncated = trimmedContent.length > MAX_ATTACHMENT_TEXT_CHARS
+        val safeContent = trimmedContent.take(MAX_ATTACHMENT_TEXT_CHARS)
+        val header = buildString {
+            append("\n\n--- ")
+            append(label)
+            append(": ")
+            append(fileName)
+            append(" ---")
+            if (wasTruncated) {
+                append("\n[Content truncated to ")
+                append(MAX_ATTACHMENT_TEXT_CHARS)
+                append(" characters]")
+            }
+        }
+
+        val attachmentBlock = "$header\n```\n$safeContent\n```"
+        return if (prompt.isBlank()) {
+            "Please analyze this attachment.$attachmentBlock"
+        } else {
+            "$prompt$attachmentBlock"
+        }
     }
 
     private fun getFileName(context: Context, uri: Uri): String? {

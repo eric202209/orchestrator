@@ -8,9 +8,14 @@
         <item name="colorSecondary">@color/send_button</item>
         <item name="colorOnSecondary">@color/black</item>
         <item name="android:windowBackground">@color/background</item>
-        <item name="android:statusBarColor">@color/toolbar_color</item>
-        <item name="android:navigationBarColor">@color/background</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
         <item name="popupMenuStyle">@style/DarkPopupMenu</item>
         <item name="android:popupMenuStyle">@style/DarkPopupMenu</item>
+        <item name="actionOverflowMenuStyle">@style/DarkPopupMenu</item>
+        <item name="android:panelBackground">@color/ai_bubble</item>
+        <item name="android:colorBackground">@color/background</item>
     </style>
 </resources>
+

@@ -1,123 +1,169 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:orientation="vertical"
-    android:padding="4dp">
+    android:paddingTop="2dp"
+    android:paddingBottom="2dp">
 
-    <!-- AI row (left aligned) -->
+    <LinearLayout
+        android:id="@+id/dateDividerLayout"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:layout_marginBottom="8dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:visibility="gone">
+
+        <View
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1"
+            android:background="@color/divider" />
+
+        <TextView
+            android:id="@+id/dateDividerText"
+            style="@style/TextAppearance.OpenClaw.Timestamp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginLeft="12dp"
+            android:layout_marginRight="12dp"
+            android:textColor="@color/text_secondary" />
+
+        <View
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1"
+            android:background="@color/divider" />
+    </LinearLayout>
+
     <LinearLayout
         android:id="@+id/aiRow"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:gravity="start|bottom"
         android:orientation="horizontal"
-        android:gravity="start"
         android:visibility="gone">
 
-        <!-- Avatar -->
         <TextView
             android:id="@+id/avatarText"
             android:layout_width="32dp"
             android:layout_height="32dp"
-            android:text="🦞"
-            android:textSize="20sp"
+            android:layout_marginTop="4dp"
+            android:layout_marginRight="8dp"
             android:gravity="center"
-            android:layout_marginEnd="8dp"
-            android:layout_marginTop="4dp" />
+            android:text="AI"
+            android:textColor="@color/text_secondary"
+            android:textSize="12sp"
+            android:textStyle="bold" />
 
-        <!-- AI bubble -->
-        <LinearLayout
-            android:layout_width="0dp"
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/aiBubbleCard"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:orientation="vertical"
-            android:background="@drawable/bubble_ai"
-            android:padding="10dp"
-            android:layout_marginEnd="48dp">
+            android:layout_marginRight="40dp"
+            app:cardBackgroundColor="@color/ai_bubble"
+            app:cardElevation="2dp"
+            app:shapeAppearanceOverlay="@style/ShapeAppearanceOverlay.OpenClaw.AiBubble">
 
-            <!-- Text message -->
-            <TextView
-                android:id="@+id/messageText"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:textColor="@color/message_text"
-                android:textSize="15sp"
-                android:lineSpacingMultiplier="1.3"
-                android:visibility="gone" />
-
-            <!-- Image (Base64 or URL) -->
-            <ImageView
-                android:id="@+id/messageImage"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:adjustViewBounds="true"
-                android:maxHeight="400dp"
-                android:scaleType="fitStart"
-                android:layout_marginTop="4dp"
-                android:visibility="gone" />
-
-            <!-- Timestamp -->
-            <TextView
-                android:id="@+id/timestampText"
+            <LinearLayout
+                android:id="@+id/aiBubbleContent"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:textSize="11sp"
-                android:textColor="#888888"
-                android:layout_gravity="end"
-                android:layout_marginTop="4dp" />
+                android:orientation="vertical"
+                android:paddingLeft="10dp"
+                android:paddingTop="8dp"
+                android:paddingRight="10dp"
+                android:paddingBottom="8dp">
 
-        </LinearLayout>
+                <TextView
+                    android:id="@+id/messageText"
+                    style="@style/TextAppearance.OpenClaw.Message"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:visibility="gone" />
+
+                <ImageView
+                    android:id="@+id/messageImage"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:adjustViewBounds="true"
+                    android:maxHeight="400dp"
+                    android:scaleType="fitStart"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/timestampText"
+                    style="@style/TextAppearance.OpenClaw.Timestamp"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="end"
+                    android:layout_marginTop="4dp" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
     </LinearLayout>
 
-    <!-- User row (right aligned) -->
     <LinearLayout
         android:id="@+id/userRow"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
         android:gravity="end"
+        android:orientation="horizontal"
         android:visibility="gone">
 
-        <LinearLayout
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/userBubbleCard"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:background="@drawable/bubble_user"
-            android:padding="10dp"
-            android:layout_marginStart="48dp">
+            android:layout_marginLeft="56dp"
+            app:cardBackgroundColor="@color/user_bubble"
+            app:cardElevation="2dp"
+            app:shapeAppearanceOverlay="@style/ShapeAppearanceOverlay.OpenClaw.UserBubble">
 
-            <ImageView
-                android:id="@+id/userMessageImage"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:adjustViewBounds="true"
-                android:maxHeight="300dp"
-                android:scaleType="fitStart"
-                android:layout_marginBottom="4dp"
-                android:visibility="gone" />
-
-            <TextView
-                android:id="@+id/userMessageText"
+            <LinearLayout
+                android:id="@+id/userBubbleContent"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:textColor="@color/message_text"
-                android:textSize="15sp"
-                android:lineSpacingMultiplier="1.3" />
+                android:orientation="vertical"
+                android:paddingLeft="10dp"
+                android:paddingTop="8dp"
+                android:paddingRight="10dp"
+                android:paddingBottom="8dp">
 
-            <TextView
-                android:id="@+id/userTimestampText"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:textSize="11sp"
-                android:textColor="#808080"
-                android:layout_gravity="end"
-                android:layout_marginTop="4dp" />
+                <ImageView
+                    android:id="@+id/userMessageImage"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="4dp"
+                    android:adjustViewBounds="true"
+                    android:maxHeight="300dp"
+                    android:scaleType="fitStart"
+                    android:visibility="gone" />
 
-        </LinearLayout>
+                <TextView
+                    android:id="@+id/userMessageText"
+                    style="@style/TextAppearance.OpenClaw.Message"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/user_bubble_text" />
+
+                <TextView
+                    android:id="@+id/userTimestampText"
+                    style="@style/TextAppearance.OpenClaw.Timestamp"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="end"
+                    android:layout_marginTop="4dp"
+                    android:textColor="@color/timestamp_text" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
     </LinearLayout>
-
 </LinearLayout>
+
 
 
 

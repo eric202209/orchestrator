@@ -1,3 +1,18 @@
 <resources>
     <string name="app_name">OpenClaw Mobile</string>
+    <string name="toolbar_title">OpenClaw Mobile</string>
+    <string name="chat_status_disconnected">Disconnected</string>
+    <string name="typing_indicator">Agent is typing…</string>
+    <string name="message_hint">Message</string>
+    <string name="attach_file">Add attachment</string>
+    <string name="remove_attachment">Remove attachment</string>
+    <string name="more_options">More options</string>
+    <string name="voice_input">Voice input</string>
+    <string name="send_message">Send</string>
+    <string name="attachment_options">Attach</string>
+    <string name="attachment_gallery">Gallery</string>
+    <string name="attachment_documents">Documents</string>
+    <string name="attachment_voice">Voice</string>
+    <string name="image_attached">Image attached</string>
+    <string name="remove_preview">Remove preview</string>
 </resources>

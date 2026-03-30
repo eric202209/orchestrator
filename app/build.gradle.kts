@@ -1,8 +1,22 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.ksp)
 }
+
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) {
+        file.inputStream().use { load(it) }
+    }
+}
+
+val defaultServerUrl =
+    (localProperties.getProperty("OPENCLAW_SERVER_URL") ?: "")
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
 
 android {
     namespace = "com.user"
@@ -15,6 +29,7 @@ android {
         versionCode = 3
         versionName = "1.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "DEFAULT_SERVER_URL", "\"$defaultServerUrl\"")
     }
 
     buildTypes {
@@ -35,11 +50,16 @@ android {
     packaging {
         resources {
             excludes += "META-INF/versions/**"
+            pickFirsts.add("org/bouncycastle/x509/CertPathReviewerMessages_de.properties")
+            pickFirsts.add("org/bouncycastle/x509/CertPathReviewerMessages.properties")
         }
     }
 
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { viewBinding = true }
+    buildFeatures {
+        viewBinding = true
+        buildConfig = true
+    }
 }
 
 dependencies {
@@ -62,18 +82,18 @@ dependencies {
     implementation(libs.coroutines)
     implementation(libs.lifecycle.runtime)
     implementation(libs.lifecycle.viewmodel)
+    
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0") {
+        exclude(group = "org.bouncycastle", module = "bcprov-jdk15to18")
+    }
 
     // MVVM
     implementation(libs.lifecycle.livedata)
     implementation(libs.activity.ktx)
 
-    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+    implementation(libs.bouncycastle)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.espresso)
 }
-
-
-
-

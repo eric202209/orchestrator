@@ -1,13 +1,15 @@
 package com.user.data
 
 import android.content.Context
+import com.user.BuildConfig
 
 class PrefsManager(context: Context) {
     private val prefs = context.getSharedPreferences("openclaw_prefs", Context.MODE_PRIVATE)
 
-    // Default to emulator host IP for SSH tunnel testing
+    // The default comes from local.properties
     var serverUrl: String
-        get() = prefs.getString("server_url", "http://10.0.2.2:18789") ?: "http://10.0.2.2:18789"
+        get() = prefs.getString("server_url", BuildConfig.DEFAULT_SERVER_URL)
+            ?: BuildConfig.DEFAULT_SERVER_URL
         set(value) = prefs.edit().putString("server_url", value).apply()
 
     // OpenClaw Gateway token
