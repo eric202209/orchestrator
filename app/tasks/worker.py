@@ -172,11 +172,17 @@ def _normalize_command(command: str, project_dir: Path) -> str:
         else:
             current = f"cd {shlex.quote(target)} && {remainder}"
 
-    abs_paths = sorted(
-        set(re.findall(r"(?<![A-Za-z0-9._-])/(?:[^\s'\";&|]+)", current)),
-        key=len,
-        reverse=True,
-    )
+    abs_path_matches = []
+    for token in shlex.split(current, posix=True):
+        if not token.startswith("/"):
+            continue
+        if any(char in token for char in "<>"):
+            continue
+        if not re.fullmatch(r"/[A-Za-z0-9._/@:+-]+(?:/[A-Za-z0-9._@:+-]+)*/*", token):
+            continue
+        abs_path_matches.append(token)
+
+    abs_paths = sorted(set(abs_path_matches), key=len, reverse=True)
     for abs_path in abs_paths:
         replacement = _normalize_path_reference(abs_path, project_dir)
         replacement = "." if replacement == "." else f"./{replacement}"

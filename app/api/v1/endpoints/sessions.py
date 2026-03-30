@@ -151,6 +151,26 @@ def _get_session_celery_task_ids(db: Session, session_id: int) -> List[str]:
     return task_ids
 
 
+def _get_session_task_subfolder(db: Session, session: SessionModel) -> str:
+    """Resolve the active task subfolder for a session."""
+    from app.models import Task
+
+    session_task = (
+        db.query(SessionTask)
+        .filter(SessionTask.session_id == session.id)
+        .order_by(SessionTask.started_at.desc().nullslast(), SessionTask.id.desc())
+        .first()
+    )
+
+    if session_task:
+        task = db.query(Task).filter(Task.id == session_task.task_id).first()
+        if task:
+            workspace = _ensure_task_workspace(db, session, task.id)
+            return workspace["task_subfolder"]
+
+    return f"task_{session.id}"
+
+
 def _revoke_session_celery_tasks(
     db: Session, session_id: int, terminate: bool = True
 ) -> List[str]:
@@ -1597,7 +1617,7 @@ async def create_session_backup(
 
         backup_result = protection.create_backup_of_existing(
             project_id=project_id,
-            task_subfolder=f"task_{session_id}",
+            task_subfolder=_get_session_task_subfolder(db, session),
         )
 
         return {
@@ -1643,7 +1663,7 @@ async def get_session_workspace_info(
 
         workspace_info = protection.check_workspace_exists(
             project_id=project_id,
-            task_subfolder=f"task_{session_id}",
+            task_subfolder=_get_session_task_subfolder(db, session),
         )
 
         return {
