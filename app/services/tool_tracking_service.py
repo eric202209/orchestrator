@@ -126,9 +126,20 @@ class ToolTrackingService:
             datetime.utcnow() - execution.timestamp
         ).total_seconds() * 1000
 
-        # Log execution
+        # Log execution with concise format
         level = "INFO" if success else "ERROR"
-        message = f"Tool '{execution.tool_name}' completed {'successfully' if success else 'failed'}"
+        
+        # Create human-readable summary
+        exec_time_s = execution.execution_time_ms / 1000.0
+        if success:
+            message = f"[TOOL] {execution.tool_name} ✅ completed in {exec_time_s:.2f}s"
+        else:
+            msg_parts = [f"[TOOL] {execution.tool_name}", "❌ failed"]
+            if error_message:
+                # Truncate error for readability
+                err_preview = str(error_message)[:100].replace("\n", " ")
+                msg_parts.append(f"error: '{err_preview}'")
+            message = " ".join(msg_parts)
 
         metadata = execution.to_dict()
         if error_message:
@@ -151,6 +162,19 @@ class ToolTrackingService:
             message: Log message
             metadata: Dict with session_id, session_instance_id, task_id, etc.
         """
+        # Filter metadata to only include useful info (exclude verbose schemas)
+        filtered_metadata = {
+            "tool_name": metadata.get("tool_name"),
+            "success": metadata.get("success"),
+            "execution_time_ms": metadata.get("execution_time_ms"),
+            "session_id": metadata.get("session_id"),
+            "task_id": metadata.get("task_id"),
+        }
+
+        # Only add error if present and not too verbose
+        if metadata.get("error"):
+            filtered_metadata["error"] = str(metadata.get("error"))[:500]  # Truncate
+
         log_entry = LogEntry(
             session_id=metadata.get("session_id"),
             session_instance_id=metadata.get(
@@ -159,7 +183,7 @@ class ToolTrackingService:
             task_id=metadata.get("task_id"),
             level=level,
             message=message,
-            metadata=json.dumps(metadata),
+            metadata=json.dumps(filtered_metadata),
         )
         self.db.add(log_entry)
         self.db.commit()

@@ -102,6 +102,10 @@ class LogStreamService:
                 "session_instance_id": log.session_instance_id,
             }
 
+            # Skip verbose tool schema logs (propertiesCount, schemaChars, etc.)
+            if self._is_verbose_tool_log(log_dict):
+                continue
+
             # Apply level filter
             if level and log_dict["level"] != level:
                 continue
@@ -111,6 +115,26 @@ class LogStreamService:
                 continue
 
             yield log_dict
+
+    def _is_verbose_tool_log(self, log_dict: Dict[str, Any]) -> bool:
+        """Check if this is a verbose tool schema log that should be filtered out"""
+        message = log_dict.get("message", "")
+        
+        # Skip logs with schema metadata patterns
+        if "propertiesCount" in message or "schemaChars" in message:
+            return True
+        
+        # Skip full JSON dumps of tool parameters
+        try:
+            metadata = log_dict.get("metadata", {})
+            if isinstance(metadata, dict):
+                # If metadata has many keys (schemafull dump), skip it
+                if len(metadata) > 10 and "tool_name" not in metadata:
+                    return True
+        except (json.JSONDecodeError, TypeError):
+            pass
+        
+        return False
 
     def get_project_logs_summary(self, project_id: int) -> Dict[str, Any]:
         """
