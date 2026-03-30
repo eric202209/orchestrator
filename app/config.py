@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     # Use host.docker.internal for Docker container communication
     OPENCLAW_GATEWAY_URL: str = "http://host.docker.internal:8001"
     OPENCLAW_API_KEY: str = ""
+    MOBILE_GATEWAY_API_KEY: str = ""
 
     # Demo mode flag - set to True for testing, False for real execution
     DEMO_MODE: bool = False  # Disabled (real execution enabled)

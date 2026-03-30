@@ -1,22 +1,58 @@
 """Mobile API — clawmobile integration via OpenClaw Gateway
 
 These endpoints are called by OpenClaw as tools, not directly by the mobile app.
-Authentication is handled by OpenClaw Gateway (token-based).
+Access is restricted to OpenClaw/Gateway using a shared API key.
 
 Flow:
   clawmobile → OpenClaw Gateway → OpenClaw agent → these endpoints
 """
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from typing import Optional, List
+import secrets
 from datetime import datetime
-import json
+from typing import Optional
 
+from fastapi import APIRouter, Depends, Header, HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.config import settings
 from app.database import get_db
 from app.models import Project, Session as SessionModel, Task, TaskStatus, LogEntry
 
-router = APIRouter()
+
+def require_mobile_gateway_key(
+    x_openclaw_api_key: str | None = Header(default=None, alias="X-OpenClaw-API-Key"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+):
+    """
+    Require a shared key from OpenClaw/Gateway before exposing orchestration data.
+
+    Accepted headers:
+    - X-OpenClaw-API-Key: <key>
+    - Authorization: Bearer <key>
+    """
+    configured_key = settings.MOBILE_GATEWAY_API_KEY or settings.OPENCLAW_API_KEY
+
+    if not configured_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Mobile gateway API key is not configured",
+        )
+
+    presented_key = x_openclaw_api_key
+    if not presented_key and authorization:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() == "bearer" and token:
+            presented_key = token
+
+    if not presented_key or not secrets.compare_digest(presented_key, configured_key):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing mobile gateway API key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+router = APIRouter(dependencies=[Depends(require_mobile_gateway_key)])
 
 
 # ── Projects ─────────────────────────────────────────────────

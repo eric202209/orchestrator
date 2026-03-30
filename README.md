@@ -18,126 +18,6 @@ This is a complete AI development agent orchestrator that automates software dev
 
 ---
 
-## 📊 Project Evolution (Phases 1-6)
-
-### **Phase 1: Authentication System** ✅
-Implemented secure JWT-based authentication with Ed25519 device pairing and API key management.
-
-**What was built:**
-- JWT access tokens (15 min) + refresh tokens (7 days)
-- Bcrypt password hashing
-- API key management (SHA-256 hashed, shown once)
-- Ed25519 cryptographic device authentication
-- Protected API endpoints with proper authorization
-
-**Key files:**
-- `app/auth.py` - JWT + Ed25519 utilities
-- `app/models.py` - User, APIKey, Device models
-- `app/api/v1/endpoints/auth.py` - Auth endpoints
-
----
-
-### **Phase 2: OpenClaw Integration** ✅
-Integrated OpenClaw session orchestration with real-time log streaming and tool tracking.
-
-**What was built:**
-- OpenClaw session service (create, execute, cleanup)
-- Real-time log streaming via WebSocket/SSE
-- Tool execution tracking with metadata
-- 12 standardized LLM prompt templates (task planning, debugging, code review, etc.)
-- Enhanced sessions API with log streaming endpoints
-
-**Key services:**
-- `app/services/openclaw_service.py`
-- `app/services/log_stream_service.py`
-- `app/services/tool_tracking_service.py`
-- `app/services/prompt_templates.py`
-
----
-
-### **Phase 3: Task Queue with Celery** ✅
-Added robust background task processing with retry logic and job scheduling.
-
-**What was built:**
-- Celery task queue with Redis backend
-- Three queue types: `default`, `openclaw`, `github`
-- Retry logic with exponential backoff (3 retries, 60s delay)
-- Job scheduler for delayed and recurring tasks
-- Background workers for task execution
-
-**Tasks implemented:**
-- `execute_openclaw_task` - Execute AI development tasks
-- `process_github_webhook` - Handle GitHub events
-- `scheduled_task_execution` - Time-based task scheduling
-- `cleanup_old_logs` - Automatic log retention
-
-**Key files:**
-- `app/celery_app.py` - Celery configuration
-- `app/tasks/worker.py` - Core task execution
-- `app/tasks/retry_logic.py` - Retry decorator
-- `start_workers.sh` - Worker startup script
-
----
-
-### **Phase 4: Frontend Dashboard** ✅
-Built a modern React + TypeScript dashboard with real-time monitoring.
-
-**What was built:**
-- Login/registration with JWT authentication
-- Dashboard with real-time statistics
-- Project management (create, view, edit, delete)
-- Task management with status tracking
-- Dark theme with Tailwind CSS
-- Responsive design (mobile-friendly)
-
-**Tech stack:**
-- React 18 + TypeScript
-- Tailwind CSS v4
-- React Router DOM
-- Axios for API calls
-- Vite build tool
-
-**Key components:**
-- `pages/Login.tsx`, `pages/Register.tsx`
-- `pages/Dashboard.tsx`
-- `pages/ProjectDetail.tsx`
-- `api/client.ts` - API client with auth interceptors
-
----
-
-### **Phase 5: Session Monitoring & Mobile Integration** 🚧
-Real-time session status monitoring and mobile app support (in progress).
-
-**Planned features:**
-- Real-time session status WebSocket streaming
-- Session lifecycle controls (start, stop, pause, resume)
-- Mobile API endpoints for ClawMobile
-- Tool usage analytics dashboard
-- Performance metrics visualization
-
-**Status:** Frontend components ready, backend endpoints needed
-
----
-
-### **Phase 6: Frontend Dashboard Enhancements** ✅
-Enhanced session management UI with full lifecycle controls.
-
-**What was built:**
-- `SessionDashboard.tsx` - Full session lifecycle UI
-- Real-time WebSocket status updates
-- Lifecycle control buttons (Start/Pause/Resume/Stop/Force Stop)
-- Session metadata display (timestamps for all events)
-- Live log streaming with color-coded levels
-- Task execution interface within sessions
-- Project integration with sessions grid view
-
-**Features:**
-- WebSocket auto-reconnect (3-second delay)
-- Status color coding (green=running, yellow=paused, etc.)
-- Auto-scrolling log stream
-- Responsive design (mobile-friendly)
-
----
 
 ## 🛠️ Quick Start
 
@@ -218,6 +98,109 @@ orchestrator/
 ---
 
 ## 🔧 API Endpoints
+
+### Mobile Gateway Endpoints
+
+These endpoints are intended for the OpenClaw/Gateway side of the stack, not for the Android app to call directly.
+
+Architecture:
+```text
+clawmobile -> Tailscale -> GX10 host -> OpenClaw/Gateway -> Orchestrator /api/v1/mobile/*
+```
+
+Required environment on the Orchestrator side:
+
+```env
+MOBILE_GATEWAY_API_KEY=replace-with-a-shared-secret
+```
+
+Accepted auth headers:
+- `X-OpenClaw-API-Key: <key>`
+- `Authorization: Bearer <key>`
+
+Available endpoints:
+- `GET /api/v1/mobile/dashboard`
+- `GET /api/v1/mobile/projects`
+- `GET /api/v1/mobile/projects/{project_id}/status`
+- `GET /api/v1/mobile/projects/{project_id}/tasks`
+- `GET /api/v1/mobile/sessions`
+- `GET /api/v1/mobile/sessions/{session_id}/summary`
+
+### OpenClaw Wrapper Script
+
+Use the helper script instead of ad hoc `curl` calls:
+
+```bash
+export MOBILE_GATEWAY_API_KEY=replace-with-a-shared-secret
+./scripts/orchestrator-mobile-api.sh dashboard
+./scripts/orchestrator-mobile-api.sh projects
+./scripts/orchestrator-mobile-api.sh project-status 1
+./scripts/orchestrator-mobile-api.sh sessions
+./scripts/orchestrator-mobile-api.sh sessions 1 running
+./scripts/orchestrator-mobile-api.sh session-summary 12
+./scripts/orchestrator-mobile-api.sh project-tasks 1 running
+```
+
+Optional:
+
+```bash
+export ORCHESTRATOR_MOBILE_BASE_URL=http://127.0.0.1:8080/api/v1
+```
+
+Suggested OpenClaw tool behavior:
+- When the user asks for overall orchestrator health, call `./scripts/orchestrator-mobile-api.sh dashboard`
+- When the user asks about projects, call `./scripts/orchestrator-mobile-api.sh projects`
+- When the user asks about one project, call `./scripts/orchestrator-mobile-api.sh project-status <id>`
+- When the user asks about recent sessions, call `./scripts/orchestrator-mobile-api.sh sessions`
+- When the user asks about one session, call `./scripts/orchestrator-mobile-api.sh session-summary <id>`
+
+### Copy-Paste OpenClaw Instruction
+
+Use this as a system prompt, tool instruction, or agent note on the OpenClaw side:
+
+```text
+You are the OpenClaw assistant for Orchestrator.
+
+Your job is to help the mobile user query Orchestrator status through the local helper script, not by guessing.
+
+Architecture:
+- clawmobile talks to OpenClaw
+- OpenClaw runs on the GX10 host/container stack
+- Orchestrator is a separate backend/frontend service
+- To read Orchestrator state, use this helper script:
+  ./scripts/orchestrator-mobile-api.sh
+
+Rules:
+1. When the user asks for orchestrator status, dashboard health, projects, sessions, tasks, or recent activity, call the helper script first.
+2. Do not invent live status from memory.
+3. If the script returns JSON, summarize it clearly for mobile.
+4. If the script fails, explain the failure briefly and mention the likely cause.
+5. Keep answers concise and operational.
+
+Command mapping:
+- Overall orchestrator health or status:
+  ./scripts/orchestrator-mobile-api.sh dashboard
+- List projects:
+  ./scripts/orchestrator-mobile-api.sh projects
+- Project status:
+  ./scripts/orchestrator-mobile-api.sh project-status <project_id>
+- Recent sessions:
+  ./scripts/orchestrator-mobile-api.sh sessions
+- Sessions for a project:
+  ./scripts/orchestrator-mobile-api.sh sessions <project_id>
+- Session summary:
+  ./scripts/orchestrator-mobile-api.sh session-summary <session_id>
+- Project tasks:
+  ./scripts/orchestrator-mobile-api.sh project-tasks <project_id>
+- Project tasks filtered by status:
+  ./scripts/orchestrator-mobile-api.sh project-tasks <project_id> <status>
+
+How to respond:
+- For dashboard requests, report projects, active/running sessions, task totals, failures, and recent activity.
+- For project requests, report project name, active sessions, and task breakdown.
+- For session requests, report session name, status, recent logs, and task progress.
+- If IDs are missing and needed, first call `projects` or `sessions` to discover them.
+```
 
 ### Authentication
 - `POST /api/v1/auth/register` - Register new user
@@ -585,14 +568,4 @@ pkill -f "vite"
 
 ---
 
-## 🎯 Next Steps
-
-1. **Complete Phase 5** - Finalize mobile API endpoints
-2. **Add Analytics** - Session performance metrics dashboard
-3. **Enhance Monitoring** - Prometheus + Grafana integration
-4. **Add Testing** - Unit tests for critical components
-5. **Security Hardening** - Rate limiting, audit logging
-
----
-
-**Last updated: 2026-03-28**
+**Last updated: 2026-03-30**
