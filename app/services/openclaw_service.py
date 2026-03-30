@@ -1032,7 +1032,9 @@ class OpenClawSessionService:
                         process.stdout, "INFO", stdout_chunks, emit_live_logs=False
                     ),
                     # Keep stderr visible because it contains actionable warnings/errors.
-                    stream_output(process.stderr, "WARN", stderr_chunks, emit_live_logs=True),
+                    stream_output(
+                        process.stderr, "WARN", stderr_chunks, emit_live_logs=True
+                    ),
                 ),
                 timeout=timeout_seconds + 30,
             )
