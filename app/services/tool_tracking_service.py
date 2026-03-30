@@ -128,7 +128,7 @@ class ToolTrackingService:
 
         # Log execution with concise format
         level = "INFO" if success else "ERROR"
-        
+
         # Create human-readable summary
         exec_time_s = execution.execution_time_ms / 1000.0
         if success:

@@ -426,7 +426,7 @@ async def execute_task(
         task_workspace = None
 
         if task_request.task_id:
-            from app.models import Task, SessionTask
+            from app.models import Task
 
             selected_task = (
                 db.query(Task)

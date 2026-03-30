@@ -589,10 +589,12 @@ class OpenClawSessionService:
 
         # Determine appropriate timeout based on step type
         # File operations (like .gitignore) typically need more time for AI to generate content
-        is_file_operation = any(keyword in step_description.lower() for keyword in 
-                                ['gitignore', 'package.json', 'create file', 'add file'])
+        is_file_operation = any(
+            keyword in step_description.lower()
+            for keyword in ["gitignore", "package.json", "create file", "add file"]
+        )
         base_timeout = 120 if is_file_operation else 60  # 2 minutes for file operations
-        
+
         for attempt in range(max_retries):
             try:
                 # Build execution prompt (optimized - no redundant context)
@@ -635,7 +637,7 @@ class OpenClawSessionService:
                 else:
                     orchestration_state.record_failure(step_result)
                     error_detail = result.get("error", "Execution failed")
-                    
+
                     # Check if this is a timeout or garbled output - these shouldn't be retried aggressively
                     if "timeout" in error_detail.lower() or "garbled" in error_detail.lower():
                         self._log_entry(
@@ -883,12 +885,12 @@ class OpenClawSessionService:
         # These patterns indicate timeout/corruption issues
         garbled_patterns = ['"', "', '", "'\"'", '","', '"\'']
         stdout_clean = stdout.strip().strip('"').strip("'")
-        
+
         if stdout_clean in ["", ",", "'", "\"", "garbled", "corrupted"] or any(
             pattern in stdout for pattern in garbled_patterns
         ):
             self._log_entry(
-                "ERROR", 
+                "ERROR",
                 f"[OPENCLAW] DETECTED GARBLED OUTPUT BEFORE JSON PARSE: '{stdout[:200]}'",
             )
             return {
