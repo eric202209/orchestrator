@@ -9,6 +9,7 @@ import os
 import logging
 import json
 import re
+import shlex
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +29,12 @@ from app.services.prompt_templates import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class TaskWorkspaceViolationError(ValueError):
+    """Raised when a planned command escapes the task workspace."""
+
+    pass
 
 
 def _serialize_step_result(step_result: StepResult) -> Dict[str, Any]:
@@ -88,6 +95,182 @@ def _save_orchestration_checkpoint(
             _serialize_step_result(r) for r in orchestration_state.execution_results
         ],
     )
+
+
+def _record_live_log(
+    db: Session,
+    session_id: int,
+    task_id: Optional[int],
+    level: str,
+    message: str,
+    session_instance_id: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    db.add(
+        LogEntry(
+            session_id=session_id,
+            task_id=task_id,
+            level=level,
+            message=message,
+            session_instance_id=session_instance_id,
+            log_metadata=json.dumps(metadata) if metadata else None,
+        )
+    )
+    db.commit()
+
+
+def _normalize_path_reference(path_text: str, project_dir: Path) -> str:
+    raw = (path_text or "").strip().strip("\"'")
+    if not raw:
+        raise TaskWorkspaceViolationError("Empty path reference is not allowed")
+    if "~" in raw:
+        raise TaskWorkspaceViolationError(
+            f"Home-directory path is not allowed in task workspace: {raw}"
+        )
+
+    candidate = Path(raw)
+    resolved = (
+        candidate.resolve()
+        if candidate.is_absolute()
+        else (project_dir / candidate).resolve()
+    )
+
+    if not resolved.is_relative_to(project_dir):
+        raise TaskWorkspaceViolationError(
+            f"Path escapes task workspace: {raw} -> {resolved}"
+        )
+
+    relative = os.path.relpath(resolved, project_dir)
+    return "." if relative == "." else relative
+
+
+def _normalize_command(command: str, project_dir: Path) -> str:
+    normalized = (command or "").strip()
+    if not normalized:
+        raise TaskWorkspaceViolationError("Empty command is not allowed")
+
+    if "~" in normalized:
+        raise TaskWorkspaceViolationError(
+            f"Home-directory paths are not allowed: {normalized}"
+        )
+
+    if re.search(r"(^|[\s'\"=/])\.\.(?:/|$)", normalized):
+        raise TaskWorkspaceViolationError(
+            f"Parent-directory traversal is not allowed: {normalized}"
+        )
+
+    current = normalized
+    cd_pattern = re.compile(r"^\s*cd\s+([^;&|]+?)\s*&&\s*(.+)$")
+    while True:
+        match = cd_pattern.match(current)
+        if not match:
+            break
+        target = _normalize_path_reference(match.group(1), project_dir)
+        remainder = match.group(2).strip()
+        if target in (".", "./"):
+            current = remainder
+        else:
+            current = f"cd {shlex.quote(target)} && {remainder}"
+
+    abs_paths = sorted(
+        set(re.findall(r"(?<![A-Za-z0-9._-])/(?:[^\s'\";&|]+)", current)),
+        key=len,
+        reverse=True,
+    )
+    for abs_path in abs_paths:
+        replacement = _normalize_path_reference(abs_path, project_dir)
+        replacement = "." if replacement == "." else f"./{replacement}"
+        current = current.replace(abs_path, replacement)
+
+    if "~" in current or re.search(r"(^|[\s'\"=/])\.\.(?:/|$)", current):
+        raise TaskWorkspaceViolationError(
+            f"Command still contains unsafe path traversal: {current}"
+        )
+
+    return current
+
+
+def _normalize_expected_files(
+    expected_files: Optional[List[str]], project_dir: Path
+) -> List[str]:
+    normalized_files: List[str] = []
+    for file_path in expected_files or []:
+        normalized = _normalize_path_reference(str(file_path), project_dir)
+        normalized_files.append("." if normalized == "." else normalized)
+    return normalized_files
+
+
+def _normalize_step(step: Dict[str, Any], project_dir: Path) -> Dict[str, Any]:
+    normalized_step = dict(step)
+    normalized_step["commands"] = [
+        _normalize_command(str(command), project_dir)
+        for command in (step.get("commands", []) or [])
+    ]
+
+    if step.get("verification"):
+        normalized_step["verification"] = _normalize_command(
+            str(step.get("verification")), project_dir
+        )
+
+    if step.get("rollback"):
+        normalized_step["rollback"] = _normalize_command(
+            str(step.get("rollback")), project_dir
+        )
+
+    normalized_step["expected_files"] = _normalize_expected_files(
+        step.get("expected_files", []), project_dir
+    )
+    return normalized_step
+
+
+def _normalize_plan(
+    plan: List[Dict[str, Any]], project_dir: Path, logger_obj: logging.Logger
+) -> List[Dict[str, Any]]:
+    normalized_plan: List[Dict[str, Any]] = []
+    for index, step in enumerate(plan or [], start=1):
+        normalized_step = _normalize_step(step, project_dir)
+        if normalized_step != step:
+            logger_obj.info(
+                f"[ISOLATION] Normalized step {index} to stay within task workspace"
+            )
+        normalized_plan.append(normalized_step)
+    return normalized_plan
+
+
+def _normalize_plan_with_live_logging(
+    db: Session,
+    session_id: int,
+    task_id: int,
+    plan: List[Dict[str, Any]],
+    project_dir: Path,
+    logger_obj: logging.Logger,
+    session_instance_id: Optional[str],
+    stage: str,
+) -> List[Dict[str, Any]]:
+    try:
+        return _normalize_plan(plan, project_dir, logger_obj)
+    except TaskWorkspaceViolationError as exc:
+        detail = str(exc)
+        logger_obj.error(f"[ISOLATION] {stage} blocked: {detail}")
+        _record_live_log(
+            db,
+            session_id,
+            task_id,
+            "ERROR",
+            f"[ISOLATION] {stage} blocked: {detail}",
+            session_instance_id=session_instance_id,
+            metadata={"stage": stage, "project_dir": str(project_dir)},
+        )
+        _record_live_log(
+            db,
+            session_id,
+            task_id,
+            "ERROR",
+            f"[ORCHESTRATION] Task stopped because a command escaped the task workspace `{project_dir}`",
+            session_instance_id=session_instance_id,
+            metadata={"stage": stage},
+        )
+        raise
 
 
 def slugify_project_name(name: str) -> str:
@@ -322,6 +505,18 @@ def execute_openclaw_task(
                 )
             ]
 
+            if orchestration_state.plan:
+                orchestration_state.plan = _normalize_plan_with_live_logging(
+                    db,
+                    session_id,
+                    task_id,
+                    orchestration_state.plan,
+                    orchestration_state.project_dir,
+                    logger,
+                    session.instance_id,
+                    "Checkpoint restore",
+                )
+
             resumed_from_checkpoint = bool(orchestration_state.plan)
             if resumed_from_checkpoint:
                 logger.info(
@@ -430,9 +625,18 @@ def execute_openclaw_task(
 
                 if success:
                     if isinstance(plan_data, list):
-                        orchestration_state.plan = plan_data
+                        orchestration_state.plan = _normalize_plan_with_live_logging(
+                            db,
+                            session_id,
+                            task_id,
+                            plan_data,
+                            orchestration_state.project_dir,
+                            logger,
+                            session.instance_id,
+                            "Planning output",
+                        )
                         logger.info(
-                            f"[ORCHESTRATION] Generated {len(plan_data)} steps in plan (using {strategy_info})"
+                            f"[ORCHESTRATION] Generated {len(orchestration_state.plan)} steps in plan (using {strategy_info})"
                         )
                     else:
                         raise ValueError("Planning result is not a list of steps")
@@ -449,6 +653,13 @@ def execute_openclaw_task(
                     )
                     db.commit()
                     return {"status": "failed", "reason": "planning_json_error"}
+            except TaskWorkspaceViolationError as e:
+                orchestration_state.status = OrchestrationStatus.ABORTED
+                orchestration_state.abort_reason = f"Workspace isolation violation: {e}"
+                task.status = TaskStatus.FAILED
+                task.error_message = str(e)
+                db.commit()
+                return {"status": "failed", "reason": "workspace_isolation_violation"}
             except Exception as e:
                 logger.error(f"[ORCHESTRATION] Failed to parse planning result: {e}")
                 orchestration_state.status = OrchestrationStatus.ABORTED
@@ -514,6 +725,7 @@ def execute_openclaw_task(
             execution_prompt = PromptTemplates.build_execution_prompt(
                 step_description=step_description,
                 step_commands=step_commands,
+                project_dir=str(orchestration_state.project_dir),
                 verification_command=verification_command,
                 rollback_command=rollback_command,
                 expected_files=expected_files,
@@ -574,6 +786,7 @@ def execute_openclaw_task(
                     prior_debug_attempts=orchestration_state.debug_attempts,
                     project_name=orchestration_state.project_name,
                     workspace_root=str(orchestration_state.workspace_root),
+                    project_dir=str(orchestration_state.project_dir),
                 )
 
                 debug_result = asyncio.run(
@@ -607,6 +820,8 @@ def execute_openclaw_task(
                             failed_steps=[step_record],
                             debug_analysis=debug_result.get("output", ""),
                             completed_steps=orchestration_state.completed_steps,
+                            workspace_root=str(orchestration_state.workspace_root),
+                            project_dir=str(orchestration_state.project_dir),
                         )
 
                         revise_result = asyncio.run(
@@ -628,8 +843,15 @@ def execute_openclaw_task(
                                 f"Failed to parse revision: {strategy_info}"
                             )
 
-                        orchestration_state.plan = revise_data.get(
-                            "revised_plan", orchestration_state.plan
+                        orchestration_state.plan = _normalize_plan_with_live_logging(
+                            db,
+                            session_id,
+                            task_id,
+                            revise_data.get("revised_plan", orchestration_state.plan),
+                            orchestration_state.project_dir,
+                            logger,
+                            session.instance_id,
+                            "Plan revision",
                         )
                         logger.info(f"[REVISION-PARSE] Using strategy: {strategy_info}")
                         logger.info(
@@ -646,6 +868,18 @@ def execute_openclaw_task(
                         )
                         continue  # Retry this step
 
+                except TaskWorkspaceViolationError as e:
+                    orchestration_state.status = OrchestrationStatus.ABORTED
+                    orchestration_state.abort_reason = (
+                        f"Workspace isolation violation: {e}"
+                    )
+                    task.status = TaskStatus.FAILED
+                    task.error_message = str(e)
+                    db.commit()
+                    return {
+                        "status": "failed",
+                        "reason": "workspace_isolation_violation",
+                    }
                 except Exception as e:
                     logger.error(f"[ORCHESTRATION] Debug parsing failed: {e}")
                     orchestration_state.status = OrchestrationStatus.ABORTED
@@ -695,16 +929,11 @@ def execute_openclaw_task(
                 report_content = report_result["report"]
                 report_filename = f"task_report_{task_id}.md"
 
-                # Save report to task subfolder
-                if task.task_subfolder:
-                    subfolder_path = os.path.join(
-                        os.path.dirname(project.workspace_path), task.task_subfolder
-                    )
-                    report_path = os.path.join(subfolder_path, report_filename)
-                    os.makedirs(subfolder_path, exist_ok=True)
-                    with open(report_path, "w", encoding="utf-8") as f:
-                        f.write(report_content)
-                    logger.info(f"[REPORT] Task report saved to: {report_path}")
+                report_path = orchestration_state.project_dir / report_filename
+                os.makedirs(orchestration_state.project_dir, exist_ok=True)
+                with open(report_path, "w", encoding="utf-8") as f:
+                    f.write(report_content)
+                logger.info(f"[REPORT] Task report saved to: {report_path}")
         except Exception as report_error:
             logger.error(
                 f"[REPORT] Failed to generate task report: {str(report_error)}"

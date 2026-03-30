@@ -593,6 +593,7 @@ class OpenClawSessionService:
                 execution_prompt = PromptTemplates.build_execution_prompt(
                     step_description=step_description,
                     step_commands=step_commands,
+                    project_dir=str(orchestration_state.project_dir),
                     verification_command=step.get("verification"),
                     rollback_command=step.get("rollback"),
                     expected_files=step.get("expected_files", []),
@@ -701,6 +702,7 @@ class OpenClawSessionService:
             prior_debug_attempts=orchestration_state.debug_attempts,
             project_name=self.session_model.name if self.session_model else "",
             workspace_root=str(orchestration_state.workspace_root),
+            project_dir=str(orchestration_state.project_dir),
         )
 
         # Execute debugging
@@ -740,6 +742,8 @@ class OpenClawSessionService:
             failed_steps=failed_steps,
             debug_analysis=debug_result.get("analysis", "Unknown error"),
             completed_steps=orchestration_state.completed_steps,
+            workspace_root=str(orchestration_state.workspace_root),
+            project_dir=str(orchestration_state.project_dir),
         )
 
         # Execute revision

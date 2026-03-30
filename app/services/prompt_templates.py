@@ -263,6 +263,13 @@ class PromptTemplates:
 - Root: {workspace_root}
 - Project: {project_dir}
 
+**Execution Boundary:**
+1. Every command MUST run inside `{project_dir}`
+2. Use relative paths only
+3. Do NOT use `..`, `~`, or absolute paths
+4. Do NOT create sibling project folders under `{workspace_root}`
+5. Assume the working directory is already `{project_dir}`
+
 **Requirements:**
 1. Create 3-8 sequential steps
 2. Each step: atomic, verifiable, rollback-safe
@@ -287,6 +294,8 @@ class PromptTemplates:
 
 **Step:** {step_description}
 
+**Working Directory:** {project_dir}
+
 **Commands:**
 {step_commands}
 
@@ -298,6 +307,12 @@ class PromptTemplates:
 **Previous:** {completed_steps_summary}
 
 **Context:** {project_context}
+
+**Path Rules:**
+1. Run everything from `{project_dir}`
+2. Treat all file paths as relative to `{project_dir}`
+3. Do NOT use `..`, `~`, or absolute paths
+4. Do NOT create files or folders outside `{project_dir}`
 
 **Output:** status, output, verification_output, files_changed, error_message
 """
@@ -319,6 +334,13 @@ class PromptTemplates:
 **History:** {prior_debug_attempts}
 
 **Context:** {project_name} @ {workspace_root}
+**Working Directory:** {project_dir}
+
+**Path Rules:**
+1. Keep every proposed fix inside `{project_dir}`
+2. Use relative paths only
+3. Do NOT use `..`, `~`, or absolute paths
+4. Do NOT suggest creating or modifying files outside `{project_dir}`
 
 **Output (JSON):**
 {{
@@ -340,6 +362,14 @@ class PromptTemplates:
 **Debug Analysis:** {debug_analysis_truncated}...
 
 **Completed (preserve):** {completed_steps}
+
+**Working Directory:** {project_dir}
+
+**Path Rules:**
+1. Revised commands MUST stay inside `{project_dir}`
+2. Use relative paths only
+3. Do NOT use `..`, `~`, or absolute paths
+4. Do NOT create sibling folders under `{workspace_root}`
 
 **Output (JSON):**
 {{
@@ -671,6 +701,7 @@ A clear status report covering current state, progress percentage, blockers, and
         cls,
         step_description: str,
         step_commands: List[str],
+        project_dir: Optional[str] = None,
         verification_command: Optional[str] = None,
         rollback_command: Optional[str] = None,
         expected_files: Optional[List[str]] = None,
@@ -694,6 +725,7 @@ A clear status report covering current state, progress percentage, blockers, and
         """
         context = {
             "step_description": step_description,
+            "project_dir": project_dir or "Current task workspace",
             "step_commands": "\n".join(f"- {cmd}" for cmd in step_commands),
             "verification_command": verification_command or "None provided",
             "rollback_command": rollback_command or "None provided",
@@ -718,6 +750,7 @@ A clear status report covering current state, progress percentage, blockers, and
         prior_debug_attempts: Optional[List[Dict]] = None,
         project_name: str = "",
         workspace_root: Optional[str] = None,
+        project_dir: Optional[str] = None,
     ) -> str:
         """
         Build a prompt for debugging phase.
@@ -761,6 +794,7 @@ A clear status report covering current state, progress percentage, blockers, and
             "prior_debug_attempts": prior_attempts_text,
             "project_name": project_name,
             "workspace_root": ws_root,
+            "project_dir": project_dir or "Current task workspace",
         }
 
         return cls.render("debugging", **context)
@@ -821,6 +855,8 @@ A clear status report covering current state, progress percentage, blockers, and
         failed_steps: List[StepResult],
         debug_analysis: str,
         completed_steps: List[Dict[str, Any]],
+        workspace_root: Optional[str] = None,
+        project_dir: Optional[str] = None,
     ) -> str:
         """
         Build a prompt for plan revision phase.
@@ -859,6 +895,8 @@ A clear status report covering current state, progress percentage, blockers, and
             "failed_steps": failed_steps_text,
             "debug_analysis_truncated": truncated_debug_analysis,
             "completed_steps": completed_steps_text,
+            "workspace_root": workspace_root or str(OPENCLAW_WORKSPACE_ROOT),
+            "project_dir": project_dir or "Current task workspace",
         }
 
         # Use the PLAN_REVISION template

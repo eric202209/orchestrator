@@ -1070,14 +1070,25 @@ function SessionDashboard() {
                 )}
                 
                 {(session?.status === 'paused' || (session?.status === 'stopped' && checkpoints.length > 0)) && (
-                  <button
-                    onClick={handleResume}
-                    disabled={executing}
-                    className="flex items-center justify-center gap-2 px-4 py-3 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-all font-medium disabled:opacity-50 col-span-2"
-                  >
-                    <Play className="h-5 w-5" />
-                    Resume Session
-                  </button>
+                  <div className="col-span-2 space-y-2">
+                    {checkpoints.length > 0 && (
+                      <div className="rounded-lg border border-blue-500/30 bg-blue-500/10 px-3 py-2 text-xs text-blue-200">
+                        <span>Resume from checkpoint: </span>
+                        <span className="font-medium text-white">{checkpoints[checkpoints.length - 1]?.name}</span>
+                        <span className="mx-2 text-blue-300">•</span>
+                        <span>Completed steps: </span>
+                        <span className="font-medium text-white">{checkpoints[checkpoints.length - 1]?.completed_steps ?? 0}</span>
+                      </div>
+                    )}
+                    <button
+                      onClick={handleResume}
+                      disabled={executing}
+                      className="flex w-full items-center justify-center gap-2 px-4 py-3 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-all font-medium disabled:opacity-50"
+                    >
+                      <Play className="h-5 w-5" />
+                      Resume Session
+                    </button>
+                  </div>
                 )}
                 
                 <button
@@ -1514,4 +1525,5 @@ function SessionDashboard() {
 }
 
 export default SessionDashboard;
+
 
