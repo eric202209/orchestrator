@@ -1,6 +1,7 @@
 package com.user
 
 import android.app.Application
+import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.user.data.ChatDatabase
 import com.user.data.PrefsManager
 import com.user.repository.ChatRepository
@@ -10,6 +11,11 @@ import com.user.repository.ChatRepository
  * Provides access to DAOs and other application-wide components
  */
 class ClawMobileApplication : Application() {
+
+    override fun onCreate() {
+        super.onCreate()
+        PDFBoxResourceLoader.init(this)
+    }
 
     private val database by lazy { ChatDatabase.getDatabase(this) }
     private val prefs by lazy { PrefsManager(this) }

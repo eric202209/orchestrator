@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@color/toolbar_color"
+    android:orientation="vertical"
+    android:paddingLeft="16dp"
+    android:paddingTop="16dp"
+    android:paddingRight="16dp"
+    android:paddingBottom="24dp">
+
+    <TextView
+        style="@style/TextAppearance.OpenClaw.ToolbarTitle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="8dp"
+        android:text="@string/attachment_options" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/galleryOptionButton"
+        style="@style/Widget.OpenClaw.AttachmentAction"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/attachment_gallery"
+        app:icon="@android:drawable/ic_menu_gallery" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/documentOptionButton"
+        style="@style/Widget.OpenClaw.AttachmentAction"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/attachment_documents"
+        app:icon="@drawable/ic_attach_file" />
+</LinearLayout>

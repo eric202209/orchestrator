@@ -43,6 +43,14 @@ class SettingsActivity : AppCompatActivity() {
                     Toast.makeText(this, "Server URL cannot be empty", Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
                 }
+                serverUrl.contains(":8080") || serverUrl.contains("/api/v1") -> {
+                    Toast.makeText(
+                        this,
+                        "Use the OpenClaw Gateway URL on GX10 (usually port 8000), not the Orchestrator dashboard/API on 8080.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@setOnClickListener
+                }
                 gatewayToken.isEmpty() -> {
                     Toast.makeText(this, "Gateway Token cannot be empty", Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
@@ -74,5 +82,7 @@ class SettingsActivity : AppCompatActivity() {
         return true
     }
 }
+
+
 
 

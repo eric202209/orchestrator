@@ -27,7 +27,7 @@
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="OpenClaw Gateway"
+                android:text="GX10 OpenClaw Gateway"
                 android:textColor="@color/ai_bubble_text"
                 android:textSize="16sp"
                 android:textStyle="bold"
@@ -46,7 +46,7 @@
                 android:id="@+id/serverUrlInput"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:hint="http://10.0.2.2:18789"
+                android:hint="http://TAILSCALE_OR_GX10_IP:8000"
                 android:textColorHint="@color/timestamp_text"
                 android:textColor="@color/ai_bubble_text"
                 android:inputType="textUri"
@@ -56,7 +56,7 @@
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="• Emulator → http://10.0.2.2:18789\n• Phone (same WiFi) → http://DEVICE_IP:18789\n• ngrok → https://xxxx.ngrok-free.app"
+                android:text="Recommended path:\n• ClawMobile -> Tailscale -> GX10 host -> OpenClaw Gateway :8000\n\nExamples:\n• Phone over Tailscale -> http://100.x.y.z:8000\n• Same LAN phone -> http://GX10_LAN_IP:8000\n• Emulator tunnel testing -> http://10.0.2.2:18789\n\nDo not use the Orchestrator dashboard/API URL here. Port 8080 is separate."
                 android:textColor="@color/timestamp_text"
                 android:textSize="12sp"
                 android:paddingTop="4dp"
@@ -84,7 +84,7 @@
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Run on GX10: cat ~/.openclaw/openclaw.json"
+                android:text="Run on GX10 host: cat ~/.openclaw/openclaw.json\nCopy gateway.auth.token.\nThis app talks to OpenClaw Gateway, not directly to the Orchestrator API."
                 android:textColor="@color/timestamp_text"
                 android:textSize="12sp"
                 android:paddingTop="4dp"

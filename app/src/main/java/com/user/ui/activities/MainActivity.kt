@@ -3,6 +3,7 @@ package com.user.ui.activities
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -24,15 +25,21 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.view.updatePadding
 import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.user.R
 import com.user.data.PrefsManager
 import com.user.databinding.ActivityMainBinding
+import com.user.databinding.BottomSheetAttachmentBinding
 import com.user.service.AgentInfo
 import com.user.ui.ChatAdapter
 import com.user.ui.tasks.TaskListActivity
 import com.user.ui.tools.GitHubActivity
 import com.user.viewmodel.ChatViewModel
+import kotlin.math.max
 
 /**
  * Main chat activity - primary interface for user interaction
@@ -42,25 +49,30 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var chatAdapter: ChatAdapter
     private val viewModel: ChatViewModel by viewModels()
-    private var selectedFileUri: Uri? = null  // Stores selected file/image for preview
+    private var selectedFileUri: Uri? = null
 
-    private val voiceLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        if (result.resultCode == RESULT_OK) {
-            result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                ?.firstOrNull()?.let { binding.messageEditText.setText(it) }
-        }
-    }
-
-    private val filePickerLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        if (result.resultCode == RESULT_OK) {
-            result.data?.data?.let { uri ->
-                selectedFileUri = uri
-                showFilePreview(uri)
-                binding.attachButton.setImageResource(android.R.drawable.ic_delete)
-                binding.attachButton.contentDescription = "Remove file"
+    private val voiceLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode == RESULT_OK) {
+                result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                    ?.firstOrNull()
+                    ?.let { binding.messageEditText.setText(it) }
             }
         }
-    }
+
+    private val galleryPickerLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode == RESULT_OK) {
+                result.data?.data?.let(::setSelectedFile)
+            }
+        }
+
+    private val documentPickerLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode == RESULT_OK) {
+                result.data?.data?.let(::setSelectedFile)
+            }
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -69,12 +81,11 @@ class MainActivity : AppCompatActivity() {
         setSupportActionBar(binding.toolbar)
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
-
-        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { view, insets ->
-            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            view.setPadding(0, systemBars.top, 0, systemBars.bottom)
-            insets
+        WindowInsetsControllerCompat(window, binding.root).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
         }
+        applyEdgeToEdgeInsets()
 
         if (PrefsManager(this).gatewayToken.isEmpty()) {
             Toast.makeText(this, "Please enter your Gateway Token", Toast.LENGTH_LONG).show()
@@ -86,59 +97,93 @@ class MainActivity : AppCompatActivity() {
         setupRecyclerView()
         setupObservers()
         setupInputHandlers()
+        updateAttachmentUi()
 
-        val sessionId    = intent.getStringExtra("session_id")
+        val sessionId = intent.getStringExtra("session_id")
         val sessionTitle = intent.getStringExtra("session_title")
         if (sessionId != null) {
-            title = sessionTitle ?: "Chat"
+            supportActionBar?.title = sessionTitle ?: getString(R.string.toolbar_title)
             supportActionBar?.setDisplayHomeAsUpEnabled(true)
             viewModel.loadSession(sessionId)
         } else {
+            supportActionBar?.title = getString(R.string.toolbar_title)
             viewModel.startNewSession()
             requestNotificationPermission()
             viewModel.startService(this)
         }
+
+        ViewCompat.requestApplyInsets(binding.root)
     }
 
-    // ── Setup ─────────────────────────────────────────────────
+    private fun applyEdgeToEdgeInsets() {
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
+            val systemBars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
+            val bottomInset = max(systemBars.bottom, imeInsets.bottom)
+
+            binding.appBar.updatePadding(top = systemBars.top)
+            binding.contentContainer.updatePadding(
+                left = systemBars.left,
+                right = systemBars.right
+            )
+            binding.recyclerView.updatePadding(
+                left = systemBars.left + dpToPx(12),
+                top = dpToPx(8),
+                right = systemBars.right + dpToPx(12),
+                bottom = dpToPx(8)
+            )
+            binding.typingIndicator.updatePadding(
+                left = dpToPx(4) + systemBars.left,
+                right = dpToPx(4) + systemBars.right
+            )
+            binding.bottomBar.updatePadding(
+                left = dpToPx(8) + systemBars.left,
+                top = dpToPx(8),
+                right = dpToPx(8) + systemBars.right,
+                bottom = dpToPx(8) + bottomInset
+            )
+            insets
+        }
+    }
 
     private fun setupRecyclerView() {
         chatAdapter = ChatAdapter()
         binding.recyclerView.apply {
-            layoutManager = LinearLayoutManager(this@MainActivity)
-                .also { it.stackFromEnd = true }
+            layoutManager = LinearLayoutManager(this@MainActivity).also { it.stackFromEnd = true }
             adapter = chatAdapter
+            if (itemDecorationCount == 0) {
+                addItemDecoration(MessageSpacingDecoration(dpToPx(4)))
+            }
         }
     }
 
     private fun setupObservers() {
         viewModel.status.observe(this) { status ->
-            when {
-                status.startsWith("✕") || status.startsWith("○") -> {
-                    binding.statusText.text = status
-                    binding.statusText.visibility = View.VISIBLE
-                }
-                status.startsWith("●") -> {
-                    binding.statusText.text = status
-                    binding.statusText.visibility = View.VISIBLE
-                    binding.statusText.postDelayed({
+            binding.statusText.text = status.removePrefix("● ").removePrefix("○ ").removePrefix("✕ ")
+            binding.statusText.visibility = View.VISIBLE
+            binding.statusText.setTextColor(resolveStatusColor(status))
+
+            if (status.startsWith("●")) {
+                binding.statusText.postDelayed({
+                    if (!isFinishing) {
                         binding.statusText.visibility = View.GONE
-                    }, 1500)
-                }
-                else -> {
-                    binding.statusText.text = status
-                    binding.statusText.visibility = View.VISIBLE
-                }
+                    }
+                }, 1500)
             }
         }
+
         viewModel.messages.observe(this) { messages ->
             chatAdapter.submitList(messages.toList())
-            if (messages.isNotEmpty())
+            if (messages.isNotEmpty()) {
                 binding.recyclerView.scrollToPosition(messages.size - 1)
+            }
         }
-        viewModel.agents.observe(this)         { setupAgentSpinner(it) }
-        viewModel.isSending.observe(this)      { binding.sendButton.isEnabled = !it }
-        viewModel.showTyping.observe(this)     { show ->
+
+        viewModel.agents.observe(this) { setupAgentSpinner(it) }
+        viewModel.isSending.observe(this) { binding.sendButton.isEnabled = !it }
+        viewModel.showTyping.observe(this) { show ->
             binding.typingIndicator.visibility = if (show) View.VISIBLE else View.GONE
         }
         viewModel.pairingRequired.observe(this) { showPairingDialog(it) }
@@ -150,36 +195,32 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupInputHandlers() {
-        binding.sendButton.setOnClickListener    { sendMessage() }
-        binding.voiceButton.setOnClickListener   { startVoiceInput() }
-        binding.historyButton.setOnClickListener {
-            startActivity(Intent(this, SessionsActivity::class.java))
-        }
+        binding.sendButton.setOnClickListener { sendMessage() }
         binding.messageEditText.setOnKeyListener { _, keyCode, event ->
-            if (keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN) {
-                sendMessage(); true
-            } else false
-        }
-
-        // Use the new paperclip icon
-        binding.attachButton.setImageResource(R.drawable.ic_attach_file)
-        binding.attachButton.setOnClickListener {
-            if (selectedFileUri != null) {
-                // Remove selected file
-                selectedFileUri = null
-                binding.attachButton.setImageResource(R.drawable.ic_attach_file)
-                binding.attachButton.contentDescription = "Attach file"
-                binding.imagePreviewLayout.visibility = View.GONE
+            if (keyCode == KeyEvent.KEYCODE_ENTER &&
+                event.action == KeyEvent.ACTION_DOWN &&
+                !event.isShiftPressed
+            ) {
+                sendMessage()
+                true
             } else {
-                openFilePicker()
+                false
             }
         }
+        binding.attachButton.setOnClickListener {
+            if (selectedFileUri != null) {
+                clearSelectedFile()
+            } else {
+                showAttachmentSheet()
+            }
+        }
+        binding.voiceButton.setOnClickListener { startVoiceInput() }
+        binding.removePreviewButton.setOnClickListener { clearSelectedFile() }
     }
-
-    // ── Helpers ───────────────────────────────────────────────
 
     private fun setupAgentSpinner(agents: List<AgentInfo>) {
         if (agents.isEmpty()) return
+
         val adapter = ArrayAdapter(
             this,
             android.R.layout.simple_spinner_item,
@@ -189,9 +230,15 @@ class MainActivity : AppCompatActivity() {
         binding.agentSpinner.adapter = adapter
         binding.agentSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
-                parent: AdapterView<*>?, view: View?, position: Int, id: Long
-            ) { viewModel.switchAgent(agents[position].agentId) }
-            override fun onNothingSelected(parent: AdapterView<*>?) {}
+                parent: AdapterView<*>?,
+                view: View?,
+                position: Int,
+                id: Long
+            ) {
+                viewModel.switchAgent(agents[position].agentId)
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
         }
     }
 
@@ -210,7 +257,6 @@ class MainActivity : AppCompatActivity() {
                         "After approving, tap Retry to reconnect."
             )
             .setPositiveButton("Retry") { _, _ ->
-                // Clear the pairing dialog state and retry connection
                 viewModel.clearPairingDialog()
                 viewModel.connect()
                 Toast.makeText(this, "Retrying connection...", Toast.LENGTH_SHORT).show()
@@ -222,69 +268,137 @@ class MainActivity : AppCompatActivity() {
     private fun sendMessage() {
         val text = binding.messageEditText.text.toString().trim()
 
-        // If there's a selected file, send it with the message
         if (selectedFileUri != null) {
             viewModel.sendFile(this, selectedFileUri!!, text)
-            // Clear the selected file after sending
-            selectedFileUri = null
-            binding.attachButton.setImageResource(R.drawable.ic_attach_file)
-            binding.attachButton.contentDescription = "Attach file"
-            binding.imagePreviewLayout.visibility = View.GONE
+            clearSelectedFile(clearInput = false)
             binding.messageEditText.text?.clear()
             return
         }
 
-        // No file, send text message only
         if (text.isEmpty()) return
         binding.messageEditText.text?.clear()
         viewModel.sendMessage(text)
     }
 
+    private fun showAttachmentSheet() {
+        val bottomSheet = BottomSheetDialog(this)
+        val sheetBinding = BottomSheetAttachmentBinding.inflate(layoutInflater)
+        bottomSheet.setContentView(sheetBinding.root)
+
+        sheetBinding.galleryOptionButton.setOnClickListener {
+            bottomSheet.dismiss()
+            openGalleryPicker()
+        }
+        sheetBinding.documentOptionButton.setOnClickListener {
+            bottomSheet.dismiss()
+            openDocumentPicker()
+        }
+
+        bottomSheet.show()
+    }
+
+    private fun openGalleryPicker() {
+        val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+            type = "image/*"
+            addCategory(Intent.CATEGORY_OPENABLE)
+        }
+        galleryPickerLauncher.launch(Intent.createChooser(intent, getString(R.string.attachment_gallery)))
+    }
+
+    private fun openDocumentPicker() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(
+                Intent.EXTRA_MIME_TYPES,
+                arrayOf(
+                    "application/pdf",
+                    "text/plain",
+                    "text/markdown",
+                    "application/json",
+                    "text/csv",
+                    "application/xml",
+                    "text/xml"
+                )
+            )
+        }
+        documentPickerLauncher.launch(
+            Intent.createChooser(intent, getString(R.string.attachment_documents))
+        )
+    }
+
     private fun startVoiceInput() {
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            )
             putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak your message…")
         }
-        try { voiceLauncher.launch(intent) }
-        catch (e: Exception) {
+        try {
+            voiceLauncher.launch(intent)
+        } catch (_: Exception) {
             Toast.makeText(this, "Voice input not available", Toast.LENGTH_SHORT).show()
         }
     }
 
+    private fun setSelectedFile(uri: Uri) {
+        selectedFileUri = uri
+        showFilePreview(uri)
+        updateAttachmentUi()
+    }
+
+    private fun clearSelectedFile(clearInput: Boolean = false) {
+        selectedFileUri = null
+        binding.imagePreviewLayout.visibility = View.GONE
+        binding.imagePreviewImage.setImageDrawable(null)
+        if (clearInput) {
+            binding.messageEditText.text?.clear()
+        }
+        updateAttachmentUi()
+    }
+
+    private fun updateAttachmentUi() {
+        val hasAttachment = selectedFileUri != null
+        binding.attachButton.setImageResource(
+            if (hasAttachment) android.R.drawable.ic_delete else R.drawable.ic_add
+        )
+        binding.attachButton.contentDescription = getString(
+            if (hasAttachment) R.string.remove_attachment else R.string.more_options
+        )
+    }
+
     private fun requestNotificationPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED) {
-                ActivityCompat.requestPermissions(
-                    this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 200
-                )
-            }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                200
+            )
         }
     }
 
-    // Show file preview when a file is selected
     private fun showFilePreview(uri: Uri) {
         try {
             val mimeType = contentResolver.getType(uri)
             val fileName = getFileName(uri)
 
-            binding.imagePreviewText.text = fileName ?: "File attached"
+            binding.imagePreviewText.text = fileName ?: getString(R.string.image_attached)
             binding.imagePreviewLayout.visibility = View.VISIBLE
 
             if (mimeType?.startsWith("image/") == true) {
                 contentResolver.openInputStream(uri)?.use { inputStream ->
                     val bitmap = android.graphics.BitmapFactory.decodeStream(inputStream)
                     binding.imagePreviewImage.setImageBitmap(bitmap)
-                    binding.imagePreviewImage.visibility = View.VISIBLE
                 }
             } else {
-                // For non-image files, show a generic file icon
                 binding.imagePreviewImage.setImageResource(android.R.drawable.ic_menu_save)
-                binding.imagePreviewImage.visibility = View.VISIBLE
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
+        } catch (_: Exception) {
+            binding.imagePreviewLayout.visibility = View.GONE
         }
     }
 
@@ -312,12 +426,15 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
         menuInflater.inflate(R.menu.main_menu, menu)
+        val color = ContextCompat.getColor(this, R.color.text_primary)
         for (i in 0 until menu.size()) {
-            val item  = menu.getItem(i)
+            val item = menu.getItem(i)
             val title = SpannableString(item.title)
             title.setSpan(
-                android.text.style.ForegroundColorSpan(android.graphics.Color.BLACK),
-                0, title.length, android.text.Spannable.SPAN_INCLUSIVE_INCLUSIVE
+                android.text.style.ForegroundColorSpan(color),
+                0,
+                title.length,
+                android.text.Spannable.SPAN_INCLUSIVE_INCLUSIVE
             )
             item.title = title
         }
@@ -326,45 +443,59 @@ class MainActivity : AppCompatActivity() {
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
-            R.id.action_new_chat      -> { startActivity(Intent(this, MainActivity::class.java)); true }
-            R.id.action_history       -> { startActivity(Intent(this, SessionsActivity::class.java)); true }
-            R.id.action_tasks         -> { startActivity(Intent(this, TaskListActivity::class.java)); true }
-            R.id.action_github        -> { startActivity(Intent(this, GitHubActivity::class.java)); true }
-            R.id.action_settings      -> { startActivity(Intent(this, SettingsActivity::class.java)); true }
+            R.id.action_new_chat -> {
+                startActivity(Intent(this, MainActivity::class.java))
+                true
+            }
+            R.id.action_history -> {
+                startActivity(Intent(this, SessionsActivity::class.java))
+                true
+            }
+            R.id.action_tasks -> {
+                startActivity(Intent(this, TaskListActivity::class.java))
+                true
+            }
+            R.id.action_github -> {
+                startActivity(Intent(this, GitHubActivity::class.java))
+                true
+            }
+            R.id.action_settings -> {
+                startActivity(Intent(this, SettingsActivity::class.java))
+                true
+            }
             else -> super.onOptionsItemSelected(item)
         }
-    }
-
-    private fun openFilePicker() {
-        val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
-            type = "*/*"
-            val mimetypes = arrayOf(
-                "application/pdf",
-                "application/msword",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                "application/vnd.ms-powerpoint",
-                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                "text/plain",
-                "text/markdown",
-                "image/jpeg",
-                "image/png",
-                "image/webp",
-                "image/bmp",
-                "image/gif",
-                "application/vnd.ms-excel",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                "application/json",
-                "text/csv",
-                "text/tab-separated-values"
-            )
-            putExtra(Intent.EXTRA_MIME_TYPES, mimetypes)
-            addCategory(Intent.CATEGORY_OPENABLE)
-        }
-        filePickerLauncher.launch(Intent.createChooser(intent, "Select File"))
     }
 
     override fun onSupportNavigateUp(): Boolean {
         finish()
         return true
+    }
+
+    private fun resolveStatusColor(status: String): Int {
+        val colorRes = when {
+            status.startsWith("✕") -> R.color.status_failed
+            status.startsWith("●") -> R.color.status_connected
+            status.contains("error", ignoreCase = true) -> R.color.status_failed
+            else -> R.color.status_disconnected
+        }
+        return ContextCompat.getColor(this, colorRes)
+    }
+
+    private fun dpToPx(dp: Int): Int =
+        (dp * resources.displayMetrics.density).toInt()
+
+    private class MessageSpacingDecoration(
+        private val spacingPx: Int
+    ) : RecyclerView.ItemDecoration() {
+        override fun getItemOffsets(
+            outRect: Rect,
+            view: View,
+            parent: RecyclerView,
+            state: RecyclerView.State
+        ) {
+            outRect.top = spacingPx / 2
+            outRect.bottom = spacingPx / 2
+        }
     }
 }

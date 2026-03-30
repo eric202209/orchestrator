@@ -48,6 +48,18 @@ app/src/main/java/com/user/
 
 ## Quick Start
 
+### Recommended Architecture
+
+Use `clawmobile` as the mobile control/chat client for the OpenClaw Gateway, and keep Orchestrator as a separate control plane:
+
+```text
+ClawMobile -> Tailscale / LAN -> GX10 Host -> OpenClaw Gateway (:8000)
+                                          -> OpenClaw agent runtime
+Orchestrator Dashboard/API (:8080) ------> manages sessions, approvals, logs
+```
+
+This is the best fit for the current app because `clawmobile` already speaks the OpenClaw Gateway protocol directly. It does not yet speak the Orchestrator auth/session API, so pointing the app at `:8080` will not work as a drop-in replacement.
+
 ### Prerequisites
 
 - Android Studio Hedgehog (2023.1.1) or newer
@@ -55,18 +67,29 @@ app/src/main/java/com/user/
 - Android SDK API 24+ (Android 7.0+)
 - OpenClaw running on your local machine or server
 
-### Connect to OpenClaw
+### Connect ClawMobile to GX10 OpenClaw Gateway
+
+**Recommended — Tailscale to GX10**
+```text
+Server URL: http://<gx10-tailscale-ip>:8000
+```
 
 **Option A — SSH tunnel (emulator or phone on different network)**
 ```powershell
 # Run on your laptop, keep it open
 ssh -N -L 18789:localhost:18789 -o ServerAliveInterval=30 USER@YOUR_SERVER_IP
 ```
-Then set Server URL in the app to `http://10.0.2.2:18789` (emulator) or `http://localhost:18789` (phone on same network).
+Then set Server URL in the app to `http://your_host_ip:18789` (emulator) or `http://localhost:18789` (phone on same network).
 
 **Option B — Same WiFi**
 
-Set Server URL to your server's local IP, e.g. `http://192.168.1.50:18789`.
+Set Server URL to your GX10 host IP, e.g. `http://192.xxx.x.xx:8000`.
+
+**Important**
+
+- `clawmobile` should point to the OpenClaw Gateway URL, typically port `8000` on Asus GX10 host.
+- Orchestrator stays separate on port `8080` for dashboard/API use.
+- If you want mobile approval controls for Orchestrator, add that as a dedicated API integration instead of replacing the Gateway connection.
 
 ### Get Your Gateway Token
 
@@ -109,13 +132,13 @@ openclaw gateway call device.pair.approve --params '{"requestId":"<id>"}' --json
 
 ## Related Projects
 
-| Project | Description |
-|---|---|
-| [OpenClaw](https://github.com/openclaw/openclaw) | AI Agent framework |
-| [ClawApp](https://github.com/qingchencloud/clawapp) | H5 + PWA mobile client |
-| [ClawBridge](https://github.com/dreamwing/clawbridge) | OpenClaw mobile dashboard |
-| [ClawPanel](https://github.com/qingchencloud/clawpanel) | Desktop management panel |
-
+| Project                                                    | Description                                       |
+|------------------------------------------------------------|---------------------------------------------------|
+| [OpenClaw](https://github.com/openclaw/openclaw)           | AI Agent framework                                |
+| [ClawApp](https://github.com/qingchencloud/clawapp)        | H5 + PWA mobile client                            |
+| [ClawBridge](https://github.com/dreamwing/clawbridge)      | OpenClaw mobile dashboard                         |
+| [ClawPanel](https://github.com/qingchencloud/clawpanel)    | Desktop management panel                          |
+| [orchestrator](https://github.com/henrycode03/orchestrator) | Automating software projects with OpenClaw agents |
 ## Privacy
 
 - All messages stored locally on device via Room
@@ -125,3 +148,4 @@ openclaw gateway call device.pair.approve --params '{"requestId":"<id>"}' --json
 ## License
 
 MIT
+
