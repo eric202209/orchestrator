@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { sessionsAPI, tasksAPI, projectsAPI } from '../api/client';
-import type { Session, LogEntry, Task, Project } from '../types/api';
+import type { Session, LogEntry, Task, Project, OverwriteCheckResult, Checkpoint } from '../types/api';
 import { 
   ArrowLeft, 
   Play, 
@@ -16,7 +16,9 @@ import {
   Settings,
   XCircle,
   Zap,
-  ShieldCheck
+  ShieldCheck,
+  Clock,
+  X
 } from 'lucide-react';
 
 function SessionDashboard() {
@@ -30,6 +32,7 @@ function SessionDashboard() {
   const [isConnected, setIsConnected] = useState(false);
   const [isLogsConnected, setIsLogsConnected] = useState(false);
   const [inputTask, setInputTask] = useState('');
+  const [selectedTaskId, setSelectedTaskId] = useState<number | null>(null);
   const [executing, setExecuting] = useState(false);
   const [isLoadingTasks, setIsLoadingTasks] = useState(false);
   const logsEndRef = useRef<HTMLDivElement>(null);
@@ -58,6 +61,13 @@ function SessionDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [projectLoaded, setProjectLoaded] = useState(false);
   const [tasksFetched, setTasksFetched] = useState(false);
+  
+  // New state for overwrite protection
+  const [showOverwriteWarning, setShowOverwriteWarning] = useState<OverwriteCheckResult | null>(null);
+
+  // Checkpoint management state
+  const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
+  const [showCheckpointModal, setShowCheckpointModal] = useState(false);
 
   // Helper function to format dates in local time
   const formatLocalTime = (dateString: string | null) => {
@@ -71,7 +81,7 @@ function SessionDashboard() {
   // Helper function to check if session is running (includes 'active' status)
   const isSessionRunning = useCallback(() => {
     return session?.status === 'running' || session?.status === 'active';
-  }, [session?.status]);
+  }, [session]);
 
   const fetchProjectTasks = useCallback(async () => {
     if (!project?.id || !projectLoaded || tasksFetched) return;
@@ -101,10 +111,31 @@ function SessionDashboard() {
     }
   }, [id, projectLoaded]);
 
+  const loadCheckpoints = useCallback(async () => {
+    if (!id) return;
+    
+    try {
+      const response = await sessionsAPI.listCheckpoints(Number(id));
+      // Ensure we always set an array, even if API returns undefined/null
+      setCheckpoints(response?.data?.checkpoints || []);
+    } catch (error) {
+      console.error('Failed to load checkpoints:', error);
+      // On error, keep existing checkpoints or reset to empty array
+      setCheckpoints([]);
+    }
+  }, [id]);
+
   useEffect(() => {
     fetchProject();
     fetchProjectTasks();
   }, [fetchProject, fetchProjectTasks]);
+
+  useEffect(() => {
+    if (!id) return;
+    if (session?.status === 'paused' || session?.status === 'stopped') {
+      loadCheckpoints();
+    }
+  }, [id, session?.status, loadCheckpoints]);
 
   // Fetch logs for the current session only (project-scoped)
   const fetchSessionLogs = useCallback(async () => {
@@ -286,12 +317,45 @@ function SessionDashboard() {
 
       console.log(`Minutes since last log: ${minutesSinceLastLog.toFixed(1)}`);
 
-      // If no new logs for 5+ minutes, alert user
-      if (minutesSinceLastLog >= 5) {
+      // Only alert if session has been running for at least 2 minutes
+      // This prevents false positives during session startup
+      const sessionStarted = session?.started_at ? new Date(session.started_at) : now;
+      const sessionUptimeMinutes = (now.getTime() - sessionStarted.getTime()) / (1000 * 60);
+
+      if (sessionUptimeMinutes >= 2 && minutesSinceLastLog >= 5) {
         console.warn('⚠️ Task appears stuck - no new logs for 5+ minutes');
         
-        // Show warning
-        alert('⚠️ Warning: No new logs for 5+ minutes. The task may be stuck.');
+        // Show warning as a non-blocking notification instead of alert()
+        const notification = document.createElement('div');
+        notification.style.cssText = `
+          position: fixed;
+          top: 20px;
+          right: 20px;
+          background: #f59e0b;
+          color: white;
+          padding: 16px 24px;
+          border-radius: 8px;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+          z-index: 9999;
+          font-family: system-ui, -apple-system, sans-serif;
+          animation: slideIn 0.3s ease-out;
+        `;
+        notification.innerHTML = `
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <span style="font-size: 24px;">⚠️</span>
+            <div>
+              <div style="font-weight: bold; margin-bottom: 4px;">Task may be stuck</div>
+              <div style="font-size: 14px; opacity: 0.9;">No new logs for ${Math.round(minutesSinceLastLog)} minutes</div>
+            </div>
+          </div>
+        `;
+        document.body.appendChild(notification);
+        
+        // Auto-dismiss after 10 seconds
+        setTimeout(() => {
+          notification.style.animation = 'slideOut 0.3s ease-out';
+          setTimeout(() => notification.remove(), 300);
+        }, 10000);
         
         // Optionally stop the session
         // handleStop();
@@ -302,7 +366,7 @@ function SessionDashboard() {
     const interval = setInterval(checkStuckTask, 30000);
     
     return () => clearInterval(interval);
-  }, [logs, isLogsConnected, session?.status, id, isSessionRunning]);
+  }, [logs, isLogsConnected, session?.started_at, id, isSessionRunning]);
 
   const fetchSession = async () => {
     if (!id) return;
@@ -407,22 +471,32 @@ function SessionDashboard() {
     };
 
     webSocket.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === 'log') {
-        const logEntry = {
-          ...data,
-          created_at: data.timestamp || new Date().toISOString()
-        };
-        setLogs(prev => {
-          const updated = [...prev, logEntry];
-          // Limit logs in memory to prevent performance issues
-          if (updated.length > MAX_LOGS_IN_MEMORY) {
-            return updated.slice(-MAX_LOGS_IN_MEMORY);
-          }
-          return updated;
-        });
-      } else if (data.type === 'connected') {
-        console.log('Logs WebSocket connected, receiving recent logs...');
+      // Handle ping/pong heartbeat messages from backend
+      if (event.data === 'ping' || event.data === 'pong') {
+        return; // Skip heartbeat messages
+      }
+      
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'log') {
+          const logEntry = {
+            ...data,
+            created_at: data.timestamp || new Date().toISOString()
+          };
+          setLogs(prev => {
+            const updated = [...prev, logEntry];
+            // Limit logs in memory to prevent performance issues
+            if (updated.length > MAX_LOGS_IN_MEMORY) {
+              return updated.slice(-MAX_LOGS_IN_MEMORY);
+            }
+            return updated;
+          });
+        } else if (data.type === 'connected') {
+          console.log('Logs WebSocket connected, receiving recent logs...');
+        }
+      } catch (error) {
+        // Log parsing error - might be connection issue or invalid data
+        console.error('Failed to parse WebSocket message:', error, 'Data:', event.data);
       }
     };
 
@@ -523,9 +597,24 @@ function SessionDashboard() {
 
   const handlePause = async () => {
     if (!id) return;
+    
     try {
+      // Pause the session (this will automatically save a checkpoint in the backend)
       await sessionsAPI.pause(Number(id));
+      
+      // Fetch updated session state
       await fetchSession();
+      
+      // Reload checkpoints to show user it was saved (with error handling)
+      try {
+        await loadCheckpoints();
+      } catch (checkpointError) {
+        console.warn('Failed to reload checkpoints after pause, but session is paused:', checkpointError);
+        // Don't crash - just keep existing checkpoints or reset safely
+        setCheckpoints([]);
+      }
+      
+      alert('✅ Session paused and checkpoint saved successfully!');
     } catch (error) {
       console.error('Failed to pause session:', error);
       alert('Failed to pause session. Please try again.');
@@ -534,12 +623,108 @@ function SessionDashboard() {
 
   const handleResume = async () => {
     if (!id) return;
+    
+    // Step 1: Check for overwrites first (same as before)
+    try {
+      console.log('🛡️ Checking for potential overwrites before resume...');
+      
+      const workspaceInfo = await sessionsAPI.getWorkspaceInfo(Number(id));
+      console.log('Workspace info:', workspaceInfo);
+      
+      if (workspaceInfo.exists) {
+        // Show warning to user
+        setShowOverwriteWarning({
+          safe_to_proceed: false,
+          workspace_exists: true,
+          file_count: workspaceInfo.file_count,
+          would_overwrite: true,
+          conflicting_files: []
+        });
+        
+        const proceed = window.confirm(
+          `⚠️  WARNING: Workspace already exists with ${workspaceInfo.file_count} files!\n\n` +
+          `Path: ${workspaceInfo.path}\n` +
+          `\nThis will resume execution in an existing workspace.\n` +
+          `Do you want to:\n` +
+          `A) Resume anyway (may overwrite existing files)\n` +
+          `B) Cancel and create a new session instead?`
+        );
+        
+        if (!proceed) {
+          console.log('❌ User cancelled resume due to overwrite warning');
+          return; // Don't proceed with resume
+        }
+      } else {
+        console.log('✅ No existing workspace, safe to resume');
+      }
+      
+    } catch (error) {
+      console.warn('⚠️  Overwrite check failed, proceeding anyway:', error);
+      // Continue with resume even if check fails
+    }
+    
+    // Step 2: Proceed with actual resume
     try {
       await sessionsAPI.resume(Number(id));
+      
+      // Clear warning after successful resume
+      setShowOverwriteWarning(null);
+      
       await fetchSession();
+      
+      // Reload checkpoints (with error handling to prevent crashes)
+      try {
+        await loadCheckpoints();
+      } catch (checkpointError) {
+        console.warn('Failed to reload checkpoints after resume, but session is resumed:', checkpointError);
+        setCheckpoints([]);
+      }
+      
+      // Show success message (if we had a warning, it's now cleared)
+      if (!showOverwriteWarning || showOverwriteWarning.safe_to_proceed) {
+        alert('✅ Session resumed successfully!');
+      }
     } catch (error) {
       console.error('Failed to resume session:', error);
+      
+      // Clear any existing warning on failure
+      setShowOverwriteWarning(null);
+      
       alert('Failed to resume session. Please try again.');
+    }
+  };
+
+  const handleDeleteCheckpoint = async (checkpointName: string) => {
+    if (!id) return;
+    
+    if (!window.confirm(`Are you sure you want to delete checkpoint "${checkpointName}"?`)) {
+      return;
+    }
+    
+    try {
+      await sessionsAPI.deleteCheckpoint(Number(id), checkpointName);
+      await loadCheckpoints();
+      alert('✅ Checkpoint deleted successfully');
+    } catch (error) {
+      console.error('Failed to delete checkpoint:', error);
+      alert('Failed to delete checkpoint. Please try again.');
+    }
+  };
+
+  const handleCleanupCheckpoints = async () => {
+    if (!id) return;
+    
+    if (!window.confirm('This will delete all checkpoints except the 3 most recent ones. Continue?')) {
+      return;
+    }
+    
+    try {
+      await sessionsAPI.cleanupCheckpoints(Number(id), 3, 24); // Keep latest 3, older than 24 hours
+      await loadCheckpoints();
+      alert('✅ Checkpoint cleanup completed');
+    } catch (error) {
+      console.error('Failed to cleanup checkpoints:', error);
+      alert('Failed to cleanup checkpoints. Please try again.');
     }
   };
 
@@ -575,11 +760,13 @@ function SessionDashboard() {
       await tasksAPI.execute(Number(id), {
         task: inputTask,
         timeout_seconds: 300,
+        task_id: selectedTaskId || undefined,
         log_timeout_minutes: 5, // Fail if no new logs for 5 minutes
         monitor_logs: true // Enable log monitoring
       });
 
       setInputTask('');
+      setSelectedTaskId(null);
       await fetchSession();
       
       // Remove redundant notification - already shown at start
@@ -881,15 +1068,26 @@ function SessionDashboard() {
                   </>
                 )}
                 
-                {session?.status === 'paused' && (
-                  <button
-                    onClick={handleResume}
-                    disabled={executing}
-                    className="flex items-center justify-center gap-2 px-4 py-3 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-all font-medium disabled:opacity-50 col-span-2"
-                  >
-                    <Play className="h-5 w-5" />
-                    Resume Session
-                  </button>
+                {(session?.status === 'paused' || (session?.status === 'stopped' && checkpoints.length > 0)) && (
+                  <div className="col-span-2 space-y-2">
+                    {checkpoints.length > 0 && (
+                      <div className="rounded-lg border border-blue-500/30 bg-blue-500/10 px-3 py-2 text-xs text-blue-200">
+                        <span>Resume from checkpoint: </span>
+                        <span className="font-medium text-white">{checkpoints[checkpoints.length - 1]?.name}</span>
+                        <span className="mx-2 text-blue-300">•</span>
+                        <span>Completed steps: </span>
+                        <span className="font-medium text-white">{checkpoints[checkpoints.length - 1]?.completed_steps ?? 0}</span>
+                      </div>
+                    )}
+                    <button
+                      onClick={handleResume}
+                      disabled={executing}
+                      className="flex w-full items-center justify-center gap-2 px-4 py-3 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-all font-medium disabled:opacity-50"
+                    >
+                      <Play className="h-5 w-5" />
+                      Resume Session
+                    </button>
+                  </div>
                 )}
                 
                 <button
@@ -918,8 +1116,60 @@ function SessionDashboard() {
                   <Trash2 className="h-5 w-5" />
                   Delete Session
                 </button>
+
+                {/* Checkpoint Management Button */}
+                {Array.isArray(checkpoints) && checkpoints.length > 0 && (
+                  <button
+                    onClick={() => setShowCheckpointModal(true)}
+                    disabled={executing}
+                    className="flex items-center justify-center gap-2 px-4 py-3 bg-purple-600/20 hover:bg-purple-600/30 text-purple-400 hover:text-purple-300 rounded-lg transition-all font-medium disabled:opacity-50 col-span-2"
+                  >
+                    <Clock className="h-5 w-5" />
+                    View Checkpoints ({checkpoints.length})
+                  </button>
+                )}
               </div>
             </div>
+
+            {/* Overwrite Warning Alert */}
+            {showOverwriteWarning && (
+              <div className="bg-amber-500/10 backdrop-blur rounded-xl border border-amber-500/30 p-6">
+                <h2 className="text-lg font-semibold text-amber-400 mb-4 flex items-center gap-2">
+                  <ShieldCheck className="h-5 w-5" />
+                  Overwrite Protection Warning
+                </h2>
+                
+                {showOverwriteWarning.workspace_exists && (
+                  <div className="space-y-3 text-sm text-slate-300">
+                    <p>
+                      ⚠️  Existing workspace detected with 
+                      <span className="font-semibold text-white"> {showOverwriteWarning.file_count} files</span>.
+                    </p>
+                    
+                    {showOverwriteWarning.conflicting_files.length > 0 && (
+                      <div>
+                        <p className="font-medium text-amber-300 mb-1">Potential conflicts:</p>
+                        <ul className="list-disc list-inside space-y-1 text-slate-400">
+                          {showOverwriteWarning.conflicting_files.map((file, idx) => (
+                            <li key={idx}>{file}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    
+                    <p className="text-xs text-slate-400 mt-3">
+                      💡 Tip: Consider creating a backup or starting a new session to preserve existing work.
+                    </p>
+                  </div>
+                )}
+                
+                {!showOverwriteWarning.workspace_exists && (
+                  <p className="text-sm text-green-400">
+                    ✅ No existing workspace - safe to proceed
+                  </p>
+                )}
+              </div>
+            )}
 
             {/* Connection Status */}
             <div className={`bg-slate-800/50 backdrop-blur rounded-xl border p-6 ${
@@ -1012,6 +1262,7 @@ function SessionDashboard() {
                       key={task.id}
                       onClick={() => {
                         setInputTask(`${task.title}\n\n${task.description || ''}`);
+                        setSelectedTaskId(task.id);
                         // Scroll to execution box
                         setTimeout(() => {
                           document.querySelector('textarea')?.focus();
@@ -1058,6 +1309,21 @@ function SessionDashboard() {
               
               <form onSubmit={handleExecute}>
                 <div className="space-y-3">
+                  {selectedTaskId && (
+                    <div className="flex items-center justify-between rounded-lg border border-primary-500/40 bg-primary-500/10 px-4 py-3 text-sm text-primary-100">
+                      <span>
+                        Selected task workspace:{' '}
+                        {tasks.find((task) => task.id === selectedTaskId)?.title || `Task #${selectedTaskId}`}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedTaskId(null)}
+                        className="text-primary-200 transition-colors hover:text-white"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                  )}
                   <textarea
                     value={inputTask}
                     onChange={(e) => setInputTask(e.target.value)}
@@ -1166,6 +1432,92 @@ function SessionDashboard() {
             </div>
           </div>
         </div>
+
+        {/* Checkpoint Modal */}
+        {showCheckpointModal && (
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+            <div className="bg-slate-800 rounded-xl border border-slate-700 max-w-2xl w-full max-h-[80vh] overflow-hidden flex flex-col">
+              {/* Modal Header */}
+              <div className="flex items-center justify-between p-6 border-b border-slate-700">
+                <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+                  <Clock className="h-5 w-5" />
+                  Session Checkpoints
+                </h3>
+                <button
+                  onClick={() => setShowCheckpointModal(false)}
+                  className="p-2 hover:bg-slate-700 rounded-lg transition-colors text-slate-400 hover:text-white"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              {/* Modal Content */}
+              <div className="flex-1 overflow-y-auto p-6">
+                {checkpoints.length === 0 ? (
+                  <div className="text-center py-8 text-slate-400">
+                    <Clock className="h-12 w-12 mb-3 mx-auto opacity-50" />
+                    <p>No checkpoints found for this session</p>
+                    <p className="text-sm mt-2">Checkpoints are automatically saved when you pause a session</p>
+                  </div>
+                ) : (
+                  <>
+                    {/* Checkpoint List */}
+                    <div className="space-y-3 mb-6">
+                      {checkpoints.map((checkpoint, index) => (
+                        <div key={index} className="bg-slate-900/50 rounded-lg border border-slate-700 p-4 hover:border-primary-500/50 transition-colors">
+                          <div className="flex items-start justify-between">
+                            <div className="flex-1">
+                              <div className="font-medium text-white mb-1">{checkpoint.name}</div>
+                              <div className="text-sm text-slate-400 space-y-1">
+                                <p>Created: {formatLocalTime(checkpoint.created_at)}</p>
+                                {checkpoint.completed_steps && (
+                                  <p>Completed steps: {checkpoint.completed_steps}</p>
+                                )}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2 ml-4">
+                              <button
+                                onClick={() => handleDeleteCheckpoint(checkpoint.name)}
+                                className="p-2 hover:bg-red-500/10 text-slate-400 hover:text-red-400 rounded-lg transition-colors"
+                                title="Delete checkpoint"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Cleanup Button */}
+                    <div className="flex items-center justify-between p-3 bg-slate-700/50 rounded-lg">
+                      <span className="text-sm text-slate-300">
+                        Keep latest 3 checkpoints, delete older than 24 hours
+                      </span>
+                      <button
+                        onClick={handleCleanupCheckpoints}
+                        className="px-4 py-2 bg-slate-600 hover:bg-slate-500 text-white rounded-lg transition-colors text-sm"
+                      >
+                        Cleanup Old Checkpoints
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* Modal Footer */}
+              <div className="p-6 border-t border-slate-700">
+                <button
+                  onClick={() => setShowCheckpointModal(false)}
+                  className="w-full px-4 py-2 bg-primary-500 hover:bg-primary-600 text-white rounded-lg transition-colors font-medium"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
       </div>
     </div>
   );

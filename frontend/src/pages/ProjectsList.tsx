@@ -22,6 +22,7 @@ function ProjectsList() {
   const [editingName, setEditingName] = useState('');
   const [newProjectName, setNewProjectName] = useState('');
   const [creatingProject, setCreatingProject] = useState(false);
+  const [updatingProject, setUpdatingProject] = useState(false);
 
   useEffect(() => {
     fetchUser();
@@ -228,19 +229,40 @@ function ProjectsList() {
                         <ExternalLink className="h-4 w-4" />
                       </a>
                     )}
-                    <button
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        startEditProject(project);
-                      }}
-                      className="text-slate-400 hover:text-blue-400 transition-colors"
-                      title="Rename project"
-                    >
-                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                      </svg>
-                    </button>
+                    {editingProjectId === project.id ? (
+                      <button
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          handleUpdateProject(project.id);
+                        }}
+                        disabled={updatingProject}
+                        className="text-green-500 hover:text-green-600 transition-colors disabled:opacity-50"
+                        title="Save changes"
+                      >
+                        {updatingProject ? (
+                          <div className="h-4 w-4 border-2 border-white/30 border-t-green-500 rounded-full animate-spin" />
+                        ) : (
+                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                        )}
+                      </button>
+                    ) : (
+                      <button
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          startEditProject(project);
+                        }}
+                        className="text-slate-400 hover:text-blue-400 transition-colors"
+                        title="Rename project"
+                      >
+                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                        </svg>
+                      </button>
+                    )}
                     <button
                       onClick={(e) => {
                         e.preventDefault();
@@ -255,21 +277,24 @@ function ProjectsList() {
                   </div>
                 </div>
                 {editingProjectId === project.id ? (
-                  <input
-                    type="text"
-                    value={editingName}
-                    onChange={(e) => setEditingName(e.target.value)}
-                    className="w-full bg-slate-900/50 border border-primary-500 rounded-lg px-3 py-1 text-white mb-2"
-                    autoFocus
-                    onBlur={() => handleUpdateProject(project.id)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        handleUpdateProject(project.id);
-                      } else if (e.key === 'Escape') {
-                        setEditingProjectId(null);
-                      }
-                    }}
-                  />
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={editingName}
+                      onChange={(e) => setEditingName(e.target.value)}
+                      className="w-full bg-slate-900/50 border border-primary-500 rounded-lg px-3 py-1 text-white mb-2 focus:outline-none focus:ring-2 focus:ring-primary-500"
+                      autoFocus
+                      onClick={(e) => e.stopPropagation()}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleUpdateProject(project.id);
+                        } else if (e.key === 'Escape') {
+                          setEditingProjectId(null);
+                        }
+                      }}
+                    />
+                  </div>
                 ) : (
                   <h3 className="text-lg font-semibold text-white mb-2 group-hover:text-primary-400 transition-colors">
                     {project.name}

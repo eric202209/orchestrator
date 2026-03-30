@@ -81,10 +81,14 @@ start_backend() {
         sleep 1
     fi
     
-    # Start backend in background
+    # Start backend in background with comprehensive timeout configuration
     nohup /root/.openclaw/workspace/projects/orchestrator/venv/bin/uvicorn app.main:app \
         --host 0.0.0.0 \
         --port 8080 \
+        --timeout-keep-alive 5 \
+        --proxy-headers \
+        --forwarded-allow-ips "*" \
+        --access-log \
         > /tmp/backend.log 2>&1 &
     
     sleep 3

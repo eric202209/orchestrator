@@ -16,21 +16,17 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8080  # Changed from 8000 to avoid llama-proxy conflict
 
-    # Localhost alias (MUST be set in .env - no default to prevent hardcoded IPs)
-    LOCALHOST: str
-
-    # CORS (uses LOCALHOST and OPENCLAW_GATEWAY_URL from .env)
+    # CORS
     @property
     def CORS_ORIGINS(self) -> List[str]:
         return [
-            f"http://{self.LOCALHOST}:3000",
-            f"http://{self.LOCALHOST}:8080",
             "http://localhost:3000",
             "http://localhost:8080",
             "http://localhost:8000",  # Keep for OpenClaw dashboard
             self.OPENCLAW_GATEWAY_URL,
             "http://172.17.0.1:3000",  # Gateway IP for external browser access
             "http://172.17.0.2:3000",  # Container IP for frontend
+            "http://172.17.0.2:8080",  # ✅ Allow mobile app to access API
         ]
 
     # Database
@@ -47,10 +43,7 @@ class Settings(BaseSettings):
     OPENCLAW_API_KEY: str = ""
 
     # Demo mode flag - set to True for testing, False for real execution
-    DEMO_MODE: bool = True  # Enabled for testing (no API keys configured)
-
-    # Orchestrator URL (for OpenClaw dashboard)
-    ORCHESTRATOR_URL: str = "http://localhost:8080"
+    DEMO_MODE: bool = False  # Disabled (real execution enabled)
 
     # Celery Task Queue
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"

@@ -6,12 +6,53 @@ Ensures all operations stay within project boundaries.
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Optional, Dict, Any
 from sqlalchemy.orm import Session
 from app.models import Project, LogEntry
+from app.services.prompt_templates import OPENCLAW_WORKSPACE_ROOT
 
 logger = logging.getLogger(__name__)
+
+
+def _slugify_workspace_name(name: str) -> str:
+    value = (name or "").strip().lower()
+    value = re.sub(r"[\s_]+", "-", value)
+    value = re.sub(r"[^a-z0-9-]", "", value)
+    value = re.sub(r"-+", "-", value).strip("-")
+    return value or "project"
+
+
+def normalize_project_workspace_path(
+    workspace_path: Optional[str], project_name: Optional[str] = None
+) -> str:
+    """Store workspace paths as project-root-relative values under OPENCLAW_WORKSPACE_ROOT."""
+    if not workspace_path:
+        return _slugify_workspace_name(project_name or "")
+
+    raw = workspace_path.strip()
+    if not raw:
+        return _slugify_workspace_name(project_name or "")
+
+    root_str = str(OPENCLAW_WORKSPACE_ROOT)
+    if raw.startswith(root_str):
+        raw = raw[len(root_str) :].lstrip("/")
+    elif raw.startswith("/"):
+        raw = Path(raw).name
+
+    raw = raw.replace("\\", "/").strip("/")
+    if raw.startswith("projects/"):
+        raw = raw[len("projects/") :]
+
+    return raw or _slugify_workspace_name(project_name or "")
+
+
+def resolve_project_workspace_path(
+    workspace_path: Optional[str], project_name: Optional[str] = None
+) -> Path:
+    relative = normalize_project_workspace_path(workspace_path, project_name)
+    return (OPENCLAW_WORKSPACE_ROOT / relative).resolve()
 
 
 class ProjectIsolationError(Exception):
@@ -44,11 +85,7 @@ class ProjectIsolationService:
         if not project:
             raise ProjectIsolationError(f"Project {project_id} not found")
 
-        # Use existing workspace_path from Project model
-        # Default to projects/{project_id} if not set
-        workspace_path = project.workspace_path or f"projects/{project_id}"
-        base_path = Path("/root/.openclaw/workspace")
-        return (base_path / workspace_path).resolve()
+        return resolve_project_workspace_path(project.workspace_path, project.name)
 
     def validate_path(
         self, project_id: int, requested_path: str, allow_relative: bool = True

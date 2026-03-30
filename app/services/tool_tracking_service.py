@@ -159,7 +159,7 @@ class ToolTrackingService:
             task_id=metadata.get("task_id"),
             level=level,
             message=message,
-            metadata=json.dumps(metadata),
+            log_metadata=json.dumps(metadata),
         )
         self.db.add(log_entry)
         self.db.commit()

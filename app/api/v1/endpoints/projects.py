@@ -6,6 +6,7 @@ from typing import List
 from app.database import get_db
 from app.models import Project
 from app.schemas import ProjectCreate, ProjectUpdate, ProjectResponse
+from app.services.project_isolation_service import normalize_project_workspace_path
 
 router = APIRouter()
 
@@ -15,7 +16,11 @@ router = APIRouter()
 )
 def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
     """Create a new project"""
-    db_project = Project(**project.model_dump())
+    project_data = project.model_dump()
+    project_data["workspace_path"] = normalize_project_workspace_path(
+        project.workspace_path, project.name
+    )
+    db_project = Project(**project_data)
     db.add(db_project)
     db.commit()
     db.refresh(db_project)
@@ -48,6 +53,11 @@ def update_project(
         raise HTTPException(status_code=404, detail="Project not found")
 
     update_data = project_update.model_dump(exclude_unset=True)
+    if "workspace_path" in update_data or "name" in update_data:
+        update_data["workspace_path"] = normalize_project_workspace_path(
+            update_data.get("workspace_path", db_project.workspace_path),
+            update_data.get("name", db_project.name),
+        )
     for field, value in update_data.items():
         setattr(db_project, field, value)
 

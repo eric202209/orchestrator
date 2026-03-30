@@ -18,29 +18,29 @@ import subprocess
 import logging
 import asyncio
 import time
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable
 from datetime import datetime
-from app.services.error_handler import EnhancedErrorHandler
 from sqlalchemy.orm import Session
-from app.models import Session as SessionModel, Task, TaskStatus, LogEntry
+from app.models import Session as SessionModel, Task, TaskStatus, LogEntry, Project
 from app.config import settings
-from app.services.error_handler import error_handler
 from app.services.prompt_templates import (
     OrchestrationStatus,
     OrchestrationState,
     StepResult,
     PromptTemplates,
 )
-from app.services.project_isolation_service import ProjectIsolationService
-from app.services.permission_service import (
-    PermissionApprovalService,
-    PermissionOperationType,
+from app.services.project_isolation_service import (
+    ProjectIsolationService,
+    resolve_project_workspace_path,
 )
+from app.services.permission_service import PermissionApprovalService
 from app.services.performance_optimizations import (
     optimize_prompt,
     compress_context,
     perf_tracker,
 )
+from app.services.checkpoint_service import CheckpointService, CheckpointError
+from app.services.tool_tracking_service import ToolTrackingService
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +78,10 @@ class OpenClawSessionService:
         )
         self.openclaw_session_key: Optional[str] = None
         self.process: Optional[subprocess.Popen] = None
+        # Initialize checkpoint service
+        from app.services.checkpoint_service import CheckpointService
+
+        self.checkpoint_service = CheckpointService(db)
 
     async def create_openclaw_session(
         self, task_description: str, context: Optional[Dict[str, Any]] = None
@@ -96,15 +100,6 @@ class OpenClawSessionService:
             OpenClawSessionError: If session creation fails
         """
         try:
-            # Prepare session message with context
-            message = {
-                "task": task_description,
-                "timestamp": datetime.utcnow().isoformat(),
-                "session_id": self.session_id,
-                "task_id": self.task_id,
-                "context": context or {},
-            }
-
             # Log session creation
             self._log_entry(
                 "INFO", f"Creating OpenClaw session for task: {task_description[:100]}"
@@ -162,15 +157,9 @@ class OpenClawSessionService:
                 result["status"] = "completed"
             else:
                 # REAL MODE: Execute task via OpenClaw HTTP API
-                # Use streaming version if log_callback is provided
-                if log_callback:
-                    result = await self.execute_task_with_streaming(
-                        optimized_prompt, timeout_seconds, log_callback
-                    )
-                else:
-                    result = await self._execute_real_mode(
-                        optimized_prompt, timeout_seconds
-                    )
+                result = await self.execute_task_with_streaming(
+                    optimized_prompt, timeout_seconds, log_callback
+                )
 
             # OPTIMIZATION: Log performance metrics
             duration = time.time() - start_time
@@ -183,7 +172,7 @@ class OpenClawSessionService:
             if self.task_model:
                 if result.get("status") == "completed":
                     self.task_model.status = TaskStatus.DONE
-                    self._log_entry("INFO", f"Task completed successfully")
+                    self._log_entry("INFO", "Task completed successfully")
                 elif result.get("status") == "failed":
                     self.task_model.status = TaskStatus.FAILED
                     self.task_model.error_message = result.get(
@@ -198,7 +187,7 @@ class OpenClawSessionService:
                     self.task_model.error_message = (
                         f"Unknown status: {result.get('status', 'unknown')}"
                     )
-                    self._log_entry("ERROR", f"Task failed with unknown status")
+                    self._log_entry("ERROR", "Task failed with unknown status")
 
                 self.task_model.completed_at = datetime.utcnow()
                 self.db.commit()
@@ -386,6 +375,20 @@ class OpenClawSessionService:
                 "INFO", f"[ORCHESTRATION] Starting optimization: {prompt[:80]}..."
             )
 
+            project_model = None
+            if self.session_model and self.session_model.project_id:
+                project_model = (
+                    self.db.query(Project)
+                    .filter(Project.id == self.session_model.project_id)
+                    .first()
+                )
+            elif self.task_model and self.task_model.project_id:
+                project_model = (
+                    self.db.query(Project)
+                    .filter(Project.id == self.task_model.project_id)
+                    .first()
+                )
+
             if orchestration_state is None:
                 # OPTIMIZATION: Compress project context
                 project_context = (
@@ -406,15 +409,26 @@ class OpenClawSessionService:
                     session_id=str(self.session_id),
                     task_description=prompt,
                     project_name=(
-                        self.session_model.name
-                        if self.session_model
+                        project_model.name
+                        if project_model
                         else (
-                            self.task_model.project.name
-                            if self.task_model and self.task_model.project
-                            else "Unknown"
+                            self.session_model.name if self.session_model else "Unknown"
                         )
                     ),
                     project_context=project_context,
+                    task_id=self.task_model.id if self.task_model else None,
+                )
+
+            if project_model and project_model.workspace_path:
+                orchestration_state._workspace_path_override = str(
+                    resolve_project_workspace_path(
+                        project_model.workspace_path, project_model.name
+                    )
+                )
+
+            if self.task_model and self.task_model.task_subfolder:
+                orchestration_state._task_subfolder_override = (
+                    self.task_model.task_subfolder
                 )
 
             # Phase 1: PLANNING (OPTIMIZED)
@@ -541,7 +555,7 @@ class OpenClawSessionService:
 
             # Phase 5: DONE
             orchestration_state.status = OrchestrationStatus.DONE
-            self._log_entry("INFO", "[ORCHESTRATION] Task completed successfully")
+            self._log_entry("INFO", "[ORCHESTRATION] Execution steps completed")
 
             # Generate summary using the summary template
             execution_results_summary = orchestration_state.prior_results_summary()
@@ -594,7 +608,8 @@ class OpenClawSessionService:
         orchestration_state: OrchestrationState,
         max_retries: int = 3,
     ) -> StepResult:
-        """Execute a single step with retry logic"""
+        """Execute a single step with retry logic and timeout protection"""
+
         step_description = step.get("description", "Unknown step")
         step_commands = step.get("commands", [])
 
@@ -602,10 +617,11 @@ class OpenClawSessionService:
 
         for attempt in range(max_retries):
             try:
-                # Build execution prompt
+                # Build execution prompt (optimized - no redundant context)
                 execution_prompt = PromptTemplates.build_execution_prompt(
                     step_description=step_description,
                     step_commands=step_commands,
+                    project_dir=str(orchestration_state.project_dir),
                     verification_command=step.get("verification"),
                     rollback_command=step.get("rollback"),
                     expected_files=step.get("expected_files", []),
@@ -615,8 +631,10 @@ class OpenClawSessionService:
                     ),
                 )
 
-                # Execute step
-                result = await self.execute_task(execution_prompt, timeout_seconds=180)
+                # OPTIMIZATION: Enforce strict timeout per attempt (60s max)
+                result = await self.execute_task(
+                    execution_prompt, timeout_seconds=min(60, 180 // max_retries)
+                )
 
                 # Check if successful
                 is_success = result.get("status") == "completed"
@@ -643,49 +661,51 @@ class OpenClawSessionService:
                         f"[STEP] Step {step_index + 1} failed (attempt {attempt + 1}/{max_retries})",
                     )
 
-            except Exception as e:
-                # Extract meaningful error message
-                error_msg = str(e)
-                error_msg_stripped = error_msg.strip()
-
-                # If error message contains garbled output, try to extract actual error
-                # Check for common garbled error patterns from OpenClaw CLI
-                is_garbled = False
-                # Simple check for obviously broken error messages
-                if error_msg_stripped in ['"', "'"]:
-                    is_garbled = True
-                elif error_msg_stripped.startswith('"), "'):
-                    is_garbled = True
-                elif error_msg_stripped == "', '":
-                    is_garbled = True
-                if is_garbled:
-                    # Try to get error from stderr if available
-                    # This handles cases where OpenClaw CLI returned garbled error
-                    self._log_entry(
-                        "WARN",
-                        f"[STEP] Garbled error detected: {repr(error_msg)}. Checking for better error message...",
+            except OpenClawSessionError as e:
+                # Handle timeout errors specifically
+                if "timed out" in str(e).lower():
+                    orchestration_state.record_failure(
+                        StepResult(
+                            step_number=step_index + 1,
+                            status="failed",
+                            error_message=f"Timeout after {60}s (attempt {attempt + 1}/{max_retries})",
+                            attempt=attempt + 1,
+                        )
                     )
+                    self._log_entry(
+                        "WARN", f"[STEP] Step {step_index + 1} timed out, retrying..."
+                    )
+                else:
+                    # Other errors - don't retry
+                    orchestration_state.record_failure(
+                        StepResult(
+                            step_number=step_index + 1,
+                            status="failed",
+                            error_message=str(e),
+                            attempt=attempt + 1,
+                        )
+                    )
+                    raise
 
-                    # If we have access to the result object, check its stderr
-                    # For now, provide a more helpful error message
-                    error_msg = f"Execution failed with unclear error. See logs for details. Original error: {str(e)[:200]}"
-
-                step_result = StepResult(
-                    step_number=step_index + 1,
-                    status="failed",
-                    error_message=error_msg,
-                    attempt=attempt + 1,
+            except Exception as e:
+                # Handle garbled errors without retrying
+                orchestration_state.record_failure(
+                    StepResult(
+                        step_number=step_index + 1,
+                        status="failed",
+                        error_message=str(e)[:500],
+                        attempt=attempt + 1,
+                    )
                 )
-                orchestration_state.record_failure(step_result)
                 self._log_entry(
-                    "ERROR", f"[STEP] Step {step_index + 1} error: {error_msg}"
+                    "ERROR", f"[STEP] Step {step_index + 1} error: {str(e)}"
                 )
 
-        # All retries failed
+        # All retries failed - return final failure result
         return StepResult(
             step_number=step_index + 1,
             status="failed",
-            error_message=f"All {max_retries} attempts failed",
+            error_message=f"All {max_retries} attempts failed (timeout protection enabled)",
             attempt=max_retries,
         )
 
@@ -708,8 +728,13 @@ class OpenClawSessionService:
             attempt_number=failed_result.attempt,
             max_attempts=3,
             prior_debug_attempts=orchestration_state.debug_attempts,
-            project_name=self.session_model.name if self.session_model else "",
+            project_name=(
+                self.task_model.project.name
+                if self.task_model and self.task_model.project
+                else (self.session_model.name if self.session_model else "")
+            ),
             workspace_root=str(orchestration_state.workspace_root),
+            project_dir=str(orchestration_state.project_dir),
         )
 
         # Execute debugging
@@ -749,6 +774,8 @@ class OpenClawSessionService:
             failed_steps=failed_steps,
             debug_analysis=debug_result.get("analysis", "Unknown error"),
             completed_steps=orchestration_state.completed_steps,
+            workspace_root=str(orchestration_state.workspace_root),
+            project_dir=str(orchestration_state.project_dir),
         )
 
         # Execute revision
@@ -804,280 +831,95 @@ class OpenClawSessionService:
             "note": "Demo mode - no actual task was executed. Enable real mode to execute via OpenClaw API.",
         }
 
-    async def _execute_real_mode(
-        self, prompt: str, timeout_seconds: int = 300
-    ) -> Dict[str, Any]:
-        """
-        Real mode: Execute task via OpenClaw CLI (uses embedded model)
+    def _parse_openclaw_response(self, result: Any) -> Dict[str, Any]:
+        """Parse OpenClaw CLI response with unified error handling"""
 
-        Args:
-            prompt: Task prompt (should already be built with templates)
-            timeout_seconds: Maximum execution time
+        # Handle subprocess.CompletedProcess object
+        if isinstance(result, subprocess.CompletedProcess):
+            stdout = result.stdout.strip()
+            stderr = result.stderr.strip()
+            return_code = result.returncode
 
-        Returns:
-            Actual execution result
-        """
-        import subprocess
-        import json
+            if return_code != 0 and stderr:
+                self._log_entry("ERROR", f"OpenClaw CLI error: {stderr[:500]}")
+        else:
+            # Already a string (from streaming mode)
+            stdout = result.strip()
+            return_code = 0
+            stderr = ""
 
-        # Check prompt length to avoid context window overflow
-        # The model has 65,536 token limit, so we need to be conservative
-        if len(prompt) > self.MAX_PROMPT_LENGTH:
-            self._log_entry(
-                "WARN",
-                f"Prompt too long ({len(prompt)} chars), truncating to {MAX_PROMPT_LENGTH}",
-            )
-            # Truncate but keep the end for context
-            prompt = (
-                prompt[:MAX_PROMPT_LENGTH] + "\n\n[TRUNCATED - prompt was too long]"
-            )
-
-        self._log_entry("INFO", f"Running in REAL MODE - executing via OpenClaw CLI")
-        self._log_entry("INFO", f"Starting task execution with prompt template:")
-        self._log_entry(
-            "INFO", f"Prompt length: {len(prompt)} chars, preview: {prompt[:200]}..."
-        )
-
-        # Use --local with unique session ID to avoid gateway lock
-        try:
-            import uuid
-
-            # Ensure task_id is not None
-            if self.task_id is None:
-                self._log_entry(
-                    "WARN",
-                    f"task_id is None! Using session_id instead: {self.session_id}",
-                )
-                task_id_str = str(self.session_id)
-            else:
-                task_id_str = str(self.task_id)
-
-            new_session_id = f"orchestrator-task-{task_id_str}-{uuid.uuid4().hex[:8]}"
-
-            # Log the full prompt structure (first 500 chars)
-            self._log_entry(
-                "INFO",
-                f"Prompt contains: {('EXECUTE THIS TASK DIRECTLY' in prompt and 'EXECUTE' or 'Standard')}",
-            )
-
-            # Escape single quotes in prompt for bash command
-            escaped_prompt = prompt.replace("'", "'\\''")
-            result = subprocess.run(
-                [
-                    "bash",
-                    "-c",
-                    f"openclaw agent --local --session-id {new_session_id} --message '{escaped_prompt}' --json --timeout {timeout_seconds}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds + 30,
-                executable="/usr/bin/bash",
-            )
-
-            # Debug: Log the full result
-            self._log_entry(
-                "INFO",
-                f"[OPENCLAW] Return code: {result.returncode}, stdout_len: {len(result.stdout)}, stderr_len: {len(result.stderr)}",
-            )
-            # Always log stderr for debugging (even when returncode is 0)
-            if result.stderr:
-                self._log_entry(
-                    "INFO",
-                    f"[OPENCLAW] STDERR (length {len(result.stderr)}): {result.stderr[:500]}",
-                )
-            if result.returncode != 0:
-                self._log_entry(
-                    "ERROR",
-                    f"[OPENCLAW] STDERR: {result.stderr[:1000]}",
-                )
-
-            if result.returncode == 0:
-                try:
-                    # Debug: Log raw stdout
-                    self._log_entry(
-                        "INFO",
-                        f"[OPENCLAW] Raw stdout: {repr(result.stdout[:500])}...",
-                    )
-
-                    # Debug: Try parsing with debug
-                    stdout_stripped = result.stdout.strip()
-                    self._log_entry(
-                        "INFO",
-                        f"[OPENCLAW] Stripped length: {len(stdout_stripped)}, first 100 chars: {repr(stdout_stripped[:100])}",
-                    )
-
-                    # CRITICAL FIX: Check for empty or invalid responses BEFORE parsing
-                    if not stdout_stripped or stdout_stripped in ['""', "''", '"', "'"]:
-                        self._log_entry(
-                            "ERROR",
-                            f"[OPENCLAW] CRITICAL: Empty or invalid response detected!",
-                        )
-                        self._log_entry(
-                            "ERROR",
-                            f"[OPENCLAW] Raw output: {repr(result.stdout[:500])}",
-                        )
-                        return {
-                            "status": "failed",
-                            "mode": "real",
-                            "output": result.stdout,
-                            "error": "Empty or invalid response from OpenClaw CLI. The CLI returned no valid JSON output.",
-                            "logs": [
-                                {
-                                    "level": "ERROR",
-                                    "message": f"OpenClaw returned empty/invalid response",
-                                    "timestamp": datetime.utcnow().isoformat(),
-                                }
-                            ],
-                            "execution_time": 0.0,
-                            "session_key": "orchestrator-session",
-                            "note": "Real execution failed - empty response",
-                        }
-
-                    # Use enhanced JSON parsing with multiple recovery strategies
-                    success, output_data, strategy = error_handler.attempt_json_parsing(
-                        stdout_stripped, context="OpenClaw response"
-                    )
-
-                    if not success:
-                        self._log_entry(
-                            "ERROR",
-                            f"[OPENCLAW] Failed to parse response: {strategy}",
-                        )
-                        self._log_entry(
-                            "ERROR",
-                            f"[OPENCLAW] Raw output: {result.stdout[:500]}",
-                        )
-                        return {
-                            "status": "failed",
-                            "mode": "real",
-                            "output": result.stdout,
-                            "error": f"Failed to parse OpenClaw response: {strategy}",
-                            "logs": [
-                                {
-                                    "level": "ERROR",
-                                    "message": f"OpenClaw response parsing failed: {strategy}",
-                                    "timestamp": datetime.utcnow().isoformat(),
-                                }
-                            ],
-                            "execution_time": 0.0,
-                            "session_key": "orchestrator-session",
-                            "note": f"Real execution failed - parsing error: {strategy}",
-                        }
-
-                    # Debug log
-                    self._log_entry(
-                        "INFO",
-                        f"[OPENCLAW] Full response received, type: {type(output_data)}, parsing strategy: {strategy}",
-                    )
-
-                    # Extract text from payloads array
-                    output_text = ""
-                    if isinstance(output_data, dict):
-                        if "payloads" in output_data:
-                            payloads = output_data.get("payloads", [])
-                            if isinstance(payloads, list) and len(payloads) > 0:
-                                first_payload = payloads[0]
-                                if isinstance(first_payload, dict):
-                                    output_text = first_payload.get("text", "")
-                                else:
-                                    output_text = str(first_payload)
-                            else:
-                                output_text = json.dumps(output_data)
-                        else:
-                            output_text = json.dumps(output_data)
-                    else:
-                        output_text = result.stdout
-
-                    # CRITICAL FIX: Check if output_text is empty after extraction
-                    if not output_text or output_text.strip() in ['""', "''", '"', "'"]:
-                        self._log_entry(
-                            "ERROR",
-                            f"[OPENCLAW] CRITICAL: Output text is empty after extraction!",
-                        )
-                        self._log_entry(
-                            "ERROR",
-                            f"[OPENCLAW] Raw output: {repr(output_text[:500])}",
-                        )
-                        return {
-                            "status": "failed",
-                            "mode": "real",
-                            "output": result.stdout,
-                            "error": "Empty output text after parsing. The OpenClaw CLI returned JSON but with no valid content.",
-                            "logs": [
-                                {
-                                    "level": "ERROR",
-                                    "message": f"OpenClaw returned empty output text",
-                                    "timestamp": datetime.utcnow().isoformat(),
-                                }
-                            ],
-                            "execution_time": 0.0,
-                            "session_key": "orchestrator-session",
-                            "note": "Real execution failed - empty output text",
-                        }
-
-                    self._log_entry(
-                        "INFO", f"Task execution completed: {output_text[:300]}"
-                    )
-
-                    return {
-                        "status": "completed",
-                        "mode": "real",
-                        "output": output_text,
-                        "logs": [
-                            {
-                                "level": "INFO",
-                                "message": f"Task received: {prompt[:100]}...",
-                                "timestamp": datetime.utcnow().isoformat(),
-                            },
-                            {
-                                "level": "INFO",
-                                "message": f"Task executed via OpenClaw CLI",
-                                "timestamp": datetime.utcnow().isoformat(),
-                            },
-                        ],
-                        "execution_time": 0.0,
-                        "session_key": "orchestrator-session",
-                        "note": "Real execution completed via OpenClaw CLI",
-                    }
-                except json.JSONDecodeError:
-                    # Non-JSON response - this is a critical error
-                    self._log_entry("ERROR", f"Non-JSON response from OpenClaw CLI!")
-                    self._log_entry("ERROR", f"Raw stdout: {result.stdout[:1000]}")
-                    return {
-                        "status": "failed",
-                        "mode": "real",
-                        "output": result.stdout,
-                        "error": f"Non-JSON response from OpenClaw CLI. Expected JSON but got: {result.stdout[:200]}",
-                        "logs": [
-                            {
-                                "level": "ERROR",
-                                "message": f"OpenClaw returned non-JSON response",
-                                "timestamp": datetime.utcnow().isoformat(),
-                            }
-                        ],
-                        "execution_time": 0.0,
-                        "session_key": "orchestrator-session",
-                        "note": "Real execution failed - invalid response format",
-                    }
-            else:
-                raise Exception(f"OpenClaw CLI failed: {result.stderr}")
-
-        except subprocess.TimeoutExpired as e:
-            self._log_entry("ERROR", f"Task execution timed out: {str(e)}")
+        # CRITICAL FIX: Validate response before parsing
+        if not stdout or stdout in ['""', "''", '"', "'"]:
+            self._log_entry("ERROR", "[OPENCLAW] CRITICAL: Empty or invalid response")
             return {
                 "status": "failed",
                 "mode": "real",
-                "output": f"Task timed out after {timeout_seconds} seconds",
-                "logs": [
-                    {
-                        "level": "ERROR",
-                        "message": f"Task execution timed out after {timeout_seconds} seconds",
-                        "timestamp": datetime.utcnow().isoformat(),
-                    }
-                ],
-                "execution_time": timeout_seconds,
-                "error": "Timeout",
+                "output": "",
+                "error": "Empty or invalid response from OpenClaw CLI",
+                "logs": [],
             }
+
+        # Parse JSON with error recovery
+        try:
+            output_data = json.loads(stdout)
+
+            # Extract text from payloads if present
+            if isinstance(output_data, dict) and "payloads" in output_data:
+                payloads = output_data.get("payloads", [])
+                if isinstance(payloads, list) and len(payloads) > 0:
+                    output_text = payloads[0].get("text", "")
+                else:
+                    output_text = json.dumps(output_data)
+            else:
+                output_text = json.dumps(output_data)
+
+            return {
+                "status": "completed" if return_code == 0 else "failed",
+                "mode": "real",
+                "output": output_text,
+                "logs": [],
+            }
+
+        except json.JSONDecodeError:
+            # Only apply garbled detection after JSON parsing actually fails.
+            garbled_patterns = [
+                "\"'",
+                '"", "',
+                "garbled",
+                "corrupted",
+            ]
+            stdout_lower = stdout.lower()
+            if stdout.strip() in {"\"'", "'"} or any(
+                pattern in stdout_lower for pattern in garbled_patterns
+            ):
+                self._log_entry(
+                    "ERROR",
+                    f"[OPENCLAW] DETECTED GARBLED OUTPUT AFTER JSON PARSE FAILURE: '{stdout[:200]}'",
+                )
+                return {
+                    "status": "failed",
+                    "mode": "real",
+                    "output": "",
+                    "error": "Execution failed with unclear error (garbled output detected). See logs for details.",
+                    "logs": [
+                        {
+                            "level": "ERROR",
+                            "message": f"Garbled output detected: '{stdout[:500]}'",
+                            "timestamp": datetime.utcnow().isoformat(),
+                        }
+                    ],
+                    "execution_time": 0.0,
+                }
+
+            # Fallback to raw text if it isn't valid JSON but still looks coherent.
+            self._log_entry("WARN", "Failed to parse JSON, using raw output")
+            return {
+                "status": "completed" if return_code == 0 else "failed",
+                "mode": "real",
+                "output": stdout,
+                "logs": [],
+            }
+
         except Exception as e:
             error_str = str(e)
             # Handle specific error types
@@ -1160,180 +1002,117 @@ class OpenClawSessionService:
             raise
 
     async def execute_task_with_streaming(
-        self, prompt: str, timeout_seconds: int = 300, log_callback: callable = None
+        self,
+        prompt: str,
+        timeout_seconds: int = 300,
+        log_callback: Optional[Callable] = None,
     ) -> Dict[str, Any]:
-        """
-        Execute task via OpenClaw CLI with real-time log streaming
+        """Execute task via OpenClaw CLI with real-time log streaming (optimized)"""
 
-        Args:
-            prompt: Task prompt
-            timeout_seconds: Maximum execution time
-            log_callback: Optional callback for real-time log entries
-
-        Returns:
-            Execution result with logs
-        """
-        import subprocess
-        import json
-
-        if len(prompt) > self.MAX_PROMPT_LENGTH:
-            self._log_entry(
-                "WARN",
-                f"Prompt too long ({len(prompt)} chars), truncating to {MAX_PROMPT_LENGTH}",
-            )
-            prompt = (
-                prompt[:MAX_PROMPT_LENGTH] + "\n\n[TRUNCATED - prompt was too long]"
-            )
-
-        self._log_entry("INFO", f"Running in REAL MODE - executing via OpenClaw CLI")
-        self._log_entry("INFO", f"Starting task execution with prompt template:")
-        self._log_entry(
-            "INFO", f"Prompt length: {len(prompt)} chars, preview: {prompt[:200]}..."
-        )
+        # OPTIMIZATION: Single session ID generation
+        task_id_str = str(self.task_id or self.session_id)
+        new_session_id = f"orchestrator-task-{task_id_str}-{int(time.time())}"
 
         try:
-            import uuid
-
-            if self.task_id is None:
-                self._log_entry(
-                    "WARN",
-                    f"task_id is None! Using session_id instead: {self.session_id}",
-                )
-                task_id_str = str(self.session_id)
-            else:
-                task_id_str = str(self.task_id)
-
-            new_session_id = f"orchestrator-task-{task_id_str}-{uuid.uuid4().hex[:8]}"
-
-            self._log_entry(
-                "INFO",
-                f"Prompt contains: {('EXECUTE THIS TASK DIRECTLY' in prompt and 'EXECUTE' or 'Standard')}",
-            )
-
-            # Use Popen for streaming instead of run()
-            escaped_prompt = prompt.replace("'", "'\\''")
-            process = await asyncio.create_subprocess_shell(
-                f"openclaw agent --local --session-id {new_session_id} --message '{escaped_prompt}' --json --timeout {timeout_seconds}",
+            process = await asyncio.create_subprocess_exec(
+                "openclaw",
+                "agent",
+                "--local",
+                "--session-id",
+                new_session_id,
+                "--message",
+                prompt,
+                "--json",
+                "--timeout",
+                str(timeout_seconds),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=8192,
             )
 
-            # Stream stdout and stderr in real-time
-            async def stream_output(stream, level):
-                """Stream output from a subprocess pipe"""
-                log_count = 0
+            stdout_chunks: List[str] = []
+            stderr_chunks: List[str] = []
+            log_count = 0
+
+            async def stream_output(
+                stream,
+                level: str,
+                chunks: List[str],
+                emit_live_logs: bool = True,
+            ) -> None:
+                nonlocal log_count
                 while True:
                     line = await stream.readline()
                     if not line:
                         break
+
                     line_text = line.decode("utf-8", errors="replace").strip()
+                    chunks.append(line_text)
+
                     if line_text:
-                        # Log to database (batch commits every 10 logs for performance)
-                        commit = (log_count + 1) % 10 == 0
-                        self._log_entry(level, line_text, commit=commit)
-                        log_count += 1
-                        # Call callback if provided
-                        if log_callback:
-                            await log_callback(level, line_text)
+                        if emit_live_logs:
+                            log_count += 1
+                            if (log_count % 10) == 0:
+                                self.db.commit()
 
+                            self._log_entry(level, line_text, commit=False)
+
+                            if log_callback:
+                                await log_callback(level, line_text)
+
+            await asyncio.wait_for(
+                asyncio.gather(
+                    # OpenClaw emits its final machine-readable JSON on stdout.
+                    # Buffer it for parsing, but don't flood Live Logs with raw JSON lines.
+                    stream_output(
+                        process.stdout, "INFO", stdout_chunks, emit_live_logs=False
+                    ),
+                    # Keep stderr visible because it contains actionable warnings/errors.
+                    stream_output(
+                        process.stderr, "WARN", stderr_chunks, emit_live_logs=True
+                    ),
+                ),
+                timeout=timeout_seconds + 30,
+            )
+
+            return_code = await asyncio.wait_for(
+                process.wait(), timeout=timeout_seconds + 30
+            )
+            stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
+            stderr_text = "\n".join(filter(None, stderr_chunks)).strip()
+
+            self._log_entry(
+                "INFO",
+                f"[OPENCLAW] Return code: {return_code}, stdout_len: {len(stdout_text)}, stderr_len: {len(stderr_text)}",
+                commit=True,
+            )
+
+            completed = subprocess.CompletedProcess(
+                args=[
+                    "openclaw",
+                    "agent",
+                    "--local",
+                    "--session-id",
+                    new_session_id,
+                ],
+                returncode=return_code,
+                stdout=stdout_text,
+                stderr=stderr_text,
+            )
+            return self._parse_openclaw_response(completed)
+
+        except asyncio.TimeoutError:
             try:
-                # Stream both stdout and stderr concurrently
-                await asyncio.gather(
-                    stream_output(process.stdout, "INFO"),
-                    stream_output(process.stderr, "WARN"),
-                )
-
-                # Wait for process to complete
-                await process.wait()
-
-                # Get final output
-                stdout, stderr = await process.communicate()
-                stdout_text = stdout.decode("utf-8", errors="replace")
-                stderr_text = stderr.decode("utf-8", errors="replace")
-
-                self._log_entry(
-                    "INFO",
-                    f"[OPENCLAW] Return code: {process.returncode}, stdout_len: {len(stdout_text)}, stderr_len: {len(stderr_text)}",
-                    commit=True,
-                )
-
-                if process.returncode == 0:
-                    try:
-                        output_data = json.loads(stdout_text.strip())
-
-                        # Extract text from payloads array
-                        output_text = ""
-                        if isinstance(output_data, dict) and "payloads" in output_data:
-                            payloads = output_data.get("payloads", [])
-                            if isinstance(payloads, list) and len(payloads) > 0:
-                                first_payload = payloads[0]
-                                if isinstance(first_payload, dict):
-                                    output_text = first_payload.get("text", "")
-
-                        self._log_entry(
-                            "INFO", f"Task execution completed: {output_text[:300]}"
-                        )
-
-                        return {
-                            "status": "completed",
-                            "mode": "real",
-                            "output": output_text,
-                            "logs": [],  # Logs already streamed via callback
-                            "execution_time": 0.0,
-                            "session_key": new_session_id,
-                            "note": "Real execution completed via OpenClaw CLI with streaming",
-                        }
-                    except json.JSONDecodeError:
-                        self._log_entry("INFO", f"OpenClaw output: {stdout_text[:500]}")
-                        return {
-                            "status": "completed",
-                            "mode": "real",
-                            "output": stdout_text,
-                            "logs": [],
-                            "execution_time": 0.0,
-                            "session_key": new_session_id,
-                            "note": "Real execution completed via OpenClaw CLI with streaming",
-                        }
-                else:
-                    raise Exception(f"OpenClaw CLI failed: {stderr_text}")
-
-            except asyncio.TimeoutError:
                 process.kill()
                 await process.wait()
-                self._log_entry(
-                    "ERROR", f"Task execution timed out: {timeout_seconds}s"
-                )
-                return {
-                    "status": "failed",
-                    "mode": "real",
-                    "output": f"Task timed out after {timeout_seconds} seconds",
-                    "logs": [],
-                    "execution_time": timeout_seconds,
-                    "error": "Timeout",
-                }
+            except Exception:
+                pass
 
-        except subprocess.TimeoutExpired as e:
-            self._log_entry("ERROR", f"Task execution timed out: {str(e)}")
-            return {
-                "status": "failed",
-                "mode": "real",
-                "output": f"Task timed out after {timeout_seconds} seconds",
-                "logs": [],
-                "execution_time": timeout_seconds,
-                "error": "Timeout",
-            }
+            raise OpenClawSessionError(f"Task timed out after {timeout_seconds}s")
+
         except Exception as e:
-            error_str = str(e)
-            self._log_entry("ERROR", f"Error executing task via OpenClaw: {error_str}")
-            return {
-                "status": "failed",
-                "mode": "real",
-                "output": f"Execution error: {error_str}",
-                "logs": [],
-                "execution_time": 0.0,
-                "error": error_str,
-            }
+            self._log_entry("ERROR", f"Real mode execution failed: {str(e)}")
+            raise
 
     async def track_tool_execution(
         self, tool_name: str, params: Dict[str, Any], result: Any, success: bool
@@ -1498,43 +1277,168 @@ class OpenClawSessionService:
 
     async def pause_session(self) -> None:
         """
-        Pause the OpenClaw session
+        Pause the OpenClaw session with full checkpoint save
+
+        Saves current execution state including:
+        - Session context (task description, project info)
+        - Orchestration workflow state (PLANNING, EXECUTING, etc.)
+        - Current step index and results from completed steps
+        - Tool execution history
 
         Raises:
             OpenClawSessionError: If pause fails
         """
         try:
-            self._log_entry("INFO", "Pausing OpenClaw session")
+            self._log_entry("INFO", "Pausing OpenClaw session with checkpoint")
 
-            # Save current state
-            context = await self.get_session_context()
-            # TODO: Implement actual pause logic
-            # Save process state, context, etc.
+            # Create checkpoint service instance
+            checkpoint_service = CheckpointService(self.db)
 
-            self._log_entry("INFO", "OpenClaw session paused")
+            # Get current session context
+            context_data = await self.get_session_context()
+
+            # Save orchestration state if available
+            orchestration_state = {}
+            if hasattr(self, "_orchestration_state"):
+                orchestration_state = self._orchestration_state
+
+            # Get step results from execution history
+            step_results = []
+            try:
+                tool_service = ToolTrackingService(self.db)
+                executions = tool_service.get_execution_history(
+                    session_id=self.session_id, limit=50
+                )
+
+                for exec_item in executions:
+                    step_results.append(
+                        {
+                            "step_type": "tool_execution",
+                            "tool_name": exec_item.tool_name,
+                            "parameters": (
+                                json.loads(exec_item.parameters)
+                                if isinstance(exec_item.parameters, str)
+                                else exec_item.parameters
+                            ),
+                            "result": exec_item.result,
+                            "success": exec_item.success,
+                            "executed_at": (
+                                exec_item.executed_at.isoformat()
+                                if exec_item.executed_at
+                                else None
+                            ),
+                        }
+                    )
+            except Exception:
+                pass  # Ignore tool tracking errors
+
+            # Find current step index (last executed step)
+            current_step_index = len(step_results) - 1 if step_results else 0
+
+            # Save checkpoint with detailed state
+            checkpoint_name = f"paused_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+
+            checkpoint_result = checkpoint_service.save_checkpoint(
+                session_id=self.session_id,
+                checkpoint_name=checkpoint_name,
+                context_data=context_data,
+                orchestration_state=orchestration_state,
+                current_step_index=current_step_index,
+                step_results=step_results,
+            )
+
+            # Log checkpoint details
+            self._log_entry(
+                "INFO",
+                f"Checkpoint saved: {checkpoint_result['path']} (name: {checkpoint_name})",
+            )
+
+            # Terminate the OpenClaw process gracefully
+            await self.cleanup()
+
+            self._log_entry(
+                "INFO", f"OpenClaw session paused - Checkpoint saved: {checkpoint_name}"
+            )
 
         except Exception as e:
             error_msg = f"Failed to pause session: {str(e)}"
             self._log_entry("ERROR", error_msg)
             raise OpenClawSessionError(error_msg)
 
-    async def resume_session(self) -> None:
+    async def resume_session(self, checkpoint_name: Optional[str] = None) -> str:
         """
-        Resume a paused session
+        Resume a paused session from a checkpoint
+
+        Args:
+            checkpoint_name: Specific checkpoint to restore (optional - uses latest if not specified)
+
+        Returns:
+            OpenClaw session key for resumed execution
 
         Raises:
             OpenClawSessionError: If resume fails
         """
         try:
-            self._log_entry("INFO", "Resuming OpenClaw session")
+            self._log_entry("INFO", "Resuming OpenClaw session from checkpoint")
 
-            # Get saved context
-            context = await self.get_session_context()
-            # TODO: Implement actual resume logic
-            # Restore process state, context, etc.
+            # Create checkpoint service instance
+            checkpoint_service = CheckpointService(self.db)
 
-            self._log_entry("INFO", "OpenClaw session resumed")
+            # Load checkpoint data
+            checkpoint_data = checkpoint_service.load_checkpoint(
+                session_id=self.session_id, checkpoint_name=checkpoint_name
+            )
 
+            # Restore context
+            context_data = checkpoint_data.get("context", {})
+            orchestration_state = checkpoint_data.get("orchestration_state", {})
+            step_results = checkpoint_data.get("step_results", [])
+            current_step_index = checkpoint_data.get("current_step_index", 0)
+
+            # Reconstruct task description from context (if available)
+            task_description = (
+                context_data.get("task_description")
+                or context_data.get("description")
+                or "Resumed session"
+            )
+
+            # Create new OpenClaw session with restored context
+            # Include information about resumed execution in the prompt
+            resume_context = {
+                **context_data,
+                "resumed_from_checkpoint": True,
+                "checkpoint_name": checkpoint_data.get("checkpoint_name"),
+                "completed_steps_count": len(step_results),
+                "last_step_index": current_step_index,
+                "previous_orchestration_state": orchestration_state.get("status", ""),
+                "previous_plan_summary": (
+                    json.dumps(orchestration_state.get("plan", []))[:500]
+                    if orchestration_state.get("plan")
+                    else None
+                ),
+            }
+
+            # Create OpenClaw session
+            session_key = await self.create_openclaw_session(
+                task_description=task_description, context=resume_context
+            )
+
+            # Log successful resume with checkpoint info
+            self._log_entry(
+                "INFO",
+                f"OpenClaw session resumed from checkpoint: {checkpoint_data.get('checkpoint_name')}",
+            )
+            self._log_entry(
+                "INFO",
+                f"Restored state - Completed steps: {len(step_results)}, Current step index: {current_step_index}, Previous status: {orchestration_state.get('status', 'unknown')}",
+            )
+
+            return session_key
+
+        except CheckpointError as e:
+            error_msg = f"No valid checkpoint found to resume from: {str(e)}"
+            self._log_entry("ERROR", error_msg)
+            raise OpenClawSessionError(error_msg)
         except Exception as e:
             error_msg = f"Failed to resume session: {str(e)}"
             self._log_entry("ERROR", error_msg)

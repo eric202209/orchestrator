@@ -111,7 +111,7 @@ export const projectsAPI = {
     apiClient.post<Project>('/projects', data),
 
   update: (id: number, data: Partial<Project>) =>
-    apiClient.patch<Project>(`/projects/${id}`, data),
+    apiClient.put<Project>(`/projects/${id}`, data),
 
   delete: (id: number) => apiClient.delete(`/projects/${id}`),
 
@@ -165,7 +165,17 @@ export const tasksAPI = {
 
   complete: (id: number) => apiClient.post(`/tasks/${id}/complete`),
 
-  execute: (sessionId: number, data: { task: string; timeout_seconds?: number; use_demo_mode?: boolean }) =>
+  execute: (
+    sessionId: number,
+    data: {
+      task: string;
+      timeout_seconds?: number;
+      use_demo_mode?: boolean;
+      task_id?: number;
+      log_timeout_minutes?: number;
+      monitor_logs?: boolean;
+    }
+  ) =>
     apiClient.post(`/sessions/${sessionId}/execute`, data, {
       timeout: 600000, // 10 minutes for task execution (OpenClaw CLI can take a while for complex tasks)
     }),
@@ -219,10 +229,91 @@ export const sessionsAPI = {
 
   resume: (id: number) => apiClient.post(`/sessions/${id}/resume`),
 
+  // Overwrite protection endpoints
+  checkOverwrites: (sessionId: number, data: { project_id: number; task_subfolder: string; planned_files?: string[] }) =>
+    apiClient.post<{ 
+      safe_to_proceed: boolean;
+      workspace_exists: boolean;
+      file_count: number;
+      would_overwrite: boolean;
+      warning_message?: string;
+      conflicting_files: string[];
+    }>(`/sessions/${sessionId}/check-overwrites`, data),
+
+  createBackup: (sessionId: number) =>
+    apiClient.post<{ 
+      success: boolean;
+      backup_path?: string;
+      files_backed_up?: number;
+      error?: string;
+    }>(`/sessions/${sessionId}/create-backup`),
+
+  getWorkspaceInfo: (sessionId: number) =>
+    apiClient.get<{ 
+      exists: boolean;
+      path?: string;
+      file_count: number;
+      last_modified?: string;
+      would_overwrite: boolean;
+    }>(`/sessions/${sessionId}/workspace-info`),
+
+  // Checkpoint management endpoints
+  saveCheckpoint: (sessionId: number, checkpointName?: string) =>
+    apiClient.post<{ 
+      success: boolean;
+      checkpoint_name: string;
+      path: string;
+      created_at: string;
+    }>(`/sessions/${sessionId}/checkpoints?checkpoint_name=${checkpointName || 'manual'}`),
+
+  listCheckpoints: (sessionId: number) =>
+    apiClient.get<Array<{ 
+      name: string;
+      created_at: string;
+      step_index?: number;
+      completed_steps: number;
+    }>>(`/sessions/${sessionId}/checkpoints`),
+
+  loadCheckpoint: (sessionId: number, checkpointName?: string) =>
+    apiClient.post<{ 
+      success: boolean;
+      checkpoint_name: string;
+      context: Record<string, unknown>;
+      orchestration_state: Record<string, unknown>;
+      current_step_index?: number;
+      step_results_count: number;
+      created_at: string;
+    }>(`/sessions/${sessionId}/checkpoints/load?checkpoint_name=${checkpointName || ''}`),
+
+  deleteCheckpoint: (sessionId: number, checkpointName: string) =>
+    apiClient.post<{ 
+      success: boolean;
+      message: string;
+    }>(`/sessions/${sessionId}/checkpoints/delete`, { checkpoint_name: checkpointName }),
+
+  cleanupCheckpoints: (sessionId: number, keepLatest?: number, maxAgeHours?: number) =>
+    apiClient.post<{ 
+      success: boolean;
+      deleted_count: number;
+      kept_count: number;
+    }>(`/sessions/${sessionId}/checkpoints/cleanup`, { 
+      keep_latest: keepLatest || 3,
+      max_age_hours: maxAgeHours || 24
+    }),
+
+  autoSaveCheckpoint: (sessionId: number, eventType?: string) =>
+    apiClient.post<{ 
+      success: boolean;
+      checkpoint_name: string;
+      event_type: string;
+      path: string;
+      created_at: string;
+    }>(`/sessions/${sessionId}/checkpoints/auto-save?event_type=${eventType || 'pause'}`),
+
   startOpenClaw: (id: number, taskDescription: string) =>
   apiClient.post(`/sessions/${id}/start-openclaw`, { task_description: taskDescription }),
 
-  execute: (id: number, data: { task: string; timeout_seconds?: number }) =>
+  execute: (id: number, data: { task: string; timeout_seconds?: number; task_id?: number }) =>
     apiClient.post(`/sessions/${id}/execute`, data),
 
   getLogs: (id: number) => apiClient.get<LogEntry[]>(`/sessions/${id}/logs`),

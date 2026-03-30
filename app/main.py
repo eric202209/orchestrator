@@ -1,5 +1,6 @@
 """AI Dev Agent Orchestrator - FastAPI Application"""
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -10,6 +11,25 @@ from app.celery_app import celery_app
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application startup and shutdown lifecycle"""
+    # Startup
+    logger.info("=" * 50)
+    logger.info("🚀 Orchestrator API starting up...")
+    logger.info(f"Version: {settings.VERSION}")
+    logger.info(f"Port: {settings.PORT}")
+    logger.info("=" * 50)
+
+    yield
+
+    # Shutdown
+    logger.info("=" * 50)
+    logger.info("🛑 Orchestrator API shutting down...")
+    logger.info("Cleaning up WebSocket connections and resources...")
+    logger.info("=" * 50)
 
 
 # Custom CORS middleware to handle OPTIONS before router
@@ -87,6 +107,7 @@ app = FastAPI(
     description="AI Development Agent Orchestrator API",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,  # Add lifespan handler for graceful shutdown
 )
 
 # Add standard FastAPI CORS middleware (handles all requests including POST)
@@ -130,8 +151,8 @@ async def general_exception_handler(request: Request, exc: Exception):
     )
 
 
-# Include routers
-app.include_router(api_router, prefix=settings.API_V1_STR)
+# Include routers (API_V1_STR = "/api/v1")
+app.include_router(api_router, prefix=settings.API_V1_STR, tags=["API"])
 
 
 # Initialize Celery Beat periodic tasks
