@@ -15,7 +15,7 @@
 
     <item
         android:id="@+id/action_filter_active"
-        android:title="Filter: Active"
+        android:title="Filter: Running"
         app:showAsAction="never"/>
 
     <item

@@ -7,10 +7,8 @@ import android.view.MenuItem
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.appcompat.widget.Toolbar
 import androidx.lifecycle.ViewModelProvider
 import androidx.recyclerview.widget.LinearLayoutManager
-import androidx.recyclerview.widget.RecyclerView
 import com.user.ClawMobileApplication
 import com.user.R
 import com.user.data.Task
@@ -64,35 +62,44 @@ class TaskListActivity : AppCompatActivity() {
     }
 
     private fun setupObservers() {
+        viewModel.allTasks.observe(this) { tasks ->
+            submitTasks(tasks)
+            updateEmptyState(tasks)
+        }
+
         viewModel.pendingTasks.observe(this) { tasks ->
             binding.pendingCount.text = tasks.size.toString()
-            updatePendingTasks(tasks)
-            updateEmptyState()
         }
 
-        viewModel.activeTasks.observe(this) { tasks ->
-            updateActiveTasks(tasks)
-            updateEmptyState()
+        viewModel.runningTasks.observe(this) { tasks ->
+            binding.activeCount.text = tasks.size.toString()
         }
     }
 
-    private fun updatePendingTasks(tasks: List<Task>) {
-        taskAdapter.submitList(tasks.filter { it.status == TaskStatus.PENDING })
+    private fun dashboardSortRank(status: TaskStatus): Int {
+        return when (status) {
+            TaskStatus.PENDING -> 0
+            TaskStatus.IN_PROGRESS -> 1
+            TaskStatus.APPROVED -> 2
+            TaskStatus.COMPLETED -> 3
+            TaskStatus.FAILED -> 4
+            TaskStatus.REJECTED -> 5
+            TaskStatus.TIMEOUT -> 6
+        }
     }
 
-    private fun updateActiveTasks(tasks: List<Task>) {
-        taskAdapter.submitList(tasks.filter {
-            it.status == TaskStatus.APPROVED || it.status == TaskStatus.IN_PROGRESS
-        })
+    private fun submitTasks(tasks: List<Task>) {
+        taskAdapter.submitList(
+            tasks.sortedWith(
+                compareBy<Task> { dashboardSortRank(it.status) }
+                    .thenByDescending { it.priority }
+                    .thenByDescending { it.createdAt }
+            )
+        )
     }
 
-    private fun updateEmptyState() {
-        val pendingTasks = viewModel.pendingTasks.value?.filter { it.status == TaskStatus.PENDING }?.isEmpty() ?: true
-        val activeTasks = viewModel.activeTasks.value?.filter {
-            it.status == TaskStatus.APPROVED || it.status == TaskStatus.IN_PROGRESS
-        }?.isEmpty() ?: true
-
-        binding.emptyView.visibility = if (pendingTasks && activeTasks) TextView.VISIBLE else TextView.GONE
+    private fun updateEmptyState(tasks: List<Task>) {
+        binding.emptyView.visibility = if (tasks.isEmpty()) TextView.VISIBLE else TextView.GONE
     }
 
     private fun approveTask(task: Task) {
@@ -138,13 +145,15 @@ class TaskListActivity : AppCompatActivity() {
                 true
             }
             R.id.action_filter_pending -> {
-                taskAdapter.submitList(viewModel.pendingTasks.value?.filter { it.status == TaskStatus.PENDING } ?: emptyList())
+                submitTasks(viewModel.pendingTasks.value.orEmpty())
                 true
             }
             R.id.action_filter_active -> {
-                taskAdapter.submitList(viewModel.activeTasks.value?.filter {
-                    it.status == TaskStatus.APPROVED || it.status == TaskStatus.IN_PROGRESS
-                } ?: emptyList())
+                submitTasks(viewModel.runningTasks.value.orEmpty())
+                true
+            }
+            R.id.action_filter_all -> {
+                submitTasks(viewModel.allTasks.value.orEmpty())
                 true
             }
             else -> super.onOptionsItemSelected(item)

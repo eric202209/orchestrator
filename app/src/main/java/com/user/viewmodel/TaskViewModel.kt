@@ -21,11 +21,14 @@ class TaskViewModel(
     private val sessionId: String
 ) : ViewModel() {
 
+    private val _allTasks = MutableLiveData<List<Task>>()
+    val allTasks: LiveData<List<Task>> = _allTasks
+
     private val _pendingTasks = MutableLiveData<List<Task>>()
     val pendingTasks: LiveData<List<Task>> = _pendingTasks
 
-    private val _activeTasks = MutableLiveData<List<Task>>()
-    val activeTasks: LiveData<List<Task>> = _activeTasks
+    private val _runningTasks = MutableLiveData<List<Task>>()
+    val runningTasks: LiveData<List<Task>> = _runningTasks
 
     private val _currentTask = MutableLiveData<Task?>()
     val currentTask: LiveData<Task?> = _currentTask
@@ -44,10 +47,9 @@ class TaskViewModel(
         loadTasksJob = CoroutineScope(Dispatchers.Main).launch {
             try {
                 val allTasks = repository.getTasksBySession(sessionId).first()
+                _allTasks.value = allTasks
                 _pendingTasks.value = allTasks.filter { it.status == TaskStatus.PENDING }
-                _activeTasks.value = allTasks.filter {
-                    it.status == TaskStatus.APPROVED || it.status == TaskStatus.IN_PROGRESS
-                }
+                _runningTasks.value = allTasks.filter { it.status == TaskStatus.IN_PROGRESS }
             } catch (e: Exception) {
                 e.printStackTrace()
             }
