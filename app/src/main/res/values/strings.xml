@@ -1,6 +1,6 @@
 <resources>
-    <string name="app_name">OpenClaw Mobile</string>
-    <string name="toolbar_title">OpenClaw Mobile</string>
+    <string name="app_name">Claw Mobile</string>
+    <string name="toolbar_title">Claw Mobile</string>
     <string name="chat_status_disconnected">Disconnected</string>
     <string name="typing_indicator">Agent is typing…</string>
     <string name="message_hint">Message</string>
