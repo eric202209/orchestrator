@@ -1043,7 +1043,7 @@ function SessionDashboard() {
                     className="flex items-center justify-center gap-2 px-4 py-3 bg-green-500 hover:bg-green-600 text-white rounded-lg transition-all font-medium disabled:opacity-50"
                   >
                     <Play className="h-5 w-5" />
-                    Start Session
+                    Start
                   </button>
                 )}
                 
