@@ -16,6 +16,7 @@
         <item name="actionOverflowMenuStyle">@style/DarkPopupMenu</item>
         <item name="android:panelBackground">@color/ai_bubble</item>
         <item name="android:colorBackground">@color/background</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
     </style>
 </resources>
 

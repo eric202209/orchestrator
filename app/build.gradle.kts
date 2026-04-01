@@ -18,6 +18,9 @@ val defaultServerUrl =
         .replace("\\", "\\\\")
         .replace("\"", "\\\"")
 
+val mobileGatewayApiKey =
+    localProperties.getProperty("mobile_gateway_api_key") ?: ""
+
 android {
     namespace = "com.user"
     compileSdk = 35
@@ -30,6 +33,11 @@ android {
         versionName = "1.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "DEFAULT_SERVER_URL", "\"$defaultServerUrl\"")
+        if (mobileGatewayApiKey.isNotEmpty()) {
+            buildConfigField("String", "MOBILE_GATEWAY_API_KEY", "\"${mobileGatewayApiKey}\"")
+        } else {
+            buildConfigField("String", "MOBILE_GATEWAY_API_KEY", "\"\"")
+        }
     }
 
     buildTypes {
@@ -82,7 +90,7 @@ dependencies {
     implementation(libs.coroutines)
     implementation(libs.lifecycle.runtime)
     implementation(libs.lifecycle.viewmodel)
-    
+
     implementation("com.tom-roush:pdfbox-android:2.0.27.0") {
         exclude(group = "org.bouncycastle", module = "bcprov-jdk15to18")
     }
@@ -97,3 +105,4 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.espresso)
 }
+

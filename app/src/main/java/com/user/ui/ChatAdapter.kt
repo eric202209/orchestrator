@@ -5,6 +5,8 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
+import android.os.Handler
+import android.os.Looper
 import android.text.format.DateUtils
 import android.util.Base64
 import android.view.LayoutInflater
@@ -18,6 +20,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.user.data.ChatMessage
 import com.user.data.MessageStatus
 import com.user.databinding.ItemMessageBinding
+import java.net.HttpURLConnection
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -240,25 +243,55 @@ class ChatAdapter : ListAdapter<ChatMessage, ChatAdapter.MessageViewHolder>(Diff
             }
         }
 
+        // Track the last loaded image URL for this ViewHolder to detect recycling
+        private var currentImageUrl: String? = null
+
         private fun loadImageFromUrl(url: String) {
+            val viewHolder = this@MessageViewHolder
+            val messagePosition = viewHolder.getAdapterPosition()
+
+            // If ViewHolder has been recycled, skip loading
+            if (messagePosition == RecyclerView.NO_POSITION) return
+
+            // Cancel previous request if same ViewHolder is being reused for different item
+            if (currentImageUrl != null && currentImageUrl != url) {
+                currentImageUrl = null
+            }
+
+            currentImageUrl = url
+
+            // Load image in background thread
             Thread {
+                var connection: HttpURLConnection? = null
                 try {
-                    val connection = java.net.URL(url).openConnection()
+                    val imageUrl = url  // Capture URL for this specific load operation
+                    connection = java.net.URL(imageUrl).openConnection() as HttpURLConnection
                     connection.connectTimeout = 10000
                     connection.readTimeout = 10000
-                    connection.connect()
-                    val bitmap = BitmapFactory.decodeStream(connection.getInputStream())
+                    connection.requestMethod = "GET"
+
+                    val bitmap = BitmapFactory.decodeStream(connection.inputStream)
+
+                    // Check if ViewHolder is still valid and not recycled
                     binding.root.post {
-                        if (bitmap != null) {
+                        if (getAdapterPosition() != RecyclerView.NO_POSITION &&
+                            currentImageUrl == imageUrl) {
                             binding.messageImage.setImageBitmap(bitmap)
+                            binding.messageImage.visibility = View.VISIBLE
                         } else {
                             binding.messageImage.visibility = View.GONE
                         }
                     }
-                } catch (_: Exception) {
+                } catch (e: Exception) {
                     binding.root.post {
-                        binding.messageImage.visibility = View.GONE
+                        if (getAdapterPosition() != RecyclerView.NO_POSITION &&
+                            currentImageUrl == url) {
+                            // Only show error if this ViewHolder is still showing the same item
+                            binding.messageImage.visibility = View.GONE
+                        }
                     }
+                } finally {
+                    connection?.disconnect()
                 }
             }.start()
         }

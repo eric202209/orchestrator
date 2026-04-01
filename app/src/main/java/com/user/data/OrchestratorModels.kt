@@ -29,41 +29,85 @@ data class DashboardResponse(
 )
 
 /**
- * Session statistics from Orchestrator
+ * Session statistics from Orchestrator API response
+ *
+ * Orchestrator returns: { "total": N, "active": N, "running": N }
  */
 data class OrchestratorSessionStats(
-    val total: Int,
-    val running: Int,
-    val completed: Int
+    val total: Int = 0,
+    @SerializedName("active")
+    val active: Int = 0,
+    // Support both 'running' and 'inProgress' field names
+    @SerializedName("running")
+    val running: Int = 0,
+    @SerializedName("inProgress")
+    val inProgress: Int = 0,
+    // Support both 'completed' (legacy) and 'active' field names
+    @SerializedName("completed")
+    val completed: Int = 0
 )
 
 /**
- * Task statistics from Orchestrator
+ * Task statistics from Orchestrator API response
+ *
+ * Orchestrator returns: { "total": N, "done": N, "running": N, "failed": N, "completion_rate": "X.X%" }
  */
 data class OrchestratorTaskStats(
-    val total: Int,
-    val pending: Int,
-    val inProgress: Int,
-    val approved: Int,
-    val done: Int,
-    val failed: Int,
-    val completionRate: String
+    val total: Int = 0,
+    val pending: Int = 0,
+    // Support both 'inProgress' and 'running' field names from orchestrator
+    @SerializedName("inProgress")
+    val inProgress: Int = 0,
+    @SerializedName("running")
+    val running: Int = 0,
+    val approved: Int = 0,
+    val done: Int = 0,
+    val failed: Int = 0,
+    // Use snake_case as returned by Orchestrator API
+    @SerializedName("completion_rate")
+    val completionRate: String = "N/A"
 )
 
 /**
  * Project from Orchestrator API
+ * Supports both 'id' (from orchestrator) and 'projectId' formats
  */
 data class Project(
-    val projectId: String,
+    // Support both field names that orchestrator might use
+    @SerializedName("id")
+    val id: String = "",
+    @SerializedName("projectId")
+    val _projectId: String = "",
     val name: String,
     val description: String? = null,
+    val status: String = "unknown",
+    val createdAt: String = "",
+    val updatedAt: String = ""
+) {
+    // Return id if set, otherwise projectId for backwards compatibility
+    fun getProjectId(): String = if (id.isNotEmpty()) id else _projectId
+}
+
+/**
+ * Task from Orchestrator API (internal model matching exact API response format)
+ */
+data class OrchestTaskResponse(
+    @SerializedName("id")
+    val id: Int,
+    val title: String,
+    val description: String? = null,
     val status: String,
+    @SerializedName("project_id")
+    val projectId: Int,
+    @SerializedName("created_at")
     val createdAt: String,
-    val updatedAt: String
+    @SerializedName("updated_at")
+    val updatedAt: String? = null,
+    val priority: Int = 0
 )
 
 /**
- * Task from Orchestrator API
+ * Task from Orchestrator API (mobile app model - string IDs for compatibility)
  */
 data class OrchestTask(
     val taskId: String,
@@ -75,6 +119,36 @@ data class OrchestTask(
     val createdAt: String,
     val updatedAt: String,
     val priority: Int = 0
+) {
+    companion object {
+        /**
+         * Convert from OrchestTaskResponse (API response model with int IDs) to OrchestTask
+         */
+        fun fromResponse(response: OrchestTaskResponse): OrchestTask {
+            return OrchestTask(
+                taskId = response.id.toString(),
+                title = response.title,
+                description = response.description,
+                status = response.status,
+                projectId = response.projectId.toString(),
+                sessionId = null,
+                createdAt = response.createdAt,
+                updatedAt = response.updatedAt ?: response.createdAt,
+                priority = response.priority
+            )
+        }
+    }
+}
+
+/**
+ * Response wrapper for /api/v1/mobile/projects/{projectId}/tasks endpoint
+ */
+data class ProjectTasksResponse(
+    @SerializedName("project_id")
+    val projectId: Int,
+    val tasks: List<OrchestTaskResponse>,
+    @SerializedName("total")
+    val total: Int
 )
 
 /**
@@ -84,4 +158,26 @@ data class OrchestratorApiResponse<T>(
     val success: Boolean,
     val data: T? = null,
     val error: String? = null
+)
+
+/**
+ * Response wrapper for project status endpoint
+ */
+data class ProjectStatusResponse(
+    val projectId: String,
+    val projectName: String,
+    val description: String? = null,
+    val activeSessions: Int = 0,
+    val tasks: TaskStatsResponse? = null
+)
+
+/**
+ * Task statistics for project status response
+ */
+data class TaskStatsResponse(
+    val total: Int = 0,
+    val pending: Int = 0,
+    val running: Int = 0,
+    val done: Int = 0,
+    val failed: Int = 0
 )

@@ -53,15 +53,7 @@ class SessionsActivity : AppCompatActivity() {
         menu.add(0, 1, 0, "Newest First").setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
         menu.add(0, 2, 0, "Oldest First").setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
         menu.add(0, 3, 0, "Delete All").setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
-        for (i in 0 until menu.size()) {
-            val item  = menu.getItem(i)
-            val title = android.text.SpannableString(item.title)
-            title.setSpan(
-                android.text.style.ForegroundColorSpan(android.graphics.Color.BLACK),
-                0, title.length, android.text.Spannable.SPAN_INCLUSIVE_INCLUSIVE
-            )
-            item.title = title
-        }
+
         return true
     }
 

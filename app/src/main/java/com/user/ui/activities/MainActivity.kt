@@ -8,7 +8,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.speech.RecognizerIntent
-import android.text.SpannableString
 import android.view.KeyEvent
 import android.view.Menu
 import android.view.MenuItem
@@ -23,10 +22,6 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
-import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
-import androidx.core.view.updatePadding
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.bottomsheet.BottomSheetDialog
@@ -39,7 +34,6 @@ import com.user.ui.ChatAdapter
 import com.user.ui.tasks.TaskListActivity
 import com.user.ui.tools.GitHubActivity
 import com.user.viewmodel.ChatViewModel
-import kotlin.math.max
 
 /**
  * Main chat activity - primary interface for user interaction
@@ -80,13 +74,6 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
         setSupportActionBar(binding.toolbar)
 
-        WindowCompat.setDecorFitsSystemWindows(window, false)
-        WindowInsetsControllerCompat(window, binding.root).apply {
-            isAppearanceLightStatusBars = false
-            isAppearanceLightNavigationBars = false
-        }
-        applyEdgeToEdgeInsets()
-
         if (PrefsManager(this).gatewayToken.isEmpty()) {
             Toast.makeText(this, "Please enter your Gateway Token", Toast.LENGTH_LONG).show()
             startActivity(Intent(this, SettingsActivity::class.java))
@@ -113,39 +100,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         ViewCompat.requestApplyInsets(binding.root)
-    }
-
-    private fun applyEdgeToEdgeInsets() {
-        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
-            val systemBars = insets.getInsets(
-                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
-            )
-            val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
-            val bottomInset = max(systemBars.bottom, imeInsets.bottom)
-
-            binding.appBar.updatePadding(top = systemBars.top)
-            binding.contentContainer.updatePadding(
-                left = systemBars.left,
-                right = systemBars.right
-            )
-            binding.recyclerView.updatePadding(
-                left = systemBars.left + dpToPx(12),
-                top = dpToPx(8),
-                right = systemBars.right + dpToPx(12),
-                bottom = dpToPx(8)
-            )
-            binding.typingIndicator.updatePadding(
-                left = dpToPx(4) + systemBars.left,
-                right = dpToPx(4) + systemBars.right
-            )
-            binding.bottomBar.updatePadding(
-                left = dpToPx(8) + systemBars.left,
-                top = dpToPx(8),
-                right = dpToPx(8) + systemBars.right,
-                bottom = dpToPx(8) + bottomInset
-            )
-            insets
-        }
     }
 
     private fun setupRecyclerView() {
@@ -426,18 +380,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
         menuInflater.inflate(R.menu.main_menu, menu)
-        val color = ContextCompat.getColor(this, R.color.text_primary)
-        for (i in 0 until menu.size()) {
-            val item = menu.getItem(i)
-            val title = SpannableString(item.title)
-            title.setSpan(
-                android.text.style.ForegroundColorSpan(color),
-                0,
-                title.length,
-                android.text.Spannable.SPAN_INCLUSIVE_INCLUSIVE
-            )
-            item.title = title
-        }
         return true
     }
 

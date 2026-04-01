@@ -24,6 +24,8 @@
 
     <!-- Orchestrator Integration -->
     <string name="orchestrator_stats">📊 Orchestrator:\n%d projects\nTotal: %d | In Progress: %d | Done: %d | Failed: %d</string>
+    <string name="orchestrator_dashboard_stats">📊 Dashboard:\nProjects: %d | Tasks: %d\nRunning: %d | Pending: %d | Done: %d | Failed: %d</string>
+    <string name="local_stats">Tasks: %d | Running: %d | Pending: %d | Completed: %d</string>
     <string name="orchestrator_syncing">Syncing with Orchestrator…</string>
     <string name="settings_orchestrator_title">Orchestrator Settings</string>
     <string name="settings_orchestrator_url">Orchestrator Server URL</string>
@@ -34,16 +36,16 @@
     <string name="settings_gateway_title">GX10 OpenClaw Gateway</string>
     <string name="settings_server_url">Server URL</string>
     <string name="settings_server_url_hint">http://TAILSCALE_OR_GX10_IP:8000</string>
-    <string name="settings_server_url_desc">Recommended path:\n• ClawMobile -&gt; Tailscale -&gt; GX10 host -&gt; OpenClaw Gateway :8000\n\nExamples:\n• Phone over Tailscale -&gt; http://100.x.y.z:8000\n• Same LAN phone -&gt; http://GX10_LAN_IP:8000\n• Emulator tunnel testing -&gt; http://10.0.2.2:18789\n\nDo not use the Orchestrator dashboard/API URL here. Port 8080 is separate.</string>
+    <string name="settings_server_url_desc">Recommended path:\n• ClawMobile -&gt; Tailscale -&gt; GX10 host -&gt; OpenClaw Gateway :8000\n\nExamples:\n• Phone over Tailscale -&gt; http://xxx.x.y.z:8000\n• Same LAN phone -&gt; http://GX10_LAN_IP:8000\n• Emulator tunnel testing -&gt; http://xx.x.x.x:18789\n\nDo not use the Orchestrator dashboard/API URL here. Port 8080 is separate.</string>
     <string name="settings_gateway_token">Gateway Token</string>
-    <string name="settings_gateway_token_hint">gateway.auth.token from openclaw.json</string>
-    <string name="settings_gateway_token_desc">Copy openclaw gateway.auth.token.\nNot directly to the Orchestrator API.</string>
+    <string name="settings_gateway_token_hint">Enter API key or use auto-filled value from local.properties</string>
+    <string name="settings_gateway_token_desc">The MOBILE_GATEWAY_API_KEY from your local.properties file\n• This is the ONLY API key - used for both Gateway and Orchestrator\n• The key will be pre-filled if set in local.properties\n• Make sure local.properties exists and contains mobile_gateway_api_key=your_key</string>
 
     <string name="settings_orchestrator_dashboard_title">Orchestrator Dashboard API (Optional)</string>
     <string name="settings_orchestrator_server_url_hint">http://GX10_IP:8080/api/v1</string>
-    <string name="settings_orchestrator_api_key_desc">Mobile Gateway API Key</string>
-    <string name="settings_orchestrator_api_key_hint">oc_orche...</string>
-    <string name="settings_orchestrator_desc">This key allows ClawMobile to sync project/task stats from Orchestrator dashboard.</string>
+    <string name="settings_orchestrator_api_key_desc">Same as Gateway Token - there\'s only ONE API key!\n• Auto-filled from local.properties if configured\n• The value is synchronized when you save settings\n• No need to enter separately - it uses the Gateway Token</string>
+    <string name="settings_orchestrator_api_key_hint">Same as Gateway Token (auto-synced)</string>
+    <string name="settings_orchestrator_desc">This key allows ClawMobile to sync project/task stats from Orchestrator dashboard. The API uses X-OpenClaw-API-Key header for authentication.</string>
 
     <string name="settings_github_title">GitHub Integration (Optional)</string>
     <string name="settings_github_token">Personal Access Token</string>

@@ -5,7 +5,8 @@
     android:id="@+id/root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/background">
+    android:background="@color/background"
+    android:fitsSystemWindows="true">
 
     <com.google.android.material.appbar.AppBarLayout
         android:id="@+id/appBar"
@@ -57,7 +58,8 @@
                 android:minHeight="48dp"
                 android:backgroundTint="@color/divider"
                 android:gravity="center_vertical|end"
-                android:popupBackground="@color/ai_bubble" />
+                android:popupBackground="@color/ai_bubble"
+                android:dropDownHorizontalOffset="-16dp" />
         </LinearLayout>
     </com.google.android.material.appbar.AppBarLayout>
 
@@ -228,5 +230,11 @@
         </LinearLayout>
     </androidx.constraintlayout.widget.ConstraintLayout>
 </androidx.coordinatorlayout.widget.CoordinatorLayout>
+
+
+
+
+
+
 
 

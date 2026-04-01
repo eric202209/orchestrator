@@ -11,6 +11,8 @@
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">false</item>
+        <!-- Allow layout to extend into display cutouts (corner notches) -->
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
         <item name="popupMenuStyle">@style/DarkPopupMenu</item>
         <item name="android:popupMenuStyle">@style/DarkPopupMenu</item>
         <item name="actionOverflowMenuStyle">@style/DarkPopupMenu</item>
@@ -18,4 +20,3 @@
         <item name="android:colorBackground">@color/background</item>
     </style>
 </resources>
-
