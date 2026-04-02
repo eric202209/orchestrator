@@ -6,11 +6,12 @@ import com.google.gson.annotations.SerializedName
  * Recent activity item from Orchestrator API
  */
 data class RecentActivity(
-    val id: String,
-    val title: String,
-    val description: String,
-    val type: String,
-    val timestamp: String
+    @SerializedName("level")
+    val level: String = "INFO",
+    val message: String = "",
+    val timestamp: String = "",
+    @SerializedName("session_id")
+    val sessionId: Int = 0
 )
 
 /**

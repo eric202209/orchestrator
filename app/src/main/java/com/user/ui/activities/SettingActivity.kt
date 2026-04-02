@@ -14,15 +14,19 @@ import com.user.databinding.ActivitySettingsBinding
  *
  * OpenClaw Gateway (Required):
  * - Local WiFi (phone on same network as host): http://<host-lan-ip>:18789
- *   Example: http://192.168.1.100:18789
+ *   Example: If your computer has IP xx.x.x.xxx, use http://xx.x.x.xxx:18789
  * - Android Emulator: http://localhost:18789 or http://xxx.x.x.x:18789
  * - Mobile Data / Remote: Tailscale IP of host:18789
  *
  * Orchestrator Dashboard/API (Optional):
- * - Android Emulator: http://xxx.xx.x.x:8080 (Docker bridge network)
- *   Dashboard UI: http://xxx.xx.x.x:3000
  * - Local WiFi (phone on same network as host): http://<host-lan-ip>:8080
- *   (Requires Docker port mapping: -p 8080:8080)
+ *   Example: If your computer has IP xx.x.x.xxx, use http://xx.x.x.xxx:8080
+ * - Android Emulator ONLY: http://xxx.xx.x.x:8080 (Docker bridge network)
+ *   Dashboard UI: http://xxx.xx.x.x:3000
+ *
+ * IMPORTANT: Find your host machine's LAN IP with: ip addr show | grep "inet "
+ * Look for the WiFi/Ethernet interface (e.g., eth0, wlan0), NOT lo or docker0
+ * Example output: inet xx.x.x.xxx/xx brd ... scope global wlP9s9
  *
  * Note: Orchestrator integration is optional. The app works fully without it,
  * using only local data from the OpenClaw Gateway.
@@ -82,8 +86,19 @@ class SettingsActivity : AppCompatActivity() {
             val githubApiUrl = binding.githubApiUrlInput.text.toString().trim()
             val githubDefaultRepo = binding.githubDefaultRepoInput.text.toString().trim()
 
-            // Orchestrator settings (optional)
-            val orchestratorServerUrl = binding.orchestratorServerUrlInput.text.toString().trim()
+            // Orchestrator settings (optional) - auto-correct common URL mistakes
+            var orchestratorServerUrl = binding.orchestratorServerUrlInput.text.toString().trim()
+            if (orchestratorServerUrl.isNotEmpty()) {
+                orchestratorServerUrl = orchestratorServerUrl.trimEnd('/')
+                if (orchestratorServerUrl.endsWith("/api/v1")) {
+                    orchestratorServerUrl = orchestratorServerUrl.removeSuffix("/api/v1")
+                    Toast.makeText(
+                        this,
+                        "Auto-corrected: removed /api/v1 suffix. URL will be saved as $orchestratorServerUrl",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
             val orchestratorApiKey = binding.orchestratorApiKeyInput.text.toString().trim()
 
             when {
@@ -93,15 +108,6 @@ class SettingsActivity : AppCompatActivity() {
                 }
                 gatewayToken.isEmpty() -> {
                     Toast.makeText(this, "Gateway Token cannot be empty", Toast.LENGTH_SHORT).show()
-                    return@setOnClickListener
-                }
-                // Validate Orchestrator URL if provided - only check for invalid paths like /api/v1
-                orchestratorServerUrl.isNotEmpty() && orchestratorServerUrl.contains("/api/v1") -> {
-                    Toast.makeText(
-                        this,
-                        "Orchestrator Backend URL should be the base API endpoint (e.g., http://xxx.xx.x.x:8080). Do not include /api/v1 in the URL.",
-                        Toast.LENGTH_LONG
-                    ).show()
                     return@setOnClickListener
                 }
                 else -> {
@@ -119,10 +125,9 @@ class SettingsActivity : AppCompatActivity() {
                         prefs.githubDefaultRepo = githubDefaultRepo
                     }
 
-                    // Orchestrator settings (optional)
+                    // Orchestrator settings (optional) - auto-corrected URL above
                     // Note: The API key is the same as the Gateway Token - there's only one key!
                     if (orchestratorServerUrl.isNotBlank()) {
-                        prefs.orchestratorServerUrl = orchestratorServerUrl
                         // Auto-use the gateway token for orchestrator api key since they're the same
                         prefs.orchestratorApiKey = gatewayToken
                         Toast.makeText(
@@ -151,5 +156,19 @@ class SettingsActivity : AppCompatActivity() {
     override fun onSupportNavigateUp(): Boolean {
         finish()
         return true
+    }
+
+    /**
+     * Show a toast with network troubleshooting tips
+     */
+    private fun showNetworkTroubleshootingTips() {
+        val message = """
+            Network Troubleshooting:
+            1. Check Android device is on same WiFi as host machine
+            2. Find host IP: ip addr show | grep "inet "
+            3. Use the WiFi/Ethernet IP (e.g., xx.x.x.xxx), NOT localhost or Docker IPs
+            4. Make sure firewall allows port 8080: sudo ufw allow 8080/tcp
+        """.trimIndent()
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
     }
 }

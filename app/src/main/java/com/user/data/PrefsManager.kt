@@ -1,7 +1,10 @@
 package com.user.data
 
 import android.content.Context
+import android.util.Log
 import com.user.BuildConfig
+
+private const val PREFS_TAG = "PrefsManager"
 
 class PrefsManager(context: Context) {
     private val prefs = context.getSharedPreferences("openclaw_prefs", Context.MODE_PRIVATE)
@@ -42,12 +45,27 @@ class PrefsManager(context: Context) {
 
     // ── Orchestrator Integration ──────────────────────────────
     var orchestratorServerUrl: String
-        get() = prefs.getString("orchestrator_server_url", "") ?: ""
-        set(value) = prefs.edit().putString("orchestrator_server_url", value).apply()
+        get() {
+            val value = prefs.getString("orchestrator_server_url", "") ?: ""
+            Log.d(PREFS_TAG, "orchestratorServerUrl GET: $value")
+            return value
+        }
+        set(value) {
+            Log.d(PREFS_TAG, "orchestratorServerUrl SET: $value")
+            prefs.edit().putString("orchestrator_server_url", value).apply()
+        }
 
     var orchestratorApiKey: String
-        get() = prefs.getString("orchestrator_api_key", "") ?: ""
-        set(value) = prefs.edit().putString("orchestrator_api_key", value).apply()
+        get() {
+            val value = prefs.getString("orchestrator_api_key", "") ?: ""
+            // Don't log the full API key for security, just show if it's set
+            Log.d(PREFS_TAG, "orchestratorApiKey GET: ${if (value.isEmpty()) "(empty)" else "${value.substring(0, 8)}...${value.length} chars"}")
+            return value
+        }
+        set(value) {
+            Log.d(PREFS_TAG, "orchestratorApiKey SET: ${if (value.isEmpty()) "(empty)" else "${value.substring(0, 8)}...${value.length} chars"}")
+            prefs.edit().putString("orchestrator_api_key", value).apply()
+        }
 
     // Check if Orchestrator is configured
     fun isOrchestratorConfigured(): Boolean {

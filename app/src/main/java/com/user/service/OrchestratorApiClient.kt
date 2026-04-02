@@ -43,6 +43,27 @@ class OrchestratorApiClient(
         .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
         .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
         .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        // Add network interceptor to log all requests/responses for debugging
+        .addNetworkInterceptor { chain ->
+            val request = chain.request()
+            Log.d(TAG, "=== NETWORK REQUEST ===")
+            Log.d(TAG, "URL: ${request.url}")
+            Log.d(TAG, "Method: ${request.method}")
+            Log.d(TAG, "Headers:")
+            request.headers.forEach { (name, value) ->
+                Log.d(TAG, "  $name: $value")
+            }
+
+            val response = chain.proceed(request)
+            Log.d(TAG, "Response Status: ${response.code} ${response.message}")
+            Log.d(TAG, "Response Headers:")
+            response.headers.forEach { (name, value) ->
+                Log.d(TAG, "  $name: $value")
+            }
+            Log.d(TAG, "========================")
+
+            response
+        }
         .build()
 
     private val gson = Gson()
