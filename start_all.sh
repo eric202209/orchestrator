@@ -198,14 +198,14 @@ verify() {
     
     local success=true
     
-    if curl -s http://127.0.0.1:8080/health > /dev/null 2>&1; then
+    if curl -s http://172.17.0.2:8080/health > /dev/null 2>&1; then
         echo -e "${GREEN}✅ Backend healthy${NC}"
     else
         echo -e "${RED}❌ Backend not responding${NC}"
         success=false
     fi
     
-    if curl -s http://127.0.0.1:3000 > /dev/null 2>&1; then
+    if curl -s http://172.17.0.2:3000 > /dev/null 2>&1; then
         echo -e "${GREEN}✅ Frontend healthy${NC}"
     else
         echo -e "${RED}❌ Frontend not responding${NC}"

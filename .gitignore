@@ -69,7 +69,7 @@ dump.rdb
 # Checkpoint files (runtime state - NEVER COMMIT)
 checkpoints/
 
-# Documentation (moved to .notes/)
+# Documentation
 docs/
 
 # Scripts to stop services (should be run locally)

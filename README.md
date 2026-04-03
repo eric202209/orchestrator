@@ -22,7 +22,9 @@ This is a complete AI development agent orchestrator that automates software dev
 ## 🛠️ Quick Start
 
 ### Prerequisites
-- ✅ **OpenClaw** running locally (gateway on port 8001)
+- ✅ **OpenClaw** running locally (gateway on port 8000) ⚠️ NOT 8001!
+  - Port 8000 = OpenClaw Gateway (python3 process)
+  - Port 8001 = llama.cpp AI server (LLM API only, DO NOT use for Orchestrator!)
 - ✅ **Redis** running (default port 6379)
 - ✅ **Python 3.10+** installed
 - ✅ **Node.js 18+** installed
@@ -89,6 +91,11 @@ orchestrator/
 │   └── package.json
 ├── orchestrator.db              # SQLite database (root level)
 ├── logs/                        # Log files
+├── scripts/                     # Utility scripts
+│   ├── security_check.sh           # Security scanning
+│   ├── sync-logs.sh                # Log synchronization
+│   ├── cleanup-*.sh                # Maintenance scripts
+│   └── README.md                   # Scripts documentation
 ├── start_all.sh                 # Comprehensive startup
 ├── start.sh                     # Basic startup
 ├── requirements.txt             # Python dependencies
@@ -97,7 +104,7 @@ orchestrator/
 
 ---
 
-## 🔧 API Endpoints
+## 🔧 API Endpoints & Scripts
 
 ### Mobile Gateway Endpoints
 
@@ -144,7 +151,7 @@ export MOBILE_GATEWAY_API_KEY=replace-with-a-shared-secret
 Optional:
 
 ```bash
-export ORCHESTRATOR_MOBILE_BASE_URL=http://127.0.0.1:8080/api/v1
+export ORCHESTRATOR_MOBILE_BASE_URL=http://your_ip_here:8080/api/v1
 ```
 
 Suggested OpenClaw tool behavior:
@@ -153,6 +160,19 @@ Suggested OpenClaw tool behavior:
 - When the user asks about one project, call `./scripts/orchestrator-mobile-api.sh project-status <id>`
 - When the user asks about recent sessions, call `./scripts/orchestrator-mobile-api.sh sessions`
 - When the user asks about one session, call `./scripts/orchestrator-mobile-api.sh session-summary <id>`
+
+### Available Scripts in `scripts/` Directory
+
+**Core Utilities:**
+- **`orchestrator-mobile-api.sh`** - Mobile API helper (NEW!) - Query Orchestrator status via OpenClaw
+- **`security_check.sh`** - Security scanning and vulnerability detection
+- **`sync-logs.sh`** / **`sync-tmp-logs.sh`** - Sync logs from `/tmp/` to project `logs/` directory
+- **`cleanup-logs.sh`** - Clean up old log files (7-day retention)
+- **`cleanup-historical-docs.sh`** - Archive historical documentation
+- **`check-logs-status.sh`** - Monitor log file health and sizes
+- **`deploy-config.sh`** - Deploy Supervisor configuration files
+
+All scripts are executable (`chmod +x`) and documented in `scripts/README.md`.
 
 ### Copy-Paste OpenClaw Instruction
 
@@ -356,7 +376,6 @@ tail -100 /tmp/celery_worker.log
 # Check if prompts are too verbose
 tail -100 /tmp/celery_worker.log | grep -i "token\|context"
 
-# Fix: Prompts were optimized in v2.0 (see .notes/BUGFIXES-2026-03-26.md)
 ```
 
 ---
@@ -568,4 +587,4 @@ pkill -f "vite"
 
 ---
 
-**Last updated: 2026-03-30**
+**Last updated: 2026-04-03**

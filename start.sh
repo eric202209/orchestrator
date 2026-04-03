@@ -170,14 +170,14 @@ check_health() {
     sleep 2
     
     # Check backend
-    if curl -s http://127.0.0.1:8080/health > /dev/null 2>&1; then
+    if curl -s http://172.17.0.2:8080/health > /dev/null 2>&1; then
         echo -e "${GREEN}✅ Backend is healthy${NC}"
     else
         echo -e "${RED}❌ Backend is not responding${NC}"
     fi
     
     # Check frontend
-    if curl -s http://127.0.0.1:3000 > /dev/null 2>&1; then
+    if curl -s http://172.17.0.2:3000 > /dev/null 2>&1; then
         echo -e "${GREEN}✅ Frontend is healthy${NC}"
     else
         echo -e "${RED}❌ Frontend is not responding${NC}"
@@ -217,8 +217,8 @@ main() {
     echo "========================================"
     echo ""
     echo "📱 Frontend Dashboard: http://172.17.0.2:3000"
-    echo "🔧 Backend API: http://127.0.0.1:8080"
-    echo "📚 API Docs: http://127.0.0.1:8080/docs"
+    echo "🔧 Backend API: http://172.17.0.2:8080"
+    echo "📚 API Docs: http://172.17.0.2:8080/docs"
     echo "🐘 Redis: localhost:6379"
     echo ""
     echo "📝 View logs:"
