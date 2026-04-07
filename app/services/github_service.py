@@ -15,21 +15,43 @@ class GitHubService:
         self.headers = {
             "Authorization": f"token {settings.GITHUB_TOKEN}",
             "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "openclaw-orchestrator",
         }
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Optional[Dict[str, Any]] = None,
+        json: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        async with httpx.AsyncClient() as client:
+            response = await client.request(
+                method,
+                f"https://api.github.com{path}",
+                headers=self.headers,
+                params=params,
+                json=json,
+            )
+
+        if response.status_code == 404:
+            raise ValueError("GitHub resource not found")
+        if response.status_code >= 400:
+            raise ValueError(
+                f"GitHub API error: {response.status_code} {response.text[:200]}"
+            )
+
+        return response.json()
 
     async def get_repository(self, owner: str, repo: str) -> Dict[str, Any]:
         """Get repository information"""
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"https://api.github.com/repos/{owner}/{repo}", headers=self.headers
-            )
-
-            if response.status_code == 404:
-                raise ValueError(f"Repository {owner}/{repo} not found")
-            elif response.status_code != 200:
-                raise ValueError(f"GitHub API error: {response.status_code}")
-
-            return response.json()
+        try:
+            return await self._request("GET", f"/repos/{owner}/{repo}")
+        except ValueError as exc:
+            if "not found" in str(exc).lower():
+                raise ValueError(f"Repository {owner}/{repo} not found") from exc
+            raise
 
     async def create_issue(
         self,
@@ -41,24 +63,13 @@ class GitHubService:
         assignees: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Create a GitHub issue"""
-        async with httpx.AsyncClient() as client:
-            data = {
-                "title": title,
-                "body": body,
-                "labels": labels or [],
-                "assignees": assignees or [],
-            }
-
-            response = await client.post(
-                f"https://api.github.com/repos/{owner}/{repo}/issues",
-                headers=self.headers,
-                json=data,
-            )
-
-            if response.status_code not in [200, 201]:
-                raise ValueError(f"Failed to create issue: {response.status_code}")
-
-            return response.json()
+        data = {
+            "title": title,
+            "body": body,
+            "labels": labels or [],
+            "assignees": assignees or [],
+        }
+        return await self._request("POST", f"/repos/{owner}/{repo}/issues", json=data)
 
     async def create_pull_request(
         self,
@@ -70,19 +81,8 @@ class GitHubService:
         base: str = "main",
     ) -> Dict[str, Any]:
         """Create a GitHub pull request"""
-        async with httpx.AsyncClient() as client:
-            data = {"title": title, "body": body, "head": head, "base": base}
-
-            response = await client.post(
-                f"https://api.github.com/repos/{owner}/{repo}/pulls",
-                headers=self.headers,
-                json=data,
-            )
-
-            if response.status_code not in [200, 201]:
-                raise ValueError(f"Failed to create PR: {response.status_code}")
-
-            return response.json()
+        data = {"title": title, "body": body, "head": head, "base": base}
+        return await self._request("POST", f"/repos/{owner}/{repo}/pulls", json=data)
 
     async def list_issues(
         self,
@@ -92,34 +92,46 @@ class GitHubService:
         labels: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """List issues in a repository"""
-        async with httpx.AsyncClient() as client:
-            params = {"state": state}
-            if labels:
-                params["labels"] = ",".join(labels)
+        params = {"state": state}
+        if labels:
+            params["labels"] = ",".join(labels)
 
-            response = await client.get(
-                f"https://api.github.com/repos/{owner}/{repo}/issues",
-                headers=self.headers,
-                params=params,
-            )
-
-            if response.status_code != 200:
-                raise ValueError(f"Failed to list issues: {response.status_code}")
-
-            return response.json()
+        return await self._request(
+            "GET", f"/repos/{owner}/{repo}/issues", params=params
+        )
 
     async def add_comment_to_issue(
         self, owner: str, repo: str, issue_number: int, body: str
     ) -> Dict[str, Any]:
         """Add a comment to an issue"""
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/comments",
-                headers=self.headers,
-                json={"body": body},
+        return await self._request(
+            "POST",
+            f"/repos/{owner}/{repo}/issues/{issue_number}/comments",
+            json={"body": body},
+        )
+
+    async def get_pull_request(
+        self, owner: str, repo: str, pr_number: int
+    ) -> Dict[str, Any]:
+        """Get a pull request by number."""
+        try:
+            return await self._request(
+                "GET", f"/repos/{owner}/{repo}/pulls/{pr_number}"
             )
+        except ValueError as exc:
+            if "not found" in str(exc).lower():
+                raise ValueError(f"Pull request #{pr_number} not found") from exc
+            raise
 
-            if response.status_code != 201:
-                raise ValueError(f"Failed to add comment: {response.status_code}")
-
-            return response.json()
+    async def get_issue(
+        self, owner: str, repo: str, issue_number: int
+    ) -> Dict[str, Any]:
+        """Get an issue by number."""
+        try:
+            return await self._request(
+                "GET", f"/repos/{owner}/{repo}/issues/{issue_number}"
+            )
+        except ValueError as exc:
+            if "not found" in str(exc).lower():
+                raise ValueError(f"Issue #{issue_number} not found") from exc
+            raise

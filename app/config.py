@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     # GitHub
     GITHUB_TOKEN: str = ""
     GITHUB_USERNAME: str = ""
+    GITHUB_WEBHOOK_SECRET: str = ""
 
     class Config:
         env_file = ".env"
