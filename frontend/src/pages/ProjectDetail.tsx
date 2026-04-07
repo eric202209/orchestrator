@@ -205,13 +205,20 @@ function ProjectDetail() {
 
     setUpdatingTask(true);
     try {
-      await tasksAPI.update(taskId, {
-        title: editTitle,
-        description: editDescription || undefined,
-        steps: editSteps || undefined,
+      const response = await tasksAPI.update(taskId, {
+        title: editTitle.trim(),
+        description: editDescription,
+        steps: editSteps,
       });
+
+      setTasks((currentTasks) =>
+        currentTasks.map((task) =>
+          task.id === taskId ? response.data : task
+        )
+      );
+
       setEditingTaskId(null);
-      fetchTasks();
+      await fetchTasks();
     } catch (error) {
       console.error('Failed to update task:', error);
       alert('Failed to update task. Please try again.');
@@ -694,3 +701,4 @@ function ProjectDetail() {
 }
 
 export default ProjectDetail;
+

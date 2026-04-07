@@ -494,6 +494,15 @@ class OpenClawSessionService:
                 planning_prompt, timeout_seconds=90
             )
 
+            if planning_result.get("status") == "failed":
+                planning_error = planning_result.get(
+                    "error", "Planning failed during OpenClaw execution"
+                )
+                self._log_entry(
+                    "ERROR", f"[ORCHESTRATION] Planning failed: {planning_error}"
+                )
+                raise OpenClawSessionError(planning_error)
+
             # Parse plan from result
             try:
                 output_text = planning_result.get("output", "[]")
@@ -601,6 +610,15 @@ class OpenClawSessionService:
                         orchestration_state.current_step_index = step_index
                         continue
 
+                    debug_analysis = debug_result.get("analysis", "Unknown failure")
+                    self._log_entry(
+                        "ERROR",
+                        f"[ORCHESTRATION] Step {step_index + 1} failed permanently: {debug_analysis}",
+                    )
+                    raise OpenClawSessionError(
+                        f"Step {step_index + 1} failed after {max_retries} attempts: {execution_result.error_message or debug_analysis}"
+                    )
+
             # Phase 5: DONE
             orchestration_state.status = OrchestrationStatus.DONE
             self._log_entry("INFO", "[ORCHESTRATION] Execution steps completed")
@@ -618,6 +636,15 @@ class OpenClawSessionService:
 
             self._log_entry("INFO", "[ORCHESTRATION] Generating summary...")
             summary_result = await self.execute_task(summary_prompt, timeout_seconds=60)
+
+            if summary_result.get("status") == "failed":
+                summary_error = summary_result.get(
+                    "error", "Summary generation failed during OpenClaw execution"
+                )
+                self._log_entry(
+                    "ERROR", f"[ORCHESTRATION] Summary failed: {summary_error}"
+                )
+                raise OpenClawSessionError(summary_error)
 
             self._log_entry(
                 "INFO", f"[ORCHESTRATION] Summary result type: {type(summary_result)}"
@@ -647,6 +674,8 @@ class OpenClawSessionService:
             orchestration_state.status = OrchestrationStatus.ABORTED
             orchestration_state.abort_reason = str(e)
             self._log_entry("ERROR", f"[ORCHESTRATION] Failed: {str(e)}")
+            if isinstance(e, OpenClawSessionError):
+                raise
             raise OpenClawSessionError(f"Orchestration failed: {str(e)}")
 
     async def _execute_step_with_retry(
@@ -896,6 +925,8 @@ class OpenClawSessionService:
             return_code = 0
             stderr = ""
 
+        cli_error_message = self._summarize_cli_error(stderr) if stderr else ""
+
         # CRITICAL FIX: Validate response before parsing
         if not stdout or stdout in ['""', "''", '"', "'"]:
             self._log_entry("ERROR", "[OPENCLAW] CRITICAL: Empty or invalid response")
@@ -903,7 +934,8 @@ class OpenClawSessionService:
                 "status": "failed",
                 "mode": "real",
                 "output": "",
-                "error": "Empty or invalid response from OpenClaw CLI",
+                "error": cli_error_message
+                or "Empty or invalid response from OpenClaw CLI",
                 "logs": [],
             }
 
@@ -925,6 +957,7 @@ class OpenClawSessionService:
                 "status": "completed" if return_code == 0 else "failed",
                 "mode": "real",
                 "output": output_text,
+                "error": cli_error_message if return_code != 0 else "",
                 "logs": [],
             }
 
@@ -965,6 +998,7 @@ class OpenClawSessionService:
                 "status": "completed" if return_code == 0 else "failed",
                 "mode": "real",
                 "output": stdout,
+                "error": cli_error_message if return_code != 0 else "",
                 "logs": [],
             }
 
@@ -1023,6 +1057,27 @@ class OpenClawSessionService:
                     "execution_time": 0.0,
                     "error": error_str,
                 }
+
+    def _summarize_cli_error(self, stderr: str) -> str:
+        """Return a compact user-facing summary from OpenClaw stderr."""
+        lines = [line.strip() for line in (stderr or "").splitlines() if line.strip()]
+        if not lines:
+            return ""
+
+        for line in lines:
+            lowered = line.lower()
+            if "[openclaw] cli failed:" in lowered:
+                return line[:500]
+
+        for line in lines:
+            lowered = line.lower()
+            if lowered.startswith("at ") or "jiti/dist/jiti.cjs" in lowered:
+                continue
+            if "referenceerror:" in lowered:
+                return f"[openclaw] CLI failed: {line[:450]}"
+            return line[:500]
+
+        return lines[0][:500]
 
     async def stream_logs(self, callback: callable) -> None:
         """

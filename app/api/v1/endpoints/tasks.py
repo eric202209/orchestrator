@@ -226,8 +226,27 @@ def update_task(task_id: int, task_update: TaskUpdate, db: Session = Depends(get
         raise HTTPException(status_code=404, detail="Task not found")
 
     update_data = task_update.model_dump(exclude_unset=True)
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No task fields provided")
+
+    editable_fields = {
+        "title",
+        "description",
+        "status",
+        "priority",
+        "steps",
+        "current_step",
+        "error_message",
+    }
+
     for field, value in update_data.items():
+        if field not in editable_fields:
+            continue
+        if field in {"description", "steps"} and value == "":
+            value = None
         setattr(task, field, value)
+
+    task.updated_at = datetime.utcnow()
 
     db.commit()
     db.refresh(task)

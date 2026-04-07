@@ -118,7 +118,7 @@ function Dashboard() {
       });
       setNewProjectName('');
       setShowCreateProject(false);
-      setRefresh(prev => prev + 1);
+      await fetchProjects();
     } catch (error) {
       console.error('Failed to create project:', error);
       alert('Failed to create project. Please try again.');
@@ -134,7 +134,7 @@ function Dashboard() {
 
     try {
       await projectsAPI.delete(projectId);
-      setRefresh(prev => prev + 1);
+      await fetchProjects();
     } catch (error) {
       console.error('Failed to delete project:', error);
       alert('Failed to delete project. Please try again.');

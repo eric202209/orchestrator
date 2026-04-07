@@ -35,6 +35,7 @@ from app.services import (
     ToolTrackingService,
     PromptTemplates,
 )
+from app.services.openclaw_service import OpenClawSessionError
 from app.services.prompt_templates import OrchestrationState, OPENCLAW_WORKSPACE_ROOT
 from app.services.project_isolation_service import resolve_project_workspace_path
 from app.services.log_utils import sort_logs, deduplicate_logs, format_logs_batch
@@ -449,9 +450,10 @@ async def execute_task(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    selected_task = None
+    task_workspace = None
+
     try:
-        selected_task = None
-        task_workspace = None
 
         if task_request.task_id:
             from app.models import Task, SessionTask
@@ -565,17 +567,45 @@ async def execute_task(
     except Exception as e:
         import traceback
 
-        error_detail = f"Task execution failed: {str(e)}\n{traceback.format_exc()}"
-        print(f"ERROR: {error_detail}")
+        if selected_task:
+            selected_task.status = TaskStatus.FAILED
+            selected_task.error_message = str(e)
+            selected_task.completed_at = datetime.utcnow()
+
+        session.is_active = False
+        session.status = "stopped"
+        session.stopped_at = datetime.now(timezone.utc)
+
+        traceback_text = traceback.format_exc()
+        logger.error(
+            "Task execution failed for session %s: %s\n%s",
+            session_id,
+            str(e),
+            traceback_text,
+        )
+        error_detail = str(e)
         db.add(
             LogEntry(
                 session_id=session_id,
+                task_id=selected_task.id if selected_task else None,
                 level="ERROR",
-                message=f"Task execution failed: {str(e)}",
+                message=(
+                    f"Task execution failed: {error_detail}"
+                    if isinstance(e, OpenClawSessionError)
+                    else f"Task execution failed: {str(e)}"
+                ),
+                log_metadata=json.dumps({"traceback": traceback_text}),
             )
         )
         db.commit()
-        raise HTTPException(status_code=500, detail=error_detail)
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                error_detail
+                if isinstance(e, OpenClawSessionError)
+                else "Task execution failed. Check session logs for details."
+            ),
+        )
 
 
 @router.websocket("/sessions/{session_id}/logs/stream")
