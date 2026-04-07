@@ -4,9 +4,14 @@ import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import com.user.ClawMobileApplication
 import com.user.BuildConfig
+import com.user.data.GitConnection
 import com.user.data.PrefsManager
 import com.user.databinding.ActivitySettingsBinding
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 private const val TAG = "SettingActivity"
 
@@ -111,24 +116,33 @@ class SettingsActivity : AppCompatActivity() {
                     prefs.gatewayToken = gatewayToken
 
                     // GitHub settings (optional)
-                    if (githubToken.isNotBlank()) {
-                        prefs.githubToken = githubToken
-                    }
-                    if (githubApiUrl.isNotBlank()) {
-                        prefs.githubApiUrl = githubApiUrl
-                    }
-                    if (githubDefaultRepo.isNotBlank()) {
-                        prefs.githubDefaultRepo = githubDefaultRepo
+                    prefs.githubToken = githubToken
+                    prefs.githubApiUrl = githubApiUrl.ifBlank { "https://api.github.com" }
+                    prefs.githubDefaultRepo = githubDefaultRepo
+
+                    val gitDao = (application as ClawMobileApplication).gitConnectionDao
+                    CoroutineScope(Dispatchers.IO).launch {
+                        if (githubToken.isBlank()) {
+                            gitDao.deleteConnectionById("github_default")
+                        } else {
+                            gitDao.insertConnection(
+                                GitConnection(
+                                    platform = "GITHUB",
+                                    apiUrl = prefs.githubApiUrl,
+                                    token = githubToken,
+                                    defaultRepo = githubDefaultRepo.ifBlank { null }
+                                )
+                            )
+                        }
                     }
 
                     // Orchestrator settings (optional) - save exactly as entered
                     val apiKeyToUse = orchestratorApiKey.ifEmpty { gatewayToken }
                     if (orchestratorServerUrl.isNotBlank()) {
-                        // Use the API key from input field, or fallback to gateway token if empty
                         prefs.orchestratorApiKey = apiKeyToUse
                         Toast.makeText(
                             this,
-                            "Orchestrator configured: $orchestratorServerUrl (using Gateway Token)",
+                            "Orchestrator configured: $orchestratorServerUrl",
                             Toast.LENGTH_SHORT
                         ).show()
                     } else {
@@ -145,7 +159,7 @@ class SettingsActivity : AppCompatActivity() {
                     Log.d(TAG, "SAVING settings:")
                     Log.d(TAG, "  serverUrl = '$serverUrl'")
                     Log.d(TAG, "  orchestratorServerUrl = '$orchestratorServerUrl'")
-                    Log.d(TAG, "  orchestratorApiKey = '${if (apiKeyToUse.isEmpty()) "(empty)" else "${apiKeyToUse.take(8)}..."}'")
+                    Log.d(TAG, "  orchestratorApiKey = '${if (apiKeyToUse.isEmpty()) "(empty)" else "${apiKeyToUse.substring(0, 8)}..."}'")
 
                     prefs.serverUrl = serverUrl
                     prefs.orchestratorServerUrl = orchestratorServerUrl
@@ -153,7 +167,7 @@ class SettingsActivity : AppCompatActivity() {
                     // Verify what was actually saved
                     val savedOrchUrl = prefs.orchestratorServerUrl
                     val savedApiKey = prefs.orchestratorApiKey
-                    Log.d(TAG, "VERIFIED SAVED - Url: '$savedOrchUrl', ApiKey: '${if (savedApiKey.isEmpty()) "(empty)" else "${savedApiKey.take(8)}..."}'")
+                    Log.d(TAG, "VERIFIED SAVED - Url: '$savedOrchUrl', ApiKey: '${if (savedApiKey.isEmpty()) "(empty)" else "${savedApiKey.substring(0, 8)}..."}'")
 
                     Toast.makeText(this, "Settings saved! Reconnecting...", Toast.LENGTH_LONG).show()
                     finish()

@@ -1,6 +1,7 @@
 package com.user.ui.tools
 
 import android.os.Bundle
+import android.graphics.Color
 import android.view.View
 import android.widget.TextView
 import android.widget.Toast
@@ -12,6 +13,7 @@ import com.user.data.GitConnectionDao
 import com.user.data.PrefsManager
 import com.user.databinding.ActivityGithubBinding
 import com.user.service.GitHubIntegrationManager
+import com.user.service.OrchestratorApiClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -44,7 +46,7 @@ class GitHubActivity : AppCompatActivity() {
 
         val token = prefs.githubToken
         if (token.isNotEmpty()) {
-            gitManager = GitHubIntegrationManager(token)
+            gitManager = GitHubIntegrationManager(token, prefs.githubApiUrl)
         }
 
         setupRecyclerView()
@@ -88,13 +90,84 @@ class GitHubActivity : AppCompatActivity() {
 
     private fun loadConnections() {
         CoroutineScope(Dispatchers.IO).launch {
-            val allConnections = gitDao.getAllConnections().first()
+            val allConnections = gitDao.getAllConnections().first().toMutableList()
+            if (allConnections.isEmpty()) {
+                buildFallbackConnections().forEach { fallback ->
+                    if (allConnections.none { it.id == fallback.id }) {
+                        allConnections.add(fallback)
+                    }
+                }
+            }
+
             withContext(Dispatchers.Main) {
                 connections.clear()
                 connections.addAll(allConnections)
                 binding.emptyView.visibility = if (allConnections.isEmpty()) View.VISIBLE else View.GONE
+                val selectedRepo = currentRepo
+                    ?: prefs.githubDefaultRepo.takeIf { it.isNotBlank() }
+                    ?: allConnections.firstOrNull()?.defaultRepo
+                currentRepo = selectedRepo
+                binding.repoInfo.text = if (selectedRepo.isNullOrBlank()) {
+                    "No repository selected"
+                } else {
+                    "Selected: $selectedRepo"
+                }
+                binding.repoRecyclerView.adapter?.notifyDataSetChanged()
             }
         }
+    }
+
+    private suspend fun buildFallbackConnections(): List<GitConnection> {
+        val fallbackConnections = mutableListOf<GitConnection>()
+
+        if (prefs.githubToken.isNotBlank()) {
+            fallbackConnections.add(
+                GitConnection(
+                    id = "github_default",
+                    platform = "GITHUB",
+                    apiUrl = prefs.githubApiUrl,
+                    token = prefs.githubToken,
+                    defaultRepo = prefs.githubDefaultRepo.ifBlank { null }
+                )
+            )
+        }
+
+        if (prefs.isOrchestratorConfigured()) {
+            val orchestratorClient = OrchestratorApiClient(prefs, prefs.gatewayToken)
+            orchestratorClient.getProjects().getOrNull()
+                ?.mapNotNull { project ->
+                    extractRepoPath(project.githubUrl)?.let { repoPath ->
+                        GitConnection(
+                            id = "orchestrator_${project.getProjectId()}",
+                            platform = "GITHUB",
+                            apiUrl = prefs.githubApiUrl,
+                            token = prefs.githubToken,
+                            defaultRepo = repoPath
+                        )
+                    }
+                }
+                ?.forEach { connection ->
+                    if (fallbackConnections.none { it.defaultRepo == connection.defaultRepo }) {
+                        fallbackConnections.add(connection)
+                    }
+                }
+        }
+
+        return fallbackConnections
+    }
+
+    private fun extractRepoPath(githubUrl: String?): String? {
+        if (githubUrl.isNullOrBlank()) return null
+
+        val normalized = githubUrl
+            .removeSuffix(".git")
+            .removePrefix("git@github.com:")
+            .removePrefix("https://github.com/")
+            .removePrefix("http://github.com/")
+            .trim('/')
+
+        val parts = normalized.split("/")
+        return if (parts.size >= 2) "${parts[0]}/${parts[1]}" else null
     }
 
     private fun showPullRequests() {
@@ -128,7 +201,11 @@ class GitHubActivity : AppCompatActivity() {
                     binding.prList.append("$card\n\n")
                 }
                 if (prs.isEmpty()) {
-                    binding.prList.append("No open PRs found\n")
+                    binding.prList.append(
+                        "No open PRs found.\n\n" +
+                                "Pushed commits only appear here when they are part of an open pull request. " +
+                                "If you only pushed commits directly, use Commit Lookup instead.\n"
+                    )
                 }
             }
         }
@@ -233,6 +310,9 @@ class GitHubActivity : AppCompatActivity() {
             val connection = repos[position]
             holder.repoText.text = connection.defaultRepo ?: "No repository"
             holder.apiUrlText.text = connection.apiUrl
+            holder.repoText.setTextColor(Color.parseColor("#E6EDF3"))
+            holder.apiUrlText.setTextColor(Color.parseColor("#8B949E"))
+            holder.itemView.setBackgroundColor(Color.TRANSPARENT)
             holder.itemView.setOnClickListener { onClick(connection) }
         }
 

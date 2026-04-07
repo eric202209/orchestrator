@@ -81,13 +81,23 @@ data class Project(
     val _projectId: String = "",
     val name: String,
     val description: String? = null,
+    @SerializedName("github_url")
+    val githubUrl: String? = null,
+    val branch: String = "main",
     val status: String = "unknown",
+    @SerializedName("created_at")
     val createdAt: String = "",
+    @SerializedName("updated_at")
     val updatedAt: String = ""
 ) {
     // Return id if set, otherwise projectId for backwards compatibility
     fun getProjectId(): String = if (id.isNotEmpty()) id else _projectId
 }
+
+data class MobileProjectsResponse(
+    val projects: List<Project> = emptyList(),
+    val total: Int = 0
+)
 
 /**
  * Task from Orchestrator API (internal model matching exact API response format)
@@ -128,9 +138,9 @@ data class OrchestTask(
 data class ProjectTasksResponse(
     @SerializedName("project_id")
     val projectId: Int,
-    val tasks: List<OrchestTaskResponse> = emptyList(),
+    val tasks: List<OrchestTaskResponse>,
     @SerializedName("total")
-    val total: Int = 0
+    val total: Int
 )
 
 /**
