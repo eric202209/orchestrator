@@ -115,16 +115,22 @@ class GitHubService:
     ) -> Dict[str, Any]:
         """Get a pull request by number."""
         try:
-            return await self._request("GET", f"/repos/{owner}/{repo}/pulls/{pr_number}")
+            return await self._request(
+                "GET", f"/repos/{owner}/{repo}/pulls/{pr_number}"
+            )
         except ValueError as exc:
             if "not found" in str(exc).lower():
                 raise ValueError(f"Pull request #{pr_number} not found") from exc
             raise
 
-    async def get_issue(self, owner: str, repo: str, issue_number: int) -> Dict[str, Any]:
+    async def get_issue(
+        self, owner: str, repo: str, issue_number: int
+    ) -> Dict[str, Any]:
         """Get an issue by number."""
         try:
-            return await self._request("GET", f"/repos/{owner}/{repo}/issues/{issue_number}")
+            return await self._request(
+                "GET", f"/repos/{owner}/{repo}/issues/{issue_number}"
+            )
         except ValueError as exc:
             if "not found" in str(exc).lower():
                 raise ValueError(f"Issue #{issue_number} not found") from exc

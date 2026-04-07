@@ -53,9 +53,7 @@ def _extract_repo(payload: dict) -> tuple[str, str]:
 async def github_webhook(
     request: Request,
     x_github_event: str | None = Header(default=None, alias="X-GitHub-Event"),
-    x_hub_signature_256: str | None = Header(
-        default=None, alias="X-Hub-Signature-256"
-    ),
+    x_hub_signature_256: str | None = Header(default=None, alias="X-Hub-Signature-256"),
 ):
     """Handle real GitHub webhooks and route them to background tasks."""
     body = await request.body()
@@ -96,7 +94,9 @@ async def github_webhook(
         }
 
     if event_type == "issues":
-        issue_number = (payload.get("issue") or {}).get("number") or payload.get("number")
+        issue_number = (payload.get("issue") or {}).get("number") or payload.get(
+            "number"
+        )
         if not issue_number:
             raise HTTPException(status_code=400, detail="Missing issue number")
         task = process_github_issue_event.delay(payload, owner, repo, int(issue_number))

@@ -122,7 +122,9 @@ def process_github_pr_event(
 
         # Get PR details
         github_service = GitHubService()
-        pr = _run_async(github_service.get_pull_request(repo_owner, repo_name, pr_number))
+        pr = _run_async(
+            github_service.get_pull_request(repo_owner, repo_name, pr_number)
+        )
 
         if not pr:
             raise ValueError(f"PR #{pr_number} not found")
@@ -201,7 +203,9 @@ def process_github_issue_event(
 
         # Get issue details
         github_service = GitHubService()
-        issue = _run_async(github_service.get_issue(repo_owner, repo_name, issue_number))
+        issue = _run_async(
+            github_service.get_issue(repo_owner, repo_name, issue_number)
+        )
 
         if not issue:
             raise ValueError(f"Issue #{issue_number} not found")
