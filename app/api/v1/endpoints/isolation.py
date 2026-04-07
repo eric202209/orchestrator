@@ -176,7 +176,7 @@ async def update_project_workspace(
         # Validate the path exists
         from pathlib import Path
 
-        base_path = Path("/root/.openclaw/workspace")
+        base_path = Path("/root/.openclaw/workspace/vault")
         full_path = (base_path / workspace_path).resolve()
 
         if not full_path.exists():

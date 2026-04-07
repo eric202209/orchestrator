@@ -10,7 +10,7 @@ Automatically sync logs from `/tmp/` to the project's `logs/` directory to preve
 
 ### Manual Execution
 ```bash
-cd /root/.openclaw/workspace/projects/orchestrator
+cd /root/.openclaw/workspace/vault/projects/orchestrator
 ./scripts/sync-logs.sh
 ```
 
@@ -22,7 +22,7 @@ Since crontab is not available, you can use OpenClaw cron jobs:
 # Add a cron job to run every 6 hours
 npx openclaw cron add \
   --schedule "0 */6 * * *" \
-  --command "/root/.openclaw/workspace/projects/orchestrator/scripts/sync-logs.sh" \
+  --command "/root/.openclaw/workspace/vault/projects/orchestrator/scripts/sync-logs.sh" \
   --name "sync-logs"
 ```
 

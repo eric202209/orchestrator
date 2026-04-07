@@ -6,8 +6,8 @@
 
 set -e
 
-PROJECT_LOGS="/root/.openclaw/workspace/projects/orchestrator/logs"
-ARCHIVE_DIR="/root/.openclaw/workspace/projects/orchestrator/.archive"
+PROJECT_LOGS="/root/.openclaw/workspace/vault/projects/orchestrator/logs"
+ARCHIVE_DIR="/root/.openclaw/workspace/vault/projects/orchestrator/.archive"
 MAX_LOG_SIZE_MB=100
 
 echo "🧹 Starting logs cleanup..."

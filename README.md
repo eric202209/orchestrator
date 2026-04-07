@@ -32,7 +32,7 @@ This is a complete AI development agent orchestrator that automates software dev
 
 ### One-Command Startup
 ```bash
-cd ~/.openclaw/workspace/projects/orchestrator
+cd ~/.openclaw/workspace/vault/projects/orchestrator
 ./start_all.sh
 ```
 
@@ -481,9 +481,9 @@ After=network.target redis.service
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/root/.openclaw/workspace/projects/orchestrator
-Environment="PATH=/root/.openclaw/workspace/projects/orchestrator/venv/bin:/usr/bin:/bin"
-ExecStart=/root/.openclaw/workspace/projects/orchestrator/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8080
+WorkingDirectory=/root/.openclaw/workspace/vault/projects/orchestrator
+Environment="PATH=/root/.openclaw/workspace/vault/projects/orchestrator/venv/bin:/usr/bin:/bin"
+ExecStart=/root/.openclaw/workspace/vault/projects/orchestrator/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8080
 Restart=always
 
 [Install]
@@ -504,9 +504,9 @@ After=network.target redis.service orchestrator-backend.service
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/root/.openclaw/workspace/projects/orchestrator
-Environment="PATH=/root/.openclaw/workspace/projects/orchestrator/venv/bin:/usr/bin:/bin"
-ExecStart=/root/.openclaw/workspace/projects/orchestrator/venv/bin/celery -A app.celery_app worker --loglevel=info -Q default,openclaw,github
+WorkingDirectory=/root/.openclaw/workspace/vault/projects/orchestrator
+Environment="PATH=/root/.openclaw/workspace/vault/projects/orchestrator/venv/bin:/usr/bin:/bin"
+ExecStart=/root/.openclaw/workspace/vault/projects/orchestrator/venv/bin/celery -A app.celery_app worker --loglevel=info -Q default,openclaw,github
 Restart=always
 
 [Install]
@@ -530,7 +530,7 @@ server {
     server_name your-domain.com;
 
     location / {
-        root /root/.openclaw/workspace/projects/orchestrator/frontend/dist;
+        root /root/.openclaw/workspace/vault/projects/orchestrator/frontend/dist;
         try_files $uri $uri/ /index.html;
     }
 

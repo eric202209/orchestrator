@@ -28,7 +28,7 @@ from enum import Enum
 #: Root directory where ALL OpenClaw projects live.
 #: Resolved once at import time so every part of the codebase agrees on the path.
 OPENCLAW_WORKSPACE_ROOT: Path = (
-    Path(os.environ.get("OPENCLAW_WORKSPACE", "~/.openclaw/workspace/projects"))
+    Path(os.environ.get("OPENCLAW_WORKSPACE", "~/.openclaw/workspace/vault/projects/"))
     .expanduser()
     .resolve()
 )
@@ -71,7 +71,7 @@ class OrchestrationState:
     Pass this into every PromptTemplates builder so the LLM always has full history.
 
     Workspace layout (new architecture):
-    ~/.openclaw/workspace/projects/
+    ~/.openclaw/workspace/vault/projects/
       <project_name>/                    ← project workspace
         task_{task_id}/                  ← task-specific subfolder
           ...source files...
@@ -104,7 +104,7 @@ class OrchestrationState:
 
     @property
     def workspace_root(self) -> Path:
-        """Absolute path to ~/.openclaw/workspace/projects/ (or $OPENCLAW_WORKSPACE)."""
+        """Absolute path to ~/.openclaw/workspace/vault/projects/ (or $OPENCLAW_WORKSPACE)."""
         return OPENCLAW_WORKSPACE_ROOT
 
     def _slugify(self, text: str) -> str:

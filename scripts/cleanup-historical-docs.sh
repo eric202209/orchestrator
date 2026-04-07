@@ -5,7 +5,7 @@
 
 set -e
 
-NOTES_DIR="/root/.openclaw/workspace/projects/orchestrator/.notes"
+NOTES_DIR="/root/.openclaw/workspace/vault/projects/orchestrator/.notes"
 CORE_FILES=("CORS_FIXES.md" "DEBUG_HISTORY.md" "PHASES_PROGRESS.md" "TASK_TIMEOUT_FIX.md" "TEST_RECORDS.md")
 
 echo "📚 Reviewing historical documentation..."

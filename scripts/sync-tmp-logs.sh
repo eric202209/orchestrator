@@ -5,7 +5,7 @@
 
 set -e
 
-PROJECT_LOGS="/root/.openclaw/workspace/projects/orchestrator/logs"
+PROJECT_LOGS="/root/.openclaw/workspace/vault/projects/orchestrator/logs"
 TMP_LOGS="/tmp"
 
 echo "🔄 Syncing logs from /tmp/ to project logs directory..."

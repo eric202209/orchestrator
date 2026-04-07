@@ -70,7 +70,7 @@ start_redis() {
 start_backend() {
     echo -e "${BLUE}🔧 Starting Backend (uvicorn)...${NC}"
     
-    cd /root/.openclaw/workspace/projects/orchestrator
+    cd /root/.openclaw/workspace/vault/projects/orchestrator
     
     # Create log directory if it doesn't exist
     mkdir -p /tmp
@@ -82,7 +82,7 @@ start_backend() {
     fi
     
     # Start backend in background with comprehensive timeout configuration
-    nohup /root/.openclaw/workspace/projects/orchestrator/venv/bin/uvicorn app.main:app \
+    nohup /root/.openclaw/workspace/vault/projects/orchestrator/venv/bin/uvicorn app.main:app \
         --host 0.0.0.0 \
         --port 8080 \
         --timeout-keep-alive 5 \
@@ -108,7 +108,7 @@ start_backend() {
 start_workers() {
     echo -e "${BLUE}👷 Starting Celery Workers...${NC}"
     
-    cd /root/.openclaw/workspace/projects/orchestrator
+    cd /root/.openclaw/workspace/vault/projects/orchestrator
     
     # Kill any existing workers
     if check_process "celery -A app.celery_app worker"; then
@@ -117,7 +117,7 @@ start_workers() {
     fi
     
     # Start worker in background
-    nohup /root/.openclaw/workspace/projects/orchestrator/venv/bin/celery \
+    nohup /root/.openclaw/workspace/vault/projects/orchestrator/venv/bin/celery \
         -A app.celery_app worker \
         --loglevel=info \
         > /tmp/worker.log 2>&1 &
@@ -139,7 +139,7 @@ start_workers() {
 start_frontend() {
     echo -e "${BLUE}🎨 Starting Frontend (Vite)...${NC}"
     
-    cd /root/.openclaw/workspace/projects/orchestrator/frontend
+    cd /root/.openclaw/workspace/vault/projects/orchestrator/frontend
     
     # Kill any existing frontend
     if check_process "vite"; then

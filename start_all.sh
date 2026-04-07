@@ -16,17 +16,36 @@ RED='\033[0;31m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-# Localhost alias (from .env, default: 172.17.0.2)
-# Set LOCALHOST= in .env to override default
-LOCALHOST=${LOCALHOST:-172.17.0.2}
+# Localhost alias (from .env, default: localhost)
+# Set LOCALHOST= in .env to override default (e.g., 172.17.0.2 for Docker)
+LOCALHOST=${LOCALHOST:-localhost}
 
 # Function to check if port is in use
 check_port() {
-    if lsof -i :$1 > /dev/null 2>&1; then
-        return 0
-    else
-        return 1
+    local port=$1
+    
+    # Try lsof first
+    if command -v lsof &> /dev/null; then
+        if lsof -i :$port &> /dev/null; then
+            return 0
+        fi
     fi
+    
+    # Fallback: check if any running process contains the port
+    # Use grep to filter the process list
+    if ps aux 2>/dev/null | grep -v grep | grep -q "port $port\|--port $port"; then
+        return 0
+    fi
+    
+    # Special case: vite/dev servers often don't show port in command line
+    # Check for common dev server processes
+    if ps aux 2>/dev/null | grep -v grep | grep -qE "(vite|pnpm dev|webpack-dev-server)"; then
+        # If any of these are running, assume a port might be in use
+        # We'll let the actual service start command handle port conflicts
+        return 0
+    fi
+    
+    return 1
 }
 
 # Function to stop all processes
@@ -36,22 +55,25 @@ stop_all() {
     # Stop backend
     if check_port 8080; then
         pkill -f "uvicorn app.main:app" 2>/dev/null || true
+        sleep 1
         echo -e "${GREEN}✅ Backend stopped${NC}"
     fi
     
     # Stop workers
-    if pgrep -f "celery -A app.tasks worker" > /dev/null; then
-        pkill -f "celery -A app.tasks worker" 2>/dev/null || true
+    if pgrep -f "celery -A app.celery_app worker" > /dev/null; then
+        pkill -f "celery -A app.celery_app worker" 2>/dev/null || true
+        sleep 1
         echo -e "${GREEN}✅ Workers stopped${NC}"
     fi
     
     # Stop frontend
     if check_port 3000; then
         pkill -f "vite" 2>/dev/null || true
+        pkill -f "pnpm dev" 2>/dev/null || true
+        sleep 1
         echo -e "${GREEN}✅ Frontend stopped${NC}"
     fi
     
-    sleep 2
     echo ""
 }
 
@@ -120,9 +142,19 @@ print('✅ Database initialized')
 start_backend() {
     echo -e "${BLUE}🔧 Starting Backend...${NC}"
     
+    # Check if already running
     if check_port 8080; then
-        pkill -f "uvicorn app.main:app" 2>/dev/null || true
-        sleep 1
+        echo -e "${YELLOW}⚠️  Backend already running on port 8080${NC}"
+        local confirm
+        read -p "Restart it? (y/n): " -n 1 -r
+        echo
+        if [[ $confirm =~ ^[Yy]$ ]]; then
+            pkill -f "uvicorn app.main:app" 2>/dev/null || true
+            sleep 1
+        else
+            echo -e "${GREEN}✅ Backend already running${NC}"
+            return 0
+        fi
     fi
     
     nohup venv/bin/uvicorn app.main:app \
@@ -145,9 +177,19 @@ start_backend() {
 start_workers() {
     echo -e "${BLUE}👷 Starting Celery Workers...${NC}"
     
+    # Check if already running
     if pgrep -f "celery -A app.celery_app worker" > /dev/null; then
-        pkill -f "celery -A app.celery_app worker" 2>/dev/null || true
-        sleep 1
+        echo -e "${YELLOW}⚠️  Workers already running${NC}"
+        local confirm
+        read -p "Restart them? (y/n): " -n 1 -r
+        echo
+        if [[ $confirm =~ ^[Yy]$ ]]; then
+            pkill -f "celery -A app.celery_app worker" 2>/dev/null || true
+            sleep 1
+        else
+            echo -e "${GREEN}✅ Workers already running${NC}"
+            return 0
+        fi
     fi
     
     nohup venv/bin/celery \
@@ -170,10 +212,20 @@ start_workers() {
 start_frontend() {
     echo -e "${BLUE}🎨 Starting Frontend...${NC}"
     
+    # Check if already running
     if check_port 3000; then
-        pkill -f "vite" 2>/dev/null || true
-        pkill -f "pnpm dev" 2>/dev/null || true
-        sleep 2
+        echo -e "${YELLOW}⚠️  Frontend already running on port 3000${NC}"
+        local confirm
+        read -p "Restart it? (y/n): " -n 1 -r
+        echo
+        if [[ $confirm =~ ^[Yy]$ ]]; then
+            pkill -f "vite" 2>/dev/null || true
+            pkill -f "pnpm dev" 2>/dev/null || true
+            sleep 2
+        else
+            echo -e "${GREEN}✅ Frontend already running${NC}"
+            return 0
+        fi
     fi
     
     cd frontend
@@ -198,14 +250,14 @@ verify() {
     
     local success=true
     
-    if curl -s http://172.17.0.2:8080/health > /dev/null 2>&1; then
+    if curl -s http://${LOCALHOST}:8080/health > /dev/null 2>&1; then
         echo -e "${GREEN}✅ Backend healthy${NC}"
     else
         echo -e "${RED}❌ Backend not responding${NC}"
         success=false
     fi
     
-    if curl -s http://172.17.0.2:3000 > /dev/null 2>&1; then
+    if curl -s http://${LOCALHOST}:3000 > /dev/null 2>&1; then
         echo -e "${GREEN}✅ Frontend healthy${NC}"
     else
         echo -e "${RED}❌ Frontend not responding${NC}"
@@ -224,8 +276,8 @@ verify() {
     if [ "$success" = true ]; then
         echo -e "${GREEN}🎉 All services are running!${NC}"
         echo ""
-        echo "📱 Dashboard: http://172.17.0.2:3000"
-        echo "🔧 API Docs: http://172.17.0.2:8080/docs"
+        echo "📱 Dashboard: http://${LOCALHOST}:3000"
+        echo "🔧 API Docs: http://${LOCALHOST}:8080/docs"
         echo ""
         echo "📝 View logs:"
         echo "  Backend:    tail -f /tmp/backend.log"
@@ -243,18 +295,55 @@ echo "  Full Orchestrator Startup"
 echo "========================================"
 echo ""
 
-# Ask if user wants to stop existing processes
-if check_port 8080 || check_port 3000 || pgrep -f "celery" > /dev/null; then
-    echo -e "${YELLOW}⚠️  Services already running${NC}"
-    read -p "Stop them and restart? (y/n): " -n 1 -r
+# Check which services are already running
+backend_running=false
+frontend_running=false
+workers_running=false
+
+if check_port 8080; then
+    backend_running=true
+fi
+
+if check_port 3000; then
+    frontend_running=true
+fi
+
+if pgrep -f "celery -A app.celery_app worker" > /dev/null; then
+    workers_running=true
+fi
+
+# If all services are running, ask if user wants to restart
+if [ "$backend_running" = true ] && [ "$frontend_running" = true ] && [ "$workers_running" = true ]; then
+    echo -e "${YELLOW}⚠️  All services already running${NC}"
+    echo ""
+    read -p "Restart all services? (y/n): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         stop_all
+        # Fall through to start services
     else
         echo "Keeping existing services running."
         verify
         exit 0
     fi
+fi
+
+# If only some services are running, warn and continue
+if [ "$backend_running" = true ] || [ "$frontend_running" = true ] || [ "$workers_running" = true ]; then
+    echo -e "${YELLOW}⚠️  Some services already running${NC}"
+    echo ""
+    if [ "$backend_running" = true ]; then
+        echo -e "  - Backend:   Already running"
+    fi
+    if [ "$frontend_running" = true ]; then
+        echo -e "  - Frontend:  Already running"
+    fi
+    if [ "$workers_running" = true ]; then
+        echo -e "  - Workers:   Already running"
+    fi
+    echo ""
+    echo "Starting only the services that are not running..."
+    echo ""
 fi
 
 # Start all services

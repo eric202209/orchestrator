@@ -26,7 +26,7 @@ class CheckpointError(Exception):
 class CheckpointService:
     """Service for managing OpenClaw session checkpoints"""
 
-    CHECKPOINT_DIR = "/root/.openclaw/workspace/projects/orchestrator/checkpoints"
+    CHECKPOINT_DIR = "/root/.openclaw/workspace/vault/projects/orchestrator/checkpoints"
 
     def __init__(self, db: Session):
         self.db = db

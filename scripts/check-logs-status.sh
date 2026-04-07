@@ -5,8 +5,8 @@
 
 set -e
 
-PROJECT_LOGS="/root/.openclaw/workspace/projects/orchestrator/logs"
-PROJECT_ROOT="/root/.openclaw/workspace/projects/orchestrator"
+PROJECT_LOGS="/root/.openclaw/workspace/vault/projects/orchestrator/logs"
+PROJECT_ROOT="/root/.openclaw/workspace/vault/projects/orchestrator"
 TMP_LOGS="/tmp"
 
 echo "🔍 Checking logs status..."

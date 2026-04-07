@@ -10,7 +10,7 @@
 
 set -e
 
-CONFIG_DIR="/root/.openclaw/workspace/projects/orchestrator/config"
+CONFIG_DIR="/root/.openclaw/workspace/vault/projects/orchestrator/config"
 SUPERVISOR_CONF_DIR="/etc/supervisor/conf.d"
 
 deploy_supervisor() {

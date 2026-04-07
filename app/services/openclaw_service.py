@@ -17,9 +17,13 @@ import json
 import subprocess
 import logging
 import asyncio
+import os
+import shutil
+import shlex
 import time
 from typing import Optional, Dict, Any, List, Callable
 from datetime import datetime
+from pathlib import Path
 from sqlalchemy.orm import Session
 from app.models import Session as SessionModel, Task, TaskStatus, LogEntry, Project
 from app.config import settings
@@ -82,6 +86,50 @@ class OpenClawSessionService:
         from app.services.checkpoint_service import CheckpointService
 
         self.checkpoint_service = CheckpointService(db)
+
+    def _resolve_openclaw_command(self) -> List[str]:
+        """Resolve the OpenClaw CLI command with fallback locations."""
+        configured_args = shlex.split((settings.OPENCLAW_CLI_ARGS or "").strip())
+        configured_path = (settings.OPENCLAW_CLI_PATH or "").strip()
+        candidates: List[str] = []
+
+        if configured_path:
+            candidates.append(configured_path)
+
+        detected_path = shutil.which("openclaw")
+        if detected_path:
+            candidates.append(detected_path)
+
+        candidates.extend(
+            [
+                "/usr/local/bin/openclaw",
+                "/usr/bin/openclaw",
+                str(Path.home() / ".local" / "bin" / "openclaw"),
+                "/root/.local/bin/openclaw",
+            ]
+        )
+
+        for candidate in dict.fromkeys(candidates):
+            if (
+                candidate
+                and os.path.isfile(candidate)
+                and os.access(candidate, os.X_OK)
+            ):
+                return [candidate, *configured_args]
+
+        node_executable = shutil.which("node")
+        node_entrypoints = [
+            "/opt/openclaw/dist/index.js",
+            "/root/.openclaw/app/dist/index.js",
+        ]
+        for entrypoint in node_entrypoints:
+            if node_executable and os.path.isfile(entrypoint):
+                return [node_executable, entrypoint, *configured_args]
+
+        raise OpenClawSessionError(
+            "OpenClaw CLI not found. Install `openclaw`, add it to PATH, set "
+            "`OPENCLAW_CLI_PATH`, or configure `OPENCLAW_CLI_ARGS` for a Node entrypoint."
+        )
 
     async def create_openclaw_session(
         self, task_description: str, context: Optional[Dict[str, Any]] = None
@@ -1014,8 +1062,9 @@ class OpenClawSessionService:
         new_session_id = f"orchestrator-task-{task_id_str}-{int(time.time())}"
 
         try:
+            openclaw_command = self._resolve_openclaw_command()
             process = await asyncio.create_subprocess_exec(
-                "openclaw",
+                *openclaw_command,
                 "agent",
                 "--local",
                 "--session-id",
@@ -1089,7 +1138,7 @@ class OpenClawSessionService:
 
             completed = subprocess.CompletedProcess(
                 args=[
-                    "openclaw",
+                    *openclaw_command,
                     "agent",
                     "--local",
                     "--session-id",

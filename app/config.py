@@ -23,8 +23,9 @@ class Settings(BaseSettings):
             "http://localhost:3000",
             "http://localhost:8080",
             "http://localhost:8000",  # Keep for OpenClaw dashboard
-            self.OPENCLAW_GATEWAY_URL,
-            "http://172.17.0.1:3000",  # Gateway IP for external browser access
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:8080",
+            "http://127.0.0.1:8000",
             "http://172.17.0.2:3000",  # Container IP for frontend
             "http://172.17.0.2:8080",  # ✅ Allow mobile app to access API
         ]
@@ -41,6 +42,8 @@ class Settings(BaseSettings):
     # Use host.docker.internal for Docker container communication
     OPENCLAW_GATEWAY_URL: str = "http://host.docker.internal:8001"
     OPENCLAW_API_KEY: str = ""
+    OPENCLAW_CLI_PATH: str = ""
+    OPENCLAW_CLI_ARGS: str = ""
     MOBILE_GATEWAY_API_KEY: str = ""
 
     # Mobile app configuration

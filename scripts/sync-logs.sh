@@ -4,7 +4,7 @@
 # This script ensures logs are not lost when /tmp/ is cleared
 #
 
-PROJECT_DIR="/root/.openclaw/workspace/projects/orchestrator"
+PROJECT_DIR="/root/.openclaw/workspace/vault/projects/orchestrator"
 LOGS_DIR="$PROJECT_DIR/logs"
 TMP_LOGS="/tmp"
 
