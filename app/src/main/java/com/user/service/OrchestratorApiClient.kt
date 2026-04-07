@@ -8,6 +8,7 @@ import com.user.data.DashboardResponse
 import com.user.data.DashboardSummary
 import com.user.data.OrchestTask
 import com.user.data.OrchestTaskResponse
+import com.user.data.MobileProjectsResponse
 import com.user.data.OrchestratorApiResponse
 import com.user.data.PrefsManager
 import com.user.data.Project
@@ -69,7 +70,7 @@ class OrchestratorApiClient(
     private val gson = Gson()
 
     private fun getBaseUrl(): String {
-        // let okhttp3 handle trailing slashes in URL concatenation
+        // Use URL as-is without modification - let okhttp3 handle trailing slashes in URL concatenation
         val baseUrl = prefs.orchestratorServerUrl.trimEnd('/')
         return baseUrl
     }
@@ -150,6 +151,15 @@ class OrchestratorApiClient(
                 // Debug: log the raw response body to see what we got
                 Log.d(TAG, "Projects API raw response: $responseBody")
 
+                val mobileProjects = runCatching {
+                    gson.fromJson(responseBody, MobileProjectsResponse::class.java)
+                }.getOrNull()
+
+                if (mobileProjects?.projects != null) {
+                    Log.d(TAG, "Successfully fetched ${mobileProjects.projects.size} projects from mobile endpoint")
+                    return@withContext Result.success(mobileProjects.projects)
+                }
+
                 val type = object : TypeToken<OrchestratorApiResponse<List<Project>>>() {}.type
                 val apiResponse = gson.fromJson<OrchestratorApiResponse<List<Project>>>(responseBody, type)
 
@@ -194,10 +204,15 @@ class OrchestratorApiClient(
                 // Parse the response - it's in format { "project_id": N, "tasks": [...], "total": N }
                 val projectTasksResponse = gson.fromJson(responseBody, ProjectTasksResponse::class.java)
 
-                // Convert from OrchestTaskResponse to OrchestTask
-                val tasks = projectTasksResponse.tasks.map { it.toOrchestTask() }
-                Log.d(TAG, "Successfully fetched ${tasks.size} tasks for project $projectId")
-                Result.success(tasks)
+                if (projectTasksResponse.tasks != null) {
+                    // Convert from OrchestTaskResponse to OrchestTask
+                    val tasks = projectTasksResponse.tasks.map { it.toOrchestTask() }
+                    Log.d(TAG, "Successfully fetched ${tasks.size} tasks for project $projectId")
+                    Result.success(tasks)
+                } else {
+                    Log.w(TAG, "Tasks API error for project $projectId: No tasks in response")
+                    Result.failure(Exception("No tasks in response"))
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Error fetching tasks for project $projectId: ${e.message}")

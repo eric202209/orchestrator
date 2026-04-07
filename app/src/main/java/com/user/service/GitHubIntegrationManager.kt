@@ -4,7 +4,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.*
 import org.json.JSONObject
-import java.io.IOException
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 
 /**
  * GitHub integration for linking PRs, issues, and commits to chats
@@ -14,6 +15,7 @@ class GitHubIntegrationManager(
     private val githubApiUrl: String = "https://api.github.com"
 ) {
     private val client = OkHttpClient()
+    private val normalizedApiUrl = githubApiUrl.trimEnd('/')
 
     /**
      * GitHub repository info
@@ -80,9 +82,9 @@ class GitHubIntegrationManager(
         try {
             val targetOwner = owner ?: getAuthenticatedUser()
             val url = if (owner != null) {
-                "$githubApiUrl/users/$owner/repos"
+                "$normalizedApiUrl/users/$owner/repos"
             } else {
-                "$githubApiUrl/user/repos"
+                "$normalizedApiUrl/user/repos"
             }
 
             val request = Request.Builder()
@@ -122,7 +124,7 @@ class GitHubIntegrationManager(
     suspend fun getPullRequests(owner: String, repo: String, state: String = "open"): List<PullRequest> =
         withContext(Dispatchers.IO) {
             try {
-                val url = "$githubApiUrl/repos/$owner/$repo/pulls?state=$state&per_page=100"
+                val url = "$normalizedApiUrl/repos/$owner/$repo/pulls?state=$state&per_page=100"
                 val request = Request.Builder()
                     .url(url)
                     .header("Authorization", "token $githubToken")
@@ -164,7 +166,7 @@ class GitHubIntegrationManager(
     suspend fun getIssue(owner: String, repo: String, issueNumber: Int): Issue? =
         withContext(Dispatchers.IO) {
             try {
-                val url = "$githubApiUrl/repos/$owner/$repo/issues/$issueNumber"
+                val url = "$normalizedApiUrl/repos/$owner/$repo/issues/$issueNumber"
                 val request = Request.Builder()
                     .url(url)
                     .header("Authorization", "token $githubToken")
@@ -199,7 +201,7 @@ class GitHubIntegrationManager(
     suspend fun getCommit(owner: String, repo: String, sha: String): Commit? =
         withContext(Dispatchers.IO) {
             try {
-                val url = "$githubApiUrl/repos/$owner/$repo/commits/$sha"
+                val url = "$normalizedApiUrl/repos/$owner/$repo/commits/$sha"
                 val request = Request.Builder()
                     .url(url)
                     .header("Authorization", "token $githubToken")
@@ -213,14 +215,15 @@ class GitHubIntegrationManager(
                     val json = JSONObject(body)
                     val authorObj = json.optJSONObject("author")
                     val commitObj = json.optJSONObject("commit")
-                    val stats = commitObj?.optJSONObject("stats")
+                    val stats = json.optJSONObject("stats")
+                    val committerObj = commitObj?.optJSONObject("committer")
 
                     Commit(
                         sha = sha,
                         message = commitObj?.optString("message", "") ?: "",
                         html_url = json.optString("html_url", ""),
                         author = authorObj?.optString("login"),
-                        committed_at = json.optString("committed_date", ""),
+                        committed_at = committerObj?.optString("date", "") ?: "",
                         additions = stats?.optInt("additions") ?: 0,
                         deletions = stats?.optInt("deletions") ?: 0
                     )
@@ -235,7 +238,8 @@ class GitHubIntegrationManager(
      */
     suspend fun searchGitHub(query: String): SearchResult = withContext(Dispatchers.IO) {
         try {
-            val url = "$githubApiUrl/search/issues?q=$query&per_page=10"
+            val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8.toString())
+            val url = "$normalizedApiUrl/search/issues?q=$encodedQuery&per_page=10"
             val request = Request.Builder()
                 .url(url)
                 .header("Authorization", "token $githubToken")
@@ -275,7 +279,7 @@ class GitHubIntegrationManager(
      */
     suspend fun getAuthenticatedUser(): String = withContext(Dispatchers.IO) {
         try {
-            val url = "$githubApiUrl/user"
+            val url = "$normalizedApiUrl/user"
             val request = Request.Builder()
                 .url(url)
                 .header("Authorization", "token $githubToken")
