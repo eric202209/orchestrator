@@ -258,7 +258,9 @@ def update_task(task_id: int, task_update: TaskUpdate, db: Session = Depends(get
             "title": task.title,
             "description": task.description,
             "steps": task.steps,
-            "status": task.status.value if hasattr(task.status, "value") else task.status,
+            "status": (
+                task.status.value if hasattr(task.status, "value") else task.status
+            ),
         },
     )
     if not update_data:
@@ -299,9 +301,9 @@ def update_task(task_id: int, task_update: TaskUpdate, db: Session = Depends(get
                         if hasattr(task.status, "value")
                         else task.status
                     ),
-                    "updated_at": task.updated_at.isoformat()
-                    if task.updated_at
-                    else None,
+                    "updated_at": (
+                        task.updated_at.isoformat() if task.updated_at else None
+                    ),
                 },
             },
             default=str,
@@ -315,7 +317,9 @@ def update_task(task_id: int, task_update: TaskUpdate, db: Session = Depends(get
             "title": task.title,
             "description": task.description,
             "steps": task.steps,
-            "status": task.status.value if hasattr(task.status, "value") else task.status,
+            "status": (
+                task.status.value if hasattr(task.status, "value") else task.status
+            ),
             "updated_at": task.updated_at.isoformat() if task.updated_at else None,
         },
     )

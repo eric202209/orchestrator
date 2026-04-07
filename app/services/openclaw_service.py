@@ -498,7 +498,9 @@ class OpenClawSessionService:
                 planning_error = planning_result.get(
                     "error", "Planning failed during OpenClaw execution"
                 )
-                self._log_entry("ERROR", f"[ORCHESTRATION] Planning failed: {planning_error}")
+                self._log_entry(
+                    "ERROR", f"[ORCHESTRATION] Planning failed: {planning_error}"
+                )
                 raise OpenClawSessionError(planning_error)
 
             # Parse plan from result
@@ -639,7 +641,9 @@ class OpenClawSessionService:
                 summary_error = summary_result.get(
                     "error", "Summary generation failed during OpenClaw execution"
                 )
-                self._log_entry("ERROR", f"[ORCHESTRATION] Summary failed: {summary_error}")
+                self._log_entry(
+                    "ERROR", f"[ORCHESTRATION] Summary failed: {summary_error}"
+                )
                 raise OpenClawSessionError(summary_error)
 
             self._log_entry(

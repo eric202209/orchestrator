@@ -29,7 +29,6 @@ function Dashboard() {
   const [newProjectName, setNewProjectName] = useState('');
   const [creatingProject, setCreatingProject] = useState(false);
   const [isAuthChecked, setIsAuthChecked] = useState(false);
-  const [refresh, setRefresh] = useState(0);
 
   const checkAuth = useCallback(async () => {
     const token = localStorage.getItem('access_token');
@@ -119,7 +118,7 @@ function Dashboard() {
       });
       setNewProjectName('');
       setShowCreateProject(false);
-      fetchProjects();
+      await fetchProjects();
     } catch (error) {
       console.error('Failed to create project:', error);
       alert('Failed to create project. Please try again.');
@@ -135,7 +134,7 @@ function Dashboard() {
 
     try {
       await projectsAPI.delete(projectId);
-      fetchProjects();
+      await fetchProjects();
     } catch (error) {
       console.error('Failed to delete project:', error);
       alert('Failed to delete project. Please try again.');
