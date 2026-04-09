@@ -11,6 +11,7 @@ import {
   ArrowLeft
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
+import { EmptyState } from '../components/ui';
 
 function ProjectsList() {
   const navigate = useNavigate();
@@ -196,17 +197,15 @@ function ProjectsList() {
 
         {/* Projects Grid */}
         {projects.length === 0 ? (
-          <div className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-12 text-center">
-            <GitBranch className="h-16 w-16 mx-auto mb-4 text-slate-600" />
-            <h3 className="text-xl font-semibold text-white mb-2">No projects yet</h3>
-            <p className="text-slate-400 mb-6">Create your first project to start orchestrating AI development tasks</p>
-            <button
-              onClick={() => setShowCreateProject(true)}
-              className="bg-primary-500 hover:bg-primary-600 text-white px-6 py-3 rounded-lg transition-all"
-            >
-              Create Project
-            </button>
-          </div>
+          <EmptyState
+            icon={GitBranch}
+            title="No projects yet"
+            description="Create your first project to start orchestrating AI development tasks"
+            action={{
+              label: 'Create Project',
+              onClick: () => setShowCreateProject(true)
+            }}
+          />
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {projects.map((project) => (

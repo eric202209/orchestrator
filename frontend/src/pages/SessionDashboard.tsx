@@ -20,6 +20,7 @@ import {
   Clock,
   X
 } from 'lucide-react';
+import { StatusBadge, EmptyState } from '../components/ui';
 
 function SessionDashboard() {
   const { id } = useParams<{ id: string }>();
@@ -985,13 +986,8 @@ function SessionDashboard() {
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
                   <span className="text-slate-400">Status:</span>
-                  <span className={`font-medium ${
-                    isSessionRunning() ? 'text-green-400' :
-                    session?.status === 'paused' ? 'text-yellow-400' :
-                    session?.status === 'stopped' ? 'text-red-400' :
-                    'text-slate-300'
-                  }`}>
-                    {session?.status || 'unknown'}
+                  <span className="font-medium">
+                    <StatusBadge status={session?.status || 'unknown'} />
                   </span>
                 </div>
                 
@@ -1400,7 +1396,7 @@ function SessionDashboard() {
                 ) : displayLogs.length === 0 ? (
                   <div className="h-full flex items-center justify-center text-slate-500">
                     <Terminal className="h-12 w-12 mb-2 opacity-50" />
-                    <p className="text-center">
+                    <p className="text-center text-sm">
                       <span className="block mb-1">No logs yet. Start the session to see activity.</span>
                       <span className="text-xs">Logs will only show from this session (isolated from other projects)</span>
                     </p>
@@ -1454,11 +1450,11 @@ function SessionDashboard() {
               {/* Modal Content */}
               <div className="flex-1 overflow-y-auto p-6">
                 {checkpoints.length === 0 ? (
-                  <div className="text-center py-8 text-slate-400">
-                    <Clock className="h-12 w-12 mb-3 mx-auto opacity-50" />
-                    <p>No checkpoints found for this session</p>
-                    <p className="text-sm mt-2">Checkpoints are automatically saved when you pause a session</p>
-                  </div>
+                  <EmptyState
+                    icon={Clock}
+                    title="No checkpoints found"
+                    description="Checkpoints are automatically saved when you pause a session"
+                  />
                 ) : (
                   <>
                     {/* Checkpoint List */}
