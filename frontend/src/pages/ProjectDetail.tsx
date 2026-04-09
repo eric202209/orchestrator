@@ -1,22 +1,21 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { projectsAPI, tasksAPI, sessionsAPI } from '../api/client';
-import type { Project, Task } from '../types/api';
+import type { Project, Task, Session } from '../types/api';
 import { 
   GitBranch, 
   Plus, 
   FileText,
-  CheckCircle2,
   XCircle,
   ArrowLeft,
   ExternalLink,
   Trash2,
-  Play,
   Terminal,
   Activity,
   Clock
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
+import { StatusBadge, EmptyState } from '../components/ui';
 
 function ProjectDetail() {
   const { id } = useParams<{ id: string }>();
@@ -103,15 +102,7 @@ function ProjectDetail() {
     }
   };
 
-   // const fetchSessions = async () => {
-  //   if (!id) return;
-  //   try {
-  //     const response = await sessionsAPI.getByProject(Number(id));
-  //     setSessions(response.data || []);
-  //   } catch (error) {
-  //     console.error('Failed to fetch sessions:', error);
-  //   }
-  // };
+   // Sessions intentionally unused - kept for future implementation
 
   const generateStepsFromDescription = async (description: string) => {
     setGeneratingSteps(true);
@@ -227,29 +218,9 @@ function ProjectDetail() {
     }
   };
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+ // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const handleDeleteProject: () => void = () => {
     // Disabled for now - implement if needed
-  };
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'done': return 'text-green-400 bg-green-400/10';
-      case 'running': return 'text-blue-400 bg-blue-400/10';
-      case 'failed': return 'text-red-400 bg-red-400/10';
-      case 'cancelled': return 'text-slate-400 bg-slate-400/10';
-      default: return 'text-yellow-400 bg-yellow-400/10';
-    }
-  };
-
-  const getStatusIcon = (status: string) => {
-    switch (status) {
-      case 'done': return <CheckCircle2 className="h-4 w-4" />;
-      case 'running': return <Activity className="h-4 w-4 animate-pulse" />;
-      case 'failed': return <XCircle className="h-4 w-4" />;
-      case 'cancelled': return <XCircle className="h-4 w-4" />;
-      default: return <Clock className="h-4 w-4" />;
-    }
   };
 
   if (loading) {
@@ -402,10 +373,15 @@ function ProjectDetail() {
           </div>
 
           {sessions.length === 0 ? (
-            <div className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-8 text-center">
-              <Terminal className="h-12 w-12 mx-auto mb-3 text-slate-600" />
-              <p className="text-slate-400">No AI sessions yet. Create a session to start orchestrating development tasks.</p>
-            </div>
+            <EmptyState
+              icon={Terminal}
+              title="No AI sessions yet"
+              description="Create a session to start orchestrating development tasks"
+              action={{
+                label: 'New Session',
+                onClick: () => navigate(`/sessions/new?project_id=${id}`)
+              }}
+            />
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {sessions.map((session) => (
@@ -415,28 +391,10 @@ function ProjectDetail() {
                   className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-6 hover:border-primary-500/50 transition-all"
                 >
                   <div className="flex items-start justify-between mb-3">
-                    <div className={`p-2 rounded-lg ${
-                      session.status === 'running' ? 'text-green-400 bg-green-400/10' :
-                      session.status === 'paused' ? 'text-yellow-400 bg-yellow-400/10' :
-                      session.status === 'stopped' ? 'text-slate-400 bg-slate-400/10' :
-                      'text-blue-400 bg-blue-400/10'
-                    }`}>
-                      {session.status === 'running' ? (
-                        <Activity className="h-5 w-5 animate-pulse" />
-                      ) : session.status === 'paused' ? (
-                        <Play className="h-5 w-5" />
-                      ) : (
-                        <Terminal className="h-5 w-5" />
-                      )}
+                    <div className="p-2 rounded-lg text-blue-400 bg-blue-400/10">
+                      <Terminal className="h-5 w-5" />
                     </div>
-                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                      session.status === 'running' ? 'text-green-400 bg-green-400/10' :
-                      session.status === 'paused' ? 'text-yellow-400 bg-yellow-400/10' :
-                      session.status === 'stopped' ? 'text-slate-400 bg-slate-400/10' :
-                      'text-blue-400 bg-blue-400/10'
-                    }`}>
-                      {session.status.toUpperCase()}
-                    </span>
+                    <StatusBadge status={session.status} size="sm" />
                   </div>
                   <h3 className="font-semibold text-white mb-1">{session.name}</h3>
                   {session.description && (
@@ -462,25 +420,23 @@ function ProjectDetail() {
           <h2 className="text-xl font-semibold text-white mb-4">Tasks</h2>
           
           {tasks.length === 0 ? (
-            <div className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-12 text-center">
-              <FileText className="h-16 w-16 mx-auto mb-4 text-slate-600" />
-              <h3 className="text-xl font-semibold text-white mb-2">No tasks yet</h3>
-              <p className="text-slate-400 mb-6">Create your first task to get started with AI development</p>
-              <button
-                onClick={() => setShowCreateTask(true)}
-                className="bg-primary-500 hover:bg-primary-600 text-white px-6 py-3 rounded-lg transition-all"
-              >
-                Create Task
-              </button>
-            </div>
+            <EmptyState
+              icon={FileText}
+              title="No tasks yet"
+              description="Create your first task to get started with AI development"
+              action={{
+                label: 'Create Task',
+                onClick: () => setShowCreateTask(true)
+              }}
+            />
           ) : (
             <div className="space-y-4">
               {tasks.map((task) => (
                 <div key={task.id} className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-6 hover:border-slate-600 transition-all">
                   <div className="flex items-start justify-between">
                     <div className="flex items-start gap-4 flex-1">
-                      <div className={`p-2 rounded-lg ${getStatusColor(task.status)} mt-1`}>
-                        {getStatusIcon(task.status)}
+                      <div className="p-2 rounded-lg text-blue-400 bg-blue-400/10 mt-1">
+                        <Activity className="h-5 w-5" />
                       </div>
                       <div className="flex-1">
                         <h3 className="text-lg font-semibold text-white mb-2">{task.title}</h3>
@@ -508,9 +464,7 @@ function ProjectDetail() {
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                         </svg>
                       </button>
-                      <span className={`px-3 py-1 rounded-full text-xs font-medium ${getStatusColor(task.status)}`}>
-                        {task.status.toUpperCase()}
-                      </span>
+                      <StatusBadge status={task.status} size="sm" />
                       <button
                         onClick={() => handleDeleteTask(task.id)}
                         className="text-slate-400 hover:text-red-400 transition-colors"

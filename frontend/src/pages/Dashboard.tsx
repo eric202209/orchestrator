@@ -7,14 +7,13 @@ import {
   LogOut, 
   Plus, 
   Activity, 
-  Clock, 
-  CheckCircle2, 
-  XCircle, 
+  CheckCircle2,
   FileText,
   Terminal,
   Trash2
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
+import { StatusBadge, EmptyState } from '../components/ui';
 
 function Dashboard() {
   const navigate = useNavigate();
@@ -147,25 +146,7 @@ function Dashboard() {
     window.location.href = '/login';
   };
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'done': return 'text-green-400 bg-green-400/10';
-      case 'running': return 'text-blue-400 bg-blue-400/10';
-      case 'failed': return 'text-red-400 bg-red-400/10';
-      case 'cancelled': return 'text-slate-400 bg-slate-400/10';
-      default: return 'text-yellow-400 bg-yellow-400/10';
-    }
-  };
-
-  const getStatusIcon = (status: string) => {
-    switch (status) {
-      case 'done': return <CheckCircle2 className="h-4 w-4" />;
-      case 'running': return <Activity className="h-4 w-4 animate-pulse" />;
-      case 'failed': return <XCircle className="h-4 w-4" />;
-      case 'cancelled': return <XCircle className="h-4 w-4" />;
-      default: return <Clock className="h-4 w-4" />;
-    }
-  };
+  // Use StatusBadge component instead of custom status rendering
 
   if (loading) {
     return (
@@ -298,18 +279,20 @@ function Dashboard() {
               </div>
               <div className="p-6">
                 {tasks.length === 0 ? (
-                  <div className="text-center py-8 text-slate-400">
-                    <Terminal className="h-12 w-12 mx-auto mb-4 opacity-50" />
-                    <p>No tasks yet. Create a project to get started!</p>
-                  </div>
+                  <EmptyState
+                    icon={Terminal}
+                    title="No tasks yet"
+                    description="Create a project to start orchestrating AI development tasks"
+                    action={{
+                      label: 'Create Project',
+                      onClick: () => setShowCreateProject(true)
+                    }}
+                  />
                 ) : (
                   <div className="space-y-4">
                     {tasks.slice(-5).reverse().map((task) => (
                       <div key={task.id} className="flex items-center justify-between py-3">
                         <div className="flex items-center gap-3">
-                          <div className={`p-2 rounded-lg ${getStatusColor(task.status)}`}>
-                            {getStatusIcon(task.status)}
-                          </div>
                           <div>
                             <p className="font-medium text-white">{task.title}</p>
                             <p className="text-sm text-slate-400">
@@ -317,9 +300,7 @@ function Dashboard() {
                             </p>
                           </div>
                         </div>
-                        <span className={`px-3 py-1 rounded-full text-xs font-medium ${getStatusColor(task.status)}`}>
-                          {task.status.toUpperCase()}
-                        </span>
+                        <StatusBadge status={task.status} />
                       </div>
                     ))}
                   </div>
@@ -376,17 +357,15 @@ function Dashboard() {
             </div>
 
             {projects.length === 0 ? (
-              <div className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-12 text-center">
-                <GitBranch className="h-16 w-16 mx-auto mb-4 text-slate-600" />
-                <h3 className="text-xl font-semibold text-white mb-2">No projects yet</h3>
-                <p className="text-slate-400 mb-6">Create your first project to start orchestrating AI development tasks</p>
-                <button
-                  onClick={() => setShowCreateProject(true)}
-                  className="bg-primary-500 hover:bg-primary-600 text-white px-6 py-3 rounded-lg transition-all"
-                >
-                  Create Project
-                </button>
-              </div>
+              <EmptyState
+                icon={GitBranch}
+                title="No projects yet"
+                description="Create your first project to start orchestrating AI development tasks"
+                action={{
+                  label: 'Create Project',
+                  onClick: () => setShowCreateProject(true)
+                }}
+              />
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {projects.map((project) => (
@@ -445,8 +424,8 @@ function Dashboard() {
                   <div key={task.id} className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-4 hover:border-slate-600 transition-all">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-3">
-                        <div className={`p-2 rounded-lg ${getStatusColor(task.status)}`}>
-                          {getStatusIcon(task.status)}
+                        <div className="p-2 rounded-lg text-blue-400 bg-blue-400/10">
+                          <Activity className="h-5 w-5" />
                         </div>
                         <div>
                           <p className="font-medium text-white">{task.title}</p>
@@ -458,9 +437,7 @@ function Dashboard() {
                           </p>
                         </div>
                       </div>
-                      <span className={`px-3 py-1 rounded-full text-xs font-medium ${getStatusColor(task.status)}`}>
-                        {task.status.toUpperCase()}
-                      </span>
+                      <StatusBadge status={task.status} size="sm" />
                     </div>
                   </div>
                 ))}
