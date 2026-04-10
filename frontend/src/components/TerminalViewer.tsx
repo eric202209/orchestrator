@@ -2,8 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { ChevronDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
+export interface TerminalLogEntry {
+  message: string;
+  timestamp?: string;
+}
+
 interface TerminalViewerProps {
-  logs: string[];
+  logs: Array<string | TerminalLogEntry>;
   autoScroll?: boolean;
   className?: string;
   height?: string;
@@ -62,50 +67,66 @@ export function TerminalViewer({
   };
 
   // Colorize logs based on content
-  const colorizeLog = (log: string) => {
-    const lines = log.split('\n');
+  const colorizeLog = (log: string | TerminalLogEntry) => {
+    const message = typeof log === 'string' ? log : log.message;
+    const timestamp = typeof log === 'string' ? undefined : log.timestamp;
+    const lines = message.split('\n');
     return lines.map((line, idx) => {
+      const prefix = idx === 0 && timestamp
+        ? (
+          <span className="text-slate-500 mr-3 shrink-0">
+            [{timestamp}]
+          </span>
+        )
+        : null;
+
       // Check for different log levels
       if (line.includes('✓') || line.includes('success') || line.includes('Success')) {
         return (
-          <div key={idx} className="text-emerald-400">
-            {line}
+          <div key={idx} className="flex">
+            {prefix}
+            <span className="text-emerald-400">{line}</span>
           </div>
         );
       }
       if (line.includes('✗') || line.includes('error') || line.includes('Error') || line.includes('failed')) {
         return (
-          <div key={idx} className="text-red-400">
-            {line}
+          <div key={idx} className="flex">
+            {prefix}
+            <span className="text-red-400">{line}</span>
           </div>
         );
       }
       if (line.includes('warning') || line.includes('Warning')) {
         return (
-          <div key={idx} className="text-yellow-400">
-            {line}
+          <div key={idx} className="flex">
+            {prefix}
+            <span className="text-yellow-400">{line}</span>
           </div>
         );
       }
       if (line.includes('info') || line.includes('Info') || line.includes('INFO')) {
         return (
-          <div key={idx} className="text-blue-400">
-            {line}
+          <div key={idx} className="flex">
+            {prefix}
+            <span className="text-blue-400">{line}</span>
           </div>
         );
       }
       if (line.includes('[') && line.includes(']')) {
         // Timestamp lines
         return (
-          <div key={idx} className="text-slate-400">
-            {line}
+          <div key={idx} className="flex">
+            {prefix}
+            <span className="text-slate-400">{line}</span>
           </div>
         );
       }
       // Default log line
       return (
-        <div key={idx} className="text-slate-200">
-          {line}
+        <div key={idx} className="flex">
+          {prefix}
+          <span className="text-slate-200">{line}</span>
         </div>
       );
     });

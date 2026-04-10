@@ -337,12 +337,14 @@ function TaskDetail() {
                 <p className="text-slate-400 text-sm">{task.project_id || 'N/A'}</p>
               </div>
               <div>
-                <h3 className="text-sm font-medium text-slate-300 mb-1">Session ID</h3>
+                <h3 className="text-sm font-medium text-slate-300 mb-1">Linked Session ID</h3>
                 <p className="text-slate-400 text-sm">{task.session_id || 'N/A'}</p>
               </div>
               <div>
                 <h3 className="text-sm font-medium text-slate-300 mb-1">Current Step</h3>
-                <p className="text-slate-400 text-sm">{task.current_step || 0}</p>
+                <p className="text-slate-400 text-sm">
+                  {task.current_step > 0 ? `Step ${task.current_step}` : 'Not started'}
+                </p>
               </div>
             </div>
           </div>

@@ -1122,10 +1122,64 @@ async def start_session(
         if session.project_id:
             print(f"DEBUG: Found project_id {session.project_id}, queuing tasks...")
             from app.services.task_service import TaskService
+            from app.models import Task
 
             task_service = TaskService(db)
+            project_tasks = task_service.get_project_tasks(session.project_id)
+            print(f"DEBUG: Found {len(project_tasks)} tasks for project")
+
+            # Recover stale task states from an older interrupted session run.
+            # If the session is being restarted and no session is currently active,
+            # tasks left in RUNNING should become PENDING so they can be re-queued.
+            stale_running_tasks = [
+                task for task in project_tasks if task.status == TaskStatus.RUNNING
+            ]
+            for task in stale_running_tasks:
+                task.status = TaskStatus.PENDING
+                task.error_message = None
+                task.started_at = None
+                task.completed_at = None
+                task.current_step = 0
+            if stale_running_tasks:
+                db.add(
+                    LogEntry(
+                        session_id=session_id,
+                        session_instance_id=session_instance_id,
+                        level="INFO",
+                        message=f"Recovered {len(stale_running_tasks)} stale running task(s) for restart",
+                    )
+                )
+                db.commit()
+
             pending_tasks = task_service.get_project_tasks(session.project_id)
-            print(f"DEBUG: Found {len(pending_tasks)} tasks for project")
+
+            if not any(task.status == TaskStatus.PENDING for task in pending_tasks):
+                retryable_failed_tasks = [
+                    task
+                    for task in pending_tasks
+                    if task.status in [TaskStatus.FAILED, TaskStatus.CANCELLED]
+                ]
+                for task in retryable_failed_tasks:
+                    task.status = TaskStatus.PENDING
+                    task.error_message = None
+                    task.started_at = None
+                    task.completed_at = None
+                    task.current_step = 0
+
+                if retryable_failed_tasks:
+                    db.add(
+                        LogEntry(
+                            session_id=session_id,
+                            session_instance_id=session_instance_id,
+                            level="INFO",
+                            message=(
+                                f"Recovered {len(retryable_failed_tasks)} failed/cancelled "
+                                "task(s) for retry"
+                            ),
+                        )
+                    )
+                    db.commit()
+                    pending_tasks = task_service.get_project_tasks(session.project_id)
 
             # Queue all pending tasks for execution
             queued_tasks = []
@@ -1156,12 +1210,33 @@ async def start_session(
                     db.add(
                         LogEntry(
                             session_id=session_id,
+                            session_instance_id=session_instance_id,
                             task_id=task.id,
                             level="INFO",
                             message=f"Task queued: {task.title}",
                             log_metadata=json.dumps({"celery_task_id": result.id}),
                         )
                     )
+
+            if not queued_tasks:
+                task_status_summary = {
+                    str(task.status.value if hasattr(task.status, "value") else task.status): 0
+                    for task in pending_tasks
+                }
+                for task in pending_tasks:
+                    key = str(task.status.value if hasattr(task.status, "value") else task.status)
+                    task_status_summary[key] = task_status_summary.get(key, 0) + 1
+
+                db.add(
+                    LogEntry(
+                        session_id=session_id,
+                        session_instance_id=session_instance_id,
+                        level="WARN",
+                        message="No tasks were queued for this session start",
+                        log_metadata=json.dumps({"task_status_summary": task_status_summary}),
+                    )
+                )
+                db.commit()
 
             # Update session metadata with queued tasks
             session_key = (

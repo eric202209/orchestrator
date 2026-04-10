@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { sessionsAPI, tasksAPI, projectsAPI } from '@/api/client';
 import type { Session, Task, Project } from '@/types/api';
 import { TerminalViewer } from '@/components/TerminalViewer';
+import type { TerminalLogEntry } from '@/components/TerminalViewer';
 import { LoadingSpinner, StatusBadge } from '@/components/ui';
 import { 
   Play, 
@@ -51,12 +52,12 @@ export default function SessionDetail() {
   const [session, setSession] = useState<Session | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [project, setProject] = useState<Project | null>(null);
-  const [displayLogs, setDisplayLogs] = useState<string[]>([]);
+  const [displayLogs, setDisplayLogs] = useState<TerminalLogEntry[]>([]);
   const [activeTab, setActiveTab] = useState<'logs' | 'tasks' | 'settings'>('logs');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
-  const [allLogs, setAllLogs] = useState<string[]>([]);
+  const [allLogs, setAllLogs] = useState<TerminalLogEntry[]>([]);
   const [logViewMode, setLogViewMode] = useState<'newest' | 'oldest' | 'success' | 'errors' | 'all'>('newest');
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
@@ -82,14 +83,28 @@ export default function SessionDetail() {
     return `${yyyy}${mm}${dd} / ${hh}:${min}:${ss}`;
   };
 
-  const applyLogView = (sourceLogs: string[], mode: string) => {
+  const formatLogTimestamp = (value?: string | null) => {
+    const parsed = parseApiDate(value);
+    if (!parsed) return '';
+    const hh = String(parsed.getHours()).padStart(2, '0');
+    const mm = String(parsed.getMinutes()).padStart(2, '0');
+    const ss = String(parsed.getSeconds()).padStart(2, '0');
+    return `${hh}:${mm}:${ss}`;
+  };
+
+  const toTerminalLogEntry = (log: SessionLogItem): TerminalLogEntry => ({
+    message: log.message,
+    timestamp: formatLogTimestamp(log.timestamp || log.created_at),
+  });
+
+  const applyLogView = (sourceLogs: TerminalLogEntry[], mode: string) => {
     let result = [...sourceLogs];
     if (mode === 'newest') {
       result = result.slice().reverse();
     } else if (mode === 'success') {
-      result = result.filter((log) => log.includes('✓') || log.includes('success') || log.includes('Success'));
+      result = result.filter((log) => log.message.includes('✓') || log.message.includes('success') || log.message.includes('Success'));
     } else if (mode === 'errors') {
-      result = result.filter((log) => log.includes('✗') || log.includes('error') || log.includes('Error') || log.includes('failed'));
+      result = result.filter((log) => log.message.includes('✗') || log.message.includes('error') || log.message.includes('Error') || log.message.includes('failed'));
     }
     setDisplayLogs(result);
   };
@@ -198,9 +213,9 @@ export default function SessionDetail() {
         const response = await sessionsAPI.getLogs(Number(sessionId));
         const loadedLogs = (response.data?.logs || []) as SessionLogItem[];
         console.log(`Loaded ${loadedLogs.length} logs for session ${sessionId}`);
-        const logMessages = loadedLogs.map((log) => log.message);
-        setAllLogs(logMessages);
-        applyLogView(logMessages, logViewMode);
+        const terminalLogs = loadedLogs.map(toTerminalLogEntry);
+        setAllLogs(terminalLogs);
+        applyLogView(terminalLogs, logViewMode);
         setTimelineEvents(
           loadedLogs
             .slice(-50)
@@ -296,7 +311,13 @@ export default function SessionDetail() {
           if (data.type === 'log') {
             console.log('✅ Received log message:', data.message);
             setAllLogs(prev => {
-              const next = [...prev.slice(-499), data.message];
+              const next = [
+                ...prev.slice(-499),
+                {
+                  message: data.message,
+                  timestamp: formatLogTimestamp(data.timestamp),
+                },
+              ];
               applyLogView(next, logViewMode);
               return next;
             });
@@ -328,6 +349,7 @@ export default function SessionDetail() {
       wsRef.current.onclose = () => {
         console.log('WebSocket closed, reconnecting...');
         setWsConnected(false);
+        wsRef.current = null;
         // Attempt reconnection after 3 seconds
         reconnectTimeoutRef.current = setTimeout(() => {
           setupWebSocket(session_id);
@@ -354,6 +376,14 @@ export default function SessionDetail() {
       const updated = await sessionsAPI.getById(Number(sessionId));
       console.log('Updated session:', updated.data);
       setSession(updated.data);
+      if (updated.data.status === 'running' || updated.data.status === 'paused') {
+        if (reconnectTimeoutRef.current) {
+          clearTimeout(reconnectTimeoutRef.current);
+        }
+        if (!wsRef.current) {
+          setupWebSocket(Number(sessionId));
+        }
+      }
       pushTimelineEvent(`Session started with status: ${updated.data.status}`, 'INFO');
       alert(`Session ${session.name} started successfully!`);
     } catch (error: any) {
@@ -394,10 +424,10 @@ export default function SessionDetail() {
     try {
       const response = await sessionsAPI.getLogs(Number(sessionId));
       const logs = (response.data?.logs || []) as SessionLogItem[];
-      const logMessages = logs.map((log) => log.message);
-      setAllLogs(logMessages);
-      applyLogView(logMessages, logViewMode);
-      console.log(`Refreshed ${logMessages.length} logs`);
+      const terminalLogs = logs.map(toTerminalLogEntry);
+      setAllLogs(terminalLogs);
+      applyLogView(terminalLogs, logViewMode);
+      console.log(`Refreshed ${terminalLogs.length} logs`);
     } catch (error: any) {
       console.error('Failed to refresh logs:', error);
       const errorMsg = error.response?.data?.detail || error.message || 'Unknown error';

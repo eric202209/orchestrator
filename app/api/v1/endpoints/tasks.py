@@ -262,18 +262,29 @@ def get_task(task_id: int, db: Session = Depends(get_db)):
     task = db.query(Task).filter(Task.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    
-    # Get associated session_id from session_tasks table
-    session_task = db.query(SessionTask).filter(SessionTask.task_id == task_id).first()
+
+    # Prefer the most recent task/session relationship so Task Detail reflects
+    # the latest execution context instead of an arbitrary historical row.
+    session_task = (
+        db.query(SessionTask)
+        .filter(SessionTask.task_id == task_id)
+        .order_by(
+            SessionTask.started_at.desc().nullslast(),
+            SessionTask.completed_at.desc().nullslast(),
+            SessionTask.id.desc(),
+        )
+        .first()
+    )
     session_id = session_task.session_id if session_task else None
-    
+
     # Add session_id to task response
     task_dict = task.__dict__.copy()
-    task_dict['session_id'] = session_id
-    
+    task_dict["session_id"] = session_id
+
     # If no session found but task is running/done, try to get from recent logs
     if not session_id and task.status in [TaskStatus.RUNNING, TaskStatus.DONE]:
         from app.models import LogEntry
+
         recent_log = (
             db.query(LogEntry)
             .filter(LogEntry.task_id == task_id)
@@ -282,8 +293,8 @@ def get_task(task_id: int, db: Session = Depends(get_db)):
         )
         if recent_log and recent_log.session_id:
             session_id = recent_log.session_id
-            task_dict['session_id'] = session_id
-    
+            task_dict["session_id"] = session_id
+
     return task_dict
 
 

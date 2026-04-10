@@ -198,7 +198,10 @@ def _normalize_command(command: str, project_dir: Path) -> str:
 
 
 def _normalize_expected_files(
-    expected_files: Optional[List[str]], project_dir: Path
+    expected_files: Optional[List[str]],
+    project_dir: Path,
+    logger_obj: logging.Logger,
+    step_index: Optional[int] = None,
 ) -> List[str]:
     normalized_files: List[str] = []
     for file_path in expected_files or []:
@@ -210,30 +213,65 @@ def _normalize_expected_files(
                 f"[ISOLATION] Skipping suspicious expected_files entry that looks like markup: {raw_file_path}"
             )
             continue
-        normalized = _normalize_path_reference(raw_file_path, project_dir)
-        normalized_files.append("." if normalized == "." else normalized)
+        try:
+            normalized = _normalize_path_reference(raw_file_path, project_dir)
+            normalized_files.append("." if normalized == "." else normalized)
+        except TaskWorkspaceViolationError as exc:
+            step_label = f"step {step_index} " if step_index is not None else ""
+            logger_obj.warning(
+                f"[ISOLATION] Skipping {step_label}expected_files entry outside workspace: "
+                f"{raw_file_path} ({exc})"
+            )
     return normalized_files
 
 
-def _normalize_step(step: Dict[str, Any], project_dir: Path) -> Dict[str, Any]:
+def _normalize_step(
+    step: Dict[str, Any],
+    project_dir: Path,
+    logger_obj: logging.Logger,
+    step_index: Optional[int] = None,
+) -> Dict[str, Any]:
+    step_label = f"step {step_index}" if step_index is not None else "step"
+
     normalized_step = dict(step)
-    normalized_step["commands"] = [
-        _normalize_command(str(command), project_dir)
-        for command in (step.get("commands", []) or [])
-    ]
+    normalized_commands = []
+    for command_index, command in enumerate(step.get("commands", []) or [], start=1):
+        raw_command = str(command)
+        try:
+            normalized_commands.append(_normalize_command(raw_command, project_dir))
+        except TaskWorkspaceViolationError as exc:
+            raise TaskWorkspaceViolationError(
+                f"{step_label} command {command_index} blocked: {exc}. "
+                f"Offending command: {raw_command}"
+            ) from exc
+    normalized_step["commands"] = normalized_commands
 
     if step.get("verification"):
-        normalized_step["verification"] = _normalize_command(
-            str(step.get("verification")), project_dir
-        )
+        raw_verification = str(step.get("verification"))
+        try:
+            normalized_step["verification"] = _normalize_command(
+                raw_verification, project_dir
+            )
+        except TaskWorkspaceViolationError as exc:
+            raise TaskWorkspaceViolationError(
+                f"{step_label} verification blocked: {exc}. "
+                f"Offending command: {raw_verification}"
+            ) from exc
 
     if step.get("rollback"):
-        normalized_step["rollback"] = _normalize_command(
-            str(step.get("rollback")), project_dir
-        )
+        raw_rollback = str(step.get("rollback"))
+        try:
+            normalized_step["rollback"] = _normalize_command(
+                raw_rollback, project_dir
+            )
+        except TaskWorkspaceViolationError as exc:
+            raise TaskWorkspaceViolationError(
+                f"{step_label} rollback blocked: {exc}. "
+                f"Offending command: {raw_rollback}"
+            ) from exc
 
     normalized_step["expected_files"] = _normalize_expected_files(
-        step.get("expected_files", []), project_dir
+        step.get("expected_files", []), project_dir, logger_obj, step_index
     )
     return normalized_step
 
@@ -243,7 +281,7 @@ def _normalize_plan(
 ) -> List[Dict[str, Any]]:
     normalized_plan: List[Dict[str, Any]] = []
     for index, step in enumerate(plan or [], start=1):
-        normalized_step = _normalize_step(step, project_dir)
+        normalized_step = _normalize_step(step, project_dir, logger_obj, index)
         if normalized_step != step:
             logger_obj.info(
                 f"[ISOLATION] Normalized step {index} to stay within task workspace"
@@ -333,6 +371,38 @@ def build_task_subfolder_name(title: str, task_id: int) -> str:
     return f"task-{slug}" if slug else f"task-{task_id}"
 
 
+def _build_minimal_planning_prompt(task_description: str, project_dir: Path) -> str:
+    """Fallback planning prompt for smaller-context models."""
+    concise_task = " ".join((task_description or "").split())
+    concise_task = concise_task[:2000]
+    return f"""Produce a JSON-only execution plan for this software task. Do not implement anything.
+
+Task:
+{concise_task}
+
+Rules:
+1. Assume working directory is {project_dir}
+2. Use relative paths only
+3. Do not use absolute paths, .., or ~
+4. Return 3 to 6 small sequential steps
+5. Each step must include: step_number, description, commands, verification, rollback, expected_files
+6. expected_files must be relative paths or []
+7. Output JSON array only
+
+Example:
+[
+  {{
+    "step_number": 1,
+    "description": "Inspect project structure and identify entry points",
+    "commands": ["ls", "find . -maxdepth 2 -type f | sort | head -100"],
+    "verification": "test -d . && echo ok",
+    "rollback": null,
+    "expected_files": []
+  }}
+]
+"""
+
+
 @celery_app.task(
     bind=True,
     max_retries=3,
@@ -376,6 +446,17 @@ def execute_openclaw_task(
 
         if not session or not task:
             raise ValueError("Session or task not found")
+
+        def emit_live(level: str, message: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+            _record_live_log(
+                db,
+                session_id,
+                task_id,
+                level,
+                message,
+                session_instance_id=session.instance_id,
+                metadata=metadata,
+            )
 
         # Get the project associated with this session
         project = (
@@ -464,9 +545,15 @@ def execute_openclaw_task(
         # Update task status
         task.status = TaskStatus.RUNNING
         task.started_at = datetime.utcnow()
+        task.current_step = 0
         db.commit()
 
         logger.info(f"[ORCHESTRATION] Starting multi-step execution for task {task_id}")
+        emit_live(
+            "INFO",
+            f"[ORCHESTRATION] Starting multi-step execution for task {task_id}",
+            metadata={"phase": "start"},
+        )
 
         # Initialize OpenClaw service
         openclaw_service = OpenClawSessionService(db, session_id, task_id)
@@ -536,10 +623,20 @@ def execute_openclaw_task(
                 logger.info(
                     f"[ORCHESTRATION] Resuming from checkpoint '{resume_checkpoint_name}' at step index {orchestration_state.current_step_index}"
                 )
+                emit_live(
+                    "INFO",
+                    f"[ORCHESTRATION] Resuming from checkpoint '{resume_checkpoint_name}' at step index {orchestration_state.current_step_index}",
+                    metadata={"phase": "resume"},
+                )
 
         if not resumed_from_checkpoint:
             # PHASE 1: PLANNING - Generate step plan
             logger.info("[ORCHESTRATION] Phase 1: PLANNING - generating step plan")
+            emit_live(
+                "INFO",
+                "[ORCHESTRATION] Phase 1: PLANNING - generating step plan",
+                metadata={"phase": "planning"},
+            )
 
             # Use project_name (already slugified) for the project context
             project_name_slug = (
@@ -554,9 +651,36 @@ def execute_openclaw_task(
                 project_dir=str(orchestration_state.project_dir),
             )
 
+            # Planning often needs more time than the old 120 second cap,
+            # especially for larger repos or denser prompts.
+            planning_timeout_seconds = max(180, min(timeout_seconds, 300))
             planning_result = asyncio.run(
-                openclaw_service.execute_task(planning_prompt, timeout_seconds=120)
+                openclaw_service.execute_task(
+                    planning_prompt, timeout_seconds=planning_timeout_seconds
+                )
             )
+
+            planning_error = (planning_result.get("error") or "").lower()
+            if "context window exceeded" in planning_error or (
+                "context" in planning_error and "exceeded" in planning_error
+            ):
+                logger.warning(
+                    "[ORCHESTRATION] Planning hit context limit; retrying with minimal prompt"
+                )
+                emit_live(
+                    "WARN",
+                    "[ORCHESTRATION] Planning prompt exceeded context; retrying with minimal prompt",
+                    metadata={"phase": "planning", "retry": "minimal_prompt"},
+                )
+                minimal_planning_prompt = _build_minimal_planning_prompt(
+                    prompt, orchestration_state.project_dir
+                )
+                planning_result = asyncio.run(
+                    openclaw_service.execute_task(
+                        minimal_planning_prompt,
+                        timeout_seconds=min(planning_timeout_seconds, 180),
+                    )
+                )
 
             # Parse planning result to get steps
             try:
@@ -637,6 +761,17 @@ def execute_openclaw_task(
                     output_text, context="planning"
                 )
 
+                planning_error = (planning_result.get("error") or "").lower()
+                if "context window exceeded" in planning_error or (
+                    "context" in planning_error and "exceeded" in planning_error
+                ):
+                    raise ValueError("Planning failed: context window exceeded")
+
+                if "request timed out before a response was generated" in output_text.lower():
+                    raise TimeoutError(
+                        f"Planning timed out after {planning_timeout_seconds}s"
+                    )
+
                 if success:
                     if isinstance(plan_data, list):
                         orchestration_state.plan = _normalize_plan_with_live_logging(
@@ -652,6 +787,18 @@ def execute_openclaw_task(
                         logger.info(
                             f"[ORCHESTRATION] Generated {len(orchestration_state.plan)} steps in plan (using {strategy_info})"
                         )
+                        emit_live(
+                            "INFO",
+                            f"[ORCHESTRATION] Generated {len(orchestration_state.plan)} steps in plan",
+                            metadata={
+                                "phase": "planning",
+                                "steps": len(orchestration_state.plan),
+                                "strategy": strategy_info,
+                            },
+                        )
+                        task.steps = json.dumps(orchestration_state.plan)
+                        task.current_step = 0
+                        db.commit()
                     else:
                         raise ValueError("Planning result is not a list of steps")
                 else:
@@ -691,6 +838,11 @@ def execute_openclaw_task(
         logger.info(
             f"[ORCHESTRATION] Phase 2: EXECUTING - executing {len(orchestration_state.plan)} steps"
         )
+        emit_live(
+            "INFO",
+            f"[ORCHESTRATION] Phase 2: EXECUTING - executing {len(orchestration_state.plan)} steps",
+            metadata={"phase": "executing", "steps": len(orchestration_state.plan)},
+        )
 
         for step_index in range(
             orchestration_state.current_step_index, len(orchestration_state.plan)
@@ -715,6 +867,8 @@ def execute_openclaw_task(
                 }
 
             orchestration_state.current_step_index = step_index
+            task.current_step = step_index + 1
+            db.commit()
 
             step_description = step.get("description", f"Step {step_index + 1}")
             step_commands = step.get("commands", [])
@@ -724,6 +878,15 @@ def execute_openclaw_task(
 
             logger.info(
                 f"[ORCHESTRATION] Executing step {step_index + 1}/{len(orchestration_state.plan)}: {step_description[:80]}..."
+            )
+            emit_live(
+                "INFO",
+                f"[ORCHESTRATION] Executing step {step_index + 1}/{len(orchestration_state.plan)}: {step_description}",
+                metadata={
+                    "phase": "executing",
+                    "step_index": step_index + 1,
+                    "step_total": len(orchestration_state.plan),
+                },
             )
 
             # Debug: Log the step data
@@ -779,6 +942,11 @@ def execute_openclaw_task(
                 logger.info(
                     f"[ORCHESTRATION] Step {step_index + 1} completed successfully"
                 )
+                emit_live(
+                    "INFO",
+                    f"[ORCHESTRATION] Step {step_index + 1} completed successfully",
+                    metadata={"phase": "executing", "step_index": step_index + 1},
+                )
             else:
                 orchestration_state.record_failure(step_record)
                 _save_orchestration_checkpoint(
@@ -788,6 +956,11 @@ def execute_openclaw_task(
                 # PHASE 3: DEBUGGING - Fix failed step
                 logger.info(
                     f"[ORCHESTRATION] Step {step_index + 1} failed, entering DEBUGGING phase"
+                )
+                emit_live(
+                    "WARN",
+                    f"[ORCHESTRATION] Step {step_index + 1} failed, entering DEBUGGING phase",
+                    metadata={"phase": "debugging", "step_index": step_index + 1},
                 )
 
                 debug_prompt = PromptTemplates.build_debugging_prompt(
@@ -828,6 +1001,11 @@ def execute_openclaw_task(
                         # PHASE 4: PLAN_REVISION
                         logger.info(
                             f"[ORCHESTRATION] Plan revision needed, entering PLAN_REVISION phase"
+                        )
+                        emit_live(
+                            "WARN",
+                            "[ORCHESTRATION] Plan revision needed, entering PLAN_REVISION phase",
+                            metadata={"phase": "plan_revision", "step_index": step_index + 1},
                         )
                         revise_prompt = PromptTemplates.build_plan_revision_prompt(
                             original_plan=orchestration_state.plan,
@@ -871,6 +1049,15 @@ def execute_openclaw_task(
                         logger.info(
                             f"[ORCHESTRATION] Plan revised, {len(orchestration_state.plan)} steps"
                         )
+                        emit_live(
+                            "INFO",
+                            f"[ORCHESTRATION] Plan revised, {len(orchestration_state.plan)} steps",
+                            metadata={
+                                "phase": "plan_revision",
+                                "steps": len(orchestration_state.plan),
+                                "strategy": strategy_info,
+                            },
+                        )
 
                         # Retry the step with revised plan
                         continue  # Retry this step
@@ -879,6 +1066,11 @@ def execute_openclaw_task(
                         # Retry the step with fix
                         logger.info(
                             f"[ORCHESTRATION] Fix applied, retrying step {step_index + 1}"
+                        )
+                        emit_live(
+                            "INFO",
+                            f"[ORCHESTRATION] Fix applied, retrying step {step_index + 1}",
+                            metadata={"phase": "debugging", "step_index": step_index + 1},
                         )
                         continue  # Retry this step
 
@@ -905,6 +1097,11 @@ def execute_openclaw_task(
 
         # PHASE 5: TASK_SUMMARY - Summarize completion
         logger.info("[ORCHESTRATION] Phase 5: TASK_SUMMARY - summarizing completion")
+        emit_live(
+            "INFO",
+            "[ORCHESTRATION] Phase 5: TASK_SUMMARY - summarizing completion",
+            metadata={"phase": "task_summary"},
+        )
 
         summary_prompt = PromptTemplates.build_task_summary(
             task_description=prompt,
@@ -923,6 +1120,7 @@ def execute_openclaw_task(
         task.status = TaskStatus.DONE
         task.completed_at = datetime.utcnow()
         task.summary = summary_result.get("output", "")[:2000]
+        task.current_step = len(orchestration_state.plan)
 
         # Update session status to stopped when task completes
         if session:
@@ -934,6 +1132,11 @@ def execute_openclaw_task(
 
         logger.info(
             f"[ORCHESTRATION] Task {task_id} completed successfully with {len(orchestration_state.plan)} steps"
+        )
+        emit_live(
+            "INFO",
+            f"[ORCHESTRATION] Task {task_id} completed successfully with {len(orchestration_state.plan)} steps",
+            metadata={"phase": "completed", "steps": len(orchestration_state.plan)},
         )
 
         # Generate and save task report
