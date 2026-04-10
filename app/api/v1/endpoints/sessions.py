@@ -212,6 +212,7 @@ def create_session(
 
     db_session = SessionModel(**session.model_dump())
     db_session.is_active = True  # Session is active when created
+    db_session.instance_id = str(uuid.uuid4())  # Generate unique instance ID immediately
     db.add(db_session)
 
     # Commit session creation
@@ -352,9 +353,24 @@ def delete_session(
     )
     db.commit()
 
-    # Delete the session
-    db.delete(db_session)
+    # Soft delete: mark as deleted and delete all logs
+    # This prevents database ID reuse issues that cause stale logs
+    db_session.deleted_at = datetime.now(timezone.utc)
+    db_session.is_active = False
+    db_session.status = "deleted"
+    
+    # Delete all logs for this session to prevent ID reuse issues
+    from app.models import LogEntry
+    deleted_logs = db.query(LogEntry).filter(
+        LogEntry.session_id == session_id
+    ).delete()
+    
     db.commit()
+    logger.info(f"Deleted {deleted_logs} logs for session {session_id}")
+
+    # Optional: Actually delete the session row if you want hard delete behavior
+    # db.delete(db_session)
+    # db.commit()
 
     logger.info(f"DELETE /sessions/{session_id} - Session deleted successfully")
     return None
@@ -657,11 +673,21 @@ async def websocket_log_stream(
         session_id, instance_id=session.instance_id, limit=20
     )
     logger.info(
-        f"Sending {len(recent_logs)} recent logs to WebSocket (filtered by instance)"
+        f"Sending {len(recent_logs)} recent logs to WebSocket (filtered by instance: {session.instance_id})"
     )
+    if not recent_logs and session.instance_id:
+        logger.warning(
+            f"No logs found for session {session_id} with instance_id {session.instance_id}"
+        )
+        # Try to get any logs for this session (without instance filter)
+        fallback_logs = log_service.get_recent_logs(session_id, instance_id=None, limit=20)
+        logger.info(f"Fallback: Found {len(fallback_logs)} logs without instance filter")
+        recent_logs = fallback_logs
 
     for log in recent_logs:
         await websocket.send_json({"type": "log", **log})
+    
+    logger.info(f"Sent {len(recent_logs)} initial logs, starting main loop...")
 
     # Background task to send periodic heartbeats (prevents 5-minute timeout)
     async def heartbeat_sender():
@@ -971,8 +997,13 @@ async def start_session(
         db.commit()
 
     try:
-        # Generate unique instance ID for this session (prevents ID reuse issues)
-        session_instance_id = str(uuid.uuid4())
+        # Use the instance_id already generated at session creation time
+        session_instance_id = session.instance_id
+        if not session_instance_id:
+            # Fallback: generate if somehow missing (shouldn't happen)
+            session_instance_id = str(uuid.uuid4())
+            session.instance_id = session_instance_id
+            db.commit()
 
         # Initialize OpenClaw service
         openclaw_service = OpenClawSessionService(db, session_id, use_demo_mode=False)
@@ -1037,8 +1068,7 @@ async def start_session(
                 else session_key
             )
 
-        # Update session with instance ID for tracking
-        session.instance_id = session_instance_id
+        # Update session state
         session.is_active = True
         session.started_at = datetime.now(timezone.utc)
         session.status = "running"
@@ -1350,6 +1380,54 @@ def get_prompt_template(
         "template": template,
         "session_id": session_id,
     }
+
+
+@router.get("/sessions/{session_id}/logs")
+def get_session_logs(
+    session_id: int,
+    db: Session = Depends(get_db),
+    limit: Optional[int] = 100,
+    offset: int = 0,
+):
+    """
+    Get logs for a session (simple endpoint for stopped sessions)
+    
+    This endpoint fetches all logs for a session, optionally filtered by instance_id.
+    It's designed to work for stopped sessions where WebSocket streaming isn't available.
+    
+    Args:
+        session_id: Session ID
+        limit: Maximum number of logs to return (default: 100)
+        offset: Offset for pagination (default: 0)
+    
+    Returns:
+        List of log entries
+    """
+    # Verify session exists
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Default limit to prevent timeouts
+    default_limit = 100
+    effective_limit = limit if limit else default_limit
+
+    # Cap limit at 1000 to prevent abuse
+    if effective_limit > 1000:
+        effective_limit = 1000
+
+    # Build query - filter by instance_id if available
+    logs_query = db.query(LogEntry).filter(
+        LogEntry.session_id == session_id
+    )
+
+    if session.instance_id:
+        logs_query = logs_query.filter(LogEntry.session_instance_id == session.instance_id)
+
+    # Apply pagination
+    logs = logs_query.order_by(LogEntry.created_at.desc()).offset(offset).limit(effective_limit).all()
+
+    return {"logs": logs, "total": logs_query.count()}
 
 
 @router.get("/sessions/{session_id}/logs/sorted")

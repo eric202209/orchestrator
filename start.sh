@@ -14,8 +14,8 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Localhost alias (from .env, default to 172.17.0.2)
-LOCALHOST=${LOCALHOST:-172.17.0.2}
+# Localhost alias (from .env, default to localhost)
+LOCALHOST=${LOCALHOST:-localhost}
 
 # Function to check if a process is running
 check_process() {
@@ -73,7 +73,13 @@ start_backend() {
     cd /root/.openclaw/workspace/vault/projects/orchestrator
     
     # Create log directory if it doesn't exist
-    mkdir -p /tmp
+    mkdir -p /root/.openclaw/workspace/vault/projects/orchestrator/logs
+    
+    # Load environment variables from .env file
+    if [ -f .env ]; then
+        export $(grep -v '^#' .env | xargs)
+        echo -e "${GREEN}✅ Environment loaded from .env${NC}"
+    fi
     
     # Kill any existing backend
     if check_process "uvicorn app.main:app"; then
@@ -82,6 +88,7 @@ start_backend() {
     fi
     
     # Start backend in background with comprehensive timeout configuration
+    # LOGS DIRECTIVE: Write directly to logs/ directory (not /tmp/) for history preservation
     nohup /root/.openclaw/workspace/vault/projects/orchestrator/venv/bin/uvicorn app.main:app \
         --host 0.0.0.0 \
         --port 8080 \
@@ -89,16 +96,16 @@ start_backend() {
         --proxy-headers \
         --forwarded-allow-ips "*" \
         --access-log \
-        > /tmp/backend.log 2>&1 &
+        >> /root/.openclaw/workspace/vault/projects/orchestrator/logs/backend.log 2>&1 &
     
     sleep 3
     
     if check_process "uvicorn app.main:app"; then
         echo -e "${GREEN}✅ Backend started on port 8080${NC}"
-        echo -e "${GREEN}📝 Backend logs: tail -f /tmp/backend.log${NC}"
+        echo -e "${GREEN}📝 Backend logs: tail -f logs/backend.log${NC}"
     else
-        echo -e "${RED}❌ Backend failed to start!${NC}"
-        echo -e "${YELLOW}Check logs: cat /tmp/backend.log${NC}"
+         echo -e "${RED}❌ Backend failed to start!${NC}"
+        echo -e "${YELLOW}Check logs: cat logs/backend.log${NC}"
         return 1
     fi
     echo ""
@@ -110,6 +117,12 @@ start_workers() {
     
     cd /root/.openclaw/workspace/vault/projects/orchestrator
     
+    # Load environment variables from .env file
+    if [ -f .env ]; then
+        export $(grep -v '^#' .env | xargs)
+        echo -e "${GREEN}✅ Environment loaded for workers${NC}"
+    fi
+    
     # Kill any existing workers
     if check_process "celery -A app.celery_app worker"; then
         pkill -f "celery -A app.celery_app worker"
@@ -117,19 +130,20 @@ start_workers() {
     fi
     
     # Start worker in background
+    # LOGS DIRECTIVE: Write directly to logs/ directory (not /tmp/) for history preservation
     nohup /root/.openclaw/workspace/vault/projects/orchestrator/venv/bin/celery \
         -A app.celery_app worker \
         --loglevel=info \
-        > /tmp/worker.log 2>&1 &
+        >> /root/.openclaw/workspace/vault/projects/orchestrator/logs/worker.log 2>&1 &
     
     sleep 5
     
     if check_process "celery -A app.celery_app worker"; then
         echo -e "${GREEN}✅ Celery worker started${NC}"
-        echo -e "${GREEN}📝 Worker logs: tail -f /tmp/worker.log${NC}"
+        echo -e "${GREEN}📝 Worker logs: tail -f logs/worker.log${NC}"
     else
-        echo -e "${RED}❌ Worker failed to start!${NC}"
-        echo -e "${YELLOW}Check logs: cat /tmp/worker.log${NC}"
+         echo -e "${RED}❌ Worker failed to start!${NC}"
+        echo -e "${YELLOW}Check logs: cat logs/worker.log${NC}"
         return 1
     fi
     echo ""
@@ -148,16 +162,17 @@ start_frontend() {
     fi
     
     # Start frontend in background
-    nohup node /usr/bin/pnpm dev > /tmp/frontend.log 2>&1 &
+    # LOGS DIRECTIVE: Write directly to logs/ directory (not /tmp/) for history preservation
+    nohup node /usr/bin/pnpm dev >> /root/.openclaw/workspace/vault/projects/orchestrator/logs/frontend.log 2>&1 &
     
     sleep 5
     
     if check_process "vite"; then
-        echo -e "${GREEN}✅ Frontend started on port 3000${NC}"
-        echo -e "${GREEN}📝 Frontend logs: tail -f /tmp/frontend.log${NC}"
+         echo -e "${GREEN}✅ Frontend started on port 3000${NC}"
+        echo -e "${GREEN}📝 Frontend logs: tail -f logs/frontend.log${NC}"
     else
-        echo -e "${RED}❌ Frontend failed to start!${NC}"
-        echo -e "${YELLOW}Check logs: cat /tmp/frontend.log${NC}"
+          echo -e "${RED}❌ Frontend failed to start!${NC}"
+        echo -e "${YELLOW}Check logs: cat logs/frontend.log${NC}"
         return 1
     fi
     echo ""
@@ -170,14 +185,14 @@ check_health() {
     sleep 2
     
     # Check backend
-    if curl -s http://172.17.0.2:8080/health > /dev/null 2>&1; then
+    if curl -s http://localhost:8080/health > /dev/null 2>&1; then
         echo -e "${GREEN}✅ Backend is healthy${NC}"
     else
         echo -e "${RED}❌ Backend is not responding${NC}"
     fi
     
     # Check frontend
-    if curl -s http://172.17.0.2:3000 > /dev/null 2>&1; then
+    if curl -s http://localhost:3000 > /dev/null 2>&1; then
         echo -e "${GREEN}✅ Frontend is healthy${NC}"
     else
         echo -e "${RED}❌ Frontend is not responding${NC}"
@@ -216,15 +231,15 @@ main() {
     echo "  🎉 All services started successfully!"
     echo "========================================"
     echo ""
-    echo "📱 Frontend Dashboard: http://172.17.0.2:3000"
-    echo "🔧 Backend API: http://172.17.0.2:8080"
-    echo "📚 API Docs: http://172.17.0.2:8080/docs"
+    echo "📱 Frontend Dashboard: http://localhost:3000"
+    echo "🔧 Backend API: http://localhost:8080"
+    echo "📚 API Docs: http://localhost:8080/docs"
     echo "🐘 Redis: localhost:6379"
     echo ""
-    echo "📝 View logs:"
-    echo "  Backend:    tail -f /tmp/backend.log"
-    echo "  Worker:     tail -f /tmp/worker.log"
-    echo "  Frontend:   tail -f /tmp/frontend.log"
+    echo "📝 View logs (permanent storage):"
+    echo "  Backend:    tail -f logs/backend.log"
+    echo "  Worker:     tail -f logs/worker.log"
+    echo "  Frontend:   tail -f logs/frontend.log"
     echo ""
     echo "🛑 To stop all services:"
     echo "  pkill -f 'uvicorn app.main:app'"

@@ -71,14 +71,24 @@ class LogStreamService:
             query = query.filter(LogEntry.task_id == task_id)
 
         if project_id:
-            # Filter logs by project through sessions
+            # Filter logs by project through sessions (only NON-DELETED sessions)
             session_ids = (
                 self.db.query(SessionModel.id)
-                .filter(SessionModel.project_id == project_id)
+                .filter(
+                    SessionModel.project_id == project_id,
+                    SessionModel.deleted_at.is_(None),
+                )
                 .all()
             )
             session_id_list = [s[0] for s in session_ids]
             query = query.filter(LogEntry.session_id.in_(session_id_list))
+            
+            # Also join to filter by session instance ID to prevent ID reuse issues
+            query = query.join(SessionModel, LogEntry.session_id == SessionModel.id)
+            query = query.filter(
+                SessionModel.instance_id.isnot(None),
+                LogEntry.session_instance_id == SessionModel.instance_id,
+            )
 
         if since:
             query = query.filter(LogEntry.created_at > since)
@@ -146,10 +156,13 @@ class LogStreamService:
         Returns:
             Summary statistics
         """
-        # Get all session IDs for this project
+        # Get all NON-DELETED session IDs for this project (filter by deleted_at is NULL)
         session_ids = (
             self.db.query(SessionModel.id)
-            .filter(SessionModel.project_id == project_id)
+            .filter(
+                SessionModel.project_id == project_id,
+                SessionModel.deleted_at.is_(None),  # Only active sessions
+            )
             .all()
         )
         session_id_list = [s[0] for s in session_ids]
@@ -161,10 +174,17 @@ class LogStreamService:
                 "recent_logs": [],
             }
 
-        # Count logs by level (filtered by instance_id)
+        # Count logs by level (filtered by session_id AND session_instance_id)
+        # This prevents showing logs from deleted/recreated sessions with reused IDs
         logs_by_level = (
             self.db.query(LogEntry.level, LogEntry.id)
-            .filter(LogEntry.session_id.in_(session_id_list))
+            .join(SessionModel, LogEntry.session_id == SessionModel.id)
+            .filter(
+                LogEntry.session_id.in_(session_id_list),
+                SessionModel.deleted_at.is_(None),  # Only active sessions
+                SessionModel.instance_id.isnot(None),  # Only sessions with instance tracking
+                LogEntry.session_instance_id == SessionModel.instance_id,  # Match instance IDs
+            )
             .all()
         )
 
@@ -172,10 +192,16 @@ class LogStreamService:
         for level, count in logs_by_level:
             level_counts[level] = count
 
-        # Get recent logs
+        # Get recent logs (same filtering as above)
         recent_logs = (
             self.db.query(LogEntry)
-            .filter(LogEntry.session_id.in_(session_id_list))
+            .join(SessionModel, LogEntry.session_id == SessionModel.id)
+            .filter(
+                LogEntry.session_id.in_(session_id_list),
+                SessionModel.deleted_at.is_(None),  # Only active sessions
+                SessionModel.instance_id.isnot(None),  # Only sessions with instance tracking
+                LogEntry.session_instance_id == SessionModel.instance_id,  # Match instance IDs
+            )
             .order_by(LogEntry.created_at.desc())
             .limit(10)
             .all()
@@ -253,9 +279,14 @@ def get_project_logs_summary_for_db(db: Session, project_id: int) -> Dict[str, A
     Returns:
         Summary statistics
     """
-    # Get all session IDs for this project
+    # Get all NON-DELETED session IDs for this project (filter by deleted_at is NULL)
     session_ids = (
-        db.query(SessionModel.id).filter(SessionModel.project_id == project_id).all()
+        db.query(SessionModel.id)
+        .filter(
+            SessionModel.project_id == project_id,
+            SessionModel.deleted_at.is_(None),  # Only active sessions
+        )
+        .all()
     )
     session_id_list = [s[0] for s in session_ids]
 
@@ -266,10 +297,17 @@ def get_project_logs_summary_for_db(db: Session, project_id: int) -> Dict[str, A
             "recent_logs": [],
         }
 
-    # Count logs by level
+    # Count logs by level (filtered by session_id AND session_instance_id)
+    # This prevents showing logs from deleted/recreated sessions with reused IDs
     logs_by_level = (
         db.query(LogEntry.level, LogEntry.id)
-        .filter(LogEntry.session_id.in_(session_id_list))
+        .join(SessionModel, LogEntry.session_id == SessionModel.id)
+        .filter(
+            LogEntry.session_id.in_(session_id_list),
+            SessionModel.deleted_at.is_(None),  # Only active sessions
+            SessionModel.instance_id.isnot(None),  # Only sessions with instance tracking
+            LogEntry.session_instance_id == SessionModel.instance_id,  # Match instance IDs
+        )
         .all()
     )
 
@@ -277,10 +315,16 @@ def get_project_logs_summary_for_db(db: Session, project_id: int) -> Dict[str, A
     for level, count in logs_by_level:
         level_counts[level] = count
 
-    # Get recent logs
+    # Get recent logs (same filtering as above)
     recent_logs = (
         db.query(LogEntry)
-        .filter(LogEntry.session_id.in_(session_id_list))
+        .join(SessionModel, LogEntry.session_id == SessionModel.id)
+        .filter(
+            LogEntry.session_id.in_(session_id_list),
+            SessionModel.deleted_at.is_(None),  # Only active sessions
+            SessionModel.instance_id.isnot(None),  # Only sessions with instance tracking
+            LogEntry.session_instance_id == SessionModel.instance_id,  # Match instance IDs
+        )
         .order_by(LogEntry.created_at.desc())
         .limit(10)
         .all()
@@ -337,14 +381,24 @@ def stream_logs(
             query = query.filter(LogEntry.task_id == task_id)
 
         if project_id:
-            # Filter logs by project through sessions
+            # Filter logs by project through sessions (only NON-DELETED sessions)
             session_ids = (
                 db.query(SessionModel.id)
-                .filter(SessionModel.project_id == project_id)
+                .filter(
+                    SessionModel.project_id == project_id,
+                    SessionModel.deleted_at.is_(None),
+                )
                 .all()
             )
             session_id_list = [s[0] for s in session_ids]
             query = query.filter(LogEntry.session_id.in_(session_id_list))
+            
+            # Also join to filter by session instance ID to prevent ID reuse issues
+            query = query.join(SessionModel, LogEntry.session_id == SessionModel.id)
+            query = query.filter(
+                SessionModel.instance_id.isnot(None),
+                LogEntry.session_instance_id == SessionModel.instance_id,
+            )
 
         if since:
             query = query.filter(LogEntry.created_at > since)
@@ -384,10 +438,13 @@ def get_project_logs_summary(project_id: int) -> Dict[str, Any]:
     db = get_db_session()
 
     try:
-        # Get all session IDs for this project
+        # Get all NON-DELETED session IDs for this project (filter by deleted_at is NULL)
         session_ids = (
             db.query(SessionModel.id)
-            .filter(SessionModel.project_id == project_id)
+            .filter(
+                SessionModel.project_id == project_id,
+                SessionModel.deleted_at.is_(None),  # Only active sessions
+            )
             .all()
         )
         session_id_list = [s[0] for s in session_ids]
@@ -399,10 +456,17 @@ def get_project_logs_summary(project_id: int) -> Dict[str, Any]:
                 "recent_logs": [],
             }
 
-        # Count logs by level
+        # Count logs by level (filtered by session_id AND session_instance_id)
+        # This prevents showing logs from deleted/recreated sessions with reused IDs
         logs_by_level = (
             db.query(LogEntry.level, LogEntry.id)
-            .filter(LogEntry.session_id.in_(session_id_list))
+            .join(SessionModel, LogEntry.session_id == SessionModel.id)
+            .filter(
+                LogEntry.session_id.in_(session_id_list),
+                SessionModel.deleted_at.is_(None),  # Only active sessions
+                SessionModel.instance_id.isnot(None),  # Only sessions with instance tracking
+                LogEntry.session_instance_id == SessionModel.instance_id,  # Match instance IDs
+            )
             .all()
         )
 
@@ -410,10 +474,16 @@ def get_project_logs_summary(project_id: int) -> Dict[str, Any]:
         for level, count in logs_by_level:
             level_counts[level] = count
 
-        # Get recent logs
+        # Get recent logs (same filtering as above)
         recent_logs = (
             db.query(LogEntry)
-            .filter(LogEntry.session_id.in_(session_id_list))
+            .join(SessionModel, LogEntry.session_id == SessionModel.id)
+            .filter(
+                LogEntry.session_id.in_(session_id_list),
+                SessionModel.deleted_at.is_(None),  # Only active sessions
+                SessionModel.instance_id.isnot(None),  # Only sessions with instance tracking
+                LogEntry.session_instance_id == SessionModel.instance_id,  # Match instance IDs
+            )
             .order_by(LogEntry.created_at.desc())
             .limit(10)
             .all()

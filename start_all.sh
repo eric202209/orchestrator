@@ -157,10 +157,11 @@ start_backend() {
         fi
     fi
     
+    # LOGS DIRECTIVE: Write directly to logs/ directory (not /tmp/) for history preservation
     nohup venv/bin/uvicorn app.main:app \
         --host 0.0.0.0 \
         --port 8080 \
-        > /tmp/backend.log 2>&1 &
+        >> /root/.openclaw/workspace/vault/projects/orchestrator/logs/backend.log 2>&1 &
     
     sleep 3
     
@@ -168,7 +169,7 @@ start_backend() {
         echo -e "${GREEN}✅ Backend started on port 8080${NC}"
     else
         echo -e "${RED}❌ Backend failed to start${NC}"
-        echo "Check logs: tail -20 /tmp/backend.log"
+        echo "Check logs: tail -20 logs/backend.log"
         exit 1
     fi
 }
@@ -192,10 +193,11 @@ start_workers() {
         fi
     fi
     
+    # LOGS DIRECTIVE: Write directly to logs/ directory (not /tmp/) for history preservation
     nohup venv/bin/celery \
         -A app.celery_app worker \
         --loglevel=info \
-        > /tmp/worker.log 2>&1 &
+        >> /root/.openclaw/workspace/vault/projects/orchestrator/logs/worker.log 2>&1 &
     
     sleep 5
     
@@ -203,7 +205,7 @@ start_workers() {
         echo -e "${GREEN}✅ Workers started${NC}"
     else
         echo -e "${RED}❌ Workers failed to start${NC}"
-        echo "Check logs: tail -50 /tmp/worker.log"
+        echo "Check logs: tail -50 logs/worker.log"
         exit 1
     fi
 }
@@ -228,8 +230,9 @@ start_frontend() {
         fi
     fi
     
+    # LOGS DIRECTIVE: Write directly to logs/ directory (not /tmp/) for history preservation
     cd frontend
-    nohup pnpm dev > /tmp/frontend.log 2>&1 &
+    nohup pnpm dev >> /root/.openclaw/workspace/vault/projects/orchestrator/logs/frontend.log 2>&1 &
     cd ..
     
     sleep 5
@@ -238,7 +241,7 @@ start_frontend() {
         echo -e "${GREEN}✅ Frontend started on port 3000${NC}"
     else
         echo -e "${RED}❌ Frontend failed to start${NC}"
-        echo "Check logs: tail -20 /tmp/frontend.log"
+        echo "Check logs: tail -20 logs/frontend.log"
         exit 1
     fi
 }
@@ -280,9 +283,9 @@ verify() {
         echo "🔧 API Docs: http://${LOCALHOST}:8080/docs"
         echo ""
         echo "📝 View logs:"
-        echo "  Backend:    tail -f /tmp/backend.log"
-        echo "  Workers:    tail -f /tmp/worker.log"
-        echo "  Frontend:   tail -f /tmp/frontend.log"
+        echo "  Backend:    tail -f logs/backend.log"
+        echo "  Workers:    tail -f logs/worker.log"
+        echo "  Frontend:   tail -f logs/frontend.log"
     else
         echo -e "${RED}⚠️  Some services failed to start${NC}"
         echo "Check the logs above for errors."

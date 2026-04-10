@@ -119,7 +119,9 @@ function SessionsList() {
               <Link
                 key={session.id}
                 to={`/sessions/${session.id}`}
-                className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-6 hover:border-primary-500/50 transition-all group"
+                className={`bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-6 hover:border-primary-500/50 transition-all group ${
+                  session.status === 'running' ? 'active-session-pulse' : ''
+                }`}
               >
                 <div className="flex items-start justify-between mb-3">
                   <div className={`p-2 rounded-lg ${getStatusColor(session.status)}`}>
