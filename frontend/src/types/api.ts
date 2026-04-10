@@ -11,6 +11,7 @@ export interface Project {
 export interface Task {
   id: number;
   project_id: number;
+  session_id?: number | null;
   title: string;
   description: string | null;
   status: TaskStatus;

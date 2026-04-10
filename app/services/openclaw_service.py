@@ -216,40 +216,30 @@ class OpenClawSessionService:
                 f"[PERFORMANCE] Task executed in {duration:.2f}s (optimized prompt)",
             )
 
-            # Update task completion based on result status
-            if self.task_model:
-                if result.get("status") == "completed":
-                    self.task_model.status = TaskStatus.DONE
-                    self._log_entry("INFO", "Task completed successfully")
-                elif result.get("status") == "failed":
-                    self.task_model.status = TaskStatus.FAILED
-                    self.task_model.error_message = result.get(
-                        "error", "Execution failed"
-                    )
-                    self._log_entry(
-                        "ERROR", f"Task failed: {self.task_model.error_message}"
-                    )
-                else:
-                    # Unknown status, mark as failed
-                    self.task_model.status = TaskStatus.FAILED
-                    self.task_model.error_message = (
-                        f"Unknown status: {result.get('status', 'unknown')}"
-                    )
-                    self._log_entry("ERROR", "Task failed with unknown status")
-
-                self.task_model.completed_at = datetime.utcnow()
-                self.db.commit()
+            result_status = result.get("status")
+            if result_status == "completed":
+                self._log_entry(
+                    "INFO",
+                    "[OPENCLAW] Request completed successfully; awaiting orchestration validation",
+                )
+            elif result_status == "failed":
+                self._log_entry(
+                    "ERROR",
+                    f"[OPENCLAW] Request failed before orchestration validation: "
+                    f"{result.get('error', 'Execution failed')}",
+                )
+            else:
+                self._log_entry(
+                    "WARNING",
+                    f"[OPENCLAW] Request returned unexpected status before orchestration validation: "
+                    f"{result_status or 'unknown'}",
+                )
 
             return result
 
         except Exception as e:
             error_msg = f"Task execution failed: {str(e)}"
             self._log_entry("ERROR", error_msg)
-
-            if self.task_model:
-                self.task_model.status = TaskStatus.FAILED
-                self.task_model.error_message = str(e)
-                self.db.commit()
 
             raise OpenClawSessionError(error_msg)
 
@@ -926,6 +916,25 @@ class OpenClawSessionService:
             stderr = ""
 
         cli_error_message = self._summarize_cli_error(stderr) if stderr else ""
+        cli_error_lower = cli_error_message.lower()
+
+        if "context size has been exceeded" in cli_error_lower or (
+            "context" in cli_error_lower and "exceeded" in cli_error_lower
+        ):
+            self._log_entry("ERROR", f"Context window exceeded: {cli_error_message}")
+            return {
+                "status": "failed",
+                "mode": "real",
+                "output": stdout,
+                "error": "Context window exceeded",
+                "logs": [
+                    {
+                        "level": "ERROR",
+                        "message": cli_error_message,
+                        "timestamp": datetime.utcnow().isoformat(),
+                    }
+                ],
+            }
 
         # CRITICAL FIX: Validate response before parsing
         if not stdout or stdout in ['""', "''", '"', "'"]:
@@ -1136,7 +1145,6 @@ class OpenClawSessionService:
 
             stdout_chunks: List[str] = []
             stderr_chunks: List[str] = []
-            log_count = 0
 
             async def stream_output(
                 stream,
@@ -1144,7 +1152,6 @@ class OpenClawSessionService:
                 chunks: List[str],
                 emit_live_logs: bool = True,
             ) -> None:
-                nonlocal log_count
                 while True:
                     line = await stream.readline()
                     if not line:
@@ -1155,11 +1162,9 @@ class OpenClawSessionService:
 
                     if line_text:
                         if emit_live_logs:
-                            log_count += 1
-                            if (log_count % 10) == 0:
-                                self.db.commit()
-
-                            self._log_entry(level, line_text, commit=False)
+                            # Commit each streamed line so the session websocket,
+                            # which polls the database, can surface it immediately.
+                            self._log_entry(level, line_text, commit=True)
 
                             if log_callback:
                                 await log_callback(level, line_text)

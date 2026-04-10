@@ -30,6 +30,19 @@ const getBrowserSafeHost = (host: string): string => {
 };
 
 const getWebSocketHost = (): string => {
+  // When the dev frontend is using the Vite proxy on the same origin,
+  // keep WebSockets on that same origin too so proxying works consistently.
+  if (import.meta.env.DEV) {
+    try {
+      const apiUrl = new URL(API_BASE_URL, window.location.origin);
+      if (apiUrl.host === window.location.host) {
+        return window.location.host;
+      }
+    } catch {
+      return window.location.host;
+    }
+  }
+
   const wsHostFromEnv = import.meta.env.VITE_API_WS_HOST;
   if (wsHostFromEnv) {
     return getBrowserSafeHost(wsHostFromEnv);
