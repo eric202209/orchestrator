@@ -17,13 +17,60 @@ NC='\033[0m' # No Color
 # Localhost alias (from .env, default to localhost)
 LOCALHOST=${LOCALHOST:-localhost}
 
-# Function to check if a process is running
+# Function to check if a process is running (by port for services)
 check_process() {
-    if pgrep -f "$1" > /dev/null; then
-        return 0
-    else
-        return 1
+    local name="$1"
+    local port=""
+    
+    # Map service names to ports
+    case "$name" in
+        "uvicorn app.main:app")
+            port=8080
+            ;;
+        "celery -A app.celery_app worker")
+            # Workers don't have a specific port, fall back to pgrep
+            if pgrep -f "$name" > /dev/null; then
+                return 0
+            fi
+            return 1
+            ;;
+        "vite")
+            port=3000
+            ;;
+        "redis-server")
+            port=6379
+            ;;
+        *)
+            # Fallback to pgrep for unknown services
+            if pgrep -f "$name" > /dev/null; then
+                return 0
+            fi
+            return 1
+            ;;
+    esac
+    
+    # Check port using lsof (most reliable)
+    if command -v lsof &> /dev/null; then
+        if lsof -i :$port &> /dev/null; then
+            return 0
+        fi
     fi
+    
+    # Fallback: netstat
+    if command -v netstat &> /dev/null; then
+        if netstat -tlnp 2>/dev/null | grep -q ":$port "; then
+            return 0
+        fi
+    fi
+    
+    # Last resort: fuser
+    if command -v fuser &> /dev/null; then
+        if fuser $port/tcp &> /dev/null; then
+            return 0
+        fi
+    fi
+    
+    return 1
 }
 
 # Function to stop existing processes
@@ -184,11 +231,14 @@ check_health() {
     
     sleep 2
     
+    local success=true
+    
     # Check backend
     if curl -s http://localhost:8080/health > /dev/null 2>&1; then
         echo -e "${GREEN}✅ Backend is healthy${NC}"
     else
         echo -e "${RED}❌ Backend is not responding${NC}"
+        success=false
     fi
     
     # Check frontend
@@ -196,9 +246,25 @@ check_health() {
         echo -e "${GREEN}✅ Frontend is healthy${NC}"
     else
         echo -e "${RED}❌ Frontend is not responding${NC}"
+        success=false
+    fi
+    
+    # Check Redis
+    if redis-cli ping > /dev/null 2>&1; then
+        echo -e "${GREEN}✅ Redis is responding${NC}"
+    else
+        echo -e "${RED}❌ Redis is not responding${NC}"
+        success=false
     fi
     
     echo ""
+    
+    if [ "$success" = true ]; then
+        echo -e "${GREEN}🎉 All services operational!${NC}"
+    else
+        echo -e "${RED}⚠️  Some services failed health checks${NC}"
+        echo "Check logs: tail -20 logs/backend.log logs/frontend.log logs/worker.log"
+    fi
 }
 
 # Main execution

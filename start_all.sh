@@ -24,25 +24,25 @@ LOCALHOST=${LOCALHOST:-localhost}
 check_port() {
     local port=$1
     
-    # Try lsof first
+    # Try lsof first (most reliable)
     if command -v lsof &> /dev/null; then
         if lsof -i :$port &> /dev/null; then
             return 0
         fi
     fi
     
-    # Fallback: check if any running process contains the port
-    # Use grep to filter the process list
-    if ps aux 2>/dev/null | grep -v grep | grep -q "port $port\|--port $port"; then
-        return 0
+    # Fallback: netstat
+    if command -v netstat &> /dev/null; then
+        if netstat -tlnp 2>/dev/null | grep -q ":$port "; then
+            return 0
+        fi
     fi
     
-    # Special case: vite/dev servers often don't show port in command line
-    # Check for common dev server processes
-    if ps aux 2>/dev/null | grep -v grep | grep -qE "(vite|pnpm dev|webpack-dev-server)"; then
-        # If any of these are running, assume a port might be in use
-        # We'll let the actual service start command handle port conflicts
-        return 0
+    # Last resort: fuser
+    if command -v fuser &> /dev/null; then
+        if fuser $port/tcp &> /dev/null; then
+            return 0
+        fi
     fi
     
     return 1
