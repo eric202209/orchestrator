@@ -137,7 +137,7 @@ start_backend() {
     # Start backend in background with comprehensive timeout configuration
     # LOGS DIRECTIVE: Write directly to logs/ directory (not /tmp/) for history preservation
     nohup /root/.openclaw/workspace/vault/projects/orchestrator/venv/bin/uvicorn app.main:app \
-        --host 0.0.0.0 \
+        --host 127.0.0.1 \
         --port 8080 \
         --timeout-keep-alive 5 \
         --proxy-headers \

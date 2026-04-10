@@ -489,9 +489,9 @@ class OpenClawSessionService:
                 project_context=project_context[:1500] if project_context else "",
             )
 
-            # OPTIMIZATION: Reduced timeout for planning (faster response)
+            # OPTIMIZATION: Increased timeout for planning (180s to avoid timeouts on complex tasks)
             planning_result = await self.execute_task(
-                planning_prompt, timeout_seconds=90
+                planning_prompt, timeout_seconds=180
             )
 
             if planning_result.get("status") == "failed":

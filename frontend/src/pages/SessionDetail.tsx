@@ -19,20 +19,146 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
+type TimelineEventType =
+  | 'planning'
+  | 'executing'
+  | 'debugging'
+  | 'revising_plan'
+  | 'summarizing'
+  | 'checkpoint'
+  | 'error'
+  | 'status'
+  | 'info';
+
+interface TimelineEvent {
+  id: string;
+  at: string;
+  type: TimelineEventType;
+  title: string;
+  detail: string;
+}
+
+interface SessionLogItem {
+  message: string;
+  level?: string;
+  timestamp?: string;
+  created_at?: string;
+}
+
 export default function SessionDetail() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const navigate = useNavigate();
   const [session, setSession] = useState<Session | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [project, setProject] = useState<Project | null>(null);
-  const [logs, setLogs] = useState<string[]>([]);
+  const [displayLogs, setDisplayLogs] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState<'logs' | 'tasks' | 'settings'>('logs');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [allLogs, setAllLogs] = useState<string[]>([]);
+  const [logViewMode, setLogViewMode] = useState<'newest' | 'oldest' | 'success' | 'errors' | 'all'>('newest');
+  const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const parseApiDate = (value?: string | null): Date | null => {
+    if (!value) return null;
+    const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value);
+    const normalized = hasTimezone ? value : `${value}Z`;
+    const parsed = new Date(normalized);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  };
+
+  const formatDateTime = (value?: string | null) => {
+    const d = parseApiDate(value);
+    if (!d) return value ? 'Invalid date' : 'N/A';
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const hh = String(d.getHours()).padStart(2, '0');
+    const min = String(d.getMinutes()).padStart(2, '0');
+    const ss = String(d.getSeconds()).padStart(2, '0');
+    return `${yyyy}${mm}${dd} / ${hh}:${min}:${ss}`;
+  };
+
+  const applyLogView = (sourceLogs: string[], mode: string) => {
+    let result = [...sourceLogs];
+    if (mode === 'newest') {
+      result = result.slice().reverse();
+    } else if (mode === 'success') {
+      result = result.filter((log) => log.includes('✓') || log.includes('success') || log.includes('Success'));
+    } else if (mode === 'errors') {
+      result = result.filter((log) => log.includes('✗') || log.includes('error') || log.includes('Error') || log.includes('failed'));
+    }
+    setDisplayLogs(result);
+  };
+
+  const classifyTimelineEvent = (message: string, level?: string, at?: string): TimelineEvent => {
+    const lower = message.toLowerCase();
+    let type: TimelineEventType = 'info';
+    let title = 'Log Update';
+
+    if (level === 'ERROR' || lower.includes('[orchestration] failed') || lower.includes('error') || lower.includes('failed')) {
+      type = 'error';
+      title = 'Error';
+    } else if (
+      lower.includes('[orchestration] phase 1: planning') ||
+      lower.includes('[orchestration] planning phase') ||
+      lower.includes('[planning]')
+    ) {
+      type = 'planning';
+      title = 'Planning';
+    } else if (
+      lower.includes('[orchestration] phase 2: executing') ||
+      lower.includes('[orchestration] starting executing phase') ||
+      lower.includes('[orchestration] executing step')
+    ) {
+      type = 'executing';
+      title = 'Executing';
+    } else if (
+      lower.includes('[orchestration] phase 3: debugging') ||
+      lower.includes('[orchestration] starting debugging phase') ||
+      lower.includes('[debug')
+    ) {
+      type = 'debugging';
+      title = 'Debugging';
+    } else if (
+      lower.includes('plan_revision') ||
+      lower.includes('[orchestration] phase 4: plan_revision') ||
+      lower.includes('[orchestration] starting plan_revision phase') ||
+      lower.includes('plan revision')
+    ) {
+      type = 'revising_plan';
+      title = 'Plan Revision';
+    } else if (
+      lower.includes('[orchestration] phase 5: task_summary') ||
+      lower.includes('[orchestration] generating summary') ||
+      lower.includes('task_summary')
+    ) {
+      type = 'summarizing';
+      title = 'Summary';
+    } else if (lower.includes('checkpoint') || lower.includes('pause') || lower.includes('resume')) {
+      type = 'checkpoint';
+      title = 'Checkpoint';
+    } else if (lower.includes('started') || lower.includes('stopped') || lower.includes('running')) {
+      type = 'status';
+      title = 'Session Status';
+    }
+
+    return {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      at: at || new Date().toISOString(),
+      type,
+      title,
+      detail: message,
+    };
+  };
+
+  const pushTimelineEvent = (message: string, level?: string, at?: string) => {
+    const event = classifyTimelineEvent(message, level, at);
+    setTimelineEvents(prev => [...prev.slice(-99), event]);
+  };
 
   useEffect(() => {
     if (!sessionId) {
@@ -70,9 +196,16 @@ export default function SessionDetail() {
       if (!sessionId) return;
       try {
         const response = await sessionsAPI.getLogs(Number(sessionId));
-        const logs = response.data?.logs || [];
-        console.log(`Loaded ${logs.length} logs for session ${sessionId}`);
-        setAllLogs(logs.map(log => log.message));
+        const loadedLogs = (response.data?.logs || []) as SessionLogItem[];
+        console.log(`Loaded ${loadedLogs.length} logs for session ${sessionId}`);
+        const logMessages = loadedLogs.map((log) => log.message);
+        setAllLogs(logMessages);
+        applyLogView(logMessages, logViewMode);
+        setTimelineEvents(
+          loadedLogs
+            .slice(-50)
+            .map((log) => classifyTimelineEvent(log.message, log.level, log.timestamp || log.created_at))
+        );
       } catch (err) {
         console.error('Failed to load logs:', err);
       }
@@ -118,23 +251,16 @@ export default function SessionDetail() {
   }, [sessionId]);
 
   const setupWebSocket = (session_id: number) => {
-    const token = localStorage.getItem('access_token');
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // WebSocket endpoint is on backend (port 8080), not frontend (port 3000)
-    const apiHost = import.meta.env.VITE_API_WS_HOST || 'localhost:8080';
-    
     // Only connect if we have a token
+    const token = localStorage.getItem('access_token');
     if (!token) {
       console.warn('No access token found, cannot connect WebSocket');
       return;
     }
-    
-    const wsUrl = `${protocol}//${apiHost}/api/v1/sessions/${session_id}/logs/stream?token=${token}`;
-    
-    console.log('Attempting WebSocket connection:', wsUrl);
 
     try {
-      wsRef.current = new WebSocket(wsUrl);
+      wsRef.current = sessionsAPI.getLogsStream(session_id);
+      console.log('Attempting WebSocket connection:', wsRef.current.url);
 
       wsRef.current.onopen = () => {
         console.log('✅ WebSocket connected');
@@ -169,7 +295,12 @@ export default function SessionDetail() {
           // Handle different message types
           if (data.type === 'log') {
             console.log('✅ Received log message:', data.message);
-            setAllLogs(prev => [...prev.slice(-499), data.message]);
+            setAllLogs(prev => {
+              const next = [...prev.slice(-499), data.message];
+              applyLogView(next, logViewMode);
+              return next;
+            });
+            pushTimelineEvent(data.message, data.level, data.timestamp);
           } else if (data.type === 'ping') {
             console.debug('Received ping, sending pong');
             // Send pong in response
@@ -216,17 +347,20 @@ export default function SessionDetail() {
     }
     
     console.log(`Starting session ${sessionId}...`);
+    pushTimelineEvent(`Start requested for session ${sessionId}`, 'INFO');
     try {
       const response = await sessionsAPI.start(Number(sessionId));
       console.log('Start API response:', response);
       const updated = await sessionsAPI.getById(Number(sessionId));
       console.log('Updated session:', updated.data);
       setSession(updated.data);
+      pushTimelineEvent(`Session started with status: ${updated.data.status}`, 'INFO');
       alert(`Session ${session.name} started successfully!`);
     } catch (error: any) {
       console.error('Failed to start session:', error);
       console.error('Error details:', error.response?.data || error.message);
       const errorMsg = error.response?.data?.detail || error.message || 'Unknown error';
+      pushTimelineEvent(`Session start failed: ${errorMsg}`, 'ERROR');
       alert(`Failed to start session: ${errorMsg}`);
     }
   };
@@ -259,9 +393,10 @@ export default function SessionDetail() {
     if (!sessionId) return;
     try {
       const response = await sessionsAPI.getLogs(Number(sessionId));
-      const logs = response.data?.logs || [];
-      const logMessages = logs.map(log => log.message);
+      const logs = (response.data?.logs || []) as SessionLogItem[];
+      const logMessages = logs.map((log) => log.message);
       setAllLogs(logMessages);
+      applyLogView(logMessages, logViewMode);
       console.log(`Refreshed ${logMessages.length} logs`);
     } catch (error: any) {
       console.error('Failed to refresh logs:', error);
@@ -279,21 +414,6 @@ export default function SessionDetail() {
     } catch (error) {
       console.error('Failed to resume session:', error);
       alert('Failed to resume session');
-    }
-  };
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'running':
-        return 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20';
-      case 'paused':
-        return 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20';
-      case 'stopped':
-        return 'bg-slate-500/10 text-slate-400 border-slate-500/20';
-      case 'failed':
-        return 'bg-red-500/10 text-red-400 border-red-500/20';
-      default:
-        return 'bg-slate-500/10 text-slate-400 border-slate-500/20';
     }
   };
 
@@ -470,7 +590,7 @@ export default function SessionDetail() {
             Created
           </p>
           <p className="text-white font-semibold">
-            {new Date(session.created_at).toLocaleDateString()}
+            {formatDateTime(session.created_at)}
           </p>
         </div>
         {session.started_at && (
@@ -480,7 +600,7 @@ export default function SessionDetail() {
               Started
             </p>
             <p className="text-white font-semibold">
-              {new Date(session.started_at).toLocaleTimeString()}
+              {formatDateTime(session.started_at)}
             </p>
           </div>
         )}
@@ -532,7 +652,7 @@ export default function SessionDetail() {
         {activeTab === 'logs' && (
           <div className="space-y-4">
             <TerminalViewer
-              logs={allLogs}
+              logs={displayLogs}
               autoScroll={true}
               className="bg-slate-900 h-[500px]"
             />
@@ -543,7 +663,7 @@ export default function SessionDetail() {
                   wsConnected ? 'bg-emerald-500 animate-pulse' : 'bg-slate-500'
                 )} />
                 <span className={cn(wsConnected ? 'text-emerald-400' : 'text-slate-500')}>
-                  {allLogs.length} logs loaded
+                  {displayLogs.length} logs loaded
                 </span>
               </div>
               <div className="flex gap-2 items-center">
@@ -555,23 +675,11 @@ export default function SessionDetail() {
                   Refresh
                 </button>
                 <select
+                  value={logViewMode}
                   onChange={(e) => {
-                    const sortBy = e.target.value;
-                    let sortedLogs = [...allLogs];
-                    if (sortBy === 'newest') {
-                      sortedLogs = sortedLogs.slice().reverse();
-                    } else if (sortBy === 'oldest') {
-                      sortedLogs = sortedLogs; // Already newest first
-                    } else if (sortBy === 'success') {
-                      sortedLogs = sortedLogs.filter(log => 
-                        log.includes('✓') || log.includes('success') || log.includes('Success')
-                      );
-                    } else if (sortBy === 'errors') {
-                      sortedLogs = sortedLogs.filter(log => 
-                        log.includes('✗') || log.includes('error') || log.includes('Error') || log.includes('failed')
-                      );
-                    }
-                    setLogs(sortedLogs);
+                    const mode = e.target.value as 'newest' | 'oldest' | 'success' | 'errors' | 'all';
+                    setLogViewMode(mode);
+                    applyLogView(allLogs, mode);
                   }}
                   className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-sm rounded-lg transition-colors"
                 >
@@ -581,6 +689,43 @@ export default function SessionDetail() {
                   <option value="errors">Filter: Errors Only</option>
                   <option value="all">Show All</option>
                 </select>
+              </div>
+            </div>
+
+            <div className="bg-slate-900 border border-slate-700 rounded-lg p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold text-slate-200">Execution Timeline</h3>
+                <span className="text-xs text-slate-400">{timelineEvents.length} events</span>
+              </div>
+              <div className="max-h-56 overflow-y-auto space-y-2 text-sm">
+                {timelineEvents.length === 0 ? (
+                  <p className="text-slate-500">No timeline events yet. Start/execute a task to see progress milestones.</p>
+                ) : (
+                  timelineEvents.slice().reverse().map((event) => (
+                    <div key={event.id} className="border border-slate-800 rounded-md p-2">
+                      <div className="flex items-center justify-between">
+                        <span className={cn(
+                          'text-xs font-medium uppercase',
+                          event.type === 'error' && 'text-red-400',
+                          event.type === 'planning' && 'text-violet-400',
+                          event.type === 'executing' && 'text-blue-400',
+                          event.type === 'debugging' && 'text-amber-400',
+                          event.type === 'revising_plan' && 'text-fuchsia-400',
+                          event.type === 'summarizing' && 'text-teal-400',
+                          event.type === 'checkpoint' && 'text-emerald-400',
+                          event.type === 'status' && 'text-cyan-400',
+                          event.type === 'info' && 'text-slate-300'
+                        )}>
+                          {event.title}
+                        </span>
+                        <span className="text-xs text-slate-500">
+                          {formatDateTime(event.at)}
+                        </span>
+                      </div>
+                      <p className="text-slate-300 mt-1 break-words">{event.detail}</p>
+                    </div>
+                  ))
+                )}
               </div>
             </div>
           </div>
@@ -627,14 +772,14 @@ export default function SessionDetail() {
                   )}
                   <div className="mt-3 flex items-center gap-4 text-xs text-slate-500">
                     {task.created_at && (
-                      <span>Created: {new Date(task.created_at).toLocaleDateString()}</span>
+                      <span>Created: {formatDateTime(task.created_at)}</span>
                     )}
                     {task.started_at && (
-                      <span>Started: {new Date(task.started_at).toLocaleTimeString()}</span>
+                      <span>Started: {formatDateTime(task.started_at)}</span>
                     )}
                     {task.completed_at && (
                       <span className="text-emerald-400">
-                        Completed: {new Date(task.completed_at).toLocaleTimeString()}
+                        Completed: {formatDateTime(task.completed_at)}
                       </span>
                     )}
                   </div>
@@ -656,18 +801,18 @@ export default function SessionDetail() {
             </div>
             <div className="bg-slate-800/50 backdrop-blur rounded-xl p-4 border border-slate-700">
               <p className="text-slate-400 text-sm mb-1">Created At</p>
-              <p className="text-white">{new Date(session.created_at).toLocaleString()}</p>
+              <p className="text-white">{formatDateTime(session.created_at)}</p>
             </div>
             {session.started_at && (
               <div className="bg-slate-800/50 backdrop-blur rounded-xl p-4 border border-slate-700">
                 <p className="text-slate-400 text-sm mb-1">Started At</p>
-                <p className="text-white">{new Date(session.started_at).toLocaleString()}</p>
+                <p className="text-white">{formatDateTime(session.started_at)}</p>
               </div>
             )}
             {session.stopped_at && (
               <div className="bg-slate-800/50 backdrop-blur rounded-xl p-4 border border-slate-700">
                 <p className="text-slate-400 text-sm mb-1">Stopped At</p>
-                <p className="text-white">{new Date(session.stopped_at).toLocaleString()}</p>
+                <p className="text-white">{formatDateTime(session.stopped_at)}</p>
               </div>
             )}
           </div>

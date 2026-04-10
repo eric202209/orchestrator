@@ -812,11 +812,113 @@ async def websocket_log_stream(
 async def websocket_session_status(
     websocket: WebSocket, session_id: int, db: Session = Depends(get_db)
 ):
+    # Validate session before accepting
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        await websocket.close(code=1008, reason="Session not found")
+        return
+
     await websocket.accept()
-    # TODO: Implement websocket status updates
-    while True:
-        data = await websocket.receive_text()
-        await websocket.send_json({"status": "ok", "data": data})
+    await websocket.send_json(
+        {
+            "type": "connected",
+            "session_id": session_id,
+            "timestamp": datetime.utcnow().isoformat(),
+            "heartbeat_interval": 30,
+            "status_interval": 2,
+        }
+    )
+
+    async def status_sender():
+        """Push live session status snapshots to the client."""
+        last_snapshot: Optional[Dict[str, Any]] = None
+        while True:
+            await asyncio.sleep(2)
+            poll_db = create_db_session()
+            try:
+                current = (
+                    poll_db.query(SessionModel)
+                    .filter(SessionModel.id == session_id)
+                    .first()
+                )
+                if not current:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "session_id": session_id,
+                            "message": "Session not found",
+                            "timestamp": datetime.utcnow().isoformat(),
+                        }
+                    )
+                    break
+
+                snapshot = {
+                    "id": current.id,
+                    "status": current.status,
+                    "is_active": current.is_active,
+                    "started_at": (
+                        current.started_at.isoformat() if current.started_at else None
+                    ),
+                    "stopped_at": (
+                        current.stopped_at.isoformat() if current.stopped_at else None
+                    ),
+                    "paused_at": (
+                        current.paused_at.isoformat() if current.paused_at else None
+                    ),
+                    "resumed_at": (
+                        current.resumed_at.isoformat() if current.resumed_at else None
+                    ),
+                    "updated_at": (
+                        current.updated_at.isoformat() if current.updated_at else None
+                    ),
+                }
+
+                if snapshot != last_snapshot:
+                    await websocket.send_json(
+                        {
+                            "type": "status_update",
+                            "session_id": session_id,
+                            "status": snapshot,
+                            "timestamp": datetime.utcnow().isoformat(),
+                        }
+                    )
+                    last_snapshot = snapshot
+            finally:
+                poll_db.close()
+
+    async def heartbeat_sender():
+        """Keep idle connections alive through intermediary proxies."""
+        while True:
+            await asyncio.sleep(30)
+            await websocket.send_text("ping")
+
+    status_task = asyncio.create_task(status_sender())
+    heartbeat_task = asyncio.create_task(heartbeat_sender())
+
+    try:
+        while True:
+            try:
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+
+            if data == "ping":
+                await websocket.send_text("pong")
+            elif data.lower() == "pong":
+                continue
+            else:
+                logger.debug(
+                    "Status websocket received message for session %s: %s",
+                    session_id,
+                    data[:100],
+                )
+    except WebSocketDisconnect:
+        logger.info("Status websocket disconnected for session %s", session_id)
+    except Exception as e:
+        logger.error("Status websocket error for session %s: %s", session_id, str(e))
+    finally:
+        status_task.cancel()
+        heartbeat_task.cancel()
 
 
 def get_session_logs(
