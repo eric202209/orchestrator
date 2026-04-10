@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     GITHUB_USERNAME: str = ""
     GITHUB_WEBHOOK_SECRET: str = ""
 
+    # Data Retention (soft delete cleanup)
+    SOFT_DELETE_RETENTION_DAYS: int = 30  # Automatically purge soft-deleted projects after 30 days
+
     class Config:
         env_file = ".env"
         case_sensitive = True

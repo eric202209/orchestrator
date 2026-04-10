@@ -34,12 +34,18 @@ function Register() {
       await authAPI.register(email, password);
       setSuccess(true);
     } catch (err: unknown) {
-      const error = err as { response?: { data?: unknown } };
+      const error = err as { response?: { data?: { detail?: string } } };
       console.error('Registration error:', error);
       // Handle different error response formats
       const detail = error.response?.data?.detail;
       if (Array.isArray(detail)) {
-        setError(detail[0]?.msg || detail[0] || 'Registration failed. Please check your email format and try again.');
+        const msg = detail[0]?.msg || detail[0];
+        // Check if it's an "already registered" error
+        if (msg && msg.includes('already registered')) {
+          setError(msg);
+        } else {
+          setError(msg || 'Registration failed. Please check your email format and try again.');
+        }
       } else if (typeof detail === 'object' && detail !== null) {
         setError(JSON.stringify(detail) || 'Registration failed. Please check your email format and try again.');
       } else if (detail) {
@@ -92,6 +98,13 @@ function Register() {
             {error && (
               <div className="bg-red-500/10 border border-red-500/20 text-red-400 px-4 py-3 rounded-lg text-sm">
                 {error}
+                {error.toLowerCase().includes('already registered') && (
+                  <div className="mt-2">
+                    <Link to="/login" className="text-primary-400 hover:text-primary-300 font-medium underline">
+                      Sign in instead
+                    </Link>
+                  </div>
+                )}
               </div>
             )}
 
