@@ -4,14 +4,14 @@ import { projectsAPI, authAPI } from '../api/client';
 import type { Project, User } from '../types/api';
 import { 
   GitBranch, 
-  Plus, 
+  Plus,
   FileText,
   XCircle,
   ExternalLink,
   ArrowLeft
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
-import { EmptyState } from '../components/ui';
+import { EmptyState, Skeleton } from '../components/ui';
 
 function ProjectsList() {
   const navigate = useNavigate();
@@ -21,7 +21,7 @@ function ProjectsList() {
   const [showCreateProject, setShowCreateProject] = useState(false);
   const [editingProjectId, setEditingProjectId] = useState<number | null>(null);
   const [editingName, setEditingName] = useState('');
-  const [newProjectName, setNewProjectName] = useState('');
+   const [newProjectName, setNewProjectName] = useState('');
   const [creatingProject, setCreatingProject] = useState(false);
   const [updatingProject, setUpdatingProject] = useState(false);
 
@@ -36,17 +36,6 @@ function ProjectsList() {
       setUser(response.data);
     } catch (error) {
       console.error('Failed to fetch user:', error);
-    }
-  };
-
-  const fetchProjects = async () => {
-    try {
-      const response = await projectsAPI.getAll();
-      setProjects(response.data);
-    } catch (error) {
-      console.error('Failed to fetch projects:', error);
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -70,6 +59,19 @@ function ProjectsList() {
       setCreatingProject(false);
     }
   };
+
+  const fetchProjects = async () => {
+    try {
+      const response = await projectsAPI.getAll();
+      setProjects(response.data);
+    } catch (error) {
+      console.error('Failed to fetch projects:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  
 
   const handleDeleteProject = async (projectId: number): Promise<void> => {
     if (!window.confirm('Are you sure you want to delete this project? This cannot be undone.')) {
@@ -138,8 +140,37 @@ function ProjectsList() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-900">
-        <div className="h-8 w-8 border-2 border-primary-500/30 border-t-primary-500 rounded-full animate-spin" />
+      <div className="min-h-screen bg-slate-900">
+        <nav className="bg-slate-800/50 backdrop-blur border-b border-slate-700">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="flex items-center justify-between h-16">
+              <div className="flex items-center gap-2">
+                <Skeleton className="h-6 w-6" />
+                <Skeleton className="h-6 w-32" />
+              </div>
+              <div className="flex items-center gap-4">
+                <Skeleton className="h-4 w-40" />
+                <Skeleton className="h-4 w-24" />
+              </div>
+            </div>
+          </div>
+        </nav>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+          <div className="flex items-center justify-between mb-8">
+            <div className="flex items-center gap-4">
+              <Skeleton className="h-5 w-5" />
+              <Skeleton className="h-8 w-32" />
+            </div>
+            <div className="flex items-center gap-3">
+              <Skeleton className="h-10 w-28" />
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <Skeleton className="h-48 w-full" />
+            <Skeleton className="h-48 w-full" />
+            <Skeleton className="h-48 w-full" />
+          </div>
+        </div>
       </div>
     );
   }

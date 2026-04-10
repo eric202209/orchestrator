@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     # Server
     HOST: str = "0.0.0.0"
     PORT: int = 8080  # Changed from 8000 to avoid llama-proxy conflict
+    LOCALHOST: str = "127.0.0.1"  # Container localhost for health checks
 
     # CORS
     @property

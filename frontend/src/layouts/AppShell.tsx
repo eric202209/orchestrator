@@ -4,6 +4,7 @@ import {
   LayoutDashboard, 
   GitBranch, 
   Terminal, 
+  ListTodo, 
   Menu, 
   X,
   Activity
@@ -20,6 +21,11 @@ const navItems = [
     title: 'Projects',
     href: '/projects',
     icon: GitBranch,
+  },
+  {
+    title: 'Tasks',
+    href: '/tasks',
+    icon: ListTodo,
   },
   {
     title: 'Sessions',
@@ -56,7 +62,7 @@ export default function AppShell() {
                   key={item.href}
                   to={item.href}
                   className={cn(
-                    'flex items-center gap-3 px-4 py-3 rounded-lg transition-all',
+                    'flex items-center gap-3 px-4 py-3 rounded-lg transition-all min-h-[44px] min-w-[44px]',
                     isActive
                       ? 'bg-primary-500/10 text-primary-400 border border-primary-500/20'
                       : 'text-slate-400 hover:bg-slate-800 hover:text-white'

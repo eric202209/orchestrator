@@ -4,11 +4,12 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
+import time
 import json
 import asyncio
 from pydantic import BaseModel
 from app.database import get_db
-from app.models import Task, TaskStatus, Project, LogEntry
+from app.models import Task, TaskStatus, Project, LogEntry, SessionTask
 from app.schemas import TaskCreate, TaskUpdate, TaskResponse
 from app.services.openclaw_service import OpenClawSessionService
 from app.services.error_handler import EnhancedErrorHandler
@@ -37,6 +38,27 @@ router = APIRouter()
 
 # Constants
 MAX_PROMPT_LENGTH = 50000  # Max prompt length to avoid context window overflow
+
+
+@router.get("/tasks", response_model=List[TaskResponse])
+def get_all_tasks(
+    skip: int = 0,
+    limit: int = 100,
+    status: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Get all tasks across all projects"""
+    query = db.query(Task)
+
+    if status:
+        try:
+            task_status = TaskStatus[status.upper()]
+            query = query.filter(Task.status == task_status)
+        except KeyError:
+            raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+
+    tasks = query.order_by(Task.created_at.desc()).offset(skip).limit(limit).all()
+    return tasks
 
 
 @router.post("/tasks", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
@@ -133,8 +155,33 @@ async def execute_task_with_openclaw(
             # If check fails, log warning but don't block execution
             print(f"⚠️  Overwrite check failed (continuing anyway): {str(e)[:100]}")
 
-        # Start OpenClaw session
-        session_service = OpenClawSessionService(db, None, task_id)
+        # Start OpenClaw session and create database session record
+        from app.models import Session as SessionModel
+        
+        # Create a new session record for this task execution
+        new_session = SessionModel(
+            name=f"Task {task_id} Execution",
+            description=prompt[:500],
+            project_id=task.project_id if task.project else None,
+            status="running",
+            instance_id=f"orchestrator-task-{task_id}-{int(time.time())}",
+        )
+        db.add(new_session)
+        db.commit()
+        db.refresh(new_session)
+        
+        # Create SessionTask relationship
+        session_task = SessionTask(
+            session_id=new_session.id,
+            task_id=task.id,
+        )
+        db.add(session_task)
+        db.commit()
+        
+        print(f"✅ Created session {new_session.id} for task {task.id}")
+        
+        # Start OpenClaw session with the new session ID
+        session_service = OpenClawSessionService(db, new_session.id, task_id)
         openclaw_key = await session_service.start_session(prompt)
 
         # Build prompt using templates
@@ -215,7 +262,29 @@ def get_task(task_id: int, db: Session = Depends(get_db)):
     task = db.query(Task).filter(Task.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    return task
+    
+    # Get associated session_id from session_tasks table
+    session_task = db.query(SessionTask).filter(SessionTask.task_id == task_id).first()
+    session_id = session_task.session_id if session_task else None
+    
+    # Add session_id to task response
+    task_dict = task.__dict__.copy()
+    task_dict['session_id'] = session_id
+    
+    # If no session found but task is running/done, try to get from recent logs
+    if not session_id and task.status in [TaskStatus.RUNNING, TaskStatus.DONE]:
+        from app.models import LogEntry
+        recent_log = (
+            db.query(LogEntry)
+            .filter(LogEntry.task_id == task_id)
+            .order_by(LogEntry.created_at.desc())
+            .first()
+        )
+        if recent_log and recent_log.session_id:
+            session_id = recent_log.session_id
+            task_dict['session_id'] = session_id
+    
+    return task_dict
 
 
 @router.put("/tasks/{task_id}", response_model=TaskResponse)

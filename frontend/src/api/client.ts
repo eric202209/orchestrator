@@ -149,6 +149,8 @@ export const projectsAPI = {
 
 // Tasks API
 export const tasksAPI = {
+  getAll: () => apiClient.get<Task[]>('/tasks'),
+
   create: (data: { project_id: number; title: string; description?: string; priority?: number }) =>
     apiClient.post<Task>('/tasks', data),
 
