@@ -159,7 +159,7 @@ start_backend() {
     
     # LOGS DIRECTIVE: Write directly to logs/ directory (not /tmp/) for history preservation
     nohup venv/bin/uvicorn app.main:app \
-        --host 0.0.0.0 \
+        --host 127.0.0.1 \
         --port 8080 \
         >> /root/.openclaw/workspace/vault/projects/orchestrator/logs/backend.log 2>&1 &
     
