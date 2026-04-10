@@ -24,9 +24,11 @@ function Login() {
       
       navigate('/');
     } catch (err: unknown) {
-      const error = err as { response?: { data?: unknown } };
-      // Handle different error response formats
-      const detail = error.response?.data?.detail;
+      const axiosLike = err as {
+        response?: { data?: { detail?: unknown } };
+        message?: string;
+      };
+      const detail = axiosLike.response?.data?.detail;
       if (Array.isArray(detail)) {
         setError(detail[0]?.msg || detail[0] || 'Login failed');
       } else if (typeof detail === 'object' && detail !== null) {
@@ -34,7 +36,9 @@ function Login() {
       } else if (detail) {
         setError(String(detail));
       } else {
-        setError(error.message || 'Login failed');
+        setError(
+          err instanceof Error ? err.message : axiosLike.message || 'Login failed'
+        );
       }
     } finally {
       setLoading(false);

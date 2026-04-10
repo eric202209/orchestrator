@@ -29,7 +29,7 @@ const statusColors: Record<string, { bg: string; text: string; icon: string }> =
   'default': { bg: 'bg-slate-500/10', text: 'text-slate-400', icon: '•' },
 };
 
-export default function StatusBadge({ 
+export function StatusBadge({ 
   status, 
   size = 'md', 
   variant = 'default', 
@@ -61,9 +61,9 @@ export default function StatusBadge({
   };
   
   const sizeClasses = {
-    sm: 'px-2 py-0.5 text-xs',
-    md: 'px-2.5 py-0.5 text-sm',
-    lg: 'px-3 py-1 text-base',
+    sm: 'px-2 py-1 text-xs min-h-[44px] min-w-[44px]',
+    md: 'px-2.5 py-1.5 text-sm min-h-[44px] min-w-[44px]',
+    lg: 'px-3 py-2 text-base min-h-[44px] min-w-[44px]',
   };
   
   const borderClasses = variant === 'outline' 

@@ -18,8 +18,9 @@ import { formatDistanceToNow } from 'date-fns';
 import { StatusBadge, EmptyState } from '../components/ui';
 
 function ProjectDetail() {
-  const { id } = useParams<{ id: string }>();
+  const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
+  const id = projectId; // Keep consistent naming
   const [project, setProject] = useState<Project | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -219,6 +220,23 @@ function ProjectDetail() {
   };
 
  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const handleDeleteSession = async (sessionId: number) => {
+    if (!confirm('Delete this session? This cannot be undone.')) {
+      return;
+    }
+
+    try {
+      await sessionsAPI.delete(sessionId);
+      alert('Session deleted');
+      // Reload sessions
+      const sessionsRes = await sessionsAPI.getByProject(Number(id));
+      setSessions(sessionsRes.data || []);
+    } catch (error) {
+      console.error('Failed to delete session:', error);
+      alert('Failed to delete session. Please try again.');
+    }
+  };
+
   const handleDeleteProject: () => void = () => {
     // Disabled for now - implement if needed
   };
@@ -259,15 +277,7 @@ function ProjectDetail() {
               </div>
             </div>
             
-            <div className="flex items-center gap-4">
-              <Link
-                to="/"
-                className="flex items-center gap-2 bg-primary-500 hover:bg-primary-600 text-white px-4 py-2 rounded-lg transition-all"
-                title="Back to Dashboard"
-              >
-                <GitBranch className="h-4 w-4" />
-                Dashboard
-              </Link>
+            <div className="flex items-center gap-3">
               {project.github_url && (
                 <a
                   href={project.github_url}
@@ -309,13 +319,6 @@ function ProjectDetail() {
               )}
             </div>
             <div className="flex items-center gap-3">
-              <button
-                onClick={() => setShowCreateTask(true)}
-                className="flex items-center gap-2 bg-primary-500 hover:bg-primary-600 text-white px-4 py-2 rounded-lg transition-all"
-              >
-                <Plus className="h-4 w-4" />
-                Create Task
-              </button>
               {tasks.length > 0 && (
                 <button
                   onClick={async () => {
@@ -363,13 +366,6 @@ function ProjectDetail() {
               <Terminal className="h-5 w-5" />
               AI Sessions
             </h2>
-            <Link
-              to={`/sessions/new?project_id=${id}`}
-              className="flex items-center gap-2 bg-primary-500 hover:bg-primary-600 text-white px-4 py-2 rounded-lg transition-all"
-            >
-              <Plus className="h-4 w-4" />
-              New Session
-            </Link>
           </div>
 
           {sessions.length === 0 ? (
@@ -385,31 +381,38 @@ function ProjectDetail() {
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {sessions.map((session) => (
-                <Link
-                  key={session.id}
-                  to={`/sessions/${session.id}`}
-                  className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-6 hover:border-primary-500/50 transition-all"
-                >
-                  <div className="flex items-start justify-between mb-3">
-                    <div className="p-2 rounded-lg text-blue-400 bg-blue-400/10">
-                      <Terminal className="h-5 w-5" />
+                <div key={session.id} className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-6 hover:border-slate-600 transition-all">
+                  <div className="flex items-start justify-between">
+                    <div className="flex items-start gap-4 flex-1">
+                      <div className="p-2 rounded-lg text-blue-400 bg-blue-400/10 mt-1">
+                        <Terminal className="h-5 w-5" />
+                      </div>
+                      <div className="flex-1">
+                        <h3 className="text-lg font-semibold text-white mb-2">{session.name}</h3>
+                        {session.description && (
+                          <p className="text-sm text-slate-400 mb-3">{session.description}</p>
+                        )}
+                        <div className="flex items-center gap-4 text-sm text-slate-500">
+                          <span className="flex items-center gap-1">
+                            <Clock className="h-3 w-3" />
+                            {formatDistanceToNow(new Date(session.created_at), { addSuffix: true })}
+                          </span>
+                          {session.started_at && <span>Started</span>}
+                        </div>
+                      </div>
                     </div>
-                    <StatusBadge status={session.status} size="sm" />
+                    <div className="flex items-center gap-2">
+                      <StatusBadge status={session.status} size="sm" />
+                      <button
+                        onClick={() => handleDeleteSession(session.id)}
+                        className="text-slate-400 hover:text-red-400 transition-colors"
+                        title="Delete session"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
                   </div>
-                  <h3 className="font-semibold text-white mb-1">{session.name}</h3>
-                  {session.description && (
-                    <p className="text-sm text-slate-400 mb-3 line-clamp-2">{session.description}</p>
-                  )}
-                  <div className="flex items-center justify-between text-xs text-slate-500">
-                    <span>{formatDistanceToNow(new Date(session.created_at), { addSuffix: true })}</span>
-                    {session.started_at && (
-                      <span className="flex items-center gap-1">
-                        <Clock className="h-3 w-3" />
-                        Started
-                      </span>
-                    )}
-                  </div>
-                </Link>
+                </div>
               ))}
             </div>
           )}

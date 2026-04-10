@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
+from datetime import datetime, timezone
 from app.database import get_db
 from app.models import Project
 from app.schemas import ProjectCreate, ProjectUpdate, ProjectResponse
@@ -68,11 +69,27 @@ def update_project(
 
 @router.delete("/projects/{project_id}")
 def delete_project(project_id: int, db: Session = Depends(get_db)):
-    """Delete a project"""
+    """Delete a project (soft delete to prevent ID reuse issues)"""
+    from app.models import Session, LogEntry
+    from app.schemas import ProjectResponse
+
     db_project = db.query(Project).filter(Project.id == project_id).first()
     if not db_project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    db.delete(db_project)
+    # Soft delete: mark as deleted instead of hard delete
+    # This prevents database ID reuse issues that cause stale logs
+    db_project.deleted_at = datetime.now(timezone.utc)
     db.commit()
-    return {"message": "Project deleted successfully"}
+
+    # Also soft delete all sessions for this project
+    deleted_sessions = db.query(Session).filter(
+        Session.project_id == project_id
+    ).update({
+        "deleted_at": datetime.now(timezone.utc),
+        "is_active": False,
+        "status": "deleted"
+    })
+    db.commit()
+
+    return {"message": "Project and associated sessions deleted successfully"}

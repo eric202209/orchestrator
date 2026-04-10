@@ -13,7 +13,7 @@ import {
   Trash2
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
-import { StatusBadge, EmptyState } from '../components/ui';
+import { StatusBadge, EmptyState, Skeleton } from '../components/ui';
 
 function Dashboard() {
   const navigate = useNavigate();
@@ -150,8 +150,35 @@ function Dashboard() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-900">
-        <div className="h-8 w-8 border-2 border-primary-500/30 border-t-primary-500 rounded-full animate-spin" />
+      <div className="min-h-screen bg-slate-900">
+        <nav className="bg-slate-800/50 backdrop-blur border-b border-slate-700">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="flex items-center justify-between h-16">
+              <div className="flex items-center gap-2">
+                <Skeleton className="h-6 w-6" />
+                <Skeleton className="h-6 w-32" />
+              </div>
+              <div className="flex items-center gap-4">
+                <Skeleton className="h-4 w-40" />
+                <Skeleton className="h-4 w-20" />
+              </div>
+            </div>
+          </div>
+        </nav>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+            <Skeleton className="h-24 w-full" />
+            <Skeleton className="h-24 w-full" />
+            <Skeleton className="h-24 w-full" />
+            <Skeleton className="h-24 w-full" />
+          </div>
+          <div className="space-y-4">
+            <Skeleton className="h-8 w-48" />
+            <Skeleton className="h-32 w-full" />
+            <Skeleton className="h-32 w-full" />
+            <Skeleton className="h-32 w-full" />
+          </div>
+        </div>
       </div>
     );
   }
@@ -283,10 +310,6 @@ function Dashboard() {
                     icon={Terminal}
                     title="No tasks yet"
                     description="Create a project to start orchestrating AI development tasks"
-                    action={{
-                      label: 'Create Project',
-                      onClick: () => setShowCreateProject(true)
-                    }}
                   />
                 ) : (
                   <div className="space-y-4">
@@ -308,63 +331,19 @@ function Dashboard() {
               </div>
             </div>
 
-            {/* Quick Actions */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <button
-                onClick={() => setShowCreateProject(true)}
-                className="bg-primary-500/10 hover:bg-primary-500/20 border border-primary-500/20 rounded-xl p-6 text-left transition-all"
-              >
-                <div className="flex items-center gap-3">
-                  <div className="h-10 w-10 bg-primary-500 rounded-lg flex items-center justify-center">
-                    <Plus className="h-5 w-5 text-white" />
-                  </div>
-                  <div>
-                    <p className="font-semibold text-white">Create Project</p>
-                    <p className="text-sm text-slate-400">Start a new development task</p>
-                  </div>
-                </div>
-              </button>
-
-              <Link
-                to="/projects"
-                className="bg-slate-700/50 hover:bg-slate-700 border border-slate-600 rounded-xl p-6 text-left transition-all"
-              >
-                <div className="flex items-center gap-3">
-                  <div className="h-10 w-10 bg-blue-500 rounded-lg flex items-center justify-center">
-                    <GitBranch className="h-5 w-5 text-white" />
-                  </div>
-                  <div>
-                    <p className="font-semibold text-white">View All Projects</p>
-                    <p className="text-sm text-slate-400">Manage your projects</p>
-                  </div>
-                </div>
-              </Link>
-            </div>
+ 
           </div>
         )}
 
         {activeTab === 'projects' && (
           <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-white">Projects</h2>
-              <button
-                onClick={() => setShowCreateProject(true)}
-                className="flex items-center gap-2 bg-primary-500 hover:bg-primary-600 text-white px-4 py-2 rounded-lg transition-all"
-              >
-                <Plus className="h-4 w-4" />
-                New Project
-              </button>
-            </div>
+            <h2 className="text-lg font-semibold text-white">Projects</h2>
 
             {projects.length === 0 ? (
               <EmptyState
                 icon={GitBranch}
                 title="No projects yet"
                 description="Create your first project to start orchestrating AI development tasks"
-                action={{
-                  label: 'Create Project',
-                  onClick: () => setShowCreateProject(true)
-                }}
               />
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
