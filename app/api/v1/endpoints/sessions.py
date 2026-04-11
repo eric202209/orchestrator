@@ -920,47 +920,6 @@ async def websocket_session_status(
         status_task.cancel()
         heartbeat_task.cancel()
 
-
-def get_session_logs_filtered(
-    session_id: int,
-    db: Session = Depends(get_db),
-    level: Optional[str] = None,
-    limit: int = 100,
-    offset: int = 0,
-):
-    """Get log entries for a session (filtered by instance_id)"""
-    # Verify session exists to get instance_id
-    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    # Filter logs by both session_id and instance_id to prevent ID reuse issues
-    query = db.query(LogEntry).filter(
-        LogEntry.session_id == session_id,
-        LogEntry.session_instance_id == session.instance_id,
-    )
-
-    if level:
-        query = query.filter(LogEntry.level == level.upper())
-
-    logs = query.order_by(LogEntry.created_at.desc()).offset(offset).limit(limit).all()
-
-    return {
-        "total": query.count(),
-        "session_instance_id": session.instance_id,
-        "logs": [
-            {
-                "id": log.id,
-                "level": log.level,
-                "message": log.message,
-                "timestamp": log.created_at.isoformat(),
-                "metadata": json.loads(log.log_metadata) if log.log_metadata else {},
-            }
-            for log in logs
-        ],
-    }
-
-
 @router.get("/sessions/{session_id}/tools")
 def get_tool_execution_history(
     session_id: int,

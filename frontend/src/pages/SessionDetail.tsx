@@ -2,23 +2,18 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { sessionsAPI, tasksAPI, projectsAPI } from '@/api/client';
 import type { Session, Task, Project } from '@/types/api';
-import { TerminalViewer } from '@/components/TerminalViewer';
 import type { TerminalLogEntry } from '@/components/TerminalViewer';
-import { LoadingSpinner, StatusBadge } from '@/components/ui';
-import { 
-  Play, 
-  Pause, 
-  Square, 
-  RefreshCw, 
-  Settings, 
-  Terminal as TerminalIcon,
-  Activity,
-  CheckCircle2,
-  XCircle,
-  Clock,
-  ExternalLink
-} from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { LoadingSpinner } from '@/components/ui';
+import {
+  SessionConnectionNotice,
+  SessionHeader,
+  SessionLogsPanel,
+  SessionSettingsPanel,
+  SessionStats,
+  SessionTabs,
+  SessionTasksPanel,
+} from '@/components/SessionDetailSections';
+import { Pause, Play, Square, XCircle } from 'lucide-react';
 
 type TimelineEventType =
   | 'planning'
@@ -642,308 +637,60 @@ export default function SessionDetail() {
 
   return (
     <div className="p-6 space-y-6">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-3 mb-2">
-            <h1 className="text-2xl font-bold text-slate-100">{session.name}</h1>
-            <StatusBadge status={session.status} />
-            {wsConnected && (
-              <div className="flex items-center gap-1 text-emerald-400 text-sm">
-                <Activity className="h-4 w-4 animate-pulse" />
-                <span>Live</span>
-              </div>
-            )}
-          </div>
-          <p className="text-slate-400 text-sm">
-            ID: {session.id} • Project: {project?.name || 'Unknown'}
-            {project?.github_url && (
-              <a
-                href={project.github_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="ml-2 text-primary-400 hover:text-primary-300"
-              >
-                <ExternalLink className="h-4 w-4 inline" />
-              </a>
-            )}
-          </p>
-        </div>
-        {getActionButtons()}
-      </div>
+      <SessionHeader
+        project={project}
+        session={session}
+        wsConnected={wsConnected}
+        actionButtons={getActionButtons()}
+      />
 
-      {/* Connection Status */}
-      <div className="flex items-center gap-2 text-sm">
-        <div className={cn(
-          'w-2 h-2 rounded-full',
-          wsConnected ? 'bg-emerald-500 animate-pulse' : 'bg-slate-500'
-        )} />
-        <span className={cn(
-          wsConnected ? 'text-emerald-400' : 'text-slate-500'
-        )}>
-          {wsConnected ? 'WebSocket Connected - Live Logs' : 'WebSocket Disconnected'}
-        </span>
-      </div>
+      <SessionConnectionNotice
+        checkpointCount={checkpointCount}
+        session={session}
+        wsConnected={wsConnected}
+      />
 
-      {/* Stats */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="bg-slate-800/50 backdrop-blur rounded-xl p-4 border border-slate-700">
-          <p className="text-slate-400 text-sm mb-1 flex items-center gap-2">
-            <Activity className="h-4 w-4" />
-            Status
-          </p>
-          <p className="text-white font-semibold capitalize">{session.status}</p>
-        </div>
-        <div className="bg-slate-800/50 backdrop-blur rounded-xl p-4 border border-slate-700">
-          <p className="text-slate-400 text-sm mb-1 flex items-center gap-2">
-            <TerminalIcon className="h-4 w-4" />
-            Tasks
-          </p>
-          <p className="text-white font-semibold">{tasks.length}</p>
-        </div>
-        <div className="bg-slate-800/50 backdrop-blur rounded-xl p-4 border border-slate-700">
-          <p className="text-slate-400 text-sm mb-1 flex items-center gap-2">
-            <Clock className="h-4 w-4" />
-            Created
-          </p>
-          <p className="text-white font-semibold">
-            {formatDateTime(session.created_at)}
-          </p>
-        </div>
-        {session.started_at && (
-          <div className="bg-slate-800/50 backdrop-blur rounded-xl p-4 border border-slate-700">
-            <p className="text-slate-400 text-sm mb-1 flex items-center gap-2">
-              <CheckCircle2 className="h-4 w-4" />
-              Started
-            </p>
-            <p className="text-white font-semibold">
-              {formatDateTime(session.started_at)}
-            </p>
-          </div>
-        )}
-      </div>
+      <SessionStats
+        formatDateTime={formatDateTime}
+        session={session}
+        tasksCount={tasks.length}
+      />
 
-      {/* Tabs */}
-      <div className="border-b border-slate-700">
-        <nav className="flex gap-4">
-          <button
-            onClick={() => setActiveTab('logs')}
-            className={cn(
-              'pb-2 px-2 text-sm font-medium flex items-center gap-2',
-              activeTab === 'logs'
-                ? 'text-blue-400 border-b-2 border-blue-400'
-                : 'text-slate-400 hover:text-slate-200'
-            )}
-          >
-            <TerminalIcon className="h-4 w-4" />
-            Logs
-          </button>
-          <button
-            onClick={() => setActiveTab('tasks')}
-            className={cn(
-              'pb-2 px-2 text-sm font-medium',
-              activeTab === 'tasks'
-                ? 'text-blue-400 border-b-2 border-blue-400'
-                : 'text-slate-400 hover:text-slate-200'
-            )}
-          >
-            Tasks ({tasks.length})
-          </button>
-          <button
-            onClick={() => setActiveTab('settings')}
-            className={cn(
-              'pb-2 px-2 text-sm font-medium flex items-center gap-2',
-              activeTab === 'settings'
-                ? 'text-blue-400 border-b-2 border-blue-400'
-                : 'text-slate-400 hover:text-slate-200'
-            )}
-          >
-            <Settings className="h-4 w-4" />
-            Settings
-          </button>
-        </nav>
-      </div>
+      <SessionTabs
+        activeTab={activeTab}
+        onChange={setActiveTab}
+        tasksCount={tasks.length}
+      />
 
-      {/* Tab Content */}
       <div className="min-h-[400px]">
         {activeTab === 'logs' && (
-          <div className="space-y-4">
-            <TerminalViewer
-              logs={displayLogs}
-              autoScroll={true}
-              className="bg-slate-900 h-[500px]"
-            />
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-sm">
-                <div className={cn(
-                  'w-2 h-2 rounded-full',
-                  wsConnected ? 'bg-emerald-500 animate-pulse' : 'bg-slate-500'
-                )} />
-                <span className={cn(wsConnected ? 'text-emerald-400' : 'text-slate-500')}>
-                  {displayLogs.length} logs loaded
-                </span>
-              </div>
-              <div className="flex gap-2 items-center">
-                <select
-                  value={logVerbosity}
-                  onChange={(e) => {
-                    const mode = e.target.value as 'clean' | 'verbose';
-                    setLogVerbosity(mode);
-                  }}
-                  className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-sm rounded-lg transition-colors"
-                >
-                  <option value="clean">Clean Logs</option>
-                  <option value="verbose">Verbose Logs</option>
-                </select>
-                <button
-                  onClick={handleRefreshLogs}
-                  className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-sm rounded-lg transition-colors flex items-center gap-2"
-                >
-                  <RefreshCw className="h-4 w-4" />
-                  Refresh
-                </button>
-                <select
-                  value={logViewMode}
-                  onChange={(e) => {
-                    const mode = e.target.value as 'newest' | 'oldest' | 'success' | 'errors' | 'all';
-                    setLogViewMode(mode);
-                    applyLogView(allLogs, mode);
-                  }}
-                  className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-sm rounded-lg transition-colors"
-                >
-                  <option value="newest">Sort: Newest First</option>
-                  <option value="oldest">Sort: Oldest First</option>
-                  <option value="success">Filter: Success Only</option>
-                  <option value="errors">Filter: Errors Only</option>
-                  <option value="all">Show All</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="bg-slate-900 border border-slate-700 rounded-lg p-4">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-semibold text-slate-200">Execution Timeline</h3>
-                <span className="text-xs text-slate-400">{timelineEvents.length} events</span>
-              </div>
-              <div className="max-h-56 overflow-y-auto space-y-2 text-sm">
-                {timelineEvents.length === 0 ? (
-                  <p className="text-slate-500">No timeline events yet. Start/execute a task to see progress milestones.</p>
-                ) : (
-                  timelineEvents.slice().reverse().map((event) => (
-                    <div key={event.id} className="border border-slate-800 rounded-md p-2">
-                      <div className="flex items-center justify-between">
-                        <span className={cn(
-                          'text-xs font-medium uppercase',
-                          event.type === 'error' && 'text-red-400',
-                          event.type === 'planning' && 'text-violet-400',
-                          event.type === 'executing' && 'text-blue-400',
-                          event.type === 'debugging' && 'text-amber-400',
-                          event.type === 'revising_plan' && 'text-fuchsia-400',
-                          event.type === 'summarizing' && 'text-teal-400',
-                          event.type === 'checkpoint' && 'text-emerald-400',
-                          event.type === 'status' && 'text-cyan-400',
-                          event.type === 'info' && 'text-slate-300'
-                        )}>
-                          {event.title}
-                        </span>
-                        <span className="text-xs text-slate-500">
-                          {formatDateTime(event.at)}
-                        </span>
-                      </div>
-                      <p className="text-slate-300 mt-1 break-words">{event.detail}</p>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-          </div>
+          <SessionLogsPanel
+            displayLogs={displayLogs}
+            formatDateTime={formatDateTime}
+            handleRefreshLogs={handleRefreshLogs}
+            logVerbosity={logVerbosity}
+            logViewMode={logViewMode}
+            onLogVerbosityChange={setLogVerbosity}
+            onLogViewModeChange={(mode) => {
+              setLogViewMode(mode);
+              applyLogView(allLogs, mode);
+            }}
+            timelineEvents={timelineEvents}
+            wsConnected={wsConnected}
+          />
         )}
 
         {activeTab === 'tasks' && (
-          <div className="space-y-4">
-            {/* Execute Task Button */}
-            {getActionButtons() && session.status !== 'running' && (
-              <div className="bg-blue-900/20 border border-blue-700/50 rounded-lg p-4 mb-4">
-                <p className="text-blue-400 text-sm mb-2">
-                  Session is not running. Start the session to execute tasks automatically.
-                </p>
-              </div>
-            )}
-            
-            {tasks.length === 0 ? (
-              <div className="text-center py-12">
-                <TerminalIcon className="h-12 w-12 text-slate-500 mx-auto mb-4" />
-                <p className="text-slate-400">No tasks yet</p>
-                {getActionButtons() && (
-                  <p className="text-slate-500 text-sm mt-2">
-                    Start the session to automatically execute tasks from your project
-                  </p>
-                )}
-              </div>
-            ) : (
-              tasks.map((task) => (
-                <div key={task.id} className="bg-slate-800/50 backdrop-blur rounded-xl p-4 border border-slate-700 hover:border-slate-600 transition-colors">
-                  <div className="flex items-start justify-between mb-2">
-                    <h3 className="font-semibold text-white">{task.title}</h3>
-                    <StatusBadge status={task.status} size="sm" />
-                  </div>
-                  {task.description && (
-                    <p className="text-slate-400 text-sm mt-1">{task.description}</p>
-                  )}
-                  {task.error_message && (
-                    <div className="mt-2 p-2 bg-red-900/20 border border-red-700/50 rounded-lg">
-                      <p className="text-red-400 text-sm flex items-center gap-2">
-                        <XCircle className="h-4 w-4" />
-                        Error: {task.error_message}
-                      </p>
-                    </div>
-                  )}
-                  <div className="mt-3 flex items-center gap-4 text-xs text-slate-500">
-                    {task.created_at && (
-                      <span>Created: {formatDateTime(task.created_at)}</span>
-                    )}
-                    {task.started_at && (
-                      <span>Started: {formatDateTime(task.started_at)}</span>
-                    )}
-                    {task.completed_at && (
-                      <span className="text-emerald-400">
-                        Completed: {formatDateTime(task.completed_at)}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
+          <SessionTasksPanel
+            actionButtons={getActionButtons()}
+            formatDateTime={formatDateTime}
+            session={session}
+            tasks={tasks}
+          />
         )}
 
         {activeTab === 'settings' && (
-          <div className="space-y-4">
-            <div className="bg-slate-800/50 backdrop-blur rounded-xl p-4 border border-slate-700">
-              <p className="text-slate-400 text-sm mb-1">Session ID</p>
-              <p className="text-white font-mono text-sm">{session.id}</p>
-            </div>
-            <div className="bg-slate-800/50 backdrop-blur rounded-xl p-4 border border-slate-700">
-              <p className="text-slate-400 text-sm mb-1">Project ID</p>
-              <p className="text-white font-mono text-sm">{session.project_id}</p>
-            </div>
-            <div className="bg-slate-800/50 backdrop-blur rounded-xl p-4 border border-slate-700">
-              <p className="text-slate-400 text-sm mb-1">Created At</p>
-              <p className="text-white">{formatDateTime(session.created_at)}</p>
-            </div>
-            {session.started_at && (
-              <div className="bg-slate-800/50 backdrop-blur rounded-xl p-4 border border-slate-700">
-                <p className="text-slate-400 text-sm mb-1">Started At</p>
-                <p className="text-white">{formatDateTime(session.started_at)}</p>
-              </div>
-            )}
-            {session.stopped_at && (
-              <div className="bg-slate-800/50 backdrop-blur rounded-xl p-4 border border-slate-700">
-                <p className="text-slate-400 text-sm mb-1">Stopped At</p>
-                <p className="text-white">{formatDateTime(session.stopped_at)}</p>
-              </div>
-            )}
-          </div>
+          <SessionSettingsPanel formatDateTime={formatDateTime} session={session} />
         )}
       </div>
     </div>

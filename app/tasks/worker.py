@@ -16,7 +16,14 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 from sqlalchemy import create_engine
 from app.celery_app import celery_app
-from app.models import Session as SessionModel, Task, TaskStatus, LogEntry, Project
+from app.models import (
+    Session as SessionModel,
+    SessionTask,
+    Task,
+    TaskStatus,
+    LogEntry,
+    Project,
+)
 from app.database import get_db, get_db_session
 from app.services import OpenClawSessionService, PromptTemplates
 from app.services.error_handler import error_handler
@@ -36,6 +43,31 @@ class TaskWorkspaceViolationError(ValueError):
     """Raised when a planned command escapes the task workspace."""
 
     pass
+
+
+def _strip_heredoc_bodies(command_text: str) -> str:
+    """Replace heredoc bodies so shell validation only sees the outer command."""
+
+    return re.sub(
+        r"<<\s*['\"]?([A-Za-z0-9_-]+)['\"]?.*?\n.*?\n\1",
+        "<<HEREDOC",
+        command_text or "",
+        flags=re.DOTALL,
+    )
+
+
+def _is_quoted_route_literal(
+    token: str, original_command: str, segment_command: Optional[str]
+) -> bool:
+    """Treat quoted grep route patterns like '/refresh' as literals, not paths."""
+
+    if segment_command not in {"grep", "egrep", "fgrep", "rg", "ripgrep"}:
+        return False
+
+    if not re.fullmatch(r"/[A-Za-z0-9._:/-]+", token):
+        return False
+
+    return f"'{token}'" in original_command or f'"{token}"' in original_command
 
 
 def _serialize_step_result(step_result: StepResult) -> Dict[str, Any]:
@@ -120,6 +152,46 @@ def _record_live_log(
     db.commit()
 
 
+def _get_latest_session_task_link(
+    db: Session, session_id: int, task_id: int
+) -> Optional[SessionTask]:
+    return (
+        db.query(SessionTask)
+        .filter(
+            SessionTask.session_id == session_id,
+            SessionTask.task_id == task_id,
+        )
+        .order_by(SessionTask.id.desc())
+        .first()
+    )
+
+
+def _extract_plan_steps(parsed_planning_output: Any) -> Optional[List[Dict[str, Any]]]:
+    """Accept common planning response wrappers and return the step list."""
+
+    if isinstance(parsed_planning_output, list):
+        return parsed_planning_output
+
+    if not isinstance(parsed_planning_output, dict):
+        return None
+
+    for key in ("steps", "plan", "task_plan", "execution_plan"):
+        candidate = parsed_planning_output.get(key)
+        if isinstance(candidate, list):
+            return candidate
+
+    payloads = parsed_planning_output.get("payloads")
+    if isinstance(payloads, list):
+        for payload in payloads:
+            if isinstance(payload, dict):
+                for key in ("steps", "plan", "task_plan", "execution_plan"):
+                    candidate = payload.get(key)
+                    if isinstance(candidate, list):
+                        return candidate
+
+    return None
+
+
 def _normalize_path_reference(path_text: str, project_dir: Path) -> str:
     raw = (path_text or "").strip().strip("\"'")
     if not raw:
@@ -152,12 +224,7 @@ def _normalize_command(command: str, project_dir: Path) -> str:
 
     # Ignore heredoc bodies when validating outer shell traversal. Paths inside
     # generated file contents like `../src/...` are source text, not shell traversal.
-    traversal_check_target = re.sub(
-        r"<<\s*['\"]?([A-Za-z0-9_-]+)['\"]?.*?\n.*?\n\1",
-        "<<HEREDOC",
-        normalized,
-        flags=re.DOTALL,
-    )
+    traversal_check_target = _strip_heredoc_bodies(normalized)
 
     if "~" in traversal_check_target:
         raise TaskWorkspaceViolationError(
@@ -183,10 +250,21 @@ def _normalize_command(command: str, project_dir: Path) -> str:
             current = f"cd {shlex.quote(target)} && {remainder}"
 
     abs_path_matches = []
-    for token in shlex.split(current, posix=True):
+    path_scan_target = _strip_heredoc_bodies(current)
+    segment_command: Optional[str] = None
+    for token in shlex.split(path_scan_target, posix=True):
+        if token in {"&&", "||", "|", ";"}:
+            segment_command = None
+            continue
+
+        if segment_command is None:
+            segment_command = token
+
         if not token.startswith("/"):
             continue
         if any(char in token for char in "<>"):
+            continue
+        if _is_quoted_route_literal(token, current, segment_command):
             continue
         if not re.fullmatch(r"/[A-Za-z0-9._/@:+-]+(?:/[A-Za-z0-9._@:+-]+)*/*", token):
             continue
@@ -198,12 +276,7 @@ def _normalize_command(command: str, project_dir: Path) -> str:
         replacement = "." if replacement == "." else f"./{replacement}"
         current = current.replace(abs_path, replacement)
 
-    current_traversal_target = re.sub(
-        r"<<\s*['\"]?([A-Za-z0-9_-]+)['\"]?.*?\n.*?\n\1",
-        "<<HEREDOC",
-        current,
-        flags=re.DOTALL,
-    )
+    current_traversal_target = _strip_heredoc_bodies(current)
 
     if "~" in current_traversal_target or re.search(
         r"(^|[\s'\"=/])\.\.(?:/|$)", current_traversal_target
@@ -563,7 +636,14 @@ def execute_openclaw_task(
         # Update task status
         task.status = TaskStatus.RUNNING
         task.started_at = datetime.utcnow()
+        task.completed_at = None
+        task.error_message = None
         task.current_step = 0
+        session_task_link = _get_latest_session_task_link(db, session_id, task_id)
+        if session_task_link:
+            session_task_link.status = TaskStatus.RUNNING
+            session_task_link.started_at = task.started_at
+            session_task_link.completed_at = None
         db.commit()
 
         logger.info(f"[ORCHESTRATION] Starting multi-step execution for task {task_id}")
@@ -791,12 +871,13 @@ def execute_openclaw_task(
                     )
 
                 if success:
-                    if isinstance(plan_data, list):
+                    extracted_plan = _extract_plan_steps(plan_data)
+                    if extracted_plan is not None:
                         orchestration_state.plan = _normalize_plan_with_live_logging(
                             db,
                             session_id,
                             task_id,
-                            plan_data,
+                            extracted_plan,
                             orchestration_state.project_dir,
                             logger,
                             session.instance_id,
@@ -818,12 +899,19 @@ def execute_openclaw_task(
                         task.current_step = 0
                         db.commit()
                     else:
-                        raise ValueError("Planning result is not a list of steps")
+                        raise ValueError(
+                            "Planning result is not a list of steps"
+                        )
                 else:
                     # Failed to parse after all strategies
                     orchestration_state.status = OrchestrationStatus.ABORTED
                     orchestration_state.abort_reason = (
                         f"Planning JSON parse failed: {strategy_info}"
+                    )
+                    emit_live(
+                        "ERROR",
+                        f"[ORCHESTRATION] Planning JSON parse failed: {strategy_info}",
+                        metadata={"phase": "planning", "reason": "planning_json_error"},
                     )
                     task.status = TaskStatus.FAILED
                     task.error_message = (
@@ -835,6 +923,14 @@ def execute_openclaw_task(
             except TaskWorkspaceViolationError as e:
                 orchestration_state.status = OrchestrationStatus.ABORTED
                 orchestration_state.abort_reason = f"Workspace isolation violation: {e}"
+                emit_live(
+                    "ERROR",
+                    f"[ORCHESTRATION] Planning output blocked: {e}",
+                    metadata={
+                        "phase": "planning",
+                        "reason": "workspace_isolation_violation",
+                    },
+                )
                 task.status = TaskStatus.FAILED
                 task.error_message = str(e)
                 db.commit()
@@ -843,6 +939,11 @@ def execute_openclaw_task(
                 logger.error(f"[ORCHESTRATION] Failed to parse planning result: {e}")
                 orchestration_state.status = OrchestrationStatus.ABORTED
                 orchestration_state.abort_reason = f"Planning parse failed: {e}"
+                emit_live(
+                    "ERROR",
+                    f"[ORCHESTRATION] Failed to parse planning result: {e}",
+                    metadata={"phase": "planning", "reason": "planning_parse_error"},
+                )
                 task.status = TaskStatus.FAILED
                 task.error_message = str(e)
                 db.commit()
@@ -876,6 +977,9 @@ def execute_openclaw_task(
                 )
                 task.status = TaskStatus.CANCELLED
                 task.completed_at = datetime.utcnow()
+                if session_task_link:
+                    session_task_link.status = TaskStatus.CANCELLED
+                    session_task_link.completed_at = task.completed_at
                 db.commit()
                 return {
                     "status": "cancelled",
@@ -1144,8 +1248,12 @@ def execute_openclaw_task(
         # Mark task as done
         task.status = TaskStatus.DONE
         task.completed_at = datetime.utcnow()
+        task.error_message = None
         task.summary = summary_result.get("output", "")[:2000]
         task.current_step = len(orchestration_state.plan)
+        if session_task_link:
+            session_task_link.status = TaskStatus.DONE
+            session_task_link.completed_at = task.completed_at
 
         # Update session status to stopped when task completes
         if session:
@@ -1200,6 +1308,11 @@ def execute_openclaw_task(
         # Update task failure with enhanced error information
         task.status = TaskStatus.FAILED
         task.error_message = str(exc)
+        task.completed_at = datetime.utcnow()
+        session_task_link = _get_latest_session_task_link(db, session_id, task_id)
+        if session_task_link:
+            session_task_link.status = TaskStatus.FAILED
+            session_task_link.completed_at = task.completed_at
 
         # Add diagnostic information
         error_str = str(exc).lower()

@@ -13,7 +13,7 @@ from app.models import Task, TaskStatus, Project, LogEntry, SessionTask
 from app.schemas import TaskCreate, TaskUpdate, TaskResponse
 from app.services.openclaw_service import OpenClawSessionService
 from app.services.error_handler import EnhancedErrorHandler
-from app.services.log_utils import sort_logs, deduplicate_logs
+from app.services.log_utils import sort_logs
 
 
 # Pydantic models for overwrite protection
@@ -38,6 +38,27 @@ router = APIRouter()
 
 # Constants
 MAX_PROMPT_LENGTH = 50000  # Max prompt length to avoid context window overflow
+
+
+def _latest_session_success_for_task(
+    db: Session, task_id: int, session_id: Optional[int]
+) -> bool:
+    if not session_id:
+        return False
+
+    success_log = (
+        db.query(LogEntry)
+        .filter(
+            LogEntry.task_id == task_id,
+            LogEntry.session_id == session_id,
+            LogEntry.message.ilike(
+                f"[ORCHESTRATION] Task {task_id} completed successfully%"
+            ),
+        )
+        .order_by(LogEntry.created_at.desc())
+        .first()
+    )
+    return success_log is not None
 
 
 @router.get("/tasks", response_model=List[TaskResponse])
@@ -276,6 +297,20 @@ def get_task(task_id: int, db: Session = Depends(get_db)):
         .first()
     )
     session_id = session_task.session_id if session_task else None
+
+    # Reconcile stale task state when the latest linked session already logged
+    # successful completion but the task record is still marked failed.
+    if task.status == TaskStatus.FAILED and _latest_session_success_for_task(
+        db, task_id, session_id
+    ):
+        task.status = TaskStatus.DONE
+        task.error_message = None
+        task.completed_at = task.completed_at or datetime.utcnow()
+        if session_task:
+            session_task.status = TaskStatus.DONE
+            session_task.completed_at = session_task.completed_at or task.completed_at
+        db.commit()
+        db.refresh(task)
 
     # Add session_id to task response
     task_dict = task.__dict__.copy()

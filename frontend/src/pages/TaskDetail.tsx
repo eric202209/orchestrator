@@ -230,6 +230,15 @@ function TaskDetail() {
         {/* Edit Mode */}
         {editing ? (
           <div className="space-y-6">
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4">
+              <p className="text-sm font-medium text-amber-300">Editing the stored plan can affect future runs.</p>
+              <p className="mt-1 text-sm text-amber-200/90">
+                Changing steps or moving the current step backward may cause earlier work to run again.
+                That can overwrite files, duplicate routes/endpoints, or conflict with existing project state.
+                Resume/checkpoint state may also override these values during recovery.
+              </p>
+            </div>
+
             <div>
               <label className="block text-sm font-medium text-slate-300 mb-2">
                 Title
@@ -273,6 +282,9 @@ function TaskDetail() {
               <label className="block text-sm font-medium text-slate-300 mb-2">
                 Current Step
               </label>
+              <p className="text-xs text-amber-300 mb-2">
+                Lowering this value can re-run earlier steps. Only change it if you intentionally want to take that risk.
+              </p>
               <input
                 type="number"
                 value={editForm.current_step}
