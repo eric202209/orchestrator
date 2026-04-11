@@ -12,7 +12,55 @@ import type {
   ProjectLogsResponse
 } from '../types/api';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080/api/v1';
+const API_BASE_URL =
+  import.meta.env.VITE_API_URL ||
+  (import.meta.env.DEV ? '/api/v1' : 'http://localhost:8080/api/v1');
+
+const getBrowserSafeHost = (host: string): string => {
+  if (!host) {
+    return host;
+  }
+  // 0.0.0.0 is valid bind address for servers, but not a stable browser target.
+  if (host.startsWith('0.0.0.0')) {
+    const fallbackHost = window.location.hostname || '127.0.0.1';
+    const withPort = host.includes(':') ? `:${host.split(':')[1]}` : '';
+    return `${fallbackHost}${withPort}`;
+  }
+  return host;
+};
+
+const getWebSocketHost = (): string => {
+  // When the dev frontend is using the Vite proxy on the same origin,
+  // keep WebSockets on that same origin too so proxying works consistently.
+  if (import.meta.env.DEV) {
+    try {
+      const apiUrl = new URL(API_BASE_URL, window.location.origin);
+      if (apiUrl.host === window.location.host) {
+        return window.location.host;
+      }
+    } catch {
+      return window.location.host;
+    }
+  }
+
+  const wsHostFromEnv = import.meta.env.VITE_API_WS_HOST;
+  if (wsHostFromEnv) {
+    return getBrowserSafeHost(wsHostFromEnv);
+  }
+
+  // In dev, prefer same-origin websocket + Vite proxy to avoid host/CORS mismatches.
+  if (import.meta.env.DEV) {
+    return window.location.host;
+  }
+
+  // Keep WS host aligned with the API base URL when possible.
+  try {
+    const apiUrl = new URL(API_BASE_URL);
+    return getBrowserSafeHost(apiUrl.host);
+  } catch {
+    return `${window.location.hostname || '127.0.0.1'}:8080`;
+  }
+};
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
@@ -138,8 +186,7 @@ export const projectsAPI = {
   getLogsStream: (projectId: number) => {
     const token = localStorage.getItem('access_token');
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // WebSocket endpoint is on backend (port 8080), not frontend (port 3000)
-    const apiHost = import.meta.env.VITE_API_WS_HOST || window.location.hostname + ':8080';
+    const apiHost = getWebSocketHost();
     const wsUrl = token 
       ? `${protocol}//${apiHost}/api/v1/projects/${projectId}/logs/stream?token=${token}`
       : `${protocol}//${apiHost}/api/v1/projects/${projectId}/logs/stream`;
@@ -269,12 +316,16 @@ export const sessionsAPI = {
     }>(`/sessions/${sessionId}/checkpoints?checkpoint_name=${checkpointName || 'manual'}`),
 
   listCheckpoints: (sessionId: number) =>
-    apiClient.get<Array<{ 
-      name: string;
-      created_at: string;
-      step_index?: number;
-      completed_steps: number;
-    }>>(`/sessions/${sessionId}/checkpoints`),
+    apiClient.get<{ 
+      session_id: number;
+      total_count: number;
+      checkpoints: Array<{
+        name: string;
+        created_at: string;
+        step_index?: number;
+        completed_steps: number;
+      }>;
+    }>(`/sessions/${sessionId}/checkpoints`),
 
   loadCheckpoint: (sessionId: number, checkpointName?: string) =>
     apiClient.post<{ 
@@ -334,8 +385,7 @@ export const sessionsAPI = {
   getStatusStream: (id: number) => {
     const token = localStorage.getItem('access_token');
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // WebSocket endpoint is on backend (port 8080), not frontend (port 3000)
-    const apiHost = import.meta.env.VITE_API_WS_HOST || window.location.hostname + ':8080';
+    const apiHost = getWebSocketHost();
     const wsUrl = token 
       ? `${protocol}//${apiHost}/api/v1/sessions/${id}/status?token=${token}`
       : `${protocol}//${apiHost}/api/v1/sessions/${id}/status`;
@@ -346,8 +396,7 @@ export const sessionsAPI = {
   getLogsStream: (id: number) => {
     const token = localStorage.getItem('access_token');
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // WebSocket endpoint is on backend (port 8080), not frontend (port 3000)
-    const apiHost = import.meta.env.VITE_API_WS_HOST || window.location.hostname + ':8080';
+    const apiHost = getWebSocketHost();
     const wsUrl = token 
       ? `${protocol}//${apiHost}/api/v1/sessions/${id}/logs/stream?token=${token}`
       : `${protocol}//${apiHost}/api/v1/sessions/${id}/logs/stream`;

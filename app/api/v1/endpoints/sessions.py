@@ -358,13 +358,13 @@ def delete_session(
     db_session.deleted_at = datetime.now(timezone.utc)
     db_session.is_active = False
     db_session.status = "deleted"
-    
+
     # Delete all logs for this session to prevent ID reuse issues
     from app.models import LogEntry
     deleted_logs = db.query(LogEntry).filter(
         LogEntry.session_id == session_id
     ).delete()
-    
+
     db.commit()
     logger.info(f"Deleted {deleted_logs} logs for session {session_id}")
 
@@ -686,7 +686,7 @@ async def websocket_log_stream(
 
     for log in recent_logs:
         await websocket.send_json({"type": "log", **log})
-    
+
     logger.info(f"Sent {len(recent_logs)} initial logs, starting main loop...")
 
     # Background task to send periodic heartbeats (prevents 5-minute timeout)
@@ -812,51 +812,113 @@ async def websocket_log_stream(
 async def websocket_session_status(
     websocket: WebSocket, session_id: int, db: Session = Depends(get_db)
 ):
-    await websocket.accept()
-    # TODO: Implement websocket status updates
-    while True:
-        data = await websocket.receive_text()
-        await websocket.send_json({"status": "ok", "data": data})
-
-
-def get_session_logs(
-    session_id: int,
-    db: Session = Depends(get_db),
-    level: Optional[str] = None,
-    limit: int = 100,
-    offset: int = 0,
-):
-    """Get log entries for a session (filtered by instance_id)"""
-    # Verify session exists to get instance_id
+    # Validate session before accepting
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+        await websocket.close(code=1008, reason="Session not found")
+        return
 
-    # Filter logs by both session_id and instance_id to prevent ID reuse issues
-    query = db.query(LogEntry).filter(
-        LogEntry.session_id == session_id,
-        LogEntry.session_instance_id == session.instance_id,
+    await websocket.accept()
+    await websocket.send_json(
+        {
+            "type": "connected",
+            "session_id": session_id,
+            "timestamp": datetime.utcnow().isoformat(),
+            "heartbeat_interval": 30,
+            "status_interval": 2,
+        }
     )
 
-    if level:
-        query = query.filter(LogEntry.level == level.upper())
+    async def status_sender():
+        """Push live session status snapshots to the client."""
+        last_snapshot: Optional[Dict[str, Any]] = None
+        while True:
+            await asyncio.sleep(2)
+            poll_db = create_db_session()
+            try:
+                current = (
+                    poll_db.query(SessionModel)
+                    .filter(SessionModel.id == session_id)
+                    .first()
+                )
+                if not current:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "session_id": session_id,
+                            "message": "Session not found",
+                            "timestamp": datetime.utcnow().isoformat(),
+                        }
+                    )
+                    break
 
-    logs = query.order_by(LogEntry.created_at.desc()).offset(offset).limit(limit).all()
+                snapshot = {
+                    "id": current.id,
+                    "status": current.status,
+                    "is_active": current.is_active,
+                    "started_at": (
+                        current.started_at.isoformat() if current.started_at else None
+                    ),
+                    "stopped_at": (
+                        current.stopped_at.isoformat() if current.stopped_at else None
+                    ),
+                    "paused_at": (
+                        current.paused_at.isoformat() if current.paused_at else None
+                    ),
+                    "resumed_at": (
+                        current.resumed_at.isoformat() if current.resumed_at else None
+                    ),
+                    "updated_at": (
+                        current.updated_at.isoformat() if current.updated_at else None
+                    ),
+                }
 
-    return {
-        "total": query.count(),
-        "session_instance_id": session.instance_id,
-        "logs": [
-            {
-                "id": log.id,
-                "level": log.level,
-                "message": log.message,
-                "timestamp": log.created_at.isoformat(),
-                "metadata": json.loads(log.log_metadata) if log.log_metadata else {},
-            }
-            for log in logs
-        ],
-    }
+                if snapshot != last_snapshot:
+                    await websocket.send_json(
+                        {
+                            "type": "status_update",
+                            "session_id": session_id,
+                            "status": snapshot,
+                            "timestamp": datetime.utcnow().isoformat(),
+                        }
+                    )
+                    last_snapshot = snapshot
+            finally:
+                poll_db.close()
+
+    async def heartbeat_sender():
+        """Keep idle connections alive through intermediary proxies."""
+        while True:
+            await asyncio.sleep(30)
+            await websocket.send_text("ping")
+
+    status_task = asyncio.create_task(status_sender())
+    heartbeat_task = asyncio.create_task(heartbeat_sender())
+
+    try:
+        while True:
+            try:
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+
+            if data == "ping":
+                await websocket.send_text("pong")
+            elif data.lower() == "pong":
+                continue
+            else:
+                logger.debug(
+                    "Status websocket received message for session %s: %s",
+                    session_id,
+                    data[:100],
+                )
+    except WebSocketDisconnect:
+        logger.info("Status websocket disconnected for session %s", session_id)
+    except Exception as e:
+        logger.error("Status websocket error for session %s: %s", session_id, str(e))
+    finally:
+        status_task.cancel()
+        heartbeat_task.cancel()
 
 
 @router.get("/sessions/{session_id}/tools")
@@ -997,13 +1059,11 @@ async def start_session(
         db.commit()
 
     try:
-        # Use the instance_id already generated at session creation time
-        session_instance_id = session.instance_id
-        if not session_instance_id:
-            # Fallback: generate if somehow missing (shouldn't happen)
-            session_instance_id = str(uuid.uuid4())
-            session.instance_id = session_instance_id
-            db.commit()
+        # Every fresh start gets a new instance id so logs from prior attempts
+        # do not mix into the latest run.
+        session_instance_id = str(uuid.uuid4())
+        session.instance_id = session_instance_id
+        db.commit()
 
         # Initialize OpenClaw service
         openclaw_service = OpenClawSessionService(db, session_id, use_demo_mode=False)
@@ -1020,10 +1080,64 @@ async def start_session(
         if session.project_id:
             print(f"DEBUG: Found project_id {session.project_id}, queuing tasks...")
             from app.services.task_service import TaskService
+            from app.models import Task
 
             task_service = TaskService(db)
+            project_tasks = task_service.get_project_tasks(session.project_id)
+            print(f"DEBUG: Found {len(project_tasks)} tasks for project")
+
+            # Recover stale task states from an older interrupted session run.
+            # If the session is being restarted and no session is currently active,
+            # tasks left in RUNNING should become PENDING so they can be re-queued.
+            stale_running_tasks = [
+                task for task in project_tasks if task.status == TaskStatus.RUNNING
+            ]
+            for task in stale_running_tasks:
+                task.status = TaskStatus.PENDING
+                task.error_message = None
+                task.started_at = None
+                task.completed_at = None
+                task.current_step = 0
+            if stale_running_tasks:
+                db.add(
+                    LogEntry(
+                        session_id=session_id,
+                        session_instance_id=session_instance_id,
+                        level="INFO",
+                        message=f"Recovered {len(stale_running_tasks)} stale running task(s) for restart",
+                    )
+                )
+                db.commit()
+
             pending_tasks = task_service.get_project_tasks(session.project_id)
-            print(f"DEBUG: Found {len(pending_tasks)} tasks for project")
+
+            if not any(task.status == TaskStatus.PENDING for task in pending_tasks):
+                retryable_failed_tasks = [
+                    task
+                    for task in pending_tasks
+                    if task.status in [TaskStatus.FAILED, TaskStatus.CANCELLED]
+                ]
+                for task in retryable_failed_tasks:
+                    task.status = TaskStatus.PENDING
+                    task.error_message = None
+                    task.started_at = None
+                    task.completed_at = None
+                    task.current_step = 0
+
+                if retryable_failed_tasks:
+                    db.add(
+                        LogEntry(
+                            session_id=session_id,
+                            session_instance_id=session_instance_id,
+                            level="INFO",
+                            message=(
+                                f"Recovered {len(retryable_failed_tasks)} failed/cancelled "
+                                "task(s) for retry"
+                            ),
+                        )
+                    )
+                    db.commit()
+                    pending_tasks = task_service.get_project_tasks(session.project_id)
 
             # Queue all pending tasks for execution
             queued_tasks = []
@@ -1054,12 +1168,33 @@ async def start_session(
                     db.add(
                         LogEntry(
                             session_id=session_id,
+                            session_instance_id=session_instance_id,
                             task_id=task.id,
                             level="INFO",
                             message=f"Task queued: {task.title}",
                             log_metadata=json.dumps({"celery_task_id": result.id}),
                         )
                     )
+
+            if not queued_tasks:
+                task_status_summary = {
+                    str(task.status.value if hasattr(task.status, "value") else task.status): 0
+                    for task in pending_tasks
+                }
+                for task in pending_tasks:
+                    key = str(task.status.value if hasattr(task.status, "value") else task.status)
+                    task_status_summary[key] = task_status_summary.get(key, 0) + 1
+
+                db.add(
+                    LogEntry(
+                        session_id=session_id,
+                        session_instance_id=session_instance_id,
+                        level="WARN",
+                        message="No tasks were queued for this session start",
+                        log_metadata=json.dumps({"task_status_summary": task_status_summary}),
+                    )
+                )
+                db.commit()
 
             # Update session metadata with queued tasks
             session_key = (
@@ -1135,6 +1270,24 @@ async def stop_session(
         raise HTTPException(status_code=400, detail="Session is not running")
 
     try:
+        checkpoint_name = None
+        try:
+            from app.services.checkpoint_service import CheckpointService
+
+            checkpoint_service = CheckpointService(db)
+            latest_checkpoint = checkpoint_service.load_checkpoint(session_id)
+            checkpoint_name = f"stopped_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+            checkpoint_service.save_checkpoint(
+                session_id=session_id,
+                checkpoint_name=checkpoint_name,
+                context_data=latest_checkpoint.get("context", {}),
+                orchestration_state=latest_checkpoint.get("orchestration_state", {}),
+                current_step_index=latest_checkpoint.get("current_step_index"),
+                step_results=latest_checkpoint.get("step_results", []),
+            )
+        except Exception:
+            checkpoint_name = None
+
         revoked_ids = _revoke_session_celery_tasks(db, session_id, terminate=True)
 
         # Initialize OpenClaw service
@@ -1157,7 +1310,11 @@ async def stop_session(
                 level="INFO",
                 message=f"Session stopped: {session.name}",
                 log_metadata=json.dumps(
-                    {"force": force, "revoked_task_ids": revoked_ids}
+                    {
+                        "force": force,
+                        "revoked_task_ids": revoked_ids,
+                        "checkpoint_name": checkpoint_name,
+                    }
                 ),
             )
         )
@@ -1391,15 +1548,15 @@ def get_session_logs(
 ):
     """
     Get logs for a session (simple endpoint for stopped sessions)
-    
+
     This endpoint fetches all logs for a session, optionally filtered by instance_id.
     It's designed to work for stopped sessions where WebSocket streaming isn't available.
-    
+
     Args:
         session_id: Session ID
         limit: Maximum number of logs to return (default: 100)
         offset: Offset for pagination (default: 0)
-    
+
     Returns:
         List of log entries
     """

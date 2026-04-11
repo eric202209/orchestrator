@@ -2,6 +2,10 @@
 
 from pydantic_settings import BaseSettings
 from typing import List
+from pathlib import Path
+
+
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 class Settings(BaseSettings):
@@ -40,8 +44,8 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
 
     # OpenClaw integration
-    # Use host.docker.internal for Docker container communication
-    OPENCLAW_GATEWAY_URL: str = "http://host.docker.internal:8001"
+    # Default to the local OpenClaw gateway, not the LLM-only port.
+    OPENCLAW_GATEWAY_URL: str = "http://127.0.0.1:8000"
     OPENCLAW_API_KEY: str = ""
     OPENCLAW_CLI_PATH: str = ""
     OPENCLAW_CLI_ARGS: str = ""
@@ -56,11 +60,15 @@ class Settings(BaseSettings):
     # Celery Task Queue
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/1"
+    CHECKPOINT_DIR: str = str(BASE_DIR / "checkpoints")
 
     # GitHub
     GITHUB_TOKEN: str = ""
     GITHUB_USERNAME: str = ""
     GITHUB_WEBHOOK_SECRET: str = ""
+
+    # Data Retention (soft delete cleanup)
+    SOFT_DELETE_RETENTION_DAYS: int = 30  # Automatically purge soft-deleted projects after 30 days
 
     class Config:
         env_file = ".env"

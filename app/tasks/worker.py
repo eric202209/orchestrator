@@ -16,7 +16,14 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 from sqlalchemy import create_engine
 from app.celery_app import celery_app
-from app.models import Session as SessionModel, Task, TaskStatus, LogEntry, Project
+from app.models import (
+    Session as SessionModel,
+    SessionTask,
+    Task,
+    TaskStatus,
+    LogEntry,
+    Project,
+)
 from app.database import get_db, get_db_session
 from app.services import OpenClawSessionService, PromptTemplates
 from app.services.error_handler import error_handler
@@ -36,6 +43,31 @@ class TaskWorkspaceViolationError(ValueError):
     """Raised when a planned command escapes the task workspace."""
 
     pass
+
+
+def _strip_heredoc_bodies(command_text: str) -> str:
+    """Replace heredoc bodies so shell validation only sees the outer command."""
+
+    return re.sub(
+        r"<<\s*['\"]?([A-Za-z0-9_-]+)['\"]?.*?\n.*?\n\1",
+        "<<HEREDOC",
+        command_text or "",
+        flags=re.DOTALL,
+    )
+
+
+def _is_quoted_route_literal(
+    token: str, original_command: str, segment_command: Optional[str]
+) -> bool:
+    """Treat quoted grep route patterns like '/refresh' as literals, not paths."""
+
+    if segment_command not in {"grep", "egrep", "fgrep", "rg", "ripgrep"}:
+        return False
+
+    if not re.fullmatch(r"/[A-Za-z0-9._:/-]+", token):
+        return False
+
+    return f"'{token}'" in original_command or f'"{token}"' in original_command
 
 
 def _serialize_step_result(step_result: StepResult) -> Dict[str, Any]:
@@ -120,6 +152,46 @@ def _record_live_log(
     db.commit()
 
 
+def _get_latest_session_task_link(
+    db: Session, session_id: int, task_id: int
+) -> Optional[SessionTask]:
+    return (
+        db.query(SessionTask)
+        .filter(
+            SessionTask.session_id == session_id,
+            SessionTask.task_id == task_id,
+        )
+        .order_by(SessionTask.id.desc())
+        .first()
+    )
+
+
+def _extract_plan_steps(parsed_planning_output: Any) -> Optional[List[Dict[str, Any]]]:
+    """Accept common planning response wrappers and return the step list."""
+
+    if isinstance(parsed_planning_output, list):
+        return parsed_planning_output
+
+    if not isinstance(parsed_planning_output, dict):
+        return None
+
+    for key in ("steps", "plan", "task_plan", "execution_plan"):
+        candidate = parsed_planning_output.get(key)
+        if isinstance(candidate, list):
+            return candidate
+
+    payloads = parsed_planning_output.get("payloads")
+    if isinstance(payloads, list):
+        for payload in payloads:
+            if isinstance(payload, dict):
+                for key in ("steps", "plan", "task_plan", "execution_plan"):
+                    candidate = payload.get(key)
+                    if isinstance(candidate, list):
+                        return candidate
+
+    return None
+
+
 def _normalize_path_reference(path_text: str, project_dir: Path) -> str:
     raw = (path_text or "").strip().strip("\"'")
     if not raw:
@@ -150,12 +222,16 @@ def _normalize_command(command: str, project_dir: Path) -> str:
     if not normalized:
         raise TaskWorkspaceViolationError("Empty command is not allowed")
 
-    if "~" in normalized:
+    # Ignore heredoc bodies when validating outer shell traversal. Paths inside
+    # generated file contents like `../src/...` are source text, not shell traversal.
+    traversal_check_target = _strip_heredoc_bodies(normalized)
+
+    if "~" in traversal_check_target:
         raise TaskWorkspaceViolationError(
             f"Home-directory paths are not allowed: {normalized}"
         )
 
-    if re.search(r"(^|[\s'\"=/])\.\.(?:/|$)", normalized):
+    if re.search(r"(^|[\s'\"=/])\.\.(?:/|$)", traversal_check_target):
         raise TaskWorkspaceViolationError(
             f"Parent-directory traversal is not allowed: {normalized}"
         )
@@ -174,10 +250,21 @@ def _normalize_command(command: str, project_dir: Path) -> str:
             current = f"cd {shlex.quote(target)} && {remainder}"
 
     abs_path_matches = []
-    for token in shlex.split(current, posix=True):
+    path_scan_target = _strip_heredoc_bodies(current)
+    segment_command: Optional[str] = None
+    for token in shlex.split(path_scan_target, posix=True):
+        if token in {"&&", "||", "|", ";"}:
+            segment_command = None
+            continue
+
+        if segment_command is None:
+            segment_command = token
+
         if not token.startswith("/"):
             continue
         if any(char in token for char in "<>"):
+            continue
+        if _is_quoted_route_literal(token, current, segment_command):
             continue
         if not re.fullmatch(r"/[A-Za-z0-9._/@:+-]+(?:/[A-Za-z0-9._@:+-]+)*/*", token):
             continue
@@ -189,7 +276,11 @@ def _normalize_command(command: str, project_dir: Path) -> str:
         replacement = "." if replacement == "." else f"./{replacement}"
         current = current.replace(abs_path, replacement)
 
-    if "~" in current or re.search(r"(^|[\s'\"=/])\.\.(?:/|$)", current):
+    current_traversal_target = _strip_heredoc_bodies(current)
+
+    if "~" in current_traversal_target or re.search(
+        r"(^|[\s'\"=/])\.\.(?:/|$)", current_traversal_target
+    ):
         raise TaskWorkspaceViolationError(
             f"Command still contains unsafe path traversal: {current}"
         )
@@ -198,7 +289,10 @@ def _normalize_command(command: str, project_dir: Path) -> str:
 
 
 def _normalize_expected_files(
-    expected_files: Optional[List[str]], project_dir: Path
+    expected_files: Optional[List[str]],
+    project_dir: Path,
+    logger_obj: logging.Logger,
+    step_index: Optional[int] = None,
 ) -> List[str]:
     normalized_files: List[str] = []
     for file_path in expected_files or []:
@@ -210,30 +304,65 @@ def _normalize_expected_files(
                 f"[ISOLATION] Skipping suspicious expected_files entry that looks like markup: {raw_file_path}"
             )
             continue
-        normalized = _normalize_path_reference(raw_file_path, project_dir)
-        normalized_files.append("." if normalized == "." else normalized)
+        try:
+            normalized = _normalize_path_reference(raw_file_path, project_dir)
+            normalized_files.append("." if normalized == "." else normalized)
+        except TaskWorkspaceViolationError as exc:
+            step_label = f"step {step_index} " if step_index is not None else ""
+            logger_obj.warning(
+                f"[ISOLATION] Skipping {step_label}expected_files entry outside workspace: "
+                f"{raw_file_path} ({exc})"
+            )
     return normalized_files
 
 
-def _normalize_step(step: Dict[str, Any], project_dir: Path) -> Dict[str, Any]:
+def _normalize_step(
+    step: Dict[str, Any],
+    project_dir: Path,
+    logger_obj: logging.Logger,
+    step_index: Optional[int] = None,
+) -> Dict[str, Any]:
+    step_label = f"step {step_index}" if step_index is not None else "step"
+
     normalized_step = dict(step)
-    normalized_step["commands"] = [
-        _normalize_command(str(command), project_dir)
-        for command in (step.get("commands", []) or [])
-    ]
+    normalized_commands = []
+    for command_index, command in enumerate(step.get("commands", []) or [], start=1):
+        raw_command = str(command)
+        try:
+            normalized_commands.append(_normalize_command(raw_command, project_dir))
+        except TaskWorkspaceViolationError as exc:
+            raise TaskWorkspaceViolationError(
+                f"{step_label} command {command_index} blocked: {exc}. "
+                f"Offending command: {raw_command}"
+            ) from exc
+    normalized_step["commands"] = normalized_commands
 
     if step.get("verification"):
-        normalized_step["verification"] = _normalize_command(
-            str(step.get("verification")), project_dir
-        )
+        raw_verification = str(step.get("verification"))
+        try:
+            normalized_step["verification"] = _normalize_command(
+                raw_verification, project_dir
+            )
+        except TaskWorkspaceViolationError as exc:
+            raise TaskWorkspaceViolationError(
+                f"{step_label} verification blocked: {exc}. "
+                f"Offending command: {raw_verification}"
+            ) from exc
 
     if step.get("rollback"):
-        normalized_step["rollback"] = _normalize_command(
-            str(step.get("rollback")), project_dir
-        )
+        raw_rollback = str(step.get("rollback"))
+        try:
+            normalized_step["rollback"] = _normalize_command(
+                raw_rollback, project_dir
+            )
+        except TaskWorkspaceViolationError as exc:
+            raise TaskWorkspaceViolationError(
+                f"{step_label} rollback blocked: {exc}. "
+                f"Offending command: {raw_rollback}"
+            ) from exc
 
     normalized_step["expected_files"] = _normalize_expected_files(
-        step.get("expected_files", []), project_dir
+        step.get("expected_files", []), project_dir, logger_obj, step_index
     )
     return normalized_step
 
@@ -243,7 +372,7 @@ def _normalize_plan(
 ) -> List[Dict[str, Any]]:
     normalized_plan: List[Dict[str, Any]] = []
     for index, step in enumerate(plan or [], start=1):
-        normalized_step = _normalize_step(step, project_dir)
+        normalized_step = _normalize_step(step, project_dir, logger_obj, index)
         if normalized_step != step:
             logger_obj.info(
                 f"[ISOLATION] Normalized step {index} to stay within task workspace"
@@ -333,12 +462,44 @@ def build_task_subfolder_name(title: str, task_id: int) -> str:
     return f"task-{slug}" if slug else f"task-{task_id}"
 
 
+def _build_minimal_planning_prompt(task_description: str, project_dir: Path) -> str:
+    """Fallback planning prompt for smaller-context models."""
+    concise_task = " ".join((task_description or "").split())
+    concise_task = concise_task[:2000]
+    return f"""Produce a JSON-only execution plan for this software task. Do not implement anything.
+
+Task:
+{concise_task}
+
+Rules:
+1. Assume working directory is {project_dir}
+2. Use relative paths only
+3. Do not use absolute paths, .., or ~
+4. Return 3 to 6 small sequential steps
+5. Each step must include: step_number, description, commands, verification, rollback, expected_files
+6. expected_files must be relative paths or []
+7. Output JSON array only
+
+Example:
+[
+  {{
+    "step_number": 1,
+    "description": "Inspect project structure and identify entry points",
+    "commands": ["ls", "find . -maxdepth 2 -type f | sort | head -100"],
+    "verification": "test -d . && echo ok",
+    "rollback": null,
+    "expected_files": []
+  }}
+]
+"""
+
+
 @celery_app.task(
     bind=True,
     max_retries=3,
     default_retry_delay=60,
-    time_limit=360,
-    soft_time_limit=300,
+    time_limit=1800,
+    soft_time_limit=1500,
     queue="celery",
 )
 def execute_openclaw_task(
@@ -376,6 +537,17 @@ def execute_openclaw_task(
 
         if not session or not task:
             raise ValueError("Session or task not found")
+
+        def emit_live(level: str, message: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+            _record_live_log(
+                db,
+                session_id,
+                task_id,
+                level,
+                message,
+                session_instance_id=session.instance_id,
+                metadata=metadata,
+            )
 
         # Get the project associated with this session
         project = (
@@ -464,9 +636,22 @@ def execute_openclaw_task(
         # Update task status
         task.status = TaskStatus.RUNNING
         task.started_at = datetime.utcnow()
+        task.completed_at = None
+        task.error_message = None
+        task.current_step = 0
+        session_task_link = _get_latest_session_task_link(db, session_id, task_id)
+        if session_task_link:
+            session_task_link.status = TaskStatus.RUNNING
+            session_task_link.started_at = task.started_at
+            session_task_link.completed_at = None
         db.commit()
 
         logger.info(f"[ORCHESTRATION] Starting multi-step execution for task {task_id}")
+        emit_live(
+            "INFO",
+            f"[ORCHESTRATION] Starting multi-step execution for task {task_id}",
+            metadata={"phase": "start"},
+        )
 
         # Initialize OpenClaw service
         openclaw_service = OpenClawSessionService(db, session_id, task_id)
@@ -536,10 +721,20 @@ def execute_openclaw_task(
                 logger.info(
                     f"[ORCHESTRATION] Resuming from checkpoint '{resume_checkpoint_name}' at step index {orchestration_state.current_step_index}"
                 )
+                emit_live(
+                    "INFO",
+                    f"[ORCHESTRATION] Resuming from checkpoint '{resume_checkpoint_name}' at step index {orchestration_state.current_step_index}",
+                    metadata={"phase": "resume"},
+                )
 
         if not resumed_from_checkpoint:
             # PHASE 1: PLANNING - Generate step plan
             logger.info("[ORCHESTRATION] Phase 1: PLANNING - generating step plan")
+            emit_live(
+                "INFO",
+                "[ORCHESTRATION] Phase 1: PLANNING - generating step plan",
+                metadata={"phase": "planning"},
+            )
 
             # Use project_name (already slugified) for the project context
             project_name_slug = (
@@ -554,9 +749,36 @@ def execute_openclaw_task(
                 project_dir=str(orchestration_state.project_dir),
             )
 
+            # Planning often needs more time than the old 120 second cap,
+            # especially for larger repos or denser prompts.
+            planning_timeout_seconds = max(180, min(timeout_seconds, 300))
             planning_result = asyncio.run(
-                openclaw_service.execute_task(planning_prompt, timeout_seconds=120)
+                openclaw_service.execute_task(
+                    planning_prompt, timeout_seconds=planning_timeout_seconds
+                )
             )
+
+            planning_error = (planning_result.get("error") or "").lower()
+            if "context window exceeded" in planning_error or (
+                "context" in planning_error and "exceeded" in planning_error
+            ):
+                logger.warning(
+                    "[ORCHESTRATION] Planning hit context limit; retrying with minimal prompt"
+                )
+                emit_live(
+                    "WARN",
+                    "[ORCHESTRATION] Planning prompt exceeded context; retrying with minimal prompt",
+                    metadata={"phase": "planning", "retry": "minimal_prompt"},
+                )
+                minimal_planning_prompt = _build_minimal_planning_prompt(
+                    prompt, orchestration_state.project_dir
+                )
+                planning_result = asyncio.run(
+                    openclaw_service.execute_task(
+                        minimal_planning_prompt,
+                        timeout_seconds=min(planning_timeout_seconds, 180),
+                    )
+                )
 
             # Parse planning result to get steps
             try:
@@ -637,13 +859,25 @@ def execute_openclaw_task(
                     output_text, context="planning"
                 )
 
+                planning_error = (planning_result.get("error") or "").lower()
+                if "context window exceeded" in planning_error or (
+                    "context" in planning_error and "exceeded" in planning_error
+                ):
+                    raise ValueError("Planning failed: context window exceeded")
+
+                if "request timed out before a response was generated" in output_text.lower():
+                    raise TimeoutError(
+                        f"Planning timed out after {planning_timeout_seconds}s"
+                    )
+
                 if success:
-                    if isinstance(plan_data, list):
+                    extracted_plan = _extract_plan_steps(plan_data)
+                    if extracted_plan is not None:
                         orchestration_state.plan = _normalize_plan_with_live_logging(
                             db,
                             session_id,
                             task_id,
-                            plan_data,
+                            extracted_plan,
                             orchestration_state.project_dir,
                             logger,
                             session.instance_id,
@@ -652,13 +886,32 @@ def execute_openclaw_task(
                         logger.info(
                             f"[ORCHESTRATION] Generated {len(orchestration_state.plan)} steps in plan (using {strategy_info})"
                         )
+                        emit_live(
+                            "INFO",
+                            f"[ORCHESTRATION] Generated {len(orchestration_state.plan)} steps in plan",
+                            metadata={
+                                "phase": "planning",
+                                "steps": len(orchestration_state.plan),
+                                "strategy": strategy_info,
+                            },
+                        )
+                        task.steps = json.dumps(orchestration_state.plan)
+                        task.current_step = 0
+                        db.commit()
                     else:
-                        raise ValueError("Planning result is not a list of steps")
+                        raise ValueError(
+                            "Planning result is not a list of steps"
+                        )
                 else:
                     # Failed to parse after all strategies
                     orchestration_state.status = OrchestrationStatus.ABORTED
                     orchestration_state.abort_reason = (
                         f"Planning JSON parse failed: {strategy_info}"
+                    )
+                    emit_live(
+                        "ERROR",
+                        f"[ORCHESTRATION] Planning JSON parse failed: {strategy_info}",
+                        metadata={"phase": "planning", "reason": "planning_json_error"},
                     )
                     task.status = TaskStatus.FAILED
                     task.error_message = (
@@ -670,6 +923,14 @@ def execute_openclaw_task(
             except TaskWorkspaceViolationError as e:
                 orchestration_state.status = OrchestrationStatus.ABORTED
                 orchestration_state.abort_reason = f"Workspace isolation violation: {e}"
+                emit_live(
+                    "ERROR",
+                    f"[ORCHESTRATION] Planning output blocked: {e}",
+                    metadata={
+                        "phase": "planning",
+                        "reason": "workspace_isolation_violation",
+                    },
+                )
                 task.status = TaskStatus.FAILED
                 task.error_message = str(e)
                 db.commit()
@@ -678,6 +939,11 @@ def execute_openclaw_task(
                 logger.error(f"[ORCHESTRATION] Failed to parse planning result: {e}")
                 orchestration_state.status = OrchestrationStatus.ABORTED
                 orchestration_state.abort_reason = f"Planning parse failed: {e}"
+                emit_live(
+                    "ERROR",
+                    f"[ORCHESTRATION] Failed to parse planning result: {e}",
+                    metadata={"phase": "planning", "reason": "planning_parse_error"},
+                )
                 task.status = TaskStatus.FAILED
                 task.error_message = str(e)
                 db.commit()
@@ -690,6 +956,11 @@ def execute_openclaw_task(
         # PHASE 2: EXECUTING - Execute each step
         logger.info(
             f"[ORCHESTRATION] Phase 2: EXECUTING - executing {len(orchestration_state.plan)} steps"
+        )
+        emit_live(
+            "INFO",
+            f"[ORCHESTRATION] Phase 2: EXECUTING - executing {len(orchestration_state.plan)} steps",
+            metadata={"phase": "executing", "steps": len(orchestration_state.plan)},
         )
 
         for step_index in range(
@@ -706,6 +977,9 @@ def execute_openclaw_task(
                 )
                 task.status = TaskStatus.CANCELLED
                 task.completed_at = datetime.utcnow()
+                if session_task_link:
+                    session_task_link.status = TaskStatus.CANCELLED
+                    session_task_link.completed_at = task.completed_at
                 db.commit()
                 return {
                     "status": "cancelled",
@@ -715,6 +989,11 @@ def execute_openclaw_task(
                 }
 
             orchestration_state.current_step_index = step_index
+            task.current_step = step_index + 1
+            _save_orchestration_checkpoint(
+                db, session_id, task_id, prompt, orchestration_state
+            )
+            db.commit()
 
             step_description = step.get("description", f"Step {step_index + 1}")
             step_commands = step.get("commands", [])
@@ -724,6 +1003,15 @@ def execute_openclaw_task(
 
             logger.info(
                 f"[ORCHESTRATION] Executing step {step_index + 1}/{len(orchestration_state.plan)}: {step_description[:80]}..."
+            )
+            emit_live(
+                "INFO",
+                f"[ORCHESTRATION] Executing step {step_index + 1}/{len(orchestration_state.plan)}: {step_description}",
+                metadata={
+                    "phase": "executing",
+                    "step_index": step_index + 1,
+                    "step_total": len(orchestration_state.plan),
+                },
             )
 
             # Debug: Log the step data
@@ -747,11 +1035,15 @@ def execute_openclaw_task(
                 project_context=f"Build project: {project_name_slug}",
             )
 
+            step_timeout_seconds = max(
+                120, timeout_seconds // max(1, len(orchestration_state.plan))
+            )
+
             # Execute step
             step_result = asyncio.run(
                 openclaw_service.execute_task(
                     execution_prompt,
-                    timeout_seconds=timeout_seconds // len(orchestration_state.plan),
+                    timeout_seconds=step_timeout_seconds,
                 )
             )
 
@@ -779,6 +1071,11 @@ def execute_openclaw_task(
                 logger.info(
                     f"[ORCHESTRATION] Step {step_index + 1} completed successfully"
                 )
+                emit_live(
+                    "INFO",
+                    f"[ORCHESTRATION] Step {step_index + 1} completed successfully",
+                    metadata={"phase": "executing", "step_index": step_index + 1},
+                )
             else:
                 orchestration_state.record_failure(step_record)
                 _save_orchestration_checkpoint(
@@ -788,6 +1085,11 @@ def execute_openclaw_task(
                 # PHASE 3: DEBUGGING - Fix failed step
                 logger.info(
                     f"[ORCHESTRATION] Step {step_index + 1} failed, entering DEBUGGING phase"
+                )
+                emit_live(
+                    "WARN",
+                    f"[ORCHESTRATION] Step {step_index + 1} failed, entering DEBUGGING phase",
+                    metadata={"phase": "debugging", "step_index": step_index + 1},
                 )
 
                 debug_prompt = PromptTemplates.build_debugging_prompt(
@@ -828,6 +1130,11 @@ def execute_openclaw_task(
                         # PHASE 4: PLAN_REVISION
                         logger.info(
                             f"[ORCHESTRATION] Plan revision needed, entering PLAN_REVISION phase"
+                        )
+                        emit_live(
+                            "WARN",
+                            "[ORCHESTRATION] Plan revision needed, entering PLAN_REVISION phase",
+                            metadata={"phase": "plan_revision", "step_index": step_index + 1},
                         )
                         revise_prompt = PromptTemplates.build_plan_revision_prompt(
                             original_plan=orchestration_state.plan,
@@ -871,6 +1178,15 @@ def execute_openclaw_task(
                         logger.info(
                             f"[ORCHESTRATION] Plan revised, {len(orchestration_state.plan)} steps"
                         )
+                        emit_live(
+                            "INFO",
+                            f"[ORCHESTRATION] Plan revised, {len(orchestration_state.plan)} steps",
+                            metadata={
+                                "phase": "plan_revision",
+                                "steps": len(orchestration_state.plan),
+                                "strategy": strategy_info,
+                            },
+                        )
 
                         # Retry the step with revised plan
                         continue  # Retry this step
@@ -879,6 +1195,11 @@ def execute_openclaw_task(
                         # Retry the step with fix
                         logger.info(
                             f"[ORCHESTRATION] Fix applied, retrying step {step_index + 1}"
+                        )
+                        emit_live(
+                            "INFO",
+                            f"[ORCHESTRATION] Fix applied, retrying step {step_index + 1}",
+                            metadata={"phase": "debugging", "step_index": step_index + 1},
                         )
                         continue  # Retry this step
 
@@ -905,6 +1226,11 @@ def execute_openclaw_task(
 
         # PHASE 5: TASK_SUMMARY - Summarize completion
         logger.info("[ORCHESTRATION] Phase 5: TASK_SUMMARY - summarizing completion")
+        emit_live(
+            "INFO",
+            "[ORCHESTRATION] Phase 5: TASK_SUMMARY - summarizing completion",
+            metadata={"phase": "task_summary"},
+        )
 
         summary_prompt = PromptTemplates.build_task_summary(
             task_description=prompt,
@@ -922,7 +1248,12 @@ def execute_openclaw_task(
         # Mark task as done
         task.status = TaskStatus.DONE
         task.completed_at = datetime.utcnow()
+        task.error_message = None
         task.summary = summary_result.get("output", "")[:2000]
+        task.current_step = len(orchestration_state.plan)
+        if session_task_link:
+            session_task_link.status = TaskStatus.DONE
+            session_task_link.completed_at = task.completed_at
 
         # Update session status to stopped when task completes
         if session:
@@ -934,6 +1265,11 @@ def execute_openclaw_task(
 
         logger.info(
             f"[ORCHESTRATION] Task {task_id} completed successfully with {len(orchestration_state.plan)} steps"
+        )
+        emit_live(
+            "INFO",
+            f"[ORCHESTRATION] Task {task_id} completed successfully with {len(orchestration_state.plan)} steps",
+            metadata={"phase": "completed", "steps": len(orchestration_state.plan)},
         )
 
         # Generate and save task report
@@ -972,6 +1308,11 @@ def execute_openclaw_task(
         # Update task failure with enhanced error information
         task.status = TaskStatus.FAILED
         task.error_message = str(exc)
+        task.completed_at = datetime.utcnow()
+        session_task_link = _get_latest_session_task_link(db, session_id, task_id)
+        if session_task_link:
+            session_task_link.status = TaskStatus.FAILED
+            session_task_link.completed_at = task.completed_at
 
         # Add diagnostic information
         error_str = str(exc).lower()
@@ -991,6 +1332,33 @@ def execute_openclaw_task(
         if is_timeout:
             task.error_message += " (Task timed out after 5 minutes)"
             task.error_message += "\nSuggested fix: Break task into smaller steps"
+
+        try:
+            orchestration_state.status = OrchestrationStatus.ABORTED
+            orchestration_state.abort_reason = str(exc)
+            _save_orchestration_checkpoint(
+                db,
+                session_id,
+                task_id,
+                prompt,
+                orchestration_state,
+                checkpoint_name="autosave_error",
+            )
+            _record_live_log(
+                db,
+                session_id,
+                task_id,
+                "WARN",
+                "[CHECKPOINT] Error checkpoint saved for resume",
+                session_instance_id=session.instance_id if session else None,
+                metadata={"checkpoint_name": "autosave_error"},
+            )
+        except Exception as checkpoint_error:
+            logger.error(
+                "[CHECKPOINT] Failed to save error checkpoint for task %s: %s",
+                task_id,
+                str(checkpoint_error),
+            )
 
         db.commit()
 

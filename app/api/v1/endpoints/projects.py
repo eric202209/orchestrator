@@ -3,11 +3,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from app.database import get_db
-from app.models import Project
+from app.models import Project, Session as SessionModel, LogEntry, Task, SessionTask
 from app.schemas import ProjectCreate, ProjectUpdate, ProjectResponse
 from app.services.project_isolation_service import normalize_project_workspace_path
+from app.config import settings
 
 router = APIRouter()
 
@@ -30,9 +31,77 @@ def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
 
 @router.get("/projects", response_model=List[ProjectResponse])
 def get_projects(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    """Get all projects"""
-    projects = db.query(Project).offset(skip).limit(limit).all()
+    """Get all active (non-deleted) projects"""
+    projects = db.query(Project).filter(
+        Project.deleted_at.is_(None)
+    ).offset(skip).limit(limit).all()
     return projects
+
+
+@router.delete("/projects/purge-soft-deleted")
+def purge_soft_deleted_projects(db: Session = Depends(get_db)):
+    """
+    Permanently delete all soft-deleted projects older than retention period.
+
+    This endpoint is typically called by a scheduled task (Celery beat)
+    to clean up old soft-deleted data and prevent database bloat.
+    """
+    cutoff_date = datetime.now(timezone.utc) - timedelta(
+        days=settings.SOFT_DELETE_RETENTION_DAYS
+    )
+
+    # Find soft-deleted projects older than retention period
+    old_deleted_projects = (
+        db.query(Project)
+        .filter(Project.deleted_at.isnot(None))
+        .filter(Project.deleted_at < cutoff_date)
+        .all()
+    )
+
+    if not old_deleted_projects:
+        return {"message": "No projects to purge", "purged_count": 0}
+
+    purged_count = 0
+
+    for project in old_deleted_projects:
+        project_id = project.id
+
+        # Delete all related data (cascade)
+        # Delete session tasks first (foreign key to session)
+        db.query(SessionTask).filter(
+            SessionTask.session_id.in_(
+                db.query(SessionModel.id).filter(SessionModel.project_id == project_id)
+            )
+        ).delete(synchronize_session=False)
+
+        # Delete all logs for sessions in this project
+        db.query(LogEntry).filter(
+            LogEntry.session_id.in_(
+                db.query(SessionModel.id).filter(SessionModel.project_id == project_id)
+            )
+        ).delete(synchronize_session=False)
+
+        # Delete all tasks in this project
+        db.query(Task).filter(Task.project_id == project_id).delete(
+            synchronize_session=False
+        )
+
+        # Delete all sessions in this project
+        db.query(SessionModel).filter(SessionModel.project_id == project_id).delete(
+            synchronize_session=False
+        )
+
+        # Delete the project itself
+        db.delete(project)
+        purged_count += 1
+
+    db.commit()
+
+    return {
+        "message": f"Purged {purged_count} soft-deleted projects permanently",
+        "purged_count": purged_count,
+        "retention_days": settings.SOFT_DELETE_RETENTION_DAYS,
+    }
 
 
 @router.get("/projects/{project_id}", response_model=ProjectResponse)

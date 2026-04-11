@@ -11,7 +11,6 @@ from app.api.v1.endpoints import (
     mobile,
     resume,
 )
-from app.api.v1.endpoints.tasks_sorted_logs import router as tasks_sorted_logs_router
 from app.api.v1.endpoints import isolation, permissions, context
 from app.api.v1.endpoints.project_logs import router as project_logs_router
 
@@ -60,11 +59,6 @@ api_router.include_router(
 
 api_router.include_router(
     tasks.router,
-    tags=["tasks"],
-)
-
-api_router.include_router(
-    tasks_sorted_logs_router,
     tags=["tasks"],
 )
 

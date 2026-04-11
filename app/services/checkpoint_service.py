@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from sqlalchemy.orm import Session
 from app.models import LogEntry
+from app.config import settings
 
 
 class CheckpointError(Exception):
@@ -26,24 +27,33 @@ class CheckpointError(Exception):
 class CheckpointService:
     """Service for managing OpenClaw session checkpoints"""
 
-    CHECKPOINT_DIR = "/root/.openclaw/workspace/vault/projects/orchestrator/checkpoints"
+    LEGACY_CHECKPOINT_DIR = "/root/.openclaw/workspace/vault/projects/orchestrator/checkpoints"
 
     def __init__(self, db: Session):
         self.db = db
+        configured_dir = Path(settings.CHECKPOINT_DIR).expanduser()
+        if not configured_dir.is_absolute():
+            configured_dir = Path.cwd() / configured_dir
+        self.checkpoint_dir = configured_dir.resolve()
         # Ensure checkpoint directory exists
-        Path(self.CHECKPOINT_DIR).mkdir(parents=True, exist_ok=True)
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    def _candidate_checkpoint_roots(self) -> List[Path]:
+        roots = [self.checkpoint_dir]
+        legacy_dir = Path(self.LEGACY_CHECKPOINT_DIR)
+        if legacy_dir != self.checkpoint_dir and legacy_dir.exists():
+            roots.append(legacy_dir)
+        return roots
 
     def _get_checkpoint_path(self, session_id: int, checkpoint_name: str) -> str:
         """Get the file path for a specific checkpoint"""
-        return os.path.join(
-            self.CHECKPOINT_DIR, f"session_{session_id}_{checkpoint_name}.json"
-        )
+        return str(self.checkpoint_dir / f"session_{session_id}_{checkpoint_name}.json")
 
     def _get_session_checkpoint_dir(self, session_id: int) -> str:
         """Get the directory for all checkpoints of a session"""
-        dir_path = os.path.join(self.CHECKPOINT_DIR, f"session_{session_id}")
+        dir_path = self.checkpoint_dir / f"session_{session_id}"
         Path(dir_path).mkdir(parents=True, exist_ok=True)
-        return dir_path
+        return str(dir_path)
 
     def _log_checkpoint(self, session_id: int, level: str, message: str):
         """Log checkpoint operation"""
@@ -148,7 +158,17 @@ class CheckpointService:
             checkpoint_path = self._get_checkpoint_path(session_id, checkpoint_name)
 
             if not os.path.exists(checkpoint_path):
-                raise CheckpointError(f"Checkpoint not found: {checkpoint_path}")
+                checkpoint_path = None
+                for checkpoint_root in self._candidate_checkpoint_roots():
+                    candidate = checkpoint_root / f"session_{session_id}_{checkpoint_name}.json"
+                    if candidate.exists():
+                        checkpoint_path = str(candidate)
+                        break
+
+            if not checkpoint_path or not os.path.exists(checkpoint_path):
+                raise CheckpointError(
+                    f"Checkpoint not found for session {session_id}: {checkpoint_name}"
+                )
 
             # Read checkpoint data
             with open(checkpoint_path, "r") as f:
@@ -178,33 +198,52 @@ class CheckpointService:
             List of checkpoint metadata (oldest first)
         """
         try:
-            session_dir = self._get_session_checkpoint_dir(session_id)
-
-            if not os.path.exists(session_dir):
-                return []
-
             checkpoints = []
+            seen_names = set()
 
-            for filename in os.listdir(session_dir):
-                if filename.endswith(".json"):
-                    filepath = os.path.join(session_dir, filename)
+            def append_checkpoint(filepath: str, fallback_name: str) -> None:
+                try:
+                    with open(filepath, "r") as f:
+                        data = json.load(f)
 
-                    try:
-                        with open(filepath, "r") as f:
-                            data = json.load(f)
+                    checkpoint_name = data.get("checkpoint_name", fallback_name)
+                    if checkpoint_name in seen_names:
+                        return
 
-                        checkpoints.append(
-                            {
-                                "name": data.get(
-                                    "checkpoint_name", filename.replace(".json", "")
-                                ),
-                                "created_at": data.get("created_at"),
-                                "step_index": data.get("current_step_index"),
-                                "completed_steps": len(data.get("step_results", [])),
-                            }
+                    checkpoints.append(
+                        {
+                            "name": checkpoint_name,
+                            "created_at": data.get("created_at"),
+                            "step_index": data.get("current_step_index"),
+                            "completed_steps": len(data.get("step_results", [])),
+                        }
+                    )
+                    seen_names.add(checkpoint_name)
+                except Exception:
+                    return
+
+            # New format: checkpoints/session_{id}/*.json
+            session_dir = self._get_session_checkpoint_dir(session_id)
+            if os.path.exists(session_dir):
+                for filename in os.listdir(session_dir):
+                    if filename.endswith(".json"):
+                        append_checkpoint(
+                            os.path.join(session_dir, filename),
+                            filename.replace(".json", ""),
                         )
-                    except Exception:
-                        continue  # Skip corrupted files
+
+            # Flat format used by current save_checkpoint implementation and legacy roots.
+            for checkpoint_root in self._candidate_checkpoint_roots():
+                if not checkpoint_root.exists():
+                    continue
+                for filename in os.listdir(checkpoint_root):
+                    if filename.endswith(".json") and filename.startswith(
+                        f"session_{session_id}_"
+                    ):
+                        append_checkpoint(
+                            os.path.join(checkpoint_root, filename),
+                            filename.replace(".json", ""),
+                        )
 
             # Sort by creation time (oldest first)
             checkpoints.sort(key=lambda x: x.get("created_at", ""))
@@ -329,26 +368,30 @@ class CheckpointService:
                             continue
 
             # Search in root directory (legacy format): checkpoints/session_{id}_{name}.json
-            legacy_pattern = f"session_{session_id}_*.json"
-            for filename in os.listdir(self.CHECKPOINT_DIR):
-                if filename.endswith(".json") and filename.startswith(
-                    f"session_{session_id}_"
-                ):
-                    filepath = os.path.join(self.CHECKPOINT_DIR, filename)
+            for checkpoint_root in self._candidate_checkpoint_roots():
+                if not checkpoint_root.exists():
+                    continue
+                for filename in os.listdir(checkpoint_root):
+                    if filename.endswith(".json") and filename.startswith(
+                        f"session_{session_id}_"
+                    ):
+                        filepath = os.path.join(checkpoint_root, filename)
 
-                    try:
-                        with open(filepath, "r") as f:
-                            data = json.load(f)
+                        try:
+                            with open(filepath, "r") as f:
+                                data = json.load(f)
 
-                        created_at = datetime.fromisoformat(
-                            data.get("created_at", "1970-01-01")
-                        )
-                        checkpoint_name = data.get(
-                            "checkpoint_name", filename.replace(".json", "")
-                        )
-                        all_checkpoints.append((checkpoint_name, created_at, filepath))
-                    except Exception:
-                        continue
+                            created_at = datetime.fromisoformat(
+                                data.get("created_at", "1970-01-01")
+                            )
+                            checkpoint_name = data.get(
+                                "checkpoint_name", filename.replace(".json", "")
+                            )
+                            all_checkpoints.append(
+                                (checkpoint_name, created_at, filepath)
+                            )
+                        except Exception:
+                            continue
 
             if not all_checkpoints:
                 return None

@@ -13,7 +13,7 @@ from app.models import Task, TaskStatus, Project, LogEntry, SessionTask
 from app.schemas import TaskCreate, TaskUpdate, TaskResponse
 from app.services.openclaw_service import OpenClawSessionService
 from app.services.error_handler import EnhancedErrorHandler
-from app.services.log_utils import sort_logs, deduplicate_logs
+from app.services.log_utils import sort_logs
 
 
 # Pydantic models for overwrite protection
@@ -38,6 +38,27 @@ router = APIRouter()
 
 # Constants
 MAX_PROMPT_LENGTH = 50000  # Max prompt length to avoid context window overflow
+
+
+def _latest_session_success_for_task(
+    db: Session, task_id: int, session_id: Optional[int]
+) -> bool:
+    if not session_id:
+        return False
+
+    success_log = (
+        db.query(LogEntry)
+        .filter(
+            LogEntry.task_id == task_id,
+            LogEntry.session_id == session_id,
+            LogEntry.message.ilike(
+                f"[ORCHESTRATION] Task {task_id} completed successfully%"
+            ),
+        )
+        .order_by(LogEntry.created_at.desc())
+        .first()
+    )
+    return success_log is not None
 
 
 @router.get("/tasks", response_model=List[TaskResponse])
@@ -157,7 +178,7 @@ async def execute_task_with_openclaw(
 
         # Start OpenClaw session and create database session record
         from app.models import Session as SessionModel
-        
+
         # Create a new session record for this task execution
         new_session = SessionModel(
             name=f"Task {task_id} Execution",
@@ -169,7 +190,7 @@ async def execute_task_with_openclaw(
         db.add(new_session)
         db.commit()
         db.refresh(new_session)
-        
+
         # Create SessionTask relationship
         session_task = SessionTask(
             session_id=new_session.id,
@@ -177,9 +198,9 @@ async def execute_task_with_openclaw(
         )
         db.add(session_task)
         db.commit()
-        
+
         print(f"✅ Created session {new_session.id} for task {task.id}")
-        
+
         # Start OpenClaw session with the new session ID
         session_service = OpenClawSessionService(db, new_session.id, task_id)
         openclaw_key = await session_service.start_session(prompt)
@@ -262,18 +283,43 @@ def get_task(task_id: int, db: Session = Depends(get_db)):
     task = db.query(Task).filter(Task.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    
-    # Get associated session_id from session_tasks table
-    session_task = db.query(SessionTask).filter(SessionTask.task_id == task_id).first()
+
+    # Prefer the most recent task/session relationship so Task Detail reflects
+    # the latest execution context instead of an arbitrary historical row.
+    session_task = (
+        db.query(SessionTask)
+        .filter(SessionTask.task_id == task_id)
+        .order_by(
+            SessionTask.started_at.desc().nullslast(),
+            SessionTask.completed_at.desc().nullslast(),
+            SessionTask.id.desc(),
+        )
+        .first()
+    )
     session_id = session_task.session_id if session_task else None
-    
+
+    # Reconcile stale task state when the latest linked session already logged
+    # successful completion but the task record is still marked failed.
+    if task.status == TaskStatus.FAILED and _latest_session_success_for_task(
+        db, task_id, session_id
+    ):
+        task.status = TaskStatus.DONE
+        task.error_message = None
+        task.completed_at = task.completed_at or datetime.utcnow()
+        if session_task:
+            session_task.status = TaskStatus.DONE
+            session_task.completed_at = session_task.completed_at or task.completed_at
+        db.commit()
+        db.refresh(task)
+
     # Add session_id to task response
     task_dict = task.__dict__.copy()
-    task_dict['session_id'] = session_id
-    
+    task_dict["session_id"] = session_id
+
     # If no session found but task is running/done, try to get from recent logs
     if not session_id and task.status in [TaskStatus.RUNNING, TaskStatus.DONE]:
         from app.models import LogEntry
+
         recent_log = (
             db.query(LogEntry)
             .filter(LogEntry.task_id == task_id)
@@ -282,8 +328,8 @@ def get_task(task_id: int, db: Session = Depends(get_db)):
         )
         if recent_log and recent_log.session_id:
             session_id = recent_log.session_id
-            task_dict['session_id'] = session_id
-    
+            task_dict["session_id"] = session_id
+
     return task_dict
 
 

@@ -12,6 +12,7 @@ import NewSession from '@/pages/NewSession';
 import TasksList from '@/pages/TasksList';
 import TaskDetail from '@/pages/TaskDetail';
 import Login from '@/pages/Login';
+import Register from '@/pages/Register';
 
 function App() {
   return (
@@ -20,6 +21,7 @@ function App() {
         <BrowserRouter>
           <Routes>
             <Route path="/login" element={<Login />} />
+            <Route path="/register" element={<Register />} />
             <Route path="/" element={<AppShell />}>
               <Route index element={<Navigate to="/dashboard" replace />} />
               <Route path="dashboard" element={<Dashboard />} />

@@ -21,6 +21,7 @@ import os
 import shutil
 import shlex
 import time
+import re
 from typing import Optional, Dict, Any, List, Callable
 from datetime import datetime
 from pathlib import Path
@@ -59,6 +60,7 @@ class OpenClawSessionService:
     """Service for managing OpenClaw session orchestration"""
 
     MAX_PROMPT_LENGTH = 50000  # Leave room for model overhead
+    STREAM_READ_LIMIT = 262144  # Allow large JSON/log lines from newer OpenClaw builds
 
     def __init__(
         self,
@@ -130,6 +132,41 @@ class OpenClawSessionService:
             "OpenClaw CLI not found. Install `openclaw`, add it to PATH, set "
             "`OPENCLAW_CLI_PATH`, or configure `OPENCLAW_CLI_ARGS` for a Node entrypoint."
         )
+
+    def _resolve_execution_cwd(self) -> Optional[str]:
+        """Resolve the best working directory for OpenClaw subprocess execution."""
+        try:
+            project_model = None
+            if self.session_model and self.session_model.project_id:
+                project_model = (
+                    self.db.query(Project)
+                    .filter(Project.id == self.session_model.project_id)
+                    .first()
+                )
+            elif self.task_model and self.task_model.project_id:
+                project_model = (
+                    self.db.query(Project)
+                    .filter(Project.id == self.task_model.project_id)
+                    .first()
+                )
+
+            if not project_model:
+                return None
+
+            project_workspace = resolve_project_workspace_path(
+                project_model.workspace_path, project_model.name
+            )
+
+            if self.task_model and self.task_model.task_subfolder:
+                return str((project_workspace / self.task_model.task_subfolder).resolve())
+
+            return str(project_workspace.resolve())
+        except Exception as exc:
+            self._log_entry(
+                "WARN",
+                f"[OPENCLAW] Failed to resolve execution cwd, falling back to default: {exc}",
+            )
+            return None
 
     async def create_openclaw_session(
         self, task_description: str, context: Optional[Dict[str, Any]] = None
@@ -216,40 +253,30 @@ class OpenClawSessionService:
                 f"[PERFORMANCE] Task executed in {duration:.2f}s (optimized prompt)",
             )
 
-            # Update task completion based on result status
-            if self.task_model:
-                if result.get("status") == "completed":
-                    self.task_model.status = TaskStatus.DONE
-                    self._log_entry("INFO", "Task completed successfully")
-                elif result.get("status") == "failed":
-                    self.task_model.status = TaskStatus.FAILED
-                    self.task_model.error_message = result.get(
-                        "error", "Execution failed"
-                    )
-                    self._log_entry(
-                        "ERROR", f"Task failed: {self.task_model.error_message}"
-                    )
-                else:
-                    # Unknown status, mark as failed
-                    self.task_model.status = TaskStatus.FAILED
-                    self.task_model.error_message = (
-                        f"Unknown status: {result.get('status', 'unknown')}"
-                    )
-                    self._log_entry("ERROR", "Task failed with unknown status")
-
-                self.task_model.completed_at = datetime.utcnow()
-                self.db.commit()
+            result_status = result.get("status")
+            if result_status == "completed":
+                self._log_entry(
+                    "INFO",
+                    "[OPENCLAW] Request completed successfully; awaiting orchestration validation",
+                )
+            elif result_status == "failed":
+                self._log_entry(
+                    "ERROR",
+                    f"[OPENCLAW] Request failed before orchestration validation: "
+                    f"{result.get('error', 'Execution failed')}",
+                )
+            else:
+                self._log_entry(
+                    "WARNING",
+                    f"[OPENCLAW] Request returned unexpected status before orchestration validation: "
+                    f"{result_status or 'unknown'}",
+                )
 
             return result
 
         except Exception as e:
             error_msg = f"Task execution failed: {str(e)}"
             self._log_entry("ERROR", error_msg)
-
-            if self.task_model:
-                self.task_model.status = TaskStatus.FAILED
-                self.task_model.error_message = str(e)
-                self.db.commit()
 
             raise OpenClawSessionError(error_msg)
 
@@ -489,9 +516,9 @@ class OpenClawSessionService:
                 project_context=project_context[:1500] if project_context else "",
             )
 
-            # OPTIMIZATION: Reduced timeout for planning (faster response)
+            # OPTIMIZATION: Increased timeout for planning (180s to avoid timeouts on complex tasks)
             planning_result = await self.execute_task(
-                planning_prompt, timeout_seconds=90
+                planning_prompt, timeout_seconds=180
             )
 
             if planning_result.get("status") == "failed":
@@ -926,6 +953,34 @@ class OpenClawSessionService:
             stderr = ""
 
         cli_error_message = self._summarize_cli_error(stderr) if stderr else ""
+        cli_error_lower = cli_error_message.lower()
+
+        if "context size has been exceeded" in cli_error_lower or (
+            "context" in cli_error_lower and "exceeded" in cli_error_lower
+        ):
+            self._log_entry("ERROR", f"Context window exceeded: {cli_error_message}")
+            return {
+                "status": "failed",
+                "mode": "real",
+                "output": stdout,
+                "error": "Context window exceeded",
+                "logs": [
+                    {
+                        "level": "ERROR",
+                        "message": cli_error_message,
+                        "timestamp": datetime.utcnow().isoformat(),
+                    }
+                ],
+            }
+
+        if (not stdout or stdout in ['""', "''", '"', "'"]) and stderr:
+            recovered_output = self._recover_json_like_output_from_stderr(stderr)
+            if recovered_output:
+                self._log_entry(
+                    "WARN",
+                    "[OPENCLAW] stdout was empty; recovered structured response from stderr",
+                )
+                stdout = recovered_output
 
         # CRITICAL FIX: Validate response before parsing
         if not stdout or stdout in ['""', "''", '"', "'"]:
@@ -1058,6 +1113,38 @@ class OpenClawSessionService:
                     "error": error_str,
                 }
 
+    def _recover_json_like_output_from_stderr(self, stderr: str) -> str:
+        """Recover a structured JSON-ish payload from stderr when stdout is empty."""
+        ansi_pattern = re.compile(r"\x1B\[[0-9;]*[A-Za-z]")
+        lines = []
+        for raw_line in (stderr or "").splitlines():
+            cleaned = ansi_pattern.sub("", raw_line).strip()
+            if cleaned:
+                lines.append(cleaned)
+
+        if not lines:
+            return ""
+
+        candidate_indexes = [
+            index
+            for index, line in enumerate(lines)
+            if line in {"{", "["}
+            or line.startswith("{")
+            or line.startswith("[")
+            or line.startswith('"payloads"')
+            or line.startswith('"stopReason"')
+        ]
+
+        for index in reversed(candidate_indexes):
+            candidate = "\n".join(lines[index:]).strip()
+            try:
+                json.loads(candidate)
+                return candidate
+            except Exception:
+                continue
+
+        return ""
+
     def _summarize_cli_error(self, stderr: str) -> str:
         """Return a compact user-facing summary from OpenClaw stderr."""
         lines = [line.strip() for line in (stderr or "").splitlines() if line.strip()]
@@ -1118,6 +1205,7 @@ class OpenClawSessionService:
 
         try:
             openclaw_command = self._resolve_openclaw_command()
+            execution_cwd = self._resolve_execution_cwd()
             process = await asyncio.create_subprocess_exec(
                 *openclaw_command,
                 "agent",
@@ -1131,12 +1219,12 @@ class OpenClawSessionService:
                 str(timeout_seconds),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                limit=8192,
+                limit=self.STREAM_READ_LIMIT,
+                cwd=execution_cwd,
             )
 
             stdout_chunks: List[str] = []
             stderr_chunks: List[str] = []
-            log_count = 0
 
             async def stream_output(
                 stream,
@@ -1144,7 +1232,6 @@ class OpenClawSessionService:
                 chunks: List[str],
                 emit_live_logs: bool = True,
             ) -> None:
-                nonlocal log_count
                 while True:
                     line = await stream.readline()
                     if not line:
@@ -1155,11 +1242,9 @@ class OpenClawSessionService:
 
                     if line_text:
                         if emit_live_logs:
-                            log_count += 1
-                            if (log_count % 10) == 0:
-                                self.db.commit()
-
-                            self._log_entry(level, line_text, commit=False)
+                            # Commit each streamed line so the session websocket,
+                            # which polls the database, can surface it immediately.
+                            self._log_entry(level, line_text, commit=True)
 
                             if log_callback:
                                 await log_callback(level, line_text)

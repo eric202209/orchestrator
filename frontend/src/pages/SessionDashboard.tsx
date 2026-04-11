@@ -70,13 +70,18 @@ function SessionDashboard() {
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
   const [showCheckpointModal, setShowCheckpointModal] = useState(false);
 
-  // Helper function to format dates in local time
+  const parseApiDate = (value?: string | null): Date | null => {
+    if (!value) return null;
+    const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value);
+    const normalized = hasTimezone ? value : `${value}Z`;
+    const parsed = new Date(normalized);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  };
+
+  // Helper function to format dates in host local time
   const formatLocalTime = (dateString: string | null) => {
-    if (!dateString) return 'N/A';
-    // Force UTC parsing by replacing 'T' with ' ' and adding 'Z' if missing
-    const cleanDate = dateString.replace('T', ' ').replace(/\.?\d+Z?$/, 'Z');
-    const date = new Date(cleanDate);
-    return date.toLocaleString();
+    const parsed = parseApiDate(dateString);
+    return parsed ? parsed.toLocaleString() : 'N/A';
   };
 
   // Helper function to check if session is running (includes 'active' status)
@@ -312,7 +317,8 @@ function SessionDashboard() {
     const checkStuckTask = () => {
       if (logs.length === 0) return;
 
-      const lastLogTime = new Date(logs[logs.length - 1].created_at);
+      const lastLogTime = parseApiDate(logs[logs.length - 1].created_at);
+      if (!lastLogTime) return;
       const now = new Date();
       const minutesSinceLastLog = (now.getTime() - lastLogTime.getTime()) / (1000 * 60);
 
@@ -320,7 +326,7 @@ function SessionDashboard() {
 
       // Only alert if session has been running for at least 2 minutes
       // This prevents false positives during session startup
-      const sessionStarted = session?.started_at ? new Date(session.started_at) : now;
+      const sessionStarted = parseApiDate(session?.started_at) || now;
       const sessionUptimeMinutes = (now.getTime() - sessionStarted.getTime()) / (1000 * 60);
 
       if (sessionUptimeMinutes >= 2 && minutesSinceLastLog >= 5) {
@@ -398,10 +404,21 @@ function SessionDashboard() {
     };
 
     webSocket.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === 'status_update') {
+      if (event.data === 'ping') {
+        webSocket.send('pong');
+        return;
+      }
+      if (event.data === 'pong') {
+        return;
+      }
 
-        setSession(prev => prev ? { ...prev, ...data.status } : null);
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'status_update') {
+          setSession(prev => prev ? { ...prev, ...data.status } : null);
+        }
+      } catch (parseError) {
+        console.warn('Failed to parse status websocket message:', parseError);
       }
     };
 
@@ -794,8 +811,9 @@ function SessionDashboard() {
   const getSortedLogs = () => {
     const filtered = getFilteredLogs();
     const sorted = [...filtered].sort((a, b) => {
-      const dateA = new Date(a.created_at || 0);
-      const dateB = new Date(b.created_at || 0);
+      const dateA = parseApiDate(a.created_at);
+      const dateB = parseApiDate(b.created_at);
+      if (!dateA || !dateB) return 0;
       return sortOrder === 'asc' ? dateA.getTime() - dateB.getTime() : dateB.getTime() - dateA.getTime();
     });
     

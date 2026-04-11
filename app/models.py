@@ -38,6 +38,7 @@ class Project(Base):
     workspace_path = Column(String(512), nullable=True)  # Project isolation workspace
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    deleted_at = Column(DateTime(timezone=True), nullable=True)  # Soft delete tracking
 
     tasks = relationship("Task", back_populates="project", cascade="all, delete-orphan")
     sessions = relationship(

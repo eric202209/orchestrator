@@ -1,9 +1,15 @@
 #!/bin/bash
 
 # Orchestrator Network - Full Startup Script
-# This script starts all components in the correct order
+# This script starts all components in the correct order.
 
-set -e
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="${SCRIPT_DIR}"
+FRONTEND_DIR="${PROJECT_ROOT}/frontend"
+VENV_DIR="${PROJECT_ROOT}/venv"
+LOG_DIR="${PROJECT_ROOT}/logs"
 
 echo "🚀 Starting Orchestrator Network..."
 echo ""
@@ -12,18 +18,129 @@ echo ""
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 # Localhost alias (from .env, default to localhost)
 LOCALHOST=${LOCALHOST:-localhost}
 
-# Function to check if a process is running
-check_process() {
-    if pgrep -f "$1" > /dev/null; then
-        return 0
+load_env() {
+    local env_file="${PROJECT_ROOT}/.env"
+    [ -f "${env_file}" ] || return 0
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        [[ -n "${line}" ]] || continue
+        [[ "${line}" =~ ^[[:space:]]*# ]] && continue
+        [[ "${line}" == *=* ]] || continue
+
+        local key="${line%%=*}"
+        local value="${line#*=}"
+
+        key="${key#"${key%%[![:space:]]*}"}"
+        key="${key%"${key##*[![:space:]]}"}"
+
+        export "${key}=${value}"
+    done < "${env_file}"
+}
+
+prepare_logs() {
+    mkdir -p "${LOG_DIR}"
+    : > "${LOG_DIR}/backend.log"
+    : > "${LOG_DIR}/worker.log"
+    : > "${LOG_DIR}/frontend.log"
+}
+
+ensure_venv() {
+    echo -e "${BLUE}🔧 Checking virtual environment...${NC}"
+    cd "${PROJECT_ROOT}"
+    if [ ! -d "${VENV_DIR}" ]; then
+        python3 -m venv "${VENV_DIR}"
+        "${VENV_DIR}/bin/pip" install -r requirements.txt
+        echo -e "${GREEN}✅ Virtual environment created${NC}"
     else
-        return 1
+        echo -e "${GREEN}✅ Virtual environment exists${NC}"
     fi
+    echo ""
+}
+
+ensure_frontend_deps() {
+    echo -e "${BLUE}📦 Checking frontend dependencies...${NC}"
+    cd "${FRONTEND_DIR}"
+    if [ ! -d "node_modules" ]; then
+        pnpm install
+        echo -e "${GREEN}✅ Frontend dependencies installed${NC}"
+    else
+        echo -e "${GREEN}✅ Frontend dependencies exist${NC}"
+    fi
+    echo ""
+}
+
+ensure_database() {
+    echo -e "${BLUE}🗄️  Checking database...${NC}"
+    cd "${PROJECT_ROOT}"
+    if [ ! -f "${PROJECT_ROOT}/orchestrator.db" ]; then
+        "${VENV_DIR}/bin/python" -c "from app.database import init_db; init_db(); print('✅ Database initialized')"
+    else
+        echo -e "${GREEN}✅ Database exists${NC}"
+    fi
+    echo ""
+}
+
+# Function to check if a process is running (by port for services)
+check_process() {
+    local name="$1"
+    local port=""
+    
+    # Map service names to ports
+    case "$name" in
+        "uvicorn app.main:app")
+            port=8080
+            ;;
+        "celery -A app.celery_app worker")
+            # Workers don't have a specific port, fall back to pgrep
+            if pgrep -f "$name" > /dev/null; then
+                return 0
+            fi
+            return 1
+            ;;
+        "vite")
+            port=3000
+            ;;
+        "redis-server")
+            port=6379
+            ;;
+        *)
+            # Fallback to pgrep for unknown services
+            if pgrep -f "$name" > /dev/null; then
+                return 0
+            fi
+            return 1
+            ;;
+    esac
+    
+    # Check port using lsof (most reliable)
+    if command -v lsof &> /dev/null; then
+        if lsof -i :$port &> /dev/null; then
+            return 0
+        fi
+    fi
+    
+    # Fallback: netstat
+    if command -v netstat &> /dev/null; then
+        if netstat -tlnp 2>/dev/null | grep -q ":$port "; then
+            return 0
+        fi
+    fi
+    
+    # Last resort: fuser
+    if command -v fuser &> /dev/null; then
+        if fuser $port/tcp &> /dev/null; then
+            return 0
+        fi
+    fi
+    
+    return 1
 }
 
 # Function to stop existing processes
@@ -37,14 +154,15 @@ stop_existing() {
     fi
     
     # Stop workers
-    if check_process "celery -A app.tasks worker"; then
-        pkill -f "celery -A app.tasks worker"
+    if check_process "celery -A app.celery_app worker"; then
+        pkill -f "celery -A app.celery_app worker" || true
         echo -e "${GREEN}✅ Workers stopped${NC}"
     fi
     
     # Stop frontend
     if check_process "vite"; then
-        pkill -f "vite"
+        pkill -f "vite" || true
+        pkill -f "pnpm dev" || true
         echo -e "${GREEN}✅ Frontend stopped${NC}"
     fi
     
@@ -70,41 +188,46 @@ start_redis() {
 start_backend() {
     echo -e "${BLUE}🔧 Starting Backend (uvicorn)...${NC}"
     
-    cd /root/.openclaw/workspace/vault/projects/orchestrator
-    
+    cd "${PROJECT_ROOT}"
+
     # Create log directory if it doesn't exist
-    mkdir -p /root/.openclaw/workspace/vault/projects/orchestrator/logs
-    
+    mkdir -p "${LOG_DIR}"
+
     # Load environment variables from .env file
-    if [ -f .env ]; then
-        export $(grep -v '^#' .env | xargs)
-        echo -e "${GREEN}✅ Environment loaded from .env${NC}"
-    fi
+    load_env
+    echo -e "${GREEN}✅ Environment loaded from .env${NC}"
     
     # Kill any existing backend
     if check_process "uvicorn app.main:app"; then
-        pkill -f "uvicorn app.main:app"
+        pkill -f "uvicorn app.main:app" || true
         sleep 1
     fi
     
     # Start backend in background with comprehensive timeout configuration
     # LOGS DIRECTIVE: Write directly to logs/ directory (not /tmp/) for history preservation
-    nohup /root/.openclaw/workspace/vault/projects/orchestrator/venv/bin/uvicorn app.main:app \
-        --host 0.0.0.0 \
+    nohup "${VENV_DIR}/bin/uvicorn" app.main:app \
+        --host 127.0.0.1 \
         --port 8080 \
         --timeout-keep-alive 5 \
         --proxy-headers \
         --forwarded-allow-ips "*" \
         --access-log \
-        >> /root/.openclaw/workspace/vault/projects/orchestrator/logs/backend.log 2>&1 &
+        >> "${LOG_DIR}/backend.log" 2>&1 &
     
-    sleep 3
-    
-    if check_process "uvicorn app.main:app"; then
+    local backend_ok=false
+    for _ in {1..10}; do
+        sleep 1
+        if curl -fsS "http://127.0.0.1:8080/health" > /dev/null 2>&1; then
+            backend_ok=true
+            break
+        fi
+    done
+
+    if [ "${backend_ok}" = true ]; then
         echo -e "${GREEN}✅ Backend started on port 8080${NC}"
         echo -e "${GREEN}📝 Backend logs: tail -f logs/backend.log${NC}"
     else
-         echo -e "${RED}❌ Backend failed to start!${NC}"
+        echo -e "${RED}❌ Backend failed to start!${NC}"
         echo -e "${YELLOW}Check logs: cat logs/backend.log${NC}"
         return 1
     fi
@@ -115,13 +238,11 @@ start_backend() {
 start_workers() {
     echo -e "${BLUE}👷 Starting Celery Workers...${NC}"
     
-    cd /root/.openclaw/workspace/vault/projects/orchestrator
+    cd "${PROJECT_ROOT}"
     
     # Load environment variables from .env file
-    if [ -f .env ]; then
-        export $(grep -v '^#' .env | xargs)
-        echo -e "${GREEN}✅ Environment loaded for workers${NC}"
-    fi
+    load_env
+    echo -e "${GREEN}✅ Environment loaded for workers${NC}"
     
     # Kill any existing workers
     if check_process "celery -A app.celery_app worker"; then
@@ -131,10 +252,10 @@ start_workers() {
     
     # Start worker in background
     # LOGS DIRECTIVE: Write directly to logs/ directory (not /tmp/) for history preservation
-    nohup /root/.openclaw/workspace/vault/projects/orchestrator/venv/bin/celery \
+    nohup "${VENV_DIR}/bin/celery" \
         -A app.celery_app worker \
         --loglevel=info \
-        >> /root/.openclaw/workspace/vault/projects/orchestrator/logs/worker.log 2>&1 &
+        >> "${LOG_DIR}/worker.log" 2>&1 &
     
     sleep 5
     
@@ -153,7 +274,7 @@ start_workers() {
 start_frontend() {
     echo -e "${BLUE}🎨 Starting Frontend (Vite)...${NC}"
     
-    cd /root/.openclaw/workspace/vault/projects/orchestrator/frontend
+    cd "${FRONTEND_DIR}"
     
     # Kill any existing frontend
     if check_process "vite"; then
@@ -163,16 +284,23 @@ start_frontend() {
     
     # Start frontend in background
     # LOGS DIRECTIVE: Write directly to logs/ directory (not /tmp/) for history preservation
-    nohup node /usr/bin/pnpm dev >> /root/.openclaw/workspace/vault/projects/orchestrator/logs/frontend.log 2>&1 &
+    nohup pnpm dev >> "${LOG_DIR}/frontend.log" 2>&1 &
     
-    sleep 5
-    
-    if check_process "vite"; then
-         echo -e "${GREEN}✅ Frontend started on port 3000${NC}"
+    local frontend_ok=false
+    for _ in {1..15}; do
+        sleep 1
+        if curl -fsS "http://127.0.0.1:3000" > /dev/null 2>&1; then
+            frontend_ok=true
+            break
+        fi
+    done
+
+    if [ "${frontend_ok}" = true ]; then
+        echo -e "${GREEN}✅ Frontend started on port 3000${NC}"
         echo -e "${GREEN}📝 Frontend logs: tail -f logs/frontend.log${NC}"
     else
-          echo -e "${RED}❌ Frontend failed to start!${NC}"
-        echo -e "${YELLOW}Check logs: cat logs/frontend.log${NC}"
+        echo -e "${RED}❌ Frontend failed to start!${NC}"
+        echo -e "${YELLOW}Check logs: cat logs/frontend.log${NC}${NC}"
         return 1
     fi
     echo ""
@@ -184,11 +312,14 @@ check_health() {
     
     sleep 2
     
+    local success=true
+    
     # Check backend
     if curl -s http://localhost:8080/health > /dev/null 2>&1; then
         echo -e "${GREEN}✅ Backend is healthy${NC}"
     else
         echo -e "${RED}❌ Backend is not responding${NC}"
+        success=false
     fi
     
     # Check frontend
@@ -196,9 +327,25 @@ check_health() {
         echo -e "${GREEN}✅ Frontend is healthy${NC}"
     else
         echo -e "${RED}❌ Frontend is not responding${NC}"
+        success=false
+    fi
+    
+    # Check Redis
+    if redis-cli ping > /dev/null 2>&1; then
+        echo -e "${GREEN}✅ Redis is responding${NC}"
+    else
+        echo -e "${RED}❌ Redis is not responding${NC}"
+        success=false
     fi
     
     echo ""
+    
+    if [ "$success" = true ]; then
+        echo -e "${GREEN}🎉 All services operational!${NC}"
+    else
+        echo -e "${RED}⚠️  Some services failed health checks${NC}"
+        echo "Check logs: tail -20 logs/backend.log logs/frontend.log logs/worker.log"
+    fi
 }
 
 # Main execution
@@ -208,6 +355,9 @@ main() {
     echo "========================================"
     echo ""
     
+    load_env
+    prepare_logs
+
     # Ask if user wants to stop existing processes
     if check_process "uvicorn app.main:app" || check_process "vite" || check_process "celery"; then
         read -p "Existing processes detected. Stop them and restart? (y/n): " -n 1 -r
@@ -217,6 +367,11 @@ main() {
         fi
     fi
     
+    # Bootstrap local runtime automatically
+    ensure_venv
+    ensure_frontend_deps
+    ensure_database
+
     # Start all services in order
     start_redis
     start_backend
@@ -243,7 +398,7 @@ main() {
     echo ""
     echo "🛑 To stop all services:"
     echo "  pkill -f 'uvicorn app.main:app'"
-    echo "  pkill -f 'celery -A app.tasks worker'"
+    echo "  pkill -f 'celery -A app.celery_app worker'"
     echo "  pkill -f 'vite'"
     echo ""
 }

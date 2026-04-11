@@ -16,8 +16,13 @@ export const fetchSessions = createAsyncThunk<Session[], SessionFilters>(
         },
       });
       return response.data.sessions || [];
-    } catch (error: any) {
-      return rejectWithValue(error.response?.data?.message || 'Failed to fetch sessions');
+    } catch (error: unknown) {
+      const axiosError = error as {
+        response?: { data?: { message?: string } };
+      };
+      return rejectWithValue(
+        axiosError.response?.data?.message || 'Failed to fetch sessions'
+      );
     }
   }
 );
@@ -69,7 +74,7 @@ const sessionsSlice = createSlice({
       state.items = state.items.filter((s) => s.id !== action.payload);
     },
     // Rollback
-    rollbackSessionDelete: (state) => {
+    rollbackSessionDelete: () => {
       console.log('Rolling back session deletion');
     },
   },
