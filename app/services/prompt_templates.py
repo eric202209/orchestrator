@@ -276,6 +276,22 @@ class PromptTemplates:
 3. Output JSON array with: step_number, description, commands[], verification?, rollback?, expected_files[]
 4. Do NOT create documentation files unless the task explicitly asks for them
 5. Avoid README files, notes files, summaries, or explanation documents unless required by the task
+6. Prefer the smallest workable plan; each step should change one concern only
+
+**Planning Rules:**
+1. Prefer short, targeted shell commands over large generated scripts
+2. Avoid `cat <<EOF`, `python - <<'PY'`, or other large inline file-generation blocks unless there is no simpler option
+3. Prefer incremental setup:
+   - create directories first
+   - create or edit one file at a time
+   - install dependencies in a separate step from code changes
+4. Prefer package-manager or editor-friendly commands for config changes when possible
+5. Do NOT assume files already exist; inspect or create them deliberately
+6. Keep verification commands short, machine-runnable, and relative to `{project_dir}`
+7. If source files need imports or references, only use relative paths that are valid inside the task workspace layout
+8. Do NOT reference parent directories in shell commands
+9. Avoid bundling install + scaffold + config + tests into one step
+10. Prefer commands that are easy to retry after partial completion
 
 **Output (JSON ONLY):**
 [
@@ -318,6 +334,16 @@ class PromptTemplates:
 5. Do NOT create documentation files unless the task explicitly requires them
 6. Avoid README files, notes files, summaries, or explanation documents unless required by the task
 
+**Execution Rules:**
+1. Follow the provided commands exactly unless a command is clearly invalid in the current workspace
+2. Before editing a file, inspect whether it already exists and preserve valid existing content when possible
+3. Prefer small, targeted edits over rewriting whole files
+4. Avoid large heredocs or multi-hundred-line inline file creation unless absolutely necessary
+5. If a config file such as `package.json`, `pyproject.toml`, or `.env` is missing, create the minimal valid version needed for this step
+6. When a command fails because a file is missing, recover by creating or initializing the smallest required file inside `{project_dir}`
+7. Keep all file references relative to `{project_dir}` even inside verification commands
+8. If the step appears too large to complete safely, do the smallest valid portion and explain the blocker in `error_message`
+
 **Output:** status, output, verification_output, files_changed, error_message
 """
 
@@ -347,6 +373,13 @@ class PromptTemplates:
 4. Do NOT suggest creating or modifying files outside `{project_dir}`
 5. Do NOT propose documentation files unless the task explicitly requires them
 6. Avoid README files, notes files, summaries, or explanation documents unless required by the task
+
+**Debugging Rules:**
+1. Prefer the smallest fix that can unblock the current step
+2. If the step failed because it was too large or brittle, return `revise_plan`
+3. Prefer fixing bad paths, missing files, or invalid assumptions before suggesting a full rewrite
+4. Avoid suggesting large heredoc-based rewrites unless the task cannot be completed safely any other way
+5. Keep fixes retry-friendly and compatible with partial progress already made inside `{project_dir}`
 
 **Output (JSON):**
 {{
@@ -378,6 +411,15 @@ class PromptTemplates:
 4. Do NOT create sibling folders under `{workspace_root}`
 5. Do NOT add documentation-only steps unless the task explicitly requires them
 6. Avoid README files, notes files, summaries, or explanation documents unless required by the task
+
+**Revision Rules:**
+1. Preserve already completed steps exactly as completed
+2. Rewrite only the remaining steps that need adjustment
+3. Split oversized steps into smaller, safer steps when that reduces risk
+4. Prefer simple commands and direct file edits over large inline file-generation commands
+5. Add or improve verification commands when the original plan had weak verification
+6. If earlier steps revealed missing base files, add a minimal initialization step before dependent edits
+7. Keep the revised plan concise and retry-friendly
 
 **Output (JSON):**
 {{

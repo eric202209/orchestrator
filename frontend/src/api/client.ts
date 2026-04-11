@@ -316,12 +316,16 @@ export const sessionsAPI = {
     }>(`/sessions/${sessionId}/checkpoints?checkpoint_name=${checkpointName || 'manual'}`),
 
   listCheckpoints: (sessionId: number) =>
-    apiClient.get<Array<{ 
-      name: string;
-      created_at: string;
-      step_index?: number;
-      completed_steps: number;
-    }>>(`/sessions/${sessionId}/checkpoints`),
+    apiClient.get<{ 
+      session_id: number;
+      total_count: number;
+      checkpoints: Array<{
+        name: string;
+        created_at: string;
+        step_index?: number;
+        completed_steps: number;
+      }>;
+    }>(`/sessions/${sessionId}/checkpoints`),
 
   loadCheckpoint: (sessionId: number, checkpointName?: string) =>
     apiClient.post<{ 

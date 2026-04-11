@@ -21,6 +21,7 @@ import os
 import shutil
 import shlex
 import time
+import re
 from typing import Optional, Dict, Any, List, Callable
 from datetime import datetime
 from pathlib import Path
@@ -59,6 +60,7 @@ class OpenClawSessionService:
     """Service for managing OpenClaw session orchestration"""
 
     MAX_PROMPT_LENGTH = 50000  # Leave room for model overhead
+    STREAM_READ_LIMIT = 262144  # Allow large JSON/log lines from newer OpenClaw builds
 
     def __init__(
         self,
@@ -130,6 +132,41 @@ class OpenClawSessionService:
             "OpenClaw CLI not found. Install `openclaw`, add it to PATH, set "
             "`OPENCLAW_CLI_PATH`, or configure `OPENCLAW_CLI_ARGS` for a Node entrypoint."
         )
+
+    def _resolve_execution_cwd(self) -> Optional[str]:
+        """Resolve the best working directory for OpenClaw subprocess execution."""
+        try:
+            project_model = None
+            if self.session_model and self.session_model.project_id:
+                project_model = (
+                    self.db.query(Project)
+                    .filter(Project.id == self.session_model.project_id)
+                    .first()
+                )
+            elif self.task_model and self.task_model.project_id:
+                project_model = (
+                    self.db.query(Project)
+                    .filter(Project.id == self.task_model.project_id)
+                    .first()
+                )
+
+            if not project_model:
+                return None
+
+            project_workspace = resolve_project_workspace_path(
+                project_model.workspace_path, project_model.name
+            )
+
+            if self.task_model and self.task_model.task_subfolder:
+                return str((project_workspace / self.task_model.task_subfolder).resolve())
+
+            return str(project_workspace.resolve())
+        except Exception as exc:
+            self._log_entry(
+                "WARN",
+                f"[OPENCLAW] Failed to resolve execution cwd, falling back to default: {exc}",
+            )
+            return None
 
     async def create_openclaw_session(
         self, task_description: str, context: Optional[Dict[str, Any]] = None
@@ -936,6 +973,15 @@ class OpenClawSessionService:
                 ],
             }
 
+        if (not stdout or stdout in ['""', "''", '"', "'"]) and stderr:
+            recovered_output = self._recover_json_like_output_from_stderr(stderr)
+            if recovered_output:
+                self._log_entry(
+                    "WARN",
+                    "[OPENCLAW] stdout was empty; recovered structured response from stderr",
+                )
+                stdout = recovered_output
+
         # CRITICAL FIX: Validate response before parsing
         if not stdout or stdout in ['""', "''", '"', "'"]:
             self._log_entry("ERROR", "[OPENCLAW] CRITICAL: Empty or invalid response")
@@ -1067,6 +1113,38 @@ class OpenClawSessionService:
                     "error": error_str,
                 }
 
+    def _recover_json_like_output_from_stderr(self, stderr: str) -> str:
+        """Recover a structured JSON-ish payload from stderr when stdout is empty."""
+        ansi_pattern = re.compile(r"\x1B\[[0-9;]*[A-Za-z]")
+        lines = []
+        for raw_line in (stderr or "").splitlines():
+            cleaned = ansi_pattern.sub("", raw_line).strip()
+            if cleaned:
+                lines.append(cleaned)
+
+        if not lines:
+            return ""
+
+        candidate_indexes = [
+            index
+            for index, line in enumerate(lines)
+            if line in {"{", "["}
+            or line.startswith("{")
+            or line.startswith("[")
+            or line.startswith('"payloads"')
+            or line.startswith('"stopReason"')
+        ]
+
+        for index in reversed(candidate_indexes):
+            candidate = "\n".join(lines[index:]).strip()
+            try:
+                json.loads(candidate)
+                return candidate
+            except Exception:
+                continue
+
+        return ""
+
     def _summarize_cli_error(self, stderr: str) -> str:
         """Return a compact user-facing summary from OpenClaw stderr."""
         lines = [line.strip() for line in (stderr or "").splitlines() if line.strip()]
@@ -1127,6 +1205,7 @@ class OpenClawSessionService:
 
         try:
             openclaw_command = self._resolve_openclaw_command()
+            execution_cwd = self._resolve_execution_cwd()
             process = await asyncio.create_subprocess_exec(
                 *openclaw_command,
                 "agent",
@@ -1140,7 +1219,8 @@ class OpenClawSessionService:
                 str(timeout_seconds),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                limit=8192,
+                limit=self.STREAM_READ_LIMIT,
+                cwd=execution_cwd,
             )
 
             stdout_chunks: List[str] = []

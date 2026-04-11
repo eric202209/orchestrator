@@ -1099,13 +1099,11 @@ async def start_session(
         db.commit()
 
     try:
-        # Use the instance_id already generated at session creation time
-        session_instance_id = session.instance_id
-        if not session_instance_id:
-            # Fallback: generate if somehow missing (shouldn't happen)
-            session_instance_id = str(uuid.uuid4())
-            session.instance_id = session_instance_id
-            db.commit()
+        # Every fresh start gets a new instance id so logs from prior attempts
+        # do not mix into the latest run.
+        session_instance_id = str(uuid.uuid4())
+        session.instance_id = session_instance_id
+        db.commit()
 
         # Initialize OpenClaw service
         openclaw_service = OpenClawSessionService(db, session_id, use_demo_mode=False)
@@ -1312,6 +1310,24 @@ async def stop_session(
         raise HTTPException(status_code=400, detail="Session is not running")
 
     try:
+        checkpoint_name = None
+        try:
+            from app.services.checkpoint_service import CheckpointService
+
+            checkpoint_service = CheckpointService(db)
+            latest_checkpoint = checkpoint_service.load_checkpoint(session_id)
+            checkpoint_name = f"stopped_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+            checkpoint_service.save_checkpoint(
+                session_id=session_id,
+                checkpoint_name=checkpoint_name,
+                context_data=latest_checkpoint.get("context", {}),
+                orchestration_state=latest_checkpoint.get("orchestration_state", {}),
+                current_step_index=latest_checkpoint.get("current_step_index"),
+                step_results=latest_checkpoint.get("step_results", []),
+            )
+        except Exception:
+            checkpoint_name = None
+
         revoked_ids = _revoke_session_celery_tasks(db, session_id, terminate=True)
 
         # Initialize OpenClaw service
@@ -1334,7 +1350,11 @@ async def stop_session(
                 level="INFO",
                 message=f"Session stopped: {session.name}",
                 log_metadata=json.dumps(
-                    {"force": force, "revoked_task_ids": revoked_ids}
+                    {
+                        "force": force,
+                        "revoked_task_ids": revoked_ids,
+                        "checkpoint_name": checkpoint_name,
+                    }
                 ),
             )
         )

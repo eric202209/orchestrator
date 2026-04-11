@@ -60,6 +60,8 @@ class OpenClawSessionError(Exception):
 class OpenClawSessionService:
     """Service for managing OpenClaw sessions and task execution"""
 
+    STREAM_READ_LIMIT = 262144
+
     def __init__(
         self,
         db: Session,
@@ -218,7 +220,7 @@ class OpenClawSessionService:
                 f"openclaw agent --local --session-id {new_session_id} --message '{prompt}' --json --timeout {timeout_seconds}",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                limit=8192,
+                limit=self.STREAM_READ_LIMIT,
             )
 
             # Stream output with batch commits (every 10 lines)

@@ -150,12 +150,21 @@ def _normalize_command(command: str, project_dir: Path) -> str:
     if not normalized:
         raise TaskWorkspaceViolationError("Empty command is not allowed")
 
-    if "~" in normalized:
+    # Ignore heredoc bodies when validating outer shell traversal. Paths inside
+    # generated file contents like `../src/...` are source text, not shell traversal.
+    traversal_check_target = re.sub(
+        r"<<\s*['\"]?([A-Za-z0-9_-]+)['\"]?.*?\n.*?\n\1",
+        "<<HEREDOC",
+        normalized,
+        flags=re.DOTALL,
+    )
+
+    if "~" in traversal_check_target:
         raise TaskWorkspaceViolationError(
             f"Home-directory paths are not allowed: {normalized}"
         )
 
-    if re.search(r"(^|[\s'\"=/])\.\.(?:/|$)", normalized):
+    if re.search(r"(^|[\s'\"=/])\.\.(?:/|$)", traversal_check_target):
         raise TaskWorkspaceViolationError(
             f"Parent-directory traversal is not allowed: {normalized}"
         )
@@ -189,7 +198,16 @@ def _normalize_command(command: str, project_dir: Path) -> str:
         replacement = "." if replacement == "." else f"./{replacement}"
         current = current.replace(abs_path, replacement)
 
-    if "~" in current or re.search(r"(^|[\s'\"=/])\.\.(?:/|$)", current):
+    current_traversal_target = re.sub(
+        r"<<\s*['\"]?([A-Za-z0-9_-]+)['\"]?.*?\n.*?\n\1",
+        "<<HEREDOC",
+        current,
+        flags=re.DOTALL,
+    )
+
+    if "~" in current_traversal_target or re.search(
+        r"(^|[\s'\"=/])\.\.(?:/|$)", current_traversal_target
+    ):
         raise TaskWorkspaceViolationError(
             f"Command still contains unsafe path traversal: {current}"
         )
@@ -407,8 +425,8 @@ Example:
     bind=True,
     max_retries=3,
     default_retry_delay=60,
-    time_limit=360,
-    soft_time_limit=300,
+    time_limit=1800,
+    soft_time_limit=1500,
     queue="celery",
 )
 def execute_openclaw_task(
@@ -868,6 +886,9 @@ def execute_openclaw_task(
 
             orchestration_state.current_step_index = step_index
             task.current_step = step_index + 1
+            _save_orchestration_checkpoint(
+                db, session_id, task_id, prompt, orchestration_state
+            )
             db.commit()
 
             step_description = step.get("description", f"Step {step_index + 1}")
@@ -910,11 +931,15 @@ def execute_openclaw_task(
                 project_context=f"Build project: {project_name_slug}",
             )
 
+            step_timeout_seconds = max(
+                120, timeout_seconds // max(1, len(orchestration_state.plan))
+            )
+
             # Execute step
             step_result = asyncio.run(
                 openclaw_service.execute_task(
                     execution_prompt,
-                    timeout_seconds=timeout_seconds // len(orchestration_state.plan),
+                    timeout_seconds=step_timeout_seconds,
                 )
             )
 
@@ -1194,6 +1219,33 @@ def execute_openclaw_task(
         if is_timeout:
             task.error_message += " (Task timed out after 5 minutes)"
             task.error_message += "\nSuggested fix: Break task into smaller steps"
+
+        try:
+            orchestration_state.status = OrchestrationStatus.ABORTED
+            orchestration_state.abort_reason = str(exc)
+            _save_orchestration_checkpoint(
+                db,
+                session_id,
+                task_id,
+                prompt,
+                orchestration_state,
+                checkpoint_name="autosave_error",
+            )
+            _record_live_log(
+                db,
+                session_id,
+                task_id,
+                "WARN",
+                "[CHECKPOINT] Error checkpoint saved for resume",
+                session_instance_id=session.instance_id if session else None,
+                metadata={"checkpoint_name": "autosave_error"},
+            )
+        except Exception as checkpoint_error:
+            logger.error(
+                "[CHECKPOINT] Failed to save error checkpoint for task %s: %s",
+                task_id,
+                str(checkpoint_error),
+            )
 
         db.commit()
 

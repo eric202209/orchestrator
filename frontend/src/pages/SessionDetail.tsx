@@ -46,6 +46,24 @@ interface SessionLogItem {
   created_at?: string;
 }
 
+const NOISY_LOG_PATTERNS = [
+  /^"[\w]+":\s?.*$/,
+  /^[\[\]{}],?$/,
+  /^"propertiesCount":\s*\d+,?$/,
+  /^"schemaChars":\s*\d+,?$/,
+  /^"summaryChars":\s*\d+,?$/,
+  /^"promptChars":\s*\d+,?$/,
+  /^"blockChars":\s*\d+,?$/,
+  /^"rawChars":\s*\d+,?$/,
+  /^"injectedChars":\s*\d+,?$/,
+  /^"truncated":\s*(true|false),?$/,
+  /^"missing":\s*(true|false),?$/,
+  /^"path":\s*".*",?$/,
+  /^"name":\s*"(healthcheck|memory_get|memory_search|session_status|update_plan|web_search|web_fetch|image|pdf|browser|BOOTSTRAP\.md|MEMORY\.md)".*$/,
+  /^"entries":\s*\[$/,
+  /^"skills":\s*{$/,
+];
+
 export default function SessionDetail() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const navigate = useNavigate();
@@ -59,7 +77,9 @@ export default function SessionDetail() {
   const [wsConnected, setWsConnected] = useState(false);
   const [allLogs, setAllLogs] = useState<TerminalLogEntry[]>([]);
   const [logViewMode, setLogViewMode] = useState<'newest' | 'oldest' | 'success' | 'errors' | 'all'>('newest');
+  const [logVerbosity, setLogVerbosity] = useState<'clean' | 'verbose'>('clean');
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
+  const [checkpointCount, setCheckpointCount] = useState(0);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -96,6 +116,30 @@ export default function SessionDetail() {
     message: log.message,
     timestamp: formatLogTimestamp(log.timestamp || log.created_at),
   });
+
+  const isNoisyLogMessage = (message?: string | null) => {
+    const trimmed = (message || '').trim();
+    if (!trimmed) return true;
+
+    if (
+      trimmed.includes('"propertiesCount"') ||
+      trimmed.includes('"schemaChars"') ||
+      trimmed.includes('"summaryChars"') ||
+      trimmed.includes('"promptChars"') ||
+      trimmed.includes('"blockChars"') ||
+      trimmed.includes('"rawChars"') ||
+      trimmed.includes('"injectedChars"')
+    ) {
+      return true;
+    }
+
+    return NOISY_LOG_PATTERNS.some((pattern) => pattern.test(trimmed));
+  };
+
+  const shouldDisplayLog = (log: SessionLogItem) =>
+    logVerbosity === 'verbose' || !isNoisyLogMessage(log.message);
+
+  const visibleLogs = (logs: SessionLogItem[]) => logs.filter(shouldDisplayLog);
 
   const applyLogView = (sourceLogs: TerminalLogEntry[], mode: string) => {
     let result = [...sourceLogs];
@@ -175,6 +219,15 @@ export default function SessionDetail() {
     setTimelineEvents(prev => [...prev.slice(-99), event]);
   };
 
+  const loadCheckpointCount = async (id: number) => {
+    try {
+      const checkpointsRes = await sessionsAPI.listCheckpoints(id);
+      setCheckpointCount(checkpointsRes.data.total_count || 0);
+    } catch {
+      setCheckpointCount(0);
+    }
+  };
+
   useEffect(() => {
     if (!sessionId) {
       setError('Session ID not found');
@@ -191,6 +244,7 @@ export default function SessionDetail() {
         setSession(sessionRes.data);
         setTasks(tasksRes.data || []);
         setProject(projectRes.data);
+        await loadCheckpointCount(Number(sessionId));
         
         // Only connect WebSocket if session is running or paused
         if (sessionRes.data.status === 'running' || sessionRes.data.status === 'paused') {
@@ -211,8 +265,8 @@ export default function SessionDetail() {
       if (!sessionId) return;
       try {
         const response = await sessionsAPI.getLogs(Number(sessionId));
-        const loadedLogs = (response.data?.logs || []) as SessionLogItem[];
-        console.log(`Loaded ${loadedLogs.length} logs for session ${sessionId}`);
+        const loadedLogs = visibleLogs((response.data?.logs || []) as SessionLogItem[]);
+        console.log(`Loaded ${loadedLogs.length} visible logs for session ${sessionId}`);
         const terminalLogs = loadedLogs.map(toTerminalLogEntry);
         setAllLogs(terminalLogs);
         applyLogView(terminalLogs, logViewMode);
@@ -247,6 +301,9 @@ export default function SessionDetail() {
         // Update session state if changed
         if (session?.status !== currentStatus) {
           setSession(currentSession.data);
+          if (currentStatus === 'stopped' || currentStatus === 'paused') {
+            await loadCheckpointCount(Number(sessionId));
+          }
         }
       } catch (err) {
         console.warn('Status poll error:', err);
@@ -263,7 +320,7 @@ export default function SessionDetail() {
       }
       clearInterval(statusPollInterval);
     };
-  }, [sessionId]);
+  }, [sessionId, logVerbosity]);
 
   const setupWebSocket = (session_id: number) => {
     // Only connect if we have a token
@@ -309,6 +366,9 @@ export default function SessionDetail() {
           
           // Handle different message types
           if (data.type === 'log') {
+            if (logVerbosity === 'clean' && isNoisyLogMessage(data.message)) {
+              return;
+            }
             console.log('✅ Received log message:', data.message);
             setAllLogs(prev => {
               const next = [
@@ -401,6 +461,7 @@ export default function SessionDetail() {
       await sessionsAPI.stop(Number(sessionId), force);
       const updated = await sessionsAPI.getById(Number(sessionId));
       setSession(updated.data);
+      await loadCheckpointCount(Number(sessionId));
     } catch (error) {
       console.error('Failed to stop session:', error);
       alert('Failed to stop session');
@@ -413,6 +474,7 @@ export default function SessionDetail() {
       await sessionsAPI.pause(Number(sessionId));
       const updated = await sessionsAPI.getById(Number(sessionId));
       setSession(updated.data);
+      await loadCheckpointCount(Number(sessionId));
     } catch (error) {
       console.error('Failed to pause session:', error);
       alert('Failed to pause session');
@@ -423,7 +485,7 @@ export default function SessionDetail() {
     if (!sessionId) return;
     try {
       const response = await sessionsAPI.getLogs(Number(sessionId));
-      const logs = (response.data?.logs || []) as SessionLogItem[];
+      const logs = visibleLogs((response.data?.logs || []) as SessionLogItem[]);
       const terminalLogs = logs.map(toTerminalLogEntry);
       setAllLogs(terminalLogs);
       applyLogView(terminalLogs, logViewMode);
@@ -441,6 +503,13 @@ export default function SessionDetail() {
       await sessionsAPI.resume(Number(sessionId));
       const updated = await sessionsAPI.getById(Number(sessionId));
       setSession(updated.data);
+      await loadCheckpointCount(Number(sessionId));
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      if (!wsRef.current && (updated.data.status === 'running' || updated.data.status === 'paused')) {
+        setupWebSocket(Number(sessionId));
+      }
     } catch (error) {
       console.error('Failed to resume session:', error);
       alert('Failed to resume session');
@@ -502,6 +571,15 @@ export default function SessionDetail() {
       default:
         return (
           <div className="flex items-center gap-2">
+            {checkpointCount > 0 && (
+              <button
+                onClick={handleResumeSession}
+                className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm transition-colors"
+              >
+                <Play className="h-4 w-4" />
+                Resume
+              </button>
+            )}
             <button
               onClick={handleStartSession}
               className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm transition-colors"
@@ -697,6 +775,17 @@ export default function SessionDetail() {
                 </span>
               </div>
               <div className="flex gap-2 items-center">
+                <select
+                  value={logVerbosity}
+                  onChange={(e) => {
+                    const mode = e.target.value as 'clean' | 'verbose';
+                    setLogVerbosity(mode);
+                  }}
+                  className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-sm rounded-lg transition-colors"
+                >
+                  <option value="clean">Clean Logs</option>
+                  <option value="verbose">Verbose Logs</option>
+                </select>
                 <button
                   onClick={handleRefreshLogs}
                   className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-sm rounded-lg transition-colors flex items-center gap-2"
