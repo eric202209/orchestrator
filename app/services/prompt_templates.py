@@ -292,6 +292,10 @@ class PromptTemplates:
 8. Do NOT reference parent directories in shell commands
 9. Avoid bundling install + scaffold + config + tests into one step
 10. Prefer commands that are easy to retry after partial completion
+11. Do NOT use `cd ... && ...` because the working directory is already `{project_dir}`
+12. Do NOT use background-process commands such as `&`, `nohup`, `disown`, or shell job control
+13. For `node` or `python` execution, prefer direct commands like `node src/index.js` or `python app.py`
+14. For final verification, prefer one-shot commands, test scripts, or short direct checks over starting a long-running server in the background
 
 **Output (JSON ONLY):**
 [
@@ -343,6 +347,10 @@ class PromptTemplates:
 6. When a command fails because a file is missing, recover by creating or initializing the smallest required file inside `{project_dir}`
 7. Keep all file references relative to `{project_dir}` even inside verification commands
 8. If the step appears too large to complete safely, do the smallest valid portion and explain the blocker in `error_message`
+9. Do NOT wrap commands with `cd ... &&`; run them directly from `{project_dir}`
+10. Do NOT use shell backgrounding such as `&`, `nohup`, `disown`, or long-lived dev servers unless the step explicitly requires process management
+11. Prefer direct interpreter invocations like `node file.js` or `python file.py`, not complex shell wrappers
+12. If verification needs a server, prefer a one-shot test command or explain that the provided verification command is not tool-safe instead of launching a background process
 
 **Output:** status, output, verification_output, files_changed, error_message
 """
@@ -380,6 +388,7 @@ class PromptTemplates:
 3. Prefer fixing bad paths, missing files, or invalid assumptions before suggesting a full rewrite
 4. Avoid suggesting large heredoc-based rewrites unless the task cannot be completed safely any other way
 5. Keep fixes retry-friendly and compatible with partial progress already made inside `{project_dir}`
+6. If failure was caused by a background process, `cd ... && ...`, or complex interpreter wrapper, replace it with a direct tool-safe command
 
 **Output (JSON):**
 {{
@@ -420,6 +429,7 @@ class PromptTemplates:
 5. Add or improve verification commands when the original plan had weak verification
 6. If earlier steps revealed missing base files, add a minimal initialization step before dependent edits
 7. Keep the revised plan concise and retry-friendly
+8. Remove background-process verification, `cd ... && ...` wrappers, and other commands that are likely to be rejected by execution-tool preflight
 
 **Output (JSON):**
 {{

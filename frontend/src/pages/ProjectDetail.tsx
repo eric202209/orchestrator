@@ -35,6 +35,7 @@ function ProjectDetail() {
   const [editDescription, setEditDescription] = useState('');
   const [editSteps, setEditSteps] = useState('');
   const [updatingTask, setUpdatingTask] = useState(false);
+  const [savingGithubUrl, setSavingGithubUrl] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -100,9 +101,6 @@ function ProjectDetail() {
       console.error('Failed to fetch tasks:', error);
     }
   };
-
-   // Sessions intentionally unused - kept for future implementation
-
   const generateStepsFromDescription = async (description: string) => {
     setGeneratingSteps(true);
     try {
@@ -234,6 +232,40 @@ function ProjectDetail() {
     }
   };
 
+  const handleUpdateGithubUrl = async () => {
+    if (!project) return;
+
+    const currentValue = project.github_url || '';
+    const nextValue = window.prompt(
+      'Enter GitHub repository URL. Leave blank to remove the current link.',
+      currentValue
+    );
+
+    if (nextValue === null) {
+      return;
+    }
+
+    const trimmedValue = nextValue.trim();
+    if (trimmedValue && !/^https?:\/\/.+/i.test(trimmedValue)) {
+      alert('Please enter a valid GitHub URL starting with http:// or https://');
+      return;
+    }
+
+    setSavingGithubUrl(true);
+    try {
+      const response = await projectsAPI.update(project.id, {
+        github_url: trimmedValue || null,
+      });
+      setProject(response.data);
+      alert(trimmedValue ? 'GitHub repository linked' : 'GitHub repository link removed');
+    } catch (error) {
+      console.error('Failed to update GitHub repository URL:', error);
+      alert('Failed to update GitHub repository link. Please try again.');
+    } finally {
+      setSavingGithubUrl(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-900">
@@ -287,14 +319,14 @@ function ProjectDetail() {
                   <ExternalLink className="h-5 w-5" />
                 </a>
               )}
-              {!project.github_url && (
-                <div
-                  className="text-slate-500"
-                  title="No GitHub repository linked"
-                >
-                  <ExternalLink className="h-5 w-5" />
-                </div>
-              )}
+              <button
+                onClick={handleUpdateGithubUrl}
+                disabled={savingGithubUrl}
+                className="text-sm text-slate-300 hover:text-white transition-colors disabled:opacity-50"
+                title={project.github_url ? 'Update GitHub repository link' : 'Link a GitHub repository'}
+              >
+                {project.github_url ? 'Edit Repo' : 'Link Repo'}
+              </button>
             </div>
           </div>
         </div>
@@ -340,6 +372,11 @@ function ProjectDetail() {
               <GitBranch className="h-4 w-4" />
               {project.branch}
             </span>
+            {project.github_url && (
+              <span className="truncate max-w-[320px]">
+                Repo: {project.github_url}
+              </span>
+            )}
             <span>{formatDistanceToNow(new Date(project.created_at), { addSuffix: true })}</span>
             <span className="flex items-center gap-1">
               <FileText className="h-4 w-4" />
@@ -651,3 +688,4 @@ function ProjectDetail() {
 }
 
 export default ProjectDetail;
+

@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from typing import List
 from datetime import datetime, timedelta, timezone
 from app.database import get_db
-from app.models import Project, Session, LogEntry, Task, SessionTask
+from app.models import Project, Session as SessionModel, LogEntry, Task, SessionTask
 from app.schemas import ProjectCreate, ProjectUpdate, ProjectResponse
 from app.services.project_isolation_service import normalize_project_workspace_path
 from app.config import settings
@@ -70,14 +70,14 @@ def purge_soft_deleted_projects(db: Session = Depends(get_db)):
         # Delete session tasks first (foreign key to session)
         db.query(SessionTask).filter(
             SessionTask.session_id.in_(
-                db.query(Session.id).filter(Session.project_id == project_id)
+                db.query(SessionModel.id).filter(SessionModel.project_id == project_id)
             )
         ).delete(synchronize_session=False)
 
         # Delete all logs for sessions in this project
         db.query(LogEntry).filter(
             LogEntry.session_id.in_(
-                db.query(Session.id).filter(Session.project_id == project_id)
+                db.query(SessionModel.id).filter(SessionModel.project_id == project_id)
             )
         ).delete(synchronize_session=False)
 
@@ -87,7 +87,7 @@ def purge_soft_deleted_projects(db: Session = Depends(get_db)):
         )
 
         # Delete all sessions in this project
-        db.query(Session).filter(Session.project_id == project_id).delete(
+        db.query(SessionModel).filter(SessionModel.project_id == project_id).delete(
             synchronize_session=False
         )
 

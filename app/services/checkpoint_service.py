@@ -198,33 +198,52 @@ class CheckpointService:
             List of checkpoint metadata (oldest first)
         """
         try:
-            session_dir = self._get_session_checkpoint_dir(session_id)
-
-            if not os.path.exists(session_dir):
-                return []
-
             checkpoints = []
+            seen_names = set()
 
-            for filename in os.listdir(session_dir):
-                if filename.endswith(".json"):
-                    filepath = os.path.join(session_dir, filename)
+            def append_checkpoint(filepath: str, fallback_name: str) -> None:
+                try:
+                    with open(filepath, "r") as f:
+                        data = json.load(f)
 
-                    try:
-                        with open(filepath, "r") as f:
-                            data = json.load(f)
+                    checkpoint_name = data.get("checkpoint_name", fallback_name)
+                    if checkpoint_name in seen_names:
+                        return
 
-                        checkpoints.append(
-                            {
-                                "name": data.get(
-                                    "checkpoint_name", filename.replace(".json", "")
-                                ),
-                                "created_at": data.get("created_at"),
-                                "step_index": data.get("current_step_index"),
-                                "completed_steps": len(data.get("step_results", [])),
-                            }
+                    checkpoints.append(
+                        {
+                            "name": checkpoint_name,
+                            "created_at": data.get("created_at"),
+                            "step_index": data.get("current_step_index"),
+                            "completed_steps": len(data.get("step_results", [])),
+                        }
+                    )
+                    seen_names.add(checkpoint_name)
+                except Exception:
+                    return
+
+            # New format: checkpoints/session_{id}/*.json
+            session_dir = self._get_session_checkpoint_dir(session_id)
+            if os.path.exists(session_dir):
+                for filename in os.listdir(session_dir):
+                    if filename.endswith(".json"):
+                        append_checkpoint(
+                            os.path.join(session_dir, filename),
+                            filename.replace(".json", ""),
                         )
-                    except Exception:
-                        continue  # Skip corrupted files
+
+            # Flat format used by current save_checkpoint implementation and legacy roots.
+            for checkpoint_root in self._candidate_checkpoint_roots():
+                if not checkpoint_root.exists():
+                    continue
+                for filename in os.listdir(checkpoint_root):
+                    if filename.endswith(".json") and filename.startswith(
+                        f"session_{session_id}_"
+                    ):
+                        append_checkpoint(
+                            os.path.join(checkpoint_root, filename),
+                            filename.replace(".json", ""),
+                        )
 
             # Sort by creation time (oldest first)
             checkpoints.sort(key=lambda x: x.get("created_at", ""))

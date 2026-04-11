@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { projectsAPI, authAPI, tasksAPI, sessionsAPI } from '../api/client';
-import type { Project, User, Task, Session } from '../types/api';
+import { projectsAPI, authAPI, tasksAPI } from '../api/client';
+import type { Project, User, Task } from '../types/api';
 import { 
   GitBranch, 
   LogOut, 
@@ -19,8 +19,6 @@ function Dashboard() {
   const [user, setUser] = useState<User | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
-  // sessions state intentionally unused - kept for future implementation
-  // const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'overview' | 'projects' | 'tasks'>('overview');
   const [showCreateProject, setShowCreateProject] = useState(false);
@@ -82,15 +80,6 @@ function Dashboard() {
         allTasks.push(...tasksResponse.data);
       }
       setTasks(allTasks);
-
-      // Fetch sessions for all projects
-      const allSessions: Session[] = [];
-      for (const project of projectsData) {
-        const sessionsResponse = await sessionsAPI.getByProject(project.id);
-        allSessions.push(...sessionsResponse.data);
-      }
-      // sessions intentionally unused - kept for future implementation
-      // setSessions(allSessions);
     } catch (error) {
       const axiosError = error as { code?: string; message?: string };
       // Suppress timeout errors - they're expected during slow network
@@ -400,12 +389,12 @@ function Dashboard() {
               <div className="space-y-2">
                 {tasks.map((task) => (
                   <div key={task.id} className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-4 hover:border-slate-600 transition-all">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-3">
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="flex min-w-0 flex-1 items-start gap-3">
                         <div className="p-2 rounded-lg text-blue-400 bg-blue-400/10">
                           <Activity className="h-5 w-5" />
                         </div>
-                        <div>
+                        <div className="min-w-0 flex-1">
                           <p className="font-medium text-white">{task.title}</p>
                           {task.description && (
                             <p className="text-sm text-slate-400 mt-1 line-clamp-1">{task.description}</p>
@@ -415,7 +404,9 @@ function Dashboard() {
                           </p>
                         </div>
                       </div>
-                      <StatusBadge status={task.status} size="sm" />
+                      <div className="shrink-0 pt-0.5">
+                        <StatusBadge status={task.status} size="sm" />
+                      </div>
                     </div>
                   </div>
                 ))}

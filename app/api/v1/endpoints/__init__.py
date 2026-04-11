@@ -11,7 +11,6 @@ from .project_logs import router as project_logs_router
 from .projects import router as projects_router
 from .sessions import router as sessions_router
 from .tasks import router as tasks_router
-from .tasks_sorted_logs import router as tasks_sorted_logs_router
 from .orchestrator import router as orchestrator_router
 
 __all__ = [
@@ -24,6 +23,6 @@ __all__ = [
     "projects_router",
     "sessions_router",
     "tasks_router",
-    "tasks_sorted_logs_router",
     "orchestrator_router",
 ]
+
