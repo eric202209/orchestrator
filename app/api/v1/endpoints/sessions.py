@@ -358,13 +358,13 @@ def delete_session(
     db_session.deleted_at = datetime.now(timezone.utc)
     db_session.is_active = False
     db_session.status = "deleted"
-    
+
     # Delete all logs for this session to prevent ID reuse issues
     from app.models import LogEntry
     deleted_logs = db.query(LogEntry).filter(
         LogEntry.session_id == session_id
     ).delete()
-    
+
     db.commit()
     logger.info(f"Deleted {deleted_logs} logs for session {session_id}")
 
@@ -686,7 +686,7 @@ async def websocket_log_stream(
 
     for log in recent_logs:
         await websocket.send_json({"type": "log", **log})
-    
+
     logger.info(f"Sent {len(recent_logs)} initial logs, starting main loop...")
 
     # Background task to send periodic heartbeats (prevents 5-minute timeout)
@@ -921,7 +921,7 @@ async def websocket_session_status(
         heartbeat_task.cancel()
 
 
-def get_session_logs(
+def get_session_logs_filtered(
     session_id: int,
     db: Session = Depends(get_db),
     level: Optional[str] = None,
@@ -1588,15 +1588,15 @@ def get_session_logs(
 ):
     """
     Get logs for a session (simple endpoint for stopped sessions)
-    
+
     This endpoint fetches all logs for a session, optionally filtered by instance_id.
     It's designed to work for stopped sessions where WebSocket streaming isn't available.
-    
+
     Args:
         session_id: Session ID
         limit: Maximum number of logs to return (default: 100)
         offset: Offset for pagination (default: 0)
-    
+
     Returns:
         List of log entries
     """

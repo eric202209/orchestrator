@@ -157,7 +157,7 @@ async def execute_task_with_openclaw(
 
         # Start OpenClaw session and create database session record
         from app.models import Session as SessionModel
-        
+
         # Create a new session record for this task execution
         new_session = SessionModel(
             name=f"Task {task_id} Execution",
@@ -169,7 +169,7 @@ async def execute_task_with_openclaw(
         db.add(new_session)
         db.commit()
         db.refresh(new_session)
-        
+
         # Create SessionTask relationship
         session_task = SessionTask(
             session_id=new_session.id,
@@ -177,9 +177,9 @@ async def execute_task_with_openclaw(
         )
         db.add(session_task)
         db.commit()
-        
+
         print(f"✅ Created session {new_session.id} for task {task.id}")
-        
+
         # Start OpenClaw session with the new session ID
         session_service = OpenClawSessionService(db, new_session.id, task_id)
         openclaw_key = await session_service.start_session(prompt)

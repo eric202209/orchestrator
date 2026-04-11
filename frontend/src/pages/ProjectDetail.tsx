@@ -4,7 +4,6 @@ import { projectsAPI, tasksAPI, sessionsAPI } from '../api/client';
 import type { Project, Task, Session } from '../types/api';
 import { 
   GitBranch, 
-  Plus, 
   FileText,
   XCircle,
   ArrowLeft,
@@ -71,8 +70,7 @@ function ProjectDetail() {
     };
     
     loadProjectData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+  }, [id, navigate]);
 
   if (error) {
     return (
@@ -219,7 +217,6 @@ function ProjectDetail() {
     }
   };
 
- // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const handleDeleteSession = async (sessionId: number) => {
     if (!confirm('Delete this session? This cannot be undone.')) {
       return;
@@ -235,10 +232,6 @@ function ProjectDetail() {
       console.error('Failed to delete session:', error);
       alert('Failed to delete session. Please try again.');
     }
-  };
-
-  const handleDeleteProject: () => void = () => {
-    // Disabled for now - implement if needed
   };
 
   if (loading) {
@@ -658,4 +651,3 @@ function ProjectDetail() {
 }
 
 export default ProjectDetail;
-

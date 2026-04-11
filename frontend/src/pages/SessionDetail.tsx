@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { sessionsAPI, tasksAPI, projectsAPI } from '@/api/client';
 import type { Session, Task, Project } from '@/types/api';
@@ -46,9 +46,18 @@ interface SessionLogItem {
   created_at?: string;
 }
 
+interface ApiErrorLike {
+  response?: {
+    data?: {
+      detail?: string;
+    };
+  };
+  message?: string;
+}
+
 const NOISY_LOG_PATTERNS = [
   /^"[\w]+":\s?.*$/,
-  /^[\[\]{}],?$/,
+  /^[[\]{}],?$/,
   /^"propertiesCount":\s*\d+,?$/,
   /^"schemaChars":\s*\d+,?$/,
   /^"summaryChars":\s*\d+,?$/,
@@ -83,15 +92,15 @@ export default function SessionDetail() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  const parseApiDate = (value?: string | null): Date | null => {
+  const parseApiDate = useCallback((value?: string | null): Date | null => {
     if (!value) return null;
     const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value);
     const normalized = hasTimezone ? value : `${value}Z`;
     const parsed = new Date(normalized);
     return Number.isNaN(parsed.getTime()) ? null : parsed;
-  };
+  }, []);
 
-  const formatDateTime = (value?: string | null) => {
+  const formatDateTime = useCallback((value?: string | null) => {
     const d = parseApiDate(value);
     if (!d) return value ? 'Invalid date' : 'N/A';
     const yyyy = d.getFullYear();
@@ -101,21 +110,21 @@ export default function SessionDetail() {
     const min = String(d.getMinutes()).padStart(2, '0');
     const ss = String(d.getSeconds()).padStart(2, '0');
     return `${yyyy}${mm}${dd} / ${hh}:${min}:${ss}`;
-  };
+  }, [parseApiDate]);
 
-  const formatLogTimestamp = (value?: string | null) => {
+  const formatLogTimestamp = useCallback((value?: string | null) => {
     const parsed = parseApiDate(value);
     if (!parsed) return '';
     const hh = String(parsed.getHours()).padStart(2, '0');
     const mm = String(parsed.getMinutes()).padStart(2, '0');
     const ss = String(parsed.getSeconds()).padStart(2, '0');
     return `${hh}:${mm}:${ss}`;
-  };
+  }, [parseApiDate]);
 
-  const toTerminalLogEntry = (log: SessionLogItem): TerminalLogEntry => ({
+  const toTerminalLogEntry = useCallback((log: SessionLogItem): TerminalLogEntry => ({
     message: log.message,
     timestamp: formatLogTimestamp(log.timestamp || log.created_at),
-  });
+  }), [formatLogTimestamp]);
 
   const isNoisyLogMessage = (message?: string | null) => {
     const trimmed = (message || '').trim();
@@ -136,12 +145,17 @@ export default function SessionDetail() {
     return NOISY_LOG_PATTERNS.some((pattern) => pattern.test(trimmed));
   };
 
-  const shouldDisplayLog = (log: SessionLogItem) =>
-    logVerbosity === 'verbose' || !isNoisyLogMessage(log.message);
+  const shouldDisplayLog = useCallback(
+    (log: SessionLogItem) => logVerbosity === 'verbose' || !isNoisyLogMessage(log.message),
+    [logVerbosity]
+  );
 
-  const visibleLogs = (logs: SessionLogItem[]) => logs.filter(shouldDisplayLog);
+  const visibleLogs = useCallback(
+    (logs: SessionLogItem[]) => logs.filter(shouldDisplayLog),
+    [shouldDisplayLog]
+  );
 
-  const applyLogView = (sourceLogs: TerminalLogEntry[], mode: string) => {
+  const applyLogView = useCallback((sourceLogs: TerminalLogEntry[], mode: string) => {
     let result = [...sourceLogs];
     if (mode === 'newest') {
       result = result.slice().reverse();
@@ -151,9 +165,9 @@ export default function SessionDetail() {
       result = result.filter((log) => log.message.includes('✗') || log.message.includes('error') || log.message.includes('Error') || log.message.includes('failed'));
     }
     setDisplayLogs(result);
-  };
+  }, []);
 
-  const classifyTimelineEvent = (message: string, level?: string, at?: string): TimelineEvent => {
+  const classifyTimelineEvent = useCallback((message: string, level?: string, at?: string): TimelineEvent => {
     const lower = message.toLowerCase();
     let type: TimelineEventType = 'info';
     let title = 'Log Update';
@@ -212,21 +226,113 @@ export default function SessionDetail() {
       title,
       detail: message,
     };
-  };
+  }, []);
 
-  const pushTimelineEvent = (message: string, level?: string, at?: string) => {
+  const pushTimelineEvent = useCallback((message: string, level?: string, at?: string) => {
     const event = classifyTimelineEvent(message, level, at);
     setTimelineEvents(prev => [...prev.slice(-99), event]);
-  };
+  }, [classifyTimelineEvent]);
 
-  const loadCheckpointCount = async (id: number) => {
+  const loadCheckpointCount = useCallback(async (id: number) => {
     try {
       const checkpointsRes = await sessionsAPI.listCheckpoints(id);
       setCheckpointCount(checkpointsRes.data.total_count || 0);
     } catch {
       setCheckpointCount(0);
     }
-  };
+  }, []);
+
+  const setupWebSocket = useCallback((session_id: number) => {
+    const token = localStorage.getItem('access_token');
+    if (!token) {
+      console.warn('No access token found, cannot connect WebSocket');
+      return;
+    }
+
+    try {
+      wsRef.current = sessionsAPI.getLogsStream(session_id);
+      console.log('Attempting WebSocket connection:', wsRef.current.url);
+
+      wsRef.current.onopen = () => {
+        console.log('✅ WebSocket connected');
+        setWsConnected(true);
+      };
+
+      wsRef.current.onmessage = (event) => {
+        if (!event.data || event.data.length === 0) {
+          return;
+        }
+
+        if (event.data.trim().startsWith('<')) {
+          console.error('WebSocket received HTML instead of JSON:', event.data.substring(0, 100));
+          console.error('This usually means the WebSocket is connecting to the wrong port. Backend should be at :8080, not :3000');
+          return;
+        }
+
+        if (event.data === 'ping' || event.data === 'pong') {
+          console.debug('Received plain text message:', event.data);
+          if (event.data === 'ping') {
+            wsRef.current?.send('pong');
+          }
+          return;
+        }
+
+        try {
+          const data = JSON.parse(event.data);
+
+          if (data.type === 'log') {
+            if (logVerbosity === 'clean' && isNoisyLogMessage(data.message)) {
+              return;
+            }
+            console.log('✅ Received log message:', data.message);
+            setAllLogs(prev => {
+              const next = [
+                ...prev.slice(-499),
+                {
+                  message: data.message,
+                  timestamp: formatLogTimestamp(data.timestamp),
+                },
+              ];
+              applyLogView(next, logViewMode);
+              return next;
+            });
+            pushTimelineEvent(data.message, data.level, data.timestamp);
+          } else if (data.type === 'ping') {
+            console.debug('Received ping, sending pong');
+            wsRef.current?.send(JSON.stringify({ type: 'pong' }));
+          } else if (data.type === 'pong') {
+            console.debug('Received pong');
+          } else if (data.type === 'connected') {
+            console.log('✅ WebSocket connected message received');
+          } else {
+            console.debug('WebSocket message received:', data);
+          }
+        } catch (e) {
+          console.warn('❌ Failed to parse WebSocket message:', e);
+          console.warn('Raw data:', event.data.substring(0, 200));
+          console.warn('Data type:', typeof event.data);
+          console.warn('Data length:', event.data?.length);
+        }
+      };
+
+      wsRef.current.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        setWsConnected(false);
+      };
+
+      wsRef.current.onclose = () => {
+        console.log('WebSocket closed, reconnecting...');
+        setWsConnected(false);
+        wsRef.current = null;
+        reconnectTimeoutRef.current = setTimeout(() => {
+          setupWebSocket(session_id);
+        }, 3000);
+      };
+    } catch (error) {
+      console.error('Failed to create WebSocket:', error);
+      setWsConnected(false);
+    }
+  }, [applyLogView, formatLogTimestamp, logVerbosity, logViewMode, pushTimelineEvent]);
 
   useEffect(() => {
     if (!sessionId) {
@@ -320,106 +426,7 @@ export default function SessionDetail() {
       }
       clearInterval(statusPollInterval);
     };
-  }, [sessionId, logVerbosity]);
-
-  const setupWebSocket = (session_id: number) => {
-    // Only connect if we have a token
-    const token = localStorage.getItem('access_token');
-    if (!token) {
-      console.warn('No access token found, cannot connect WebSocket');
-      return;
-    }
-
-    try {
-      wsRef.current = sessionsAPI.getLogsStream(session_id);
-      console.log('Attempting WebSocket connection:', wsRef.current.url);
-
-      wsRef.current.onopen = () => {
-        console.log('✅ WebSocket connected');
-        setWsConnected(true);
-      };
-
-      wsRef.current.onmessage = (event) => {
-        // Check if response is empty
-        if (!event.data || event.data.length === 0) {
-          return;
-        }
-        
-        // Check if it looks like HTML (error page)
-        if (event.data.trim().startsWith('<')) {
-          console.error('WebSocket received HTML instead of JSON:', event.data.substring(0, 100));
-          console.error('This usually means the WebSocket is connecting to the wrong port. Backend should be at :8080, not :3000');
-          return;
-        }
-        
-        // Check if it's a plain text message (like "ping")
-        if (event.data === 'ping' || event.data === 'pong') {
-          console.debug('Received plain text message:', event.data);
-          if (event.data === 'ping') {
-            wsRef.current?.send('pong');
-          }
-          return;
-        }
-        
-        try {
-          const data = JSON.parse(event.data);
-          
-          // Handle different message types
-          if (data.type === 'log') {
-            if (logVerbosity === 'clean' && isNoisyLogMessage(data.message)) {
-              return;
-            }
-            console.log('✅ Received log message:', data.message);
-            setAllLogs(prev => {
-              const next = [
-                ...prev.slice(-499),
-                {
-                  message: data.message,
-                  timestamp: formatLogTimestamp(data.timestamp),
-                },
-              ];
-              applyLogView(next, logViewMode);
-              return next;
-            });
-            pushTimelineEvent(data.message, data.level, data.timestamp);
-          } else if (data.type === 'ping') {
-            console.debug('Received ping, sending pong');
-            // Send pong in response
-            wsRef.current?.send(JSON.stringify({ type: 'pong' }));
-          } else if (data.type === 'pong') {
-            console.debug('Received pong');
-          } else if (data.type === 'connected') {
-            console.log('✅ WebSocket connected message received');
-          } else {
-            console.debug('WebSocket message received:', data);
-          }
-        } catch (e) {
-          console.warn('❌ Failed to parse WebSocket message:', e);
-          console.warn('Raw data:', event.data.substring(0, 200));
-          console.warn('Data type:', typeof event.data);
-          console.warn('Data length:', event.data?.length);
-        }
-      };
-
-      wsRef.current.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        setWsConnected(false);
-      };
-
-      wsRef.current.onclose = () => {
-        console.log('WebSocket closed, reconnecting...');
-        setWsConnected(false);
-        wsRef.current = null;
-        // Attempt reconnection after 3 seconds
-        reconnectTimeoutRef.current = setTimeout(() => {
-          setupWebSocket(session_id);
-        }, 3000);
-      };
-    } catch (error) {
-      console.error('Failed to create WebSocket:', error);
-      setWsConnected(false);
-    }
-  };
+  }, [applyLogView, classifyTimelineEvent, loadCheckpointCount, logVerbosity, logViewMode, session?.status, sessionId, setupWebSocket, toTerminalLogEntry, visibleLogs]);
 
   const handleStartSession = async () => {
     if (!session || !sessionId) {
@@ -446,10 +453,11 @@ export default function SessionDetail() {
       }
       pushTimelineEvent(`Session started with status: ${updated.data.status}`, 'INFO');
       alert(`Session ${session.name} started successfully!`);
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const apiError = error as ApiErrorLike;
       console.error('Failed to start session:', error);
-      console.error('Error details:', error.response?.data || error.message);
-      const errorMsg = error.response?.data?.detail || error.message || 'Unknown error';
+      console.error('Error details:', apiError.response?.data || apiError.message);
+      const errorMsg = apiError.response?.data?.detail || apiError.message || 'Unknown error';
       pushTimelineEvent(`Session start failed: ${errorMsg}`, 'ERROR');
       alert(`Failed to start session: ${errorMsg}`);
     }
@@ -490,9 +498,10 @@ export default function SessionDetail() {
       setAllLogs(terminalLogs);
       applyLogView(terminalLogs, logViewMode);
       console.log(`Refreshed ${terminalLogs.length} logs`);
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const apiError = error as ApiErrorLike;
       console.error('Failed to refresh logs:', error);
-      const errorMsg = error.response?.data?.detail || error.message || 'Unknown error';
+      const errorMsg = apiError.response?.data?.detail || apiError.message || 'Unknown error';
       alert(`Failed to refresh logs: ${errorMsg}`);
     }
   };

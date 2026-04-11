@@ -1,6 +1,6 @@
 import { cn } from '@/lib/utils';
 
-interface TextAreaProps extends React.TextareaHTMLAttributes<HTMLTextAreaElement> {}
+type TextAreaProps = React.TextareaHTMLAttributes<HTMLTextAreaElement>;
 
 export function TextArea({ className, ...props }: TextAreaProps) {
   return (
@@ -13,3 +13,4 @@ export function TextArea({ className, ...props }: TextAreaProps) {
     />
   );
 }
+

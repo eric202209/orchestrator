@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { tasksAPI } from '@/api/client';
 import type { Task } from '@/types/api';
@@ -13,21 +13,17 @@ import {
   XCircle as XCircleIcon,
   Calendar,
   AlertCircle,
-  Wand2,
   FileJson
 } from 'lucide-react';
 import { StatusBadge, LoadingSpinner, Button, TextArea, Alert } from '@/components/ui';
 import { cn } from '@/lib/utils';
 
-type TaskStatus = 'pending' | 'running' | 'done' | 'failed';
-
 function TaskDetail() {
-  const { projectId, taskId } = useParams<{ projectId: string; taskId: string }>();
+  const { taskId } = useParams<{ projectId: string; taskId: string }>();
   const navigate = useNavigate();
   const [task, setTask] = useState<Task | null>(null);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
-  const [generating, setGenerating] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [editForm, setEditForm] = useState({
     title: '',
@@ -36,11 +32,7 @@ function TaskDetail() {
     current_step: 0
   });
 
-  useEffect(() => {
-    fetchTask();
-  }, [projectId, taskId]);
-
-  const fetchTask = async () => {
+  const fetchTask = useCallback(async () => {
     try {
       const response = await tasksAPI.getById(Number(taskId));
       setTask(response.data);
@@ -57,21 +49,11 @@ function TaskDetail() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [taskId]);
 
-  const generateSteps = async () => {
-    setGenerating(true);
-    try {
-      // This would call an AI endpoint to generate steps
-      // For now, we'll show a message that this feature needs backend implementation
-      setSaveError('Step generation requires backend AI integration');
-    } catch (error) {
-      console.error('Failed to generate steps:', error);
-      setSaveError('Failed to generate steps');
-    } finally {
-      setGenerating(false);
-    }
-  };
+  useEffect(() => {
+    fetchTask();
+  }, [fetchTask]);
 
   const handleSave = async () => {
     try {
@@ -82,7 +64,7 @@ function TaskDetail() {
       if (editForm.steps.trim()) {
         try {
           stepsJson = JSON.stringify(JSON.parse(editForm.steps));
-        } catch (e) {
+        } catch {
           setSaveError('Invalid JSON format for steps. Please check your syntax.');
           return;
         }
@@ -355,3 +337,4 @@ function TaskDetail() {
 }
 
 export default TaskDetail;
+

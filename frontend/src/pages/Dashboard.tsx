@@ -1,11 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { projectsAPI, authAPI, tasksAPI, sessionsAPI } from '../api/client';
 import type { Project, User, Task, Session } from '../types/api';
 import { 
   GitBranch, 
   LogOut, 
-  Plus, 
   Activity, 
   CheckCircle2,
   FileText,

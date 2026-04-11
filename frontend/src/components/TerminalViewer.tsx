@@ -22,7 +22,6 @@ export function TerminalViewer({
 }: TerminalViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [showScrollIndicator, setShowScrollIndicator] = useState(false);
-  const [isAtBottom, setIsAtBottom] = useState(true);
 
   // Handle scroll detection
   useEffect(() => {
@@ -35,7 +34,6 @@ export function TerminalViewer({
       const clientHeight = container.clientHeight;
       
       const isAtBottomPos = scrollHeight - scrollTop <= clientHeight + 10;
-      setIsAtBottom(isAtBottomPos);
       setShowScrollIndicator(!isAtBottomPos && logs.length > 0);
     };
 
@@ -189,3 +187,4 @@ export function TerminalViewer({
 }
 
 export default TerminalViewer;
+

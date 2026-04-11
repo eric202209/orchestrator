@@ -1,4 +1,10 @@
 [flake8]
 max-line-length = 120
 ignore = E501, W503, F401, F841, E402, F541, E722, F821, F823, E203
-exclude = venv, .git, __pycache__, build, dist
+exclude =
+    .git,
+    __pycache__,
+    .venv,
+    venv,
+    frontend/node_modules,
+    frontend/dist

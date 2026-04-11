@@ -82,7 +82,7 @@ class LogStreamService:
             )
             session_id_list = [s[0] for s in session_ids]
             query = query.filter(LogEntry.session_id.in_(session_id_list))
-            
+
             # Also join to filter by session instance ID to prevent ID reuse issues
             query = query.join(SessionModel, LogEntry.session_id == SessionModel.id)
             query = query.filter(
@@ -392,7 +392,7 @@ def stream_logs(
             )
             session_id_list = [s[0] for s in session_ids]
             query = query.filter(LogEntry.session_id.in_(session_id_list))
-            
+
             # Also join to filter by session instance ID to prevent ID reuse issues
             query = query.join(SessionModel, LogEntry.session_id == SessionModel.id)
             query = query.filter(
