@@ -920,6 +920,7 @@ async def websocket_session_status(
         status_task.cancel()
         heartbeat_task.cancel()
 
+
 @router.get("/sessions/{session_id}/tools")
 def get_tool_execution_history(
     session_id: int,
