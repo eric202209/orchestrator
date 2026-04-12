@@ -135,15 +135,29 @@ openclaw gateway call device.pair.approve --params '{"requestId":"<id>"}' --json
 | Project                                                    | Description                                       |
 |------------------------------------------------------------|---------------------------------------------------|
 | [OpenClaw](https://github.com/openclaw/openclaw)           | AI Agent framework                                |
-| [ClawApp](https://github.com/qingchencloud/clawapp)        | H5 + PWA mobile client                            |
-| [ClawBridge](https://github.com/dreamwing/clawbridge)      | OpenClaw mobile dashboard                         |
-| [ClawPanel](https://github.com/qingchencloud/clawpanel)    | Desktop management panel                          |
 | [orchestrator](https://github.com/henrycode03/orchestrator) | Automating software projects with OpenClaw agents |
+
 ## Privacy
 
 - All messages stored locally on device via Room
 - No analytics, no cloud sync, no third-party SDKs
 - Only outbound connection is to your own OpenClaw server
+
+## Star History
+
+Consider giving it a star — it helps others discover the project and keeps us motivated!
+
+<p align="center">
+  <a href="https://github.com/eric202209/clawmobile/stargazers">
+    <img src="https://img.shields.io/github/stars/eric202209/clawmobile?style=for-the-badge&logo=github&color=yellow" alt="GitHub Stars" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://star-history.com/#eric202209/clawmobile&Date">
+    <img src="https://api.star-history.com/svg?repos=eric202209/clawmobile&type=Date" width="600" alt="Star History Chart" />
+  </a>
+</p>
 
 ## License
 
