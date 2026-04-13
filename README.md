@@ -2,6 +2,13 @@
 
 Orchestrator is a control plane for running and tracking OpenClaw-driven development work. It gives you a web dashboard, task and session lifecycle management, real-time logs, and a mobile-friendly status layer that ClawMobile can query through OpenClaw.
 
+[![Release](https://img.shields.io/github/v/release/henrycode03/orchestrator?style=flat-square&label=release&color=555555)](https://github.com/henrycode03/orchestrator/releases)
+[![Downloads](https://img.shields.io/github/downloads/henrycode03/orchestrator/total?style=flat-square&label=downloads&color=4c9be8)](https://github.com/henrycode03/orchestrator/releases)
+[![License](https://img.shields.io/github/license/henrycode03/orchestrator?style=flat-square&color=blue)](https://github.com/henrycode03/orchestrator/blob/main/LICENSE)
+[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20android%20%7C%20web-1f6feb?style=flat-square)](#)
+
+---
+
 ## What It Does
 
 - Manage projects, tasks, and OpenClaw-backed work sessions in one place
@@ -9,6 +16,8 @@ Orchestrator is a control plane for running and tracking OpenClaw-driven develop
 - Stream logs and status updates in real time
 - Track tool usage, checkpoints, and execution history
 - Expose a small mobile API for status queries through OpenClaw
+
+---
 
 ## Why Use It With ClawMobile
 
@@ -27,6 +36,7 @@ Architecture:
 ClawMobile -> OpenClaw -> Orchestrator mobile endpoints
                           -> Web dashboard for full control
 ```
+---
 
 ## Core Concepts
 
@@ -34,6 +44,8 @@ ClawMobile -> OpenClaw -> Orchestrator mobile endpoints
 - `Task`: a unit of planned work inside a project
 - `Session`: an active or historical OpenClaw execution context for that project
 - `Checkpoint`: saved session state used for pause/resume flows
+
+---
 
 ## Prerequisites
 
@@ -47,6 +59,8 @@ Important OpenClaw port note:
 
 - `8000` = OpenClaw gateway
 - `8001` = LLM server only, not the Orchestrator integration target
+
+---
 
 ## First-Time Setup
 
@@ -77,6 +91,8 @@ cp .env.example .env
 - create `orchestrator.db` if missing
 - start backend, workers, and frontend
 
+---
+
 ## Quick Start
 
 If your environment is already prepared and you just want to restart the stack:
@@ -98,6 +114,8 @@ Default URLs:
 - API: `http://localhost:8080`
 - API docs: `http://localhost:8080/docs`
 
+---
+
 ## Typical Usage
 
 1. Open the dashboard.
@@ -112,6 +130,8 @@ Common workflows:
 - Run an OpenClaw session for one task or a broader development goal
 - Monitor progress from desktop in the dashboard
 - Check health or summaries from mobile through OpenClaw
+
+---
 
 ## Environment Variables
 
@@ -133,6 +153,8 @@ Optional:
 - `GITHUB_WEBHOOK_SECRET`
 - `OPENCLAW_CLI_PATH`
 - `OPENCLAW_CLI_ARGS`
+
+---
 
 ## Mobile and OpenClaw Integration
 
@@ -157,6 +179,8 @@ Available mobile endpoints:
 - `GET /api/v1/mobile/projects/{project_id}/tasks`
 - `GET /api/v1/mobile/sessions`
 - `GET /api/v1/mobile/sessions/{session_id}/summary`
+
+---
 
 ## Helper Script for OpenClaw
 
@@ -220,6 +244,8 @@ For a host-based or Tailscale-accessible deployment:
   - `http://gx10.tailnet-name:8080`
   - `http://100.x.y.z:8080`
 
+---
+
 ## OpenClaw Instruction
 
 Use this on the OpenClaw side when the goal is to answer mobile status questions accurately:
@@ -253,6 +279,8 @@ Command mapping:
   ./scripts/orchestrator-mobile-api.sh project-tasks <project_id>
 ```
 
+---
+
 ## Main API Areas
 
 - Auth: register, login, refresh, current user
@@ -263,6 +291,8 @@ Command mapping:
 Interactive docs:
 
 - `http://localhost:8080/docs`
+
+---
 
 ## Project Layout
 
@@ -276,6 +306,8 @@ orchestrator/
 └── start.sh            Main startup script
 ```
 
+---
+
 ## Useful Scripts
 
 - `cp .env.example .env` - create a local environment file
@@ -285,6 +317,8 @@ orchestrator/
 - `./scripts/security_check.sh` - run security checks
 - `./scripts/sync-logs.sh` - sync logs into the project log directory
 - `./scripts/cleanup-logs.sh` - clean up old logs
+
+---
 
 ## Runtime Files You Can Ignore
 
@@ -299,6 +333,8 @@ These are normal local/runtime artifacts and should be created or updated automa
 - `checkpoints/`
 
 They are not part of normal source control workflow.
+
+---
 
 ## Troubleshooting
 
@@ -320,10 +356,30 @@ They are not part of normal source control workflow.
 - New machine setup feels broken
   Make sure you copied `.env.example` to `.env`, then use `./start_all.sh` instead of `./start.sh` for the first run.
 
+---
+
 ## Summary
 
 Use Orchestrator when you want OpenClaw work to be observable and manageable instead of opaque. Use it with ClawMobile when you want fast mobile status access without giving up the richer desktop control surface.
 
 ---
 
-**Last updated: 2026-04-12**
+## Star History
+
+Consider giving it a star — it helps others discover the project and keeps us motivated!
+
+<p align="center">
+  <a href="https://github.com/eric202209/orchestrator/stargazers">
+    <img src="https://img.shields.io/github/stars/eric202209/orchestrator?style=for-the-badge&logo=github&color=yellow" alt="GitHub Stars" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://star-history.com/#eric202209/orchestrator&Date">
+    <img src="https://api.star-history.com/svg?repos=eric202209/orchestrator&type=Date" width="600" alt="Star History Chart" />
+  </a>
+</p>
+
+---
+
+**Last updated: 2026-04-13**
