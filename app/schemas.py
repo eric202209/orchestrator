@@ -221,6 +221,40 @@ class DeviceUnpairResponse(BaseModel):
     message: str
 
 
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class ProfileUpdateRequest(BaseModel):
+    name: Optional[str] = None
+
+
+class SystemSettingsUpdateRequest(BaseModel):
+    workspace_root: Optional[str] = None
+    mobile_api_key: Optional[str] = None
+    rotate_mobile_api_key: bool = False
+
+
+class AccountSettingsResponse(BaseModel):
+    email: EmailStr
+    name: Optional[str] = None
+
+
+class SystemSettingsResponse(BaseModel):
+    workspace_root: str
+    mobile_base_url: str
+    mobile_api_key_configured: bool
+    mobile_api_key_preview: Optional[str] = None
+    mobile_api_key_source: Optional[str] = None
+    openclaw_gateway_url: str
+
+
+class AppSettingsResponse(BaseModel):
+    account: AccountSettingsResponse
+    system: SystemSettingsResponse
+
+
 class VerifySignatureRequest(BaseModel):
     message: str
     signature: str

@@ -139,26 +139,61 @@ def update_project(
 @router.delete("/projects/{project_id}")
 def delete_project(project_id: int, db: Session = Depends(get_db)):
     """Delete a project (soft delete to prevent ID reuse issues)"""
-    from app.models import Session, LogEntry
-    from app.schemas import ProjectResponse
+    from app.models import Session, TaskCheckpoint
+    from app.services.checkpoint_service import CheckpointService
 
     db_project = db.query(Project).filter(Project.id == project_id).first()
     if not db_project:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    session_ids = [
+        session_id
+        for (session_id,) in db.query(SessionModel.id)
+        .filter(SessionModel.project_id == project_id)
+        .all()
+    ]
+    task_ids = [
+        task_id
+        for (task_id,) in db.query(Task.id).filter(Task.project_id == project_id).all()
+    ]
+
     # Soft delete: mark as deleted instead of hard delete
     # This prevents database ID reuse issues that cause stale logs
     db_project.deleted_at = datetime.now(timezone.utc)
-    db.commit()
 
     # Also soft delete all sessions for this project
-    deleted_sessions = db.query(Session).filter(
+    db.query(Session).filter(
         Session.project_id == project_id
     ).update({
         "deleted_at": datetime.now(timezone.utc),
         "is_active": False,
         "status": "deleted"
     })
+
+    if session_ids:
+        checkpoint_service = CheckpointService(db)
+        for session_id in session_ids:
+            checkpoint_service.delete_all_checkpoints(session_id)
+
+        db.query(LogEntry).filter(
+            LogEntry.session_id.in_(session_ids)
+        ).delete(synchronize_session=False)
+        db.query(SessionTask).filter(
+            SessionTask.session_id.in_(session_ids)
+        ).delete(synchronize_session=False)
+        db.query(TaskCheckpoint).filter(
+            TaskCheckpoint.session_id.in_(session_ids)
+        ).delete(synchronize_session=False)
+
+    if task_ids:
+        db.query(LogEntry).filter(LogEntry.task_id.in_(task_ids)).delete(
+            synchronize_session=False
+        )
+        db.query(TaskCheckpoint).filter(TaskCheckpoint.task_id.in_(task_ids)).delete(
+            synchronize_session=False
+        )
+        db.query(Task).filter(Task.id.in_(task_ids)).delete(synchronize_session=False)
+
     db.commit()
 
-    return {"message": "Project and associated sessions deleted successfully"}
+    return {"message": "Project and associated artifacts deleted successfully"}

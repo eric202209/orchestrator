@@ -10,6 +10,7 @@ PROJECT_ROOT="${SCRIPT_DIR}"
 FRONTEND_DIR="${PROJECT_ROOT}/frontend"
 VENV_DIR="${PROJECT_ROOT}/venv"
 LOG_DIR="${PROJECT_ROOT}/logs"
+PID_DIR="${PROJECT_ROOT}/run"
 
 echo "🚀 Starting Orchestrator Network..."
 echo ""
@@ -23,6 +24,8 @@ NC='\033[0m' # No Color
 
 # Localhost alias (from .env, default to localhost)
 LOCALHOST=${LOCALHOST:-localhost}
+BACKEND_HOST=${BACKEND_HOST:-0.0.0.0}
+BACKEND_PORT=${BACKEND_PORT:-8080}
 
 load_env() {
     local env_file="${PROJECT_ROOT}/.env"
@@ -46,9 +49,23 @@ load_env() {
 
 prepare_logs() {
     mkdir -p "${LOG_DIR}"
+    mkdir -p "${PID_DIR}"
     : > "${LOG_DIR}/backend.log"
     : > "${LOG_DIR}/worker.log"
     : > "${LOG_DIR}/frontend.log"
+}
+
+cleanup_pid_file() {
+    local pid_file="$1"
+    [ -f "${pid_file}" ] || return 0
+
+    local pid
+    pid="$(cat "${pid_file}" 2>/dev/null || true)"
+    if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+        return 0
+    fi
+
+    rm -f "${pid_file}"
 }
 
 ensure_venv() {
@@ -95,7 +112,7 @@ check_process() {
     # Map service names to ports
     case "$name" in
         "uvicorn app.main:app")
-            port=8080
+            port="${BACKEND_PORT}"
             ;;
         "celery -A app.celery_app worker")
             # Workers don't have a specific port, fall back to pgrep
@@ -146,20 +163,38 @@ check_process() {
 # Function to stop existing processes
 stop_existing() {
     echo -e "${YELLOW}⚠️  Stopping existing processes...${NC}"
-    
+    cleanup_pid_file "${PID_DIR}/backend.pid"
+    cleanup_pid_file "${PID_DIR}/worker.pid"
+    cleanup_pid_file "${PID_DIR}/frontend.pid"
+
     # Stop backend
-    if check_process "uvicorn app.main:app"; then
-        pkill -f "uvicorn app.main:app"
+    if [ -f "${PID_DIR}/backend.pid" ]; then
+        kill "$(cat "${PID_DIR}/backend.pid")" 2>/dev/null || true
+        rm -f "${PID_DIR}/backend.pid"
         echo -e "${GREEN}✅ Backend stopped${NC}"
     fi
-    
+    if check_process "uvicorn app.main:app"; then
+        pkill -f "uvicorn app.main:app" || true
+        echo -e "${GREEN}✅ Backend stopped${NC}"
+    fi
+
     # Stop workers
+    if [ -f "${PID_DIR}/worker.pid" ]; then
+        kill "$(cat "${PID_DIR}/worker.pid")" 2>/dev/null || true
+        rm -f "${PID_DIR}/worker.pid"
+        echo -e "${GREEN}✅ Workers stopped${NC}"
+    fi
     if check_process "celery -A app.celery_app worker"; then
         pkill -f "celery -A app.celery_app worker" || true
         echo -e "${GREEN}✅ Workers stopped${NC}"
     fi
-    
+
     # Stop frontend
+    if [ -f "${PID_DIR}/frontend.pid" ]; then
+        kill "$(cat "${PID_DIR}/frontend.pid")" 2>/dev/null || true
+        rm -f "${PID_DIR}/frontend.pid"
+        echo -e "${GREEN}✅ Frontend stopped${NC}"
+    fi
     if check_process "vite"; then
         pkill -f "vite" || true
         pkill -f "pnpm dev" || true
@@ -205,28 +240,36 @@ start_backend() {
     
     # Start backend in background with comprehensive timeout configuration
     # LOGS DIRECTIVE: Write directly to logs/ directory (not /tmp/) for history preservation
+    cleanup_pid_file "${PID_DIR}/backend.pid"
     nohup "${VENV_DIR}/bin/uvicorn" app.main:app \
-        --host 127.0.0.1 \
-        --port 8080 \
+        --host "${BACKEND_HOST}" \
+        --port "${BACKEND_PORT}" \
         --timeout-keep-alive 5 \
         --proxy-headers \
         --forwarded-allow-ips "*" \
         --access-log \
         >> "${LOG_DIR}/backend.log" 2>&1 &
+    local backend_pid=$!
+    echo "${backend_pid}" > "${PID_DIR}/backend.pid"
     
     local backend_ok=false
-    for _ in {1..10}; do
-        sleep 1
-        if curl -fsS "http://127.0.0.1:8080/health" > /dev/null 2>&1; then
+    for _ in {1..15}; do
+        if ! kill -0 "${backend_pid}" 2>/dev/null; then
+            break
+        fi
+        if curl -fsS "http://127.0.0.1:${BACKEND_PORT}/health" > /dev/null 2>&1; then
             backend_ok=true
             break
         fi
+        sleep 1
     done
 
     if [ "${backend_ok}" = true ]; then
-        echo -e "${GREEN}✅ Backend started on port 8080${NC}"
+        echo -e "${GREEN}✅ Backend started on ${BACKEND_HOST}:${BACKEND_PORT}${NC}"
+        echo -e "${GREEN}🆔 Backend PID: ${backend_pid}${NC}"
         echo -e "${GREEN}📝 Backend logs: tail -f logs/backend.log${NC}"
     else
+        rm -f "${PID_DIR}/backend.pid"
         echo -e "${RED}❌ Backend failed to start!${NC}"
         echo -e "${YELLOW}Check logs: cat logs/backend.log${NC}"
         return 1
@@ -252,18 +295,33 @@ start_workers() {
     
     # Start worker in background
     # LOGS DIRECTIVE: Write directly to logs/ directory (not /tmp/) for history preservation
+    cleanup_pid_file "${PID_DIR}/worker.pid"
     nohup "${VENV_DIR}/bin/celery" \
         -A app.celery_app worker \
         --loglevel=info \
         >> "${LOG_DIR}/worker.log" 2>&1 &
+    local worker_pid=$!
+    echo "${worker_pid}" > "${PID_DIR}/worker.pid"
+
+    local worker_ok=false
+    for _ in {1..20}; do
+        if ! kill -0 "${worker_pid}" 2>/dev/null; then
+            break
+        fi
+        if grep -q "ready" "${LOG_DIR}/worker.log" 2>/dev/null; then
+            worker_ok=true
+            break
+        fi
+        sleep 1
+    done
     
-    sleep 5
-    
-    if check_process "celery -A app.celery_app worker"; then
+    if [ "${worker_ok}" = true ] || check_process "celery -A app.celery_app worker"; then
         echo -e "${GREEN}✅ Celery worker started${NC}"
+        echo -e "${GREEN}🆔 Worker PID: ${worker_pid}${NC}"
         echo -e "${GREEN}📝 Worker logs: tail -f logs/worker.log${NC}"
     else
-         echo -e "${RED}❌ Worker failed to start!${NC}"
+        rm -f "${PID_DIR}/worker.pid"
+        echo -e "${RED}❌ Worker failed to start!${NC}"
         echo -e "${YELLOW}Check logs: cat logs/worker.log${NC}"
         return 1
     fi
@@ -278,16 +336,30 @@ start_frontend() {
     
     # Kill any existing frontend
     if check_process "vite"; then
-        pkill -f "vite"
+        pkill -f "vite" || true
+        pkill -f "pnpm dev" || true
         sleep 1
+    fi
+
+    if check_process "vite"; then
+        echo -e "${RED}❌ Port 3000 is still occupied after stopping existing frontend processes.${NC}"
+        echo -e "${YELLOW}Run: pgrep -af 'vite|pnpm dev'${NC}"
+        echo -e "${YELLOW}Then stop the stale process before retrying.${NC}"
+        return 1
     fi
     
     # Start frontend in background
     # LOGS DIRECTIVE: Write directly to logs/ directory (not /tmp/) for history preservation
+    cleanup_pid_file "${PID_DIR}/frontend.pid"
     nohup pnpm dev >> "${LOG_DIR}/frontend.log" 2>&1 &
+    local frontend_pid=$!
+    echo "${frontend_pid}" > "${PID_DIR}/frontend.pid"
     
     local frontend_ok=false
     for _ in {1..15}; do
+        if ! kill -0 "${frontend_pid}" 2>/dev/null; then
+            break
+        fi
         sleep 1
         if curl -fsS "http://127.0.0.1:3000" > /dev/null 2>&1; then
             frontend_ok=true
@@ -297,8 +369,10 @@ start_frontend() {
 
     if [ "${frontend_ok}" = true ]; then
         echo -e "${GREEN}✅ Frontend started on port 3000${NC}"
+        echo -e "${GREEN}🆔 Frontend PID: ${frontend_pid}${NC}"
         echo -e "${GREEN}📝 Frontend logs: tail -f logs/frontend.log${NC}"
     else
+        rm -f "${PID_DIR}/frontend.pid"
         echo -e "${RED}❌ Frontend failed to start!${NC}"
         echo -e "${YELLOW}Check logs: cat logs/frontend.log${NC}${NC}"
         return 1
@@ -315,7 +389,7 @@ check_health() {
     local success=true
     
     # Check backend
-    if curl -s http://localhost:8080/health > /dev/null 2>&1; then
+    if curl -s "http://127.0.0.1:${BACKEND_PORT}/health" > /dev/null 2>&1; then
         echo -e "${GREEN}✅ Backend is healthy${NC}"
     else
         echo -e "${RED}❌ Backend is not responding${NC}"
@@ -387,8 +461,8 @@ main() {
     echo "========================================"
     echo ""
     echo "📱 Frontend Dashboard: http://localhost:3000"
-    echo "🔧 Backend API: http://localhost:8080"
-    echo "📚 API Docs: http://localhost:8080/docs"
+    echo "🔧 Backend API: http://${LOCALHOST}:${BACKEND_PORT}"
+    echo "📚 API Docs: http://${LOCALHOST}:${BACKEND_PORT}/docs"
     echo "🐘 Redis: localhost:6379"
     echo ""
     echo "📝 View logs (permanent storage):"
@@ -405,3 +479,4 @@ main() {
 
 # Run main function
 main
+

@@ -10,6 +10,7 @@ from app.api.v1.endpoints import (
     users,
     mobile,
     resume,
+    settings,
 )
 from app.api.v1.endpoints import isolation, permissions, context
 from app.api.v1.endpoints.project_logs import router as project_logs_router
@@ -49,6 +50,11 @@ api_router.include_router(
 api_router.include_router(
     users.router,
     tags=["users"],
+)
+
+api_router.include_router(
+    settings.router,
+    tags=["settings"],
 )
 
 # Add other routers
@@ -102,6 +108,7 @@ api_router.include_router(
 
 # Mobile API — clawmobile integration via OpenClaw Gateway
 api_router.include_router(mobile.router, tags=["mobile"])
+api_router.include_router(mobile.admin_router, tags=["mobile-admin"])
 
 # Resume Operations (pause, resume, retry steps)
 api_router.include_router(

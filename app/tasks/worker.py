@@ -166,6 +166,56 @@ def _get_latest_session_task_link(
     )
 
 
+def _build_task_report_payload(db: Session, task_id: int) -> Dict[str, Any]:
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise ValueError(f"Task {task_id} not found")
+
+    logs = (
+        db.query(LogEntry)
+        .filter(LogEntry.task_id == task_id)
+        .order_by(LogEntry.created_at)
+        .all()
+    )
+
+    return {
+        "task_id": task.id,
+        "title": task.title,
+        "status": task.status.value,
+        "created_at": task.created_at.isoformat(),
+        "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+        "duration_seconds": (
+            (task.completed_at - task.started_at).total_seconds()
+            if task.started_at and task.completed_at
+            else None
+        ),
+        "logs": [
+            {
+                "level": log.level,
+                "message": log.message,
+                "timestamp": log.created_at.isoformat(),
+            }
+            for log in logs
+        ],
+    }
+
+
+def _render_task_report(
+    report: Dict[str, Any], output_format: str = "json"
+) -> Dict[str, Any]:
+    if output_format == "markdown":
+        report_text = f"# Task Report: {report['title']}\n\n"
+        report_text += f"**Status:** {report['status']}\n\n"
+        report_text += f"**Duration:** {report['duration_seconds']} seconds\n\n"
+        report_text += "## Logs\n\n"
+        for log in report["logs"]:
+            report_text += f"- [{log['level']}] {log['message']}\n"
+
+        return {"report": report_text, "format": "markdown"}
+
+    return {"report": report, "format": output_format}
+
+
 def _extract_plan_steps(parsed_planning_output: Any) -> Optional[List[Dict[str, Any]]]:
     """Accept common planning response wrappers and return the step list."""
 
@@ -529,6 +579,10 @@ def execute_openclaw_task(
         context: Additional context
     """
     db = get_db_session()
+    session: Optional[SessionModel] = None
+    task: Optional[Task] = None
+    orchestration_state: Optional[OrchestrationState] = None
+    session_task_link: Optional[SessionTask] = None
 
     try:
         # Get session and task
@@ -1274,7 +1328,10 @@ def execute_openclaw_task(
 
         # Generate and save task report
         try:
-            report_result = self.generate_task_report(task_id, format="markdown")
+            report_payload = _build_task_report_payload(db, task_id)
+            report_result = _render_task_report(
+                report_payload, output_format="markdown"
+            )
             if report_result and "report" in report_result:
                 report_content = report_result["report"]
                 report_filename = f"task_report_{task_id}.md"
@@ -1306,22 +1363,27 @@ def execute_openclaw_task(
         is_timeout = "time limit" in str(exc).lower() or "timeout" in str(exc).lower()
 
         # Update task failure with enhanced error information
-        task.status = TaskStatus.FAILED
-        task.error_message = str(exc)
-        task.completed_at = datetime.utcnow()
-        session_task_link = _get_latest_session_task_link(db, session_id, task_id)
-        if session_task_link:
+        if task:
+            task.status = TaskStatus.FAILED
+            task.error_message = str(exc)
+            task.completed_at = datetime.utcnow()
+
+        if not session_task_link:
+            session_task_link = _get_latest_session_task_link(db, session_id, task_id)
+        if session_task_link and task:
             session_task_link.status = TaskStatus.FAILED
             session_task_link.completed_at = task.completed_at
 
         # Add diagnostic information
         error_str = str(exc).lower()
         if "json" in error_str or "parse" in error_str:
-            task.error_message += "\nDiagnosis: JSON parsing error detected"
-            task.error_message += "\nSuggested fix: Check AI agent response format"
+            if task:
+                task.error_message += "\nDiagnosis: JSON parsing error detected"
+                task.error_message += "\nSuggested fix: Check AI agent response format"
         elif "empty" in error_str:
-            task.error_message += "\nDiagnosis: Empty response from AI agent"
-            task.error_message += "\nSuggested fix: Retry with more specific prompt"
+            if task:
+                task.error_message += "\nDiagnosis: Empty response from AI agent"
+                task.error_message += "\nSuggested fix: Retry with more specific prompt"
 
         # Update session status to stopped when task fails
         if session:
@@ -1330,29 +1392,31 @@ def execute_openclaw_task(
             session.completed_at = datetime.utcnow()
 
         if is_timeout:
-            task.error_message += " (Task timed out after 5 minutes)"
-            task.error_message += "\nSuggested fix: Break task into smaller steps"
+            if task:
+                task.error_message += " (Task timed out after 5 minutes)"
+                task.error_message += "\nSuggested fix: Break task into smaller steps"
 
         try:
-            orchestration_state.status = OrchestrationStatus.ABORTED
-            orchestration_state.abort_reason = str(exc)
-            _save_orchestration_checkpoint(
-                db,
-                session_id,
-                task_id,
-                prompt,
-                orchestration_state,
-                checkpoint_name="autosave_error",
-            )
-            _record_live_log(
-                db,
-                session_id,
-                task_id,
-                "WARN",
-                "[CHECKPOINT] Error checkpoint saved for resume",
-                session_instance_id=session.instance_id if session else None,
-                metadata={"checkpoint_name": "autosave_error"},
-            )
+            if orchestration_state:
+                orchestration_state.status = OrchestrationStatus.ABORTED
+                orchestration_state.abort_reason = str(exc)
+                _save_orchestration_checkpoint(
+                    db,
+                    session_id,
+                    task_id,
+                    prompt,
+                    orchestration_state,
+                    checkpoint_name="autosave_error",
+                )
+                _record_live_log(
+                    db,
+                    session_id,
+                    task_id,
+                    "WARN",
+                    "[CHECKPOINT] Error checkpoint saved for resume",
+                    session_instance_id=session.instance_id if session else None,
+                    metadata={"checkpoint_name": "autosave_error"},
+                )
         except Exception as checkpoint_error:
             logger.error(
                 "[CHECKPOINT] Failed to save error checkpoint for task %s: %s",
@@ -1548,58 +1612,11 @@ def generate_task_report(self, task_id: int, output_format: str = "json"):
     """
     try:
         db = get_db_session()
-
-        task = db.query(Task).filter(Task.id == task_id).first()
-        if not task:
-            raise ValueError(f"Task {task_id} not found")
-
-        # Get session logs
-        logs = (
-            db.query(LogEntry)
-            .filter(LogEntry.task_id == task_id)
-            .order_by(LogEntry.created_at)
-            .all()
-        )
-
-        # Build report
-        report = {
-            "task_id": task.id,
-            "title": task.title,
-            "status": task.status.value,
-            "created_at": task.created_at.isoformat(),
-            "completed_at": (
-                task.completed_at.isoformat() if task.completed_at else None
-            ),
-            "duration_seconds": (
-                (task.completed_at - task.started_at).total_seconds()
-                if task.started_at and task.completed_at
-                else None
-            ),
-            "logs": [
-                {
-                    "level": log.level,
-                    "message": log.message,
-                    "timestamp": log.created_at.isoformat(),
-                }
-                for log in logs
-            ],
-        }
-
-        db.close()
-
-        if output_format == "markdown":
-            # Convert to markdown
-            report_text = f"# Task Report: {task.title}\n\n"
-            report_text += f"**Status:** {task.status.value}\n\n"
-            report_text += f"**Duration:** {report['duration_seconds']} seconds\n\n"
-            report_text += "## Logs\n\n"
-            for log in report["logs"]:
-                report_text += f"- [{log['level']}] {log['message']}\n"
-
-            return {"report": report_text, "format": "markdown"}
-
-        return {"report": report, "format": format}
+        report = _build_task_report_payload(db, task_id)
+        return _render_task_report(report, output_format=output_format)
 
     except Exception as exc:
         logger.error(f"Report generation failed: {str(exc)}")
         raise self.retry(exc=exc, max_retries=3)
+    finally:
+        db.close()

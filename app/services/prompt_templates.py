@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from enum import Enum
+from app.services.system_settings import get_effective_workspace_root
 
 # ---------------------------------------------------------------------------
 # Workspace constants
@@ -105,7 +106,7 @@ class OrchestrationState:
     @property
     def workspace_root(self) -> Path:
         """Absolute path to ~/.openclaw/workspace/vault/projects/ (or $OPENCLAW_WORKSPACE)."""
-        return OPENCLAW_WORKSPACE_ROOT
+        return get_effective_workspace_root()
 
     def _slugify(self, text: str) -> str:
         """
@@ -784,7 +785,7 @@ Examples:
         Returns:
             Planning prompt string ready for LLM call.
         """
-        ws_root = workspace_root or str(OPENCLAW_WORKSPACE_ROOT)
+        ws_root = workspace_root or str(get_effective_workspace_root())
 
         # Create a slug from project context (remove spaces, special chars)
         import re
@@ -881,7 +882,7 @@ Examples:
         Returns:
             Debugging prompt string ready for LLM call.
         """
-        ws_root = workspace_root or str(OPENCLAW_WORKSPACE_ROOT)
+        ws_root = workspace_root or str(get_effective_workspace_root())
         prior_attempts_text = (
             "\n".join(
                 f"Attempt {a['attempt']}: {a['error']}"
@@ -1007,7 +1008,7 @@ Examples:
             "failed_steps": failed_steps_text,
             "debug_analysis_truncated": truncated_debug_analysis,
             "completed_steps": completed_steps_text,
-            "workspace_root": workspace_root or str(OPENCLAW_WORKSPACE_ROOT),
+            "workspace_root": workspace_root or str(get_effective_workspace_root()),
             "project_dir": project_dir or "Current task workspace",
         }
 

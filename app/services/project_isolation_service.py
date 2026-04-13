@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from sqlalchemy.orm import Session
 from app.models import Project, LogEntry
-from app.services.prompt_templates import OPENCLAW_WORKSPACE_ROOT
+from app.services.system_settings import get_effective_workspace_root
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,8 @@ def normalize_project_workspace_path(
     if not raw:
         return _slugify_workspace_name(project_name or "")
 
-    root_str = str(OPENCLAW_WORKSPACE_ROOT)
+    workspace_root = get_effective_workspace_root()
+    root_str = str(workspace_root)
     if raw.startswith(root_str):
         raw = raw[len(root_str) :].lstrip("/")
     elif raw.startswith("/"):
@@ -52,7 +53,7 @@ def resolve_project_workspace_path(
     workspace_path: Optional[str], project_name: Optional[str] = None
 ) -> Path:
     relative = normalize_project_workspace_path(workspace_path, project_name)
-    return (OPENCLAW_WORKSPACE_ROOT / relative).resolve()
+    return (get_effective_workspace_root() / relative).resolve()
 
 
 class ProjectIsolationError(Exception):

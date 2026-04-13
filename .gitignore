@@ -83,3 +83,9 @@ config/*.conf
 config/*.ini
 config/*.cfg
 config/README.md
+
+# Run
+run/
+backend.pid
+frontend.pid
+worker.pid

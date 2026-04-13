@@ -177,6 +177,7 @@ function Dashboard() {
     activeTasks: tasks.filter(t => t.status === 'running').length,
     completedTasks: tasks.filter(t => t.status === 'done').length,
   };
+  const accountLabel = user?.name?.trim() || user?.email || '';
 
   return (
     <div className="min-h-screen bg-slate-900">
@@ -190,8 +191,8 @@ function Dashboard() {
             </div>
             
             <div className="flex items-center gap-4">
-              {user && (
-                <span className="text-sm text-slate-400">{user.email}</span>
+              {accountLabel && (
+                <span className="text-sm text-slate-400">{accountLabel}</span>
               )}
               <button
                 onClick={handleLogout}

@@ -13,6 +13,7 @@ import TasksList from '@/pages/TasksList';
 import TaskDetail from '@/pages/TaskDetail';
 import Login from '@/pages/Login';
 import Register from '@/pages/Register';
+import SettingsPage from '@/pages/SettingsPage';
 
 function App() {
   return (
@@ -32,6 +33,7 @@ function App() {
               <Route path="sessions/:sessionId" element={<SessionDetail />} />
               <Route path="tasks" element={<TasksList />} />
               <Route path="projects/:projectId/tasks/:taskId" element={<TaskDetail />} />
+              <Route path="settings" element={<SettingsPage />} />
             </Route>
           </Routes>
         </BrowserRouter>

@@ -268,28 +268,81 @@ class CheckpointService:
             True if deleted successfully
         """
         try:
-            checkpoint_path = self._get_checkpoint_path(session_id, checkpoint_name)
+            deleted = False
 
-            if not os.path.exists(checkpoint_path):
-                return False
+            for checkpoint_root in self._candidate_checkpoint_roots():
+                candidate = checkpoint_root / f"session_{session_id}_{checkpoint_name}.json"
+                if candidate.exists():
+                    os.remove(candidate)
+                    deleted = True
 
-            os.remove(checkpoint_path)
-            self._log_checkpoint(
-                session_id, "INFO", f"Checkpoint deleted: {checkpoint_name}"
-            )
+            session_dir = Path(self._get_session_checkpoint_dir(session_id))
+            if session_dir.exists():
+                for candidate in session_dir.glob("*.json"):
+                    try:
+                        with open(candidate, "r") as f:
+                            data = json.load(f)
+                        candidate_name = data.get(
+                            "checkpoint_name", candidate.stem.replace(".json", "")
+                        )
+                    except Exception:
+                        candidate_name = candidate.stem
 
-            # Cleanup empty session directory
-            session_dir = self._get_session_checkpoint_dir(session_id)
-            if os.path.exists(session_dir) and not os.listdir(session_dir):
-                os.rmdir(session_dir)
+                    if candidate_name == checkpoint_name:
+                        candidate.unlink(missing_ok=True)
+                        deleted = True
 
-            return True
+                if not any(session_dir.iterdir()):
+                    session_dir.rmdir()
+
+            if deleted:
+                self._log_checkpoint(
+                    session_id, "INFO", f"Checkpoint deleted: {checkpoint_name}"
+                )
+
+            return deleted
 
         except Exception as e:
             self._log_checkpoint(
                 session_id, "ERROR", f"Failed to delete checkpoint: {str(e)}"
             )
             return False
+
+    def delete_all_checkpoints(self, session_id: int) -> int:
+        """Delete every checkpoint file for a session across all supported roots."""
+        deleted_count = 0
+
+        try:
+            for checkpoint_root in self._candidate_checkpoint_roots():
+                if not checkpoint_root.exists():
+                    continue
+                for candidate in checkpoint_root.glob(f"session_{session_id}_*.json"):
+                    candidate.unlink(missing_ok=True)
+                    deleted_count += 1
+
+            session_dir = self.checkpoint_dir / f"session_{session_id}"
+            if session_dir.exists():
+                for candidate in session_dir.glob("*.json"):
+                    candidate.unlink(missing_ok=True)
+                    deleted_count += 1
+                if not any(session_dir.iterdir()):
+                    session_dir.rmdir()
+
+            if deleted_count:
+                self._log_checkpoint(
+                    session_id,
+                    "INFO",
+                    f"Deleted all checkpoints for session {session_id} ({deleted_count} files)",
+                )
+
+            return deleted_count
+        except Exception as e:
+            self._log_checkpoint(
+                session_id,
+                "ERROR",
+                f"Failed to delete all checkpoints: {str(e)}",
+            )
+            return deleted_count
 
     def cleanup_old_checkpoints(
         self, session_id: int, keep_latest: int = 3, max_age_hours: int = 24

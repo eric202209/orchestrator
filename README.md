@@ -94,9 +94,9 @@ This starts:
 
 Default URLs:
 
-- Dashboard: `http://172.17.0.2:3000`
-- API: `http://172.17.0.2:8080`
-- API docs: `http://172.17.0.2:8080/docs`
+- Dashboard: `http://localhost:3000`
+- API: `http://localhost:8080`
+- API docs: `http://localhost:8080/docs`
 
 ## Typical Usage
 
@@ -180,6 +180,45 @@ Optional:
 ```bash
 export ORCHESTRATOR_MOBILE_BASE_URL=http://127.0.0.1:8080/api/v1
 ```
+
+### Mobile Connection Management
+
+For logged-in Orchestrator users, you can inspect the current mobile connection setup without digging through `.env` or logs:
+
+- `GET /api/v1/mobile-admin/connection-info`
+- `GET /api/v1/mobile-admin/connection-secret`
+
+These endpoints require normal Orchestrator authentication (`Authorization: Bearer <access_token>`), not the mobile shared key.
+
+`connection-info` returns:
+
+- recommended mobile base URL
+- required header name
+- whether a mobile key is configured
+- masked key preview
+- configured key source
+
+`connection-secret` returns the current raw shared key so you can configure ClawMobile or rotate your deployment manually.
+
+Example:
+
+```bash
+curl -H "Authorization: Bearer <access_token>" \
+  http://127.0.0.1:8080/api/v1/mobile-admin/connection-info
+
+curl -H "Authorization: Bearer <access_token>" \
+  http://127.0.0.1:8080/api/v1/mobile-admin/connection-secret
+```
+
+### Recommended Host Setup
+
+For a host-based or Tailscale-accessible deployment:
+
+- bind Orchestrator API to `0.0.0.0:8080`
+- keep llama.cpp or other local model servers on loopback-only ports like `127.0.0.1:8000`
+- point ClawMobile at the host LAN/Tailscale URL, for example:
+  - `http://gx10.tailnet-name:8080`
+  - `http://100.x.y.z:8080`
 
 ## OpenClaw Instruction
 
@@ -270,13 +309,13 @@ They are not part of normal source control workflow.
   Set `MOBILE_GATEWAY_API_KEY` or `OPENCLAW_API_KEY` before calling the script.
 
 - Frontend does not load
-  Check `/tmp/frontend.log`.
+  Check `logs/frontend.log`.
 
 - Backend does not respond
-  Check `/tmp/backend.log` and verify Redis is running.
+  Check `logs/backend.log` and verify Redis is running.
 
 - Worker jobs do not execute
-  Check `/tmp/worker.log`.
+  Check `logs/worker.log`.
 
 - New machine setup feels broken
   Make sure you copied `.env.example` to `.env`, then use `./start_all.sh` instead of `./start.sh` for the first run.
@@ -287,4 +326,4 @@ Use Orchestrator when you want OpenClaw work to be observable and manageable ins
 
 ---
 
-**Last updated: 2026-04-09**
+**Last updated: 2026-04-12**
