@@ -149,6 +149,20 @@ export const authAPI = {
     apiClient.delete(`/auth/api-keys/${id}`),
 };
 
+export const settingsAPI = {
+  get: () => apiClient.get('/settings'),
+  updateProfile: (data: { name?: string | null }) =>
+    apiClient.patch('/settings/profile', data),
+  changePassword: (data: { current_password: string; new_password: string }) =>
+    apiClient.post('/settings/password', data),
+  updateSystem: (data: {
+    workspace_root?: string;
+    mobile_api_key?: string;
+    rotate_mobile_api_key?: boolean;
+  }) => apiClient.patch('/settings/system', data),
+  revealMobileSecret: () => apiClient.get('/settings/mobile-secret'),
+};
+
 // Projects API
 export const projectsAPI = {
   getAll: () => apiClient.get<Project[]>('/projects'),

@@ -333,7 +333,8 @@ def delete_session(
 ):
     """Delete a session"""
     import json
-    from app.models import Session as SessionModel, LogEntry
+    from app.models import Session as SessionModel, LogEntry, TaskCheckpoint
+    from app.services.checkpoint_service import CheckpointService
 
     logger.info(f"DELETE /sessions/{session_id} - Starting deletion")
 
@@ -359,14 +360,32 @@ def delete_session(
     db_session.is_active = False
     db_session.status = "deleted"
 
+    checkpoint_service = CheckpointService(db)
+    deleted_checkpoints = checkpoint_service.delete_all_checkpoints(session_id)
+
+    deleted_session_tasks = (
+        db.query(SessionTask).filter(SessionTask.session_id == session_id).delete()
+    )
+    deleted_task_checkpoints = (
+        db.query(TaskCheckpoint)
+        .filter(TaskCheckpoint.session_id == session_id)
+        .delete(synchronize_session=False)
+    )
+
     # Delete all logs for this session to prevent ID reuse issues
-    from app.models import LogEntry
     deleted_logs = db.query(LogEntry).filter(
         LogEntry.session_id == session_id
     ).delete()
 
     db.commit()
     logger.info(f"Deleted {deleted_logs} logs for session {session_id}")
+    logger.info(
+        "Deleted session %s artifacts: checkpoints=%s session_tasks=%s task_checkpoints=%s",
+        session_id,
+        deleted_checkpoints,
+        deleted_session_tasks,
+        deleted_task_checkpoints,
+    )
 
     # Optional: Actually delete the session row if you want hard delete behavior
     # db.delete(db_session)

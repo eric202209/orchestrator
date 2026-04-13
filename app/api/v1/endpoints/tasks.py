@@ -371,10 +371,21 @@ def update_task(task_id: int, task_update: TaskUpdate, db: Session = Depends(get
 @router.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_task(task_id: int, db: Session = Depends(get_db)):
     """Delete a task"""
+    from app.models import TaskCheckpoint
+
     task = db.query(Task).filter(Task.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
+    db.query(LogEntry).filter(LogEntry.task_id == task_id).delete(
+        synchronize_session=False
+    )
+    db.query(SessionTask).filter(SessionTask.task_id == task_id).delete(
+        synchronize_session=False
+    )
+    db.query(TaskCheckpoint).filter(TaskCheckpoint.task_id == task_id).delete(
+        synchronize_session=False
+    )
     db.delete(task)
     db.commit()
     return None

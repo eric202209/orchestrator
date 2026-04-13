@@ -8,18 +8,24 @@ Flow:
 """
 
 import secrets
+import logging
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
-from app.models import Project, Session as SessionModel, Task, TaskStatus, LogEntry
+from app.dependencies import get_current_active_user
+from app.models import LogEntry, Project, Session as SessionModel, Task, TaskStatus, User
+from app.services.system_settings import get_effective_mobile_gateway_key
+
+logger = logging.getLogger(__name__)
 
 
 def require_mobile_gateway_key(
+    request: Request,
     x_openclaw_api_key: str | None = Header(default=None, alias="X-OpenClaw-API-Key"),
     authorization: str | None = Header(default=None, alias="Authorization"),
 ):
@@ -33,6 +39,11 @@ def require_mobile_gateway_key(
     configured_key = settings.MOBILE_GATEWAY_API_KEY or settings.OPENCLAW_API_KEY
 
     if not configured_key:
+        logger.warning(
+            "Mobile API request rejected: key not configured path=%s client=%s",
+            request.url.path,
+            request.client.host if request.client else "unknown",
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Mobile gateway API key is not configured",
@@ -45,6 +56,13 @@ def require_mobile_gateway_key(
             presented_key = token
 
     if not presented_key or not secrets.compare_digest(presented_key, configured_key):
+        logger.warning(
+            "Mobile API auth failed path=%s client=%s auth_header=%s api_key_header=%s",
+            request.url.path,
+            request.client.host if request.client else "unknown",
+            bool(authorization),
+            bool(x_openclaw_api_key),
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing mobile gateway API key",
@@ -52,16 +70,114 @@ def require_mobile_gateway_key(
         )
 
 
+def _log_mobile_request(request: Request, action: str, **extra: object) -> None:
+    client_host = request.client.host if request.client else "unknown"
+    details = " ".join(f"{key}={value}" for key, value in extra.items() if value is not None)
+    suffix = f" {details}" if details else ""
+    logger.info(
+        "Mobile API request action=%s path=%s client=%s%s",
+        action,
+        request.url.path,
+        client_host,
+        suffix,
+    )
+
+
 router = APIRouter(dependencies=[Depends(require_mobile_gateway_key)])
+admin_router = APIRouter(prefix="/mobile-admin", tags=["mobile-admin"])
+
+
+def _get_mobile_shared_key() -> tuple[str, str] | tuple[None, None]:
+    return get_effective_mobile_gateway_key(
+        settings.MOBILE_GATEWAY_API_KEY, settings.OPENCLAW_API_KEY
+    )
+
+
+def _mask_secret(secret: str | None) -> str | None:
+    if not secret:
+        return None
+    if len(secret) <= 8:
+        return "*" * len(secret)
+    return f"{secret[:8]}...{secret[-4:]}"
+
+
+def _derive_mobile_base_url(request: Request) -> str:
+    configured = (settings.ORCHESTRATOR_MOBILE_BASE_URL or "").strip().rstrip("/")
+    if configured:
+        if configured.endswith("/api/v1"):
+            return f"{configured}/mobile"
+        if configured.endswith("/api/v1/mobile"):
+            return configured
+        if configured.endswith("/mobile"):
+            return configured
+        return f"{configured}/api/v1/mobile"
+
+    base_url = str(request.base_url).rstrip("/")
+    return f"{base_url}{settings.API_V1_STR}/mobile"
+
+
+@admin_router.get("/connection-info")
+def get_mobile_connection_info(
+    request: Request,
+    current_user: User = Depends(get_current_active_user),
+):
+    """Return recommended mobile connection details for authenticated users."""
+    shared_key, key_source = _get_mobile_shared_key()
+    mobile_base_url = _derive_mobile_base_url(request)
+    return {
+        "user_email": current_user.email,
+        "mobile_base_url": mobile_base_url,
+        "dashboard_url": mobile_base_url.removesuffix("/api/v1/mobile"),
+        "required_header": "X-OpenClaw-API-Key",
+        "authorization_header_supported": True,
+        "api_key_configured": bool(shared_key),
+        "api_key_preview": _mask_secret(shared_key),
+        "api_key_source": key_source,
+        "available_endpoints": [
+            f"{mobile_base_url}/dashboard",
+            f"{mobile_base_url}/projects",
+            f"{mobile_base_url}/projects/{{project_id}}/status",
+            f"{mobile_base_url}/projects/{{project_id}}/tasks",
+            f"{mobile_base_url}/sessions",
+            f"{mobile_base_url}/sessions/{{session_id}}/summary",
+        ],
+    }
+
+
+@admin_router.get("/connection-secret")
+def reveal_mobile_connection_secret(
+    current_user: User = Depends(get_current_active_user),
+):
+    """Reveal the configured mobile shared key to an authenticated user."""
+    shared_key, key_source = _get_mobile_shared_key()
+    if not shared_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Mobile gateway API key is not configured",
+        )
+
+    return {
+        "user_email": current_user.email,
+        "header_name": "X-OpenClaw-API-Key",
+        "api_key": shared_key,
+        "api_key_preview": _mask_secret(shared_key),
+        "api_key_source": key_source,
+    }
 
 
 # ── Projects ─────────────────────────────────────────────────
 
 
 @router.get("/mobile/projects")
-def list_projects(db: Session = Depends(get_db)):
+def list_projects(request: Request, db: Session = Depends(get_db)):
     """List all projects — called by OpenClaw as a tool"""
-    projects = db.query(Project).all()
+    _log_mobile_request(request, "list_projects")
+    projects = (
+        db.query(Project)
+        .filter(Project.deleted_at.is_(None))
+        .order_by(Project.created_at.desc())
+        .all()
+    )
     return {
         "projects": [
             {
@@ -77,16 +193,27 @@ def list_projects(db: Session = Depends(get_db)):
 
 
 @router.get("/mobile/projects/{project_id}/status")
-def get_project_status(project_id: int, db: Session = Depends(get_db)):
+def get_project_status(
+    project_id: int, request: Request, db: Session = Depends(get_db)
+):
     """Get project status including active sessions and tasks"""
-    project = db.query(Project).filter(Project.id == project_id).first()
+    _log_mobile_request(request, "project_status", project_id=project_id)
+    project = (
+        db.query(Project)
+        .filter(Project.id == project_id, Project.deleted_at.is_(None))
+        .first()
+    )
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
     # Get active sessions
     active_sessions = (
         db.query(SessionModel)
-        .filter(SessionModel.project_id == project_id, SessionModel.is_active)
+        .filter(
+            SessionModel.project_id == project_id,
+            SessionModel.is_active,
+            SessionModel.deleted_at.is_(None),
+        )
         .all()
     )
 
@@ -123,12 +250,16 @@ def get_project_status(project_id: int, db: Session = Depends(get_db)):
 
 @router.get("/mobile/sessions")
 def list_sessions(
+    request: Request,
     project_id: Optional[int] = None,
     status: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     """List sessions, optionally filtered by project or status"""
-    query = db.query(SessionModel)
+    _log_mobile_request(
+        request, "list_sessions", project_id=project_id, status=status
+    )
+    query = db.query(SessionModel).filter(SessionModel.deleted_at.is_(None))
 
     if project_id:
         query = query.filter(SessionModel.project_id == project_id)
@@ -154,9 +285,16 @@ def list_sessions(
 
 
 @router.get("/mobile/sessions/{session_id}/summary")
-def get_session_summary(session_id: int, db: Session = Depends(get_db)):
+def get_session_summary(
+    session_id: int, request: Request, db: Session = Depends(get_db)
+):
     """Get a concise session summary for mobile display"""
-    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    _log_mobile_request(request, "session_summary", session_id=session_id)
+    session = (
+        db.query(SessionModel)
+        .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
+        .first()
+    )
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -200,9 +338,21 @@ def get_session_summary(session_id: int, db: Session = Depends(get_db)):
 
 @router.get("/mobile/projects/{project_id}/tasks")
 def list_project_tasks(
-    project_id: int, status: Optional[str] = None, db: Session = Depends(get_db)
+    project_id: int,
+    request: Request,
+    status: Optional[str] = None,
+    db: Session = Depends(get_db),
 ):
     """List tasks for a project"""
+    _log_mobile_request(request, "project_tasks", project_id=project_id, status=status)
+    project = (
+        db.query(Project)
+        .filter(Project.id == project_id, Project.deleted_at.is_(None))
+        .first()
+    )
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
     query = db.query(Task).filter(Task.project_id == project_id)
 
     if status:
@@ -241,17 +391,29 @@ def list_project_tasks(
 
 
 @router.get("/mobile/dashboard")
-def get_dashboard(db: Session = Depends(get_db)):
+def get_dashboard(request: Request, db: Session = Depends(get_db)):
     """
     Get overall system status for mobile dashboard.
     Called by OpenClaw when user asks for system overview.
     """
+    _log_mobile_request(request, "dashboard")
     # Count all entities
-    total_projects = db.query(Project).count()
-    total_sessions = db.query(SessionModel).count()
-    active_sessions = db.query(SessionModel).filter(SessionModel.is_active).count()
+    total_projects = db.query(Project).filter(Project.deleted_at.is_(None)).count()
+    total_sessions = (
+        db.query(SessionModel).filter(SessionModel.deleted_at.is_(None)).count()
+    )
+    active_sessions = (
+        db.query(SessionModel)
+        .filter(SessionModel.is_active, SessionModel.deleted_at.is_(None))
+        .count()
+    )
     running_sessions = (
-        db.query(SessionModel).filter(SessionModel.status == "running").count()
+        db.query(SessionModel)
+        .filter(
+            SessionModel.status == "running",
+            SessionModel.deleted_at.is_(None),
+        )
+        .count()
     )
 
     # Task stats across all projects

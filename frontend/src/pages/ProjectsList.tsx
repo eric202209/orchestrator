@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { projectsAPI, authAPI } from '../api/client';
-import type { Project, User } from '../types/api';
+import { projectsAPI } from '../api/client';
+import type { Project } from '../types/api';
 import { 
   GitBranch, 
   Plus,
@@ -15,7 +15,6 @@ import { EmptyState, Skeleton } from '../components/ui';
 
 function ProjectsList() {
   const navigate = useNavigate();
-  const [user, setUser] = useState<User | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreateProject, setShowCreateProject] = useState(false);
@@ -26,18 +25,8 @@ function ProjectsList() {
   const [updatingProject, setUpdatingProject] = useState(false);
 
   useEffect(() => {
-    fetchUser();
     fetchProjects();
   }, []);
-
-  const fetchUser = async () => {
-    try {
-      const response = await authAPI.getMe();
-      setUser(response.data);
-    } catch (error) {
-      console.error('Failed to fetch user:', error);
-    }
-  };
 
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -187,9 +176,6 @@ function ProjectsList() {
             </div>
             
             <div className="flex items-center gap-4">
-              {user && (
-                <span className="text-sm text-slate-400">{user.email}</span>
-              )}
               <Link
                 to="/"
                 className="text-sm text-slate-400 hover:text-white transition-colors"

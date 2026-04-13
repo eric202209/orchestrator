@@ -4,11 +4,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from sqlalchemy import text
 from app.config import settings
 from app.api.v1.router import api_router
 from app.api.v1.endpoints import auth
 from app.celery_app import celery_app
+from app.database import engine, init_db
 import logging
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +20,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Manage application startup and shutdown lifecycle"""
     # Startup
+    init_db()
     logger.info("=" * 50)
     logger.info("🚀 Orchestrator API starting up...")
     logger.info(f"Version: {settings.VERSION}")
@@ -173,4 +177,52 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"}
+    checks = {
+        "api": "ok",
+        "database": "unknown",
+        "redis": "unknown",
+    }
+    details = {
+        "version": settings.VERSION,
+        "openclaw_gateway_url": settings.OPENCLAW_GATEWAY_URL,
+    }
+    overall_status = "healthy"
+
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        checks["database"] = "ok"
+    except Exception as exc:
+        checks["database"] = "error"
+        details["database_error"] = str(exc)
+        overall_status = "degraded"
+
+    try:
+        import redis
+
+        broker_url = urlparse(settings.CELERY_BROKER_URL)
+        redis_client = redis.Redis(
+            host=broker_url.hostname or "localhost",
+            port=broker_url.port or 6379,
+            db=int((broker_url.path or "/0").lstrip("/") or "0"),
+            password=broker_url.password,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
+        redis_client.ping()
+        checks["redis"] = "ok"
+    except Exception as exc:
+        checks["redis"] = "error"
+        details["redis_error"] = str(exc)
+        overall_status = "degraded"
+
+    payload = {
+        "status": overall_status,
+        "checks": checks,
+        "details": details,
+    }
+
+    if overall_status == "healthy":
+        return payload
+
+    return JSONResponse(status_code=503, content=payload)

@@ -7,7 +7,8 @@ import {
   ListTodo, 
   Menu, 
   X,
-  Activity
+  Activity,
+  Settings
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -31,6 +32,11 @@ const navItems = [
     title: 'Sessions',
     href: '/sessions',
     icon: Terminal,
+  },
+  {
+    title: 'Settings',
+    href: '/settings',
+    icon: Settings,
   },
 ];
 
