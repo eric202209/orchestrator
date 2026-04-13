@@ -60,6 +60,8 @@ class ProjectDetailActivity : AppCompatActivity() {
     private fun loadProjectData() {
         val client = orchestratorClient ?: run {
             binding.projectStatusSummary.text = "Orchestrator is not configured on this device."
+            binding.projectTreeSummary.text = "Orchestrator is not configured on this device."
+            binding.projectTreeView.visibility = View.GONE
             binding.projectTasksEmpty.visibility = View.VISIBLE
             return
         }
@@ -95,6 +97,33 @@ class ProjectDetailActivity : AppCompatActivity() {
                 binding.activeSessionsSummary.text = activeSessionSummary
             }.onFailure { error ->
                 binding.projectStatusSummary.text = error.message ?: "Unable to load project status."
+            }
+
+            client.getProjectTree(projectId).onSuccess { tree ->
+                when {
+                    !tree.exists -> {
+                        binding.projectTreeSummary.text = "Project workspace has not been created yet."
+                        binding.projectTreeView.visibility = View.GONE
+                    }
+                    tree.treeLines.isEmpty() -> {
+                        binding.projectTreeSummary.text = "Project workspace is empty."
+                        binding.projectTreeView.visibility = View.GONE
+                    }
+                    else -> {
+                        val summary = buildString {
+                            append("${tree.totalEntriesShown} item")
+                            if (tree.totalEntriesShown != 1) append("s")
+                            append(" shown")
+                            if (tree.truncated) append(" • trimmed for mobile")
+                        }
+                        binding.projectTreeSummary.text = summary
+                        binding.projectTreeView.text = tree.treeLines.joinToString("\n")
+                        binding.projectTreeView.visibility = View.VISIBLE
+                    }
+                }
+            }.onFailure { error ->
+                binding.projectTreeSummary.text = error.message ?: "Unable to load file tree."
+                binding.projectTreeView.visibility = View.GONE
             }
 
             client.getProjectTasks(projectId).onSuccess { tasks ->

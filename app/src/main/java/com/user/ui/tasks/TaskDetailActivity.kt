@@ -8,6 +8,7 @@ import com.user.R
 import com.user.data.Task
 import com.user.data.TaskStatus
 import com.user.databinding.ActivityTaskDetailBinding
+import com.user.ui.OutputHighlighter
 import com.user.viewmodel.TaskViewModel
 import com.user.viewmodel.TaskViewModelFactory
 
@@ -107,12 +108,20 @@ class TaskDetailActivity : AppCompatActivity() {
 
         // Update result and error
         val hasResult = !task.result.isNullOrBlank()
-        binding.taskResult.text = task.result ?: ""
+        binding.taskResult.text = OutputHighlighter.render(
+            this,
+            task.result ?: "",
+            isError = false
+        )
         binding.taskResultLabel.visibility = if (hasResult) android.view.View.VISIBLE else android.view.View.GONE
         binding.taskResult.visibility = if (hasResult) android.view.View.VISIBLE else android.view.View.GONE
 
         val hasError = !task.error.isNullOrBlank()
-        binding.taskError.text = task.error ?: ""
+        binding.taskError.text = OutputHighlighter.render(
+            this,
+            task.error ?: "",
+            isError = true
+        )
         binding.taskErrorLabel.visibility = if (hasError) android.view.View.VISIBLE else android.view.View.GONE
         binding.taskError.visibility = if (hasError) android.view.View.VISIBLE else android.view.View.GONE
 

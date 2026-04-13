@@ -2,7 +2,6 @@ package com.user.service
 
 import android.util.Log
 import com.google.gson.Gson
-import com.google.gson.JsonObject
 import com.google.gson.reflect.TypeToken
 import com.user.data.DashboardResponse
 import com.user.data.DashboardSummary
@@ -13,9 +12,9 @@ import com.user.data.MobileProjectsResponse
 import com.user.data.OrchestratorApiResponse
 import com.user.data.PrefsManager
 import com.user.data.Project
+import com.user.data.ProjectTreeResponse
 import com.user.data.ProjectStatusResponse
 import com.user.data.ProjectTasksResponse
-import com.user.data.TaskStatsResponse
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -278,7 +277,7 @@ class OrchestratorApiClient(
     suspend fun getProjectStatus(projectId: String): Result<ProjectStatusResponse> = withContext(Dispatchers.IO) {
         try {
             val url = buildMobileUrl("projects/${projectId}/status")
-            Log.d(TAG, "Fetching status for project $projectId from: $url")
+            Log.d(TAG, "Fetching status for project $projectId from: $url [project-status-v1]")
 
             val request = Request.Builder()
                 .url(url)
@@ -295,36 +294,58 @@ class OrchestratorApiClient(
                 }
 
                 val responseBody = response.body?.string() ?: throw Exception("Empty response")
+                Log.d(TAG, "Project status raw response for $projectId: $responseBody")
+                val parsed = gson.fromJson(responseBody, ProjectStatusResponse::class.java)
 
-                // Parse the response - it's not wrapped in success/error, direct object
-                val jsonObject = gson.fromJson(responseBody, JsonObject::class.java)
-
-                if (jsonObject.has("project_id")) {
-                    val taskStatsJson = jsonObject.getAsJsonObject("tasks")
-                    val taskStats = TaskStatsResponse(
-                        total = taskStatsJson?.get("total")?.takeUnless { it.isJsonNull }?.asInt ?: 0,
-                        pending = taskStatsJson?.get("pending")?.takeUnless { it.isJsonNull }?.asInt ?: 0,
-                        running = taskStatsJson?.get("running")?.takeUnless { it.isJsonNull }?.asInt ?: 0,
-                        done = taskStatsJson?.get("done")?.takeUnless { it.isJsonNull }?.asInt ?: 0,
-                        failed = taskStatsJson?.get("failed")?.takeUnless { it.isJsonNull }?.asInt ?: 0
-                    )
-
-                    Log.d(TAG, "Successfully fetched status for project $projectId: $taskStats")
-                    Result.success(ProjectStatusResponse(
-                        projectId = jsonObject.get("project_id")?.takeUnless { it.isJsonNull }?.asInt?.toString() ?: projectId,
-                        projectName = jsonObject.get("project_name")?.takeUnless { it.isJsonNull }?.asString ?: "Project",
-                        description = jsonObject.get("description")?.takeUnless { it.isJsonNull }?.asString,
-                        activeSessions = jsonObject.get("active_sessions")?.takeUnless { it.isJsonNull }?.asInt ?: 0,
-                        tasks = taskStats
-                    ))
-                } else {
+                if (parsed.projectId.isBlank()) {
                     Log.w(TAG, "Unexpected response format for project $projectId - missing project_id")
-                    buildFailure("Project status response for $projectId was missing project_id.")
+                    return@withContext buildFailure("Project status response for $projectId was missing project_id.")
                 }
+
+                val normalized = parsed.copy(
+                    projectId = parsed.projectId.ifBlank { projectId },
+                    projectName = parsed.projectName.ifBlank { "Project" },
+                    sessions = parsed.sessions.filter { it.id != 0 || it.name.isNotBlank() || it.status.isNotBlank() }
+                )
+
+                Log.d(TAG, "Successfully fetched status for project $projectId: ${normalized.tasks}")
+                Result.success(normalized)
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Error fetching status for project $projectId: ${e.message}")
-            buildFailure("Failed to load project status for $projectId.", e)
+            Log.w(TAG, "Error fetching status for project $projectId [project-status-v1]: ${e.message}")
+            buildFailure("Failed to load project status for $projectId [project-status-v1].", e)
+        }
+    }
+
+    /**
+     * Fetch a compact file tree for a project.
+     */
+    suspend fun getProjectTree(projectId: String): Result<ProjectTreeResponse> = withContext(Dispatchers.IO) {
+        try {
+            val url = buildMobileUrl("projects/${projectId}/tree")
+            Log.d(TAG, "Fetching file tree for project $projectId from: $url")
+
+            val request = Request.Builder()
+                .url(url)
+                .headers(okhttp3.Headers.headersOf(*buildHeadersArray()))
+                .get()
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.w(TAG, "Project tree API failed for $projectId: ${response.code} ${response.message}")
+                    return@withContext buildFailure(
+                        "Project tree API failed for $projectId (${response.code} ${response.message})."
+                    )
+                }
+
+                val responseBody = response.body?.string() ?: throw Exception("Empty response")
+                val projectTree = gson.fromJson(responseBody, ProjectTreeResponse::class.java)
+                Result.success(projectTree)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error fetching file tree for project $projectId: ${e.message}")
+            buildFailure("Failed to load file tree for project $projectId.", e)
         }
     }
 

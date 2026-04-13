@@ -175,6 +175,20 @@ data class ProjectSessionSummary(
     val startedAt: String? = null
 )
 
+data class ProjectTreeResponse(
+    @SerializedName("project_id")
+    val projectId: String = "",
+    @SerializedName("project_name")
+    val projectName: String = "",
+    val root: String = "",
+    val exists: Boolean = false,
+    @SerializedName("tree_lines")
+    val treeLines: List<String> = emptyList(),
+    @SerializedName("total_entries_shown")
+    val totalEntriesShown: Int = 0,
+    val truncated: Boolean = false
+)
+
 /**
  * Task statistics for project status response
  */

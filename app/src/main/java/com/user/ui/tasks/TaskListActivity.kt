@@ -63,6 +63,12 @@ class TaskListActivity : AppCompatActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        viewModel.refreshAll()
+        loadProjectsFromOrchestrator()
+    }
+
     private fun setupViewModel() {
         val sessionId = intent.getStringExtra("session_id") ?: ""
         val app = application as ClawMobileApplication
@@ -187,7 +193,8 @@ class TaskListActivity : AppCompatActivity() {
         // Update all dashboard stats
         binding.totalProjectsCount.text = stats.projects.toString()
         binding.totalTasksCount.text = stats.tasks.total.toString()
-        binding.runningCount.text = stats.tasks.inProgress.toString()
+        val running = maxOf(stats.tasks.inProgress, stats.tasks.running)
+        binding.runningCount.text = running.toString()
 
         // Calculate pending and completed from Orchestrator data
         val pending = stats.tasks.pending + stats.tasks.approved
@@ -195,13 +202,14 @@ class TaskListActivity : AppCompatActivity() {
         binding.completedCount.text = stats.tasks.done.toString()
 
         // Show comprehensive stats summary
-        val activeCount = maxOf(stats.tasks.inProgress, stats.tasks.running)
         binding.executionSummaryView.text = when {
+            running > 0 && stats.tasks.failed > 0 ->
+                "$running running • ${stats.tasks.failed} failed • ${stats.tasks.done} done"
+            running > 0 ->
+                "$running task(s) currently running"
             stats.tasks.failed > 0 && stats.tasks.done > 0 ->
-                "${stats.tasks.failed} failed, ${stats.tasks.done} done"
+                "${stats.tasks.failed} failed • ${stats.tasks.done} done"
             stats.tasks.failed > 0 -> "${stats.tasks.failed} failed task(s) need attention"
-            activeCount > 0 ->
-                "$activeCount task(s) currently running"
             pending > 0 -> "$pending task(s) waiting to run"
             stats.tasks.done > 0 -> "${stats.tasks.done} task(s) completed successfully"
             else -> "No execution activity yet"
@@ -211,7 +219,7 @@ class TaskListActivity : AppCompatActivity() {
             R.string.orchestrator_dashboard_stats,
             stats.projects,
             stats.tasks.total,
-            stats.tasks.inProgress,
+            running,
             pending,
             stats.tasks.done,
             stats.tasks.failed
@@ -334,7 +342,6 @@ class TaskListActivity : AppCompatActivity() {
                             projectId,
                             ProjectProgressAdapter.ProjectStats()
                         )
-                        updateOrchestratorWarning(error.message ?: "Unable to load project status for $projectId.")
                     }
                 }
             }
@@ -364,7 +371,7 @@ class TaskListActivity : AppCompatActivity() {
     }
 
     private fun updateEmptyState(tasks: List<Task>) {
-        binding.emptyView.visibility = if (tasks.isEmpty()) TextView.VISIBLE else TextView.GONE
+        binding.emptyView.visibility = if (tasks.isEmpty()) View.VISIBLE else View.GONE
     }
 
     private fun approveTask(task: Task) {
