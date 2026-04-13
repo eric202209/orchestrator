@@ -432,6 +432,17 @@ export default function SessionDetail() {
     
     console.log(`Starting session ${sessionId}...`);
     pushTimelineEvent(`Start requested for session ${sessionId}`, 'INFO');
+    const previousSession = session;
+    setSession((current) =>
+      current
+        ? {
+            ...current,
+            status: 'running',
+            is_active: true,
+            started_at: current.started_at || new Date().toISOString(),
+          }
+        : current
+    );
     try {
       const response = await sessionsAPI.start(Number(sessionId));
       console.log('Start API response:', response);
@@ -449,6 +460,7 @@ export default function SessionDetail() {
       pushTimelineEvent(`Session started with status: ${updated.data.status}`, 'INFO');
       alert(`Session ${session.name} started successfully!`);
     } catch (error: unknown) {
+      setSession(previousSession);
       const apiError = error as ApiErrorLike;
       console.error('Failed to start session:', error);
       console.error('Error details:', apiError.response?.data || apiError.message);
@@ -460,12 +472,26 @@ export default function SessionDetail() {
 
   const handleStopSession = async (force: boolean = false) => {
     if (!session || !sessionId) return;
+    const previousSession = session;
+    const stoppedAt = new Date().toISOString();
+    setSession((current) =>
+      current
+        ? {
+            ...current,
+            status: 'stopped',
+            is_active: false,
+            stopped_at: stoppedAt,
+          }
+        : current
+    );
+    pushTimelineEvent(`Stop requested for session ${sessionId}`, 'INFO');
     try {
       await sessionsAPI.stop(Number(sessionId), force);
       const updated = await sessionsAPI.getById(Number(sessionId));
       setSession(updated.data);
       await loadCheckpointCount(Number(sessionId));
     } catch (error) {
+      setSession(previousSession);
       console.error('Failed to stop session:', error);
       alert('Failed to stop session');
     }
@@ -473,12 +499,26 @@ export default function SessionDetail() {
 
   const handlePauseSession = async () => {
     if (!session || !sessionId) return;
+    const previousSession = session;
+    const pausedAt = new Date().toISOString();
+    setSession((current) =>
+      current
+        ? {
+            ...current,
+            status: 'paused',
+            is_active: false,
+            paused_at: pausedAt,
+          }
+        : current
+    );
+    pushTimelineEvent(`Pause requested for session ${sessionId}`, 'INFO');
     try {
       await sessionsAPI.pause(Number(sessionId));
       const updated = await sessionsAPI.getById(Number(sessionId));
       setSession(updated.data);
       await loadCheckpointCount(Number(sessionId));
     } catch (error) {
+      setSession(previousSession);
       console.error('Failed to pause session:', error);
       alert('Failed to pause session');
     }
@@ -503,6 +543,19 @@ export default function SessionDetail() {
 
   const handleResumeSession = async () => {
     if (!session || !sessionId) return;
+    const previousSession = session;
+    const resumedAt = new Date().toISOString();
+    setSession((current) =>
+      current
+        ? {
+            ...current,
+            status: 'running',
+            is_active: true,
+            resumed_at: resumedAt,
+          }
+        : current
+    );
+    pushTimelineEvent(`Resume requested for session ${sessionId}`, 'INFO');
     try {
       await sessionsAPI.resume(Number(sessionId));
       const updated = await sessionsAPI.getById(Number(sessionId));
@@ -515,6 +568,7 @@ export default function SessionDetail() {
         setupWebSocket(Number(sessionId));
       }
     } catch (error) {
+      setSession(previousSession);
       console.error('Failed to resume session:', error);
       alert('Failed to resume session');
     }

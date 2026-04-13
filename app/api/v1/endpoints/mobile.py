@@ -10,6 +10,7 @@ Flow:
 import secrets
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
@@ -19,9 +20,22 @@ from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_active_user
 from app.models import LogEntry, Project, Session as SessionModel, Task, TaskStatus, User
+from app.services.project_isolation_service import resolve_project_workspace_path
 from app.services.system_settings import get_effective_mobile_gateway_key
 
 logger = logging.getLogger(__name__)
+TREE_MAX_DEPTH = 3
+TREE_MAX_ENTRIES = 120
+TREE_EXCLUDED_NAMES = {
+    ".git",
+    ".openclaw",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".idea",
+    ".pytest_cache",
+}
 
 
 def require_mobile_gateway_key(
@@ -81,6 +95,51 @@ def _log_mobile_request(request: Request, action: str, **extra: object) -> None:
         client_host,
         suffix,
     )
+
+
+def _build_project_tree_lines(
+    root: Path, max_depth: int = TREE_MAX_DEPTH, max_entries: int = TREE_MAX_ENTRIES
+) -> tuple[list[str], bool]:
+    lines: list[str] = []
+    truncated = False
+    entries_seen = 0
+
+    def walk(path: Path, prefix: str, depth: int) -> None:
+        nonlocal truncated, entries_seen
+        if truncated or depth >= max_depth:
+            return
+
+        try:
+            children = [
+                child
+                for child in sorted(
+                    path.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())
+                )
+                if child.name not in TREE_EXCLUDED_NAMES
+            ]
+        except OSError:
+            lines.append(f"{prefix}[unreadable]")
+            return
+
+        for index, child in enumerate(children):
+            if entries_seen >= max_entries:
+                truncated = True
+                return
+
+            is_last = index == len(children) - 1
+            branch = "└── " if is_last else "├── "
+            label = f"{child.name}/" if child.is_dir() else child.name
+            lines.append(f"{prefix}{branch}{label}")
+            entries_seen += 1
+
+            if child.is_dir():
+                next_prefix = f"{prefix}{'    ' if is_last else '│   '}"
+                walk(child, next_prefix, depth + 1)
+                if truncated:
+                    return
+
+    walk(root, "", 0)
+    return lines, truncated
 
 
 router = APIRouter(dependencies=[Depends(require_mobile_gateway_key)])
@@ -244,6 +303,45 @@ def get_project_status(
         ],
     }
 
+
+@router.get("/mobile/projects/{project_id}/tree")
+def get_project_tree(
+    project_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Return a compact, mobile-friendly project file tree."""
+    _log_mobile_request(request, "project_tree", project_id=project_id)
+    project = (
+        db.query(Project)
+        .filter(Project.id == project_id, Project.deleted_at.is_(None))
+        .first()
+    )
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_root = resolve_project_workspace_path(project.workspace_path, project.name)
+    if not project_root.exists():
+        return {
+            "project_id": project_id,
+            "project_name": project.name,
+            "root": str(project_root),
+            "exists": False,
+            "tree_lines": [],
+            "total_entries_shown": 0,
+            "truncated": False,
+        }
+
+    tree_lines, truncated = _build_project_tree_lines(project_root)
+    return {
+        "project_id": project_id,
+        "project_name": project.name,
+        "root": str(project_root),
+        "exists": True,
+        "tree_lines": tree_lines,
+        "total_entries_shown": len(tree_lines),
+        "truncated": truncated,
+    }
 
 # ── Sessions ─────────────────────────────────────────────────
 
@@ -416,11 +514,17 @@ def get_dashboard(request: Request, db: Session = Depends(get_db)):
         .count()
     )
 
-    # Task stats across all projects
-    total_tasks = db.query(Task).count()
-    done_tasks = db.query(Task).filter(Task.status == TaskStatus.DONE).count()
-    failed_tasks = db.query(Task).filter(Task.status == TaskStatus.FAILED).count()
-    running_tasks = db.query(Task).filter(Task.status == TaskStatus.RUNNING).count()
+    active_project_ids = (
+        db.query(Project.id).filter(Project.deleted_at.is_(None)).subquery()
+    )
+
+    # Task stats across active projects only
+    task_query = db.query(Task).filter(Task.project_id.in_(active_project_ids))
+    total_tasks = task_query.count()
+    pending_tasks = task_query.filter(Task.status == TaskStatus.PENDING).count()
+    done_tasks = task_query.filter(Task.status == TaskStatus.DONE).count()
+    failed_tasks = task_query.filter(Task.status == TaskStatus.FAILED).count()
+    running_tasks = task_query.filter(Task.status == TaskStatus.RUNNING).count()
 
     # Recent activity (last 5 log entries)
     recent_logs = db.query(LogEntry).order_by(LogEntry.created_at.desc()).limit(5).all()
@@ -436,6 +540,7 @@ def get_dashboard(request: Request, db: Session = Depends(get_db)):
             },
             "tasks": {
                 "total": total_tasks,
+                "pending": pending_tasks,
                 "done": done_tasks,
                 "running": running_tasks,
                 "failed": failed_tasks,
@@ -456,3 +561,4 @@ def get_dashboard(request: Request, db: Session = Depends(get_db)):
             for log in recent_logs
         ],
     }
+

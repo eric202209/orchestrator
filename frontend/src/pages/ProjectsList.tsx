@@ -30,18 +30,38 @@ function ProjectsList() {
 
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newProjectName.trim()) return;
+    const trimmedName = newProjectName.trim();
+    if (!trimmedName) return;
 
     setCreatingProject(true);
+    const tempId = -Date.now();
+    const now = new Date().toISOString();
+    const optimisticProject: Project = {
+      id: tempId,
+      name: trimmedName,
+      description: null,
+      github_url: null,
+      branch: 'main',
+      created_at: now,
+      updated_at: now,
+    };
+
+    setProjects((current) => [optimisticProject, ...current]);
+    setNewProjectName('');
+    setShowCreateProject(false);
+
     try {
-      await projectsAPI.create({ 
-        name: newProjectName,
+      const response = await projectsAPI.create({ 
+        name: trimmedName,
         branch: 'main'
       });
-      setNewProjectName('');
-      setShowCreateProject(false);
-      fetchProjects();
+      setProjects((current) =>
+        current.map((project) => (project.id === tempId ? response.data : project))
+      );
     } catch (error) {
+      setProjects((current) => current.filter((project) => project.id !== tempId));
+      setNewProjectName(trimmedName);
+      setShowCreateProject(true);
       console.error('Failed to create project:', error);
       alert('Failed to create project. Please try again.');
     } finally {
@@ -66,6 +86,9 @@ function ProjectsList() {
     if (!window.confirm('Are you sure you want to delete this project? This cannot be undone.')) {
       return;
     }
+
+    const previousProjects = projects;
+    setProjects((current) => current.filter((project) => project.id !== projectId));
 
     try {
       const token = localStorage.getItem('access_token');
@@ -95,10 +118,9 @@ function ProjectsList() {
         }
         throw new Error(errorMessage);
       }
-
-      fetchProjects();
       alert('Project deleted successfully!');
     } catch (error: unknown) {
+      setProjects(previousProjects);
       const err = error as { message?: string };
       console.error('❌ Failed to delete project:', err.message || error);
       alert(`Failed to delete project: ${err.message || 'Unknown error'}`);
@@ -111,14 +133,26 @@ function ProjectsList() {
   };
 
   const handleUpdateProject = async (projectId: number) => {
-    if (!editingName.trim()) return;
+    const trimmedName = editingName.trim();
+    if (!trimmedName) return;
 
     setUpdatingProject(true);
+    const previousProjects = projects;
+    setProjects((current) =>
+      current.map((project) =>
+        project.id === projectId ? { ...project, name: trimmedName } : project
+      )
+    );
+    setEditingProjectId(null);
+
     try {
-      await projectsAPI.update(projectId, { name: editingName });
-      setEditingProjectId(null);
-      fetchProjects();
+      const response = await projectsAPI.update(projectId, { name: trimmedName });
+      setProjects((current) =>
+        current.map((project) => (project.id === projectId ? response.data : project))
+      );
     } catch (error: unknown) {
+      setProjects(previousProjects);
+      setEditingProjectId(projectId);
       const err = error as { response?: { data?: { detail?: unknown } } };
       console.error('Failed to update project:', error);
       alert(`Failed to update project: ${err.response?.data?.detail || error.message}`);

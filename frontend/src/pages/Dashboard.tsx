@@ -93,20 +93,39 @@ function Dashboard() {
 
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newProjectName.trim()) {
+    const trimmedName = newProjectName.trim();
+    if (!trimmedName) {
       return;
     }
 
     setCreatingProject(true);
+    const tempId = -Date.now();
+    const now = new Date().toISOString();
+    const optimisticProject: Project = {
+      id: tempId,
+      name: trimmedName,
+      description: null,
+      github_url: null,
+      branch: 'main',
+      created_at: now,
+      updated_at: now,
+    };
+    setProjects((current) => [optimisticProject, ...current]);
+    setNewProjectName('');
+    setShowCreateProject(false);
+
     try {
-      await projectsAPI.create({ 
-        name: newProjectName,
+      const response = await projectsAPI.create({ 
+        name: trimmedName,
         branch: 'main'
       });
-      setNewProjectName('');
-      setShowCreateProject(false);
-      await fetchProjects();
+      setProjects((current) =>
+        current.map((project) => (project.id === tempId ? response.data : project))
+      );
     } catch (error) {
+      setProjects((current) => current.filter((project) => project.id !== tempId));
+      setNewProjectName(trimmedName);
+      setShowCreateProject(true);
       console.error('Failed to create project:', error);
       alert('Failed to create project. Please try again.');
     } finally {
@@ -119,10 +138,16 @@ function Dashboard() {
       return;
     }
 
+    const previousProjects = projects;
+    const previousTasks = tasks;
+    setProjects((current) => current.filter((project) => project.id !== projectId));
+    setTasks((current) => current.filter((task) => task.project_id !== projectId));
+
     try {
       await projectsAPI.delete(projectId);
-      await fetchProjects();
     } catch (error) {
+      setProjects(previousProjects);
+      setTasks(previousTasks);
       console.error('Failed to delete project:', error);
       alert('Failed to delete project. Please try again.');
     }
