@@ -130,6 +130,32 @@ function ProjectDetail() {
     e.preventDefault();
     if (!taskTitle.trim() || !id) return;
 
+    setCreatingTask(true);
+    const tempId = -Date.now();
+    const now = new Date().toISOString();
+    const optimisticTask: Task = {
+      id: tempId,
+      project_id: Number(id),
+      title: taskTitle.trim(),
+      description: taskDescription || null,
+      status: 'pending',
+      priority: 0,
+      steps: taskSteps.trim() ? taskSteps : null,
+      current_step: 0,
+      error_message: null,
+      created_at: now,
+      updated_at: now,
+      started_at: null,
+      completed_at: null,
+      session_id: null,
+      task_subfolder: null,
+    };
+    setTasks((current) => [optimisticTask, ...current]);
+    setTaskTitle('');
+    setTaskDescription('');
+    setTaskSteps('');
+    setShowCreateTask(false);
+
     try {
       const payload: {
         project_id: number;
@@ -147,13 +173,16 @@ function ProjectDetail() {
         payload.steps = taskSteps;
       }
 
-      await tasksAPI.create(payload);
-      setTaskTitle('');
-      setTaskDescription('');
-      setTaskSteps('');
-      setShowCreateTask(false);
-      fetchTasks();
+      const response = await tasksAPI.create(payload);
+      setTasks((current) =>
+        current.map((task) => (task.id === tempId ? response.data : task))
+      );
     } catch (error) {
+      setTasks((current) => current.filter((task) => task.id !== tempId));
+      setTaskTitle(optimisticTask.title);
+      setTaskDescription(optimisticTask.description || '');
+      setTaskSteps(optimisticTask.steps || '');
+      setShowCreateTask(true);
       console.error('Failed to create task:', error);
       alert('Failed to create task. Please try again.');
     } finally {
@@ -167,14 +196,23 @@ function ProjectDetail() {
     }
 
     console.log('Deleting task:', taskId);
+    const previousTasks = tasks;
+    setTasks((current) => current.filter((task) => task.id !== taskId));
     try {
       // Use DELETE instead of PATCH with cancelled status
       await tasksAPI.delete(taskId);
       console.log('Task deleted successfully');
-      fetchTasks();
     } catch (error) {
+      setTasks(previousTasks);
       console.error('Failed to delete task:', error);
-      if (error.response) {
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'response' in error &&
+        typeof error.response === 'object' &&
+        error.response !== null &&
+        'data' in error.response
+      ) {
         console.error('Error response:', error.response.data);
       }
       alert('Failed to delete task. Please try again.');
@@ -189,12 +227,28 @@ function ProjectDetail() {
   };
 
   const handleUpdateTask = async (taskId: number) => {
-    if (!editTitle.trim()) return;
+    const trimmedTitle = editTitle.trim();
+    if (!trimmedTitle) return;
 
     setUpdatingTask(true);
+    const previousTasks = tasks;
+    setTasks((currentTasks) =>
+      currentTasks.map((task) =>
+        task.id === taskId
+          ? {
+              ...task,
+              title: trimmedTitle,
+              description: editDescription || null,
+              steps: editSteps || null,
+            }
+          : task
+      )
+    );
+    setEditingTaskId(null);
+
     try {
       const response = await tasksAPI.update(taskId, {
-        title: editTitle.trim(),
+        title: trimmedTitle,
         description: editDescription,
         steps: editSteps,
       });
@@ -205,9 +259,9 @@ function ProjectDetail() {
         )
       );
 
-      setEditingTaskId(null);
-      await fetchTasks();
     } catch (error) {
+      setTasks(previousTasks);
+      setEditingTaskId(taskId);
       console.error('Failed to update task:', error);
       alert('Failed to update task. Please try again.');
     } finally {
@@ -220,13 +274,13 @@ function ProjectDetail() {
       return;
     }
 
+    const previousSessions = sessions;
+    setSessions((current) => current.filter((session) => session.id !== sessionId));
     try {
       await sessionsAPI.delete(sessionId);
       alert('Session deleted');
-      // Reload sessions
-      const sessionsRes = await sessionsAPI.getByProject(Number(id));
-      setSessions(sessionsRes.data || []);
     } catch (error) {
+      setSessions(previousSessions);
       console.error('Failed to delete session:', error);
       alert('Failed to delete session. Please try again.');
     }

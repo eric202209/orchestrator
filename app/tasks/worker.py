@@ -675,8 +675,13 @@ def execute_openclaw_task(
             os.makedirs(task_workspace, exist_ok=True)
             logger.info(f"Created task workspace: {task_workspace}")
 
-        # Check if task has been running too long (safety check)
-        if task.started_at:
+        is_resume_execution = bool(resume_checkpoint_name)
+
+        # Check if task has been running too long (safety check).
+        # Skip this stale-run guard for explicit checkpoint resumes, otherwise a
+        # legitimate resume after several minutes gets rejected before we even
+        # load the saved orchestration state.
+        if task.started_at and not is_resume_execution:
             time_since_start = datetime.utcnow() - task.started_at
             if time_since_start.total_seconds() > 300:  # 5 minutes
                 logger.warning(
@@ -686,6 +691,12 @@ def execute_openclaw_task(
                 task.error = f"Task already running for {time_since_start}, possible duplicate execution"
                 db.commit()
                 raise Exception("Task timeout - already running too long")
+        elif task.started_at and is_resume_execution:
+            logger.info(
+                "[ORCHESTRATION] Skipping stale-run timeout guard for task %s because resume checkpoint '%s' was requested",
+                task_id,
+                resume_checkpoint_name,
+            )
 
         # Update task status
         task.status = TaskStatus.RUNNING
