@@ -259,7 +259,7 @@ def list_projects(request: Request, db: Session = Depends(get_db)):
 def get_project_status(
     project_id: int, request: Request, db: Session = Depends(get_db)
 ):
-    """Get project status including active sessions and tasks"""
+    """Get project status including active and recent sessions plus tasks."""
     _log_mobile_request(request, "project_status", project_id=project_id)
     project = (
         db.query(Project)
@@ -280,6 +280,17 @@ def get_project_status(
         .all()
     )
 
+    recent_sessions = (
+        db.query(SessionModel)
+        .filter(
+            SessionModel.project_id == project_id,
+            SessionModel.deleted_at.is_(None),
+        )
+        .order_by(SessionModel.started_at.desc().nullslast(), SessionModel.id.desc())
+        .limit(8)
+        .all()
+    )
+
     # Get task stats
     tasks = db.query(Task).filter(Task.project_id == project_id).all()
     task_stats = {
@@ -295,15 +306,17 @@ def get_project_status(
         "project_name": project.name,
         "description": project.description,
         "active_sessions": len(active_sessions),
+        "recent_sessions": len(recent_sessions),
         "tasks": task_stats,
         "sessions": [
             {
                 "id": s.id,
                 "name": s.name,
                 "status": s.status,
+                "is_active": bool(s.is_active),
                 "started_at": s.started_at.isoformat() if s.started_at else None,
             }
-            for s in active_sessions
+            for s in recent_sessions
         ],
     }
 
@@ -568,11 +581,29 @@ def list_project_tasks(
         except KeyError:
             raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
 
-    tasks = query.all()
+    tasks = query.order_by(Task.created_at.asc().nullslast(), Task.id.asc()).all()
 
-    return {
-        "project_id": project_id,
-        "tasks": [
+    task_payload = []
+    total_tasks = len(tasks)
+    for index, t in enumerate(tasks, start=1):
+        latest_session = (
+            db.query(
+                SessionModel.id,
+                SessionModel.name,
+                SessionModel.status,
+                SessionModel.is_active,
+            )
+            .join(SessionTask, SessionTask.session_id == SessionModel.id)
+            .filter(SessionTask.task_id == t.id, SessionModel.deleted_at.is_(None))
+            .order_by(
+                SessionTask.started_at.desc().nullslast(),
+                SessionTask.completed_at.desc().nullslast(),
+                SessionTask.id.desc(),
+            )
+            .first()
+        )
+
+        task_payload.append(
             {
                 "id": t.id,
                 "title": t.title,
@@ -586,10 +617,26 @@ def list_project_tasks(
                     if hasattr(t, "created_at") and t.created_at
                     else None
                 ),
+                "updated_at": (
+                    t.updated_at.isoformat()
+                    if hasattr(t, "updated_at") and t.updated_at
+                    else None
+                ),
+                "sequence_index": index,
+                "sequence_total": total_tasks,
+                "latest_session_id": latest_session.id if latest_session else None,
+                "latest_session_name": latest_session.name if latest_session else None,
+                "latest_session_status": latest_session.status if latest_session else None,
+                "has_active_session": bool(
+                    latest_session.is_active if latest_session else False
+                ),
             }
-            for t in tasks
-        ],
-        "total": len(tasks),
+        )
+
+    return {
+        "project_id": project_id,
+        "tasks": task_payload,
+        "total": total_tasks,
     }
 
 
@@ -669,3 +716,4 @@ def get_dashboard(request: Request, db: Session = Depends(get_db)):
             for log in recent_logs
         ],
     }
+

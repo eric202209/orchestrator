@@ -10,11 +10,12 @@ Implements:
 
 import json
 import os
+import re
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
 from pathlib import Path
 from sqlalchemy.orm import Session
-from app.models import LogEntry
+from app.models import LogEntry, Session as SessionModel
 from app.config import settings
 
 
@@ -44,6 +45,25 @@ class CheckpointService:
         if legacy_dir != self.checkpoint_dir and legacy_dir.exists():
             roots.append(legacy_dir)
         return roots
+
+    def _session_checkpoint_dirs(self, session_id: int) -> List[Path]:
+        dirs: List[Path] = []
+        seen: set[Path] = set()
+        for checkpoint_root in self._candidate_checkpoint_roots():
+            session_dir = checkpoint_root / f"session_{session_id}"
+            if session_dir not in seen:
+                dirs.append(session_dir)
+                seen.add(session_dir)
+        return dirs
+
+    def _extract_session_id(self, path: Path) -> Optional[int]:
+        match = re.match(r"session_(\d+)(?:_|$)", path.name)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
 
     def _get_checkpoint_path(self, session_id: int, checkpoint_name: str) -> str:
         """Get the file path for a specific checkpoint"""
@@ -320,12 +340,27 @@ class CheckpointService:
                     candidate.unlink(missing_ok=True)
                     deleted_count += 1
 
-            session_dir = self.checkpoint_dir / f"session_{session_id}"
-            if session_dir.exists():
+            for session_dir in self._session_checkpoint_dirs(session_id):
+                if not session_dir.exists():
+                    continue
                 for candidate in session_dir.glob("*.json"):
                     candidate.unlink(missing_ok=True)
                     deleted_count += 1
-                if not any(session_dir.iterdir()):
+
+                # Remove any leftover nested artifacts, then the directory itself.
+                for child in sorted(session_dir.iterdir(), reverse=True):
+                    if child.is_file():
+                        child.unlink(missing_ok=True)
+                        deleted_count += 1
+                    elif child.is_dir():
+                        for nested in sorted(child.rglob("*"), reverse=True):
+                            if nested.is_file():
+                                nested.unlink(missing_ok=True)
+                                deleted_count += 1
+                            elif nested.is_dir():
+                                nested.rmdir()
+                        child.rmdir()
+                if session_dir.exists() and not any(session_dir.iterdir()):
                     session_dir.rmdir()
 
             if deleted_count:
@@ -387,6 +422,85 @@ class CheckpointService:
                 session_id, "ERROR", f"Failed to cleanup checkpoints: {str(e)}"
             )
             return {"error": str(e), "deleted": 0}
+
+    def cleanup_orphaned_checkpoints(self) -> Dict[str, Any]:
+        """
+        Delete checkpoint artifacts for sessions that are missing or soft-deleted.
+
+        Returns:
+            Summary including orphaned session ids and deleted artifact count.
+        """
+        deleted_files = 0
+        deleted_dirs = 0
+        orphaned_session_ids: set[int] = set()
+
+        try:
+            known_sessions = {
+                session_id: deleted_at is not None
+                for session_id, deleted_at in self.db.query(
+                    SessionModel.id, SessionModel.deleted_at
+                ).all()
+            }
+
+            def is_orphaned(session_id: int) -> bool:
+                return session_id not in known_sessions or known_sessions[session_id]
+
+            for checkpoint_root in self._candidate_checkpoint_roots():
+                if not checkpoint_root.exists():
+                    continue
+
+                for candidate in checkpoint_root.iterdir():
+                    session_id = self._extract_session_id(candidate)
+                    if session_id is None or not is_orphaned(session_id):
+                        continue
+
+                    orphaned_session_ids.add(session_id)
+
+                    if candidate.is_file():
+                        candidate.unlink(missing_ok=True)
+                        deleted_files += 1
+                    elif candidate.is_dir():
+                        for nested in sorted(candidate.rglob("*"), reverse=True):
+                            if nested.is_file():
+                                nested.unlink(missing_ok=True)
+                                deleted_files += 1
+                            elif nested.is_dir():
+                                nested.rmdir()
+                        if candidate.exists():
+                            candidate.rmdir()
+                        deleted_dirs += 1
+
+            if orphaned_session_ids:
+                self.db.add(
+                    LogEntry(
+                        session_id=None,
+                        level="INFO",
+                        message=(
+                            "[CHECKPOINT] Cleaned orphaned checkpoint artifacts for "
+                            f"sessions: {', '.join(str(sid) for sid in sorted(orphaned_session_ids))}"
+                        ),
+                        log_metadata=json.dumps(
+                            {
+                                "orphaned_session_ids": sorted(orphaned_session_ids),
+                                "deleted_files": deleted_files,
+                                "deleted_dirs": deleted_dirs,
+                            }
+                        ),
+                    )
+                )
+
+            return {
+                "deleted_files": deleted_files,
+                "deleted_dirs": deleted_dirs,
+                "orphaned_session_ids": sorted(orphaned_session_ids),
+            }
+        except Exception as e:
+            return {
+                "deleted_files": deleted_files,
+                "deleted_dirs": deleted_dirs,
+                "orphaned_session_ids": sorted(orphaned_session_ids),
+                "error": str(e),
+            }
 
     def _find_latest_checkpoint(self, session_id: int) -> Optional[str]:
         """Find the most recent checkpoint name for a session

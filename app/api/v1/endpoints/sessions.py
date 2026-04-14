@@ -2268,3 +2268,39 @@ async def cleanup_session_checkpoints(
         raise HTTPException(
             status_code=500, detail=f"Failed to cleanup checkpoints: {str(e)}"
         )
+
+
+@router.post("/checkpoints/orphaned/cleanup")
+async def cleanup_orphaned_checkpoints(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """
+    Clean checkpoint artifacts for sessions that are missing or soft-deleted.
+    """
+    try:
+        from app.services.checkpoint_service import CheckpointService
+
+        checkpoint_service = CheckpointService(db)
+        result = checkpoint_service.cleanup_orphaned_checkpoints()
+
+        if result.get("error"):
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to cleanup orphaned checkpoints: {result['error']}",
+            )
+
+        db.commit()
+        return {
+            "success": True,
+            "deleted_files": result.get("deleted_files", 0),
+            "deleted_dirs": result.get("deleted_dirs", 0),
+            "orphaned_session_ids": result.get("orphaned_session_ids", []),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to cleanup orphaned checkpoints: {str(e)}",
+        )
