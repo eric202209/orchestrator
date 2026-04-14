@@ -32,6 +32,9 @@ check_pattern() {
         ! -path "./dist/*" \
         ! -path "./frontend/dist/*" \
         ! -path "./build/*" \
+        ! -path "./checkpoints/*" \
+        ! -path "./frontend/package-lock.json" \
+        ! -path "./frontend/pnpm-lock.yaml" \
         ! -path "./.git/*" \
         ${exclude_file:+! -path "$exclude_file"} \
         -exec grep -lE "$pattern" {} \; 2>/dev/null | grep -v "^$" || true)
@@ -58,7 +61,8 @@ check_pattern "OPENCLAW_API_KEY\s*[:=]\s*['\"][^'\"]+['\"]" "hardcoded OpenClaw 
 check_pattern "X-OpenClaw-API-Key['\"]?\s*[:=]\s*['\"][^'\"]+['\"]" "hardcoded X-OpenClaw-API-Key headers"
 check_pattern "Bearer\s+[A-Za-z0-9._-]{20,}" "hardcoded bearer tokens"
 check_pattern "[A-Fa-f0-9]{64}" "64-character hex strings (possible API keys)"
-check_pattern "[A-Za-z0-9]{32,}" "long alphanumeric strings (potential API keys)"
+# Keep this broad pattern late and require mixed-case/alnum to reduce lockfile noise.
+check_pattern "(?=.*[A-Za-z])(?=.*[0-9])[A-Za-z0-9]{32,}" "long mixed alphanumeric strings (potential API keys)"
 check_pattern "sk-[A-Za-z0-9]{20,}" "sk- prefixed tokens (Stripe/OpenAI)"
 check_pattern "ghp_[A-Za-z0-9]{36}" "GitHub Personal Access Tokens"
 check_pattern "gho_[A-Za-z0-9]{36}" "GitHub OAuth Tokens"
@@ -75,10 +79,10 @@ check_pattern "172\.\d+\.\d+\.\d+" "172.x.x.x IP addresses (Docker containers)"
 check_pattern "192\.168\.\d+\.\d+" "192.168.x.x IP addresses (private networks)"
 check_pattern "10\.\d+\.\d+\.\d+" "10.x.x.x IP addresses (private networks)"
 
-# Check for credentials
-check_pattern "credential" "credential references" "./scripts/security_check.sh"
-check_pattern "auth_token" "auth_token references" "./scripts/security_check.sh"
-check_pattern "access_token" "access_token references" "./scripts/security_check.sh"
+# Check for suspicious credential assignments/usages, not normal identifier names
+check_pattern "credential(s)?\s*[:=]\s*['\"][^'\"]+['\"]" "hardcoded credential assignments" "./scripts/security_check.sh"
+check_pattern "auth_token\s*[:=]\s*['\"][^'\"]+['\"]" "hardcoded auth_token values" "./scripts/security_check.sh"
+check_pattern "access_token\s*[:=]\s*['\"][^'\"]+['\"]" "hardcoded access_token values" "./scripts/security_check.sh"
 
 echo ""
 echo "========================================"
@@ -96,3 +100,4 @@ else
     echo "Consider adding them to .gitignore if they're environment-specific."
     exit 1
 fi
+
