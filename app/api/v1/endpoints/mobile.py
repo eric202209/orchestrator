@@ -38,6 +38,31 @@ TREE_EXCLUDED_NAMES = {
 }
 
 
+def _status_value(value: object) -> str:
+    return value.value if hasattr(value, "value") else str(value)
+
+
+def _build_task_counts(tasks: list[Task]) -> dict[str, int]:
+    counts = {
+        "total": len(tasks),
+        "pending": 0,
+        "running": 0,
+        "done": 0,
+        "failed": 0,
+    }
+    for task in tasks:
+        status_value = _status_value(task.status).lower()
+        if status_value == TaskStatus.RUNNING.value:
+            counts["running"] += 1
+        elif status_value == TaskStatus.DONE.value:
+            counts["done"] += 1
+        elif status_value == TaskStatus.FAILED.value:
+            counts["failed"] += 1
+        else:
+            counts["pending"] += 1
+    return counts
+
+
 def require_mobile_gateway_key(
     request: Request,
     x_openclaw_api_key: str | None = Header(default=None, alias="X-OpenClaw-API-Key"),
@@ -293,13 +318,7 @@ def get_project_status(
 
     # Get task stats
     tasks = db.query(Task).filter(Task.project_id == project_id).all()
-    task_stats = {
-        "total": len(tasks),
-        "pending": sum(1 for t in tasks if t.status == TaskStatus.PENDING),
-        "running": sum(1 for t in tasks if t.status == TaskStatus.RUNNING),
-        "done": sum(1 for t in tasks if t.status == TaskStatus.DONE),
-        "failed": sum(1 for t in tasks if t.status == TaskStatus.FAILED),
-    }
+    task_stats = _build_task_counts(tasks)
 
     return {
         "project_id": project_id,
@@ -424,6 +443,7 @@ def get_session_summary(
 
     # Get task progress
     tasks = db.query(Task).filter(Task.project_id == session.project_id).all()
+    task_counts = _build_task_counts(tasks)
 
     return {
         "session_id": session_id,
@@ -432,10 +452,11 @@ def get_session_summary(
         "is_active": session.is_active,
         "started_at": session.started_at.isoformat() if session.started_at else None,
         "task_progress": {
-            "total": len(tasks),
-            "done": sum(1 for t in tasks if t.status == TaskStatus.DONE),
-            "running": sum(1 for t in tasks if t.status == TaskStatus.RUNNING),
-            "failed": sum(1 for t in tasks if t.status == TaskStatus.FAILED),
+            "total": task_counts["total"],
+            "pending": task_counts["pending"],
+            "done": task_counts["done"],
+            "running": task_counts["running"],
+            "failed": task_counts["failed"],
         },
         "recent_logs": [
             {
@@ -676,10 +697,12 @@ def get_dashboard(request: Request, db: Session = Depends(get_db)):
     # Task stats across active projects only
     task_query = db.query(Task).filter(Task.project_id.in_(active_project_ids))
     total_tasks = task_query.count()
-    pending_tasks = task_query.filter(Task.status == TaskStatus.PENDING).count()
-    done_tasks = task_query.filter(Task.status == TaskStatus.DONE).count()
-    failed_tasks = task_query.filter(Task.status == TaskStatus.FAILED).count()
-    running_tasks = task_query.filter(Task.status == TaskStatus.RUNNING).count()
+    all_tasks = task_query.all()
+    task_counts = _build_task_counts(all_tasks)
+    pending_tasks = task_counts["pending"]
+    done_tasks = task_counts["done"]
+    failed_tasks = task_counts["failed"]
+    running_tasks = task_counts["running"]
 
     # Recent activity (last 5 log entries)
     recent_logs = db.query(LogEntry).order_by(LogEntry.created_at.desc()).limit(5).all()
