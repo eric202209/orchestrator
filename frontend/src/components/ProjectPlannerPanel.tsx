@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { formatDistanceToNow } from 'date-fns'
 import {
   ArrowDown,
@@ -81,7 +81,7 @@ export function ProjectPlannerPanel({
     setDraftTasks([])
   }
 
-  const loadPlans = async () => {
+  const loadPlans = useCallback(async () => {
     try {
       setLoadingPlans(true)
       const response = await projectsAPI.getPlans(project.id)
@@ -91,11 +91,11 @@ export function ProjectPlannerPanel({
     } finally {
       setLoadingPlans(false)
     }
-  }
+  }, [project.id])
 
   useEffect(() => {
     loadPlans()
-  }, [project.id, loadPlans])
+  }, [loadPlans])
 
   const handleGenerate = async () => {
     if (!requirement.trim()) {

@@ -73,7 +73,7 @@ class Task(Base):
     completed_at = Column(DateTime(timezone=True), nullable=True)
     # Task workspace subfolder within project
     task_subfolder = Column(String(255), nullable=True)
-    
+
     # Add unique constraint on (project_id, task_subfolder) to prevent race conditions
     __table_args__ = (
         UniqueConstraint("project_id", "task_subfolder", name="uq_tasks_project_subfolder"),
@@ -117,7 +117,7 @@ class Session(Base):
     instance_id = Column(
         String(36), nullable=True, index=True
     )  # UUID for session versioning
-    
+
     # Add unique constraint on (project_id, name) to prevent duplicate sessions per project
     __table_args__ = (
         UniqueConstraint("project_id", "name", name="uq_sessions_project_name"),

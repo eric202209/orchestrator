@@ -230,6 +230,8 @@ def get_mobile_connection_info(
             f"{mobile_base_url}/tasks/{{task_id}}/retry",
         ],
     }
+
+
 @admin_router.get("/connection-secret")
 def reveal_mobile_connection_secret(
     current_user: User = Depends(get_current_active_user),

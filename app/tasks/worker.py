@@ -1422,7 +1422,7 @@ def execute_openclaw_task(
                         logger.info(
                             f"[ORCHESTRATION] Applying {fix_type} before retrying step {step_index + 1}"
                         )
-                        
+
                         # Store the fix attempt for history
                         orchestration_state.debug_attempts.append({
                             "attempt": len(orchestration_state.debug_attempts) + 1,
@@ -1432,14 +1432,14 @@ def execute_openclaw_task(
                             "confidence": debug_data.get("confidence", "MEDIUM"),
                             "error": step_record.error_message,
                         })
-                        
+
                         # If this is a command_fix, we need to modify the step_commands
                         # For code_fix, we let the LLM's execution prompt handle the fix
                         if fix_type == "command_fix" and debug_data.get("fix"):
                             # The fix contains the corrected command(s)
                             # Update the step's expected command for the retry
                             step_commands = [debug_data.get("fix", step_commands[0] if step_commands else "")]
-                        
+
                         emit_live(
                             "INFO",
                             f"[ORCHESTRATION] Fix applied ({fix_type}), retrying step {step_index + 1}",
