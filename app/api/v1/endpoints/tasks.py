@@ -480,7 +480,9 @@ def get_project_workspace_overview(project_id: int, db: Session = Depends(get_db
             "workspace_status": task.workspace_status,
             "task_subfolder": task.task_subfolder,
             "promoted_at": (
-                task.promoted_at.isoformat() if getattr(task, "promoted_at", None) else None
+                task.promoted_at.isoformat()
+                if getattr(task, "promoted_at", None)
+                else None
             ),
         }
         for task in tasks
@@ -494,7 +496,9 @@ def get_project_workspace_overview(project_id: int, db: Session = Depends(get_db
         "baseline": baseline,
         "promoted_tasks": promoted_tasks,
         "ready_task_ids": [
-            task.id for task in tasks if getattr(task, "workspace_status", None) == "ready"
+            task.id
+            for task in tasks
+            if getattr(task, "workspace_status", None) == "ready"
         ],
     }
 

@@ -539,7 +539,11 @@ class OpenClawSessionService:
             orchestration_state.status = OrchestrationStatus.PLANNING
             self._log_entry("INFO", "[ORCHESTRATION] PLANNING phase")
 
-            if self.task_model and self.task_model.steps and not orchestration_state.plan:
+            if (
+                self.task_model
+                and self.task_model.steps
+                and not orchestration_state.plan
+            ):
                 try:
                     stored_plan_payload = json.loads(self.task_model.steps)
                     from app.tasks.worker import _extract_plan_steps
@@ -561,12 +565,16 @@ class OpenClawSessionService:
                 # OPTIMIZATION: Compress project context in planning prompt
                 planning_prompt = PromptTemplates.build_planning_prompt(
                     task_description=prompt,
-                    project_context=orchestration_state.project_context[:4000]
-                    if orchestration_state.project_context
-                    else "",
+                    project_context=(
+                        orchestration_state.project_context[:4000]
+                        if orchestration_state.project_context
+                        else ""
+                    ),
                     execution_profile=(
                         getattr(self.task_model, "execution_profile", None)
-                        or getattr(self.session_model, "default_execution_profile", None)
+                        or getattr(
+                            self.session_model, "default_execution_profile", None
+                        )
                         or "full_lifecycle"
                     ),
                 )
@@ -594,12 +602,17 @@ class OpenClawSessionService:
                     if isinstance(output_text, str):
                         try:
                             output_data = json.loads(output_text)
-                            if isinstance(output_data, dict) and "payloads" in output_data:
+                            if (
+                                isinstance(output_data, dict)
+                                and "payloads" in output_data
+                            ):
                                 payloads = output_data.get("payloads", [])
                                 if isinstance(payloads, list) and len(payloads) > 0:
                                     first_payload = payloads[0]
                                     if isinstance(first_payload, dict):
-                                        output_text = first_payload.get("text", output_text)
+                                        output_text = first_payload.get(
+                                            "text", output_text
+                                        )
                         except json.JSONDecodeError:
                             pass
 

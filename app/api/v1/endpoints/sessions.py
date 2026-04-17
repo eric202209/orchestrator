@@ -321,7 +321,9 @@ def _maybe_queue_next_automatic_task(
     if not next_task:
         pending_blocked_task = (
             db.query(Task)
-            .filter(Task.project_id == session.project_id, Task.status == TaskStatus.PENDING)
+            .filter(
+                Task.project_id == session.project_id, Task.status == TaskStatus.PENDING
+            )
             .order_by(
                 Task.plan_position.asc().nullslast(),
                 Task.priority.desc(),

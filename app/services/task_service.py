@@ -149,13 +149,17 @@ class TaskService:
                 blocked.append(entry)
 
         if promoted:
-            lines.append("Promoted workspaces already accepted into the project baseline:")
+            lines.append(
+                "Promoted workspaces already accepted into the project baseline:"
+            )
             lines.extend(promoted[:6])
         if prior_done:
             lines.append("Earlier ordered tasks already completed and can be reused:")
             lines.extend(prior_done[:6])
         if blocked:
-            lines.append("Earlier ordered tasks still incomplete and should not be ignored:")
+            lines.append(
+                "Earlier ordered tasks still incomplete and should not be ignored:"
+            )
             lines.extend(blocked[:6])
 
         lines.append(
@@ -175,7 +179,9 @@ class TaskService:
         if not project or not current_task:
             return {"hydrated": False, "source_tasks": [], "files_copied": 0}
 
-        project_root = resolve_project_workspace_path(project.workspace_path, project.name)
+        project_root = resolve_project_workspace_path(
+            project.workspace_path, project.name
+        )
         current_order = getattr(current_task, "plan_position", None)
         if current_order is None:
             return {"hydrated": False, "source_tasks": [], "files_copied": 0}
@@ -258,7 +264,9 @@ class TaskService:
         }
 
     def get_project_baseline_dir(self, project: Project) -> Path:
-        project_root = resolve_project_workspace_path(project.workspace_path, project.name)
+        project_root = resolve_project_workspace_path(
+            project.workspace_path, project.name
+        )
         return project_root / BASELINE_DIR_NAME
 
     def _copy_tree_into_target(
@@ -290,7 +298,9 @@ class TaskService:
         if not task.task_subfolder:
             return {"baseline_path": str(baseline_dir), "files_copied": 0}
 
-        project_root = resolve_project_workspace_path(project.workspace_path, project.name)
+        project_root = resolve_project_workspace_path(
+            project.workspace_path, project.name
+        )
         source_dir = (project_root / task.task_subfolder).resolve()
         if not source_dir.exists():
             return {"baseline_path": str(baseline_dir), "files_copied": 0}

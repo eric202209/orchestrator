@@ -877,7 +877,9 @@ def execute_openclaw_task(
 
         task_service = TaskService(db)
         hydration_result = (
-            task_service.hydrate_task_workspace(project, task, orchestration_state.project_dir)
+            task_service.hydrate_task_workspace(
+                project, task, orchestration_state.project_dir
+            )
             if project and task
             else {"hydrated": False, "source_tasks": [], "files_copied": 0}
         )
@@ -1111,7 +1113,9 @@ def execute_openclaw_task(
                 )
             )
 
-            initial_output_text = _extract_structured_text(planning_result.get("output", ""))
+            initial_output_text = _extract_structured_text(
+                planning_result.get("output", "")
+            )
             if _should_retry_planning_with_minimal_prompt(
                 planning_result, initial_output_text
             ):
@@ -1371,12 +1375,11 @@ def execute_openclaw_task(
             if _is_long_running_verification_task(
                 execution_profile, step_description, prompt
             ):
-                step_timeout_seconds = max(
-                    600, min(timeout_seconds, 1800)
-                )
+                step_timeout_seconds = max(600, min(timeout_seconds, 1800))
             else:
                 step_timeout_seconds = max(
-                    300, timeout_seconds // max(1, min(len(orchestration_state.plan), 3))
+                    300,
+                    timeout_seconds // max(1, min(len(orchestration_state.plan), 3)),
                 )
 
             # Execute step
