@@ -1248,6 +1248,14 @@ def execute_openclaw_task(
                 )
             )
 
+            # Count attempts for this step (from debug_attempts history)
+            step_debug_attempts = [
+                da for da in orchestration_state.debug_attempts
+                if da.get("attempt") is not None and da.get("step_index", -1) == step_index
+            ]
+            current_attempt = len(step_debug_attempts) + 1
+            max_attempts = 3  # Maximum retry attempts per step
+
             # Record result
             step_output = step_result.get("output", "")
             step_status = (
@@ -1259,9 +1267,9 @@ def execute_openclaw_task(
                 status=step_status,
                 output=step_output[:1000],
                 verification_output=step_result.get("verification_output", ""),
-                files_changed=expected_files,  # Simplified
+                files_changed=step_result.get("files_changed", expected_files),
                 error_message=step_result.get("error", ""),
-                attempt=1,
+                attempt=current_attempt,
             )
 
             if step_status == "success":
@@ -1293,13 +1301,30 @@ def execute_openclaw_task(
                     metadata={"phase": "debugging", "step_index": step_index + 1},
                 )
 
+                # Check if we've exceeded max attempts
+                if current_attempt >= max_attempts:
+                    logger.warning(
+                        f"[ORCHESTRATION] Step {step_index + 1} failed after {current_attempt} attempts (max: {max_attempts}), marking as failed"
+                    )
+                    emit_live(
+                        "ERROR",
+                        f"[ORCHESTRATION] Step {step_index + 1} failed after {current_attempt} attempts, marking as failed",
+                        metadata={"phase": "debugging", "step_index": step_index + 1, "max_attempts_reached": True},
+                    )
+                    orchestration_state.status = OrchestrationStatus.ABORTED
+                    orchestration_state.abort_reason = f"Step {step_index + 1} failed after {current_attempt} attempts"
+                    task.status = TaskStatus.FAILED
+                    task.error_message = f"Step failed after {current_attempt} attempts: {step_record.error_message[:500]}"
+                    db.commit()
+                    return {"status": "failed", "reason": "max_attempts_reached"}
+
                 debug_prompt = PromptTemplates.build_debugging_prompt(
                     step_description=step_description,
                     error_message=step_record.error_message,
                     command_output=step_output,
                     verification_output=step_record.verification_output,
-                    attempt_number=1,
-                    max_attempts=3,
+                    attempt_number=current_attempt,
+                    max_attempts=max_attempts,
                     prior_debug_attempts=orchestration_state.debug_attempts,
                     project_name=orchestration_state.project_name,
                     workspace_root=str(orchestration_state.workspace_root),
@@ -1393,15 +1418,34 @@ def execute_openclaw_task(
                         continue  # Retry this step
 
                     elif fix_type == "code_fix" or fix_type == "command_fix":
-                        # Retry the step with fix
+                        # Apply the fix to the step before retrying
                         logger.info(
-                            f"[ORCHESTRATION] Fix applied, retrying step {step_index + 1}"
+                            f"[ORCHESTRATION] Applying {fix_type} before retrying step {step_index + 1}"
                         )
+                        
+                        # Store the fix attempt for history
+                        orchestration_state.debug_attempts.append({
+                            "attempt": len(orchestration_state.debug_attempts) + 1,
+                            "fix_type": fix_type,
+                            "fix": debug_data.get("fix", ""),
+                            "analysis": debug_data.get("analysis", ""),
+                            "confidence": debug_data.get("confidence", "MEDIUM"),
+                            "error": step_record.error_message,
+                        })
+                        
+                        # If this is a command_fix, we need to modify the step_commands
+                        # For code_fix, we let the LLM's execution prompt handle the fix
+                        if fix_type == "command_fix" and debug_data.get("fix"):
+                            # The fix contains the corrected command(s)
+                            # Update the step's expected command for the retry
+                            step_commands = [debug_data.get("fix", step_commands[0] if step_commands else "")]
+                        
                         emit_live(
                             "INFO",
-                            f"[ORCHESTRATION] Fix applied, retrying step {step_index + 1}",
-                            metadata={"phase": "debugging", "step_index": step_index + 1},
+                            f"[ORCHESTRATION] Fix applied ({fix_type}), retrying step {step_index + 1}",
+                            metadata={"phase": "debugging", "step_index": step_index + 1, "fix_type": fix_type},
                         )
+                        # Continue to retry the step with the fix incorporated
                         continue  # Retry this step
 
                 except TaskWorkspaceViolationError as e:

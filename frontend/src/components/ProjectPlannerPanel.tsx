@@ -51,6 +51,8 @@ const normalizeDraftTasks = (tasks: PlannerTaskCandidate[]) =>
   sortDraftTasks(tasks).map((task, index) => ({
     ...task,
     plan_position: index + 1,
+    // Preserve the include field if it exists, default to true for backward compatibility
+    include: task.include ?? true,
   }))
 
 export function ProjectPlannerPanel({
