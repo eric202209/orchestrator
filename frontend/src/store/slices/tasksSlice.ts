@@ -1,5 +1,5 @@
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
-import { Task, TaskFilters } from '@/types';
+import type { Task, TaskFilters, TaskStatus } from '@/types';
 
 const tasksSlice = createSlice({
   name: 'tasks',
@@ -11,7 +11,7 @@ const tasksSlice = createSlice({
   },
   reducers: {
     // Optimistic updates
-    updateTaskStatusOptimistic: (state, action: PayloadAction<{ taskId: number; status: string }>) => {
+    updateTaskStatusOptimistic: (state, action: PayloadAction<{ taskId: number; status: TaskStatus }>) => {
       const task = state.items.find((t) => t.id === action.payload.taskId);
       if (task) {
         task.status = action.payload.status;

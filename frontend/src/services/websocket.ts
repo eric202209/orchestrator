@@ -15,6 +15,7 @@ export interface WebSocketMessage {
   message?: string;
   timestamp?: string;
   status?: unknown;
+  heartbeat_interval?: number;
 }
 
 export interface WebSocketOptions {
@@ -27,7 +28,7 @@ export interface WebSocketOptions {
 
 class WebSocketService {
   private ws: WebSocket | null = null;
-  private heartbeatInterval: NodeJS.Timeout | null = null;
+  private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private reconnectAttempts: number = 0;
   private readonly maxReconnectAttempts: number;
   private readonly reconnectDelay: number;
@@ -119,11 +120,11 @@ class WebSocketService {
 
       this.ws.onerror = (error) => {
         console.error('❌ WebSocket error:', error);
-        this.onError?.(error as Error);
+        this.onError?.(new Error('WebSocket error'));
       };
     } catch (error) {
       console.error('Failed to create WebSocket connection:', error);
-      this.onError?.(error as Error);
+      this.onError?.(error instanceof Error ? error : new Error(String(error)));
     }
   }
 

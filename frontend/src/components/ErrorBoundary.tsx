@@ -1,19 +1,16 @@
 import { ErrorBoundary as ReactErrorBoundary } from 'react-error-boundary';
-
-interface FallbackProps {
-  error: Error;
-  resetErrorBoundary: () => void;
-}
+import type { FallbackProps } from 'react-error-boundary';
 
 function ErrorFallback({ error, resetErrorBoundary }: FallbackProps) {
+  const normalizedError = error instanceof Error ? error : new Error(String(error));
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-900 text-slate-100 p-4">
       <div className="max-w-md w-full bg-slate-800 rounded-lg p-6 space-y-4">
         <h2 className="text-xl font-semibold text-red-400">Something went wrong</h2>
-        <p className="text-slate-400 text-sm">{error.message}</p>
+        <p className="text-slate-400 text-sm">{normalizedError.message}</p>
         <details className="bg-slate-900 rounded p-3 text-xs font-mono text-slate-500">
           <summary className="cursor-pointer mb-2">Stack Trace</summary>
-          {error.stack}
+          {normalizedError.stack}
         </details>
         <div className="flex gap-3">
           <button

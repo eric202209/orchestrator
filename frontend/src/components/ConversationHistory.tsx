@@ -11,6 +11,7 @@ interface ConversationMessage {
   role: string;
   content: string;
   timestamp: string;
+  created_at?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -134,7 +135,7 @@ export default function ConversationHistory({ sessionId, limit = 20 }: Conversat
                   <p className="text-sm text-gray-900">{message.content}</p>
                 </div>
                 <p className="text-xs text-gray-500 mt-1">
-                  {new Date(message.created_at).toLocaleTimeString()}
+                  {new Date(message.created_at || message.timestamp).toLocaleTimeString()}
                 </p>
               </div>
             </div>

@@ -1,5 +1,5 @@
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
-import { Project, ProjectFilters } from '@/types';
+import type { Project, ProjectFilters } from '@/types';
 
 const projectsSlice = createSlice({
   name: 'projects',

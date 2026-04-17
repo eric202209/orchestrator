@@ -1,8 +1,10 @@
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useKeyboardShortcuts } from '@/lib/hooks/useKeyboardShortcuts';
 
 export function useKeyboardShortcutsWithModal() {
   const navigate = useNavigate();
+  const [isHelpOpen, setIsHelpOpen] = useState(false);
 
   const handleSearch = () => {
     // TODO: Implement session search modal
@@ -30,7 +32,8 @@ export function useKeyboardShortcutsWithModal() {
   });
 
   return {
-    setIsHelpOpen: () => {},
+    isHelpOpen,
+    setIsHelpOpen,
   };
 }
 

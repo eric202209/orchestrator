@@ -693,27 +693,21 @@ def delete_session(
 
     logger.info(f"DELETE /sessions/{session_id} - Starting deletion")
 
-    db_session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    db_session = (
+        db.query(SessionModel)
+        .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
+        .first()
+    )
     if not db_session:
         logger.warning(f"DELETE /sessions/{session_id} - Session not found")
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Log deletion before actually deleting
-    db.add(
-        LogEntry(
-            session_id=session_id,
-            level="INFO",
-            message=f"Session deletion requested: {db_session.name}",
-            log_metadata=json.dumps({"requested_by": current_user.email}),
-        )
-    )
-    db.commit()
-
-    # Soft delete: mark as deleted and delete all logs
-    # This prevents database ID reuse issues that cause stale logs
-    db_session.deleted_at = datetime.now(timezone.utc)
+    deleted_at = datetime.now(timezone.utc)
+    db_session.deleted_at = deleted_at
     db_session.is_active = False
     db_session.status = "deleted"
+    if "__deleted__" not in db_session.name:
+        db_session.name = f"{db_session.name}__deleted__{db_session.id}"
 
     checkpoint_service = CheckpointService(db)
     deleted_checkpoints = checkpoint_service.delete_all_checkpoints(session_id)

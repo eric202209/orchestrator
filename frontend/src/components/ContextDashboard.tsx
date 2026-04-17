@@ -19,10 +19,6 @@ export default function ContextDashboard({ sessionId, projectId, taskId }: Conte
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    fetchContextSummary();
-  }, [sessionId, fetchContextSummary]);
-
   const fetchContextSummary = useCallback(async () => {
     try {
       setLoading(true);
@@ -36,6 +32,10 @@ export default function ContextDashboard({ sessionId, projectId, taskId }: Conte
       setLoading(false);
     }
   }, [sessionId]);
+
+  useEffect(() => {
+    fetchContextSummary();
+  }, [sessionId, fetchContextSummary]);
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

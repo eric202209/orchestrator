@@ -34,8 +34,8 @@ export const ProjectIsolationStatus: React.FC<{ projectId: number }> = ({ projec
 
   const loadStatus = useCallback(async () => {
     try {
-      const data = await api.get(`/isolation/projects/${projectId}/isolation/status`);
-      setStatus(data);
+      const response = await api.get<IsolationStatus>(`/isolation/projects/${projectId}/isolation/status`);
+      setStatus(response.data);
     } catch (error) {
       console.error('Failed to load isolation status:', error);
       setStatus({
@@ -58,10 +58,10 @@ export const ProjectIsolationStatus: React.FC<{ projectId: number }> = ({ projec
 
   const validatePath = useCallback(async () => {
     try {
-      const data = await api.post(`/isolation/projects/${projectId}/isolation/validate`, {
+      const response = await api.post<ValidateResponse>(`/isolation/projects/${projectId}/isolation/validate`, {
         path: testPath,
       });
-      setValidationResult(data);
+      setValidationResult(response.data);
     } catch (error: unknown) {
       setValidationResult({
         valid: false,
@@ -80,6 +80,10 @@ export const ProjectIsolationStatus: React.FC<{ projectId: number }> = ({ projec
         <p className="text-gray-400">Loading isolation status...</p>
       </div>
     );
+  }
+
+  if (!status) {
+    return null;
   }
 
   const statusColors = {

@@ -1,5 +1,5 @@
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
-import { Log, LogFilters } from '@/types';
+import type { Log, LogFilters } from '@/types';
 
 const logsSlice = createSlice({
   name: 'logs',

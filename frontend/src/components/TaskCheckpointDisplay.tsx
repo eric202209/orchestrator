@@ -21,6 +21,7 @@ interface CheckpointResumeData {
 
 interface TaskCheckpointDisplayProps {
   taskId: number;
+  sessionId?: number;
 }
 
 export default function TaskCheckpointDisplay({ taskId }: TaskCheckpointDisplayProps) {

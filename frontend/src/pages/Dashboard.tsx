@@ -117,7 +117,6 @@ function Dashboard() {
     try {
       const response = await projectsAPI.create({ 
         name: trimmedName,
-        branch: 'main'
       });
       setProjects((current) =>
         current.map((project) => (project.id === tempId ? response.data : project))

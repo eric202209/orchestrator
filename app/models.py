@@ -12,6 +12,8 @@ from sqlalchemy import (
     Float,
     JSON,
     UniqueConstraint,
+    Index,
+    text,
 )
 from sqlalchemy.orm import relationship, declarative_base
 from sqlalchemy.sql import func
@@ -123,9 +125,15 @@ class Session(Base):
         String(36), nullable=True, index=True
     )  # UUID for session versioning
 
-    # Add unique constraint on (project_id, name) to prevent duplicate sessions per project
     __table_args__ = (
-        UniqueConstraint("project_id", "name", name="uq_sessions_project_name"),
+        Index(
+            "ix_sessions_project_name_active",
+            "project_id",
+            "name",
+            unique=True,
+            sqlite_where=text("deleted_at IS NULL"),
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
     )
 
     project = relationship("Project", back_populates="sessions")

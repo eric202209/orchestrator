@@ -4,6 +4,7 @@ export interface Project {
   description: string | null;
   github_url: string | null;
   branch: string;
+  workspace_path?: string | null;
   created_at: string;
   updated_at: string | null;
 }
@@ -53,7 +54,7 @@ export interface Session {
   last_alert_level?: string | null;
   last_alert_message?: string | null;
   last_alert_at?: string | null;
-  session_key: string | null;
+  session_key?: string | null;
   started_at: string | null;
   stopped_at: string | null;
   paused_at: string | null;
@@ -119,6 +120,7 @@ export interface AuthTokens {
 export interface User {
   id: number;
   email: string;
+  name?: string | null;
   is_active: boolean;
   created_at: string;
   updated_at: string | null;
@@ -127,11 +129,15 @@ export interface User {
 // API Response Types
 export interface SortedLogsResponse {
   session_id: number;
+  session_instance_id?: string | null;
   total_logs: number;
   returned_logs: number;
+  offset?: number;
+  limit?: number;
   sort_order: 'asc' | 'desc';
   deduplicated: boolean;
   logs: LogEntry[];
+  has_more?: boolean;
 }
 
 export interface TaskSortedLogsResponse {
@@ -176,4 +182,29 @@ export interface Checkpoint {
   created_at: string | null;
   step_index?: number;
   completed_steps?: number;
+}
+
+export interface SessionFilters {
+  status?: string;
+  is_active?: boolean;
+  project_id?: number;
+  skip?: number;
+  limit?: number;
+}
+
+export interface TaskFilters {
+  status?: TaskStatus;
+  project_id?: number;
+  search?: string;
+}
+
+export interface ProjectFilters {
+  search?: string;
+}
+
+export type Log = LogEntry;
+export interface LogFilters {
+  level?: string;
+  session_id?: number;
+  task_id?: number;
 }

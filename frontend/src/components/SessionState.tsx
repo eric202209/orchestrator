@@ -23,7 +23,7 @@ interface ConversationMessage {
 
 interface SessionStateProps {
   sessionId: number;
-  // projectId intentionally unused - session_id is sufficient for state operations
+  projectId?: number;
 }
 
 export default function SessionStateDisplay({ sessionId }: SessionStateProps) {

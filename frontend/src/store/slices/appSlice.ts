@@ -1,5 +1,5 @@
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
-import { Session, Project, Task } from '@/types';
+import type { Session, Project, Task, TaskStatus } from '@/types';
 
 interface AppState {
   sessions: Session[];
@@ -28,7 +28,7 @@ const appSlice = createSlice({
     deleteSessionOptimistic: (state, action: PayloadAction<number>) => {
       state.sessions = state.sessions.filter((s) => s.id !== action.payload);
     },
-    updateTaskStatusOptimistic: (state, action: PayloadAction<{ taskId: number; status: string }>) => {
+    updateTaskStatusOptimistic: (state, action: PayloadAction<{ taskId: number; status: TaskStatus }>) => {
       const task = state.tasks.find((t) => t.id === action.payload.taskId);
       if (task) {
         task.status = action.payload.status;

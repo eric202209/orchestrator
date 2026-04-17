@@ -929,7 +929,7 @@ def execute_openclaw_task(
                     f"[ORCHESTRATION] Task {task_id} already running for {time_since_start}, marking as failed"
                 )
                 task.status = TaskStatus.FAILED
-                task.error = f"Task already running for {time_since_start}, possible duplicate execution"
+                task.error_message = f"Task already running for {time_since_start}, possible duplicate execution"
                 db.commit()
                 raise Exception("Task timeout - already running too long")
         elif task.started_at and is_resume_execution:

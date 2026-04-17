@@ -41,7 +41,7 @@ function SessionDashboard() {
   
   // Track reconnect attempts and timeouts
   const reconnectCountRef = useRef(0);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isConnectingRef = useRef(false);
   
   // Refs for WebSocket connection functions to avoid forward reference issues
@@ -86,7 +86,7 @@ function SessionDashboard() {
 
   // Helper function to check if session is running (includes 'active' status)
   const isSessionRunning = useCallback(() => {
-    return session?.status === 'running' || session?.status === 'active';
+    return session?.status === 'running';
   }, [session]);
 
   const fetchProjectTasks = useCallback(async () => {
@@ -175,9 +175,12 @@ function SessionDashboard() {
       console.log('logsArray length:', logsArray.length);
       
       // Transform logs to use created_at
-      const transformedLogs = logsArray.map((log: unknown) => ({
+      const transformedLogs = logsArray.map((log) => ({
         ...log,
-        created_at: (log as { timestamp?: string }).timestamp || log.created_at
+        created_at:
+          log.created_at ||
+          (log as LogEntry & { timestamp?: string }).timestamp ||
+          new Date().toISOString(),
       }));
       
       setLogs(transformedLogs);
@@ -191,7 +194,13 @@ function SessionDashboard() {
       const err = error as { response?: { data?: { detail?: unknown } } };
       console.error('Failed to fetch session logs:', error);
       console.error('Response structure:', err?.response?.data);
-      alert(`Failed to load session logs: ${err.response?.data?.detail || error.message || 'Unknown error'}. Please try again.`);
+      const message =
+        typeof err.response?.data?.detail === 'string'
+          ? err.response.data.detail
+          : error instanceof Error
+            ? error.message
+            : 'Unknown error';
+      alert(`Failed to load session logs: ${message}. Please try again.`);
     } finally {
       setIsLoadingLogs(false);
     }
@@ -649,19 +658,19 @@ function SessionDashboard() {
       const workspaceInfo = await sessionsAPI.getWorkspaceInfo(Number(id));
       console.log('Workspace info:', workspaceInfo);
       
-      if (workspaceInfo.exists) {
+      if (workspaceInfo.data.exists) {
         // Show warning to user
         setShowOverwriteWarning({
           safe_to_proceed: false,
           workspace_exists: true,
-          file_count: workspaceInfo.file_count,
+          file_count: workspaceInfo.data.file_count,
           would_overwrite: true,
           conflicting_files: []
         });
         
         const proceed = window.confirm(
-          `⚠️  WARNING: Workspace already exists with ${workspaceInfo.file_count} files!\n\n` +
-          `Path: ${workspaceInfo.path}\n` +
+          `⚠️  WARNING: Workspace already exists with ${workspaceInfo.data.file_count} files!\n\n` +
+          `Path: ${workspaceInfo.data.path}\n` +
           `\nThis will resume execution in an existing workspace.\n` +
           `Do you want to:\n` +
           `A) Resume anyway (may overwrite existing files)\n` +

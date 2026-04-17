@@ -1,5 +1,5 @@
 import { createSlice, PayloadAction, createAsyncThunk } from '@reduxjs/toolkit';
-import { Session, SessionFilters } from '@/types';
+import type { Session, SessionFilters } from '@/types';
 import { sessionsAPI } from '@/api/client';
 
 export const fetchSessions = createAsyncThunk<Session[], SessionFilters>(
@@ -85,4 +85,3 @@ export const {
 } = sessionsSlice.actions;
 
 export default sessionsSlice.reducer;
-

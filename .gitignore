@@ -89,3 +89,7 @@ run/
 backend.pid
 frontend.pid
 worker.pid
+
+# alembic
+alembic
+alembic.ini

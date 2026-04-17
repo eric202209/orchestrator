@@ -53,7 +53,6 @@ function ProjectsList() {
     try {
       const response = await projectsAPI.create({ 
         name: trimmedName,
-        branch: 'main'
       });
       setProjects((current) =>
         current.map((project) => (project.id === tempId ? response.data : project))
@@ -155,7 +154,13 @@ function ProjectsList() {
       setEditingProjectId(projectId);
       const err = error as { response?: { data?: { detail?: unknown } } };
       console.error('Failed to update project:', error);
-      alert(`Failed to update project: ${err.response?.data?.detail || error.message}`);
+      const message =
+        typeof err.response?.data?.detail === 'string'
+          ? err.response.data.detail
+          : error instanceof Error
+            ? error.message
+            : 'Unknown error';
+      alert(`Failed to update project: ${message}`);
     } finally {
       setUpdatingProject(false);
     }

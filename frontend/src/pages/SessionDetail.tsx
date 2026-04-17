@@ -85,7 +85,7 @@ export default function SessionDetail() {
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
   const [checkpointCount, setCheckpointCount] = useState(0);
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const parseApiDate = useCallback((value?: string | null): Date | null => {
     if (!value) return null;

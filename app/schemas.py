@@ -165,6 +165,8 @@ class SessionResponse(SessionBase):
     resumed_at: Optional[datetime] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
+    instance_id: Optional[str] = None
+    deleted_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True

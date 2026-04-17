@@ -448,8 +448,10 @@ function ProjectDetail() {
                   className="text-slate-400 hover:text-white transition-colors"
                   onClick={(e) => {
                     e.preventDefault();
-                    // Open in new tab without waiting for response
-                    window.open(project.github_url, '_blank');
+                    const repoUrl = project.github_url;
+                    if (repoUrl) {
+                      window.open(repoUrl, '_blank');
+                    }
                   }}
                   title={project.github_url}
                 >

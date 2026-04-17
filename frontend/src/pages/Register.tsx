@@ -34,7 +34,7 @@ function Register() {
       await authAPI.register(email, password);
       setSuccess(true);
     } catch (err: unknown) {
-      const error = err as { response?: { data?: { detail?: string } } };
+      const error = err as { response?: { data?: { detail?: string | Array<{ msg?: string }> | object } }; message?: string };
       console.error('Registration error:', error);
       // Handle different error response formats
       const detail = error.response?.data?.detail;

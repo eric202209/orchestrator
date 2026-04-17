@@ -19,7 +19,7 @@ type TaskStatus = 'pending' | 'running' | 'done' | 'failed';
 
 function TasksList() {
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [projects, setProjects] = useState<Project[]>({});
+  const [projects, setProjects] = useState<Record<number, Project>>({});
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<TaskStatus | 'all'>('all');

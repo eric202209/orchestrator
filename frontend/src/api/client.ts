@@ -12,7 +12,9 @@ import type {
   User,
   SortedLogsResponse,
   TaskSortedLogsResponse,
-  ProjectLogsResponse
+  ProjectLogsResponse,
+  WorkspaceInfo,
+  SessionFilters,
 } from '../types/api';
 
 const API_BASE_URL =
@@ -172,7 +174,7 @@ export const projectsAPI = {
 
   getById: (id: number) => apiClient.get<Project>(`/projects/${id}`),
 
-  create: (data: { name: string; description?: string; workspace_path?: string }) =>
+  create: (data: { name: string; description?: string; github_url?: string; branch?: string; workspace_path?: string }) =>
     apiClient.post<Project>('/projects', data),
 
   update: (id: number, data: Partial<Project>) =>
@@ -340,13 +342,7 @@ export const tasksAPI = {
 
 // Sessions API
 export const sessionsAPI = {
-  getAll: (params?: {
-    status?: string;
-    is_active?: boolean;
-    project_id?: number;
-    skip?: number;
-    limit?: number;
-  }) => apiClient.get<Session[]>('/sessions', { params }),
+  getAll: (params?: SessionFilters) => apiClient.get<Session[]>('/sessions', { params }),
 
   create: (data: { project_id: number; name: string; description?: string; execution_mode?: 'automatic' | 'manual'; default_execution_profile?: ExecutionProfile }) =>
     apiClient.post<Session>('/sessions', data),
@@ -409,13 +405,7 @@ export const sessionsAPI = {
     }>(`/sessions/${sessionId}/create-backup`),
 
   getWorkspaceInfo: (sessionId: number) =>
-    apiClient.get<{ 
-      exists: boolean;
-      path?: string;
-      file_count: number;
-      last_modified?: string;
-      would_overwrite: boolean;
-    }>(`/sessions/${sessionId}/workspace-info`),
+    apiClient.get<WorkspaceInfo>(`/sessions/${sessionId}/workspace-info`),
 
   // Checkpoint management endpoints
   saveCheckpoint: (sessionId: number, checkpointName?: string) =>
@@ -483,7 +473,8 @@ export const sessionsAPI = {
   generateSteps: (data: { task_name: string; description: string }) =>
     apiClient.post<Array<{ title: string; description: string }>>('/generate-steps', data),
 
-  getLogs: (id: number) => apiClient.get<LogEntry[]>(`/sessions/${id}/logs`),
+  getLogs: (id: number) =>
+    apiClient.get<{ logs: LogEntry[]; total: number }>(`/sessions/${id}/logs`),
 
   getTools: (id: number) => apiClient.get<Array<{ id: number; tool_name: string; parameters: string; result: string; executed_at: string }>>(`/sessions/${id}/tools`),
 
@@ -540,4 +531,5 @@ export const sessionsAPI = {
 
 };
 
+export const api = apiClient;
 export default apiClient;
