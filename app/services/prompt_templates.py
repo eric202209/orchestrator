@@ -345,8 +345,8 @@ class PromptTemplates:
 
 **Path Rules:**
 1. Run everything from `{project_dir}`
-2. Treat all file paths as relative to `{project_dir}`
-3. Do NOT use `..`, `~`, or absolute paths
+2. Treat shell command paths as relative to `{project_dir}`
+3. For file-read or file-write tool calls, use absolute paths rooted under `{project_dir}` because the tool resolver may not inherit the shell working directory
 4. Do NOT create files or folders outside `{project_dir}`
 5. Do NOT create documentation files unless the task explicitly requires them
 6. Avoid README files, notes files, summaries, or explanation documents unless required by the task
@@ -358,7 +358,7 @@ class PromptTemplates:
 4. Avoid large heredocs or multi-hundred-line inline file creation unless absolutely necessary
 5. If a config file such as `package.json`, `pyproject.toml`, or `.env` is missing, create the minimal valid version needed for this step
 6. When a command fails because a file is missing, recover by creating or initializing the smallest required file inside `{project_dir}`
-7. Keep all file references relative to `{project_dir}` even inside verification commands
+7. Keep shell command and verification paths relative to `{project_dir}`
 8. If the step appears too large to complete safely, do the smallest valid portion and explain the blocker in `error_message`
 9. Do NOT wrap commands with `cd ... &&`; run them directly from `{project_dir}`
 10. Do NOT use shell backgrounding such as `&`, `nohup`, `disown`, or long-lived dev servers unless the step explicitly requires process management
@@ -367,7 +367,8 @@ class PromptTemplates:
 13. If the context mentions hydrated baseline files from prior tasks, inspect and reuse them before creating new competing files or duplicate interfaces
 14. Before reading a file path, confirm that it exists; do not attempt to read missing files
 15. Never pass a directory path to a file-read tool; only read actual files
-16. For command execution, pass direct commands only and rely on `{project_dir}` as the working directory instead of wrapping commands with `cd ... && ...`
+16. When using a file-read or file-write tool, pass the full absolute path inside `{project_dir}` such as `{project_dir}/src/index.ts`
+17. For command execution, pass direct commands only and rely on `{project_dir}` as the working directory instead of wrapping commands with `cd ... && ...`
 
 **Execution Profile Rules:**
 {execution_profile_rules}
@@ -396,8 +397,8 @@ class PromptTemplates:
 
 **Path Rules:**
 1. Keep every proposed fix inside `{project_dir}`
-2. Use relative paths only
-3. Do NOT use `..`, `~`, or absolute paths
+2. Use relative paths for shell commands and verification commands
+3. For file-read or file-write tool calls, use absolute paths rooted under `{project_dir}`
 4. Do NOT suggest creating or modifying files outside `{project_dir}`
 5. Do NOT propose documentation files unless the task explicitly requires them
 6. Avoid README files, notes files, summaries, or explanation documents unless required by the task
@@ -435,8 +436,8 @@ class PromptTemplates:
 
 **Path Rules:**
 1. Revised commands MUST stay inside `{project_dir}`
-2. Use relative paths only
-3. Do NOT use `..`, `~`, or absolute paths
+2. Use relative paths for shell commands and verification commands
+3. For file-read or file-write tool calls, use absolute paths rooted under `{project_dir}`
 4. Do NOT create sibling folders under `{workspace_root}`
 5. Do NOT add documentation-only steps unless the task explicitly requires them
 6. Avoid README files, notes files, summaries, or explanation documents unless required by the task
