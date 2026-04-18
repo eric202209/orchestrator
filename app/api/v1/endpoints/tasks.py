@@ -51,7 +51,9 @@ def _resolve_task_subfolder_name(task: Task) -> str:
     return f"task-{slug}" if slug else f"task-{task.id}"
 
 
-def _prepare_task_for_fresh_execution(task: Task, clear_saved_plan: bool = False) -> None:
+def _prepare_task_for_fresh_execution(
+    task: Task, clear_saved_plan: bool = False
+) -> None:
     """Reset task execution state before a fresh run."""
     task.status = TaskStatus.RUNNING
     task.error_message = None
