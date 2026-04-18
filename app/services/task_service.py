@@ -6,8 +6,7 @@ from pathlib import Path
 from typing import Optional
 from sqlalchemy.orm import Session
 from datetime import datetime
-from app.models import Task, TaskStatus, Project, SessionTask
-from app.schemas import TaskUpdate
+from app.models import Task, TaskStatus, Project
 from app.services.project_isolation_service import resolve_project_workspace_path
 
 
@@ -79,7 +78,9 @@ class TaskService:
     ) -> dict:
         source_dir = source_dir.resolve()
         project_root = self.get_project_root(project).resolve()
-        snapshot_dir = (project_root / AUTO_SNAPSHOT_ROOT / snapshot_key).resolve()
+        snapshot_dir = (
+            project_root / AUTO_SNAPSHOT_ROOT / snapshot_key
+        ).resolve()
 
         if snapshot_dir.exists():
             shutil.rmtree(snapshot_dir)
@@ -96,9 +97,7 @@ class TaskService:
 
         files_copied = 0
         reserved_names = (
-            self._reserved_project_names(project)
-            if preserve_project_root_rules
-            else set()
+            self._reserved_project_names(project) if preserve_project_root_rules else set()
         )
         for source_path in source_dir.rglob("*"):
             if source_path.is_dir():
@@ -133,7 +132,9 @@ class TaskService:
     ) -> dict:
         target_dir = target_dir.resolve()
         project_root = self.get_project_root(project).resolve()
-        snapshot_dir = (project_root / AUTO_SNAPSHOT_ROOT / snapshot_key).resolve()
+        snapshot_dir = (
+            project_root / AUTO_SNAPSHOT_ROOT / snapshot_key
+        ).resolve()
 
         if not snapshot_dir.exists():
             return {
@@ -146,9 +147,7 @@ class TaskService:
 
         target_dir.mkdir(parents=True, exist_ok=True)
         reserved_names = (
-            self._reserved_project_names(project)
-            if preserve_project_root_rules
-            else set()
+            self._reserved_project_names(project) if preserve_project_root_rules else set()
         )
 
         for child in list(target_dir.iterdir()):
@@ -156,10 +155,7 @@ class TaskService:
                 continue
             if child.name in HYDRATION_EXCLUDED_NAMES:
                 continue
-            if (
-                preserve_project_root_rules
-                and child.name == AUTO_SNAPSHOT_ROOT.split("/")[-1]
-            ):
+            if preserve_project_root_rules and child.name == AUTO_SNAPSHOT_ROOT.split("/")[-1]:
                 continue
             if child.is_dir():
                 shutil.rmtree(child)
@@ -587,11 +583,7 @@ class TaskService:
         )
         return {
             "exists": file_count > 0,
-            "path": str(
-                baseline_dir
-                if baseline_dir.exists() or not legacy_dir.exists()
-                else legacy_dir
-            ),
+            "path": str(baseline_dir if baseline_dir.exists() or not legacy_dir.exists() else legacy_dir),
             "file_count": file_count,
             "promoted_task_count": promoted_task_count,
         }

@@ -7,8 +7,6 @@ from fastapi.responses import JSONResponse, Response
 from sqlalchemy import text
 from app.config import settings
 from app.api.v1.router import api_router
-from app.api.v1.endpoints import auth
-from app.celery_app import celery_app
 from app.database import engine, init_db, get_db_session
 from app.services.checkpoint_service import CheckpointService
 import logging

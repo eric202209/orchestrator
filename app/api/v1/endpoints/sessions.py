@@ -36,13 +36,11 @@ from app.services import (
     PromptTemplates,
 )
 from app.services.openclaw_service import OpenClawSessionError
-from app.services.prompt_templates import OrchestrationState, OPENCLAW_WORKSPACE_ROOT
+from app.services.prompt_templates import OrchestrationState
 from app.services.project_isolation_service import resolve_project_workspace_path
 from app.services.name_formatter import humanize_display_name
-from app.services.log_utils import sort_logs, deduplicate_logs, format_logs_batch
-from app.services.log_stream_service import stream_logs, get_project_logs_summary
+from app.services.log_utils import deduplicate_logs
 from app.dependencies import get_current_active_user, get_current_user
-from app.auth import verify_token
 
 router = APIRouter()
 

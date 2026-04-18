@@ -1,7 +1,6 @@
 """API Router v1"""
 
-from fastapi import APIRouter, Depends
-from fastapi import HTTPException
+from fastapi import APIRouter
 from app.api.v1.endpoints import (
     tasks,
     github,

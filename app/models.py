@@ -9,7 +9,6 @@ from sqlalchemy import (
     ForeignKey,
     Enum,
     Boolean,
-    Float,
     JSON,
     UniqueConstraint,
     Index,

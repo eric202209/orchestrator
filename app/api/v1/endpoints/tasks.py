@@ -2,16 +2,14 @@
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
-from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
+from typing import List, Dict, Optional
+from datetime import datetime
 import time
 import json
-import asyncio
 from pydantic import BaseModel
 from app.database import get_db
 from app.models import Task, TaskStatus, Project, LogEntry, SessionTask
 from app.schemas import TaskCreate, TaskUpdate, TaskResponse, TaskPromotionRequest
-from app.services.openclaw_service import OpenClawSessionService
 from app.services.error_handler import EnhancedErrorHandler
 from app.services.log_utils import sort_logs
 from app.services.name_formatter import humanize_display_name
@@ -53,9 +51,7 @@ def _resolve_task_subfolder_name(task: Task) -> str:
     return f"task-{slug}" if slug else f"task-{task.id}"
 
 
-def _prepare_task_for_fresh_execution(
-    task: Task, clear_saved_plan: bool = False
-) -> None:
+def _prepare_task_for_fresh_execution(task: Task, clear_saved_plan: bool = False) -> None:
     """Reset task execution state before a fresh run."""
     task.status = TaskStatus.RUNNING
     task.error_message = None

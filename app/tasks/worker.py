@@ -14,7 +14,6 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 from pathlib import Path
 from sqlalchemy.orm import Session
-from sqlalchemy import create_engine
 from app.celery_app import celery_app
 from app.models import (
     Session as SessionModel,
@@ -24,7 +23,7 @@ from app.models import (
     LogEntry,
     Project,
 )
-from app.database import get_db, get_db_session
+from app.database import get_db_session
 from app.services import OpenClawSessionService, PromptTemplates
 from app.services.error_handler import error_handler
 from app.services.checkpoint_service import CheckpointService
@@ -34,7 +33,6 @@ from app.services.prompt_templates import (
     OrchestrationStatus,
     OrchestrationState,
     StepResult,
-    OPENCLAW_WORKSPACE_ROOT,
 )
 
 logger = logging.getLogger(__name__)
@@ -261,9 +259,7 @@ def _build_task_report_payload(db: Session, task_id: int) -> Dict[str, Any]:
             "task_subfolder": getattr(task, "task_subfolder", None),
             "created_at": task.created_at.isoformat(),
             "started_at": task.started_at.isoformat() if task.started_at else None,
-            "completed_at": (
-                task.completed_at.isoformat() if task.completed_at else None
-            ),
+            "completed_at": task.completed_at.isoformat() if task.completed_at else None,
             "error_message": task.error_message,
         },
         "logs": [
@@ -486,7 +482,9 @@ def _run_virtual_merge_gate(
         and task.plan_position is not None
         and task.plan_position < current_task.plan_position
     ]
-    incomplete = [task for task in prior_tasks if task.status != TaskStatus.DONE]
+    incomplete = [
+        task for task in prior_tasks if task.status != TaskStatus.DONE
+    ]
     if incomplete:
         summary = ", ".join(
             f"#{task.plan_position} {task.title} ({task.status.value})"
@@ -585,9 +583,7 @@ def _looks_like_truncated_multistep_plan(
 
     text = output_text or ""
     step_number_mentions = len(
-        re.findall(
-            r'(?:\\)?["\']step_number(?:\\)?["\']\s*:\s*\d+', text, flags=re.IGNORECASE
-        )
+        re.findall(r'(?:\\)?["\']step_number(?:\\)?["\']\s*:\s*\d+', text, flags=re.IGNORECASE)
     )
     if step_number_mentions > 1:
         return True
@@ -600,9 +596,7 @@ def _looks_like_truncated_multistep_plan(
         return True
 
     description_mentions = len(
-        re.findall(
-            r'(?:\\)?["\']description(?:\\)?["\']\s*:', text, flags=re.IGNORECASE
-        )
+        re.findall(r'(?:\\)?["\']description(?:\\)?["\']\s*:', text, flags=re.IGNORECASE)
     )
     if description_mentions > 1:
         return True
@@ -656,9 +650,7 @@ def _repair_step_commands_with_self_correction(
         )
         return None
 
-    repaired_step = _normalize_step(
-        repair_data, project_dir, logger_obj, step_index + 1
-    )
+    repaired_step = _normalize_step(repair_data, project_dir, logger_obj, step_index + 1)
     if _step_needs_command_repair(repaired_step):
         _record_live_log(
             db,
@@ -953,9 +945,7 @@ def _normalize_expected_files(
     return normalized_files
 
 
-def _missing_expected_files(
-    project_dir: Path, expected_files: Optional[List[str]]
-) -> List[str]:
+def _missing_expected_files(project_dir: Path, expected_files: Optional[List[str]]) -> List[str]:
     missing: List[str] = []
     for expected in expected_files or []:
         raw = str(expected or "").strip()
@@ -1454,9 +1444,7 @@ def execute_openclaw_task(
                     },
                 )
 
-        def restore_workspace_snapshot_if_needed(
-            reason: str,
-        ) -> Optional[Dict[str, Any]]:
+        def restore_workspace_snapshot_if_needed(reason: str) -> Optional[Dict[str, Any]]:
             if not project:
                 return None
             restore_result = _restore_workspace_after_abort(
@@ -1797,10 +1785,8 @@ def execute_openclaw_task(
                             f"[ORCHESTRATION] After stripping markdown, length: {len(output_text)}"
                         )
 
-                    success, plan_data, strategy_info = (
-                        error_handler.attempt_json_parsing(
-                            output_text, context="planning"
-                        )
+                    success, plan_data, strategy_info = error_handler.attempt_json_parsing(
+                        output_text, context="planning"
                     )
 
                     if _should_retry_planning_with_minimal_prompt(
@@ -1842,9 +1828,7 @@ def execute_openclaw_task(
                             f"Raw output: {output_text[:500]}"
                         )
                         db.commit()
-                        restore_workspace_snapshot_if_needed(
-                            "planning JSON parse failure"
-                        )
+                        restore_workspace_snapshot_if_needed("planning JSON parse failure")
                         return {"status": "failed", "reason": "planning_json_error"}
 
                     extracted_plan = _extract_plan_steps(plan_data)
@@ -1861,12 +1845,9 @@ def execute_openclaw_task(
                         used_minimal_planning_prompt = True
                         continue
 
-                    if (
-                        _looks_like_truncated_multistep_plan(
-                            output_text, extracted_plan
-                        )
-                        and not used_minimal_planning_prompt
-                    ):
+                    if _looks_like_truncated_multistep_plan(
+                        output_text, extracted_plan
+                    ) and not used_minimal_planning_prompt:
                         planning_result = _retry_planning_with_minimal_prompt(
                             openclaw_service=openclaw_service,
                             task_description=prompt,
@@ -1883,7 +1864,9 @@ def execute_openclaw_task(
                         output_text, extracted_plan
                     ):
                         orchestration_state.status = OrchestrationStatus.ABORTED
-                        orchestration_state.abort_reason = "Planning output collapsed a multi-step plan into a single step"
+                        orchestration_state.abort_reason = (
+                            "Planning output collapsed a multi-step plan into a single step"
+                        )
                         emit_live(
                             "ERROR",
                             "[ORCHESTRATION] Planning output was truncated into a single-step plan",
@@ -1899,9 +1882,7 @@ def execute_openclaw_task(
                             "success."
                         )
                         db.commit()
-                        restore_workspace_snapshot_if_needed(
-                            "truncated multi-step plan"
-                        )
+                        restore_workspace_snapshot_if_needed("truncated multi-step plan")
                         return {
                             "status": "failed",
                             "reason": "truncated_multistep_plan_after_retry",
@@ -2429,9 +2410,7 @@ def execute_openclaw_task(
                     task.status = TaskStatus.FAILED
                     task.error_message = str(e)
                     db.commit()
-                    restore_workspace_snapshot_if_needed(
-                        "debug workspace isolation violation"
-                    )
+                    restore_workspace_snapshot_if_needed("debug workspace isolation violation")
                     return {
                         "status": "failed",
                         "reason": "workspace_isolation_violation",
@@ -2514,9 +2493,7 @@ def execute_openclaw_task(
             elif blocked_pending_task:
                 session.status = "paused"
                 session.is_active = False
-                blockers = TaskService(db).get_blocking_prior_tasks(
-                    blocked_pending_task
-                )
+                blockers = TaskService(db).get_blocking_prior_tasks(blocked_pending_task)
                 if blockers:
                     blocking_summary = ", ".join(
                         f"#{item.plan_position} {item.title} ({item.status.value})"

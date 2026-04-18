@@ -1,7 +1,7 @@
 """Pydantic schemas for API validation"""
 
-from pydantic import BaseModel, EmailStr, HttpUrl
-from typing import Optional, List
+from pydantic import BaseModel, EmailStr
+from typing import Optional
 from datetime import datetime
 from enum import Enum
 

@@ -16,10 +16,10 @@ from fastapi import (
 )
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from typing import Optional, AsyncGenerator, Dict, Any
+from typing import Optional, AsyncGenerator
 import json
 from app.database import get_db
-from app.models import LogEntry, Session as SessionModel, Task, Project
+from app.models import Project
 from app.services.log_stream_service import LogStreamService
 
 router = APIRouter()

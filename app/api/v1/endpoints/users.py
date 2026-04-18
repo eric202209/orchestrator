@@ -1,11 +1,11 @@
 """User management endpoints"""
 
-from typing import List, Optional
+from typing import List
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import User as UserModel
-from app.schemas import UserResponse, UserCreate
+from app.schemas import UserResponse
 
 router = APIRouter(
     prefix="/users",
