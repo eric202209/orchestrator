@@ -186,6 +186,54 @@ TOOL_FAILURE_PATTERNS = (
 )
 
 
+def _tool_failure_correction_hints(
+    tool_failures: List[str], project_dir: Path
+) -> List[str]:
+    hints: List[str] = []
+
+    for failure in tool_failures:
+        message = str(failure or "")
+
+        raw_params_match = re.search(r"raw_params=(\{.*\})", message)
+        raw_params: Dict[str, Any] = {}
+        if raw_params_match:
+            try:
+                raw_params = json.loads(raw_params_match.group(1))
+            except json.JSONDecodeError:
+                raw_params = {}
+
+        raw_path = str(raw_params.get("path") or "").strip()
+        if raw_path and not Path(raw_path).is_absolute():
+            corrected_path = (project_dir / raw_path).resolve()
+            hints.append(
+                "File-tool paths are being resolved against the wrong root. "
+                f"Retry the file read/write using the absolute task-workspace path "
+                f"`{corrected_path}` instead of `{raw_path}`."
+            )
+
+        raw_command = str(raw_params.get("command") or "").strip()
+        if raw_command.startswith("cd ") and "&&" in raw_command:
+            hints.append(
+                "The execution tool rejected a wrapped shell command. "
+                "Retry with a direct command such as `node dist/server.js` and rely "
+                f"on the task working directory `{project_dir}` instead of `cd ... &&`."
+            )
+
+        if "read failed: eisd" in message.lower():
+            hints.append(
+                "A directory path was passed to the file-read tool. Retry by reading "
+                "an actual file path inside the task workspace, not the folder itself."
+            )
+
+    deduped: List[str] = []
+    seen = set()
+    for hint in hints:
+        if hint not in seen:
+            seen.add(hint)
+            deduped.append(hint)
+    return deduped
+
+
 def _recent_step_tool_failures(
     db: Session,
     session_id: int,
@@ -2195,10 +2243,17 @@ def execute_openclaw_task(
             if step_status == "success" and tool_failures:
                 step_status = "failed"
                 failure_summary = " | ".join(tool_failures[:3])
+                correction_hints = _tool_failure_correction_hints(
+                    tool_failures, orchestration_state.project_dir
+                )
                 step_result["error"] = (
                     "Step reported success but task logs contain tool failures: "
                     f"{failure_summary}"
                 )
+                if correction_hints:
+                    step_result["error"] += " | Retry hints: " + " | ".join(
+                        correction_hints[:3]
+                    )
                 emit_live(
                     "WARN",
                     (
@@ -2209,6 +2264,7 @@ def execute_openclaw_task(
                         "phase": "executing",
                         "step_index": step_index + 1,
                         "tool_failures": tool_failures[:10],
+                        "correction_hints": correction_hints[:10],
                     },
                 )
 

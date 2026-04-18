@@ -410,6 +410,7 @@ class PromptTemplates:
 4. Avoid suggesting large heredoc-based rewrites unless the task cannot be completed safely any other way
 5. Keep fixes retry-friendly and compatible with partial progress already made inside `{project_dir}`
 6. If failure was caused by a background process, `cd ... && ...`, or complex interpreter wrapper, replace it with a direct tool-safe command
+7. If the failure mentions `raw_params` or shows a file path resolved under the wrong workspace root, fix that first by using an absolute file-tool path inside `{project_dir}`
 
 **Output (JSON):**
 {{
