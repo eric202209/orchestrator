@@ -18,7 +18,8 @@ HYDRATION_EXCLUDED_NAMES = {
     ".pytest_cache",
 }
 TASK_REPORT_RE = re.compile(r"^task_report_\d+\.md$", re.IGNORECASE)
-BASELINE_DIR_NAME = ".project-baseline"
+LEGACY_BASELINE_DIR_NAME = ".project-baseline"
+AUTO_SNAPSHOT_ROOT = ".openclaw/auto-snapshots"
 
 
 class TaskService:
@@ -53,6 +54,134 @@ class TaskService:
         if changed:
             self.db.commit()
         return tasks
+
+    def get_project_root(self, project: Project) -> Path:
+        return resolve_project_workspace_path(project.workspace_path, project.name)
+
+    def _reserved_project_names(self, project: Project) -> set[str]:
+        task_subfolders = {
+            task.task_subfolder
+            for task in self.get_project_tasks(project.id)
+            if getattr(task, "task_subfolder", None)
+        }
+        reserved = set(HYDRATION_EXCLUDED_NAMES)
+        reserved.add(LEGACY_BASELINE_DIR_NAME)
+        reserved.update(task_subfolders)
+        return reserved
+
+    def create_workspace_snapshot(
+        self,
+        project: Project,
+        source_dir: Path,
+        *,
+        snapshot_key: str,
+        preserve_project_root_rules: bool = False,
+    ) -> dict:
+        source_dir = source_dir.resolve()
+        project_root = self.get_project_root(project).resolve()
+        snapshot_dir = (project_root / AUTO_SNAPSHOT_ROOT / snapshot_key).resolve()
+
+        if snapshot_dir.exists():
+            shutil.rmtree(snapshot_dir)
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+        if not source_dir.exists():
+            return {
+                "snapshot_path": str(snapshot_dir),
+                "source_path": str(source_dir),
+                "files_copied": 0,
+                "source_exists": False,
+                "preserve_project_root_rules": preserve_project_root_rules,
+            }
+
+        files_copied = 0
+        reserved_names = (
+            self._reserved_project_names(project)
+            if preserve_project_root_rules
+            else set()
+        )
+        for source_path in source_dir.rglob("*"):
+            if source_path.is_dir():
+                continue
+            relative = source_path.relative_to(source_dir)
+            if preserve_project_root_rules and relative.parts:
+                first_part = relative.parts[0]
+                if first_part in reserved_names:
+                    continue
+            if any(part in HYDRATION_EXCLUDED_NAMES for part in relative.parts):
+                continue
+            destination = snapshot_dir / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, destination)
+            files_copied += 1
+
+        return {
+            "snapshot_path": str(snapshot_dir),
+            "source_path": str(source_dir),
+            "files_copied": files_copied,
+            "source_exists": True,
+            "preserve_project_root_rules": preserve_project_root_rules,
+        }
+
+    def restore_workspace_snapshot(
+        self,
+        project: Project,
+        target_dir: Path,
+        *,
+        snapshot_key: str,
+        preserve_project_root_rules: bool = False,
+    ) -> dict:
+        target_dir = target_dir.resolve()
+        project_root = self.get_project_root(project).resolve()
+        snapshot_dir = (project_root / AUTO_SNAPSHOT_ROOT / snapshot_key).resolve()
+
+        if not snapshot_dir.exists():
+            return {
+                "restored": False,
+                "reason": "snapshot_missing",
+                "snapshot_path": str(snapshot_dir),
+                "target_path": str(target_dir),
+                "files_restored": 0,
+            }
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        reserved_names = (
+            self._reserved_project_names(project)
+            if preserve_project_root_rules
+            else set()
+        )
+
+        for child in list(target_dir.iterdir()):
+            if preserve_project_root_rules and child.name in reserved_names:
+                continue
+            if child.name in HYDRATION_EXCLUDED_NAMES:
+                continue
+            if (
+                preserve_project_root_rules
+                and child.name == AUTO_SNAPSHOT_ROOT.split("/")[-1]
+            ):
+                continue
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink(missing_ok=True)
+
+        files_restored = 0
+        for snapshot_path in snapshot_dir.rglob("*"):
+            if snapshot_path.is_dir():
+                continue
+            relative = snapshot_path.relative_to(snapshot_dir)
+            destination = target_dir / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(snapshot_path, destination)
+            files_restored += 1
+
+        return {
+            "restored": True,
+            "snapshot_path": str(snapshot_dir),
+            "target_path": str(target_dir),
+            "files_restored": files_restored,
+        }
 
     def infer_workspace_status(self, task: Task) -> str:
         current_status = getattr(task, "workspace_status", None)
@@ -179,20 +308,19 @@ class TaskService:
         if not project or not current_task:
             return {"hydrated": False, "source_tasks": [], "files_copied": 0}
 
-        project_root = resolve_project_workspace_path(
-            project.workspace_path, project.name
-        )
+        project_root = self.get_project_root(project)
         current_order = getattr(current_task, "plan_position", None)
         if current_order is None:
             return {"hydrated": False, "source_tasks": [], "files_copied": 0}
 
         target_dir.mkdir(parents=True, exist_ok=True)
-        baseline_dir = self.get_project_baseline_dir(project)
         source_tasks = []
         files_copied = 0
 
-        if baseline_dir.exists():
+        baseline_dirs = self.get_existing_project_baseline_dirs(project)
+        for baseline_dir in baseline_dirs:
             copied = self._copy_tree_into_target(
+                project=project,
                 source_dir=baseline_dir,
                 target_dir=target_dir,
                 overwrite=False,
@@ -202,11 +330,18 @@ class TaskService:
                     {
                         "task_id": None,
                         "title": "project baseline",
-                        "task_subfolder": BASELINE_DIR_NAME,
+                        "task_subfolder": baseline_dir.name,
                         "files_copied": copied,
                     }
                 )
                 files_copied += copied
+
+        if files_copied > 0:
+            return {
+                "hydrated": bool(source_tasks),
+                "source_tasks": source_tasks,
+                "files_copied": files_copied,
+            }
 
         candidate_tasks = []
         for task in self.get_project_tasks(project.id):
@@ -241,6 +376,7 @@ class TaskService:
                 continue
 
             copied_for_task = self._copy_tree_into_target(
+                project=project,
                 source_dir=source_dir,
                 target_dir=target_dir,
                 overwrite=True,
@@ -264,22 +400,47 @@ class TaskService:
         }
 
     def get_project_baseline_dir(self, project: Project) -> Path:
-        project_root = resolve_project_workspace_path(
-            project.workspace_path, project.name
-        )
-        return project_root / BASELINE_DIR_NAME
+        return self.get_project_root(project)
+
+    def get_legacy_project_baseline_dir(self, project: Project) -> Path:
+        return self.get_project_root(project) / LEGACY_BASELINE_DIR_NAME
+
+    def get_existing_project_baseline_dirs(self, project: Project) -> list[Path]:
+        baseline_dirs: list[Path] = []
+        canonical_dir = self.get_project_baseline_dir(project)
+        legacy_dir = self.get_legacy_project_baseline_dir(project)
+        for candidate in (canonical_dir, legacy_dir):
+            if candidate.exists() and candidate not in baseline_dirs:
+                baseline_dirs.append(candidate)
+        return baseline_dirs
 
     def _copy_tree_into_target(
         self,
+        project: Project,
         source_dir: Path,
         target_dir: Path,
         overwrite: bool,
     ) -> int:
         copied = 0
+        project_root = self.get_project_root(project).resolve()
+        task_subfolders = {
+            task.task_subfolder
+            for task in self.get_project_tasks(project.id)
+            if getattr(task, "task_subfolder", None)
+        }
         for source_path in source_dir.rglob("*"):
             if source_path.is_dir():
                 continue
             relative = source_path.relative_to(source_dir)
+            if source_dir.resolve() == project_root:
+                if relative.parts:
+                    first_part = relative.parts[0]
+                    if (
+                        first_part in task_subfolders
+                        or first_part in HYDRATION_EXCLUDED_NAMES
+                        or first_part == LEGACY_BASELINE_DIR_NAME
+                    ):
+                        continue
             if any(part in HYDRATION_EXCLUDED_NAMES for part in relative.parts):
                 continue
             if TASK_REPORT_RE.match(source_path.name):
@@ -298,36 +459,41 @@ class TaskService:
         if not task.task_subfolder:
             return {"baseline_path": str(baseline_dir), "files_copied": 0}
 
-        project_root = resolve_project_workspace_path(
-            project.workspace_path, project.name
-        )
+        project_root = self.get_project_root(project)
         source_dir = (project_root / task.task_subfolder).resolve()
         if not source_dir.exists():
             return {"baseline_path": str(baseline_dir), "files_copied": 0}
 
         files_copied = self._copy_tree_into_target(
+            project=project,
             source_dir=source_dir,
             target_dir=baseline_dir,
             overwrite=True,
         )
         return {"baseline_path": str(baseline_dir), "files_copied": files_copied}
 
+    def auto_publish_task_into_baseline(self, project: Project, task: Task) -> dict:
+        """Publish a completed task into the canonical merged project workspace."""
+        return self.promote_task_into_baseline(project, task)
+
     def rebuild_project_baseline(self, project: Project) -> dict:
         baseline_dir = self.get_project_baseline_dir(project)
-        if baseline_dir.exists():
-            shutil.rmtree(baseline_dir)
         baseline_dir.mkdir(parents=True, exist_ok=True)
+        self._clear_project_root_baseline_contents(project)
 
-        promoted_tasks = [
+        merged_tasks = [
             task
             for task in self.get_project_tasks(project.id)
-            if getattr(task, "workspace_status", None) == "promoted"
-            and getattr(task, "task_subfolder", None)
+            if getattr(task, "task_subfolder", None)
+            and (
+                getattr(task, "workspace_status", None) == "promoted"
+                or task.status == TaskStatus.DONE
+            )
         ]
 
         applied_tasks = []
         total_files = 0
-        for task in promoted_tasks:
+        for task in merged_tasks:
             result = self.promote_task_into_baseline(project, task)
             applied_tasks.append(
                 {
@@ -340,10 +506,62 @@ class TaskService:
 
         return {
             "baseline_path": str(baseline_dir),
-            "promoted_task_count": len(promoted_tasks),
+            "promoted_task_count": len(
+                [
+                    task
+                    for task in merged_tasks
+                    if getattr(task, "workspace_status", None) == "promoted"
+                ]
+            ),
+            "merged_task_count": len(merged_tasks),
             "files_copied": total_files,
             "applied_tasks": applied_tasks,
         }
+
+    def _clear_project_root_baseline_contents(self, project: Project) -> None:
+        project_root = self.get_project_root(project)
+        task_subfolders = {
+            task.task_subfolder
+            for task in self.get_project_tasks(project.id)
+            if getattr(task, "task_subfolder", None)
+        }
+        preserved_names = set(HYDRATION_EXCLUDED_NAMES)
+        preserved_names.add(LEGACY_BASELINE_DIR_NAME)
+        preserved_names.update(task_subfolders)
+
+        for child in project_root.iterdir():
+            if child.name in preserved_names:
+                continue
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink(missing_ok=True)
+
+    def _count_baseline_files(self, project: Project, baseline_dir: Path) -> int:
+        if not baseline_dir.exists():
+            return 0
+
+        project_root = self.get_project_root(project).resolve()
+        task_subfolders = {
+            task.task_subfolder
+            for task in self.get_project_tasks(project.id)
+            if getattr(task, "task_subfolder", None)
+        }
+        count = 0
+        for path in baseline_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(baseline_dir)
+            if baseline_dir.resolve() == project_root and relative.parts:
+                first_part = relative.parts[0]
+                if (
+                    first_part in task_subfolders
+                    or first_part in HYDRATION_EXCLUDED_NAMES
+                    or first_part == LEGACY_BASELINE_DIR_NAME
+                ):
+                    continue
+            count += 1
+        return count
 
     def get_project_baseline_overview(self, project: Optional[Project]) -> dict:
         if not project:
@@ -355,11 +573,10 @@ class TaskService:
             }
 
         baseline_dir = self.get_project_baseline_dir(project)
-        file_count = (
-            sum(1 for path in baseline_dir.rglob("*") if path.is_file())
-            if baseline_dir.exists()
-            else 0
-        )
+        legacy_dir = self.get_legacy_project_baseline_dir(project)
+        file_count = self._count_baseline_files(project, baseline_dir)
+        if file_count == 0 and legacy_dir.exists():
+            file_count = self._count_baseline_files(project, legacy_dir)
         promoted_task_count = (
             self.db.query(Task)
             .filter(
@@ -369,8 +586,12 @@ class TaskService:
             .count()
         )
         return {
-            "exists": baseline_dir.exists(),
-            "path": str(baseline_dir),
+            "exists": file_count > 0,
+            "path": str(
+                baseline_dir
+                if baseline_dir.exists() or not legacy_dir.exists()
+                else legacy_dir
+            ),
             "file_count": file_count,
             "promoted_task_count": promoted_task_count,
         }

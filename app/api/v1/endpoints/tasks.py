@@ -14,6 +14,7 @@ from app.schemas import TaskCreate, TaskUpdate, TaskResponse, TaskPromotionReque
 from app.services.openclaw_service import OpenClawSessionService
 from app.services.error_handler import EnhancedErrorHandler
 from app.services.log_utils import sort_logs
+from app.services.name_formatter import humanize_display_name
 from app.services.task_service import TaskService
 
 
@@ -52,25 +53,17 @@ def _resolve_task_subfolder_name(task: Task) -> str:
     return f"task-{slug}" if slug else f"task-{task.id}"
 
 
-def _latest_session_success_for_task(
-    db: Session, task_id: int, session_id: Optional[int]
-) -> bool:
-    if not session_id:
-        return False
-
-    success_log = (
-        db.query(LogEntry)
-        .filter(
-            LogEntry.task_id == task_id,
-            LogEntry.session_id == session_id,
-            LogEntry.message.ilike(
-                f"[ORCHESTRATION] Task {task_id} completed successfully%"
-            ),
-        )
-        .order_by(LogEntry.created_at.desc())
-        .first()
-    )
-    return success_log is not None
+def _prepare_task_for_fresh_execution(
+    task: Task, clear_saved_plan: bool = False
+) -> None:
+    """Reset task execution state before a fresh run."""
+    task.status = TaskStatus.RUNNING
+    task.error_message = None
+    task.started_at = datetime.utcnow()
+    task.completed_at = None
+    task.current_step = 0
+    if clear_saved_plan:
+        task.steps = None
 
 
 def _get_active_task_session(db: Session, task_id: int) -> Optional[int]:
@@ -130,7 +123,11 @@ def _queue_task_retry(
 
     started_at = datetime.utcnow()
     new_session = SessionModel(
-        name=_ensure_unique_session_name(db, task.project_id, f"{task.title}_session"),
+        name=_ensure_unique_session_name(
+            db,
+            task.project_id,
+            humanize_display_name(f"{task.title} session"),
+        ),
         description=prompt[:500],
         project_id=task.project_id,
         status="running",
@@ -151,11 +148,13 @@ def _queue_task_retry(
     )
     db.add(session_task)
 
-    task.status = TaskStatus.RUNNING
-    task.error_message = None
+    should_clear_saved_plan = task.status in (
+        TaskStatus.DONE,
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
+    )
+    _prepare_task_for_fresh_execution(task, clear_saved_plan=should_clear_saved_plan)
     task.started_at = started_at
-    task.completed_at = None
-    task.current_step = 0
 
     result = execute_openclaw_task.delay(
         session_id=new_session.id,
@@ -171,7 +170,13 @@ def _queue_task_retry(
             task_id=task.id,
             level="INFO",
             message=f"Task queued: {task.title}",
-            log_metadata=json.dumps({"celery_task_id": result.id, "retry": True}),
+            log_metadata=json.dumps(
+                {
+                    "celery_task_id": result.id,
+                    "retry": True,
+                    "cleared_saved_plan": should_clear_saved_plan,
+                }
+            ),
         )
     )
     db.add(
@@ -229,7 +234,9 @@ def create_task(task: TaskCreate, db: Session = Depends(get_db)):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    db_task = Task(**task.model_dump(), status=TaskStatus.PENDING)
+    task_data = task.model_dump()
+    task_data["title"] = humanize_display_name(task_data.get("title", ""))
+    db_task = Task(**task_data, status=TaskStatus.PENDING)
     db.add(db_task)
     db.commit()
     db.refresh(db_task)
@@ -428,20 +435,6 @@ def get_task(task_id: int, db: Session = Depends(get_db)):
     )
     session_id = session_task.session_id if session_task else None
 
-    # Reconcile stale task state when the latest linked session already logged
-    # successful completion but the task record is still marked failed.
-    if task.status == TaskStatus.FAILED and _latest_session_success_for_task(
-        db, task_id, session_id
-    ):
-        task.status = TaskStatus.DONE
-        task.error_message = None
-        task.completed_at = task.completed_at or datetime.utcnow()
-        if session_task:
-            session_task.status = TaskStatus.DONE
-            session_task.completed_at = session_task.completed_at or task.completed_at
-        db.commit()
-        db.refresh(task)
-
     # Add session_id to task response
     task_dict = task.__dict__.copy()
     task_dict["session_id"] = session_id
@@ -608,6 +601,8 @@ def update_task(task_id: int, task_update: TaskUpdate, db: Session = Depends(get
     update_data = task_update.model_dump(exclude_unset=True)
     if not update_data:
         raise HTTPException(status_code=400, detail="No task fields provided")
+    if "title" in update_data and update_data["title"] is not None:
+        update_data["title"] = humanize_display_name(update_data["title"])
 
     editable_fields = {
         "title",

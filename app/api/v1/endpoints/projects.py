@@ -16,6 +16,7 @@ from app.models import (
 from app.schemas import ProjectCreate, ProjectUpdate, ProjectResponse
 from app.services.project_isolation_service import normalize_project_workspace_path
 from app.services.checkpoint_service import CheckpointService
+from app.services.name_formatter import humanize_display_name
 from app.services.task_service import TaskService
 from app.config import settings
 
@@ -28,6 +29,7 @@ router = APIRouter()
 def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
     """Create a new project"""
     project_data = project.model_dump()
+    project_data["name"] = humanize_display_name(project_data.get("name", ""))
     project_data["workspace_path"] = normalize_project_workspace_path(
         project.workspace_path, project.name
     )
@@ -177,6 +179,8 @@ def update_project(
         raise HTTPException(status_code=404, detail="Project not found")
 
     update_data = project_update.model_dump(exclude_unset=True)
+    if "name" in update_data and update_data["name"] is not None:
+        update_data["name"] = humanize_display_name(update_data["name"])
     if "workspace_path" in update_data or "name" in update_data:
         update_data["workspace_path"] = normalize_project_workspace_path(
             update_data.get("workspace_path", db_project.workspace_path),

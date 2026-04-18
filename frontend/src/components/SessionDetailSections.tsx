@@ -418,13 +418,19 @@ export function SessionTasksPanel({
               </div>
               <div className="flex items-center gap-2">
                 <StatusBadge status={task.status} size="sm" />
-                {onExecuteTask && (session.execution_mode === 'manual' || task.status === 'pending') && (
+                {onExecuteTask && (
+                  session.execution_mode === 'manual' ||
+                  task.status === 'pending' ||
+                  task.status === 'failed' ||
+                  task.status === 'cancelled' ||
+                  task.status === 'done'
+                ) && (
                   <button
                     onClick={() => onExecuteTask(task)}
-                    disabled={task.status === 'done' || task.status === 'running'}
+                    disabled={task.status === 'running'}
                     className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    Run Task
+                    {task.status === 'done' ? 'Run Again' : 'Run Task'}
                   </button>
                 )}
               </div>

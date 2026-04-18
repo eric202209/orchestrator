@@ -302,6 +302,18 @@ function ProjectDetail() {
     }
   };
 
+  const handleRerunTask = async (task: Task) => {
+    if (task.status === 'running') return;
+    try {
+      await tasksAPI.retry(task.id);
+      await fetchTasks();
+      alert(task.status === 'done' ? 'Task queued to run again' : 'Task queued');
+    } catch (error) {
+      console.error('Failed to rerun task:', error);
+      alert('Failed to queue the task. Please try again.');
+    }
+  };
+
   const startEditTask = (task: Task) => {
     setEditingTaskId(task.id);
     setEditTitle(task.title);
@@ -740,6 +752,15 @@ function ProjectDetail() {
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
+                      {task.status !== 'running' && (
+                        <button
+                          onClick={() => handleRerunTask(task)}
+                          className="rounded-lg bg-blue-600/90 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-500"
+                          title={task.status === 'done' ? 'Run task again' : 'Run task'}
+                        >
+                          {task.status === 'done' ? 'Run Again' : 'Run'}
+                        </button>
+                      )}
                       {task.status === 'done' && task.task_subfolder && task.workspace_status !== 'promoted' && (
                         <button
                           onClick={() => handlePromoteTask(task)}

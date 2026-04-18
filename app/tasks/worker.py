@@ -63,17 +63,7 @@ def _get_next_pending_project_task(
 ) -> Optional[Task]:
     if not project_id:
         return None
-    return (
-        db.query(Task)
-        .filter(Task.project_id == project_id, Task.status == TaskStatus.PENDING)
-        .order_by(
-            Task.plan_position.asc().nullslast(),
-            Task.priority.desc(),
-            Task.created_at.asc().nullslast(),
-            Task.id.asc(),
-        )
-        .first()
-    )
+    return TaskService(db).get_next_pending_task(project_id)
 
 
 def _strip_heredoc_bodies(command_text: str) -> str:
@@ -143,6 +133,11 @@ def _save_orchestration_checkpoint(
             "project_name": orchestration_state.project_name,
             "project_context": orchestration_state.project_context,
             "task_subfolder": orchestration_state.task_subfolder,
+            "project_dir_override": (
+                str(orchestration_state.project_dir)
+                if orchestration_state._project_dir_override
+                else None
+            ),
         },
         orchestration_state={
             "status": orchestration_state.status.value,
@@ -183,6 +178,41 @@ def _record_live_log(
     db.commit()
 
 
+TOOL_FAILURE_PATTERNS = (
+    "read failed: ENOENT",
+    "read failed: EISDIR",
+    "exec failed: exec preflight",
+    "complex interpreter invocation detected",
+    "no such file or directory, access",
+    "illegal operation on a directory, read",
+)
+
+
+def _recent_step_tool_failures(
+    db: Session,
+    session_id: int,
+    task_id: int,
+    started_at: datetime,
+) -> List[str]:
+    recent_logs = (
+        db.query(LogEntry)
+        .filter(
+            LogEntry.session_id == session_id,
+            LogEntry.task_id == task_id,
+            LogEntry.created_at >= started_at,
+        )
+        .order_by(LogEntry.created_at.asc(), LogEntry.id.asc())
+        .all()
+    )
+    matches: List[str] = []
+    for log in recent_logs:
+        message = str(log.message or "")
+        lowered = message.lower()
+        if any(pattern.lower() in lowered for pattern in TOOL_FAILURE_PATTERNS):
+            matches.append(message[:500])
+    return matches
+
+
 def _get_latest_session_task_link(
     db: Session, session_id: int, task_id: int
 ) -> Optional[SessionTask]:
@@ -220,6 +250,22 @@ def _build_task_report_payload(db: Session, task_id: int) -> Dict[str, Any]:
             if task.started_at and task.completed_at
             else None
         ),
+        "structured_state": {
+            "task_id": task.id,
+            "project_id": task.project_id,
+            "title": task.title,
+            "status": task.status.value,
+            "plan_position": getattr(task, "plan_position", None),
+            "execution_profile": getattr(task, "execution_profile", None),
+            "workspace_status": getattr(task, "workspace_status", None),
+            "task_subfolder": getattr(task, "task_subfolder", None),
+            "created_at": task.created_at.isoformat(),
+            "started_at": task.started_at.isoformat() if task.started_at else None,
+            "completed_at": (
+                task.completed_at.isoformat() if task.completed_at else None
+            ),
+            "error_message": task.error_message,
+        },
         "logs": [
             {
                 "level": log.level,
@@ -238,6 +284,12 @@ def _render_task_report(
         report_text = f"# Task Report: {report['title']}\n\n"
         report_text += f"**Status:** {report['status']}\n\n"
         report_text += f"**Duration:** {report['duration_seconds']} seconds\n\n"
+        structured_state = report.get("structured_state", {})
+        if structured_state:
+            report_text += "## Structured State\n\n"
+            report_text += "```json\n"
+            report_text += json.dumps(structured_state, indent=2)
+            report_text += "\n```\n\n"
         report_text += "## Logs\n\n"
         for log in report["logs"]:
             report_text += f"- [{log['level']}] {log['message']}\n"
@@ -245,6 +297,392 @@ def _render_task_report(
         return {"report": report_text, "format": "markdown"}
 
     return {"report": report, "format": output_format}
+
+
+def _is_verification_style_task(
+    execution_profile: str, title: Optional[str], description: Optional[str]
+) -> bool:
+    combined = f"{execution_profile} {title or ''} {description or ''}".lower()
+    markers = (
+        "verify",
+        "verification",
+        "refine",
+        "review",
+        "qa",
+        "audit",
+        "integration",
+        "test",
+    )
+    return execution_profile in {"test_only", "review_only"} or any(
+        marker in combined for marker in markers
+    )
+
+
+def _get_task_report_path(project_root: Path, task: Task) -> Optional[Path]:
+    if not task or not getattr(task, "task_subfolder", None):
+        return None
+    report_path = project_root / task.task_subfolder / f"task_report_{task.id}.md"
+    return report_path
+
+
+def _get_state_manager_path(project_root: Path) -> Path:
+    return project_root / ".openclaw" / "state_manager.json"
+
+
+def _build_project_state_snapshot(
+    db: Session,
+    project: Optional[Project],
+    current_task: Optional[Task],
+    session_id: Optional[int],
+) -> Dict[str, Any]:
+    if not project:
+        return {
+            "project_id": None,
+            "project_name": None,
+            "session_id": session_id,
+            "status": "unknown",
+            "updated_at": datetime.utcnow().isoformat(),
+            "tasks": [],
+        }
+
+    task_service = TaskService(db)
+    ordered_tasks = task_service.get_project_tasks(project.id)
+    inconsistent_pairs = []
+    highest_incomplete_position = None
+    for task in ordered_tasks:
+        if task.plan_position is None:
+            continue
+        if task.status != TaskStatus.DONE:
+            highest_incomplete_position = task.plan_position
+            break
+
+    if highest_incomplete_position is not None:
+        for task in ordered_tasks:
+            if (
+                task.plan_position is not None
+                and task.plan_position > highest_incomplete_position
+                and task.status == TaskStatus.DONE
+            ):
+                inconsistent_pairs.append(
+                    {
+                        "task_id": task.id,
+                        "plan_position": task.plan_position,
+                        "title": task.title,
+                    }
+                )
+
+    failed_or_cancelled = [
+        task
+        for task in ordered_tasks
+        if task.status in {TaskStatus.FAILED, TaskStatus.CANCELLED}
+    ]
+    overall_status = "ready"
+    if failed_or_cancelled or inconsistent_pairs:
+        overall_status = "unsynced"
+    elif any(task.status == TaskStatus.RUNNING for task in ordered_tasks):
+        overall_status = "running"
+    elif any(task.status == TaskStatus.PENDING for task in ordered_tasks):
+        overall_status = "pending"
+
+    return {
+        "project_id": project.id,
+        "project_name": project.name,
+        "session_id": session_id,
+        "current_task_id": current_task.id if current_task else None,
+        "current_task_title": current_task.title if current_task else None,
+        "status": overall_status,
+        "updated_at": datetime.utcnow().isoformat(),
+        "failed_or_cancelled_task_ids": [task.id for task in failed_or_cancelled],
+        "inconsistent_completed_tasks": inconsistent_pairs,
+        "tasks": [
+            {
+                "task_id": task.id,
+                "title": task.title,
+                "plan_position": task.plan_position,
+                "status": task.status.value,
+                "workspace_status": getattr(task, "workspace_status", None),
+                "task_subfolder": getattr(task, "task_subfolder", None),
+            }
+            for task in ordered_tasks
+        ],
+    }
+
+
+def _write_project_state_snapshot(
+    db: Session,
+    project: Optional[Project],
+    current_task: Optional[Task],
+    session_id: Optional[int],
+) -> None:
+    if not project:
+        return
+    project_root = resolve_project_workspace_path(project.workspace_path, project.name)
+    state_path = _get_state_manager_path(project_root)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _build_project_state_snapshot(db, project, current_task, session_id)
+    state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _workspace_snapshot_key(task_id: int) -> str:
+    return f"task-{task_id}-pre-run"
+
+
+def _snapshot_workspace_before_run(
+    task_service: TaskService,
+    project: Optional[Project],
+    task_id: int,
+    target_dir: Path,
+    *,
+    preserve_project_root_rules: bool,
+) -> Optional[Dict[str, Any]]:
+    if not project:
+        return None
+    return task_service.create_workspace_snapshot(
+        project,
+        target_dir,
+        snapshot_key=_workspace_snapshot_key(task_id),
+        preserve_project_root_rules=preserve_project_root_rules,
+    )
+
+
+def _restore_workspace_after_abort(
+    task_service: TaskService,
+    project: Optional[Project],
+    task_id: int,
+    target_dir: Path,
+    *,
+    preserve_project_root_rules: bool,
+) -> Optional[Dict[str, Any]]:
+    if not project:
+        return None
+    return task_service.restore_workspace_snapshot(
+        project,
+        target_dir,
+        snapshot_key=_workspace_snapshot_key(task_id),
+        preserve_project_root_rules=preserve_project_root_rules,
+    )
+
+
+def _run_virtual_merge_gate(
+    db: Session,
+    project: Optional[Project],
+    current_task: Optional[Task],
+    execution_profile: str,
+) -> Optional[str]:
+    if not project or not current_task:
+        return None
+    if not _is_verification_style_task(
+        execution_profile, current_task.title, current_task.description
+    ):
+        return None
+    if current_task.plan_position is None:
+        return None
+
+    project_root = resolve_project_workspace_path(project.workspace_path, project.name)
+    prior_tasks = [
+        task
+        for task in TaskService(db).get_project_tasks(project.id)
+        if task.id != current_task.id
+        and task.plan_position is not None
+        and task.plan_position < current_task.plan_position
+    ]
+    incomplete = [task for task in prior_tasks if task.status != TaskStatus.DONE]
+    if incomplete:
+        summary = ", ".join(
+            f"#{task.plan_position} {task.title} ({task.status.value})"
+            for task in incomplete[:3]
+        )
+        return f"Virtual merge gate failed: earlier ordered tasks are incomplete: {summary}"
+
+    missing_reports = []
+    for task in prior_tasks:
+        report_path = _get_task_report_path(project_root, task)
+        if report_path and not report_path.exists():
+            missing_reports.append(
+                f"#{task.plan_position} {task.title} (missing {report_path.name})"
+            )
+    if missing_reports:
+        return (
+            "Virtual merge gate failed: missing structured task reports for prior work: "
+            + ", ".join(missing_reports[:3])
+        )
+
+    state_path = _get_state_manager_path(project_root)
+    if state_path.exists():
+        try:
+            state_data = json.loads(state_path.read_text(encoding="utf-8"))
+            if state_data.get("status") == "unsynced":
+                return (
+                    "Virtual merge gate failed: project state manager is UNSYNCED. "
+                    "Resolve earlier task inconsistencies before verify/refine."
+                )
+        except Exception:
+            return "Virtual merge gate failed: state manager file is unreadable"
+
+    return None
+
+
+def _step_needs_command_repair(step: Dict[str, Any]) -> bool:
+    commands = step.get("commands", [])
+    if not isinstance(commands, list):
+        return True
+    return not any(str(command or "").strip() for command in commands)
+
+
+def _build_step_repair_prompt(
+    task_prompt: str,
+    step: Dict[str, Any],
+    step_index: int,
+    project_dir: Path,
+    prior_results_summary: str,
+    project_context: str,
+) -> str:
+    return f"""Repair this execution step so it becomes machine-runnable JSON. Return JSON object only.
+
+Task:
+{task_prompt[:2000]}
+
+Current step index:
+{step_index + 1}
+
+Current step JSON:
+{json.dumps(step, indent=2)[:4000]}
+
+Project context:
+{project_context[:3000]}
+
+Prior completed results:
+{prior_results_summary[:2000]}
+
+Rules:
+1. Working directory is {project_dir}
+2. Use relative paths only
+3. Do not use .., ~, or absolute paths
+4. commands must be a non-empty JSON array of shell commands
+5. verification and rollback may be null
+6. expected_files must be a JSON array
+7. Keep the step intent the same
+8. Output JSON object only, no prose
+
+Example:
+{{
+  "step_number": 1,
+  "description": "Inspect project structure and locate implementation entry points",
+  "commands": ["rg --files . | head -100"],
+  "verification": "test -d . && echo ok",
+  "rollback": null,
+  "expected_files": []
+}}
+"""
+
+
+def _looks_like_truncated_multistep_plan(
+    output_text: str, extracted_plan: Optional[List[Dict[str, Any]]]
+) -> bool:
+    """Detect mixed-content planning output that collapsed into a single-step plan."""
+    if not extracted_plan or len(extracted_plan) != 1:
+        return False
+
+    text = output_text or ""
+    step_number_mentions = len(
+        re.findall(
+            r'(?:\\)?["\']step_number(?:\\)?["\']\s*:\s*\d+', text, flags=re.IGNORECASE
+        )
+    )
+    if step_number_mentions > 1:
+        return True
+
+    if re.search(
+        r'(?:\\)?["\']step_number(?:\\)?["\']\s*:\s*[2-9]\d*',
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return True
+
+    description_mentions = len(
+        re.findall(
+            r'(?:\\)?["\']description(?:\\)?["\']\s*:', text, flags=re.IGNORECASE
+        )
+    )
+    if description_mentions > 1:
+        return True
+
+    return False
+
+
+def _repair_step_commands_with_self_correction(
+    openclaw_service: Any,
+    db: Session,
+    session_id: int,
+    task_id: int,
+    session_instance_id: Optional[str],
+    task_prompt: str,
+    step: Dict[str, Any],
+    step_index: int,
+    project_dir: Path,
+    prior_results_summary: str,
+    project_context: str,
+    logger_obj: logging.Logger,
+) -> Optional[Dict[str, Any]]:
+    repair_prompt = _build_step_repair_prompt(
+        task_prompt=task_prompt,
+        step=step,
+        step_index=step_index,
+        project_dir=project_dir,
+        prior_results_summary=prior_results_summary,
+        project_context=project_context,
+    )
+    repair_result = asyncio.run(
+        openclaw_service.execute_task(repair_prompt, timeout_seconds=120)
+    )
+    repair_output = _extract_structured_text(repair_result.get("output", "{}"))
+    success, repair_data, strategy_info = error_handler.attempt_json_parsing(
+        repair_output, context="step_repair"
+    )
+    if not success or not isinstance(repair_data, dict):
+        logger_obj.warning(
+            "[ORCHESTRATION] Step %s self-correction failed to parse: %s",
+            step_index + 1,
+            strategy_info,
+        )
+        _record_live_log(
+            db,
+            session_id,
+            task_id,
+            "WARN",
+            f"[ORCHESTRATION] Step {step_index + 1} self-correction failed: {strategy_info}",
+            session_instance_id=session_instance_id,
+            metadata={"phase": "step_validation", "strategy": strategy_info},
+        )
+        return None
+
+    repaired_step = _normalize_step(
+        repair_data, project_dir, logger_obj, step_index + 1
+    )
+    if _step_needs_command_repair(repaired_step):
+        _record_live_log(
+            db,
+            session_id,
+            task_id,
+            "WARN",
+            (
+                f"[ORCHESTRATION] Step {step_index + 1} self-correction returned no runnable commands"
+            ),
+            session_instance_id=session_instance_id,
+            metadata={"phase": "step_validation"},
+        )
+        return None
+
+    _record_live_log(
+        db,
+        session_id,
+        task_id,
+        "INFO",
+        f"[ORCHESTRATION] Step {step_index + 1} repaired by self-correction",
+        session_instance_id=session_instance_id,
+        metadata={"phase": "step_validation", "strategy": strategy_info},
+    )
+    return repaired_step
 
 
 def _extract_plan_steps(parsed_planning_output: Any) -> Optional[List[Dict[str, Any]]]:
@@ -515,6 +953,27 @@ def _normalize_expected_files(
     return normalized_files
 
 
+def _missing_expected_files(
+    project_dir: Path, expected_files: Optional[List[str]]
+) -> List[str]:
+    missing: List[str] = []
+    for expected in expected_files or []:
+        raw = str(expected or "").strip()
+        if not raw:
+            continue
+        expects_dir = raw.endswith("/")
+        candidate = (project_dir / raw.rstrip("/")).resolve()
+        if not candidate.is_relative_to(project_dir):
+            missing.append(raw)
+            continue
+        if expects_dir:
+            if not candidate.exists() or not candidate.is_dir():
+                missing.append(raw)
+        elif not candidate.exists():
+            missing.append(raw)
+    return missing
+
+
 def _normalize_step(
     step: Dict[str, Any],
     project_dir: Path,
@@ -700,6 +1159,41 @@ Example:
 """
 
 
+def _retry_planning_with_minimal_prompt(
+    openclaw_service: Any,
+    task_description: str,
+    project_dir: Path,
+    timeout_seconds: int,
+    logger: logging.Logger,
+    emit_live: Any,
+    reason: str,
+) -> Dict[str, Any]:
+    """Retry planning with the strict JSON-only fallback prompt."""
+
+    logger.warning(
+        "[ORCHESTRATION] Planning output was not machine-parseable; "
+        f"retrying with minimal prompt ({reason})"
+    )
+    emit_live(
+        "WARN",
+        "[ORCHESTRATION] Planning output needed a strict JSON retry",
+        metadata={
+            "phase": "planning",
+            "retry": "minimal_prompt",
+            "reason": reason[:240],
+        },
+    )
+    minimal_planning_prompt = _build_minimal_planning_prompt(
+        task_description, project_dir
+    )
+    return asyncio.run(
+        openclaw_service.execute_task(
+            minimal_planning_prompt,
+            timeout_seconds=min(timeout_seconds, 240),
+        )
+    )
+
+
 def _is_long_running_verification_task(
     execution_profile: str, step_description: str, task_prompt: str
 ) -> bool:
@@ -869,13 +1363,49 @@ def execute_openclaw_task(
             # Fallback: use slugified project name
             pass
 
+        task_service = TaskService(db)
+        runs_in_canonical_baseline = bool(
+            project
+            and task
+            and _is_verification_style_task(
+                execution_profile, task.title, task.description
+            )
+        )
+        if runs_in_canonical_baseline and project:
+            consolidation_result = task_service.rebuild_project_baseline(project)
+            canonical_baseline_dir = task_service.get_project_baseline_dir(project)
+            canonical_baseline_dir.mkdir(parents=True, exist_ok=True)
+            orchestration_state._project_dir_override = str(canonical_baseline_dir)
+            logger.info(
+                "[ORCHESTRATION] Using canonical project baseline for task %s at %s",
+                task_id,
+                canonical_baseline_dir,
+            )
+            emit_live(
+                "INFO",
+                (
+                    "[ORCHESTRATION] Consolidated completed work into canonical "
+                    f"project baseline ({consolidation_result.get('files_copied', 0)} files) "
+                    f"and will execute in {canonical_baseline_dir}"
+                ),
+                metadata={
+                    "phase": "consolidation",
+                    "baseline_path": str(canonical_baseline_dir),
+                    "files_copied": consolidation_result.get("files_copied", 0),
+                    "merged_task_count": consolidation_result.get(
+                        "merged_task_count", 0
+                    ),
+                },
+            )
+
         # Create the task workspace directory if it doesn't exist
         task_workspace = orchestration_state.project_dir
         if not os.path.exists(task_workspace):
             os.makedirs(task_workspace, exist_ok=True)
             logger.info(f"Created task workspace: {task_workspace}")
 
-        task_service = TaskService(db)
+        is_resume_execution = bool(resume_checkpoint_name)
+
         hydration_result = (
             task_service.hydrate_task_workspace(
                 project, task, orchestration_state.project_dir
@@ -901,6 +1431,63 @@ def execute_openclaw_task(
                 },
             )
 
+        workspace_snapshot_result: Optional[Dict[str, Any]] = None
+        if project and not is_resume_execution:
+            workspace_snapshot_result = _snapshot_workspace_before_run(
+                task_service,
+                project,
+                task_id,
+                orchestration_state.project_dir,
+                preserve_project_root_rules=runs_in_canonical_baseline,
+            )
+            if workspace_snapshot_result is not None:
+                emit_live(
+                    "INFO",
+                    (
+                        "[ORCHESTRATION] Captured workspace snapshot before execution "
+                        f"({workspace_snapshot_result.get('files_copied', 0)} files)"
+                    ),
+                    metadata={
+                        "phase": "workspace_snapshot",
+                        "snapshot_path": workspace_snapshot_result.get("snapshot_path"),
+                        "source_exists": workspace_snapshot_result.get("source_exists"),
+                    },
+                )
+
+        def restore_workspace_snapshot_if_needed(
+            reason: str,
+        ) -> Optional[Dict[str, Any]]:
+            if not project:
+                return None
+            restore_result = _restore_workspace_after_abort(
+                task_service,
+                project,
+                task_id,
+                orchestration_state.project_dir,
+                preserve_project_root_rules=runs_in_canonical_baseline,
+            )
+            if restore_result and restore_result.get("restored"):
+                logger.warning(
+                    "[ORCHESTRATION] Restored workspace snapshot for task %s after %s (%s files)",
+                    task_id,
+                    reason,
+                    restore_result.get("files_restored", 0),
+                )
+                emit_live(
+                    "WARN",
+                    (
+                        "[ORCHESTRATION] Restored workspace to the pre-run snapshot "
+                        f"after {reason} ({restore_result.get('files_restored', 0)} files)"
+                    ),
+                    metadata={
+                        "phase": "workspace_restore",
+                        "reason": reason,
+                        "snapshot_path": restore_result.get("snapshot_path"),
+                        "target_path": restore_result.get("target_path"),
+                    },
+                )
+            return restore_result
+
         project_context_summary = task_service.build_project_execution_context(
             project=project,
             current_task=task,
@@ -915,8 +1502,6 @@ def execute_openclaw_task(
                 f"Hydrated baseline sources available directly in this workspace: {hydrated_sources}"
             )[:5000]
         orchestration_state.project_context = project_context_summary
-
-        is_resume_execution = bool(resume_checkpoint_name)
 
         # Check if task has been running too long (safety check).
         # Skip this stale-run guard for explicit checkpoint resumes, otherwise a
@@ -952,6 +1537,7 @@ def execute_openclaw_task(
             session_task_link.started_at = task.started_at
             session_task_link.completed_at = None
         db.commit()
+        _write_project_state_snapshot(db, project, task, session_id)
 
         logger.info(f"[ORCHESTRATION] Starting multi-step execution for task {task_id}")
         emit_live(
@@ -988,6 +1574,10 @@ def execute_openclaw_task(
             if checkpoint_context.get("task_subfolder"):
                 orchestration_state._task_subfolder_override = checkpoint_context.get(
                     "task_subfolder"
+                )
+            if checkpoint_context.get("project_dir_override"):
+                orchestration_state._project_dir_override = checkpoint_context.get(
+                    "project_dir_override"
                 )
 
             orchestration_state.plan = checkpoint_state.get("plan", []) or []
@@ -1049,6 +1639,28 @@ def execute_openclaw_task(
             )[:5000]
         orchestration_state.project_context = refreshed_project_context
 
+        gate_error = _run_virtual_merge_gate(
+            db=db,
+            project=project,
+            current_task=task,
+            execution_profile=execution_profile,
+        )
+        if gate_error:
+            orchestration_state.status = OrchestrationStatus.ABORTED
+            orchestration_state.abort_reason = gate_error
+            task.status = TaskStatus.FAILED
+            task.error_message = gate_error
+            if session_task_link:
+                session_task_link.status = TaskStatus.FAILED
+                session_task_link.completed_at = datetime.utcnow()
+            session.status = "paused"
+            session.is_active = False
+            _set_session_alert(session, "error", gate_error[:2000])
+            db.commit()
+            restore_workspace_snapshot_if_needed("virtual merge gate failure")
+            _write_project_state_snapshot(db, project, task, session_id)
+            return {"status": "failed", "reason": "virtual_merge_gate_failed"}
+
         if (
             not resumed_from_checkpoint
             and task
@@ -1107,6 +1719,7 @@ def execute_openclaw_task(
             # Planning often needs more time than the old 300 second cap,
             # especially for larger repos or denser prompts.
             planning_timeout_seconds = max(240, min(timeout_seconds, 480))
+            used_minimal_planning_prompt = False
             planning_result = asyncio.run(
                 openclaw_service.execute_task(
                     planning_prompt, timeout_seconds=planning_timeout_seconds
@@ -1133,102 +1746,168 @@ def execute_openclaw_task(
                         ],
                     },
                 )
-                minimal_planning_prompt = _build_minimal_planning_prompt(
-                    prompt, orchestration_state.project_dir
+                planning_result = _retry_planning_with_minimal_prompt(
+                    openclaw_service=openclaw_service,
+                    task_description=prompt,
+                    project_dir=orchestration_state.project_dir,
+                    timeout_seconds=planning_timeout_seconds,
+                    logger=logger,
+                    emit_live=emit_live,
+                    reason=(planning_result.get("error") or initial_output_text),
                 )
-                planning_result = asyncio.run(
-                    openclaw_service.execute_task(
-                        minimal_planning_prompt,
-                        timeout_seconds=min(planning_timeout_seconds, 240),
-                    )
-                )
+                used_minimal_planning_prompt = True
 
             # Parse planning result to get steps
             try:
-                output_result = planning_result.get("output", {})
+                while True:
+                    output_result = planning_result.get("output", {})
 
-                # Debug: Log raw result to diagnose JSON parsing issues
-                logger.info(
-                    f"[ORCHESTRATION] Planning result keys: {list(planning_result.keys()) if isinstance(planning_result, dict) else 'Not a dict'}"
-                )
-                logger.info(
-                    f"[ORCHESTRATION] Planning output type: {type(output_result)}, preview: {str(output_result)[:300]}"
-                )
-
-                # Debug: Log raw output
-                logger.info(
-                    f"[ORCHESTRATION] Raw planning output type: {type(output_result)}, content preview: {str(output_result)[:200]}"
-                )
-
-                output_text = _extract_structured_text(output_result)
-                if not output_text.strip() and isinstance(output_result, dict):
-                    output_text = json.dumps(output_result)
+                    # Debug: Log raw result to diagnose JSON parsing issues
                     logger.info(
-                        "[ORCHESTRATION] Structured text extraction empty; using full JSON"
+                        f"[ORCHESTRATION] Planning result keys: {list(planning_result.keys()) if isinstance(planning_result, dict) else 'Not a dict'}"
                     )
-                elif isinstance(output_result, str):
-                    logger.info("[ORCHESTRATION] Raw string response")
-                else:
                     logger.info(
-                        f"[ORCHESTRATION] Structured text extracted from {type(output_result)}"
+                        f"[ORCHESTRATION] Planning output type: {type(output_result)}, preview: {str(output_result)[:300]}"
                     )
-
-                logger.info(
-                    f"[ORCHESTRATION] Final extracted text length: {len(output_text)}"
-                )
-
-                # Strip Markdown code fences if present
-                import re
-
-                if isinstance(output_text, str):
-                    # Remove ```json or ``` wrappers
-                    markdown_pattern = r"^\s*```(?:json)?\s*|\s*```$"
-                    output_text = re.sub(markdown_pattern, "", output_text.strip())
                     logger.info(
-                        f"[ORCHESTRATION] After stripping markdown, length: {len(output_text)}"
+                        f"[ORCHESTRATION] Raw planning output type: {type(output_result)}, content preview: {str(output_result)[:200]}"
                     )
 
-                # Use enhanced JSON parsing with multiple recovery strategies
-                success, plan_data, strategy_info = error_handler.attempt_json_parsing(
-                    output_text, context="planning"
-                )
-
-                if _should_retry_planning_with_minimal_prompt(
-                    planning_result, output_text
-                ):
-                    raise TimeoutError(
-                        f"Planning timed out or exceeded context after {planning_timeout_seconds}s"
-                    )
-
-                if success:
-                    extracted_plan = _extract_plan_steps(plan_data)
-                    if extracted_plan is not None:
-                        orchestration_state.plan = _normalize_plan_with_live_logging(
-                            db,
-                            session_id,
-                            task_id,
-                            extracted_plan,
-                            orchestration_state.project_dir,
-                            logger,
-                            session.instance_id,
-                            "Planning output",
-                        )
+                    output_text = _extract_structured_text(output_result)
+                    if not output_text.strip() and isinstance(output_result, dict):
+                        output_text = json.dumps(output_result)
                         logger.info(
-                            f"[ORCHESTRATION] Generated {len(orchestration_state.plan)} steps in plan (using {strategy_info})"
+                            "[ORCHESTRATION] Structured text extraction empty; using full JSON"
+                        )
+                    elif isinstance(output_result, str):
+                        logger.info("[ORCHESTRATION] Raw string response")
+                    else:
+                        logger.info(
+                            f"[ORCHESTRATION] Structured text extracted from {type(output_result)}"
+                        )
+
+                    logger.info(
+                        f"[ORCHESTRATION] Final extracted text length: {len(output_text)}"
+                    )
+
+                    if isinstance(output_text, str):
+                        markdown_pattern = r"^\s*```(?:json)?\s*|\s*```$"
+                        output_text = re.sub(markdown_pattern, "", output_text.strip())
+                        logger.info(
+                            f"[ORCHESTRATION] After stripping markdown, length: {len(output_text)}"
+                        )
+
+                    success, plan_data, strategy_info = (
+                        error_handler.attempt_json_parsing(
+                            output_text, context="planning"
+                        )
+                    )
+
+                    if _should_retry_planning_with_minimal_prompt(
+                        planning_result, output_text
+                    ):
+                        raise TimeoutError(
+                            f"Planning timed out or exceeded context after {planning_timeout_seconds}s"
+                        )
+
+                    if not success and not used_minimal_planning_prompt:
+                        planning_result = _retry_planning_with_minimal_prompt(
+                            openclaw_service=openclaw_service,
+                            task_description=prompt,
+                            project_dir=orchestration_state.project_dir,
+                            timeout_seconds=planning_timeout_seconds,
+                            logger=logger,
+                            emit_live=emit_live,
+                            reason=f"json_parse_failed: {output_text[:240]}",
+                        )
+                        used_minimal_planning_prompt = True
+                        continue
+
+                    if not success:
+                        orchestration_state.status = OrchestrationStatus.ABORTED
+                        orchestration_state.abort_reason = (
+                            f"Planning JSON parse failed: {strategy_info}"
                         )
                         emit_live(
-                            "INFO",
-                            f"[ORCHESTRATION] Generated {len(orchestration_state.plan)} steps in plan",
+                            "ERROR",
+                            f"[ORCHESTRATION] Planning JSON parse failed: {strategy_info}",
                             metadata={
                                 "phase": "planning",
-                                "steps": len(orchestration_state.plan),
-                                "strategy": strategy_info,
+                                "reason": "planning_json_error",
                             },
                         )
-                        task.steps = json.dumps(orchestration_state.plan)
-                        task.current_step = 0
+                        task.status = TaskStatus.FAILED
+                        task.error_message = (
+                            f"Planning JSON parse failed: {strategy_info}. "
+                            f"Raw output: {output_text[:500]}"
+                        )
                         db.commit()
-                    else:
+                        restore_workspace_snapshot_if_needed(
+                            "planning JSON parse failure"
+                        )
+                        return {"status": "failed", "reason": "planning_json_error"}
+
+                    extracted_plan = _extract_plan_steps(plan_data)
+                    if extracted_plan is None and not used_minimal_planning_prompt:
+                        planning_result = _retry_planning_with_minimal_prompt(
+                            openclaw_service=openclaw_service,
+                            task_description=prompt,
+                            project_dir=orchestration_state.project_dir,
+                            timeout_seconds=planning_timeout_seconds,
+                            logger=logger,
+                            emit_live=emit_live,
+                            reason=f"unexpected_plan_shape: {str(plan_data)[:240]}",
+                        )
+                        used_minimal_planning_prompt = True
+                        continue
+
+                    if (
+                        _looks_like_truncated_multistep_plan(
+                            output_text, extracted_plan
+                        )
+                        and not used_minimal_planning_prompt
+                    ):
+                        planning_result = _retry_planning_with_minimal_prompt(
+                            openclaw_service=openclaw_service,
+                            task_description=prompt,
+                            project_dir=orchestration_state.project_dir,
+                            timeout_seconds=planning_timeout_seconds,
+                            logger=logger,
+                            emit_live=emit_live,
+                            reason="truncated_multistep_plan_detected",
+                        )
+                        used_minimal_planning_prompt = True
+                        continue
+
+                    if _looks_like_truncated_multistep_plan(
+                        output_text, extracted_plan
+                    ):
+                        orchestration_state.status = OrchestrationStatus.ABORTED
+                        orchestration_state.abort_reason = "Planning output collapsed a multi-step plan into a single step"
+                        emit_live(
+                            "ERROR",
+                            "[ORCHESTRATION] Planning output was truncated into a single-step plan",
+                            metadata={
+                                "phase": "planning",
+                                "reason": "truncated_multistep_plan_after_retry",
+                            },
+                        )
+                        task.status = TaskStatus.FAILED
+                        task.error_message = (
+                            "Planning output collapsed a multi-step plan into a single "
+                            "step after retry. The run was stopped to avoid a false "
+                            "success."
+                        )
+                        db.commit()
+                        restore_workspace_snapshot_if_needed(
+                            "truncated multi-step plan"
+                        )
+                        return {
+                            "status": "failed",
+                            "reason": "truncated_multistep_plan_after_retry",
+                        }
+
+                    if extracted_plan is None:
                         plan_shape = type(plan_data).__name__
                         plan_keys = (
                             sorted(plan_data.keys())
@@ -1239,24 +1918,33 @@ def execute_openclaw_task(
                             "Planning result is not a recognized list of steps "
                             f"(type={plan_shape}, keys={plan_keys}, preview={str(plan_data)[:240]})"
                         )
-                else:
-                    # Failed to parse after all strategies
-                    orchestration_state.status = OrchestrationStatus.ABORTED
-                    orchestration_state.abort_reason = (
-                        f"Planning JSON parse failed: {strategy_info}"
+
+                    orchestration_state.plan = _normalize_plan_with_live_logging(
+                        db,
+                        session_id,
+                        task_id,
+                        extracted_plan,
+                        orchestration_state.project_dir,
+                        logger,
+                        session.instance_id,
+                        "Planning output",
+                    )
+                    logger.info(
+                        f"[ORCHESTRATION] Generated {len(orchestration_state.plan)} steps in plan (using {strategy_info})"
                     )
                     emit_live(
-                        "ERROR",
-                        f"[ORCHESTRATION] Planning JSON parse failed: {strategy_info}",
-                        metadata={"phase": "planning", "reason": "planning_json_error"},
+                        "INFO",
+                        f"[ORCHESTRATION] Generated {len(orchestration_state.plan)} steps in plan",
+                        metadata={
+                            "phase": "planning",
+                            "steps": len(orchestration_state.plan),
+                            "strategy": strategy_info,
+                        },
                     )
-                    task.status = TaskStatus.FAILED
-                    task.error_message = (
-                        f"Planning JSON parse failed: {strategy_info}. "
-                        f"Raw output: {output_text[:500]}"
-                    )
+                    task.steps = json.dumps(orchestration_state.plan)
+                    task.current_step = 0
                     db.commit()
-                    return {"status": "failed", "reason": "planning_json_error"}
+                    break
             except TaskWorkspaceViolationError as e:
                 orchestration_state.status = OrchestrationStatus.ABORTED
                 orchestration_state.abort_reason = f"Workspace isolation violation: {e}"
@@ -1271,6 +1959,7 @@ def execute_openclaw_task(
                 task.status = TaskStatus.FAILED
                 task.error_message = str(e)
                 db.commit()
+                restore_workspace_snapshot_if_needed("workspace isolation violation")
                 return {"status": "failed", "reason": "workspace_isolation_violation"}
             except Exception as e:
                 logger.error(f"[ORCHESTRATION] Failed to parse planning result: {e}")
@@ -1284,6 +1973,7 @@ def execute_openclaw_task(
                 task.status = TaskStatus.FAILED
                 task.error_message = str(e)
                 db.commit()
+                restore_workspace_snapshot_if_needed("planning parse error")
                 return {"status": "failed", "reason": "planning_parse_error"}
 
         _save_orchestration_checkpoint(
@@ -1318,6 +2008,8 @@ def execute_openclaw_task(
                     session_task_link.status = TaskStatus.CANCELLED
                     session_task_link.completed_at = task.completed_at
                 db.commit()
+                restore_workspace_snapshot_if_needed(f"session {session.status}")
+                _write_project_state_snapshot(db, project, task, session_id)
                 return {
                     "status": "cancelled",
                     "task_id": task_id,
@@ -1337,6 +2029,71 @@ def execute_openclaw_task(
             verification_command = step.get("verification")
             rollback_command = step.get("rollback")
             expected_files = step.get("expected_files", [])
+
+            if _step_needs_command_repair(step):
+                repaired_step = None
+                for repair_attempt in range(1, 3):
+                    emit_live(
+                        "WARN",
+                        (
+                            f"[ORCHESTRATION] Step {step_index + 1} has no runnable commands; "
+                            f"attempting self-correction ({repair_attempt}/2)"
+                        ),
+                        metadata={
+                            "phase": "step_validation",
+                            "step_index": step_index + 1,
+                            "attempt": repair_attempt,
+                        },
+                    )
+                    repaired_step = _repair_step_commands_with_self_correction(
+                        openclaw_service=openclaw_service,
+                        db=db,
+                        session_id=session_id,
+                        task_id=task_id,
+                        session_instance_id=session.instance_id if session else None,
+                        task_prompt=prompt,
+                        step=step,
+                        step_index=step_index,
+                        project_dir=orchestration_state.project_dir,
+                        prior_results_summary=orchestration_state.prior_results_summary(),
+                        project_context=orchestration_state.project_context,
+                        logger_obj=logger,
+                    )
+                    if repaired_step is not None:
+                        orchestration_state.plan[step_index] = repaired_step
+                        step = repaired_step
+                        task.steps = json.dumps(orchestration_state.plan)
+                        _save_orchestration_checkpoint(
+                            db, session_id, task_id, prompt, orchestration_state
+                        )
+                        db.commit()
+                        break
+
+                if repaired_step is None:
+                    manual_gate_message = (
+                        f"Step {step_index + 1} generated empty or invalid commands twice. "
+                        "Manual review is required before execution can continue."
+                    )
+                    orchestration_state.status = OrchestrationStatus.ABORTED
+                    orchestration_state.abort_reason = manual_gate_message
+                    task.status = TaskStatus.FAILED
+                    task.error_message = manual_gate_message
+                    if session_task_link:
+                        session_task_link.status = TaskStatus.FAILED
+                        session_task_link.completed_at = datetime.utcnow()
+                    session.status = "paused"
+                    session.is_active = False
+                    _set_session_alert(session, "error", manual_gate_message)
+                    db.commit()
+                    restore_workspace_snapshot_if_needed("manual review gate")
+                    _write_project_state_snapshot(db, project, task, session_id)
+                    return {"status": "failed", "reason": "manual_review_required"}
+
+                step_description = step.get("description", f"Step {step_index + 1}")
+                step_commands = step.get("commands", [])
+                verification_command = step.get("verification")
+                rollback_command = step.get("rollback")
+                expected_files = step.get("expected_files", [])
 
             logger.info(
                 f"[ORCHESTRATION] Executing step {step_index + 1}/{len(orchestration_state.plan)}: {step_description[:80]}..."
@@ -1383,6 +2140,7 @@ def execute_openclaw_task(
                 )
 
             # Execute step
+            step_started_at = datetime.utcnow()
             step_result = asyncio.run(
                 openclaw_service.execute_task(
                     execution_prompt,
@@ -1405,6 +2163,56 @@ def execute_openclaw_task(
             step_status = (
                 "success" if step_result.get("status") != "failed" else "failed"
             )
+
+            if step_status == "success":
+                missing_files = _missing_expected_files(
+                    orchestration_state.project_dir, expected_files
+                )
+                if missing_files:
+                    step_status = "failed"
+                    missing_summary = ", ".join(missing_files[:6])
+                    step_result["error"] = (
+                        "Step reported success but expected files are missing: "
+                        f"{missing_summary}"
+                    )
+                    emit_live(
+                        "WARN",
+                        (
+                            f"[ORCHESTRATION] Step {step_index + 1} reported success but "
+                            f"did not materialize expected files: {missing_summary}"
+                        ),
+                        metadata={
+                            "phase": "executing",
+                            "step_index": step_index + 1,
+                            "missing_expected_files": missing_files[:20],
+                        },
+                    )
+
+            tool_failures = _recent_step_tool_failures(
+                db,
+                session_id,
+                task_id,
+                step_started_at,
+            )
+            if step_status == "success" and tool_failures:
+                step_status = "failed"
+                failure_summary = " | ".join(tool_failures[:3])
+                step_result["error"] = (
+                    "Step reported success but task logs contain tool failures: "
+                    f"{failure_summary}"
+                )
+                emit_live(
+                    "WARN",
+                    (
+                        f"[ORCHESTRATION] Step {step_index + 1} reported success but "
+                        "task logs contain tool failures"
+                    ),
+                    metadata={
+                        "phase": "executing",
+                        "step_index": step_index + 1,
+                        "tool_failures": tool_failures[:10],
+                    },
+                )
 
             step_record = StepResult(
                 step_number=step_index + 1,
@@ -1466,6 +2274,8 @@ def execute_openclaw_task(
                     task.status = TaskStatus.FAILED
                     task.error_message = f"Step failed after {current_attempt} attempts: {step_record.error_message[:500]}"
                     db.commit()
+                    restore_workspace_snapshot_if_needed("max step attempts reached")
+                    _write_project_state_snapshot(db, project, task, session_id)
                     return {"status": "failed", "reason": "max_attempts_reached"}
 
                 debug_prompt = PromptTemplates.build_debugging_prompt(
@@ -1619,6 +2429,9 @@ def execute_openclaw_task(
                     task.status = TaskStatus.FAILED
                     task.error_message = str(e)
                     db.commit()
+                    restore_workspace_snapshot_if_needed(
+                        "debug workspace isolation violation"
+                    )
                     return {
                         "status": "failed",
                         "reason": "workspace_isolation_violation",
@@ -1630,6 +2443,7 @@ def execute_openclaw_task(
                     task.status = TaskStatus.FAILED
                     task.error_message = str(e)
                     db.commit()
+                    restore_workspace_snapshot_if_needed("debug parse error")
                     return {"status": "failed", "reason": "debug_parse_error"}
 
         # PHASE 5: TASK_SUMMARY - Summarize completion
@@ -1665,21 +2479,63 @@ def execute_openclaw_task(
             session_task_link.status = TaskStatus.DONE
             session_task_link.completed_at = task.completed_at
 
+        baseline_publish_result = None
+        if project and task.task_subfolder and not runs_in_canonical_baseline:
+            baseline_publish_result = task_service.auto_publish_task_into_baseline(
+                project, task
+            )
+
         _set_session_alert(session, None, None)
 
         next_task = None
+        blocked_pending_task = None
         if session and session.execution_mode == "automatic":
             next_task = _get_next_pending_project_task(db, session.project_id)
+            if not next_task and session.project_id:
+                blocked_pending_task = (
+                    db.query(Task)
+                    .filter(
+                        Task.project_id == session.project_id,
+                        Task.status == TaskStatus.PENDING,
+                    )
+                    .order_by(
+                        Task.plan_position.asc().nullslast(),
+                        Task.priority.desc(),
+                        Task.created_at.asc().nullslast(),
+                        Task.id.asc(),
+                    )
+                    .first()
+                )
 
         if session:
             if next_task:
                 session.status = "running"
                 session.is_active = True
+            elif blocked_pending_task:
+                session.status = "paused"
+                session.is_active = False
+                blockers = TaskService(db).get_blocking_prior_tasks(
+                    blocked_pending_task
+                )
+                if blockers:
+                    blocking_summary = ", ".join(
+                        f"#{item.plan_position} {item.title} ({item.status.value})"
+                        for item in blockers[:3]
+                    )
+                    _set_session_alert(
+                        session,
+                        "warning",
+                        (
+                            "Automatic execution is paused because an earlier ordered task "
+                            f"is incomplete: {blocking_summary}"
+                        )[:2000],
+                    )
             else:
                 session.status = "stopped"
                 session.is_active = False
 
         db.commit()
+        _write_project_state_snapshot(db, project, task, session_id)
 
         logger.info(
             f"[ORCHESTRATION] Task {task_id} completed successfully with {len(orchestration_state.plan)} steps"
@@ -1687,8 +2543,28 @@ def execute_openclaw_task(
         emit_live(
             "INFO",
             f"[ORCHESTRATION] Task {task_id} completed successfully with {len(orchestration_state.plan)} steps",
-            metadata={"phase": "completed", "steps": len(orchestration_state.plan)},
+            metadata={
+                "phase": "completed",
+                "steps": len(orchestration_state.plan),
+                "baseline_publish_result": baseline_publish_result,
+            },
         )
+
+        if baseline_publish_result:
+            db.add(
+                LogEntry(
+                    session_id=session_id,
+                    session_instance_id=session.instance_id,
+                    task_id=task_id,
+                    level="INFO",
+                    message=(
+                        "[ORCHESTRATION] Published task workspace into canonical project baseline "
+                        f"({baseline_publish_result.get('files_copied', 0)} files)"
+                    ),
+                    log_metadata=json.dumps(baseline_publish_result),
+                )
+            )
+            db.commit()
 
         if session and next_task:
             next_session_task_link = _get_latest_session_task_link(
@@ -1842,7 +2718,22 @@ def execute_openclaw_task(
                 str(checkpoint_error),
             )
 
+        try:
+            if (
+                project
+                and orchestration_state
+                and "restore_workspace_snapshot_if_needed" in locals()
+            ):
+                restore_workspace_snapshot_if_needed("task exception")
+        except Exception as restore_error:
+            logger.error(
+                "[ORCHESTRATION] Failed to restore pre-run workspace snapshot for task %s: %s",
+                task_id,
+                str(restore_error),
+            )
+
         db.commit()
+        _write_project_state_snapshot(db, project, task, session_id)
 
         if session:
             db.add(

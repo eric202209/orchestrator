@@ -115,6 +115,18 @@ function TaskDetail() {
     }
   };
 
+  const handleRerun = async () => {
+    if (!task || task.status === 'running') return;
+    try {
+      setSaveError(null);
+      await tasksAPI.retry(task.id);
+      await fetchTask();
+    } catch (error) {
+      console.error('Failed to rerun task:', error);
+      setSaveError('Failed to queue the task for another run');
+    }
+  };
+
   const getStatusIcon = (status: string) => {
     switch (status) {
       case 'done':
@@ -360,6 +372,11 @@ function TaskDetail() {
                 </p>
               )}
               <div className="mt-4 flex flex-wrap gap-2">
+                {task.status !== 'running' && (
+                  <Button size="sm" variant="outline" onClick={handleRerun}>
+                    {task.status === 'done' ? 'Run Again' : 'Run Task'}
+                  </Button>
+                )}
                 {task.status === 'done' && task.task_subfolder && task.workspace_status !== 'promoted' && (
                   <Button size="sm" onClick={handlePromote}>
                     Promote Workspace

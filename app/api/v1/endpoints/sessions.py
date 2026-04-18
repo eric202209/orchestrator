@@ -38,6 +38,7 @@ from app.services import (
 from app.services.openclaw_service import OpenClawSessionError
 from app.services.prompt_templates import OrchestrationState, OPENCLAW_WORKSPACE_ROOT
 from app.services.project_isolation_service import resolve_project_workspace_path
+from app.services.name_formatter import humanize_display_name
 from app.services.log_utils import sort_logs, deduplicate_logs, format_logs_batch
 from app.services.log_stream_service import stream_logs, get_project_logs_summary
 from app.dependencies import get_current_active_user, get_current_user
@@ -88,6 +89,17 @@ def _ensure_unique_session_name(
 def _build_task_subfolder_name(title: str, task_id: int) -> str:
     slug = _slugify_task_name(title)
     return f"task-{slug}" if slug else f"task-{task_id}"
+
+
+def _prepare_task_for_fresh_execution(task, clear_saved_plan: bool = False) -> None:
+    """Reset task execution state before a fresh manual/automatic rerun."""
+    task.status = TaskStatus.RUNNING
+    task.started_at = datetime.utcnow()
+    task.completed_at = None
+    task.error_message = None
+    task.current_step = 0
+    if clear_saved_plan:
+        task.steps = None
 
 
 def _ensure_task_workspace(
@@ -267,11 +279,13 @@ def _queue_task_for_session(
         session_task_link.started_at = datetime.utcnow()
         session_task_link.completed_at = None
 
-    task.status = TaskStatus.RUNNING
-    task.started_at = datetime.utcnow()
-    task.completed_at = None
-    task.error_message = None
-    task.current_step = 0
+    prior_status = task.status
+    should_clear_saved_plan = prior_status in (
+        TaskStatus.DONE,
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
+    )
+    _prepare_task_for_fresh_execution(task, clear_saved_plan=should_clear_saved_plan)
 
     session.status = "running"
     session.is_active = True
@@ -299,6 +313,7 @@ def _queue_task_for_session(
                     "task_workspace": task_workspace["workspace_path"],
                     "plan_position": getattr(task, "plan_position", None),
                     "execution_mode": session.execution_mode,
+                    "cleared_saved_plan": should_clear_saved_plan,
                 }
             ),
         )
@@ -310,6 +325,79 @@ def _queue_task_for_session(
         "task_name": task.title,
         "celery_id": result.id,
         "plan_position": getattr(task, "plan_position", None),
+    }
+
+
+def _reopen_failed_ordered_task_if_needed(
+    db: Session, session: SessionModel
+) -> Optional[Dict[str, Any]]:
+    """Reopen the earliest failed/cancelled ordered task when automatic flow is blocked."""
+    from app.models import Task
+    from app.services.task_service import TaskService
+
+    if session.execution_mode != "automatic" or not session.project_id:
+        return None
+
+    task_service = TaskService(db)
+    if task_service.get_next_pending_task(session.project_id):
+        return None
+
+    retryable_task = (
+        db.query(Task)
+        .filter(
+            Task.project_id == session.project_id,
+            Task.status.in_([TaskStatus.FAILED, TaskStatus.CANCELLED]),
+        )
+        .order_by(
+            Task.plan_position.asc().nullslast(),
+            Task.priority.desc(),
+            Task.created_at.asc().nullslast(),
+            Task.id.asc(),
+        )
+        .first()
+    )
+    if not retryable_task:
+        return None
+
+    retryable_task.status = TaskStatus.PENDING
+    retryable_task.error_message = None
+    retryable_task.started_at = None
+    retryable_task.completed_at = None
+    retryable_task.current_step = 0
+    retryable_task.steps = None
+
+    session_link = (
+        db.query(SessionTask)
+        .filter(
+            SessionTask.session_id == session.id,
+            SessionTask.task_id == retryable_task.id,
+        )
+        .order_by(SessionTask.id.desc())
+        .first()
+    )
+    if session_link:
+        session_link.status = TaskStatus.PENDING
+        session_link.started_at = None
+        session_link.completed_at = None
+
+    db.add(
+        LogEntry(
+            session_id=session.id,
+            session_instance_id=session.instance_id,
+            task_id=retryable_task.id,
+            level="INFO",
+            message=(
+                "Recovered earliest failed/cancelled ordered task for automatic retry: "
+                f"#{getattr(retryable_task, 'plan_position', None)} {retryable_task.title}"
+            ),
+        )
+    )
+    db.commit()
+
+    return {
+        "task_id": retryable_task.id,
+        "task_name": retryable_task.title,
+        "plan_position": getattr(retryable_task, "plan_position", None),
     }
 
 
@@ -339,6 +427,11 @@ def _maybe_queue_next_automatic_task(
 
     task_service = TaskService(db)
     next_task = task_service.get_next_pending_task(session.project_id)
+    if not next_task:
+        recovered_task = _reopen_failed_ordered_task_if_needed(db, session)
+        if recovered_task:
+            next_task = task_service.get_next_pending_task(session.project_id)
+
     if not next_task:
         pending_blocked_task = (
             db.query(Task)
@@ -420,7 +513,9 @@ def create_session(
 
     session_data = session.model_dump()
     session_data["name"] = _ensure_unique_session_name(
-        db, session.project_id, session_data.get("name") or "session"
+        db,
+        session.project_id,
+        humanize_display_name(session_data.get("name") or "session"),
     )
     db_session = SessionModel(**session_data)
     db_session.is_active = True  # Session is active when created
@@ -1516,6 +1611,8 @@ async def start_session(
                 db.commit()
 
             pending_tasks = task_service.get_project_tasks(session.project_id)
+            _reopen_failed_ordered_task_if_needed(db, session)
+            pending_tasks = task_service.get_project_tasks(session.project_id)
 
             if not any(task.status == TaskStatus.PENDING for task in pending_tasks):
                 retryable_failed_tasks = [
@@ -1529,6 +1626,7 @@ async def start_session(
                     task.started_at = None
                     task.completed_at = None
                     task.current_step = 0
+                    task.steps = None
 
                 if retryable_failed_tasks:
                     db.add(

@@ -294,6 +294,7 @@ export const tasksAPI = {
     apiClient.put<Task>(`/tasks/${id}`, data),
 
   delete: (id: number) => apiClient.delete(`/tasks/${id}`),
+  retry: (id: number) => apiClient.post(`/tasks/${id}/retry`),
   promoteWorkspace: (id: number, note?: string) =>
     apiClient.post<Task>(`/tasks/${id}/promote`, { note }),
   requestWorkspaceChanges: (id: number, note: string) =>
