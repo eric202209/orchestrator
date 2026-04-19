@@ -1,30 +1,25 @@
-"""Context Preservation Service
+"""Context Preservation Service.
 
 Provides session state persistence, task resumption, and conversation history.
-Ensures no work is lost and users can resume interrupted sessions.
+This service intentionally follows the ORM model shape and avoids referencing
+columns that are not defined there.
 """
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, Dict, Any, List
 
 from sqlalchemy.orm import Session as DBSession
 from sqlalchemy import func
 
-from app.database import SessionLocal
 from app.models import (
-    Session as SessionModel,
     SessionState,
     ConversationHistory,
     TaskCheckpoint,
 )
 
 logger = logging.getLogger(__name__)
-
-
-# Models moved to models.py to avoid circular imports
-# SessionState, TaskCheckpoint, ConversationHistory are now defined in app.models
 
 
 class ContextPreservationService:
@@ -79,7 +74,6 @@ class ContextPreservationService:
                 project_id=project_id,
                 current_step=0,
                 total_steps=0,
-                state_version=1,
             )
             self.db.add(state)
 
@@ -93,18 +87,14 @@ class ContextPreservationService:
         state.debug_attempts = json.dumps(debug_attempts) if debug_attempts else None
         state.changed_files = json.dumps(changed_files) if changed_files else None
 
-        # Increment version
-        state.state_version += 1
-
-        # Update timestamp
-        state.last_snapshot_at = datetime.utcnow()
-
         self.db.commit()
         self.db.refresh(state)
 
         logger.info(
-            f"Session state saved: session={session_id}, "
-            f"step={current_step}/{total_steps}, version={state.state_version}"
+            "Session state saved: session=%s, step=%s/%s",
+            session_id,
+            current_step,
+            total_steps,
         )
 
         return state
@@ -147,10 +137,6 @@ class ContextPreservationService:
                 if state.total_steps > 0
                 else 0
             ),
-            "state_version": state.state_version,
-            "last_snapshot_at": (
-                state.last_snapshot_at.isoformat() if state.last_snapshot_at else None
-            ),
             "has_debug_attempts": bool(state.debug_attempts),
             "has_changed_files": bool(state.changed_files),
         }
@@ -175,11 +161,21 @@ class ContextPreservationService:
         Returns:
             Created ConversationHistory
         """
-        # Check if we need to trim history
-        history = self.get_conversation_history(session_id, limit=10)
-        if len(history) >= self.MAX_CONVERSATION_MESSAGES:
-            # Remove oldest messages
-            oldest = history[-1]
+        history_count = (
+            self.db.query(func.count(ConversationHistory.id))
+            .filter(ConversationHistory.session_id == session_id)
+            .scalar()
+        ) or 0
+        if history_count >= self.MAX_CONVERSATION_MESSAGES:
+            oldest = (
+                self.db.query(ConversationHistory)
+                .filter(ConversationHistory.session_id == session_id)
+                .order_by(ConversationHistory.id.asc())
+                .first()
+            )
+        else:
+            oldest = None
+        if oldest:
             self.db.delete(oldest)
             self.db.commit()
 
@@ -214,7 +210,7 @@ class ContextPreservationService:
         return (
             self.db.query(ConversationHistory)
             .filter(ConversationHistory.session_id == session_id)
-            .order_by(ConversationHistory.created_at.desc())
+            .order_by(ConversationHistory.id.desc())
             .limit(limit)
             .all()
         )
@@ -370,11 +366,7 @@ class ContextPreservationService:
             True if snapshot should be taken
         """
         state = self.load_session_state(session_id)
-        if not state or not state.last_snapshot_at:
-            return True
-
-        elapsed = datetime.utcnow() - state.last_snapshot_at
-        return elapsed.total_seconds() >= self.AUTO_SNAPSHOT_INTERVAL
+        return state is not None
 
     def auto_snapshot_session(self, session_id: int) -> Optional[SessionState]:
         """
@@ -426,7 +418,7 @@ class ContextPreservationService:
                     "role": msg.role,
                     "content": msg.content,
                     "metadata": msg.metadata_json,
-                    "created_at": msg.created_at.isoformat(),
+                    "created_at": None,
                 }
                 for msg in self.get_conversation_history(session_id)
             ],

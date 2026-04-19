@@ -233,7 +233,7 @@ class ToolTrackingService:
         executions = []
         for log in logs:
             try:
-                metadata = json.loads(log.metadata) if log.metadata else {}
+                metadata = json.loads(log.log_metadata) if log.log_metadata else {}
                 if "tool_name" in metadata:
                     executions.append(metadata)
             except json.JSONDecodeError:
@@ -270,7 +270,7 @@ class ToolTrackingService:
 
         for log in logs:
             try:
-                metadata = json.loads(log.metadata) if log.metadata else {}
+                metadata = json.loads(log.log_metadata) if log.log_metadata else {}
                 if "tool_name" not in metadata:
                     continue
 

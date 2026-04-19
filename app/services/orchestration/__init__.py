@@ -1,9 +1,28 @@
-"""Orchestration stage services."""
+"""Stable import surface for orchestration flows, helpers, and validators.
 
-from .types import ValidationVerdict
-from .planner import PlannerService
+Keep this module focused on re-exporting the worker-facing orchestration API.
+Internal cross-module calls inside the package should usually import directly
+from the concrete module they need.
+"""
+
+from .completion_flow import finalize_successful_task
+from .execution_flow import (
+    StepExecutionAssessment,
+    ToolPathFailureDecision,
+    assess_step_execution,
+    determine_step_timeout,
+    is_long_running_verification_task,
+    missing_expected_files,
+    repeated_tool_path_failure_decision,
+)
+from .execution_loop import execute_step_loop
 from .executor import ExecutorService
-from .validator import ValidatorService
+from .failure_flow import handle_task_failure
+from .parsing import (
+    extract_plan_steps,
+    extract_structured_text,
+    looks_like_truncated_multistep_plan,
+)
 from .persistence import (
     record_live_log,
     record_validation_verdict,
@@ -11,6 +30,9 @@ from .persistence import (
     save_orchestration_checkpoint,
     set_session_alert,
 )
+from .planner import PlannerService
+from .planning_flow import execute_planning_phase
+from .reporting import build_task_report_payload, render_task_report
 from .runtime import (
     build_project_state_snapshot,
     build_workspace_discovery_step,
@@ -25,14 +47,18 @@ from .step_support import (
     repair_step_commands_with_self_correction,
     step_needs_command_repair,
 )
-from .execution_flow import (
-    StepExecutionAssessment,
-    ToolPathFailureDecision,
-    assess_step_execution,
-    determine_step_timeout,
-    is_long_running_verification_task,
-    missing_expected_files,
-    repeated_tool_path_failure_decision,
+from .task_rules import (
+    get_task_report_path,
+    is_verification_style_task,
+    run_virtual_merge_gate,
+    should_force_review_execution_profile,
+)
+from .types import ValidationVerdict
+from .validator import ValidatorService
+from .workspace_guard import (
+    TaskWorkspaceViolationError,
+    normalize_plan_with_live_logging,
+    normalize_step,
 )
 
 __all__ = [
@@ -62,4 +88,20 @@ __all__ = [
     "is_long_running_verification_task",
     "missing_expected_files",
     "repeated_tool_path_failure_decision",
+    "TaskWorkspaceViolationError",
+    "normalize_plan_with_live_logging",
+    "normalize_step",
+    "extract_plan_steps",
+    "extract_structured_text",
+    "looks_like_truncated_multistep_plan",
+    "get_task_report_path",
+    "is_verification_style_task",
+    "run_virtual_merge_gate",
+    "should_force_review_execution_profile",
+    "build_task_report_payload",
+    "render_task_report",
+    "execute_planning_phase",
+    "execute_step_loop",
+    "finalize_successful_task",
+    "handle_task_failure",
 ]

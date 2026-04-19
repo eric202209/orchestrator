@@ -19,6 +19,7 @@ from app.services.checkpoint_service import CheckpointService
 from app.services.name_formatter import humanize_display_name
 from app.services.task_service import TaskService
 from app.config import settings
+from app.dependencies import get_current_active_user
 
 router = APIRouter()
 
@@ -26,7 +27,11 @@ router = APIRouter()
 @router.post(
     "/projects", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED
 )
-def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
+def create_project(
+    project: ProjectCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
     """Create a new project"""
     project_data = project.model_dump()
     project_data["name"] = humanize_display_name(project_data.get("name", ""))
@@ -54,7 +59,10 @@ def get_projects(skip: int = 0, limit: int = 100, db: Session = Depends(get_db))
 
 
 @router.delete("/projects/purge-soft-deleted")
-def purge_soft_deleted_projects(db: Session = Depends(get_db)):
+def purge_soft_deleted_projects(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
     """
     Permanently delete all soft-deleted projects older than retention period.
 
@@ -147,7 +155,11 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/projects/{project_id}/baseline/rebuild")
-def rebuild_project_baseline(project_id: int, db: Session = Depends(get_db)):
+def rebuild_project_baseline(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
     """Rebuild the canonical project baseline from promoted task workspaces."""
     project = (
         db.query(Project)
@@ -167,7 +179,10 @@ def rebuild_project_baseline(project_id: int, db: Session = Depends(get_db)):
 
 @router.put("/projects/{project_id}", response_model=ProjectResponse)
 def update_project(
-    project_id: int, project_update: ProjectUpdate, db: Session = Depends(get_db)
+    project_id: int,
+    project_update: ProjectUpdate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
 ):
     """Update a project"""
     db_project = (
@@ -195,7 +210,11 @@ def update_project(
 
 
 @router.delete("/projects/{project_id}")
-def delete_project(project_id: int, db: Session = Depends(get_db)):
+def delete_project(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
     """Delete a project (soft delete to prevent ID reuse issues)"""
     from app.models import Session, TaskCheckpoint
     from app.services.checkpoint_service import CheckpointService

@@ -546,9 +546,9 @@ class OpenClawSessionService:
             ):
                 try:
                     stored_plan_payload = json.loads(self.task_model.steps)
-                    from app.tasks.worker import _extract_plan_steps
+                    from app.services.orchestration.parsing import extract_plan_steps
 
-                    stored_plan = _extract_plan_steps(stored_plan_payload)
+                    stored_plan = extract_plan_steps(stored_plan_payload)
                     if stored_plan:
                         orchestration_state.plan = stored_plan
                         self._log_entry(

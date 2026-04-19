@@ -100,7 +100,6 @@ api_router.include_router(
 # Context Preservation
 api_router.include_router(
     context.router,
-    prefix="/context",
     tags=["context-preservation"],
 )
 

@@ -9,8 +9,8 @@ import json
 from typing import Optional, Generator, Dict, Any, List
 from datetime import datetime
 from sqlalchemy.orm import Session
-from sqlalchemy import create_engine, and_
-from app.models import LogEntry, Session as SessionModel, Task, Project
+from sqlalchemy import create_engine, func
+from app.models import LogEntry, Session as SessionModel
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +177,7 @@ class LogStreamService:
         # Count logs by level (filtered by session_id AND session_instance_id)
         # This prevents showing logs from deleted/recreated sessions with reused IDs
         logs_by_level = (
-            self.db.query(LogEntry.level, LogEntry.id)
+            self.db.query(LogEntry.level, func.count(LogEntry.id))
             .join(SessionModel, LogEntry.session_id == SessionModel.id)
             .filter(
                 LogEntry.session_id.in_(session_id_list),
@@ -306,7 +306,7 @@ def get_project_logs_summary_for_db(db: Session, project_id: int) -> Dict[str, A
     # Count logs by level (filtered by session_id AND session_instance_id)
     # This prevents showing logs from deleted/recreated sessions with reused IDs
     logs_by_level = (
-        db.query(LogEntry.level, LogEntry.id)
+        db.query(LogEntry.level, func.count(LogEntry.id))
         .join(SessionModel, LogEntry.session_id == SessionModel.id)
         .filter(
             LogEntry.session_id.in_(session_id_list),
