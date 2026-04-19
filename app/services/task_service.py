@@ -1,5 +1,6 @@
 """Task service - Business logic for tasks"""
 
+import json
 import re
 import shutil
 from pathlib import Path
@@ -56,6 +57,36 @@ class TaskService:
 
     def get_project_root(self, project: Project) -> Path:
         return resolve_project_workspace_path(project.workspace_path, project.name)
+
+    def _parse_task_steps(self, task: Task) -> list[dict]:
+        raw_steps = getattr(task, "steps", None)
+        if not raw_steps:
+            return []
+        try:
+            parsed = json.loads(raw_steps) if isinstance(raw_steps, str) else raw_steps
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+
+    def get_task_expected_files(self, task: Task) -> list[str]:
+        expected_files: list[str] = []
+        seen = set()
+        for step in self._parse_task_steps(task):
+            raw_files = step.get("expected_files", [])
+            if not isinstance(raw_files, list):
+                continue
+            for raw_path in raw_files:
+                normalized = str(raw_path or "").strip().strip("\"'")
+                if (
+                    not normalized
+                    or normalized in seen
+                    or normalized.startswith("/")
+                    or normalized.startswith("..")
+                ):
+                    continue
+                seen.add(normalized)
+                expected_files.append(normalized)
+        return expected_files
 
     def _reserved_project_names(self, project: Project) -> set[str]:
         task_subfolders = {
@@ -593,6 +624,53 @@ class TaskService:
             ),
             "file_count": file_count,
             "promoted_task_count": promoted_task_count,
+        }
+
+    def validate_project_baseline(
+        self, project: Project, current_task: Optional[Task] = None
+    ) -> dict:
+        baseline_dir = self.get_project_baseline_dir(project)
+        baseline_overview = self.get_project_baseline_overview(project)
+        tasks = self.get_project_tasks(project.id)
+
+        if current_task and getattr(current_task, "plan_position", None) is not None:
+            cutoff = current_task.plan_position
+            candidate_tasks = [
+                task
+                for task in tasks
+                if task.id != current_task.id
+                and task.plan_position is not None
+                and task.plan_position < cutoff
+                and task.status == TaskStatus.DONE
+            ]
+        else:
+            candidate_tasks = [task for task in tasks if task.status == TaskStatus.DONE]
+
+        missing_expected_files = []
+        tasks_with_expected_files = []
+        for task in candidate_tasks:
+            expected_files = self.get_task_expected_files(task)
+            if not expected_files:
+                continue
+            tasks_with_expected_files.append(task.id)
+            for relative_path in expected_files:
+                if not (baseline_dir / relative_path).exists():
+                    missing_expected_files.append(
+                        {
+                            "task_id": task.id,
+                            "title": task.title,
+                            "plan_position": task.plan_position,
+                            "path": relative_path,
+                        }
+                    )
+
+        return {
+            "baseline_exists": baseline_overview["exists"],
+            "baseline_path": baseline_overview["path"],
+            "baseline_file_count": baseline_overview["file_count"],
+            "validated_task_count": len(candidate_tasks),
+            "tasks_with_expected_files": tasks_with_expected_files,
+            "missing_expected_files": missing_expected_files,
         }
 
     def update_task_status(

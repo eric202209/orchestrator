@@ -10,6 +10,7 @@ import logging
 import json
 import re
 import shlex
+import asyncio
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 from pathlib import Path
@@ -210,6 +211,16 @@ def _tool_failure_correction_hints(
                 f"Retry the file read/write using the absolute task-workspace path "
                 f"`{corrected_path}` instead of `{raw_path}`."
             )
+        elif raw_path and Path(raw_path).is_absolute():
+            corrected_path = (project_dir / raw_path.lstrip("/")).resolve()
+            if not Path(raw_path).exists() and corrected_path.is_relative_to(
+                project_dir
+            ):
+                hints.append(
+                    "The file-tool path looks like a truncated absolute path. "
+                    f"Do not shorten the workspace root. Retry with the real absolute "
+                    f"task-workspace path `{project_dir}` or a file inside it, not `{raw_path}`."
+                )
 
         raw_command = str(raw_params.get("command") or "").strip()
         if raw_command.startswith("cd ") and "&&" in raw_command:
@@ -223,6 +234,11 @@ def _tool_failure_correction_hints(
             hints.append(
                 "A directory path was passed to the file-read tool. Retry by reading "
                 "an actual file path inside the task workspace, not the folder itself."
+            )
+        elif raw_path and re.search(r"/task-[^/]+/?$", raw_path):
+            hints.append(
+                "A task workspace directory was passed to the file-read tool. "
+                "Read a specific file inside that directory, not the directory path itself."
             )
 
     deduped: List[str] = []
@@ -524,10 +540,11 @@ def _run_virtual_merge_gate(
     if current_task.plan_position is None:
         return None
 
+    task_service = TaskService(db)
     project_root = resolve_project_workspace_path(project.workspace_path, project.name)
     prior_tasks = [
         task
-        for task in TaskService(db).get_project_tasks(project.id)
+        for task in task_service.get_project_tasks(project.id)
         if task.id != current_task.id
         and task.plan_position is not None
         and task.plan_position < current_task.plan_position
@@ -565,7 +582,65 @@ def _run_virtual_merge_gate(
         except Exception:
             return "Virtual merge gate failed: state manager file is unreadable"
 
+    baseline_validation = task_service.validate_project_baseline(project, current_task)
+    if prior_tasks and baseline_validation["baseline_file_count"] == 0:
+        return (
+            "Virtual merge gate failed: canonical merged project state is empty even "
+            "though earlier ordered tasks are completed."
+        )
+
+    missing_expected_files = baseline_validation["missing_expected_files"]
+    if missing_expected_files:
+        summary = ", ".join(
+            f"#{entry['plan_position']} {entry['title']} -> {entry['path']}"
+            for entry in missing_expected_files[:5]
+        )
+        return (
+            "Virtual merge gate failed: canonical merged project state is missing "
+            f"files declared by prior completed tasks: {summary}"
+        )
+
     return None
+
+
+def _is_repeated_tool_path_failure(
+    debug_attempts: List[Dict[str, Any]], error_message: str
+) -> bool:
+    combined = str(error_message or "").lower()
+    if not any(
+        marker in combined
+        for marker in (
+            "raw_params",
+            "wrong root",
+            "absolute task-workspace path",
+            "read failed: enoent",
+            "read failed: eisdir",
+            "exec failed: exec preflight",
+        )
+    ):
+        return False
+
+    prior_related = 0
+    for attempt in debug_attempts:
+        prior_text = " ".join(
+            [
+                str(attempt.get("error", "")),
+                str(attempt.get("analysis", "")),
+                str(attempt.get("fix", "")),
+            ]
+        ).lower()
+        if any(
+            marker in prior_text
+            for marker in (
+                "raw_params",
+                "absolute task-workspace path",
+                "read failed: enoent",
+                "read failed: eisdir",
+                "exec failed: exec preflight",
+            )
+        ):
+            prior_related += 1
+    return prior_related >= 2
 
 
 def _step_needs_command_repair(step: Dict[str, Any]) -> bool:
@@ -651,6 +726,41 @@ def _looks_like_truncated_multistep_plan(
         )
     )
     if description_mentions > 1:
+        return True
+
+    return False
+
+
+def _plan_contains_brittle_commands(
+    extracted_plan: Optional[List[Dict[str, Any]]], output_text: str = ""
+) -> bool:
+    if not extracted_plan:
+        return False
+
+    heredoc_count = 0
+    for step in extracted_plan:
+        commands = step.get("commands", [])
+        if not isinstance(commands, list):
+            return True
+        for command in commands:
+            raw_command = str(command or "")
+            lowered = raw_command.lower()
+            if "cat >" in lowered and "<< 'eof'" in lowered:
+                heredoc_count += 1
+            if "cat >" in lowered and "<< eof" in lowered:
+                heredoc_count += 1
+            if re.search(r"mkdir\s+-p\s+[^|;&\n]+,cat\s+>", lowered):
+                return True
+            if raw_command.count("\n") > 25:
+                return True
+            if len(raw_command) > 1200:
+                return True
+
+    if heredoc_count >= 2:
+        return True
+
+    lowered_output = (output_text or "").lower()
+    if lowered_output.count("cat >") >= 2 and "```json" in lowered_output:
         return True
 
     return False
@@ -1189,7 +1299,10 @@ Rules:
 4. Return 3 to 6 small sequential steps
 5. Each step must include: step_number, description, commands, verification, rollback, expected_files
 6. expected_files must be relative paths or []
-7. Output JSON array only
+7. Do not use `cat > file <<EOF`, heredocs, or multi-line inline file creation in planning output
+8. Do not join separate shell commands with commas
+9. Prefer mkdir/touch/package-manager/editor-friendly commands and one-file-at-a-time edits
+10. Output JSON array only
 
 Example:
 [
@@ -1235,7 +1348,71 @@ def _retry_planning_with_minimal_prompt(
     return asyncio.run(
         openclaw_service.execute_task(
             minimal_planning_prompt,
-            timeout_seconds=min(timeout_seconds, 240),
+            timeout_seconds=min(timeout_seconds, 180),
+        )
+    )
+
+
+def _build_planning_repair_prompt(
+    task_description: str, malformed_output: str, project_dir: Path
+) -> str:
+    concise_task = " ".join((task_description or "").split())[:2000]
+    broken_output = (malformed_output or "")[:8000]
+    return f"""Repair this malformed planning output into valid machine-runnable JSON. Return JSON array only.
+
+Task:
+{concise_task}
+
+Working directory:
+{project_dir}
+
+Malformed planning output:
+{broken_output}
+
+Rules:
+1. Return a JSON array only
+2. Keep 3 to 8 sequential steps
+3. Each step must include: step_number, description, commands, verification, rollback, expected_files
+4. Use relative paths only in shell commands and expected_files
+5. Do not use absolute paths, .., or ~
+6. Do not use heredocs, `cat > file <<EOF`, or multi-line inline file dumps in the repaired plan
+7. Do not join separate shell commands with commas
+8. Prefer short setup/edit commands over dumping full source files in planning output
+9. If the malformed output contains oversized inline file content, replace it with smaller setup/edit commands that preserve the same step intent
+10. expected_files must be a JSON array
+"""
+
+
+def _repair_planning_output_with_minimal_prompt(
+    openclaw_service: Any,
+    task_description: str,
+    malformed_output: str,
+    project_dir: Path,
+    timeout_seconds: int,
+    logger: logging.Logger,
+    emit_live: Any,
+    reason: str,
+) -> Dict[str, Any]:
+    logger.warning(
+        "[ORCHESTRATION] Planning output was malformed but salvageable; "
+        f"attempting repair ({reason})"
+    )
+    emit_live(
+        "WARN",
+        "[ORCHESTRATION] Planning output was malformed; attempting one repair pass",
+        metadata={
+            "phase": "planning",
+            "retry": "repair_prompt",
+            "reason": reason[:240],
+        },
+    )
+    repair_prompt = _build_planning_repair_prompt(
+        task_description, malformed_output, project_dir
+    )
+    return asyncio.run(
+        openclaw_service.execute_task(
+            repair_prompt,
+            timeout_seconds=min(timeout_seconds, 120),
         )
     )
 
@@ -1274,6 +1451,25 @@ def _should_retry_planning_with_minimal_prompt(
         "timeout",
     )
     return any(marker in combined_text for marker in retry_markers)
+
+
+def _should_start_with_minimal_planning_prompt(
+    task_prompt: str,
+    project_context: str,
+) -> bool:
+    combined = f"{task_prompt or ''}\n{project_context or ''}"
+    lowered_context = (project_context or "").lower()
+    dense_context_markers = (
+        "hydrated baseline sources available directly in this workspace",
+        "canonical baseline available",
+        "earlier ordered tasks already completed and can be reused",
+        "promoted workspaces already accepted into the project baseline",
+    )
+    return (
+        len(combined) > 12000
+        or len(project_context or "") > 6000
+        or any(marker in lowered_context for marker in dense_context_markers)
+    )
 
 
 @celery_app.task(
@@ -1762,15 +1958,45 @@ def execute_openclaw_task(
                 execution_profile=execution_profile,
             )
 
-            # Planning often needs more time than the old 300 second cap,
-            # especially for larger repos or denser prompts.
-            planning_timeout_seconds = max(240, min(timeout_seconds, 480))
-            used_minimal_planning_prompt = False
-            planning_result = asyncio.run(
-                openclaw_service.execute_task(
-                    planning_prompt, timeout_seconds=planning_timeout_seconds
+            # Planning should not monopolize the entire task budget.
+            # Large or hydration-heavy contexts start directly with the
+            # stricter minimal prompt to avoid long context stalls.
+            planning_timeout_seconds = max(180, min(timeout_seconds, 300))
+            start_with_minimal_planning_prompt = (
+                _should_start_with_minimal_planning_prompt(
+                    prompt,
+                    orchestration_state.project_context,
                 )
             )
+            used_minimal_planning_prompt = start_with_minimal_planning_prompt
+
+            if start_with_minimal_planning_prompt:
+                emit_live(
+                    "WARN",
+                    "[ORCHESTRATION] Planning context is dense; starting with minimal prompt",
+                    metadata={
+                        "phase": "planning",
+                        "strategy": "minimal_prompt_first",
+                        "project_context_length": len(
+                            orchestration_state.project_context or ""
+                        ),
+                    },
+                )
+                planning_result = _retry_planning_with_minimal_prompt(
+                    openclaw_service=openclaw_service,
+                    task_description=prompt,
+                    project_dir=orchestration_state.project_dir,
+                    timeout_seconds=planning_timeout_seconds,
+                    logger=logger,
+                    emit_live=emit_live,
+                    reason="dense_planning_context",
+                )
+            else:
+                planning_result = asyncio.run(
+                    openclaw_service.execute_task(
+                        planning_prompt, timeout_seconds=planning_timeout_seconds
+                    )
+                )
 
             initial_output_text = _extract_structured_text(
                 planning_result.get("output", "")
@@ -1805,6 +2031,7 @@ def execute_openclaw_task(
 
             # Parse planning result to get steps
             try:
+                used_planning_repair_prompt = False
                 while True:
                     output_result = planning_result.get("output", {})
 
@@ -1869,6 +2096,20 @@ def execute_openclaw_task(
                         used_minimal_planning_prompt = True
                         continue
 
+                    if not success and not used_planning_repair_prompt:
+                        planning_result = _repair_planning_output_with_minimal_prompt(
+                            openclaw_service=openclaw_service,
+                            task_description=prompt,
+                            malformed_output=output_text,
+                            project_dir=orchestration_state.project_dir,
+                            timeout_seconds=planning_timeout_seconds,
+                            logger=logger,
+                            emit_live=emit_live,
+                            reason=f"json_parse_failed_after_minimal: {strategy_info}",
+                        )
+                        used_planning_repair_prompt = True
+                        continue
+
                     if not success:
                         orchestration_state.status = OrchestrationStatus.ABORTED
                         orchestration_state.abort_reason = (
@@ -1907,6 +2148,20 @@ def execute_openclaw_task(
                         used_minimal_planning_prompt = True
                         continue
 
+                    if extracted_plan is None and not used_planning_repair_prompt:
+                        planning_result = _repair_planning_output_with_minimal_prompt(
+                            openclaw_service=openclaw_service,
+                            task_description=prompt,
+                            malformed_output=output_text,
+                            project_dir=orchestration_state.project_dir,
+                            timeout_seconds=planning_timeout_seconds,
+                            logger=logger,
+                            emit_live=emit_live,
+                            reason="unexpected_plan_shape_after_minimal",
+                        )
+                        used_planning_repair_prompt = True
+                        continue
+
                     if (
                         _looks_like_truncated_multistep_plan(
                             output_text, extracted_plan
@@ -1923,6 +2178,25 @@ def execute_openclaw_task(
                             reason="truncated_multistep_plan_detected",
                         )
                         used_minimal_planning_prompt = True
+                        continue
+
+                    if (
+                        _looks_like_truncated_multistep_plan(
+                            output_text, extracted_plan
+                        )
+                        and not used_planning_repair_prompt
+                    ):
+                        planning_result = _repair_planning_output_with_minimal_prompt(
+                            openclaw_service=openclaw_service,
+                            task_description=prompt,
+                            malformed_output=output_text,
+                            project_dir=orchestration_state.project_dir,
+                            timeout_seconds=planning_timeout_seconds,
+                            logger=logger,
+                            emit_live=emit_live,
+                            reason="truncated_multistep_plan_after_minimal",
+                        )
+                        used_planning_repair_prompt = True
                         continue
 
                     if _looks_like_truncated_multistep_plan(
@@ -1964,6 +2238,50 @@ def execute_openclaw_task(
                             "Planning result is not a recognized list of steps "
                             f"(type={plan_shape}, keys={plan_keys}, preview={str(plan_data)[:240]})"
                         )
+
+                    if (
+                        _plan_contains_brittle_commands(extracted_plan, output_text)
+                        and not used_planning_repair_prompt
+                    ):
+                        planning_result = _repair_planning_output_with_minimal_prompt(
+                            openclaw_service=openclaw_service,
+                            task_description=prompt,
+                            malformed_output=output_text,
+                            project_dir=orchestration_state.project_dir,
+                            timeout_seconds=planning_timeout_seconds,
+                            logger=logger,
+                            emit_live=emit_live,
+                            reason="brittle_heredoc_heavy_plan",
+                        )
+                        used_planning_repair_prompt = True
+                        continue
+
+                    if _plan_contains_brittle_commands(extracted_plan, output_text):
+                        orchestration_state.status = OrchestrationStatus.ABORTED
+                        orchestration_state.abort_reason = (
+                            "Planning output produced brittle heredoc-heavy commands"
+                        )
+                        emit_live(
+                            "ERROR",
+                            "[ORCHESTRATION] Planning output used brittle heredoc-heavy commands",
+                            metadata={
+                                "phase": "planning",
+                                "reason": "brittle_planning_commands",
+                            },
+                        )
+                        task.status = TaskStatus.FAILED
+                        task.error_message = (
+                            "Planning produced brittle heredoc-heavy commands. "
+                            f"Raw output: {output_text[:500]}"
+                        )
+                        db.commit()
+                        restore_workspace_snapshot_if_needed(
+                            "planning brittle command failure"
+                        )
+                        return {
+                            "status": "failed",
+                            "reason": "planning_brittle_commands",
+                        }
 
                     orchestration_state.plan = _normalize_plan_with_live_logging(
                         db,
@@ -2306,6 +2624,34 @@ def execute_openclaw_task(
                     f"[ORCHESTRATION] Step {step_index + 1} failed, entering DEBUGGING phase",
                     metadata={"phase": "debugging", "step_index": step_index + 1},
                 )
+
+                if _is_repeated_tool_path_failure(
+                    orchestration_state.debug_attempts, step_record.error_message
+                ):
+                    manual_gate_message = (
+                        f"Step {step_index + 1} hit repeated workspace/tool-path "
+                        "failures. Manual review is required before execution can continue."
+                    )
+                    logger.warning("[ORCHESTRATION] %s", manual_gate_message)
+                    emit_live(
+                        "ERROR",
+                        f"[ORCHESTRATION] {manual_gate_message}",
+                        metadata={
+                            "phase": "debugging",
+                            "step_index": step_index + 1,
+                            "manual_review_required": True,
+                            "reason": "repeated_tool_path_failure",
+                        },
+                    )
+                    orchestration_state.status = OrchestrationStatus.ABORTED
+                    orchestration_state.abort_reason = manual_gate_message
+                    task.status = TaskStatus.FAILED
+                    task.error_message = manual_gate_message
+                    db.commit()
+                    _set_session_alert(session, "error", manual_gate_message)
+                    restore_workspace_snapshot_if_needed("repeated tool/path failures")
+                    _write_project_state_snapshot(db, project, task, session_id)
+                    return {"status": "failed", "reason": "manual_review_required"}
 
                 # Check if we've exceeded max attempts
                 if current_attempt >= max_attempts:

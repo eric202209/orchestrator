@@ -287,7 +287,7 @@ class PromptTemplates:
 
 **Planning Rules:**
 1. Prefer short, targeted shell commands over large generated scripts
-2. Avoid `cat <<EOF`, `python - <<'PY'`, or other large inline file-generation blocks unless there is no simpler option
+2. Avoid `cat <<EOF`, `cat > file <<EOF`, `python - <<'PY'`, or other large inline file-generation blocks in plans unless there is no simpler option
 3. Prefer incremental setup:
    - create directories first
    - create or edit one file at a time
@@ -304,6 +304,8 @@ class PromptTemplates:
 13. For `node` or `python` execution, prefer direct commands like `node src/index.js` or `python app.py`
 14. For final verification, prefer one-shot commands, test scripts, or short direct checks over starting a long-running server in the background
 15. If the context mentions completed or promoted prior task artifacts, assume those files have already been hydrated into `{project_dir}` and extend them instead of recreating parallel implementations
+16. Never join separate shell commands with commas; each command must stand alone as a valid shell command
+17. Plans that dump whole source files through heredocs are considered low quality; prefer smaller setup/edit commands
 
 **Execution Profile Rules:**
 {execution_profile_rules}
@@ -347,9 +349,10 @@ class PromptTemplates:
 1. Run everything from `{project_dir}`
 2. Treat shell command paths as relative to `{project_dir}`
 3. For file-read or file-write tool calls, use absolute paths rooted under `{project_dir}` because the tool resolver may not inherit the shell working directory
-4. Do NOT create files or folders outside `{project_dir}`
-5. Do NOT create documentation files unless the task explicitly requires them
-6. Avoid README files, notes files, summaries, or explanation documents unless required by the task
+4. Never shorten the absolute workspace path. Use the full real path beginning with `{project_dir}`, not a truncated variant like `/vault/...`
+5. Do NOT create files or folders outside `{project_dir}`
+6. Do NOT create documentation files unless the task explicitly requires them
+7. Avoid README files, notes files, summaries, or explanation documents unless required by the task
 
 **Execution Rules:**
 1. Follow the provided commands exactly unless a command is clearly invalid in the current workspace
@@ -368,7 +371,8 @@ class PromptTemplates:
 14. Before reading a file path, confirm that it exists; do not attempt to read missing files
 15. Never pass a directory path to a file-read tool; only read actual files
 16. When using a file-read or file-write tool, pass the full absolute path inside `{project_dir}` such as `{project_dir}/src/index.ts`
-17. For command execution, pass direct commands only and rely on `{project_dir}` as the working directory instead of wrapping commands with `cd ... && ...`
+17. Do not pass `{project_dir}` itself or any `task-*` directory to a file-read tool; read a specific file inside it
+18. For command execution, pass direct commands only and rely on `{project_dir}` as the working directory instead of wrapping commands with `cd ... && ...`
 
 **Execution Profile Rules:**
 {execution_profile_rules}
@@ -399,9 +403,10 @@ class PromptTemplates:
 1. Keep every proposed fix inside `{project_dir}`
 2. Use relative paths for shell commands and verification commands
 3. For file-read or file-write tool calls, use absolute paths rooted under `{project_dir}`
-4. Do NOT suggest creating or modifying files outside `{project_dir}`
-5. Do NOT propose documentation files unless the task explicitly requires them
-6. Avoid README files, notes files, summaries, or explanation documents unless required by the task
+4. Never shorten the absolute workspace path; use the full real path beginning with `{project_dir}`
+5. Do NOT suggest creating or modifying files outside `{project_dir}`
+6. Do NOT propose documentation files unless the task explicitly requires them
+7. Avoid README files, notes files, summaries, or explanation documents unless required by the task
 
 **Debugging Rules:**
 1. Prefer the smallest fix that can unblock the current step
@@ -410,7 +415,7 @@ class PromptTemplates:
 4. Avoid suggesting large heredoc-based rewrites unless the task cannot be completed safely any other way
 5. Keep fixes retry-friendly and compatible with partial progress already made inside `{project_dir}`
 6. If failure was caused by a background process, `cd ... && ...`, or complex interpreter wrapper, replace it with a direct tool-safe command
-7. If the failure mentions `raw_params` or shows a file path resolved under the wrong workspace root, fix that first by using an absolute file-tool path inside `{project_dir}`
+7. If the failure mentions `raw_params` or shows a file path resolved under the wrong workspace root, fix that first by using the full absolute file-tool path inside `{project_dir}`
 
 **Output (JSON):**
 {{
@@ -439,9 +444,10 @@ class PromptTemplates:
 1. Revised commands MUST stay inside `{project_dir}`
 2. Use relative paths for shell commands and verification commands
 3. For file-read or file-write tool calls, use absolute paths rooted under `{project_dir}`
-4. Do NOT create sibling folders under `{workspace_root}`
-5. Do NOT add documentation-only steps unless the task explicitly requires them
-6. Avoid README files, notes files, summaries, or explanation documents unless required by the task
+4. Never shorten the absolute workspace path; use the full real path beginning with `{project_dir}`
+5. Do NOT create sibling folders under `{workspace_root}`
+6. Do NOT add documentation-only steps unless the task explicitly requires them
+7. Avoid README files, notes files, summaries, or explanation documents unless required by the task
 
 **Revision Rules:**
 1. Preserve already completed steps exactly as completed
