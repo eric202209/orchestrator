@@ -43,6 +43,7 @@ from app.services.orchestration import (
     normalize_step as _normalize_step,
     render_task_report as _render_task_report,
     run_virtual_merge_gate as _run_virtual_merge_gate,
+    should_restore_workspace_on_failure,
     should_force_review_execution_profile as _should_force_review_execution_profile,
 )
 from app.services.orchestration.persistence import (
@@ -240,6 +241,7 @@ def execute_openclaw_task(
             # Fallback: use slugified project name
             pass
 
+        is_resume_execution = bool(resume_checkpoint_name)
         task_service = TaskService(db)
         runs_in_canonical_baseline = bool(
             project
@@ -248,7 +250,7 @@ def execute_openclaw_task(
                 execution_profile, task.title, task.description
             )
         )
-        if runs_in_canonical_baseline and project:
+        if runs_in_canonical_baseline and project and not is_resume_execution:
             consolidation_result = task_service.rebuild_project_baseline(project)
             canonical_baseline_dir = task_service.get_project_baseline_dir(project)
             canonical_baseline_dir.mkdir(parents=True, exist_ok=True)
@@ -274,20 +276,63 @@ def execute_openclaw_task(
                     ),
                 },
             )
+        elif runs_in_canonical_baseline and project and is_resume_execution:
+            emit_live(
+                "INFO",
+                "[ORCHESTRATION] Resume requested; skipped pre-run canonical baseline rebuild to preserve the current workspace",
+                metadata={
+                    "phase": "resume",
+                    "workspace_mutation_skipped": True,
+                    "reason": "resume_preserve_workspace",
+                },
+            )
 
         # Create the task workspace directory if it doesn't exist
         task_workspace = orchestration_state.project_dir
+        if is_resume_execution and project and task and task.task_subfolder:
+            task_workspace_review = task_service.review_existing_workspace(
+                project=project,
+                current_task=task,
+                target_dir=task_workspace,
+            )
+            if not task_workspace_review.get("has_existing_files"):
+                project_root = task_service.get_project_root(project)
+                project_root_review = task_service.review_existing_workspace(
+                    project=project,
+                    current_task=task,
+                    target_dir=project_root,
+                )
+                if project_root_review.get("has_existing_files"):
+                    orchestration_state._project_dir_override = str(project_root)
+                    task_workspace = orchestration_state.project_dir
+                    logger.warning(
+                        "[ORCHESTRATION] Resume for task %s found an empty task workspace at %s; using populated project root %s instead",
+                        task_id,
+                        task.task_subfolder,
+                        project_root,
+                    )
+                    emit_live(
+                        "WARN",
+                        (
+                            "[ORCHESTRATION] Resume found no files in the task workspace "
+                            f"`{task.task_subfolder}`; using the populated project root "
+                            f"{project_root} instead"
+                        ),
+                        metadata={
+                            "phase": "resume",
+                            "empty_task_workspace": task.task_subfolder,
+                            "fallback_project_root": str(project_root),
+                        },
+                    )
         if not os.path.exists(task_workspace):
             os.makedirs(task_workspace, exist_ok=True)
             logger.info(f"Created task workspace: {task_workspace}")
-
-        is_resume_execution = bool(resume_checkpoint_name)
 
         hydration_result = (
             task_service.hydrate_task_workspace(
                 project, task, orchestration_state.project_dir
             )
-            if project and task
+            if project and task and not is_resume_execution
             else {"hydrated": False, "source_tasks": [], "files_copied": 0}
         )
         if hydration_result.get("hydrated"):
@@ -305,6 +350,16 @@ def execute_openclaw_task(
                 metadata={
                     "phase": "workspace_hydration",
                     "sources": hydration_result.get("source_tasks", []),
+                },
+            )
+        elif is_resume_execution:
+            emit_live(
+                "INFO",
+                "[ORCHESTRATION] Resume requested; skipped pre-run workspace hydration to preserve existing task files",
+                metadata={
+                    "phase": "resume",
+                    "workspace_mutation_skipped": True,
+                    "reason": "resume_preserve_workspace",
                 },
             )
 
@@ -337,6 +392,32 @@ def execute_openclaw_task(
         ) -> Optional[Dict[str, Any]]:
             if not project:
                 return None
+            should_restore = should_restore_workspace_on_failure(reason)
+            if not should_restore:
+                logger.warning(
+                    "[ORCHESTRATION] Preserved workspace for task %s after %s; automatic restore is limited to isolation-violation failures",
+                    task_id,
+                    reason,
+                )
+                emit_live(
+                    "WARN",
+                    (
+                        "[ORCHESTRATION] Preserved the current workspace after "
+                        f"{reason}; automatic restore is only applied for "
+                        "workspace-isolation violations"
+                    ),
+                    metadata={
+                        "phase": "workspace_restore",
+                        "reason": reason,
+                        "restore_skipped": True,
+                        "policy": "preserve_on_non_isolation_failures",
+                    },
+                )
+                return {
+                    "restored": False,
+                    "reason": "preserved_non_isolation_failure",
+                    "target_path": str(orchestration_state.project_dir),
+                }
             restore_result = _restore_workspace_after_abort(
                 task_service,
                 project,
@@ -461,13 +542,11 @@ def execute_openclaw_task(
         checkpoint_service = CheckpointService(db)
         resumed_from_checkpoint = False
 
-        if resume_checkpoint_name:
-            checkpoint_data = checkpoint_service.load_checkpoint(
-                session_id=session_id, checkpoint_name=resume_checkpoint_name
-            )
-            checkpoint_context = checkpoint_data.get("context", {})
-            checkpoint_state = checkpoint_data.get("orchestration_state", {})
+        def _apply_checkpoint_payload(checkpoint_payload: Dict[str, Any]) -> str:
+            checkpoint_context = checkpoint_payload.get("context", {}) or {}
+            checkpoint_state = checkpoint_payload.get("orchestration_state", {}) or {}
 
+            nonlocal prompt
             prompt = checkpoint_context.get("task_description", prompt) or prompt
             orchestration_state.project_name = checkpoint_context.get(
                 "project_name", orchestration_state.project_name
@@ -488,7 +567,7 @@ def execute_openclaw_task(
             orchestration_state.current_step_index = (
                 checkpoint_state.get(
                     "current_step_index",
-                    checkpoint_data.get("current_step_index", 0) or 0,
+                    checkpoint_payload.get("current_step_index", 0) or 0,
                 )
                 or 0
             )
@@ -519,9 +598,152 @@ def execute_openclaw_task(
             orchestration_state.execution_results = [
                 _restore_step_result(item)
                 for item in checkpoint_state.get(
-                    "execution_results", checkpoint_data.get("step_results", [])
+                    "execution_results", checkpoint_payload.get("step_results", [])
                 )
             ]
+            if (
+                orchestration_state.completion_repair_attempts > 0
+                and orchestration_state.plan
+                and len(orchestration_state.execution_results)
+                == int(orchestration_state.current_step_index or 0)
+                and int(orchestration_state.current_step_index or 0)
+                == len(orchestration_state.plan) - 1
+            ):
+                stale_repair_step = orchestration_state.plan[-1]
+                orchestration_state.plan = orchestration_state.plan[
+                    : orchestration_state.current_step_index
+                ]
+                orchestration_state.completion_repair_attempts = 0
+                task.steps = json.dumps(orchestration_state.plan)
+                emit_live(
+                    "WARN",
+                    "[ORCHESTRATION] Dropped a stale pending completion-repair step from the resume checkpoint and reset the repair budget",
+                    metadata={
+                        "phase": "resume",
+                        "stale_completion_repair_step": stale_repair_step.get(
+                            "description", ""
+                        ),
+                    },
+                )
+            completed_step_count = max(
+                len(orchestration_state.execution_results),
+                int(orchestration_state.current_step_index or 0),
+            )
+            compatibility = (
+                ValidatorService.assess_plan_workspace_compatibility(
+                    project_dir=orchestration_state.project_dir,
+                    plan=orchestration_state.plan,
+                    completed_step_count=completed_step_count,
+                )
+                if orchestration_state.plan
+                else {"compatible": True}
+            )
+            if (
+                orchestration_state.plan
+                and orchestration_state.current_step_index
+                >= len(orchestration_state.plan)
+            ):
+                orchestration_state.completion_repair_attempts = 0
+            return compatibility
+
+        def _clear_resume_execution_state(error_message: str) -> None:
+            orchestration_state.plan = []
+            orchestration_state.current_step_index = 0
+            orchestration_state.debug_attempts = []
+            orchestration_state.execution_results = []
+            orchestration_state.changed_files = []
+            orchestration_state.completion_repair_attempts = 0
+            orchestration_state.status = OrchestrationStatus.PLANNING
+            orchestration_state.abort_reason = ""
+            task.steps = None
+            task.current_step = 0
+            task.error_message = None
+            if session_task_link:
+                session_task_link.status = TaskStatus.RUNNING
+                session_task_link.started_at = task.started_at
+                session_task_link.completed_at = None
+            session.status = "running"
+            session.is_active = True
+            _set_session_alert(session, "warn", error_message[:2000])
+            db.commit()
+
+        if resume_checkpoint_name:
+            checkpoint_data = checkpoint_service.load_resume_checkpoint(
+                session_id=session_id, checkpoint_name=resume_checkpoint_name
+            )
+            requested_resume_checkpoint_name = (
+                checkpoint_data.get("_requested_checkpoint_name")
+                or resume_checkpoint_name
+            )
+            resolved_resume_checkpoint_name = (
+                checkpoint_data.get("_resolved_checkpoint_name")
+                or resume_checkpoint_name
+            )
+            resume_workspace_compatibility = _apply_checkpoint_payload(checkpoint_data)
+            if orchestration_state.plan and not resume_workspace_compatibility.get(
+                "compatible", True
+            ):
+                fallback_checkpoint_names = [
+                    name
+                    for name in ("autosave_latest", "autosave_error")
+                    if name != resolved_resume_checkpoint_name
+                ]
+                fallback_applied = False
+                for fallback_name in fallback_checkpoint_names:
+                    try:
+                        fallback_data = checkpoint_service.load_checkpoint(
+                            session_id, fallback_name
+                        )
+                    except Exception:
+                        continue
+                    fallback_compatibility = _apply_checkpoint_payload(fallback_data)
+                    if fallback_compatibility.get("compatible", True):
+                        emit_live(
+                            "WARN",
+                            f"[ORCHESTRATION] Resume checkpoint drift detected; switching to compatible fallback checkpoint '{fallback_name}'",
+                            metadata={
+                                "phase": "resume",
+                                "reason": "resume_workspace_drift_fallback",
+                                "requested_checkpoint_name": requested_resume_checkpoint_name,
+                                "resolved_checkpoint_name": resolved_resume_checkpoint_name,
+                                "fallback_checkpoint_name": fallback_name,
+                                "compatibility": resume_workspace_compatibility,
+                            },
+                        )
+                        logger.warning(
+                            "[ORCHESTRATION] Resume checkpoint drift detected for task %s; switched from %s to compatible fallback %s",
+                            task_id,
+                            resolved_resume_checkpoint_name,
+                            fallback_name,
+                        )
+                        resolved_resume_checkpoint_name = fallback_name
+                        resume_workspace_compatibility = fallback_compatibility
+                        fallback_applied = True
+                        break
+                if not fallback_applied:
+                    compatibility_error = (
+                        "Checkpoint plan does not match the current workspace; "
+                        "discarding saved execution state and replanning from existing files"
+                    )
+                    logger.warning(
+                        "[ORCHESTRATION] %s task=%s checkpoint=%s details=%s",
+                        compatibility_error,
+                        task_id,
+                        resolved_resume_checkpoint_name,
+                        resume_workspace_compatibility,
+                    )
+                    emit_live(
+                        "WARN",
+                        "[ORCHESTRATION] Resume checkpoint plan no longer matches the current workspace; falling back to a fresh replan from existing files",
+                        metadata={
+                            "phase": "resume",
+                            "reason": "resume_workspace_drift",
+                            "requested_checkpoint_name": requested_resume_checkpoint_name,
+                            "resolved_checkpoint_name": resolved_resume_checkpoint_name,
+                            "compatibility": resume_workspace_compatibility,
+                        },
+                    )
+                    _clear_resume_execution_state(compatibility_error)
 
             if orchestration_state.plan:
                 orchestration_state.plan = _normalize_plan_with_live_logging(
@@ -592,12 +814,16 @@ def execute_openclaw_task(
             resumed_from_checkpoint = bool(orchestration_state.plan)
             if resumed_from_checkpoint:
                 logger.info(
-                    f"[ORCHESTRATION] Resuming from checkpoint '{resume_checkpoint_name}' at step index {orchestration_state.current_step_index}"
+                    f"[ORCHESTRATION] Resuming from checkpoint '{resolved_resume_checkpoint_name}' at step index {orchestration_state.current_step_index}"
                 )
                 emit_live(
                     "INFO",
-                    f"[ORCHESTRATION] Resuming from checkpoint '{resume_checkpoint_name}' at step index {orchestration_state.current_step_index}",
-                    metadata={"phase": "resume"},
+                    f"[ORCHESTRATION] Resuming from checkpoint '{resolved_resume_checkpoint_name}' at step index {orchestration_state.current_step_index}",
+                    metadata={
+                        "phase": "resume",
+                        "requested_checkpoint_name": requested_resume_checkpoint_name,
+                        "resolved_checkpoint_name": resolved_resume_checkpoint_name,
+                    },
                 )
 
         refreshed_project_context = task_service.build_project_execution_context(

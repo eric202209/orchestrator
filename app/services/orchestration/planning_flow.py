@@ -91,7 +91,12 @@ def execute_planning_phase(
             )
         )
 
-    initial_output_text = extract_structured_text(planning_result.get("output", ""))
+    initial_output_text = __coerce_output_text(
+        ctx=ctx,
+        planning_result=planning_result,
+        output_result=planning_result.get("output", ""),
+        extract_structured_text=extract_structured_text,
+    )
     if PlannerService.should_retry_with_minimal_prompt(
         planning_result, initial_output_text
     ) and not PlannerService.looks_salvageable_planning_output(initial_output_text):
@@ -126,6 +131,7 @@ def execute_planning_phase(
             output_result = planning_result.get("output", {})
             output_text = __coerce_output_text(
                 ctx=ctx,
+                planning_result=planning_result,
                 output_result=output_result,
                 extract_structured_text=extract_structured_text,
             )
@@ -452,6 +458,7 @@ def __repair_planning_output(
 def __coerce_output_text(
     *,
     ctx: OrchestrationRunContext,
+    planning_result: Any,
     output_result: Any,
     extract_structured_text: Callable[[Any], str],
 ) -> str:
@@ -465,6 +472,22 @@ def __coerce_output_text(
         output_text = json.dumps(output_result)
         ctx.logger.info(
             "[ORCHESTRATION] Structured text extraction empty; using full JSON"
+        )
+    if not output_text.strip():
+        fallback_text = extract_structured_text(planning_result)
+        if fallback_text.strip():
+            output_text = fallback_text
+            ctx.logger.info(
+                "[ORCHESTRATION] Output field was empty; recovered planning text from full result payload"
+            )
+    if (
+        not output_text.strip()
+        and isinstance(planning_result, dict)
+        and planning_result
+    ):
+        output_text = json.dumps(planning_result)
+        ctx.logger.info(
+            "[ORCHESTRATION] Using serialized full planning result payload as final fallback"
         )
     elif isinstance(output_result, str):
         ctx.logger.info("[ORCHESTRATION] Raw string response")

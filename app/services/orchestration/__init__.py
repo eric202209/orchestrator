@@ -34,6 +34,7 @@ from .policy import (
     SUMMARY_TIMEOUT_SECONDS,
     ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS,
     clamp_planning_timeout,
+    should_restore_workspace_on_failure,
 )
 from .persistence import (
     record_live_log,
@@ -117,6 +118,7 @@ __all__ = [
     "DEBUG_TIMEOUT_SECONDS",
     "SUMMARY_TIMEOUT_SECONDS",
     "clamp_planning_timeout",
+    "should_restore_workspace_on_failure",
     "get_task_report_path",
     "is_verification_style_task",
     "run_virtual_merge_gate",

@@ -27,6 +27,43 @@ from app.services.task_service import TaskService
 logger = logging.getLogger(__name__)
 
 
+def _reset_running_session_tasks(
+    db: Session,
+    *,
+    session_id: int,
+    next_status: TaskStatus = TaskStatus.PENDING,
+) -> int:
+    """Normalize tasks/links after pause/stop so resume does not inherit RUNNING state."""
+
+    running_links = (
+        db.query(SessionTask)
+        .filter(
+            SessionTask.session_id == session_id,
+            SessionTask.status == TaskStatus.RUNNING,
+        )
+        .all()
+    )
+    updated = 0
+    seen_task_ids: set[int] = set()
+
+    for link in running_links:
+        link.status = next_status
+        link.completed_at = None
+        updated += 1
+        if link.task_id in seen_task_ids:
+            continue
+        seen_task_ids.add(link.task_id)
+        task = db.query(Task).filter(Task.id == link.task_id).first()
+        if not task:
+            continue
+        if task.status == TaskStatus.RUNNING:
+            task.status = next_status
+            task.completed_at = None
+            task.error_message = None
+
+    return updated
+
+
 async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any]:
     """Start a session and queue work if needed."""
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
@@ -322,6 +359,11 @@ async def stop_session_lifecycle(
         session.is_active = False
         session.stopped_at = datetime.now(timezone.utc)
         session.status = "stopped"
+        reset_count = _reset_running_session_tasks(
+            db,
+            session_id=session_id,
+            next_status=TaskStatus.PENDING,
+        )
         db.commit()
 
         db.add(
@@ -334,6 +376,7 @@ async def stop_session_lifecycle(
                         "force": force,
                         "revoked_task_ids": revoked_ids,
                         "checkpoint_name": checkpoint_name,
+                        "reset_running_tasks": reset_count,
                     }
                 ),
             )
@@ -391,6 +434,11 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
         session.is_active = True
         session.status = "paused"
         session.paused_at = datetime.now(timezone.utc)
+        reset_count = _reset_running_session_tasks(
+            db,
+            session_id=session_id,
+            next_status=TaskStatus.PENDING,
+        )
         db.commit()
 
         db.add(
@@ -402,6 +450,7 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                     {
                         "revoked_task_ids": revoked_ids,
                         "checkpoint_name": checkpoint_name,
+                        "reset_running_tasks": reset_count,
                     }
                 ),
             )
@@ -440,14 +489,17 @@ async def resume_session_lifecycle(db: Session, session_id: int) -> Dict[str, An
     try:
         checkpoint_service = CheckpointService(db)
         try:
-            checkpoint_data = checkpoint_service.load_checkpoint(session_id)
+            checkpoint_data = checkpoint_service.load_resume_checkpoint(session_id)
         except CheckpointError as checkpoint_error:
             raise HTTPException(
                 status_code=404,
                 detail=f"No usable checkpoint found for session {session_id}: {checkpoint_error}",
             ) from checkpoint_error
 
-        checkpoint_name = checkpoint_data.get("checkpoint_name")
+        requested_checkpoint_name = checkpoint_data.get("_requested_checkpoint_name")
+        checkpoint_name = checkpoint_data.get(
+            "_resolved_checkpoint_name"
+        ) or checkpoint_data.get("checkpoint_name")
         context_data = checkpoint_data.get("context", {})
         task_id = context_data.get("task_id")
         if not task_id:
@@ -485,10 +537,20 @@ async def resume_session_lifecycle(db: Session, session_id: int) -> Dict[str, An
             LogEntry(
                 session_id=session_id,
                 level="INFO",
-                message=f"Session resumed: {session.name}",
+                message=(
+                    f"Session resumed: {session.name}"
+                    + (
+                        f" (requested checkpoint: {requested_checkpoint_name}, resolved checkpoint: {checkpoint_name})"
+                        if requested_checkpoint_name
+                        and requested_checkpoint_name != checkpoint_name
+                        else f" (checkpoint: {checkpoint_name})"
+                    )
+                ),
                 log_metadata=json.dumps(
                     {
+                        "requested_checkpoint_name": requested_checkpoint_name,
                         "checkpoint_name": checkpoint_name,
+                        "resolved_checkpoint_name": checkpoint_name,
                         "celery_task_id": result.id,
                         "task_id": task.id,
                     }
@@ -500,7 +562,17 @@ async def resume_session_lifecycle(db: Session, session_id: int) -> Dict[str, An
         return {
             "status": "resumed",
             "session_id": session_id,
-            "message": f"Session '{session.name}' resumed successfully",
+            "requested_checkpoint_name": requested_checkpoint_name,
+            "resolved_checkpoint_name": checkpoint_name,
+            "message": (
+                f"Session '{session.name}' resumed successfully"
+                + (
+                    f" using resolved checkpoint '{checkpoint_name}' instead of '{requested_checkpoint_name}'"
+                    if requested_checkpoint_name
+                    and requested_checkpoint_name != checkpoint_name
+                    else f" using checkpoint '{checkpoint_name}'"
+                )
+            ),
         }
     except HTTPException:
         raise

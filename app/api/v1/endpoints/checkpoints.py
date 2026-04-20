@@ -131,8 +131,16 @@ async def list_checkpoints(
         checkpoint_service = CheckpointService(db)
 
         checkpoints = checkpoint_service.list_checkpoints(session_id)
+        recommended_checkpoint_name = checkpoint_service.resolve_resume_checkpoint_name(
+            session_id
+        )
 
-        return checkpoints
+        return {
+            "session_id": session_id,
+            "total_count": len(checkpoints),
+            "recommended_checkpoint_name": recommended_checkpoint_name,
+            "checkpoints": checkpoints,
+        }
 
     except Exception as e:
         logger.error(f"Failed to list checkpoints for session {session_id}: {str(e)}")
@@ -172,13 +180,15 @@ async def load_checkpoint(
 
         checkpoint_service = CheckpointService(db)
 
-        checkpoint_data = checkpoint_service.load_checkpoint(
+        checkpoint_data = checkpoint_service.load_resume_checkpoint(
             session_id=session_id, checkpoint_name=checkpoint_name
         )
 
         return {
             "success": True,
-            "checkpoint_name": checkpoint_data.get("checkpoint_name"),
+            "checkpoint_name": checkpoint_data.get("_resolved_checkpoint_name")
+            or checkpoint_data.get("checkpoint_name"),
+            "requested_checkpoint_name": checkpoint_name,
             "context": checkpoint_data.get("context", {}),
             "orchestration_state": checkpoint_data.get("orchestration_state", {}),
             "current_step_index": checkpoint_data.get("current_step_index"),

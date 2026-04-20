@@ -489,6 +489,30 @@ class ValidatorService:
         return reasons
 
     @staticmethod
+    def _split_content_issue_severity(
+        reasons: List[str],
+    ) -> tuple[List[str], List[str]]:
+        repairable: List[str] = []
+        rejected: List[str] = []
+        for reason in reasons:
+            lowered = reason.lower()
+            if any(
+                marker in lowered
+                for marker in (
+                    "`pass` placeholders",
+                    "not-implemented markers",
+                    "syntax errors",
+                    "broken python __main__",
+                )
+            ):
+                rejected.append(reason)
+            elif "todo or placeholder markers" in lowered:
+                repairable.append(reason)
+            else:
+                rejected.append(reason)
+        return repairable, rejected
+
+    @staticmethod
     def _core_expected_files(plan: List[Dict[str, Any]]) -> List[str]:
         files: List[str] = []
         seen = set()
@@ -507,6 +531,64 @@ class ValidatorService:
                     seen.add(path_text)
                     files.append(path_text)
         return files
+
+    @classmethod
+    def assess_plan_workspace_compatibility(
+        cls,
+        *,
+        project_dir: Path,
+        plan: List[Dict[str, Any]],
+        completed_step_count: int = 0,
+    ) -> Dict[str, Any]:
+        """Check whether a saved plan's completed portion still matches the current workspace."""
+
+        scoped_plan = (
+            plan[:completed_step_count]
+            if completed_step_count and completed_step_count > 0
+            else plan
+        )
+        expected_core_files = cls._core_expected_files(scoped_plan)
+        candidate_files = cls._iter_candidate_files(project_dir, expected_core_files)
+        nested_matches = cls._find_nested_expected_file_matches(
+            project_dir, expected_core_files
+        )
+
+        project_dir = project_dir.resolve()
+        workspace_source_files = [
+            path
+            for path in project_dir.rglob("*")
+            if path.is_file()
+            and path.suffix.lower() in SOURCE_EXTENSIONS
+            and not any(
+                part in {"node_modules", "__pycache__", ".openclaw"}
+                for part in path.relative_to(project_dir).parts
+            )
+        ]
+        nested_match_count = sum(len(matches) for matches in nested_matches.values())
+        expected_count = len(expected_core_files)
+        matched_count = len(candidate_files)
+        compatible = not (
+            workspace_source_files
+            and expected_count > 0
+            and matched_count == 0
+            and nested_match_count == 0
+        )
+
+        return {
+            "compatible": compatible,
+            "completed_step_count": completed_step_count,
+            "expected_core_count": expected_count,
+            "matched_core_count": matched_count,
+            "nested_match_count": nested_match_count,
+            "workspace_source_count": len(workspace_source_files),
+            "expected_core_files": expected_core_files[:20],
+            "matched_core_files": [
+                str(path.relative_to(project_dir)) for path in candidate_files[:20]
+            ],
+            "nested_matches": {
+                key: value[:10] for key, value in nested_matches.items()
+            },
+        }
 
     @classmethod
     def validate_step_success(
@@ -554,7 +636,11 @@ class ValidatorService:
         for candidate in candidate_files:
             placeholder_reasons.extend(cls._detect_placeholder_content(candidate))
         if placeholder_reasons and validation_profile == "implementation":
-            rejected.extend(placeholder_reasons[:6])
+            repairable_placeholder_reasons, rejected_placeholder_reasons = (
+                cls._split_content_issue_severity(placeholder_reasons)
+            )
+            repairable.extend(repairable_placeholder_reasons[:6])
+            rejected.extend(rejected_placeholder_reasons[:6])
             details["placeholder_reasons"] = placeholder_reasons[:20]
 
         return ValidationVerdict(
@@ -635,12 +721,17 @@ class ValidatorService:
         for candidate in candidate_files:
             placeholder_reasons.extend(cls._detect_placeholder_content(candidate))
         if placeholder_reasons and profile == "implementation":
-            rejected.extend(placeholder_reasons[:10])
+            repairable_placeholder_reasons, rejected_placeholder_reasons = (
+                cls._split_content_issue_severity(placeholder_reasons)
+            )
+            repairable.extend(repairable_placeholder_reasons[:10])
+            rejected.extend(rejected_placeholder_reasons[:10])
             details["placeholder_reasons"] = placeholder_reasons[:20]
 
         if profile == "implementation" and not candidate_files:
-            if relaxed_mode and nested_matches:
-                warnings.append(
+            if nested_matches:
+                target = warnings if relaxed_mode else repairable
+                target.append(
                     "No core implementation files were found at the workspace root, but nested generated files were detected"
                 )
             else:

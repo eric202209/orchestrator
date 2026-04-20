@@ -78,6 +78,121 @@ class CheckpointService:
             Path(dir_path).mkdir(parents=True, exist_ok=True)
         return str(dir_path)
 
+    def _checkpoint_progress_score(self, data: Dict[str, Any]) -> int:
+        orchestration_state = data.get("orchestration_state", {}) or {}
+        step_results = data.get("step_results", []) or []
+        execution_results = orchestration_state.get("execution_results", []) or []
+        plan = orchestration_state.get("plan", []) or []
+        current_step_index = (
+            orchestration_state.get("current_step_index")
+            or data.get("current_step_index")
+            or 0
+        )
+        completed_steps = max(len(step_results), len(execution_results))
+        return (completed_steps * 1000) + (int(current_step_index) * 10) + len(plan)
+
+    def _checkpoint_name_priority(self, checkpoint_name: str) -> int:
+        lowered = str(checkpoint_name or "").lower()
+        if lowered == "autosave_latest":
+            return 50
+        if lowered == "autosave_error":
+            return 20
+        if lowered.startswith("paused_") or lowered.startswith("stopped_"):
+            return 10
+        return 0
+
+    def _collect_checkpoint_entries(self, session_id: int) -> List[Dict[str, Any]]:
+        entries: List[Dict[str, Any]] = []
+        seen_names: set[str] = set()
+
+        def append_entry(filepath: str, fallback_name: str) -> None:
+            try:
+                with open(filepath, "r") as f:
+                    data = json.load(f)
+                checkpoint_name = data.get("checkpoint_name", fallback_name)
+                if checkpoint_name in seen_names:
+                    return
+                created_at = datetime.fromisoformat(
+                    data.get("created_at", "1970-01-01")
+                )
+                entries.append(
+                    {
+                        "name": checkpoint_name,
+                        "created_at": created_at,
+                        "path": filepath,
+                        "data": data,
+                        "progress_score": self._checkpoint_progress_score(data),
+                        "name_priority": self._checkpoint_name_priority(
+                            checkpoint_name
+                        ),
+                    }
+                )
+                seen_names.add(checkpoint_name)
+            except Exception:
+                return
+
+        session_dir = self._get_session_checkpoint_dir(session_id, create=False)
+        if os.path.exists(session_dir):
+            for filename in os.listdir(session_dir):
+                if filename.endswith(".json"):
+                    append_entry(
+                        os.path.join(session_dir, filename),
+                        filename.replace(".json", ""),
+                    )
+
+        for checkpoint_root in self._candidate_checkpoint_roots():
+            if not checkpoint_root.exists():
+                continue
+            for filename in os.listdir(checkpoint_root):
+                if filename.endswith(".json") and filename.startswith(
+                    f"session_{session_id}_"
+                ):
+                    append_entry(
+                        os.path.join(checkpoint_root, filename),
+                        filename.replace(".json", ""),
+                    )
+
+        entries.sort(
+            key=lambda item: (
+                item["progress_score"],
+                item["name_priority"],
+                item["created_at"],
+            ),
+            reverse=True,
+        )
+        return entries
+
+    def resolve_resume_checkpoint_name(
+        self, session_id: int, requested_checkpoint_name: Optional[str] = None
+    ) -> Optional[str]:
+        entries = self._collect_checkpoint_entries(session_id)
+        if not entries:
+            return None
+
+        best_entry = entries[0]
+        if not requested_checkpoint_name:
+            return best_entry["name"]
+
+        requested_entry = next(
+            (entry for entry in entries if entry["name"] == requested_checkpoint_name),
+            None,
+        )
+        if requested_entry is None:
+            return best_entry["name"]
+
+        requested_score = requested_entry["progress_score"]
+        best_score = best_entry["progress_score"]
+        if requested_entry["name"] == best_entry["name"]:
+            return requested_entry["name"]
+
+        if requested_score <= 0 and best_score > requested_score:
+            return best_entry["name"]
+
+        if best_score - requested_score >= 1000:
+            return best_entry["name"]
+
+        return requested_entry["name"]
+
     def _remove_tree(self, path: Path) -> tuple[int, int]:
         """Remove a directory tree or a single file. Returns (files, dirs) removed."""
         deleted_files = 0
@@ -238,6 +353,19 @@ class CheckpointService:
             self._log_checkpoint(session_id, "ERROR", error_msg)
             raise CheckpointError(error_msg)
 
+    def load_resume_checkpoint(
+        self, session_id: int, checkpoint_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        resolved_name = self.resolve_resume_checkpoint_name(
+            session_id, requested_checkpoint_name=checkpoint_name
+        )
+        if not resolved_name:
+            raise CheckpointError(f"No checkpoints found for session {session_id}")
+        checkpoint_data = self.load_checkpoint(session_id, resolved_name)
+        checkpoint_data["_resolved_checkpoint_name"] = resolved_name
+        checkpoint_data["_requested_checkpoint_name"] = checkpoint_name
+        return checkpoint_data
+
     def list_checkpoints(self, session_id: int) -> List[Dict[str, Any]]:
         """
         List all checkpoints for a session
@@ -249,52 +377,21 @@ class CheckpointService:
             List of checkpoint metadata (oldest first)
         """
         try:
+            entries = self._collect_checkpoint_entries(session_id)
+            recommended_name = self.resolve_resume_checkpoint_name(session_id)
             checkpoints = []
-            seen_names = set()
-
-            def append_checkpoint(filepath: str, fallback_name: str) -> None:
-                try:
-                    with open(filepath, "r") as f:
-                        data = json.load(f)
-
-                    checkpoint_name = data.get("checkpoint_name", fallback_name)
-                    if checkpoint_name in seen_names:
-                        return
-
-                    checkpoints.append(
-                        {
-                            "name": checkpoint_name,
-                            "created_at": data.get("created_at"),
-                            "step_index": data.get("current_step_index"),
-                            "completed_steps": len(data.get("step_results", [])),
-                        }
-                    )
-                    seen_names.add(checkpoint_name)
-                except Exception:
-                    return
-
-            # New format: checkpoints/session_{id}/*.json
-            session_dir = self._get_session_checkpoint_dir(session_id, create=False)
-            if os.path.exists(session_dir):
-                for filename in os.listdir(session_dir):
-                    if filename.endswith(".json"):
-                        append_checkpoint(
-                            os.path.join(session_dir, filename),
-                            filename.replace(".json", ""),
-                        )
-
-            # Flat format used by current save_checkpoint implementation and legacy roots.
-            for checkpoint_root in self._candidate_checkpoint_roots():
-                if not checkpoint_root.exists():
-                    continue
-                for filename in os.listdir(checkpoint_root):
-                    if filename.endswith(".json") and filename.startswith(
-                        f"session_{session_id}_"
-                    ):
-                        append_checkpoint(
-                            os.path.join(checkpoint_root, filename),
-                            filename.replace(".json", ""),
-                        )
+            for entry in entries:
+                data = entry["data"]
+                checkpoints.append(
+                    {
+                        "name": entry["name"],
+                        "created_at": data.get("created_at"),
+                        "step_index": data.get("current_step_index"),
+                        "completed_steps": len(data.get("step_results", [])),
+                        "progress_score": entry["progress_score"],
+                        "recommended": entry["name"] == recommended_name,
+                    }
+                )
 
             # Sort by creation time (oldest first)
             checkpoints.sort(key=lambda x: x.get("created_at", ""))
@@ -520,70 +617,17 @@ class CheckpointService:
             }
 
     def _find_latest_checkpoint(self, session_id: int) -> Optional[str]:
-        """Find the most recent checkpoint name for a session
+        """Find the best checkpoint name for a session
 
         Searches both the legacy flat format (root directory) and new subdirectory format.
-        Returns the checkpoint_name from the most recently created checkpoint file.
+        Prefers the most complete usable checkpoint, then falls back to the most recent.
         """
         try:
-            all_checkpoints = []
-
-            # Search in subdirectory (new format): checkpoints/session_{id}/*.json
-            session_dir = self._get_session_checkpoint_dir(session_id, create=False)
-            if os.path.exists(session_dir):
-                for filename in os.listdir(session_dir):
-                    if filename.endswith(".json"):
-                        filepath = os.path.join(session_dir, filename)
-
-                        try:
-                            with open(filepath, "r") as f:
-                                data = json.load(f)
-
-                            created_at = datetime.fromisoformat(
-                                data.get("created_at", "1970-01-01")
-                            )
-                            checkpoint_name = data.get(
-                                "checkpoint_name", filename.replace(".json", "")
-                            )
-                            all_checkpoints.append(
-                                (checkpoint_name, created_at, filepath)
-                            )
-                        except Exception:
-                            continue
-
-            # Search in root directory (legacy format): checkpoints/session_{id}_{name}.json
-            for checkpoint_root in self._candidate_checkpoint_roots():
-                if not checkpoint_root.exists():
-                    continue
-                for filename in os.listdir(checkpoint_root):
-                    if filename.endswith(".json") and filename.startswith(
-                        f"session_{session_id}_"
-                    ):
-                        filepath = os.path.join(checkpoint_root, filename)
-
-                        try:
-                            with open(filepath, "r") as f:
-                                data = json.load(f)
-
-                            created_at = datetime.fromisoformat(
-                                data.get("created_at", "1970-01-01")
-                            )
-                            checkpoint_name = data.get(
-                                "checkpoint_name", filename.replace(".json", "")
-                            )
-                            all_checkpoints.append(
-                                (checkpoint_name, created_at, filepath)
-                            )
-                        except Exception:
-                            continue
-
+            all_checkpoints = self._collect_checkpoint_entries(session_id)
             if not all_checkpoints:
                 return None
 
-            # Sort by creation time (most recent first)
-            all_checkpoints.sort(key=lambda x: x[1], reverse=True)
-
-            return all_checkpoints[0][0]
+            return all_checkpoints[0]["name"]
 
         except Exception as e:
             print(f"Failed to find latest checkpoint: {e}")

@@ -3,6 +3,9 @@
 import asyncio
 import json
 import logging
+import os
+import re
+from pathlib import Path
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional
 
@@ -27,6 +30,185 @@ from app.services.orchestration.validator import ValidatorService
 from app.services.prompt_templates import OrchestrationStatus, StepResult
 
 
+RELATIVE_PATH_TOKEN_RE = re.compile(
+    r"(?<![\w./-])("
+    r"(?:src|tests|fixtures|scripts|config)/[A-Za-z0-9_./-]+"
+    r"|(?:package\.json|tsconfig\.json|vitest\.config\.ts|jest\.config\.js|README\.md|\.env\.example)"
+    r")(?![\w./-])"
+)
+
+
+def _collect_workspace_inventory_paths(
+    project_dir: Path,
+    max_files: int = 200,
+) -> list[str]:
+    existing_files: list[str] = []
+    if not project_dir.exists():
+        return existing_files
+    for path in sorted(project_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(project_dir)
+        if any(
+            part in {"node_modules", ".openclaw", "__pycache__"}
+            for part in relative.parts
+        ):
+            continue
+        existing_files.append(str(relative))
+        if len(existing_files) >= max_files:
+            break
+    return existing_files
+
+
+def _build_completion_repair_workspace_summary(
+    *,
+    project_dir: Path,
+    completion_validation: Any,
+    max_files: int = 80,
+) -> str:
+    expected_files = (
+        list((completion_validation.details or {}).get("expected_core_files", []) or [])
+        if completion_validation
+        else []
+    )
+    existing_files = [
+        path
+        for path in _collect_workspace_inventory_paths(
+            project_dir, max_files=max_files * 2
+        )
+        if Path(path).suffix.lower() in {".ts", ".tsx", ".js", ".jsx", ".json", ".sh"}
+    ][:max_files]
+
+    similar_map: dict[str, list[str]] = {}
+    lowered_existing = [(item, item.lower()) for item in existing_files]
+    for expected in expected_files[:20]:
+        expected_name = Path(expected).stem.lower().replace("-", "_")
+        expected_parent = str(Path(expected).parent).lower()
+        matches: list[str] = []
+        for existing, lowered in lowered_existing:
+            existing_name = Path(existing).stem.lower().replace("-", "_")
+            if expected_name == existing_name:
+                matches.append(existing)
+                continue
+            if (
+                expected_parent
+                and expected_parent in lowered
+                and any(
+                    token and token in existing_name
+                    for token in expected_name.split("_")
+                )
+            ):
+                matches.append(existing)
+        if matches:
+            similar_map[expected] = matches[:5]
+
+    lines = [
+        "Current workspace inventory:",
+        *[f"- {path}" for path in existing_files[:max_files]],
+    ]
+    if expected_files:
+        lines.append("Expected core files from the current accepted plan:")
+        lines.extend(f"- {path}" for path in expected_files[:20])
+    if similar_map:
+        lines.append(
+            "Existing files that look structurally similar to missing expected files:"
+        )
+        for expected, matches in similar_map.items():
+            lines.append(f"- {expected} -> {', '.join(matches)}")
+    return "\n".join(lines)
+
+
+def _extract_relative_paths_from_text(raw_text: str) -> set[str]:
+    text = str(raw_text or "")
+    return {match.group(1).strip() for match in RELATIVE_PATH_TOKEN_RE.finditer(text)}
+
+
+def _collect_created_paths_from_commands(
+    commands: list[str],
+) -> tuple[set[str], set[str]]:
+    created_files: set[str] = set()
+    created_dirs: set[str] = set()
+    for command in commands:
+        text = str(command or "").strip()
+        if not text:
+            continue
+        for match in re.finditer(r"(?:cat|tee)\s*>\s*([A-Za-z0-9_./-]+)", text):
+            created_files.add(match.group(1).strip())
+        if text.startswith("touch "):
+            for token in text.split()[1:]:
+                cleaned = token.strip()
+                if cleaned and ("/" in cleaned or "." in cleaned):
+                    created_files.add(cleaned)
+        if text.startswith("mkdir -p "):
+            for token in text.split()[2:]:
+                cleaned = token.strip()
+                if cleaned:
+                    created_dirs.add(cleaned.rstrip("/"))
+        if text.startswith("mv "):
+            parts = text.split()
+            if len(parts) >= 3:
+                created_files.add(parts[-1].strip())
+    return created_files, created_dirs
+
+
+def _completion_repair_invalid_paths(
+    *,
+    repair_step: Dict[str, Any],
+    project_dir: Path,
+    completion_validation: Any,
+) -> list[str]:
+    inventory_files = set(_collect_workspace_inventory_paths(project_dir))
+    expected_files = set(
+        list((completion_validation.details or {}).get("expected_core_files", []) or [])
+    )
+    commands = [str(command) for command in repair_step.get("commands", []) or []]
+    created_files, created_dirs = _collect_created_paths_from_commands(commands)
+    referenced_paths: set[str] = set()
+    for text in commands + [
+        str(repair_step.get("verification") or ""),
+        str(repair_step.get("rollback") or ""),
+    ]:
+        referenced_paths.update(_extract_relative_paths_from_text(text))
+
+    invalid: list[str] = []
+    for path in sorted(referenced_paths):
+        if (
+            path in inventory_files
+            or path in expected_files
+            or path in created_files
+            or any(
+                path == directory or path.startswith(f"{directory}/")
+                for directory in created_dirs
+            )
+        ):
+            continue
+        invalid.append(path)
+    return invalid
+
+
+def _extract_reported_changed_files(output_text: str, project_dir: Path) -> list[str]:
+    reported: list[str] = []
+    text = str(output_text or "")
+    patterns = [
+        r"`([^`]+)`",
+        r"[-*]\s+([A-Za-z0-9_./-]+\.(?:ts|tsx|js|jsx|json|sh))",
+        r"(src/[A-Za-z0-9_./-]+\.(?:ts|tsx|js|jsx))",
+        r"(tests/[A-Za-z0-9_./-]+\.(?:ts|tsx|js|jsx))",
+        r"(vitest\.config\.ts|jest\.config\.js|package\.json|tsconfig\.json|\.env\.example)",
+    ]
+    seen: set[str] = set()
+    for pattern in patterns:
+        for match in re.finditer(pattern, text):
+            candidate = match.group(1).strip()
+            if not candidate or candidate in seen:
+                continue
+            resolved = (project_dir / candidate).resolve()
+            if resolved.exists() and resolved.is_file():
+                seen.add(candidate)
+                reported.append(candidate)
+    return reported
+
+
 def _build_completion_repair_prompt(
     *,
     task_prompt: str,
@@ -35,6 +217,7 @@ def _build_completion_repair_prompt(
     prior_results_summary: str,
     project_context: str,
     next_step_number: int,
+    workspace_inventory: str,
 ) -> str:
     return f"""Return one minimal JSON repair step to fix completion validation issues. Output JSON object only.
 
@@ -53,6 +236,9 @@ Prior completed results:
 Project context:
 {project_context[:2500]}
 
+Current workspace inventory:
+{workspace_inventory[:5000]}
+
 Rules:
 1. Return a single JSON object with keys: step_number, description, commands, verification, rollback, expected_files
 2. Keep the fix atomic and minimal
@@ -63,6 +249,9 @@ Rules:
 7. Prefer fixing misplaced files, missing core files, or weak structure over rewriting the whole project
 8. commands must be a non-empty JSON array
 9. expected_files must list the files this repair should materialize or normalize
+10. Use the workspace inventory above as the source of truth; do not assume older file names or architectures that are not present
+11. Prefer renaming, moving, or normalizing existing files over creating parallel replacements
+12. Do not read or modify a guessed file path unless it appears in the workspace inventory or your commands create it first
 
 Output example:
 {{
@@ -180,6 +369,10 @@ def _attempt_completion_repair(
         prior_results_summary=orchestration_state.prior_results_summary(),
         project_context=orchestration_state.project_context,
         next_step_number=next_step_number,
+        workspace_inventory=_build_completion_repair_workspace_summary(
+            project_dir=Path(orchestration_state.project_dir),
+            completion_validation=completion_validation,
+        ),
     )
     repair_plan_result = asyncio.run(
         ctx.openclaw_service.execute_task(repair_prompt, timeout_seconds=120)
@@ -217,6 +410,73 @@ def _attempt_completion_repair(
 
     if not repair_step.get("commands"):
         return {"status": "failed", "reason": "repair_step_missing_commands"}
+
+    invalid_paths = _completion_repair_invalid_paths(
+        repair_step=repair_step,
+        project_dir=Path(orchestration_state.project_dir),
+        completion_validation=completion_validation,
+    )
+    if invalid_paths:
+        logger.warning(
+            "[ORCHESTRATION] Completion repair step referenced inventory-missing paths: %s",
+            invalid_paths[:10],
+        )
+        emit_live(
+            "WARN",
+            "[ORCHESTRATION] Completion repair step referenced paths that are not present in the current workspace inventory; requesting one guarded retry",
+            metadata={
+                "phase": "completion_repair",
+                "invalid_paths": invalid_paths[:10],
+            },
+        )
+        guarded_retry_prompt = (
+            repair_prompt
+            + "\n\nThe previous repair step was invalid because it referenced these paths that are not present in the workspace inventory or not created by the repair step:\n"
+            + json.dumps(invalid_paths[:20], indent=2)
+            + "\nReturn a replacement repair step that uses only inventory-confirmed paths or creates the referenced files first."
+        )
+        guarded_retry_result = asyncio.run(
+            ctx.openclaw_service.execute_task(guarded_retry_prompt, timeout_seconds=120)
+        )
+        guarded_retry_output = extract_structured_text(
+            guarded_retry_result.get("output", "{}")
+        )
+        retry_success, retry_data, retry_strategy_info = (
+            error_handler.attempt_json_parsing(
+                guarded_retry_output, context="completion_repair"
+            )
+        )
+        if not retry_success:
+            fallback_output = extract_structured_text(guarded_retry_result)
+            if fallback_output and fallback_output != guarded_retry_output:
+                retry_success, retry_data, retry_strategy_info = (
+                    error_handler.attempt_json_parsing(
+                        fallback_output, context="completion_repair"
+                    )
+                )
+        if not retry_success:
+            return {
+                "status": "failed",
+                "reason": f"repair_step_inventory_guard_parse_failed:{retry_strategy_info}",
+            }
+        repair_step = _extract_completion_repair_step(retry_data, next_step_number)
+        if not repair_step or not repair_step.get("commands"):
+            return {
+                "status": "failed",
+                "reason": "repair_step_inventory_guard_missing_commands",
+            }
+        invalid_paths = _completion_repair_invalid_paths(
+            repair_step=repair_step,
+            project_dir=Path(orchestration_state.project_dir),
+            completion_validation=completion_validation,
+        )
+        if invalid_paths:
+            return {
+                "status": "failed",
+                "reason": "repair_step_inventory_guard_rejected:"
+                + ", ".join(invalid_paths[:10]),
+            }
+        strategy_info = retry_strategy_info
 
     orchestration_state.plan.append(repair_step)
     task.steps = json.dumps(orchestration_state.plan)
@@ -268,6 +528,27 @@ def _attempt_completion_repair(
         expected_files=repair_step.get("expected_files", []),
         extract_structured_text=extract_structured_text,
     )
+    reported_changed_files = _extract_reported_changed_files(
+        str(repair_exec_result.get("output", "")),
+        Path(orchestration_state.project_dir),
+    )
+    if reported_changed_files:
+        repair_exec_result["files_changed"] = reported_changed_files
+        adjusted_expected_files = [
+            path
+            for path in reported_changed_files
+            if path.startswith(("src/", "tests/"))
+            or path
+            in {
+                "vitest.config.ts",
+                "jest.config.js",
+                "package.json",
+                "tsconfig.json",
+                ".env.example",
+            }
+        ]
+        if adjusted_expected_files:
+            repair_step["expected_files"] = adjusted_expected_files
     assessment = assess_step_execution(
         db=db,
         session_id=ctx.session_id,
@@ -448,6 +729,9 @@ def finalize_successful_task(
             completion_error = "Completion repair failed: " + str(
                 repair_result.get("reason") or "unknown reason"
             )
+            completion_failure_reason = str(
+                repair_result.get("reason") or "unknown reason"
+            )
             orchestration_state.status = OrchestrationStatus.ABORTED
             orchestration_state.abort_reason = completion_error
             task.status = TaskStatus.FAILED
@@ -465,10 +749,10 @@ def finalize_successful_task(
             db.commit()
             emit_live(
                 "ERROR",
-                "[ORCHESTRATION] Completion repair failed",
+                f"[ORCHESTRATION] Completion repair failed: {completion_failure_reason}",
                 metadata={
                     "phase": "completion_repair",
-                    "reason": repair_result.get("reason"),
+                    "reason": completion_failure_reason,
                 },
             )
             save_orchestration_checkpoint_fn(

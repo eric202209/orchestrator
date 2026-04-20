@@ -46,6 +46,14 @@ def handle_task_failure(
 
     should_retry = error_handler.should_retry(exc, "task_execution")
     is_timeout = "time limit" in str(exc).lower() or "timeout" in str(exc).lower()
+    non_restoring_failure_markers = (
+        "completion validation failed",
+        "baseline publish validation failed",
+        "completion repair failed",
+    )
+    should_restore_workspace = not any(
+        marker in str(exc).lower() for marker in non_restoring_failure_markers
+    )
 
     if task:
         task.status = TaskStatus.FAILED
@@ -120,13 +128,24 @@ def handle_task_failure(
         )
 
     try:
-        if project and orchestration_state and restore_workspace_snapshot_if_needed:
+        if (
+            project
+            and orchestration_state
+            and restore_workspace_snapshot_if_needed
+            and should_restore_workspace
+        ):
             restore_workspace_snapshot_if_needed("task exception")
     except Exception as restore_error:
         logger.error(
             "[ORCHESTRATION] Failed to restore pre-run workspace snapshot for task %s: %s",
             task_id,
             str(restore_error),
+        )
+
+    if not should_restore_workspace:
+        logger.warning(
+            "[ORCHESTRATION] Skipped workspace restore for task %s because the failure was a completion/baseline validation issue",
+            task_id,
         )
 
     db.commit()

@@ -191,9 +191,13 @@ def list_session_checkpoints_payload(db: Session, session_id: int) -> Dict[str, 
     _get_session_or_404(db, session_id)
     checkpoint_service = CheckpointService(db)
     checkpoints = checkpoint_service.list_checkpoints(session_id)
+    recommended_checkpoint_name = checkpoint_service.resolve_resume_checkpoint_name(
+        session_id
+    )
     return {
         "session_id": session_id,
         "total_count": len(checkpoints),
+        "recommended_checkpoint_name": recommended_checkpoint_name,
         "checkpoints": checkpoints,
     }
 
