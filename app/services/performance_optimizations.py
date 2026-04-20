@@ -48,18 +48,28 @@ class PerformanceTracker:
 perf_tracker = PerformanceTracker()
 
 
-def optimize_prompt(prompt: str, max_tokens: int = 30000) -> str:
-    """Optimize prompt by removing unnecessary whitespace and shortening"""
+def optimize_prompt(
+    prompt: str,
+    max_tokens: int = 30000,
+    *,
+    hard_char_limit: int | None = None,
+) -> str:
+    """Optimize prompt by removing unnecessary whitespace and shortening."""
     # Remove excessive whitespace
     optimized = " ".join(prompt.split())
 
+    target_chars = max_tokens * 3
+    if hard_char_limit is not None:
+        target_chars = min(target_chars, hard_char_limit)
+
     # Truncate if too long (keep beginning and end)
-    if len(optimized) > max_tokens * 3:  # ~3 chars per token
-        half = max_tokens * 3 // 2
+    if len(optimized) > target_chars:
+        head = max(400, int(target_chars * 0.6))
+        tail = max(250, target_chars - head - 36)
         optimized = (
-            optimized[:half]
+            optimized[:head]
             + "\n\n[Content truncated for performance]\n\n"
-            + optimized[-half:]
+            + optimized[-tail:]
         )
 
     return optimized

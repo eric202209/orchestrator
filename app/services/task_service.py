@@ -469,9 +469,16 @@ class TaskService:
             )
             lines.extend(blocked[:6])
 
-        lines.append(
-            "Important: treat hydrated files in the current task workspace as existing project baseline; extend them instead of recreating parallel copies."
-        )
+        if current_task and getattr(current_task, "plan_position", None) is not None:
+            lines.append(
+                "Important: execute directly in the canonical project root. Treat the "
+                "current project folder as the source of truth and do not create a "
+                "parallel top-level task workspace."
+            )
+        else:
+            lines.append(
+                "Important: treat hydrated files in the current task workspace as existing project baseline; extend them instead of recreating parallel copies."
+            )
 
         context = "\n".join(lines)
         return context[:max_chars]
@@ -561,13 +568,23 @@ class TaskService:
 
         consistency = self.analyze_workspace_consistency(target_dir)
 
+        workspace_label = (
+            "canonical project root"
+            if current_task and getattr(current_task, "plan_position", None) is not None
+            else "task workspace"
+        )
         lines = [
             "Existing workspace review:",
-            f"- task workspace: {target_dir}",
+            f"- {workspace_label}: {target_dir}",
             f"- file count: {len(files)}",
             f"- source file count: {source_count}",
         ]
-        if current_task and getattr(current_task, "task_subfolder", None) and project:
+        if (
+            current_task
+            and getattr(current_task, "plan_position", None) is None
+            and getattr(current_task, "task_subfolder", None)
+            and project
+        ):
             lines.append(
                 "- note: the project root is the canonical merged baseline and "
                 f"`{current_task.task_subfolder}` is the isolated task workspace; overlapping files are expected after publish"

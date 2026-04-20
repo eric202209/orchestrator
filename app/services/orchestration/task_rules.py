@@ -30,6 +30,25 @@ def is_verification_style_task(
     )
 
 
+def should_execute_in_canonical_project_root(
+    task: Optional[Task],
+    execution_profile: Optional[str],
+    title: Optional[str],
+    description: Optional[str],
+) -> bool:
+    if not task:
+        return False
+
+    if getattr(task, "plan_position", None) is not None:
+        return True
+
+    return is_verification_style_task(
+        execution_profile or "",
+        title or getattr(task, "title", None),
+        description or getattr(task, "description", None),
+    )
+
+
 def should_force_review_execution_profile(
     execution_profile: str,
     task_prompt: str,
@@ -53,7 +72,11 @@ def should_force_review_execution_profile(
 
 
 def get_task_report_path(project_root: Path, task: Task) -> Optional[Path]:
-    if not task or not getattr(task, "task_subfolder", None):
+    if not task:
+        return None
+    if getattr(task, "plan_position", None) is not None:
+        return project_root / f"task_report_{task.id}.md"
+    if not getattr(task, "task_subfolder", None):
         return None
     return project_root / task.task_subfolder / f"task_report_{task.id}.md"
 

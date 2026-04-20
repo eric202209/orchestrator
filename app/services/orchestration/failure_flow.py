@@ -28,6 +28,7 @@ def handle_task_failure(
         ..., None
     ] = save_orchestration_checkpoint,
     record_live_log_fn: Callable[..., None] = record_live_log,
+    queue_task_for_session_fn: Optional[Callable[..., Any]] = None,
 ) -> None:
     db = ctx.db if ctx else None
     session = ctx.session if ctx else None
@@ -45,6 +46,9 @@ def handle_task_failure(
     error_handler = ctx.error_handler if ctx else None
 
     should_retry = error_handler.should_retry(exc, "task_execution")
+    retry_count = int(getattr(getattr(self_task, "request", None), "retries", 0) or 0)
+    max_retries = int(getattr(self_task, "max_retries", 0) or 0)
+    has_retry_capacity = should_retry and retry_count < max_retries
     is_timeout = "time limit" in str(exc).lower() or "timeout" in str(exc).lower()
     non_restoring_failure_markers = (
         "completion validation failed",
@@ -53,6 +57,15 @@ def handle_task_failure(
     )
     should_restore_workspace = not any(
         marker in str(exc).lower() for marker in non_restoring_failure_markers
+    )
+
+    auto_recovery_eligible = bool(
+        session
+        and task
+        and session.execution_mode == "automatic"
+        and getattr(task, "plan_position", None) is not None
+        and not is_timeout
+        and getattr(task, "workspace_status", None) != "changes_requested"
     )
 
     if task:
@@ -127,6 +140,88 @@ def handle_task_failure(
             str(checkpoint_error),
         )
 
+    if has_retry_capacity and session and task:
+        task.status = TaskStatus.RUNNING
+        task.completed_at = None
+        task.workspace_status = "in_progress" if task.task_subfolder else "not_created"
+        if session_task_link:
+            session_task_link.status = TaskStatus.RUNNING
+            session_task_link.completed_at = None
+        session.status = "running"
+        session.is_active = True
+        set_session_alert(
+            session,
+            "warning",
+            (
+                f"Retrying task {task_id} automatically after failure "
+                f"({retry_count + 1}/{max_retries + 1})"
+            )[:2000],
+        )
+        db.commit()
+        raise self_task.retry(exc=exc)
+
+    if auto_recovery_eligible and queue_task_for_session_fn and session and task:
+        recovery_message = (
+            "Automatic recovery queued for failed ordered task. "
+            "The next run will inspect the real workspace first and fix the underlying issue."
+        )
+        task.status = TaskStatus.PENDING
+        task.started_at = None
+        task.completed_at = None
+        task.current_step = 0
+        task.steps = None
+        task.workspace_status = "changes_requested"
+        task.error_message = (
+            f"{str(exc)}\n\n"
+            "Automatic recovery requested: inspect the real workspace and repair the bug "
+            "instead of repeating the previous assumptions."
+        )[:4000]
+        if session_task_link:
+            session_task_link.status = TaskStatus.PENDING
+            session_task_link.started_at = None
+            session_task_link.completed_at = None
+        session.status = "running"
+        session.is_active = True
+        set_session_alert(session, "warning", recovery_message[:2000])
+        db.commit()
+        try:
+            queue_task_for_session_fn(db=db, session=session, task_id=task.id)
+            record_live_log_fn(
+                db,
+                session_id,
+                task_id,
+                "WARN",
+                "[ORCHESTRATION] Ordered task failed; queued one automatic recovery rerun with repair context",
+                session_instance_id=session.instance_id if session else None,
+                metadata={
+                    "phase": "failure",
+                    "automatic_recovery": True,
+                    "retry_count": retry_count,
+                },
+            )
+            db.commit()
+            write_project_state_snapshot_fn(db, project, task, session_id)
+            return
+        except Exception as recovery_queue_error:
+            logger.error(
+                "[ORCHESTRATION] Failed to queue automatic recovery for task %s: %s",
+                task_id,
+                recovery_queue_error,
+            )
+            task.status = TaskStatus.FAILED
+            task.workspace_status = "blocked" if task.task_subfolder else "not_created"
+            session.status = "paused"
+            session.is_active = False
+            set_session_alert(
+                session,
+                "error",
+                (
+                    f"{alert_message}. Automatic recovery could not be queued: "
+                    f"{str(recovery_queue_error)}"
+                )[:2000],
+            )
+            db.commit()
+
     try:
         if (
             project
@@ -179,4 +274,4 @@ def handle_task_failure(
     if is_timeout:
         raise exc
 
-    raise self_task.retry(exc=exc)
+    raise exc

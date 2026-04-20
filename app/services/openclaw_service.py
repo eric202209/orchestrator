@@ -38,6 +38,9 @@ from app.services.project_isolation_service import (
     ProjectIsolationService,
     resolve_project_workspace_path,
 )
+from app.services.orchestration.task_rules import (
+    should_execute_in_canonical_project_root,
+)
 from app.services.permission_service import PermissionApprovalService
 from app.services.task_service import TaskService
 from app.services.performance_optimizations import (
@@ -158,6 +161,14 @@ class OpenClawSessionService:
                 project_model.workspace_path, project_model.name
             )
 
+            if self.task_model and should_execute_in_canonical_project_root(
+                self.task_model,
+                getattr(self.task_model, "execution_profile", None),
+                getattr(self.task_model, "title", None),
+                getattr(self.task_model, "description", None),
+            ):
+                return str(project_workspace.resolve())
+
             if self.task_model and self.task_model.task_subfolder:
                 return str(
                     (project_workspace / self.task_model.task_subfolder).resolve()
@@ -248,6 +259,20 @@ class OpenClawSessionService:
                 result = await self.execute_task_with_streaming(
                     optimized_prompt, timeout_seconds, log_callback
                 )
+                if result.get("error") == "Context window exceeded":
+                    retry_prompt = optimize_prompt(
+                        prompt,
+                        max_tokens=1200,
+                        hard_char_limit=2800,
+                    )
+                    if retry_prompt != optimized_prompt:
+                        self._log_entry(
+                            "WARN",
+                            "[OPENCLAW] Context overflow detected; retrying once with a compact prompt",
+                        )
+                        result = await self.execute_task_with_streaming(
+                            retry_prompt, timeout_seconds, log_callback
+                        )
 
             # OPTIMIZATION: Log performance metrics
             duration = time.time() - start_time
@@ -490,18 +515,40 @@ class OpenClawSessionService:
                     )
                 )
 
+            runs_in_canonical_baseline = bool(
+                project_model
+                and self.task_model
+                and should_execute_in_canonical_project_root(
+                    self.task_model,
+                    getattr(self.task_model, "execution_profile", None),
+                    getattr(self.task_model, "title", None),
+                    getattr(self.task_model, "description", None),
+                )
+            )
+
             if self.task_model and self.task_model.task_subfolder:
                 orchestration_state._task_subfolder_override = (
                     self.task_model.task_subfolder
                 )
 
+            if runs_in_canonical_baseline and project_model:
+                canonical_baseline_dir = task_service.get_project_baseline_dir(
+                    project_model
+                )
+                canonical_baseline_dir.mkdir(parents=True, exist_ok=True)
+                orchestration_state._project_dir_override = str(canonical_baseline_dir)
+
             os.makedirs(orchestration_state.project_dir, exist_ok=True)
 
             if project_model and self.task_model:
-                hydration_result = task_service.hydrate_task_workspace(
-                    project=project_model,
-                    current_task=self.task_model,
-                    target_dir=orchestration_state.project_dir,
+                hydration_result = (
+                    task_service.hydrate_task_workspace(
+                        project=project_model,
+                        current_task=self.task_model,
+                        target_dir=orchestration_state.project_dir,
+                    )
+                    if not runs_in_canonical_baseline
+                    else {"hydrated": False, "source_tasks": [], "files_copied": 0}
                 )
                 project_context = task_service.build_project_execution_context(
                     project=project_model,

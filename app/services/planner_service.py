@@ -304,7 +304,17 @@ class PlannerService:
             return "debug_only"
         if any(
             word in combined
-            for word in ["review", "audit", "inspect changes", "code review"]
+            for word in [
+                "review",
+                "audit",
+                "inspect",
+                "analysis",
+                "analyze",
+                "architecture",
+                "inventory",
+                "inspect changes",
+                "code review",
+            ]
         ):
             return "review_only"
         if any(
@@ -371,7 +381,7 @@ class PlannerService:
         tasks = [
             (
                 "Inspect current project architecture",
-                "Review the existing code paths, data flow, and extension points relevant to the requirement.",
+                "Enumerate the real workspace files first, then inspect the existing code paths, tests, fixtures, configs, data flow, and extension points relevant to the requirement. Treat the current project files as the source of truth and capture any gaps or bugs that must be fixed before implementation.",
             ),
             (
                 "Implement the core changes",

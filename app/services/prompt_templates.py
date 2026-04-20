@@ -434,7 +434,9 @@ class PromptTemplates:
   "fix_type": "code_fix" | "command_fix" | "revise_plan",
   "analysis": "...",
   "fix": "...",
-  "confidence": "HIGH" | "MEDIUM" | "LOW"
+  "confidence": "HIGH" | "MEDIUM" | "LOW",
+  "expected_files": ["optional", "replacement", "list"],
+  "verification": "optional replacement verification command"
 }}
 """
 
@@ -888,19 +890,19 @@ Examples:
         Returns:
             Execution prompt string ready for LLM call.
         """
-        step_description_text = (step_description or "")[:500]
+        step_description_text = (step_description or "")[:360]
         command_lines = [
-            f"- {str(cmd or '')[:400]}" for cmd in (step_commands or [])[:12]
+            f"- {str(cmd or '')[:220]}" for cmd in (step_commands or [])[:8]
         ]
-        verification_text = str(verification_command or "None provided")[:300]
-        rollback_text = str(rollback_command or "None provided")[:300]
+        verification_text = str(verification_command or "None provided")[:180]
+        rollback_text = str(rollback_command or "None provided")[:180]
         expected_file_lines = [
-            f"- {str(f or '')[:200]}" for f in (expected_files or [])[:20]
+            f"- {str(f or '')[:120]}" for f in (expected_files or [])[:12]
         ]
         completed_summary_text = (completed_steps_summary or "No steps completed yet.")[
-            :1400
+            :900
         ]
-        project_context_text = (project_context or "No additional context.")[:1800]
+        project_context_text = (project_context or "No additional context.")[:1100]
 
         context = {
             "step_description": step_description_text,
@@ -953,19 +955,19 @@ Examples:
         ws_root = workspace_root or str(get_effective_workspace_root())
         prior_attempts_text = (
             "\n".join(
-                f"Attempt {a['attempt']}: {str(a['error'])[:240]}"
-                for a in (prior_debug_attempts or [])[-3:]
+                f"Attempt {a['attempt']}: {str(a['error'])[:180]}"
+                for a in (prior_debug_attempts or [])[-2:]
             )
             or "No prior attempts."
         )
 
         # Pre-process values that need slicing or conditional logic
-        truncated_output = command_output[:1200] if command_output else "No output"
+        truncated_output = command_output[:700] if command_output else "No output"
         truncated_verification = (
-            verification_output[:160] if verification_output else "None"
+            verification_output[:120] if verification_output else "None"
         )
-        truncated_error = (error_message or "")[:500]
-        truncated_description = (step_description or "")[:400]
+        truncated_error = (error_message or "")[:260]
+        truncated_description = (step_description or "")[:240]
 
         context = {
             "step_description": truncated_description,

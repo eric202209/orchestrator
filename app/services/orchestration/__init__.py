@@ -72,6 +72,7 @@ from .task_rules import (
     get_task_report_path,
     is_verification_style_task,
     run_virtual_merge_gate,
+    should_execute_in_canonical_project_root,
     should_force_review_execution_profile,
 )
 from .telemetry import emit_phase_event, record_phase_event
@@ -136,6 +137,7 @@ __all__ = [
     "get_task_report_path",
     "is_verification_style_task",
     "run_virtual_merge_gate",
+    "should_execute_in_canonical_project_root",
     "should_force_review_execution_profile",
     "record_phase_event",
     "emit_phase_event",

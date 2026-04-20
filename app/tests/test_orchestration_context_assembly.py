@@ -108,10 +108,10 @@ def test_assembled_prompts_trim_dense_context_but_keep_workspace_inventory(tmp_p
 
     assert "Current workspace inventory:" in planning_prompt
     assert "src/main.ts" in planning_prompt
-    assert len(planning_prompt) < 6000
+    assert len(planning_prompt) < 5200
     assert "Current workspace inventory:" in execution_prompt
     assert "tests/main.test.ts" in execution_prompt
-    assert len(execution_prompt) < 5000
+    assert len(execution_prompt) < 4200
 
 
 def test_completion_repair_inputs_are_summary_only_and_workspace_driven(tmp_path):

@@ -37,12 +37,12 @@ from app.services.orchestration import (
     extract_plan_steps as _extract_plan_steps,
     extract_structured_text as _extract_structured_text,
     handle_task_failure,
-    is_verification_style_task as _is_verification_style_task,
     looks_like_truncated_multistep_plan as _looks_like_truncated_multistep_plan,
     normalize_plan_with_live_logging as _normalize_plan_with_live_logging,
     normalize_step as _normalize_step,
     render_task_report as _render_task_report,
     run_virtual_merge_gate as _run_virtual_merge_gate,
+    should_execute_in_canonical_project_root as _should_execute_in_canonical_project_root,
     should_restore_workspace_on_failure,
     should_force_review_execution_profile as _should_force_review_execution_profile,
 )
@@ -67,6 +67,9 @@ from app.services.task_service import TaskService
 from app.services.prompt_templates import (
     OrchestrationStatus,
     OrchestrationState,
+)
+from app.services.session_runtime_service import (
+    queue_task_for_session as _queue_task_for_session,
 )
 
 logger = logging.getLogger(__name__)
@@ -182,6 +185,16 @@ def execute_openclaw_task(
             if session.project_id
             else None
         )
+        runs_in_canonical_baseline = bool(
+            project
+            and task
+            and _should_execute_in_canonical_project_root(
+                task,
+                execution_profile,
+                task.title if task else None,
+                task.description if task else None,
+            )
+        )
 
         # Initialize orchestration state with new workspace architecture
         # Structure: workspace_root / project_workspace / task_subfolder
@@ -202,7 +215,8 @@ def execute_openclaw_task(
 
             orchestration_state._workspace_path_override = workspace_path
 
-            # Also set task subfolder if not already in database
+            # Keep a stable task subfolder identifier for metadata/reporting, even
+            # when execution itself happens in the canonical project root.
             if task.task_subfolder:
                 orchestration_state._task_subfolder_override = task.task_subfolder
             else:
@@ -244,45 +258,38 @@ def execute_openclaw_task(
 
         is_resume_execution = bool(resume_checkpoint_name)
         task_service = TaskService(db)
-        runs_in_canonical_baseline = bool(
-            project
-            and task
-            and _is_verification_style_task(
-                execution_profile, task.title, task.description
-            )
-        )
         if runs_in_canonical_baseline and project and not is_resume_execution:
-            consolidation_result = task_service.rebuild_project_baseline(project)
             canonical_baseline_dir = task_service.get_project_baseline_dir(project)
             canonical_baseline_dir.mkdir(parents=True, exist_ok=True)
             orchestration_state._project_dir_override = str(canonical_baseline_dir)
             logger.info(
-                "[ORCHESTRATION] Using canonical project baseline for task %s at %s",
+                "[ORCHESTRATION] Using canonical project root for task %s at %s",
                 task_id,
                 canonical_baseline_dir,
             )
             emit_live(
                 "INFO",
                 (
-                    "[ORCHESTRATION] Consolidated completed work into canonical "
-                    f"project baseline ({consolidation_result.get('files_copied', 0)} files) "
-                    f"and will execute in {canonical_baseline_dir}"
+                    "[ORCHESTRATION] Using the canonical project root as the live "
+                    f"workspace and will execute in {canonical_baseline_dir}"
                 ),
                 metadata={
-                    "phase": "consolidation",
-                    "baseline_path": str(canonical_baseline_dir),
-                    "files_copied": consolidation_result.get("files_copied", 0),
-                    "merged_task_count": consolidation_result.get(
-                        "merged_task_count", 0
-                    ),
+                    "phase": "canonical_workspace",
+                    "workspace_path": str(canonical_baseline_dir),
+                    "workspace_mutation_skipped": True,
+                    "reason": "project_root_is_source_of_truth",
                 },
             )
         elif runs_in_canonical_baseline and project and is_resume_execution:
+            canonical_baseline_dir = task_service.get_project_baseline_dir(project)
+            canonical_baseline_dir.mkdir(parents=True, exist_ok=True)
+            orchestration_state._project_dir_override = str(canonical_baseline_dir)
             emit_live(
                 "INFO",
-                "[ORCHESTRATION] Resume requested; skipped pre-run canonical baseline rebuild to preserve the current workspace",
+                "[ORCHESTRATION] Resume requested; using the canonical project root and skipping pre-run baseline rebuild to preserve the current workspace",
                 metadata={
                     "phase": "resume",
+                    "baseline_path": str(canonical_baseline_dir),
                     "workspace_mutation_skipped": True,
                     "reason": "resume_preserve_workspace",
                 },
@@ -1154,6 +1161,7 @@ def execute_openclaw_task(
             ),
             exc=exc,
             get_latest_session_task_link_fn=_get_latest_session_task_link,
+            queue_task_for_session_fn=_queue_task_for_session,
         )
 
     finally:

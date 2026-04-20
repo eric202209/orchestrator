@@ -167,6 +167,10 @@ async def execute_task_payload(
                 orchestration_state._task_subfolder_override = (
                     selected_task.task_subfolder
                 )
+            if task_workspace.get("workspace_path"):
+                orchestration_state._project_dir_override = task_workspace[
+                    "workspace_path"
+                ]
 
         result = await openclaw_service.execute_task_with_orchestration(
             prompt, timeout_seconds, orchestration_state=orchestration_state

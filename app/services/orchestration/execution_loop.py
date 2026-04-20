@@ -25,6 +25,7 @@ from app.services.orchestration.persistence import (
     set_session_alert,
 )
 from app.services.orchestration.step_support import (
+    coerce_debug_step_result,
     coerce_execution_step_result,
     repair_step_commands_with_self_correction,
     step_needs_command_repair,
@@ -525,9 +526,11 @@ def execute_step_loop(
         )
 
         try:
-            debug_output = debug_result.get("output", "{}")
-            success, debug_data, strategy_info = error_handler.attempt_json_parsing(
-                debug_output, context="debug"
+            success, debug_data, strategy_info = coerce_debug_step_result(
+                debug_result,
+                error_message=step_record.error_message,
+                step=step,
+                extract_structured_text=extract_structured_text,
             )
             if not success:
                 raise ValueError(f"Failed to parse debug result: {strategy_info}")
@@ -652,10 +655,19 @@ def execute_step_loop(
                         "step_index": step_index,
                     }
                 )
+                step_updated = False
                 if fix_type == "command_fix" and debug_data.get("fix"):
                     step["commands"] = [
                         debug_data.get("fix", step_commands[0] if step_commands else "")
                     ]
+                    step_updated = True
+                if isinstance(debug_data.get("expected_files"), list):
+                    step["expected_files"] = debug_data.get("expected_files", [])
+                    step_updated = True
+                if isinstance(debug_data.get("verification"), str):
+                    step["verification"] = debug_data.get("verification", "")
+                    step_updated = True
+                if step_updated:
                     orchestration_state.plan[step_index] = step
                     task.steps = json.dumps(orchestration_state.plan)
                 emit_live(

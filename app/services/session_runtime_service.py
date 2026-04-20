@@ -12,6 +12,9 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.models import LogEntry, Session as SessionModel, SessionTask, Task, TaskStatus
+from app.services.orchestration.task_rules import (
+    should_execute_in_canonical_project_root,
+)
 from app.services.project_isolation_service import resolve_project_workspace_path
 from app.services.prompt_templates import OrchestrationState
 from app.services.task_service import TaskService
@@ -132,7 +135,18 @@ def ensure_task_workspace(
         orchestration_state._task_subfolder_override = candidate
         db.flush()
 
-    workspace_path = Path(orchestration_state.project_dir)
+    if should_execute_in_canonical_project_root(
+        task,
+        getattr(task, "execution_profile", None),
+        task.title,
+        task.description,
+    ):
+        workspace_path = Path(
+            resolve_project_workspace_path(project.workspace_path, project.name)
+        )
+        orchestration_state._project_dir_override = str(workspace_path)
+    else:
+        workspace_path = Path(orchestration_state.project_dir)
     workspace_path.mkdir(parents=True, exist_ok=True)
 
     return {
@@ -193,6 +207,28 @@ def set_session_alert(
     db.flush()
 
 
+def build_task_execution_prompt(task: Task) -> str:
+    """Build the runtime prompt for a task, preserving recovery context when needed."""
+    base_prompt = (task.description or task.title or "").strip()
+    if not base_prompt:
+        return ""
+
+    workspace_status = getattr(task, "workspace_status", None)
+    prior_error = (getattr(task, "error_message", None) or "").strip()
+    if workspace_status != "changes_requested" or not prior_error:
+        return base_prompt
+
+    return (
+        f"{base_prompt}\n\n"
+        "Recovery instructions:\n"
+        "- The previous execution did not complete successfully.\n"
+        "- First inspect the real current workspace, tests, fixtures, and configs before proposing new structure.\n"
+        "- Diagnose and fix the underlying mistake or bug instead of repeating the same plan.\n"
+        "- Reuse existing files when present and treat them as the source of truth.\n"
+        f"- Previous failure details: {prior_error[:1800]}"
+    )
+
+
 def queue_task_for_session(
     db: Session,
     session: SessionModel,
@@ -248,6 +284,7 @@ def queue_task_for_session(
         TaskStatus.FAILED,
         TaskStatus.CANCELLED,
     )
+    task_prompt = build_task_execution_prompt(task)
     prepare_task_for_fresh_execution(task, clear_saved_plan=should_clear_saved_plan)
 
     session.status = "running"
@@ -259,7 +296,7 @@ def queue_task_for_session(
     result = execute_openclaw_task.delay(
         session_id=session.id,
         task_id=task.id,
-        prompt=task.description or task.title,
+        prompt=task_prompt,
         timeout_seconds=timeout_seconds,
     )
 

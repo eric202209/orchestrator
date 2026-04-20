@@ -109,8 +109,8 @@ def build_workspace_inventory_summary(
 def _condense_step_results(
     execution_results: Iterable[StepResult],
     *,
-    max_entries: int = 6,
-    max_chars: int = 1400,
+    max_entries: int = 4,
+    max_chars: int = 900,
 ) -> str:
     lines: List[str] = []
     for result in list(execution_results)[-max_entries:]:
@@ -128,8 +128,8 @@ def _condense_step_results(
 def _condense_dict_events(
     events: Iterable[Dict[str, Any]],
     *,
-    max_entries: int = 5,
-    max_chars: int = 1200,
+    max_entries: int = 4,
+    max_chars: int = 800,
 ) -> str:
     lines: List[str] = []
     for item in list(events)[-max_entries:]:
@@ -181,7 +181,7 @@ def assemble_planning_prompt(ctx: Any, workspace_review: Dict[str, Any]) -> str:
         validation_history=_condense_dict_events(
             ctx.orchestration_state.validation_history, max_entries=3
         ),
-        max_chars=2800,
+        max_chars=2200,
     )
     return PromptTemplates.build_planning_prompt(
         task_description=ctx.prompt,
@@ -202,12 +202,12 @@ def assemble_execution_prompt(ctx: Any, step: Dict[str, Any]) -> str:
         ctx.orchestration_state.project_context,
         workspace_summary=workspace_summary,
         recent_history=_condense_dict_events(
-            ctx.orchestration_state.phase_history, max_entries=4
+            ctx.orchestration_state.phase_history, max_entries=3, max_chars=500
         ),
         validation_history=_condense_dict_events(
-            ctx.orchestration_state.validation_history, max_entries=3
+            ctx.orchestration_state.validation_history, max_entries=2, max_chars=400
         ),
-        max_chars=2200,
+        max_chars=1500,
     )
     return PromptTemplates.build_execution_prompt(
         step_description=step.get("description", ""),
@@ -244,16 +244,16 @@ def assemble_completion_repair_inputs(
         ctx.orchestration_state.project_context,
         workspace_summary=workspace_summary,
         recent_history=_condense_dict_events(
-            ctx.orchestration_state.phase_history, max_entries=5
+            ctx.orchestration_state.phase_history, max_entries=4, max_chars=700
         ),
         validation_history=_condense_dict_events(
-            ctx.orchestration_state.validation_history, max_entries=4
+            ctx.orchestration_state.validation_history, max_entries=3, max_chars=600
         ),
-        max_chars=2600,
+        max_chars=1900,
     )
     return {
         "prior_results_summary": _condense_step_results(
-            ctx.orchestration_state.execution_results, max_entries=8, max_chars=1600
+            ctx.orchestration_state.execution_results, max_entries=5, max_chars=1100
         ),
         "project_context": project_context,
         "workspace_inventory": workspace_summary,

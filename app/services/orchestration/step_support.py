@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -202,3 +203,188 @@ def coerce_execution_step_result(
         return coerced
 
     return result
+
+
+def coerce_debug_step_result(
+    raw_result: Dict[str, Any],
+    *,
+    error_message: str,
+    step: Optional[Dict[str, Any]],
+    extract_structured_text: Callable[[Any], str],
+) -> tuple[bool, Optional[Dict[str, Any]], str]:
+    """Recover a structured debug result when the model returned prose."""
+    output_text = extract_structured_text((raw_result or {}).get("output", ""))
+    success, parsed_data, strategy_info = error_handler.attempt_json_parsing(
+        output_text, context="debug"
+    )
+    if success and isinstance(parsed_data, dict):
+        return True, parsed_data, strategy_info
+
+    inferred = _infer_debug_payload_from_text(
+        output_text,
+        error_message=error_message,
+        step=step,
+    )
+    if inferred:
+        return True, inferred, "Inferred structured debug payload from prose"
+
+    return False, None, strategy_info
+
+
+def _infer_debug_payload_from_text(
+    text: str,
+    *,
+    error_message: str,
+    step: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    normalized = (text or "").strip()
+    if not normalized:
+        return None
+
+    lowered = normalized.lower()
+    analysis = _extract_labeled_debug_field(
+        normalized,
+        ("analysis", "root cause", "cause"),
+    )
+    fix = _extract_labeled_debug_field(
+        normalized,
+        ("fix", "recommended fix", "proposed fix", "solution", "next step"),
+    )
+    confidence = _extract_labeled_debug_field(normalized, ("confidence",))
+    explicit_fix_type = _extract_labeled_debug_field(
+        normalized,
+        ("fix_type", "fix type"),
+    )
+
+    if not analysis:
+        analysis = normalized.split("\n\n", 1)[0].strip()[:800]
+
+    fix_type_match = re.search(
+        r"\b(code_fix|command_fix|revise_plan)\b",
+        explicit_fix_type or normalized,
+        flags=re.IGNORECASE,
+    )
+    if fix_type_match:
+        fix_type = fix_type_match.group(1).lower()
+    elif any(
+        marker in lowered
+        for marker in (
+            "revise_plan",
+            "revise the plan",
+            "split the step",
+            "split this step",
+            "rewrite the remaining plan",
+            "too large",
+            "too brittle",
+        )
+    ):
+        fix_type = "revise_plan"
+    elif any(
+        marker in lowered
+        for marker in (
+            "replace the command",
+            "update the command",
+            "run `",
+            "use `",
+            "use rg --files",
+            "list the files first",
+            "wrong expected file",
+            "wrong expected files",
+        )
+    ):
+        fix_type = "command_fix"
+    else:
+        fix_type = "code_fix"
+
+    payload: Dict[str, Any] = {
+        "fix_type": fix_type,
+        "analysis": analysis[:1200],
+        "fix": (fix or "").strip()[:1200],
+        "confidence": _normalize_debug_confidence(confidence or normalized),
+    }
+
+    missing_expected_files = _extract_missing_expected_files(error_message)
+    should_trim_expected_files = (
+        bool(missing_expected_files)
+        and isinstance(step, dict)
+        and isinstance(step.get("expected_files"), list)
+        and any(
+            marker in lowered
+            for marker in (
+                "doesn't exist",
+                "does not exist",
+                "not required",
+                "should not",
+                "shouldn't",
+                "wrong assumption",
+                "incorrectly expected",
+                "remove",
+                "no readme",
+                "without expecting",
+            )
+        )
+    )
+    if should_trim_expected_files:
+        updated_expected_files = [
+            item
+            for item in step.get("expected_files", [])
+            if item not in missing_expected_files
+        ]
+        if updated_expected_files != step.get("expected_files", []):
+            payload["expected_files"] = updated_expected_files
+            if not payload["fix"]:
+                payload["fix"] = (
+                    "Retry the step without expecting these files: "
+                    + ", ".join(missing_expected_files)
+                )[:1200]
+            if payload["fix_type"] == "code_fix":
+                payload["fix_type"] = "command_fix"
+
+    if (
+        not payload.get("analysis")
+        and not payload.get("fix")
+        and "expected_files" not in payload
+    ):
+        return None
+
+    return payload
+
+
+def _extract_labeled_debug_field(text: str, labels: tuple[str, ...]) -> str:
+    for label in labels:
+        pattern = re.compile(
+            rf"(?:^|\n)\s*(?:\*\*)?{re.escape(label)}(?:\*\*)?\s*:\s*(.+?)(?=\n\s*(?:\*\*)?[A-Za-z _-]+(?:\*\*)?\s*:|\Z)",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        match = pattern.search(text)
+        if match:
+            cleaned = match.group(1).strip()
+            cleaned = re.sub(r"^\*+\s*", "", cleaned)
+            cleaned = re.sub(r"\s*\*+$", "", cleaned)
+            return cleaned.strip()
+    return ""
+
+
+def _normalize_debug_confidence(value: str) -> str:
+    lowered = (value or "").lower()
+    if "high" in lowered:
+        return "HIGH"
+    if "low" in lowered:
+        return "LOW"
+    return "MEDIUM"
+
+
+def _extract_missing_expected_files(error_message: str) -> list[str]:
+    prefix = "expected files are missing:"
+    lowered = (error_message or "").lower()
+    if prefix not in lowered:
+        return []
+
+    start = lowered.index(prefix) + len(prefix)
+    raw_suffix = (error_message or "")[start:]
+    candidates = []
+    for item in raw_suffix.split(","):
+        cleaned = item.strip().strip(".")
+        if cleaned:
+            candidates.append(cleaned)
+    return candidates
