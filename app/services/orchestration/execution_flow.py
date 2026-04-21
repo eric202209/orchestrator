@@ -72,15 +72,69 @@ def determine_step_timeout(
     return max(300, timeout_seconds // max(1, min(total_steps, 3)))
 
 
+# Minimum non-trivial file size in bytes.  Files smaller than this are
+# treated as "empty" (touch, echo '', placeholder stubs).
+_MIN_MEANINGFUL_BYTES = 4
+
+
 def missing_expected_files(project_dir: Path, expected_files: List[str]) -> List[str]:
+    """
+    Return the list of expected paths that are absent OR effectively empty.
+
+    A file is considered missing if it:
+      - does not exist, OR
+      - exists but is zero bytes, OR
+      - exists but is smaller than _MIN_MEANINGFUL_BYTES AND contains only
+        whitespace / comment lines (catches `# TODO` stubs).
+    """
     missing: List[str] = []
     for raw_path in expected_files or []:
-        path_text = str(raw_path or "").strip().strip("\"'")
+        path_text = str(raw_path or "").strip().strip("'\"\\")
         if not path_text:
             continue
-        if not (project_dir / path_text).exists():
+
+        full_path = project_dir / path_text
+
+        if not full_path.exists():
             missing.append(path_text)
+            continue
+
+        # Directories are not deliverable files — skip silently.
+        if full_path.is_dir():
+            continue
+
+        size = full_path.stat().st_size
+        if size == 0:
+            missing.append(path_text)
+            continue
+
+        if size < _MIN_MEANINGFUL_BYTES:
+            try:
+                content = full_path.read_text(errors="replace").strip()
+                if not content or all(
+                    line.strip().startswith("#") or not line.strip()
+                    for line in content.splitlines()
+                ):
+                    missing.append(path_text)
+            except OSError:
+                pass  # Unreadable → treat as present; execution will surface error
+
     return missing
+
+
+def empty_expected_files(project_dir: Path, expected_files: List[str]) -> List[str]:
+    """Return files that exist but are empty/stub — useful for debug messages."""
+    present_but_empty: List[str] = []
+    for raw_path in expected_files or []:
+        path_text = str(raw_path or "").strip().strip("'\"\\")
+        if not path_text:
+            continue
+        full_path = project_dir / path_text
+        if not full_path.exists() or full_path.is_dir():
+            continue
+        if full_path.stat().st_size < _MIN_MEANINGFUL_BYTES:
+            present_but_empty.append(path_text)
+    return present_but_empty
 
 
 def execute_verification_command(
@@ -158,6 +212,17 @@ def assess_step_execution(
             error_message = (
                 "Step reported success but expected files are missing: "
                 f"{missing_summary}"
+            )
+        # Surface empty/stub files as a distinct failure so the debug
+        # prompt knows to re-generate content, not just re-create paths.
+        empty_files = empty_expected_files(project_dir, expected_files)
+        if empty_files and not missing_files:
+            step_status = "failed"
+            empty_summary = ", ".join(empty_files[:6])
+            error_message = (
+                "Step produced empty or stub files that contain no real content: "
+                f"{empty_summary}. "
+                "Re-generate the file bodies — do not just recreate empty paths."
             )
 
     tool_failures = ExecutorService.recent_step_tool_failures(

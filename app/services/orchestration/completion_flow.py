@@ -61,7 +61,7 @@ def _build_completion_repair_workspace_summary(
     )
     existing_files = [
         path
-        for path in _collect_workspace_inventory_paths(
+        for path in collect_workspace_inventory_paths(
             project_dir, max_files=max_files * 2
         )
         if Path(path).suffix.lower() in {".ts", ".tsx", ".js", ".jsx", ".json", ".sh"}
@@ -145,7 +145,7 @@ def _completion_repair_invalid_paths(
     project_dir: Path,
     completion_validation: Any,
 ) -> list[str]:
-    inventory_files = set(_collect_workspace_inventory_paths(project_dir))
+    inventory_files = set(collect_workspace_inventory_paths(project_dir))
     expected_files = set(
         list((completion_validation.details or {}).get("expected_core_files", []) or [])
     )

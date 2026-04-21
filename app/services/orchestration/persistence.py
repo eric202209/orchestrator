@@ -103,9 +103,12 @@ def save_orchestration_checkpoint(
             "project_name": orchestration_state.project_name,
             "project_context": orchestration_state.project_context,
             "task_subfolder": orchestration_state.task_subfolder,
-            "project_dir_override": (
-                str(orchestration_state.project_dir)
-                if orchestration_state._project_dir_override
+            # Always persist the concrete resolved path so resume is stable
+            # regardless of workspace_root recalculation.
+            "project_dir_override": str(orchestration_state.project_dir),
+            "workspace_path_override": (
+                str(orchestration_state._workspace_path_override)
+                if orchestration_state._workspace_path_override
                 else None
             ),
         },

@@ -70,7 +70,11 @@ def execute_planning_phase(
     )
     if workspace_review.get("has_existing_files"):
         start_with_minimal_planning_prompt = True
-    if planning_prompt_tokens > 2200:
+    # Qwen3.5-35B has a 128 k context window; 2200 tokens is far too
+    # conservative.  Use 8000 tokens (~6000 words) as the boundary
+    # so normal project contexts get the full planning prompt.
+    MINIMAL_PROMPT_TOKEN_THRESHOLD = 8000
+    if planning_prompt_tokens > MINIMAL_PROMPT_TOKEN_THRESHOLD:
         start_with_minimal_planning_prompt = True
     used_minimal_planning_prompt = start_with_minimal_planning_prompt
 

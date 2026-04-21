@@ -371,6 +371,25 @@ def execute_step_loop(
             )
             continue
 
+        if step_status == "failed":
+            cleanup_summary = ExecutorService.cleanup_failed_step_artefacts(
+                project_dir=orchestration_state.project_dir,
+                step=step,
+                logger=logger,
+                emit_live=emit_live,
+            )
+
+            # Surface the cleanup info in the debug prompt so the model knows
+            # which files it must re-generate from scratch.
+            if cleanup_summary["removed_files"]:
+                extra_context = (
+                    "\\n\\nNote: the following files were empty/stub after the failed step "
+                    "and have been removed so you must regenerate their full content: "
+                    + ", ".join(cleanup_summary["removed_files"][:10])
+                )
+            else:
+                extra_context = ""
+
         orchestration_state.record_failure(step_record)
         save_orchestration_checkpoint(
             db, session_id, task_id, prompt, orchestration_state
@@ -507,7 +526,7 @@ def execute_step_loop(
             return {"status": "failed", "reason": "max_attempts_reached"}
 
         debug_prompt = PromptTemplates.build_debugging_prompt(
-            step_description=step_description,
+            step_description=step_description + extra_context,
             error_message=step_record.error_message,
             command_output=step_output,
             verification_output=step_record.verification_output,

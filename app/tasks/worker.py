@@ -218,40 +218,44 @@ def execute_openclaw_task(
             # Keep a stable task subfolder identifier for metadata/reporting, even
             # when execution itself happens in the canonical project root.
             if task.task_subfolder:
+                # ✅ Subfolder already locked from a previous run — use it
+                # unconditionally so all cycles land in the same directory.
                 orchestration_state._task_subfolder_override = task.task_subfolder
+                logger.info(
+                    "[ORCHESTRATION] Reusing locked task subfolder '%s' for task %s",
+                    task.task_subfolder,
+                    task_id,
+                )
             else:
-                # Generate task subfolder from task title (slugified)
-                # Use task title if available, otherwise fall back to task_id
+                # First run: generate a stable slug and persist it immediately.
                 task_title_slug = build_task_subfolder_name(task.title, task_id)
 
-                # Ensure unique subfolder name (append counter if needed)
+                # Resolve collisions once, then freeze.
                 counter = 1
                 subfolder_name = task_title_slug
                 while True:
-                    subfolder_path = f"{workspace_path}/{subfolder_name}"
-                    # Check if this subfolder already exists
                     existing_tasks = (
                         db.query(Task)
                         .filter(
                             Task.project_id == session.project_id,
                             Task.task_subfolder == subfolder_name,
+                            Task.id != task_id,  # exclude self
                         )
                         .all()
                     )
-
-                    # If this is the first task with this name, or it's our current task
-                    if len(existing_tasks) == 1 and existing_tasks[0].id == task_id:
+                    if not existing_tasks:
                         break
-                    elif len(existing_tasks) == 0:
-                        break
-                    else:
-                        # Another task already uses this name, append counter
-                        subfolder_name = f"{task_title_slug}-{counter}"
-                        counter += 1
+                    subfolder_name = f"{task_title_slug}-{counter}"
+                    counter += 1
 
                 task.task_subfolder = subfolder_name
                 db.commit()
                 orchestration_state._task_subfolder_override = subfolder_name
+                logger.info(
+                    "[ORCHESTRATION] Locked new task subfolder '%s' for task %s",
+                    subfolder_name,
+                    task_id,
+                )
         else:
             # Fallback: use slugified project name
             pass

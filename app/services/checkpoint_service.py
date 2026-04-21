@@ -165,31 +165,72 @@ class CheckpointService:
     def resolve_resume_checkpoint_name(
         self, session_id: int, requested_checkpoint_name: Optional[str] = None
     ) -> Optional[str]:
+        """
+        Return the checkpoint name to use for resume.
+
+        Priority rules:
+        1. If no name requested → return highest-progress checkpoint.
+        2. If requested name not found on disk → warn, return best.
+        3. If requested checkpoint has genuinely zero progress (score == 0
+           and plan is empty) and a better one exists → warn, return best.
+        4. Otherwise → honour the caller's explicit choice exactly.
+        """
         entries = self._collect_checkpoint_entries(session_id)
         if not entries:
             return None
 
         best_entry = entries[0]
+
         if not requested_checkpoint_name:
             return best_entry["name"]
 
         requested_entry = next(
-            (entry for entry in entries if entry["name"] == requested_checkpoint_name),
+            (e for e in entries if e["name"] == requested_checkpoint_name),
             None,
         )
+
+        # Requested checkpoint file is missing entirely.
         if requested_entry is None:
+            self._log_checkpoint(
+                session_id,
+                "WARN",
+                f"Requested checkpoint '{requested_checkpoint_name}' not found; "
+                f"falling back to best available '{best_entry['name']}'",
+            )
             return best_entry["name"]
 
-        requested_score = requested_entry["progress_score"]
-        best_score = best_entry["progress_score"]
+        # Same entry → trivial.
         if requested_entry["name"] == best_entry["name"]:
             return requested_entry["name"]
 
-        if requested_score <= 0 and best_score > requested_score:
+        requested_score = requested_entry["progress_score"]
+        best_score = best_entry["progress_score"]
+
+        # Only auto-upgrade when the requested checkpoint is truly empty
+        # (no plan, no executed steps).
+        plan = (
+            requested_entry.get("data", {})
+            .get("orchestration_state", {})
+            .get("plan", [])
+        )
+        if requested_score <= 0 and not plan and best_score > 0:
+            self._log_checkpoint(
+                session_id,
+                "WARN",
+                f"Requested checkpoint '{requested_checkpoint_name}' has no "
+                f"recorded progress; using best available '{best_entry['name']}'",
+            )
             return best_entry["name"]
 
+        # Honour the explicit caller choice in all other cases.
         if best_score - requested_score >= 1000:
-            return best_entry["name"]
+            self._log_checkpoint(
+                session_id,
+                "INFO",
+                f"Honouring explicit checkpoint '{requested_checkpoint_name}' "
+                f"(score={requested_score}) even though '{best_entry['name']}' "
+                f"has higher progress (score={best_score})",
+            )
 
         return requested_entry["name"]
 
@@ -503,15 +544,9 @@ class CheckpointService:
         self, session_id: int, keep_latest: int = 3, max_age_hours: int = 24
     ) -> Dict[str, Any]:
         """
-        Clean up old checkpoints, keeping only the latest N
-
-        Args:
-            session_id: Session ID
-            keep_latest: Number of most recent checkpoints to keep
-            max_age_hours: Delete checkpoints older than this (hours)
-
-        Returns:
-            Cleanup statistics
+        Clean up old checkpoints, keeping only the latest N that are
+        newer than max_age_hours.  Always preserves the `recommended`
+        checkpoint so resume never loses its target.
         """
         try:
             checkpoints = self.list_checkpoints(session_id)
@@ -519,23 +554,37 @@ class CheckpointService:
             if len(checkpoints) <= keep_latest:
                 return {"deleted": 0, "kept": len(checkpoints)}
 
-            # Calculate cutoff time
-            cutoff_time = datetime.utcnow() - timedelta(hours=max_age_hours)
+            # Sort newest first so we always keep the most-progressed ones.
+            sorted_cp = sorted(
+                checkpoints,
+                key=lambda x: x.get("created_at", ""),
+                reverse=True,
+            )
 
+            # The first keep_latest are protected; the rest are candidates.
+            protected = {cp["name"] for cp in sorted_cp[:keep_latest]}
+            # Also protect the checkpoint flagged as recommended.
+            protected.update(cp["name"] for cp in sorted_cp if cp.get("recommended"))
+
+            cutoff_time = datetime.utcnow() - timedelta(hours=max_age_hours)
             deleted_count = 0
 
-            for checkpoint in checkpoints:
-                created_at = datetime.fromisoformat(checkpoint["created_at"])
+            for checkpoint in sorted_cp[keep_latest:]:
+                if checkpoint["name"] in protected:
+                    continue
+                try:
+                    created_at = datetime.fromisoformat(
+                        checkpoint.get("created_at", "1970-01-01")
+                    )
+                except ValueError:
+                    created_at = datetime.min
 
-                # Delete if older than max_age_hours OR if we've kept enough recent ones
-                if (
-                    created_at < cutoff_time
-                    or len(checkpoints) - deleted_count > keep_latest
-                ):
+                if created_at < cutoff_time:
                     self.delete_checkpoint(session_id, checkpoint["name"])
                     deleted_count += 1
 
-            return {"deleted": deleted_count, "kept": len(checkpoints) - deleted_count}
+            kept = len(checkpoints) - deleted_count
+            return {"deleted": deleted_count, "kept": kept}
 
         except Exception as e:
             self._log_checkpoint(

@@ -307,33 +307,59 @@ class ContextPreservationService:
         )
 
     def resume_from_checkpoint(
-        self, task_id: int, checkpoint_id: Optional[int] = None
+        self,
+        task_id: int,
+        session_id: Optional[int] = None,
+        checkpoint_id: Optional[int] = None,
+        checkpoint_name: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Resume from checkpoint
+        Load the canonical resume state for a task.
 
-        Args:
-            task_id: Task ID
-            checkpoint_id: Specific checkpoint ID (optional)
-
-        Returns:
-            Resume data dict or None
+        Delegates to CheckpointService (disk-based) as the single source
+        of truth for orchestration state.  The DB TaskCheckpoint rows are
+        used only when no disk checkpoint exists (legacy fallback).
         """
-        checkpoints = self.get_checkpoints(task_id)
+        # ── Primary path: disk-based CheckpointService ───────────────────
+        if session_id is not None:
+            try:
+                from app.services.checkpoint_service import CheckpointService
 
-        if not checkpoints:
+                cp_service = CheckpointService(self.db)
+                data = cp_service.load_resume_checkpoint(
+                    session_id, checkpoint_name=checkpoint_name
+                )
+                if data:
+                    return {
+                        "source": "checkpoint_service",
+                        "checkpoint_name": data.get("_resolved_checkpoint_name"),
+                        "state_snapshot": data.get("orchestration_state"),
+                        "context": data.get("context"),
+                        "current_step_index": data.get("current_step_index"),
+                        "step_results": data.get("step_results", []),
+                    }
+            except Exception as exc:
+                logger.warning(
+                    "CheckpointService resume failed for session %s: %s; "
+                    "falling back to DB checkpoints",
+                    session_id,
+                    exc,
+                )
+
+        # ── Fallback: DB TaskCheckpoint rows (legacy / no disk file) ─────
+        db_checkpoints = self.get_checkpoints(task_id)
+        if not db_checkpoints:
             return None
 
-        # Use latest checkpoint if none specified
         if not checkpoint_id:
-            checkpoint = checkpoints[-1]
+            checkpoint = db_checkpoints[-1]
         else:
-            checkpoint = next((c for c in checkpoints if c.id == checkpoint_id), None)
-
+            checkpoint = next(
+                (c for c in db_checkpoints if c.id == checkpoint_id), None
+            )
         if not checkpoint:
             return None
 
-        # Parse checkpoint data
         state_snapshot = (
             json.loads(checkpoint.state_snapshot) if checkpoint.state_snapshot else None
         )
@@ -345,6 +371,7 @@ class ContextPreservationService:
         )
 
         return {
+            "source": "db_fallback",
             "checkpoint_id": checkpoint.id,
             "checkpoint_type": checkpoint.checkpoint_type,
             "step_number": checkpoint.step_number,
