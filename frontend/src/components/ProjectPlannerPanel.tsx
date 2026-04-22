@@ -1,5 +1,5 @@
 import type { Dispatch, SetStateAction } from 'react'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { formatDistanceToNow } from 'date-fns'
 import {
   Bot,
@@ -99,7 +99,7 @@ export function ProjectPlannerPanel({
   const [manualCommitting, setManualCommitting] = useState(false)
   const [deletingPlanId, setDeletingPlanId] = useState<number | null>(null)
 
-  const loadSessions = async () => {
+  const loadSessions = useCallback(async () => {
     try {
       setLoadingSessions(true)
       const response = await planningAPI.list(project.id)
@@ -119,9 +119,9 @@ export function ProjectPlannerPanel({
     } finally {
       setLoadingSessions(false)
     }
-  }
+  }, [project.id])
 
-  const loadPlans = async () => {
+  const loadPlans = useCallback(async () => {
     try {
       setLoadingPlans(true)
       const response = await projectsAPI.getPlans(project.id)
@@ -131,16 +131,16 @@ export function ProjectPlannerPanel({
     } finally {
       setLoadingPlans(false)
     }
-  }
+  }, [project.id])
 
-  const loadSession = async (sessionId: number) => {
+  const loadSession = useCallback(async (sessionId: number) => {
     try {
       const response = await planningAPI.get(sessionId)
       setActiveSession(response.data)
     } catch (error) {
       console.error('Failed to load planning session:', error)
     }
-  }
+  }, [])
 
   useEffect(() => {
     setActiveSessionId(null)
@@ -157,7 +157,7 @@ export function ProjectPlannerPanel({
     setManualRequirement(project.description || defaultPrompt)
     void loadSessions()
     void loadPlans()
-  }, [project.id])
+  }, [loadPlans, loadSessions, project.description, project.id])
 
   useEffect(() => {
     if (activeSessionId) {
@@ -165,7 +165,7 @@ export function ProjectPlannerPanel({
     } else {
       setActiveSession(null)
     }
-  }, [activeSessionId])
+  }, [activeSessionId, loadSession])
 
   useEffect(() => {
     if (!activeSession) {
@@ -200,7 +200,7 @@ export function ProjectPlannerPanel({
     }, 2500)
 
     return () => window.clearInterval(timer)
-  }, [activeSession, activeSessionId])
+  }, [activeSession, activeSessionId, loadSession, loadSessions])
 
   const handleStartSession = async () => {
     if (!newPrompt.trim()) {
