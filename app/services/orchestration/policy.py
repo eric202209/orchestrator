@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from typing import Any
 
 PLANNING_TIMEOUT_MIN_SECONDS = 180
 PLANNING_TIMEOUT_MAX_SECONDS = 240
@@ -44,6 +45,10 @@ WORKSPACE_PRESERVE_REASON_MARKERS = (
     "resume preserve workspace",
     "user requested stop",
 )
+ISOLATION_RESTORE_REASON_MARKERS = (
+    "workspace isolation violation",
+    "debug workspace isolation violation",
+)
 
 
 @dataclass(frozen=True)
@@ -56,9 +61,24 @@ class PolicyProfile:
     validation_severity: str
     completion_repair_budget: int
     workspace_restore_mode: str
+    planning_mode: str
+    retry_mode: str
+    restore_behavior_label: str
 
-    def to_dict(self) -> dict[str, str | int]:
-        return asdict(self)
+    def effect_summary(self) -> dict[str, Any]:
+        return {
+            "planning_mode": self.planning_mode,
+            "validation_severity": self.validation_severity,
+            "completion_repair_budget": self.completion_repair_budget,
+            "retry_mode": self.retry_mode,
+            "workspace_restore_mode": self.workspace_restore_mode,
+            "restore_behavior_label": self.restore_behavior_label,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["effects"] = self.effect_summary()
+        return payload
 
 
 _POLICY_PROFILES = {
@@ -69,6 +89,9 @@ _POLICY_PROFILES = {
         validation_severity="standard",
         completion_repair_budget=1,
         workspace_restore_mode="preserve_resume_restore_failures",
+        planning_mode="balanced",
+        retry_mode="single_repair_then_relax",
+        restore_behavior_label="Restore only workspace-isolation failures by default",
     ),
     "strict": PolicyProfile(
         name="strict",
@@ -77,6 +100,9 @@ _POLICY_PROFILES = {
         validation_severity="high",
         completion_repair_budget=0,
         workspace_restore_mode="restore_most_failures",
+        planning_mode="strict",
+        retry_mode="fail_fast",
+        restore_behavior_label="Restore most orchestration failures to the pre-run snapshot",
     ),
     "recovery_friendly": PolicyProfile(
         name="recovery_friendly",
@@ -85,6 +111,9 @@ _POLICY_PROFILES = {
         validation_severity="standard",
         completion_repair_budget=2,
         workspace_restore_mode="preserve_for_resume",
+        planning_mode="recovery_friendly",
+        retry_mode="extra_repair_budget",
+        restore_behavior_label="Preserve more workspace state to support replay and operator recovery",
     ),
 }
 
@@ -98,22 +127,47 @@ def clamp_planning_timeout(timeout_seconds: int) -> int:
     )
 
 
-def should_restore_workspace_on_failure(reason: str) -> bool:
+def apply_validation_policy(status: str, *, severity: str, stage: str) -> str:
+    """Escalate validator outcomes according to the active policy severity."""
+
+    normalized_status = str(status or "").strip().lower()
+    normalized_severity = str(severity or "standard").strip().lower()
+    if normalized_severity != "high":
+        return normalized_status
+    if stage in {"plan", "task_completion", "baseline_publish"}:
+        if normalized_status in {"warning", "repair_required"}:
+            return "rejected"
+    return normalized_status
+
+
+def should_restore_workspace_on_failure(
+    reason: str, policy_profile: str | None = "balanced"
+) -> bool:
     """
     Return True when the workspace should be rolled back to the pre-run
     snapshot.  Preservation takes priority over restoration — if a reason
     matches both lists, it is preserved (safe for resume).
     """
     normalized_reason = str(reason or "").strip().lower()
+    profile = get_policy_profile(policy_profile)
 
     # Explicit preserve signals beat everything.
     if any(marker in normalized_reason for marker in WORKSPACE_PRESERVE_REASON_MARKERS):
         return False
 
-    return any(
-        marker in normalized_reason
-        for marker in WORKSPACE_RESTORE_ALLOWED_REASON_MARKERS
-    )
+    if any(marker in normalized_reason for marker in ISOLATION_RESTORE_REASON_MARKERS):
+        return True
+
+    if profile.workspace_restore_mode == "restore_most_failures":
+        return (
+            any(
+                marker in normalized_reason
+                for marker in WORKSPACE_RESTORE_ALLOWED_REASON_MARKERS
+            )
+            or "completion validation failed" in normalized_reason
+        )
+
+    return False
 
 
 def list_policy_profiles() -> list[PolicyProfile]:

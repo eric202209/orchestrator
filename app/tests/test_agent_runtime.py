@@ -1,4 +1,5 @@
 from app.config import settings
+from app.services.agents.agent_backends import UnsupportedAgentBackendError
 from app.services.agents.agent_runtime import (
     build_runtime_cli_agent_command,
     create_agent_runtime,
@@ -15,13 +16,16 @@ def test_create_agent_runtime_uses_configured_local_backend(db_session):
     assert runtime.backend_descriptor.name == settings.ORCHESTRATOR_AGENT_BACKEND
 
 
-def test_create_agent_runtime_falls_back_for_unknown_backend(db_session, monkeypatch):
+def test_create_agent_runtime_rejects_unknown_backend(db_session, monkeypatch):
     monkeypatch.setattr(settings, "ORCHESTRATOR_AGENT_BACKEND", "unknown_backend")
 
-    runtime = create_agent_runtime(db_session, session_id=None)
+    try:
+        create_agent_runtime(db_session, session_id=None)
+    except UnsupportedAgentBackendError as exc:
+        assert "Unsupported orchestration backend" in str(exc)
+        return
 
-    assert isinstance(runtime, OpenClawSessionService)
-    assert runtime.backend_descriptor.name == "local_openclaw"
+    raise AssertionError("Expected UnsupportedAgentBackendError")
 
 
 def test_create_agent_runtime_uses_db_backend_override(db_session, monkeypatch):

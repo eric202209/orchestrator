@@ -7,7 +7,14 @@ from typing import Any, Optional, Protocol
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.services.agents.agent_backends import (
+    UnsupportedAgentBackendError,
+    require_backend_descriptor,
+)
 from app.services.agents.openclaw_service import OpenClawSessionService
+from app.services.agents.providers.openclaw_adapter import (
+    create_runtime as create_openclaw_runtime,
+)
 from app.services.workspace.system_settings import get_effective_agent_backend
 
 
@@ -16,7 +23,7 @@ class AgentRuntime(Protocol):
 
     backend_descriptor: Any
 
-    async def create_openclaw_session(
+    async def create_session(
         self, task_description: str, context: Optional[dict[str, Any]] = None
     ) -> str: ...
 
@@ -62,21 +69,17 @@ def create_agent_runtime(
     backend_name = get_effective_agent_backend(
         settings.ORCHESTRATOR_AGENT_BACKEND, db=db
     ).strip()
-    if backend_name == "local_openclaw":
-        return OpenClawSessionService(
+    descriptor = require_backend_descriptor(backend_name)
+    if descriptor.name == "local_openclaw":
+        return create_openclaw_runtime(
             db,
             session_id,
             task_id,
             use_demo_mode=use_demo_mode,
         )
 
-    # Unknown backends currently fall back to the local runtime so the platform
-    # remains operational while new adapters are being wired in.
-    return OpenClawSessionService(
-        db,
-        session_id,
-        task_id,
-        use_demo_mode=use_demo_mode,
+    raise UnsupportedAgentBackendError(
+        f"Backend '{descriptor.name}' does not have a registered runtime adapter."
     )
 
 

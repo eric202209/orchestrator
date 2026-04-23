@@ -295,15 +295,6 @@ class PlannerService:
 
         if any(
             word in combined
-            for word in ["test", "testing", "verify", "verification", "qa"]
-        ):
-            return "test_only"
-        if any(
-            word in combined for word in ["debug", "fix", "investigate", "root cause"]
-        ):
-            return "debug_only"
-        if any(
-            word in combined
             for word in [
                 "review",
                 "audit",
@@ -317,6 +308,15 @@ class PlannerService:
             ]
         ):
             return "review_only"
+        if any(
+            word in combined
+            for word in ["test", "testing", "verify", "verification", "qa"]
+        ):
+            return "test_only"
+        if any(
+            word in combined for word in ["debug", "fix", "investigate", "root cause"]
+        ):
+            return "debug_only"
         if any(
             word in combined
             for word in ["implement", "build", "create", "add", "execute"]

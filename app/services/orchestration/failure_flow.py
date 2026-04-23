@@ -2,7 +2,7 @@
 
 import logging
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Callable, Optional
 
 from app.models import LogEntry, TaskStatus
@@ -75,7 +75,7 @@ def handle_task_failure(
     if task:
         task.status = TaskStatus.FAILED
         task.error_message = str(exc)
-        task.completed_at = datetime.utcnow()
+        task.completed_at = datetime.now(UTC)
         task.workspace_status = "blocked" if task.task_subfolder else "not_created"
 
     if not session_task_link:

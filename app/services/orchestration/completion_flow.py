@@ -507,7 +507,7 @@ def _attempt_completion_repair(
     db = ctx.db
     session = ctx.session
 
-    if orchestration_state.completion_repair_attempts >= 1:
+    if orchestration_state.completion_repair_attempts >= ctx.completion_repair_budget:
         return {"status": "skipped", "reason": "repair_attempt_limit_reached"}
 
     orchestration_state.completion_repair_attempts += 1
@@ -515,7 +515,7 @@ def _attempt_completion_repair(
 
     emit_live(
         "WARN",
-        "[ORCHESTRATION] Completion validation is repairable; generating one minimal repair step",
+        "[ORCHESTRATION] Completion validation is repairable; generating a minimal repair step",
         metadata={
             "phase": "completion_repair",
             "attempt": orchestration_state.completion_repair_attempts,
@@ -738,6 +738,7 @@ def _attempt_completion_repair(
         step_result=repair_exec_result,
         step_started_at=step_started_at,
         validation_profile=ctx.validation_profile,
+        validation_severity=ctx.validation_severity,
         relaxed_mode=orchestration_state.relaxed_mode,
     )
     if assessment.validation_verdict:
@@ -1030,6 +1031,11 @@ def finalize_successful_task(
         title=task.title if task else None,
         description=task.description if task else None,
         relaxed_mode=orchestration_state.relaxed_mode,
+        completion_evidence={
+            "summary_generated": bool(summary_result),
+            "execution_results_count": len(orchestration_state.execution_results),
+        },
+        validation_severity=ctx.validation_severity,
     )
     record_validation_verdict(
         db,
@@ -1058,6 +1064,13 @@ def finalize_successful_task(
                 title=task.title if task else None,
                 description=task.description if task else None,
                 relaxed_mode=orchestration_state.relaxed_mode,
+                completion_evidence={
+                    "summary_generated": bool(summary_result),
+                    "execution_results_count": len(
+                        orchestration_state.execution_results
+                    ),
+                },
+                validation_severity=ctx.validation_severity,
             )
             record_validation_verdict(
                 db,
@@ -1335,6 +1348,7 @@ def finalize_successful_task(
             consistency_issues=baseline_materialization.get("consistency_issues", []),
             consistency_details=baseline_materialization.get("consistency"),
             relaxed_mode=orchestration_state.relaxed_mode,
+            validation_severity=ctx.validation_severity,
         )
         record_validation_verdict(
             db,

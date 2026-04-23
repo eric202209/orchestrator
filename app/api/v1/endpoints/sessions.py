@@ -43,7 +43,7 @@ from app.services import (
     pause_session_lifecycle as _pause_session_lifecycle,
     resume_session_lifecycle as _resume_session_lifecycle,
     set_session_alert as _set_session_alert,
-    start_openclaw_session_payload as _start_openclaw_session_payload,
+    start_session_payload as _start_session_payload,
     start_session_lifecycle as _start_session_lifecycle,
     stop_session_lifecycle as _stop_session_lifecycle,
     stream_session_logs as _stream_session_logs,
@@ -409,6 +409,20 @@ class StartOpenClawRequest(BaseModel):
     task_description: str
 
 
+@router.post("/sessions/{session_id}/start")
+async def start_session(
+    session_id: int,
+    request: StartOpenClawRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Start a backend-neutral orchestration session for a task."""
+
+    return await _start_session_payload(
+        db, session_id, task_description=request.task_description
+    )
+
+
 @router.post("/sessions/{session_id}/start-openclaw")
 async def start_openclaw_session(
     session_id: int,
@@ -421,7 +435,7 @@ async def start_openclaw_session(
 
     Creates an OpenClaw session and begins task execution
     """
-    return await _start_openclaw_session_payload(
+    return await _start_session_payload(
         db, session_id, task_description=request.task_description
     )
 

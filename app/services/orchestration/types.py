@@ -64,6 +64,9 @@ class OrchestrationRunContext:
     logger: Any
     emit_live: Callable[..., None]
     error_handler: Any
+    policy_profile_name: str = "balanced"
+    validation_severity: str = "standard"
+    completion_repair_budget: int = 1
     restore_workspace_snapshot_if_needed: Optional[Callable[[str], Any]] = None
 
     @property

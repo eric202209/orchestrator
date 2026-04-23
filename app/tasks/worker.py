@@ -77,6 +77,8 @@ from app.services.prompt_templates import (
 from app.services.session.session_runtime_service import (
     queue_task_for_session as _queue_task_for_session,
 )
+from app.services.orchestration.policy import get_policy_profile
+from app.services.workspace.system_settings import get_effective_policy_profile
 
 logger = logging.getLogger(__name__)
 
@@ -437,6 +439,8 @@ def execute_openclaw_task(
             )
 
         workspace_snapshot_result: Optional[Dict[str, Any]] = None
+        active_policy_name = get_effective_policy_profile(db=db)
+        active_policy = get_policy_profile(active_policy_name)
         if project:
             workspace_snapshot_result = _snapshot_workspace_before_run(
                 task_service,
@@ -465,7 +469,9 @@ def execute_openclaw_task(
         ) -> Optional[Dict[str, Any]]:
             if not project:
                 return None
-            should_restore = should_restore_workspace_on_failure(reason)
+            should_restore = should_restore_workspace_on_failure(
+                reason, policy_profile=active_policy.name
+            )
             if not should_restore:
                 logger.warning(
                     "[ORCHESTRATION] Preserved workspace for task %s after %s; automatic restore is limited to isolation-violation failures",
@@ -483,7 +489,7 @@ def execute_openclaw_task(
                         "phase": "workspace_restore",
                         "reason": reason,
                         "restore_skipped": True,
-                        "policy": "preserve_on_non_isolation_failures",
+                        "policy": active_policy.name,
                     },
                 )
                 _append_orchestration_event(
@@ -933,6 +939,7 @@ def execute_openclaw_task(
                     project_dir=orchestration_state.project_dir,
                     title=task.title if task else None,
                     description=task.description if task else None,
+                    validation_severity=active_policy.validation_severity,
                 )
                 _record_validation_verdict(
                     db,
@@ -1057,6 +1064,9 @@ def execute_openclaw_task(
             logger=logger,
             emit_live=emit_live,
             error_handler=error_handler,
+            policy_profile_name=active_policy.name,
+            validation_severity=active_policy.validation_severity,
+            completion_repair_budget=active_policy.completion_repair_budget,
             restore_workspace_snapshot_if_needed=restore_workspace_snapshot_if_needed,
         )
 
@@ -1111,6 +1121,7 @@ def execute_openclaw_task(
                         project_dir=orchestration_state.project_dir,
                         title=task.title if task else None,
                         description=task.description if task else None,
+                        validation_severity=active_policy.validation_severity,
                     )
                     _record_validation_verdict(
                         db,
@@ -1234,6 +1245,21 @@ def execute_openclaw_task(
                         logger=logger,
                         emit_live=lambda *_args, **_kwargs: None,
                         error_handler=error_handler,
+                        policy_profile_name=(
+                            active_policy.name
+                            if "active_policy" in locals()
+                            else "balanced"
+                        ),
+                        validation_severity=(
+                            active_policy.validation_severity
+                            if "active_policy" in locals()
+                            else "standard"
+                        ),
+                        completion_repair_budget=(
+                            active_policy.completion_repair_budget
+                            if "active_policy" in locals()
+                            else 1
+                        ),
                         restore_workspace_snapshot_if_needed=(
                             restore_workspace_snapshot_if_needed
                             if "restore_workspace_snapshot_if_needed" in locals()

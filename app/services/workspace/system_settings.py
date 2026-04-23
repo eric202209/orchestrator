@@ -14,6 +14,7 @@ WORKSPACE_ROOT_KEY = "openclaw_workspace_root"
 MOBILE_API_KEY_KEY = "mobile_gateway_api_key"
 AGENT_BACKEND_KEY = "orchestrator_agent_backend"
 AGENT_MODEL_FAMILY_KEY = "orchestrator_agent_model_family"
+ADAPTATION_PROFILE_KEY = "orchestrator_adaptation_profile"
 ORCHESTRATION_POLICY_PROFILE_KEY = "orchestration_policy_profile"
 
 
@@ -92,6 +93,15 @@ def get_effective_agent_model_family(
     return (
         get_setting_value_runtime(AGENT_MODEL_FAMILY_KEY, env_model_family, db=db)
         or env_model_family
+    )
+
+
+def get_effective_adaptation_profile(
+    default_profile: str = "openclaw_default", db: Optional[Session] = None
+) -> str:
+    return (
+        get_setting_value_runtime(ADAPTATION_PROFILE_KEY, default_profile, db=db)
+        or default_profile
     )
 
 

@@ -173,6 +173,7 @@ export const settingsAPI = {
     rotate_mobile_api_key?: boolean;
     agent_backend?: string;
     agent_model_family?: string;
+    agent_adaptation_profile?: string;
     orchestration_policy_profile?: string;
   }) => apiClient.patch<AppSettings>('/settings/system', data),
   revealMobileSecret: () => apiClient.get('/settings/mobile-secret'),
@@ -509,8 +510,10 @@ export const sessionsAPI = {
       }
     }),
 
+  startSession: (id: number, taskDescription: string) =>
+  apiClient.post(`/sessions/${id}/start`, { task_description: taskDescription }),
   startOpenClaw: (id: number, taskDescription: string) =>
-  apiClient.post(`/sessions/${id}/start-openclaw`, { task_description: taskDescription }),
+  apiClient.post(`/sessions/${id}/start`, { task_description: taskDescription }),
 
   execute: (id: number, data: { task: string; timeout_seconds?: number; task_id?: number }) =>
     apiClient.post(`/sessions/${id}/execute`, data),

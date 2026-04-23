@@ -8,14 +8,23 @@ from typing import Any, Dict, List, Optional
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models import LogEntry, Session as SessionModel
 from app.services.agents.agent_runtime import create_agent_runtime
+from app.services.model_adaptation import get_adaptation_profile
+from app.services.orchestration.policy import get_policy_profile
 from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.log_utils import deduplicate_logs
 from app.services.agents.openclaw_service import OpenClawSessionError
 from app.services.workspace.overwrite_protection_service import (
     OverwriteProtectionError,
     OverwriteProtectionService,
+)
+from app.services.workspace.system_settings import (
+    get_effective_adaptation_profile,
+    get_effective_agent_backend,
+    get_effective_agent_model_family,
+    get_effective_policy_profile,
 )
 from app.services.session.session_runtime_service import get_session_task_subfolder
 
@@ -217,6 +226,31 @@ def inspect_session_checkpoint_payload(
     latest_validation = validation_history[-1] if validation_history else None
     latest_plan_validation = orchestration_state.get("last_plan_validation")
     latest_completion_validation = orchestration_state.get("last_completion_validation")
+    runtime_metadata = (
+        payload.get("runtime_metadata")
+        or orchestration_state.get("runtime_metadata")
+        or {}
+    )
+    current_backend = get_effective_agent_backend(
+        settings.ORCHESTRATOR_AGENT_BACKEND, db=db
+    )
+    current_model_family = get_effective_agent_model_family(
+        settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=db
+    )
+    current_policy = get_effective_policy_profile(db=db)
+    current_adaptation = get_effective_adaptation_profile(db=db)
+    validation_verdicts = {
+        "latest_status": (
+            (
+                latest_completion_validation
+                or latest_plan_validation
+                or latest_validation
+            )
+            or {}
+        ).get("status"),
+        "plan_status": (latest_plan_validation or {}).get("status"),
+        "completion_status": (latest_completion_validation or {}).get("status"),
+    }
 
     return {
         "session_id": session_id,
@@ -245,6 +279,23 @@ def inspect_session_checkpoint_payload(
         "latest_validation": latest_validation,
         "latest_plan_validation": latest_plan_validation,
         "latest_completion_validation": latest_completion_validation,
+        "runtime_metadata": {
+            "backend": runtime_metadata.get("backend") or current_backend,
+            "model_family": runtime_metadata.get("model_family")
+            or current_model_family,
+            "policy_profile": runtime_metadata.get("policy_profile")
+            or get_policy_profile(current_policy).name,
+            "adaptation_profile": runtime_metadata.get("adaptation_profile")
+            or get_adaptation_profile(current_adaptation).name,
+            "derived_from_current_settings": not bool(runtime_metadata),
+        },
+        "validation_verdicts": validation_verdicts,
+        "replay_source": {
+            "requested_checkpoint_name": payload.get("_requested_checkpoint_name"),
+            "resolved_checkpoint_name": payload.get("_resolved_checkpoint_name")
+            or payload.get("checkpoint_name", checkpoint_name),
+            "mode": payload.get("replay_mode") or "inspection",
+        },
         "validation_history": validation_history[-10:],
         "plan_preview": plan[:5],
         "step_results_preview": step_results[-5:],
@@ -268,6 +319,11 @@ async def load_session_checkpoint_payload(
         "session_key": session_key,
         "message": f"Session resumed from checkpoint: {checkpoint_name}",
         "session_id": session_id,
+        "mode": "resume",
+        "replay_source": {
+            "checkpoint_name": checkpoint_name,
+            "mode": "resume",
+        },
     }
 
 
@@ -276,6 +332,11 @@ async def replay_session_checkpoint_payload(
 ) -> Dict[str, Any]:
     result = await load_session_checkpoint_payload(db, session_id, checkpoint_name)
     result["replay_requested"] = True
+    result["mode"] = "replay"
+    result["replay_source"] = {
+        "checkpoint_name": checkpoint_name,
+        "mode": "replay",
+    }
     result["message"] = f"Replay started from checkpoint: {checkpoint_name}"
     return result
 

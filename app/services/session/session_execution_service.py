@@ -26,7 +26,7 @@ from app.services.tool_tracking_service import ToolTrackingService
 logger = logging.getLogger(__name__)
 
 
-async def start_openclaw_session_payload(
+async def start_session_payload(
     db: Session, session_id: int, *, task_description: str
 ) -> Dict[str, Any]:
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
@@ -35,13 +35,13 @@ async def start_openclaw_session_payload(
 
     try:
         openclaw_service = create_agent_runtime(db, session_id, use_demo_mode=False)
-        session_key = await openclaw_service.create_openclaw_session(task_description)
+        session_key = await openclaw_service.create_session(task_description)
 
         db.add(
             LogEntry(
                 session_id=session_id,
                 level="INFO",
-                message=f"OpenClaw session started: {task_description[:100]}",
+                message=f"Agent session started: {task_description[:100]}",
                 log_metadata=json.dumps(
                     {"session_key": session_key, "task_description": task_description}
                 ),
@@ -53,18 +53,28 @@ async def start_openclaw_session_payload(
             "status": "started",
             "session_key": session_key,
             "session_id": session_id,
-            "message": f"OpenClaw session created for task: {task_description[:50]}...",
+            "message": f"Agent session created for task: {task_description[:50]}...",
         }
     except Exception as exc:
         db.add(
             LogEntry(
                 session_id=session_id,
                 level="ERROR",
-                message=f"Failed to start OpenClaw session: {str(exc)}",
+                message=f"Failed to start agent session: {str(exc)}",
             )
         )
         db.commit()
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+async def start_openclaw_session_payload(
+    db: Session, session_id: int, *, task_description: str
+) -> Dict[str, Any]:
+    """Backward-compatible alias for callers still using the old name."""
+
+    return await start_session_payload(
+        db, session_id, task_description=task_description
+    )
 
 
 async def execute_task_payload(
@@ -145,7 +155,7 @@ async def execute_task_payload(
             if selected_task and selected_task.description
             else session.description or session.name
         )
-        await openclaw_service.create_openclaw_session(task_description)
+        await openclaw_service.create_session(task_description)
 
         orchestration_state = None
         if selected_task and task_workspace:

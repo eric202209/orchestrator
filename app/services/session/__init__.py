@@ -6,6 +6,7 @@ from .session_execution_service import (
     get_session_statistics_payload,
     get_tool_execution_history_payload,
     start_openclaw_session_payload,
+    start_session_payload,
     track_tool_execution_payload,
 )
 from .session_inspection_service import (
@@ -53,6 +54,7 @@ __all__ = [
     "get_session_statistics_payload",
     "get_tool_execution_history_payload",
     "start_openclaw_session_payload",
+    "start_session_payload",
     "track_tool_execution_payload",
     "check_session_overwrites_payload",
     "cleanup_orphaned_checkpoints_payload",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from typing import Any, Dict
 
 from fastapi import HTTPException
@@ -107,7 +107,7 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
             task_description[:50],
             session_instance_id,
         )
-        session_key = await openclaw_service.create_openclaw_session(task_description)
+        session_key = await openclaw_service.create_session(task_description)
 
         set_session_alert(db, session, None, None)
 
@@ -339,7 +339,7 @@ async def stop_session_lifecycle(
         try:
             checkpoint_service = CheckpointService(db)
             latest_checkpoint = checkpoint_service.load_checkpoint(session_id)
-            checkpoint_name = f"stopped_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+            checkpoint_name = f"stopped_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
             checkpoint_service.save_checkpoint(
                 session_id=session_id,
                 checkpoint_name=checkpoint_name,

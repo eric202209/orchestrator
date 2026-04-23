@@ -191,6 +191,7 @@ def assess_step_execution(
     step_result: Dict[str, Any],
     step_started_at: datetime,
     validation_profile: str,
+    validation_severity: str = "standard",
     relaxed_mode: bool = False,
 ) -> StepExecutionAssessment:
     step_output = str(step_result.get("output", ""))
@@ -267,6 +268,7 @@ def assess_step_execution(
             missing_expected_files=missing_files,
             tool_failures=tool_failures,
             validation_profile=validation_profile,
+            validation_severity=validation_severity,
             relaxed_mode=relaxed_mode,
         )
         if not validation_verdict.accepted:

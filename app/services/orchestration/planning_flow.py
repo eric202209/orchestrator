@@ -343,6 +343,7 @@ def execute_planning_phase(
                 project_dir=ctx.orchestration_state.project_dir,
                 title=ctx.task.title if ctx.task else None,
                 description=ctx.task.description if ctx.task else None,
+                validation_severity=ctx.validation_severity,
             )
             record_validation_verdict(
                 ctx.db,

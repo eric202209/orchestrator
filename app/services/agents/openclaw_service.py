@@ -239,7 +239,7 @@ class OpenClawSessionService:
             )
             return None
 
-    async def create_openclaw_session(
+    async def create_session(
         self, task_description: str, context: Optional[Dict[str, Any]] = None
     ) -> str:
         """
@@ -281,6 +281,13 @@ class OpenClawSessionService:
             error_msg = f"Failed to create OpenClaw session: {str(e)}"
             self._log_entry("ERROR", error_msg)
             raise OpenClawSessionError(error_msg)
+
+    async def create_openclaw_session(
+        self, task_description: str, context: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """Backward-compatible alias for older callers."""
+
+        return await self.create_session(task_description, context=context)
 
     async def execute_task(
         self, prompt: str, timeout_seconds: int = 300, log_callback: callable = None
@@ -1661,7 +1668,7 @@ class OpenClawSessionService:
         Returns:
             OpenClaw session key
         """
-        return await self.create_openclaw_session(task_description)
+        return await self.create_session(task_description)
 
     async def stop_session(self) -> None:
         """
@@ -1827,7 +1834,7 @@ class OpenClawSessionService:
             }
 
             # Create OpenClaw session
-            session_key = await self.create_openclaw_session(
+            session_key = await self.create_session(
                 task_description=task_description, context=resume_context
             )
 

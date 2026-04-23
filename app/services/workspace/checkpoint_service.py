@@ -13,7 +13,7 @@ import logging
 import os
 import re
 from typing import Optional, Dict, Any, List
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from sqlalchemy.orm import Session
 from app.models import LogEntry, Session as SessionModel
@@ -307,7 +307,7 @@ class CheckpointService:
             checkpoint_data = {
                 "session_id": session_id,
                 "checkpoint_name": checkpoint_name,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(UTC).isoformat(),
                 "context": context_data or {},
                 "orchestration_state": orchestration_state or {},
                 "current_step_index": current_step_index,

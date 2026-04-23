@@ -17,6 +17,7 @@ export default function SettingsPage() {
   const [mobileApiKey, setMobileApiKey] = useState('');
   const [agentBackend, setAgentBackend] = useState('');
   const [agentModelFamily, setAgentModelFamily] = useState('');
+  const [adaptationProfile, setAdaptationProfile] = useState('');
   const [policyProfile, setPolicyProfile] = useState('');
   const [revealedMobileSecret, setRevealedMobileSecret] = useState<string | null>(null);
   const [currentPassword, setCurrentPassword] = useState('');
@@ -33,6 +34,7 @@ export default function SettingsPage() {
       setWorkspaceRoot(data.system.workspace_root || '');
       setAgentBackend(data.system.agent_backend || '');
       setAgentModelFamily(data.system.agent_model_family || '');
+      setAdaptationProfile(data.system.agent_adaptation_profile || '');
       setPolicyProfile(data.system.orchestration_policy_profile || '');
       setMobileApiKey('');
     } catch (err) {
@@ -52,6 +54,7 @@ export default function SettingsPage() {
     setWorkspaceRoot(data.system.workspace_root || '');
     setAgentBackend(data.system.agent_backend || '');
     setAgentModelFamily(data.system.agent_model_family || '');
+    setAdaptationProfile(data.system.agent_adaptation_profile || '');
     setPolicyProfile(data.system.orchestration_policy_profile || '');
     setMobileApiKey('');
   };
@@ -82,6 +85,7 @@ export default function SettingsPage() {
         rotate_mobile_api_key: rotateMobileKey,
         agent_backend: agentBackend || undefined,
         agent_model_family: agentModelFamily.trim() || undefined,
+        agent_adaptation_profile: adaptationProfile || undefined,
         orchestration_policy_profile: policyProfile || undefined,
       });
       refreshFromResponse(response.data);
@@ -135,6 +139,14 @@ export default function SettingsPage() {
   if (!settings) {
     return <div className="text-red-400">{error || 'Settings unavailable'}</div>;
   }
+
+  const selectedBackendDescriptor =
+    settings.system.supported_backends.find((backend) => backend.name === agentBackend) ||
+    settings.system.supported_backends[0];
+  const activeBackendCapabilities =
+    selectedBackendDescriptor?.capabilities || settings.system.backend_capabilities;
+  const activeBackendHealth =
+    selectedBackendDescriptor?.health || settings.system.backend_health;
 
   return (
     <div className="space-y-6">
@@ -203,6 +215,7 @@ export default function SettingsPage() {
                   );
                   if (selected) {
                     setAgentModelFamily(selected.default_model_family);
+                    setAdaptationProfile(selected.config.adaptation_profiles[0] || '');
                   }
                 }}
                 className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white"
@@ -224,6 +237,31 @@ export default function SettingsPage() {
             </div>
           </div>
           <div>
+            <label className="block text-sm text-slate-400 mb-2">Adaptation Profile</label>
+            <select
+              value={adaptationProfile}
+              onChange={(e) => setAdaptationProfile(e.target.value)}
+              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white"
+            >
+              {settings.system.available_adaptation_profiles
+                .filter((profile) => {
+                  const backend = selectedBackendDescriptor;
+                  if (!backend) {
+                    return true;
+                  }
+                  return backend.config.adaptation_profiles.includes(profile.name);
+                })
+                .map((profile) => (
+                  <option key={profile.name} value={profile.name}>
+                    {profile.display_name}
+                  </option>
+                ))}
+            </select>
+            <p className="mt-2 text-xs text-slate-500">
+              {settings.system.available_adaptation_profiles.find((profile) => profile.name === adaptationProfile)?.description}
+            </p>
+          </div>
+          <div>
             <label className="block text-sm text-slate-400 mb-2">Policy Profile</label>
             <select
               value={policyProfile}
@@ -239,15 +277,34 @@ export default function SettingsPage() {
             <p className="mt-2 text-xs text-slate-500">
               {settings.system.available_policy_profiles.find((profile) => profile.name === policyProfile)?.description}
             </p>
+            <p className="mt-2 text-xs text-slate-400">
+              {settings.system.available_policy_profiles.find((profile) => profile.name === policyProfile)?.effects?.restore_behavior_label}
+            </p>
           </div>
           <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-4">
             <div className="text-sm text-slate-400">Backend Capabilities</div>
             <div className="mt-2 text-xs text-slate-300">
-              {Object.entries(settings.system.backend_capabilities)
+              {Object.entries(activeBackendCapabilities)
                 .filter(([, value]) => value === true)
                 .map(([key]) => key.replace(/^supports_/, '').replace(/_/g, ' '))
                 .join(' • ') || 'No capabilities reported'}
             </div>
+          </div>
+          <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-4">
+            <div className="text-sm text-slate-400">Backend Readiness</div>
+            <div className="mt-2 text-sm text-white">
+              {activeBackendHealth.ready ? 'Ready' : 'Unavailable'} ({activeBackendHealth.status})
+            </div>
+            {activeBackendHealth.errors.length > 0 && (
+              <div className="mt-2 text-xs text-red-300">
+                {activeBackendHealth.errors.join(' ')}
+              </div>
+            )}
+            {activeBackendHealth.warnings.length > 0 && (
+              <div className="mt-2 text-xs text-amber-300">
+                {activeBackendHealth.warnings.join(' ')}
+              </div>
+            )}
           </div>
         </div>
         <button onClick={() => handleSystemSave(false)} disabled={savingSystem} className="mt-4 inline-flex items-center gap-2 rounded-lg bg-primary-500 px-4 py-2 text-white hover:bg-primary-600 disabled:opacity-50">

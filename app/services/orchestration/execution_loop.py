@@ -285,6 +285,7 @@ def execute_step_loop(
             step_result=step_result,
             step_started_at=step_started_at,
             validation_profile=validation_profile,
+            validation_severity=ctx.validation_severity,
             relaxed_mode=orchestration_state.relaxed_mode,
         )
         step_output = assessment.step_output
@@ -526,7 +527,11 @@ def execute_step_loop(
             write_project_state_snapshot_fn(db, project, task, session_id)
             return {"status": "failed", "reason": "manual_review_required"}
 
-        if current_attempt >= max_attempts and not orchestration_state.relaxed_mode:
+        if (
+            current_attempt >= max_attempts
+            and not orchestration_state.relaxed_mode
+            and ctx.policy_profile_name != "strict"
+        ):
             orchestration_state.relaxed_mode = True
             orchestration_state.debug_attempts.append(
                 {
@@ -699,6 +704,7 @@ def execute_step_loop(
                     project_dir=orchestration_state.project_dir,
                     title=task.title if task else None,
                     description=task.description if task else None,
+                    validation_severity=ctx.validation_severity,
                 )
                 record_validation_verdict(
                     db,

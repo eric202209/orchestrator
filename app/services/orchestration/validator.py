@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from sqlalchemy.orm import Session
 
 from app.models import TaskCheckpoint
+from .policy import apply_validation_policy
 from .types import ValidationVerdict
 
 
@@ -35,19 +36,91 @@ class ValidatorService:
     """Deterministic plan and completion validation."""
 
     @staticmethod
+    def _ordered_reasons(
+        *,
+        warnings: List[str],
+        repairable: List[str],
+        rejected: List[str],
+    ) -> List[str]:
+        """Return reasons in severity-first order for stable operator feedback."""
+
+        return rejected + repairable + warnings
+
+    @staticmethod
     def _select_status(
         *,
         warnings: List[str],
         repairable: List[str],
         rejected: List[str],
+        severity: str = "standard",
+        stage: str = "",
     ) -> str:
         if rejected:
-            return "rejected"
-        if repairable:
-            return "repair_required"
-        if warnings:
-            return "warning"
-        return "accepted"
+            status = "rejected"
+        elif repairable:
+            status = "repair_required"
+        elif warnings:
+            status = "warning"
+        else:
+            status = "accepted"
+        return apply_validation_policy(status, severity=severity, stage=stage)
+
+    @staticmethod
+    def validate_plan_schema(plan: Any) -> Dict[str, Any]:
+        """Validate the structural schema of a plan independently of heuristics."""
+
+        errors: List[str] = []
+        details: Dict[str, Any] = {}
+        if not isinstance(plan, list):
+            return {
+                "valid": False,
+                "errors": ["Plan payload must be a list of step objects"],
+                "details": {"received_type": type(plan).__name__},
+            }
+
+        non_dict_steps: List[int] = []
+        invalid_step_numbers: List[int] = []
+        invalid_descriptions: List[int] = []
+        invalid_commands: List[int] = []
+        invalid_expected_files: List[int] = []
+
+        for index, step in enumerate(plan, start=1):
+            if not isinstance(step, dict):
+                non_dict_steps.append(index)
+                continue
+            if not isinstance(step.get("step_number"), int):
+                invalid_step_numbers.append(index)
+            if not isinstance(step.get("description", ""), str):
+                invalid_descriptions.append(index)
+            commands = step.get("commands", [])
+            if not isinstance(commands, list) or any(
+                not isinstance(command, str) for command in commands
+            ):
+                invalid_commands.append(index)
+            expected_files = step.get("expected_files", [])
+            if expected_files is not None and (
+                not isinstance(expected_files, list)
+                or any(not isinstance(path, str) for path in expected_files)
+            ):
+                invalid_expected_files.append(index)
+
+        if non_dict_steps:
+            errors.append("Plan contains non-object steps")
+            details["non_dict_steps"] = non_dict_steps
+        if invalid_step_numbers:
+            errors.append("Plan steps must define integer step_number values")
+            details["invalid_step_number_steps"] = invalid_step_numbers
+        if invalid_descriptions:
+            errors.append("Plan step descriptions must be strings")
+            details["invalid_description_steps"] = invalid_descriptions
+        if invalid_commands:
+            errors.append("Plan step commands must be arrays of strings")
+            details["invalid_commands_steps"] = invalid_commands
+        if invalid_expected_files:
+            errors.append("Plan expected_files must be arrays of strings")
+            details["invalid_expected_files_steps"] = invalid_expected_files
+
+        return {"valid": not errors, "errors": errors, "details": details}
 
     @staticmethod
     def infer_validation_profile(
@@ -394,6 +467,7 @@ class ValidatorService:
         project_dir: Optional[Path] = None,
         title: Optional[str] = None,
         description: Optional[str] = None,
+        validation_severity: str = "standard",
     ) -> ValidationVerdict:
         profile = cls.infer_validation_profile(
             task_prompt, execution_profile, title=title, description=description
@@ -402,6 +476,11 @@ class ValidatorService:
         repairable: List[str] = []
         rejected: List[str] = []
         details: Dict[str, Any] = {"plan_length": len(plan)}
+        schema_validation = cls.validate_plan_schema(plan)
+        details["plan_schema"] = schema_validation
+        if not schema_validation["valid"]:
+            rejected.extend(schema_validation["errors"])
+            details.update(schema_validation["details"])
 
         if cls._plan_contains_brittle_commands(plan, output_text):
             repairable.append(
@@ -487,10 +566,16 @@ class ValidatorService:
         return ValidationVerdict(
             stage="plan",
             status=cls._select_status(
-                warnings=warnings, repairable=repairable, rejected=rejected
+                warnings=warnings,
+                repairable=repairable,
+                rejected=rejected,
+                severity=validation_severity,
+                stage="plan",
             ),
             profile=profile,
-            reasons=warnings + repairable + rejected,
+            reasons=cls._ordered_reasons(
+                warnings=warnings, repairable=repairable, rejected=rejected
+            ),
             details=details,
         )
 
@@ -672,6 +757,7 @@ class ValidatorService:
         tool_failures: List[str],
         validation_profile: str,
         relaxed_mode: bool = False,
+        validation_severity: str = "standard",
     ) -> ValidationVerdict:
         warnings: List[str] = []
         repairable: List[str] = []
@@ -717,10 +803,16 @@ class ValidatorService:
         return ValidationVerdict(
             stage="step_completion",
             status=cls._select_status(
-                warnings=warnings, repairable=repairable, rejected=rejected
+                warnings=warnings,
+                repairable=repairable,
+                rejected=rejected,
+                severity=validation_severity,
+                stage="step_completion",
             ),
             profile=validation_profile,
-            reasons=warnings + repairable + rejected,
+            reasons=cls._ordered_reasons(
+                warnings=warnings, repairable=repairable, rejected=rejected
+            ),
             details=details | {"step_output_preview": step_output[:240]},
         )
 
@@ -736,6 +828,8 @@ class ValidatorService:
         title: Optional[str] = None,
         description: Optional[str] = None,
         relaxed_mode: bool = False,
+        completion_evidence: Optional[Dict[str, Any]] = None,
+        validation_severity: str = "standard",
     ) -> ValidationVerdict:
         profile = cls.infer_validation_profile(
             task_prompt, execution_profile, title=title, description=description
@@ -760,6 +854,23 @@ class ValidatorService:
                 str(path.relative_to(project_dir)) for path in candidate_files[:20]
             ],
         }
+        completion_evidence = completion_evidence or {}
+        contract = {
+            "execution_profile": execution_profile,
+            "validation_profile": profile,
+            "summary_generated": bool(completion_evidence.get("summary_generated")),
+            "execution_results_count": int(
+                completion_evidence.get("execution_results_count") or 0
+            ),
+            "requires_source_outputs": profile in {"implementation", "integration"},
+        }
+        details["completion_contract"] = contract
+        if not contract["summary_generated"]:
+            rejected.append("Completion contract requires a generated task summary")
+        if contract["execution_results_count"] <= 0:
+            rejected.append(
+                "Completion contract requires at least one recorded execution result"
+            )
 
         if missing_core:
             repairable.append(
@@ -840,10 +951,16 @@ class ValidatorService:
         return ValidationVerdict(
             stage="task_completion",
             status=cls._select_status(
-                warnings=warnings, repairable=repairable, rejected=rejected
+                warnings=warnings,
+                repairable=repairable,
+                rejected=rejected,
+                severity=validation_severity,
+                stage="task_completion",
             ),
             profile=profile,
-            reasons=warnings + repairable + rejected,
+            reasons=cls._ordered_reasons(
+                warnings=warnings, repairable=repairable, rejected=rejected
+            ),
             details=details,
         )
 
@@ -858,6 +975,7 @@ class ValidatorService:
         consistency_issues: Optional[List[str]] = None,
         consistency_details: Optional[Dict[str, Any]] = None,
         relaxed_mode: bool = False,
+        validation_severity: str = "standard",
     ) -> ValidationVerdict:
         warnings: List[str] = []
         repairable: List[str] = []
@@ -892,10 +1010,16 @@ class ValidatorService:
         return ValidationVerdict(
             stage="baseline_publish",
             status=ValidatorService._select_status(
-                warnings=warnings, repairable=repairable, rejected=rejected
+                warnings=warnings,
+                repairable=repairable,
+                rejected=rejected,
+                severity=validation_severity,
+                stage="baseline_publish",
             ),
             profile=validation_profile,
-            reasons=warnings + repairable + rejected,
+            reasons=ValidatorService._ordered_reasons(
+                warnings=warnings, repairable=repairable, rejected=rejected
+            ),
             details=details,
         )
 

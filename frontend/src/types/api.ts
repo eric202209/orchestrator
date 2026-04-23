@@ -259,6 +259,23 @@ export interface CheckpointInspection {
   latest_validation?: Record<string, unknown> | null;
   latest_plan_validation?: Record<string, unknown> | null;
   latest_completion_validation?: Record<string, unknown> | null;
+  runtime_metadata?: {
+    backend: string;
+    model_family: string;
+    policy_profile: string;
+    adaptation_profile: string;
+    derived_from_current_settings: boolean;
+  };
+  validation_verdicts?: {
+    latest_status?: string | null;
+    plan_status?: string | null;
+    completion_status?: string | null;
+  };
+  replay_source?: {
+    requested_checkpoint_name?: string | null;
+    resolved_checkpoint_name?: string | null;
+    mode: string;
+  };
   validation_history: Record<string, unknown>[];
   plan_preview: Array<Record<string, unknown>>;
   step_results_preview: Array<Record<string, unknown>>;
@@ -269,8 +286,24 @@ export interface BackendDescriptor {
   display_name: string;
   implementation: string;
   default_model_family: string;
+  implemented: boolean;
   available: boolean;
   capabilities: Record<string, boolean | number | string | null>;
+  config: {
+    auth_mode: string;
+    transport_mode: string;
+    required_env_vars: string[];
+    supported_prompt_format: string;
+    streaming_mode: string;
+    adaptation_profiles: string[];
+  };
+  health: {
+    available: boolean;
+    ready: boolean;
+    status: string;
+    errors: string[];
+    warnings: string[];
+  };
 }
 
 export interface PolicyProfile {
@@ -280,6 +313,14 @@ export interface PolicyProfile {
   validation_severity: string;
   completion_repair_budget: number;
   workspace_restore_mode: string;
+  effects?: {
+    planning_mode: string;
+    validation_severity: string;
+    completion_repair_budget: number;
+    retry_mode: string;
+    workspace_restore_mode: string;
+    restore_behavior_label: string;
+  };
 }
 
 export interface AppSettings {
@@ -296,10 +337,26 @@ export interface AppSettings {
     openclaw_gateway_url: string;
     agent_backend: string;
     agent_model_family: string;
+    agent_adaptation_profile: string;
     backend_capabilities: Record<string, boolean | number | string | null>;
+    backend_health: {
+      available: boolean;
+      ready: boolean;
+      status: string;
+      errors: string[];
+      warnings: string[];
+    };
     supported_backends: BackendDescriptor[];
     orchestration_policy_profile: string;
     available_policy_profiles: PolicyProfile[];
+    available_adaptation_profiles: Array<{
+      name: string;
+      display_name: string;
+      backend: string;
+      model_family: string;
+      prompt_format: string;
+      description: string;
+    }>;
   };
 }
 

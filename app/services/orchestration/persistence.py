@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -36,7 +36,7 @@ def append_orchestration_event(
     details: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     payload = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "event_type": event_type,
         "session_id": session_id,
         "task_id": task_id,
@@ -58,7 +58,7 @@ def set_session_alert(
         return
     session.last_alert_level = level
     session.last_alert_message = message
-    session.last_alert_at = datetime.utcnow() if message else None
+    session.last_alert_at = datetime.now(UTC) if message else None
 
 
 def serialize_step_result(step_result: StepResult) -> Dict[str, Any]:

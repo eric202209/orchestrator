@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Project, Task, TaskStatus
 from app.services.workspace.project_isolation_service import (
+    _slugify_workspace_name,
     resolve_project_workspace_path,
 )
 
@@ -60,6 +61,16 @@ class TaskService:
         return tasks
 
     def get_project_root(self, project: Project) -> Path:
+        raw_workspace_path = str(project.workspace_path or "").strip()
+        if raw_workspace_path.startswith("/"):
+            explicit_path = Path(raw_workspace_path).expanduser().resolve()
+            project_slug = _slugify_workspace_name(project.name or "")
+            if explicit_path.name == project_slug:
+                return explicit_path
+            nested_candidate = explicit_path / project_slug
+            if nested_candidate.exists():
+                return nested_candidate.resolve()
+            return explicit_path
         return resolve_project_workspace_path(project.workspace_path, project.name)
 
     def analyze_workspace_consistency(
