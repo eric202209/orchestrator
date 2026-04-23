@@ -150,6 +150,11 @@ class OpenClawSessionService:
 
         return self._parse_openclaw_response(proc)
 
+    def reports_context_overflow(self, result: Optional[Dict[str, Any]]) -> bool:
+        """Detect overflow errors for the local OpenClaw CLI/runtime."""
+
+        return self._is_context_overflow_result(result)
+
     def _resolve_openclaw_command(self) -> List[str]:
         """Resolve the OpenClaw CLI command with fallback locations."""
         configured_args = shlex.split((settings.OPENCLAW_CLI_ARGS or "").strip())

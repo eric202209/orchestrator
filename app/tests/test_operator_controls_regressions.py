@@ -67,6 +67,18 @@ def test_settings_reject_mismatched_backend_and_adaptation_profile(
     assert "not supported by backend" in response.json()["detail"]
 
 
+def test_settings_reject_unimplemented_backend_selection(authenticated_client):
+    response = authenticated_client.patch(
+        "/api/v1/settings/system",
+        json={
+            "agent_backend": "openai_responses_api",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "no runtime adapter is implemented yet" in response.json()["detail"]
+
+
 def test_checkpoint_inspection_returns_validation_and_plan_preview(
     authenticated_client, db_session
 ):

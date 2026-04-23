@@ -19,7 +19,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Any, Optional, List
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from app.services.workspace.system_settings import get_effective_workspace_root
 
@@ -101,7 +101,7 @@ class OrchestrationState:
     completion_repair_attempts: int = 0
     status: OrchestrationStatus = OrchestrationStatus.PLANNING
     abort_reason: str = ""
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     # Optional: Override workspace path (for database-configured paths)
     _workspace_path_override: Optional[str] = None

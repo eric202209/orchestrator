@@ -1,8 +1,8 @@
-"""Factory and protocol for orchestration runtime backends."""
+"""Factory helpers for orchestration runtime backends."""
 
 from __future__ import annotations
 
-from typing import Any, Optional, Protocol
+from typing import Any, Callable, Optional
 
 from sqlalchemy.orm import Session
 
@@ -11,50 +11,70 @@ from app.services.agents.agent_backends import (
     UnsupportedAgentBackendError,
     require_backend_descriptor,
 )
-from app.services.agents.openclaw_service import OpenClawSessionService
+from app.services.agents.interfaces import AgentRuntime
+from app.services.agents.providers.openai_adapter import (
+    create_runtime as create_openai_runtime,
+)
 from app.services.agents.providers.openclaw_adapter import (
     create_runtime as create_openclaw_runtime,
 )
+from app.services.agents.providers.remote_openclaw_adapter import (
+    create_runtime as create_remote_openclaw_runtime,
+)
 from app.services.workspace.system_settings import get_effective_agent_backend
 
+RuntimeFactory = Callable[
+    [Session, Optional[int], Optional[int], Optional[bool]], AgentRuntime
+]
 
-class AgentRuntime(Protocol):
-    """Minimal runtime contract shared by orchestration entrypoints."""
 
-    backend_descriptor: Any
+def _create_openclaw_runtime(
+    db: Session,
+    session_id: Optional[int],
+    task_id: Optional[int],
+    use_demo_mode: Optional[bool],
+) -> AgentRuntime:
+    return create_openclaw_runtime(
+        db,
+        session_id,
+        task_id,
+        use_demo_mode=use_demo_mode,
+    )
 
-    async def create_session(
-        self, task_description: str, context: Optional[dict[str, Any]] = None
-    ) -> str: ...
 
-    async def execute_task(
-        self, prompt: str, timeout_seconds: int = 300, log_callback: Any = None
-    ) -> dict[str, Any]: ...
+def _create_remote_openclaw_runtime(
+    db: Session,
+    session_id: Optional[int],
+    task_id: Optional[int],
+    use_demo_mode: Optional[bool],
+) -> AgentRuntime:
+    return create_remote_openclaw_runtime(
+        db,
+        session_id,
+        task_id,
+        use_demo_mode=use_demo_mode,
+    )
 
-    async def execute_task_with_orchestration(
-        self, prompt: str, timeout_seconds: int = 300, orchestration_state: Any = None
-    ) -> dict[str, Any]: ...
 
-    async def pause_session(self) -> None: ...
+def _create_openai_runtime(
+    db: Session,
+    session_id: Optional[int],
+    task_id: Optional[int],
+    use_demo_mode: Optional[bool],
+) -> AgentRuntime:
+    return create_openai_runtime(
+        db,
+        session_id,
+        task_id,
+        use_demo_mode=use_demo_mode,
+    )
 
-    async def resume_session(self, checkpoint_name: Optional[str] = None) -> str: ...
 
-    async def stop_session(self) -> None: ...
-
-    async def get_session_context(self) -> dict[str, Any]: ...
-
-    def get_backend_metadata(self) -> dict[str, Any]: ...
-
-    def build_cli_agent_command(
-        self,
-        prompt: str,
-        *,
-        source_brain: str = "local",
-        timeout_seconds: int = 180,
-        session_prefix: str = "planning",
-    ) -> list[str]: ...
-
-    def parse_cli_response(self, proc: Any) -> dict[str, Any]: ...
+_RUNTIME_FACTORIES: dict[str, RuntimeFactory] = {
+    "local_openclaw": _create_openclaw_runtime,
+    "remote_openclaw_gateway": _create_remote_openclaw_runtime,
+    "openai_responses_api": _create_openai_runtime,
+}
 
 
 def create_agent_runtime(
@@ -70,13 +90,9 @@ def create_agent_runtime(
         settings.ORCHESTRATOR_AGENT_BACKEND, db=db
     ).strip()
     descriptor = require_backend_descriptor(backend_name)
-    if descriptor.name == "local_openclaw":
-        return create_openclaw_runtime(
-            db,
-            session_id,
-            task_id,
-            use_demo_mode=use_demo_mode,
-        )
+    runtime_factory = _RUNTIME_FACTORIES.get(descriptor.name)
+    if runtime_factory is not None:
+        return runtime_factory(db, session_id, task_id, use_demo_mode)
 
     raise UnsupportedAgentBackendError(
         f"Backend '{descriptor.name}' does not have a registered runtime adapter."
@@ -117,7 +133,14 @@ def parse_runtime_cli_response(
     return runtime.parse_cli_response(proc)
 
 
-def runtime_reports_context_overflow(result: Optional[dict[str, Any]]) -> bool:
+def runtime_reports_context_overflow(
+    db: Session,
+    result: Optional[dict[str, Any]],
+    *,
+    session_id: Optional[int] = None,
+    task_id: Optional[int] = None,
+) -> bool:
     """Backend-neutral context overflow check for planning retries."""
 
-    return OpenClawSessionService._is_context_overflow_result(result)
+    runtime = create_agent_runtime(db, session_id=session_id, task_id=task_id)
+    return runtime.reports_context_overflow(result)

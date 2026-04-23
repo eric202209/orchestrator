@@ -62,6 +62,7 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 Orchestrator API starting up...")
     logger.info(f"Version: {settings.VERSION}")
     logger.info(f"Port: {settings.PORT}")
+    logger.info("Celery task queue initialized")
     logger.info("=" * 50)
 
     yield
@@ -115,13 +116,6 @@ async def general_exception_handler(request: Request, exc: Exception):
 
 # Include routers (API_V1_STR = "/api/v1")
 app.include_router(api_router, prefix=settings.API_V1_STR, tags=["API"])
-
-
-# Initialize Celery Beat periodic tasks
-@app.on_event("startup")
-async def startup_celery():
-    """Setup Celery Beat when app starts"""
-    logger.info("Celery task queue initialized")
 
 
 @app.get("/")

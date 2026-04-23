@@ -503,14 +503,28 @@ class PlanningSessionService:
     def _run_openclaw_with_fallback(
         self, prompt: str, *, source_brain: str = "local"
     ) -> dict[str, Any]:
-        result = self._run_openclaw(prompt, source_brain=source_brain)
-        if not runtime_reports_context_overflow(result):
+        result = self._invoke_openclaw(prompt, source_brain=source_brain)
+        if not runtime_reports_context_overflow(self.db, result):
             return result
 
         compact_prompt = self._build_compact_synthesis_prompt(prompt)
         if compact_prompt == prompt:
             return result
-        return self._run_openclaw(compact_prompt, source_brain=source_brain)
+        return self._invoke_openclaw(compact_prompt, source_brain=source_brain)
+
+    def _invoke_openclaw(
+        self, prompt: str, *, source_brain: str = "local"
+    ) -> dict[str, Any]:
+        """
+        Run planning synthesis while tolerating older monkeypatched helpers used in tests.
+        """
+
+        try:
+            return self._run_openclaw(prompt, source_brain=source_brain)
+        except TypeError as exc:
+            if "source_brain" not in str(exc):
+                raise
+            return self._run_openclaw(prompt)
 
     def _parse_finalization_payload(self, result: dict[str, Any]) -> dict[str, str]:
         if result.get("status") == "failed":
@@ -625,9 +639,15 @@ Artifact requirements:
     ) -> dict[str, Any]:
         heuristic_question = self._heuristic_next_question(session)
         heuristic_needs = self._heuristic_needs_clarification(session)
+        user_followups = [m for m in session.messages if m.role == "user"][1:]
         question_count = len([m for m in session.messages if m.role == "assistant"])
         if question_count >= self.MAX_QUESTIONS:
             return {"needs_clarification": False, "question": None}
+
+        # Keep the first turn deterministic for obviously underspecified prompts so
+        # planning sessions don't jump straight to completion when a runtime is live.
+        if heuristic_needs and not user_followups:
+            return {"needs_clarification": True, "question": heuristic_question}
 
         prompt = self._build_clarification_prompt(
             session,

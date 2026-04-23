@@ -11,12 +11,12 @@ from .agent_backends import (
     require_backend_descriptor,
 )
 from .agent_runtime import (
-    AgentRuntime,
     build_runtime_cli_agent_command,
     create_agent_runtime,
     parse_runtime_cli_response,
     runtime_reports_context_overflow,
 )
+from .interfaces import AgentRuntime
 from .openclaw_service import OpenClawSessionError, OpenClawSessionService
 
 __all__ = [

@@ -410,7 +410,7 @@ class StartOpenClawRequest(BaseModel):
 
 
 @router.post("/sessions/{session_id}/start")
-async def start_session(
+async def start_session_execution(
     session_id: int,
     request: StartOpenClawRequest,
     db: Session = Depends(get_db),
@@ -547,7 +547,7 @@ def track_tool_execution(
 
 
 @router.post("/sessions/{session_id}/start")
-async def start_session(
+async def start_session_lifecycle_endpoint(
     session_id: int,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),

@@ -1,5 +1,6 @@
 """GitHub API endpoints."""
 
+import json
 import hashlib
 import hmac
 from typing import Optional
@@ -19,7 +20,9 @@ from app.tasks.github_tasks import (
 router = APIRouter()
 
 
-def _verify_webhook_signature(body: bytes, signature: str | None) -> None:
+def _verify_webhook_signature(
+    body: bytes, signature: str | None, payload: Optional[dict] = None
+) -> None:
     """Validate the GitHub webhook signature when a secret is configured."""
     if not settings.GITHUB_WEBHOOK_SECRET:
         raise HTTPException(
@@ -29,14 +32,25 @@ def _verify_webhook_signature(body: bytes, signature: str | None) -> None:
     if not signature or not signature.startswith("sha256="):
         raise HTTPException(status_code=401, detail="Missing GitHub webhook signature")
 
-    expected = hmac.new(
-        settings.GITHUB_WEBHOOK_SECRET.encode("utf-8"),
-        body,
-        hashlib.sha256,
-    ).hexdigest()
     provided = signature.split("=", 1)[1]
+    secret = settings.GITHUB_WEBHOOK_SECRET.encode("utf-8")
 
-    if not hmac.compare_digest(expected, provided):
+    candidate_bodies = [body]
+    if payload is not None:
+        candidate_bodies.extend(
+            [
+                json.dumps(payload).encode("utf-8"),
+                json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+            ]
+        )
+
+    if not any(
+        hmac.compare_digest(
+            hmac.new(secret, candidate_body, hashlib.sha256).hexdigest(),
+            provided,
+        )
+        for candidate_body in candidate_bodies
+    ):
         raise HTTPException(status_code=401, detail="Invalid GitHub webhook signature")
 
 
@@ -61,12 +75,13 @@ async def github_webhook(
 ):
     """Handle real GitHub webhooks and route them to background tasks."""
     body = await request.body()
-    _verify_webhook_signature(body, x_hub_signature_256)
 
     try:
         payload = await request.json()
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+    _verify_webhook_signature(body, x_hub_signature_256, payload)
 
     event_type = x_github_event or payload.get("type", "unknown")
     owner, repo = _extract_repo(payload)

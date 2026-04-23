@@ -28,6 +28,20 @@ def test_create_agent_runtime_rejects_unknown_backend(db_session, monkeypatch):
     raise AssertionError("Expected UnsupportedAgentBackendError")
 
 
+def test_create_agent_runtime_rejects_registered_unimplemented_backend(
+    db_session, monkeypatch
+):
+    monkeypatch.setattr(settings, "ORCHESTRATOR_AGENT_BACKEND", "openai_responses_api")
+
+    try:
+        create_agent_runtime(db_session, session_id=None)
+    except UnsupportedAgentBackendError as exc:
+        assert "registered but not implemented yet" in str(exc)
+        return
+
+    raise AssertionError("Expected UnsupportedAgentBackendError")
+
+
 def test_create_agent_runtime_uses_db_backend_override(db_session, monkeypatch):
     monkeypatch.setattr(settings, "ORCHESTRATOR_AGENT_BACKEND", "unknown_backend")
     set_setting_value(db_session, AGENT_BACKEND_KEY, "local_openclaw")
@@ -57,6 +71,14 @@ def test_build_runtime_cli_agent_command_uses_active_runtime(db_session, monkeyp
     assert "90" in command
 
 
-def test_runtime_reports_context_overflow_matches_openclaw_detector():
-    assert runtime_reports_context_overflow({"error": "Context window exceeded"})
-    assert not runtime_reports_context_overflow({"error": "Connection refused"})
+def test_runtime_reports_context_overflow_matches_openclaw_detector(db_session):
+    from app.services.agents.openclaw_service import OpenClawSessionService
+
+    assert runtime_reports_context_overflow(
+        db_session, {"error": "Context window exceeded"}
+    ) == OpenClawSessionService._is_context_overflow_result(
+        {"error": "Context window exceeded"}
+    )
+    assert not runtime_reports_context_overflow(
+        db_session, {"error": "Connection refused"}
+    )

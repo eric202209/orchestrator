@@ -3,7 +3,7 @@
 import logging
 import json
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request
@@ -64,7 +64,7 @@ def _prepare_task_for_fresh_execution(
     """Reset task execution state before a fresh run."""
     task.status = TaskStatus.RUNNING
     task.error_message = None
-    task.started_at = datetime.utcnow()
+    task.started_at = datetime.now(UTC)
     task.completed_at = None
     task.current_step = 0
     if clear_saved_plan:
@@ -126,7 +126,7 @@ def _queue_task_retry(
             status_code=400, detail="Task is missing a description or title to execute"
         )
 
-    started_at = datetime.utcnow()
+    started_at = datetime.now(UTC)
     new_session = SessionModel(
         name=_ensure_unique_session_name(
             db,

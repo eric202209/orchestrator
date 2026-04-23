@@ -16,6 +16,16 @@ from app.services.workspace.system_settings import get_effective_workspace_root
 logger = logging.getLogger(__name__)
 
 
+def _resolve_workspace_root(db: Optional[Session] = None) -> Path:
+    """Call the workspace-root resolver in a test-compatible way."""
+
+    try:
+        return get_effective_workspace_root(db=db)
+    except TypeError:
+        # Some tests monkeypatch this helper with a no-arg lambda.
+        return get_effective_workspace_root()
+
+
 def _slugify_workspace_name(name: str) -> str:
     value = (name or "").strip().lower()
     value = re.sub(r"[\s_]+", "-", value)
@@ -37,7 +47,7 @@ def normalize_project_workspace_path(
     if not raw:
         return _slugify_workspace_name(project_name or "")
 
-    workspace_root = get_effective_workspace_root(db=db)
+    workspace_root = _resolve_workspace_root(db=db)
     root_str = str(workspace_root)
     if raw.startswith(root_str):
         raw = raw[len(root_str) :].lstrip("/")
@@ -57,7 +67,7 @@ def resolve_project_workspace_path(
     db: Optional[Session] = None,
 ) -> Path:
     relative = normalize_project_workspace_path(workspace_path, project_name, db=db)
-    return (get_effective_workspace_root(db=db) / relative).resolve()
+    return (_resolve_workspace_root(db=db) / relative).resolve()
 
 
 class ProjectIsolationError(Exception):

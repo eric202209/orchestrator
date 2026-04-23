@@ -230,6 +230,19 @@ def update_system_settings(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(exc),
             ) from exc
+        if not backend.implemented:
+            detail = (
+                backend.health.errors[0]
+                if backend.health.errors
+                else (
+                    f"Backend '{backend.name}' is visible for planning and UI work, "
+                    "but it cannot be selected for execution yet."
+                )
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=detail,
+            )
         set_setting_value(
             db,
             AGENT_BACKEND_KEY,

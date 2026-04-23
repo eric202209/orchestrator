@@ -147,6 +147,7 @@ export default function SettingsPage() {
     selectedBackendDescriptor?.capabilities || settings.system.backend_capabilities;
   const activeBackendHealth =
     selectedBackendDescriptor?.health || settings.system.backend_health;
+  const activeBackendConfig = selectedBackendDescriptor?.config;
 
   return (
     <div className="space-y-6">
@@ -289,11 +290,36 @@ export default function SettingsPage() {
                 .map(([key]) => key.replace(/^supports_/, '').replace(/_/g, ' '))
                 .join(' • ') || 'No capabilities reported'}
             </div>
+            <div className="mt-2 text-xs text-slate-500">
+              MCP support: {activeBackendCapabilities.mcp_capable ? 'supported by descriptor' : 'not declared'}
+            </div>
           </div>
+          {activeBackendConfig && (
+            <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-4">
+              <div className="text-sm text-slate-400">Backend Configuration</div>
+              <div className="mt-2 space-y-1 text-xs text-slate-300">
+                <div>Transport: {activeBackendConfig.transport_mode}</div>
+                <div>Auth: {activeBackendConfig.auth_mode}</div>
+                <div>Prompt format: {activeBackendConfig.supported_prompt_format}</div>
+                <div>Streaming: {activeBackendConfig.streaming_mode}</div>
+                <div>
+                  Required env vars:{' '}
+                  {activeBackendConfig.required_env_vars.length > 0
+                    ? activeBackendConfig.required_env_vars.join(', ')
+                    : 'None'}
+                </div>
+              </div>
+            </div>
+          )}
           <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-4">
             <div className="text-sm text-slate-400">Backend Readiness</div>
             <div className="mt-2 text-sm text-white">
               {activeBackendHealth.ready ? 'Ready' : 'Unavailable'} ({activeBackendHealth.status})
+            </div>
+            <div className="mt-2 text-xs text-slate-400">
+              {selectedBackendDescriptor?.implemented
+                ? 'This backend has a runtime adapter in the codebase.'
+                : 'This backend is listed for architecture planning only and cannot be selected for live execution yet.'}
             </div>
             {activeBackendHealth.errors.length > 0 && (
               <div className="mt-2 text-xs text-red-300">
