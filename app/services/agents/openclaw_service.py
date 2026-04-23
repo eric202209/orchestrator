@@ -34,8 +34,8 @@ from app.services.prompt_templates import (
     StepResult,
     PromptTemplates,
 )
-from app.services.agent_backends import BackendDescriptor, get_backend_descriptor
-from app.services.project_isolation_service import (
+from app.services.agents.agent_backends import BackendDescriptor, get_backend_descriptor
+from app.services.workspace.project_isolation_service import (
     ProjectIsolationService,
     resolve_project_workspace_path,
 )
@@ -49,8 +49,12 @@ from app.services.performance_optimizations import (
     compress_context,
     perf_tracker,
 )
-from app.services.checkpoint_service import CheckpointService, CheckpointError
+from app.services.workspace.checkpoint_service import CheckpointService, CheckpointError
 from app.services.tool_tracking_service import ToolTrackingService
+from app.services.workspace.system_settings import (
+    get_effective_agent_backend,
+    get_effective_agent_model_family,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,10 +95,10 @@ class OpenClawSessionService:
         self._task_session_id: Optional[str] = None
         self.process: Optional[subprocess.Popen] = None
         self.backend_descriptor: BackendDescriptor = get_backend_descriptor(
-            settings.ORCHESTRATOR_AGENT_BACKEND
+            get_effective_agent_backend(settings.ORCHESTRATOR_AGENT_BACKEND, db=db)
         )
         # Initialize checkpoint service
-        from app.services.checkpoint_service import CheckpointService
+        from app.services.workspace.checkpoint_service import CheckpointService
 
         self.checkpoint_service = CheckpointService(db)
 
@@ -105,7 +109,9 @@ class OpenClawSessionService:
             "backend": self.backend_descriptor.name,
             "display_name": self.backend_descriptor.display_name,
             "implementation": self.backend_descriptor.implementation,
-            "model_family": settings.ORCHESTRATOR_AGENT_MODEL_FAMILY,
+            "model_family": get_effective_agent_model_family(
+                settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=self.db
+            ),
             "capabilities": self.backend_descriptor.capabilities.to_dict(),
         }
 

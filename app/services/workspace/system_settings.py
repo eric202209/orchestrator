@@ -12,6 +12,9 @@ from app.models import SystemSetting
 
 WORKSPACE_ROOT_KEY = "openclaw_workspace_root"
 MOBILE_API_KEY_KEY = "mobile_gateway_api_key"
+AGENT_BACKEND_KEY = "orchestrator_agent_backend"
+AGENT_MODEL_FAMILY_KEY = "orchestrator_agent_model_family"
+ORCHESTRATION_POLICY_PROFILE_KEY = "orchestration_policy_profile"
 
 
 def get_setting_value(
@@ -75,3 +78,29 @@ def get_effective_mobile_gateway_key(
 
 def generate_mobile_gateway_key() -> str:
     return secrets.token_hex(32)
+
+
+def get_effective_agent_backend(env_backend: str, db: Optional[Session] = None) -> str:
+    return (
+        get_setting_value_runtime(AGENT_BACKEND_KEY, env_backend, db=db) or env_backend
+    )
+
+
+def get_effective_agent_model_family(
+    env_model_family: str, db: Optional[Session] = None
+) -> str:
+    return (
+        get_setting_value_runtime(AGENT_MODEL_FAMILY_KEY, env_model_family, db=db)
+        or env_model_family
+    )
+
+
+def get_effective_policy_profile(
+    default_profile: str = "balanced", db: Optional[Session] = None
+) -> str:
+    return (
+        get_setting_value_runtime(
+            ORCHESTRATION_POLICY_PROFILE_KEY, default_profile, db=db
+        )
+        or default_profile
+    )

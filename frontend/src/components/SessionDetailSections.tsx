@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import type { Project, Session, Task } from '@/types/api';
+import type { Checkpoint, CheckpointInspection, Project, Session, Task } from '@/types/api';
 import type { TerminalLogEntry } from '@/components/TerminalViewer';
 import { TerminalViewer } from '@/components/TerminalViewer';
 import { StatusBadge } from '@/components/ui';
@@ -463,15 +463,23 @@ export function SessionTasksPanel({
 }
 
 interface SessionSettingsPanelProps {
+  checkpoints?: Checkpoint[];
+  checkpointInspection?: CheckpointInspection | null;
   formatDateTime: (value?: string | null) => string;
+  onInspectCheckpoint?: (checkpointName: string) => void;
   onModeChange?: (mode: 'automatic' | 'manual') => void;
+  onReplayCheckpoint?: (checkpointName: string) => void;
   onRefreshTasks?: () => void;
   session: Session;
 }
 
 export function SessionSettingsPanel({
+  checkpoints = [],
+  checkpointInspection,
   formatDateTime,
+  onInspectCheckpoint,
   onModeChange,
+  onReplayCheckpoint,
   onRefreshTasks,
   session,
 }: SessionSettingsPanelProps) {
@@ -536,6 +544,72 @@ export function SessionSettingsPanel({
           <p className="text-white">{formatDateTime(session.stopped_at)}</p>
         </div>
       )}
+      <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4 backdrop-blur">
+        <div className="mb-3 flex items-center justify-between">
+          <p className="text-sm text-slate-400">Checkpoint Inspector</p>
+          <span className="text-xs text-slate-500">{checkpoints.length} stored</span>
+        </div>
+        {checkpoints.length === 0 ? (
+          <p className="text-sm text-slate-500">No checkpoints recorded for this session yet.</p>
+        ) : (
+          <div className="space-y-2">
+            {checkpoints.map((checkpoint) => (
+              <div
+                key={checkpoint.name}
+                className="rounded-lg border border-slate-700 bg-slate-900/70 p-3"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-medium text-white">
+                      {checkpoint.name}
+                      {checkpoint.recommended ? (
+                        <span className="ml-2 text-xs text-emerald-400">Recommended</span>
+                      ) : null}
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      {formatDateTime(checkpoint.created_at)} • Step {checkpoint.step_index ?? 0} • Completed {checkpoint.completed_steps ?? 0}
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => onInspectCheckpoint?.(checkpoint.name)}
+                      className="rounded-lg bg-slate-700 px-3 py-1.5 text-xs text-white transition-colors hover:bg-slate-600"
+                    >
+                      Inspect
+                    </button>
+                    <button
+                      onClick={() => onReplayCheckpoint?.(checkpoint.name)}
+                      className="rounded-lg bg-emerald-700 px-3 py-1.5 text-xs text-white transition-colors hover:bg-emerald-600"
+                    >
+                      Replay
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        {checkpointInspection && (
+          <div className="mt-4 rounded-lg border border-cyan-800/60 bg-cyan-950/20 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm font-medium text-cyan-200">
+                {checkpointInspection.checkpoint_name}
+              </p>
+              <span className="text-xs text-cyan-400">
+                {checkpointInspection.summary.status || 'unknown'}
+              </span>
+            </div>
+            <p className="mt-2 text-xs text-slate-300">
+              Plan steps {checkpointInspection.summary.plan_step_count} • Completed {checkpointInspection.summary.completed_step_count} • Repairs {checkpointInspection.summary.completion_repair_attempts}
+            </p>
+            {checkpointInspection.latest_validation && (
+              <pre className="mt-3 overflow-x-auto rounded-lg bg-slate-950/80 p-3 text-xs text-slate-300">
+                {JSON.stringify(checkpointInspection.latest_validation, null, 2)}
+              </pre>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

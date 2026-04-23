@@ -3,7 +3,7 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 from app.config import settings
-from app.models import Project, Session as SessionModel, Task, TaskStatus
+from app.models import Project, Session as SessionModel, Task, TaskStatus, User
 from app.api.v1.endpoints.auth import generate_keypair
 from app.services.auth_rate_limit import clear_auth_rate_limits, enforce_auth_rate_limit
 
@@ -51,6 +51,26 @@ def test_settings_exposes_backend_metadata_without_secrets(authenticated_client)
     )
     assert payload["system"]["backend_capabilities"]["supports_planning"] is True
     assert "api_key" not in payload["system"]["backend_capabilities"]
+
+
+def test_settings_system_update_requires_admin_in_multi_user_deployments(
+    authenticated_client, db_session
+):
+    db_session.add_all(
+        [
+            User(email="one@example.com", hashed_password="x", is_active=True),
+            User(email="two@example.com", hashed_password="y", is_active=True),
+        ]
+    )
+    db_session.commit()
+
+    response = authenticated_client.patch(
+        "/api/v1/settings/system",
+        json={"workspace_root": "/tmp/secure-root"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Admin privileges are required for this action"
 
 
 def test_task_update_rejects_unsupported_fields(authenticated_client, db_session):

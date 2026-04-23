@@ -1,6 +1,7 @@
 """Projects API endpoints"""
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import false, or_
 from sqlalchemy.orm import Session
 from typing import List
 from datetime import datetime, timedelta, timezone
@@ -15,10 +16,16 @@ from app.models import (
     PlanningArtifact,
     PlanningMessage,
     PlanningSession,
+    PermissionRequest,
+    SessionState,
+    ConversationHistory,
+    TaskCheckpoint,
 )
 from app.schemas import ProjectCreate, ProjectUpdate, ProjectResponse
-from app.services.project_isolation_service import normalize_project_workspace_path
-from app.services.checkpoint_service import CheckpointService
+from app.services.workspace.project_isolation_service import (
+    normalize_project_workspace_path,
+)
+from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.name_formatter import humanize_display_name
 from app.services.task_service import TaskService
 from app.config import settings
@@ -102,56 +109,45 @@ def purge_soft_deleted_projects(
             checkpoint_service.delete_all_checkpoints(session_id)
         checkpoint_service.cleanup_orphaned_checkpoints()
 
-        # Delete all related data (cascade)
-        # Delete session tasks first (foreign key to session)
-        db.query(SessionTask).filter(
-            SessionTask.session_id.in_(
-                db.query(SessionModel.id).filter(SessionModel.project_id == project_id)
+        task_ids = [
+            task_id
+            for (task_id,) in db.query(Task.id)
+            .filter(Task.project_id == project_id)
+            .all()
+        ]
+
+        if session_ids:
+            db.query(LogEntry).filter(LogEntry.session_id.in_(session_ids)).delete(
+                synchronize_session=False
             )
-        ).delete(synchronize_session=False)
+            db.query(SessionState).filter(
+                SessionState.session_id.in_(session_ids)
+            ).delete(synchronize_session=False)
+            db.query(ConversationHistory).filter(
+                ConversationHistory.session_id.in_(session_ids)
+            ).delete(synchronize_session=False)
 
-        # Delete all logs for sessions in this project
-        db.query(LogEntry).filter(
-            LogEntry.session_id.in_(
-                db.query(SessionModel.id).filter(SessionModel.project_id == project_id)
+        if task_ids:
+            db.query(LogEntry).filter(LogEntry.task_id.in_(task_ids)).delete(
+                synchronize_session=False
             )
-        ).delete(synchronize_session=False)
 
-        # Delete all tasks in this project
-        db.query(Task).filter(Task.project_id == project_id).delete(
-            synchronize_session=False
-        )
-
-        db.query(PlanningArtifact).filter(
-            PlanningArtifact.planning_session_id.in_(
-                db.query(PlanningSession.id).filter(
-                    PlanningSession.project_id == project_id
+        if session_ids or task_ids:
+            db.query(TaskCheckpoint).filter(
+                or_(
+                    (
+                        TaskCheckpoint.session_id.in_(session_ids)
+                        if session_ids
+                        else false()
+                    ),
+                    TaskCheckpoint.task_id.in_(task_ids) if task_ids else false(),
                 )
-            )
+            ).delete(synchronize_session=False)
+
+        db.query(PermissionRequest).filter(
+            PermissionRequest.project_id == project_id
         ).delete(synchronize_session=False)
 
-        db.query(PlanningMessage).filter(
-            PlanningMessage.planning_session_id.in_(
-                db.query(PlanningSession.id).filter(
-                    PlanningSession.project_id == project_id
-                )
-            )
-        ).delete(synchronize_session=False)
-
-        db.query(PlanningSession).filter(
-            PlanningSession.project_id == project_id
-        ).delete(synchronize_session=False)
-
-        db.query(Plan).filter(Plan.project_id == project_id).delete(
-            synchronize_session=False
-        )
-
-        # Delete all sessions in this project
-        db.query(SessionModel).filter(SessionModel.project_id == project_id).delete(
-            synchronize_session=False
-        )
-
-        # Delete the project itself
         db.delete(project)
         purged_count += 1
 
@@ -241,7 +237,7 @@ def delete_project(
 ):
     """Delete a project (soft delete to prevent ID reuse issues)"""
     from app.models import Session, TaskCheckpoint
-    from app.services.checkpoint_service import CheckpointService
+    from app.services.workspace.checkpoint_service import CheckpointService
 
     db_project = (
         db.query(Project)

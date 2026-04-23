@@ -1,20 +1,26 @@
 """Tasks API endpoints"""
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request
-from sqlalchemy.orm import Session
-from typing import List, Dict, Optional
-from datetime import datetime
-import time
+import logging
 import json
-from pydantic import BaseModel
+import time
+from datetime import datetime
+from typing import Dict, List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, status, Request
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
 from app.database import get_db
 from app.models import Task, TaskStatus, Project, LogEntry, SessionTask
 from app.schemas import TaskCreate, TaskUpdate, TaskResponse, TaskPromotionRequest
 from app.dependencies import get_current_active_user
+from app.services.agents.openclaw_service import OpenClawSessionService
 from app.services.error_handler import EnhancedErrorHandler
 from app.services.log_utils import sort_logs
 from app.services.name_formatter import humanize_display_name
 from app.services.task_service import TaskService
+
+logger = logging.getLogger(__name__)
 
 
 # Pydantic models for overwrite protection
@@ -23,7 +29,7 @@ class OverwriteCheckRequest(BaseModel):
 
     project_id: int
     task_subfolder: str
-    planned_files: Optional[List[str]] = []
+    planned_files: List[str] = Field(default_factory=list)
 
 
 class BackupResponse(BaseModel):
@@ -129,15 +135,13 @@ def _queue_task_retry(
         ),
         description=prompt[:500],
         project_id=task.project_id,
-        status="running",
+        status="pending",
         default_execution_profile=getattr(task, "execution_profile", "full_lifecycle"),
-        is_active=True,
-        started_at=started_at,
+        is_active=False,
         instance_id=f"orchestrator-task-{task.id}-{int(time.time())}",
     )
     db.add(new_session)
-    db.commit()
-    db.refresh(new_session)
+    db.flush()
 
     session_task = SessionTask(
         session_id=new_session.id,
@@ -155,12 +159,20 @@ def _queue_task_retry(
     _prepare_task_for_fresh_execution(task, clear_saved_plan=should_clear_saved_plan)
     task.started_at = started_at
 
-    result = execute_openclaw_task.delay(
-        session_id=new_session.id,
-        task_id=task.id,
-        prompt=prompt,
-        timeout_seconds=timeout_seconds,
-    )
+    try:
+        result = execute_openclaw_task.delay(
+            session_id=new_session.id,
+            task_id=task.id,
+            prompt=prompt,
+            timeout_seconds=timeout_seconds,
+        )
+    except Exception:
+        db.rollback()
+        raise
+
+    new_session.status = "running"
+    new_session.is_active = True
+    new_session.started_at = started_at
 
     db.add(
         LogEntry(
@@ -299,93 +311,85 @@ async def execute_task_with_openclaw(
         timeout_seconds = 600
 
     try:
-        # NEW: Check for potential overwrites BEFORE executing task
-        from app.services.overwrite_protection_service import (
+        from app.services.workspace.overwrite_protection_service import (
             OverwriteProtectionService,
             OverwriteProtectionError,
         )
 
         protection = OverwriteProtectionService(db)
 
-        # Get project info to check workspace
         if not task.project:
             raise HTTPException(status_code=404, detail="Project not found")
 
+        overwrite_warning = ""
         try:
             overwrite_result = protection.check_and_warn(
                 project_id=task.project.id,
                 task_subfolder=_resolve_task_subfolder_name(task),
-                planned_files=[],  # We don't know planned files yet
-                action="warn",  # Show warning but allow proceed
+                planned_files=[],
+                action="warn",
+            )
+            if not overwrite_result["safe_to_proceed"]:
+                warning_message = overwrite_result.get("warning_message") or ""
+                logger.warning(
+                    "Overwrite warning for task %s: %s",
+                    task.id,
+                    warning_message[:200],
+                )
+                if warning_message:
+                    overwrite_warning = (
+                        "\n\n### EXISTING WORKSPACE WARNING:\n" + warning_message
+                    )
+        except OverwriteProtectionError as exc:
+            logger.warning(
+                "Overwrite check failed for task %s (continuing): %s",
+                task.id,
+                str(exc)[:200],
             )
 
-            if not overwrite_result["safe_to_proceed"]:
-                # Log the warning for audit trail
-                print(
-                    f"⚠️  Overwrite detected: {overwrite_result.get('warning_message', '')[:200]}"
-                )
-        except Exception as e:
-            # If check fails, log warning but don't block execution
-            print(f"⚠️  Overwrite check failed (continuing anyway): {str(e)[:100]}")
-
-        # Start OpenClaw session and create database session record
         from app.models import Session as SessionModel
 
-        # Create a new session record for this task execution
         new_session = SessionModel(
             name=f"Task {task_id} Execution",
             description=prompt[:500],
             project_id=task.project_id if task.project else None,
-            status="running",
+            status="pending",
+            is_active=False,
             instance_id=f"orchestrator-task-{task_id}-{int(time.time())}",
         )
         db.add(new_session)
-        db.commit()
-        db.refresh(new_session)
+        db.flush()
 
-        # Create SessionTask relationship
         session_task = SessionTask(
             session_id=new_session.id,
             task_id=task.id,
         )
         db.add(session_task)
-        db.commit()
 
-        print(f"✅ Created session {new_session.id} for task {task.id}")
-
-        # Start OpenClaw session with the new session ID
         session_service = OpenClawSessionService(db, new_session.id, task_id)
-        openclaw_key = await session_service.start_session(prompt)
+        try:
+            await session_service.start_session(prompt)
+        except Exception:
+            db.rollback()
+            raise
 
-        # Build prompt using templates
+        new_session.status = "running"
+        new_session.is_active = True
+        new_session.started_at = datetime.utcnow()
+        db.commit()
+        db.refresh(new_session)
+
+        logger.info("Created session %s for task %s", new_session.id, task.id)
+
         from app.services.prompt_templates import PromptTemplates
 
-        # Add overwrite warning to prompt if detected
-        overwrite_warning = ""
-        try:
-            protection = OverwriteProtectionService(db)
-            result = protection.check_and_warn(
-                project_id=task.project.id,
-                task_subfolder=_resolve_task_subfolder_name(task),
-                action="warn",
-            )
-
-            if not result["safe_to_proceed"] and result.get("warning_message"):
-                overwrite_warning = f"\n\n### ⚠️  EXISTING WORKSPACE WARNING:\n{result['warning_message']}"
-        except:
-            pass
-
-        # Build enhanced prompt - use build_task_prompt for simple task execution
         prompt_text = PromptTemplates.build_task_prompt(
             task_description=prompt + overwrite_warning,
             project_context=f"Project: {task.project.name if task.project else 'Unknown'} at {task.project.workspace_path if task.project and task.project.workspace_path else '/workspace'}",
         )
 
-        # Increase timeout for complex tasks - default to 600 seconds (10 minutes)
-        # This prevents premature timeouts on medium/large tasks
         actual_timeout = max(timeout_seconds, 600)
 
-        # Execute with streaming enabled for real-time logs
         result = await session_service.execute_task_with_streaming(
             prompt=prompt_text,
             timeout_seconds=actual_timeout,
@@ -405,7 +409,6 @@ async def execute_task_with_openclaw(
         return result
 
     except Exception as e:
-        # Use enhanced error handler
         error_handler = EnhancedErrorHandler()
         recovery_plan = error_handler.create_error_recovery_plan(e, "task_execution")
 
@@ -413,10 +416,10 @@ async def execute_task_with_openclaw(
         import traceback
 
         error_details = traceback.format_exc()
-        print(f"Error executing task: {error_msg}")
-        print(f"Details: {error_details}")
+        logger.exception(
+            "Error executing task %s: %s\n%s", task_id, error_msg, error_details
+        )
 
-        # Update task with enhanced error information
         if task:
             task.status = TaskStatus.FAILED
             task.error_message = f"{error_msg}\nRecommended action: {recovery_plan.get('recommended_action', 'manual_intervention')}"
@@ -766,7 +769,7 @@ async def check_task_overwrites(
         raise HTTPException(status_code=404, detail="Task not found")
 
     try:
-        from app.services.overwrite_protection_service import (
+        from app.services.workspace.overwrite_protection_service import (
             OverwriteProtectionService,
             OverwriteProtectionError,
         )
@@ -813,7 +816,9 @@ async def create_task_backup(task_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Task not found")
 
     try:
-        from app.services.overwrite_protection_service import OverwriteProtectionService
+        from app.services.workspace.overwrite_protection_service import (
+            OverwriteProtectionService,
+        )
 
         protection = OverwriteProtectionService(db)
 
@@ -846,7 +851,9 @@ async def get_workspace_info(task_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Task not found")
 
     try:
-        from app.services.overwrite_protection_service import OverwriteProtectionService
+        from app.services.workspace.overwrite_protection_service import (
+            OverwriteProtectionService,
+        )
 
         protection = OverwriteProtectionService(db)
 

@@ -5,10 +5,10 @@ import asyncio
 from pathlib import Path
 
 from app.models import Project, Session as SessionModel, SessionTask, Task, TaskStatus
-from app.services.checkpoint_service import CheckpointService
+from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.orchestration.policy import should_restore_workspace_on_failure
-from app.services import session_lifecycle_service
-from app.services.session_lifecycle_service import stop_session_lifecycle
+import app.services.session.session_lifecycle_service as session_lifecycle_service
+from app.services.session.session_lifecycle_service import stop_session_lifecycle
 from app.services.task_service import TaskService
 
 

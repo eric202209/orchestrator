@@ -9,6 +9,7 @@ Implements:
 """
 
 import json
+import logging
 import os
 import re
 from typing import Optional, Dict, Any, List
@@ -17,6 +18,8 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 from app.models import LogEntry, Session as SessionModel
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class CheckpointError(Exception):
@@ -679,19 +682,7 @@ class CheckpointService:
             return all_checkpoints[0]["name"]
 
         except Exception as e:
-            print(f"Failed to find latest checkpoint: {e}")
+            logger.warning(
+                "Failed to find latest checkpoint for session %s: %s", session_id, e
+            )
             return None
-
-
-# Global instance for dependency injection
-_checkpoint_service_instance = None
-
-
-def get_checkpoint_service(db: Session) -> CheckpointService:
-    """Get or create checkpoint service instance"""
-    global _checkpoint_service_instance
-
-    if _checkpoint_service_instance is None or _checkpoint_service_instance.db != db:
-        _checkpoint_service_instance = CheckpointService(db)
-
-    return _checkpoint_service_instance

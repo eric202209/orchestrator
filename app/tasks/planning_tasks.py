@@ -6,7 +6,7 @@ import logging
 
 from app.celery_app import celery_app
 from app.database import get_db_session
-from app.services.planning_session_service import PlanningSessionService
+from app.services.planning.planning_session_service import PlanningSessionService
 
 logger = logging.getLogger(__name__)
 

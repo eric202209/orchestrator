@@ -323,7 +323,7 @@ class ContextPreservationService:
         # ── Primary path: disk-based CheckpointService ───────────────────
         if session_id is not None:
             try:
-                from app.services.checkpoint_service import CheckpointService
+                from app.services.workspace.checkpoint_service import CheckpointService
 
                 cp_service = CheckpointService(self.db)
                 data = cp_service.load_resume_checkpoint(

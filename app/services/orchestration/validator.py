@@ -292,6 +292,49 @@ class ValidatorService:
         return [step for step in bad_steps if step is not None]
 
     @staticmethod
+    def _plan_missing_required_fields(
+        plan: List[Dict[str, Any]]
+    ) -> Dict[str, List[int]]:
+        missing_description: List[int] = []
+        missing_commands: List[int] = []
+
+        for index, step in enumerate(plan, start=1):
+            step_number = step.get("step_number", index)
+            if not str(step.get("description") or "").strip():
+                missing_description.append(step_number)
+
+            commands = step.get("commands", [])
+            if not isinstance(commands, list) or not any(
+                str(command or "").strip() for command in commands
+            ):
+                missing_commands.append(step_number)
+
+        return {
+            "missing_description_steps": missing_description,
+            "missing_commands_steps": missing_commands,
+        }
+
+    @staticmethod
+    def _plan_has_invalid_step_sequence(plan: List[Dict[str, Any]]) -> bool:
+        step_numbers = [step.get("step_number") for step in plan]
+        if not all(isinstance(step_number, int) for step_number in step_numbers):
+            return True
+        return step_numbers != list(range(1, len(plan) + 1))
+
+    @staticmethod
+    def _plan_contains_unsafe_paths(plan: List[Dict[str, Any]]) -> List[str]:
+        invalid_paths: List[str] = []
+        for step in plan:
+            for path_value in step.get("expected_files", []) or []:
+                raw_path = str(path_value or "").strip()
+                if not raw_path:
+                    continue
+                candidate = Path(raw_path)
+                if candidate.is_absolute() or ".." in candidate.parts:
+                    invalid_paths.append(raw_path)
+        return invalid_paths[:20]
+
+    @staticmethod
     def _plan_nests_task_workspace(
         plan: List[Dict[str, Any]], project_dir: Optional[Path]
     ) -> List[int]:
@@ -364,6 +407,34 @@ class ValidatorService:
             repairable.append(
                 "Plan contains brittle heredoc-heavy or malformed commands"
             )
+
+        if cls._plan_has_invalid_step_sequence(plan):
+            rejected.append(
+                "Plan step numbers must be consecutive integers starting at 1"
+            )
+
+        missing_fields = cls._plan_missing_required_fields(plan)
+        if missing_fields["missing_description_steps"]:
+            rejected.append(
+                "Plan contains steps with empty descriptions "
+                f"(steps: {missing_fields['missing_description_steps'][:5]})"
+            )
+            details["missing_description_steps"] = missing_fields[
+                "missing_description_steps"
+            ]
+        if missing_fields["missing_commands_steps"]:
+            rejected.append(
+                "Plan contains steps without runnable commands "
+                f"(steps: {missing_fields['missing_commands_steps'][:5]})"
+            )
+            details["missing_commands_steps"] = missing_fields["missing_commands_steps"]
+
+        unsafe_paths = cls._plan_contains_unsafe_paths(plan)
+        if unsafe_paths:
+            rejected.append(
+                "Plan references unsafe expected file paths outside the workspace root"
+            )
+            details["unsafe_expected_files"] = unsafe_paths
 
         non_runnable_steps = cls._plan_contains_non_runnable_commands(plan)
         if non_runnable_steps:

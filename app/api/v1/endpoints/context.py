@@ -10,7 +10,7 @@ from typing import Dict, Any, List, Optional
 
 from app.database import get_db
 from app.dependencies import get_current_user
-from app.services.context_service import ContextPreservationService
+from app.services.workspace.context_service import ContextPreservationService
 
 logger = logging.getLogger(__name__)
 

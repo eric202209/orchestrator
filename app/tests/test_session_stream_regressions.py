@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi.routing import APIWebSocketRoute
 
 from app.api.v1.router import api_router
-from app.services.session_stream_service import _prepare_initial_log_batch
+from app.services.session.session_stream_service import _prepare_initial_log_batch
 
 
 def test_prepare_initial_log_batch_orders_oldest_to_newest_and_tracks_max_id():

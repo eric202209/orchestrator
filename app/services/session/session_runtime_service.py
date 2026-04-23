@@ -15,7 +15,9 @@ from app.models import LogEntry, Session as SessionModel, SessionTask, Task, Tas
 from app.services.orchestration.task_rules import (
     should_execute_in_canonical_project_root,
 )
-from app.services.project_isolation_service import resolve_project_workspace_path
+from app.services.workspace.project_isolation_service import (
+    resolve_project_workspace_path,
+)
 from app.services.prompt_templates import OrchestrationState
 from app.services.task_service import TaskService
 

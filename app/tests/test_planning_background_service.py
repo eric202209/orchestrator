@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from app.models import PlanningArtifact, PlanningSession, Project
-from app.services.planning_session_service import PlanningSessionService
+from app.services.planning.planning_session_service import PlanningSessionService
 
 
 def _create_project(db_session, name: str = "Planning Background Project") -> Project:
@@ -109,6 +109,38 @@ def test_process_session_sets_waiting_and_releases_processing_lease(
     assert updated.processing_token is None
     assert updated.processing_started_at is None
     assert updated.messages[-1].content == "Which rollout constraints matter most?"
+
+
+def test_recover_active_sessions_clears_processing_lease_before_rescheduling(
+    db_session, monkeypatch
+):
+    project = _create_project(db_session, name="Recovery Lease Project")
+    session = PlanningSession(
+        project_id=project.id,
+        title="Recover me",
+        prompt="Recover me",
+        status="active",
+        source_brain="local",
+        processing_token="stuck-token",
+    )
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+
+    queued: list[int] = []
+    monkeypatch.setattr(
+        PlanningSessionService,
+        "schedule_processing",
+        lambda self, session_id: queued.append(session_id),
+    )
+
+    recovered = PlanningSessionService(db_session).recover_active_sessions()
+    db_session.refresh(session)
+
+    assert recovered == [session.id]
+    assert queued == [session.id]
+    assert session.processing_token is None
+    assert session.processing_started_at is None
 
 
 def test_commit_preserves_artifact_history_and_exposes_latest(db_session, monkeypatch):

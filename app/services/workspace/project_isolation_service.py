@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from sqlalchemy.orm import Session
 from app.models import Project, LogEntry
-from app.services.system_settings import get_effective_workspace_root
+from app.services.workspace.system_settings import get_effective_workspace_root
 
 logger = logging.getLogger(__name__)
 

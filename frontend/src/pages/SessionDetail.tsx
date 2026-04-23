@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { sessionsAPI, tasksAPI, projectsAPI } from '@/api/client';
-import type { Session, Task, Project } from '@/types/api';
+import type { Checkpoint, CheckpointInspection, Session, Task, Project } from '@/types/api';
 import type { TerminalLogEntry } from '@/components/TerminalViewer';
 import { LoadingSpinner } from '@/components/ui';
 import {
@@ -85,6 +85,8 @@ export default function SessionDetail() {
   const [logVerbosity, setLogVerbosity] = useState<'clean' | 'verbose'>('clean');
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
   const [checkpointCount, setCheckpointCount] = useState(0);
+  const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
+  const [checkpointInspection, setCheckpointInspection] = useState<CheckpointInspection | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const shouldReconnectRef = useRef(true);
@@ -234,10 +236,24 @@ export default function SessionDetail() {
     try {
       const checkpointsRes = await sessionsAPI.listCheckpoints(id);
       setCheckpointCount(checkpointsRes.data.total_count || 0);
+      setCheckpoints(checkpointsRes.data.checkpoints || []);
     } catch {
       setCheckpointCount(0);
+      setCheckpoints([]);
     }
   }, []);
+
+  const inspectCheckpoint = useCallback(async (checkpointName: string) => {
+    if (!sessionId) return;
+    try {
+      const response = await sessionsAPI.inspectCheckpoint(Number(sessionId), checkpointName);
+      setCheckpointInspection(response.data);
+      pushTimelineEvent(`Inspected checkpoint ${checkpointName}`, 'INFO');
+    } catch (error) {
+      console.error('Failed to inspect checkpoint:', error);
+      alert('Failed to inspect checkpoint');
+    }
+  }, [pushTimelineEvent, sessionId]);
 
   const setupWebSocket = useCallback((session_id: number) => {
     const token = localStorage.getItem('access_token');
@@ -362,6 +378,23 @@ export default function SessionDetail() {
     },
     [setupWebSocket]
   );
+
+  const replayCheckpoint = useCallback(async (checkpointName: string) => {
+    if (!sessionId) return;
+    try {
+      await sessionsAPI.replayCheckpoint(Number(sessionId), checkpointName);
+      pushTimelineEvent(`Replay requested from checkpoint ${checkpointName}`, 'INFO');
+      const updated = await sessionsAPI.getById(Number(sessionId));
+      setSession(updated.data);
+      await loadCheckpointCount(Number(sessionId));
+      if (!wsRef.current && (updated.data.status === 'running' || updated.data.status === 'paused')) {
+        scheduleWebSocketConnect(Number(sessionId), 1200);
+      }
+    } catch (error) {
+      console.error('Failed to replay checkpoint:', error);
+      alert('Failed to replay checkpoint');
+    }
+  }, [loadCheckpointCount, pushTimelineEvent, scheduleWebSocketConnect, sessionId]);
 
   useEffect(() => {
     if (!sessionId) {
@@ -844,8 +877,12 @@ export default function SessionDetail() {
 
         {activeTab === 'settings' && (
           <SessionSettingsPanel
+            checkpointInspection={checkpointInspection}
+            checkpoints={checkpoints}
             formatDateTime={formatDateTime}
+            onInspectCheckpoint={inspectCheckpoint}
             onModeChange={handleExecutionModeChange}
+            onReplayCheckpoint={replayCheckpoint}
             onRefreshTasks={refreshTasksForSession}
             session={session}
           />

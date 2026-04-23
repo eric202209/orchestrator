@@ -10,8 +10,8 @@ from app.database import get_db
 from app.models import Plan, Project, Task, TaskStatus
 from app.schemas import PlanResponse, PlannerTaskCandidate, TaskResponse
 from app.services.name_formatter import humanize_display_name
-from app.services.plan_commit_service import PlanCommitService
-from app.services.planner_service import PlannerService
+from app.services.planning.plan_commit_service import PlanCommitService
+from app.services.planning.planner_service import PlannerService
 
 router = APIRouter()
 

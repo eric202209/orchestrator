@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models import Project
-from app.services.project_isolation_service import (
+from app.services.workspace.project_isolation_service import (
     ProjectIsolationService,
     ProjectIsolationError,
 )

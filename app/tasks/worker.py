@@ -65,14 +65,16 @@ from app.services.orchestration.runtime import (
     write_project_state_snapshot as _write_project_state_snapshot,
 )
 from app.services.error_handler import error_handler
-from app.services.checkpoint_service import CheckpointService
-from app.services.project_isolation_service import resolve_project_workspace_path
+from app.services.workspace.checkpoint_service import CheckpointService
+from app.services.workspace.project_isolation_service import (
+    resolve_project_workspace_path,
+)
 from app.services.task_service import TaskService
 from app.services.prompt_templates import (
     OrchestrationStatus,
     OrchestrationState,
 )
-from app.services.session_runtime_service import (
+from app.services.session.session_runtime_service import (
     queue_task_for_session as _queue_task_for_session,
 )
 

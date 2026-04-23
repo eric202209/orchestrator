@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
+
 PLANNING_TIMEOUT_MIN_SECONDS = 180
 PLANNING_TIMEOUT_MAX_SECONDS = 240
 MINIMAL_PLANNING_TIMEOUT_SECONDS = 120
@@ -44,6 +46,49 @@ WORKSPACE_PRESERVE_REASON_MARKERS = (
 )
 
 
+@dataclass(frozen=True)
+class PolicyProfile:
+    """Operator-visible policy profile for validation and recovery posture."""
+
+    name: str
+    display_name: str
+    description: str
+    validation_severity: str
+    completion_repair_budget: int
+    workspace_restore_mode: str
+
+    def to_dict(self) -> dict[str, str | int]:
+        return asdict(self)
+
+
+_POLICY_PROFILES = {
+    "balanced": PolicyProfile(
+        name="balanced",
+        display_name="Balanced",
+        description="Default safety and repair posture for routine implementation work.",
+        validation_severity="standard",
+        completion_repair_budget=1,
+        workspace_restore_mode="preserve_resume_restore_failures",
+    ),
+    "strict": PolicyProfile(
+        name="strict",
+        display_name="Strict",
+        description="Bias toward hard validation gates and conservative recovery.",
+        validation_severity="high",
+        completion_repair_budget=0,
+        workspace_restore_mode="restore_most_failures",
+    ),
+    "recovery_friendly": PolicyProfile(
+        name="recovery_friendly",
+        display_name="Recovery Friendly",
+        description="Allow one extra repair loop and preserve more state for operator replay.",
+        validation_severity="standard",
+        completion_repair_budget=2,
+        workspace_restore_mode="preserve_for_resume",
+    ),
+}
+
+
 def clamp_planning_timeout(timeout_seconds: int) -> int:
     """Bound planning time so dense tasks fail faster and more predictably."""
 
@@ -69,3 +114,16 @@ def should_restore_workspace_on_failure(reason: str) -> bool:
         marker in normalized_reason
         for marker in WORKSPACE_RESTORE_ALLOWED_REASON_MARKERS
     )
+
+
+def list_policy_profiles() -> list[PolicyProfile]:
+    """Return supported operator policy profiles."""
+
+    return list(_POLICY_PROFILES.values())
+
+
+def get_policy_profile(name: str | None) -> PolicyProfile:
+    """Resolve a requested policy profile with a balanced fallback."""
+
+    normalized = (name or "balanced").strip().lower()
+    return _POLICY_PROFILES.get(normalized, _POLICY_PROFILES["balanced"])

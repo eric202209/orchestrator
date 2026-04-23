@@ -24,14 +24,14 @@ from app.models import (
     Task,
 )
 from app.schemas import PlannerTaskCandidate
-from app.services.agent_runtime import (
+from app.services.agents.agent_runtime import (
     build_runtime_cli_agent_command,
     parse_runtime_cli_response,
     runtime_reports_context_overflow,
 )
-from app.services.openclaw_service import OpenClawSessionError
-from app.services.plan_commit_service import PlanCommitService
-from app.services.planner_service import PlannerService
+from app.services.agents.openclaw_service import OpenClawSessionError
+from app.services.planning.plan_commit_service import PlanCommitService
+from app.services.planning.planner_service import PlannerService
 from app.services.performance_optimizations import optimize_prompt
 
 
@@ -183,15 +183,20 @@ class PlanningSessionService:
             return session
 
     def recover_active_sessions(self) -> list[int]:
-        session_ids = [
-            session_id
-            for (session_id,) in self.db.query(PlanningSession.id)
+        active_sessions = (
+            self.db.query(PlanningSession)
             .join(Project)
             .filter(Project.deleted_at.is_(None))
             .filter(PlanningSession.status == "active")
             .filter(PlanningSession.current_prompt_id.is_(None))
             .all()
-        ]
+        )
+        session_ids = [session.id for session in active_sessions]
+        for session in active_sessions:
+            session.processing_token = None
+            session.processing_started_at = None
+            session.updated_at = datetime.now(timezone.utc)
+        self.db.commit()
         for session_id in session_ids:
             self.schedule_processing(session_id)
         return session_ids

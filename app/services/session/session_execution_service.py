@@ -13,11 +13,13 @@ from sqlalchemy.orm import Session
 
 from app.models import LogEntry, Session as SessionModel, SessionTask, TaskStatus
 from app.schemas import TaskExecuteRequest
-from app.services.agent_runtime import create_agent_runtime
-from app.services.openclaw_service import OpenClawSessionError
-from app.services.project_isolation_service import resolve_project_workspace_path
+from app.services.agents.agent_runtime import create_agent_runtime
+from app.services.agents.openclaw_service import OpenClawSessionError
+from app.services.workspace.project_isolation_service import (
+    resolve_project_workspace_path,
+)
 from app.services.prompt_templates import OrchestrationState
-from app.services.session_runtime_service import ensure_task_workspace
+from app.services.session.session_runtime_service import ensure_task_workspace
 from app.services.tool_tracking_service import ToolTrackingService
 
 

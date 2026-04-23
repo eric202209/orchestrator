@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional, Dict, List, Any
 from sqlalchemy.orm import Session
 from app.models import Project
-from app.services.project_isolation_service import (
+from app.services.workspace.project_isolation_service import (
     ProjectIsolationService,
     ProjectIsolationError,
 )

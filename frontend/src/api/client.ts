@@ -18,6 +18,8 @@ import type {
   ProjectLogsResponse,
   WorkspaceInfo,
   SessionFilters,
+  CheckpointInspection,
+  AppSettings,
 } from '../types/api';
 
 const API_BASE_URL =
@@ -160,16 +162,19 @@ export const authAPI = {
 };
 
 export const settingsAPI = {
-  get: () => apiClient.get('/settings'),
+  get: () => apiClient.get<AppSettings>('/settings'),
   updateProfile: (data: { name?: string | null }) =>
-    apiClient.patch('/settings/profile', data),
+    apiClient.patch<AppSettings>('/settings/profile', data),
   changePassword: (data: { current_password: string; new_password: string }) =>
     apiClient.post('/settings/password', data),
   updateSystem: (data: {
     workspace_root?: string;
     mobile_api_key?: string;
     rotate_mobile_api_key?: boolean;
-  }) => apiClient.patch('/settings/system', data),
+    agent_backend?: string;
+    agent_model_family?: string;
+    orchestration_policy_profile?: string;
+  }) => apiClient.patch<AppSettings>('/settings/system', data),
   revealMobileSecret: () => apiClient.get('/settings/mobile-secret'),
 };
 
@@ -438,61 +443,71 @@ export const sessionsAPI = {
     apiClient.get<WorkspaceInfo>(`/sessions/${sessionId}/workspace-info`),
 
   // Checkpoint management endpoints
-  saveCheckpoint: (sessionId: number, checkpointName?: string) =>
+  saveCheckpoint: (sessionId: number) =>
     apiClient.post<{ 
       success: boolean;
-      checkpoint_name: string;
-      path: string;
-      created_at: string;
-    }>(`/sessions/${sessionId}/checkpoints?checkpoint_name=${checkpointName || 'manual'}`),
+      session_id: number;
+      message: string;
+    }>(`/sessions/${sessionId}/checkpoint/save`),
 
   listCheckpoints: (sessionId: number) =>
     apiClient.get<{ 
       session_id: number;
       total_count: number;
+      recommended_checkpoint_name?: string | null;
       checkpoints: Array<{
         name: string;
-        created_at: string;
+        created_at: string | null;
         step_index?: number;
         completed_steps: number;
+        progress_score?: number;
+        recommended?: boolean;
       }>;
     }>(`/sessions/${sessionId}/checkpoints`),
 
   loadCheckpoint: (sessionId: number, checkpointName?: string) =>
     apiClient.post<{ 
       success: boolean;
-      checkpoint_name: string;
-      context: Record<string, unknown>;
-      orchestration_state: Record<string, unknown>;
-      current_step_index?: number;
-      step_results_count: number;
-      created_at: string;
-    }>(`/sessions/${sessionId}/checkpoints/load?checkpoint_name=${checkpointName || ''}`),
+      session_key: string;
+      message: string;
+      session_id: number;
+    }>(`/sessions/${sessionId}/checkpoint/load`, undefined, {
+      params: { checkpoint_name: checkpointName || '' },
+    }),
 
-  deleteCheckpoint: (sessionId: number, checkpointName: string) =>
+  inspectCheckpoint: (sessionId: number, checkpointName: string) =>
+    apiClient.get<CheckpointInspection>(
+      `/sessions/${sessionId}/checkpoints/${encodeURIComponent(checkpointName)}`
+    ),
+
+  replayCheckpoint: (sessionId: number, checkpointName: string) =>
     apiClient.post<{ 
       success: boolean;
+      session_key: string;
       message: string;
-    }>(`/sessions/${sessionId}/checkpoints/delete`, { checkpoint_name: checkpointName }),
+      session_id: number;
+      replay_requested: boolean;
+    }>(
+      `/sessions/${sessionId}/checkpoints/${encodeURIComponent(checkpointName)}/replay`
+    ),
+
+  deleteCheckpoint: (sessionId: number, checkpointName: string) =>
+    apiClient.delete<{ 
+      success: boolean;
+      message: string;
+    }>(`/sessions/${sessionId}/checkpoints/${encodeURIComponent(checkpointName)}`),
 
   cleanupCheckpoints: (sessionId: number, keepLatest?: number, maxAgeHours?: number) =>
     apiClient.post<{ 
       success: boolean;
       deleted_count: number;
       kept_count: number;
-    }>(`/sessions/${sessionId}/checkpoints/cleanup`, { 
-      keep_latest: keepLatest || 3,
-      max_age_hours: maxAgeHours || 24
+    }>(`/sessions/${sessionId}/checkpoint/cleanup`, undefined, { 
+      params: {
+        keep_latest: keepLatest || 3,
+        max_age_hours: maxAgeHours || 24,
+      }
     }),
-
-  autoSaveCheckpoint: (sessionId: number, eventType?: string) =>
-    apiClient.post<{ 
-      success: boolean;
-      checkpoint_name: string;
-      event_type: string;
-      path: string;
-      created_at: string;
-    }>(`/sessions/${sessionId}/checkpoints/auto-save?event_type=${eventType || 'pause'}`),
 
   startOpenClaw: (id: number, taskDescription: string) =>
   apiClient.post(`/sessions/${id}/start-openclaw`, { task_description: taskDescription }),

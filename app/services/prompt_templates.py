@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from enum import Enum
-from app.services.system_settings import get_effective_workspace_root
+from app.services.workspace.system_settings import get_effective_workspace_root
 
 # ---------------------------------------------------------------------------
 # Workspace constants

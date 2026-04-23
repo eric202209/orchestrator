@@ -3,10 +3,23 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
-from app.models import PlanningArtifact, PlanningMessage, PlanningSession, Project
-from app.services.project_isolation_service import normalize_project_workspace_path
+from app.models import (
+    ConversationHistory,
+    PermissionRequest,
+    PlanningArtifact,
+    PlanningMessage,
+    PlanningSession,
+    Project,
+    Session as SessionModel,
+    SessionState,
+    Task,
+    TaskCheckpoint,
+)
+from app.services.workspace.project_isolation_service import (
+    normalize_project_workspace_path,
+)
 
-from app.services.planning_session_service import PlanningSessionService
+from app.services.planning.planning_session_service import PlanningSessionService
 
 
 def _create_project(authenticated_client, name: str = "Planner Project") -> dict:
@@ -340,6 +353,40 @@ def test_purge_soft_deleted_projects_removes_planning_records(
             content="# Project: Purge Planning Project\n\n## Task List\n- [ ] TASK_START: Keep clean | Remove planning rows on purge",
         )
     )
+    task = Task(project_id=project.id, title="Old Task")
+    db_session.add(task)
+    db_session.flush()
+
+    session = SessionModel(project_id=project.id, name="Old Session", status="stopped")
+    db_session.add(session)
+    db_session.flush()
+
+    db_session.add(
+        SessionState(session_id=session.id, project_id=project.id, current_step=1)
+    )
+    db_session.add(
+        ConversationHistory(
+            session_id=session.id,
+            role="assistant",
+            content="hello",
+        )
+    )
+    db_session.add(
+        PermissionRequest(
+            project_id=project.id,
+            session_id=session.id,
+            task_id=task.id,
+            operation_type="write",
+            status="pending",
+        )
+    )
+    db_session.add(
+        TaskCheckpoint(
+            task_id=task.id,
+            session_id=session.id,
+            checkpoint_type="error",
+        )
+    )
     db_session.commit()
 
     purge = authenticated_client.delete("/api/v1/projects/purge-soft-deleted")
@@ -348,3 +395,7 @@ def test_purge_soft_deleted_projects_removes_planning_records(
     assert db_session.query(PlanningSession).count() == 0
     assert db_session.query(PlanningMessage).count() == 0
     assert db_session.query(PlanningArtifact).count() == 0
+    assert db_session.query(SessionState).count() == 0
+    assert db_session.query(ConversationHistory).count() == 0
+    assert db_session.query(PermissionRequest).count() == 0
+    assert db_session.query(TaskCheckpoint).count() == 0

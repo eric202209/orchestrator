@@ -15,7 +15,7 @@ from app.services.permission_service import (
     PermissionApprovalService,
     PermissionStatus,
 )
-from app.services.project_isolation_service import ProjectIsolationService
+from app.services.workspace.project_isolation_service import ProjectIsolationService
 
 logger = logging.getLogger(__name__)
 

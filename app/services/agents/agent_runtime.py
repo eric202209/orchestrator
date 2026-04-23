@@ -7,7 +7,8 @@ from typing import Any, Optional, Protocol
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.services.openclaw_service import OpenClawSessionService
+from app.services.agents.openclaw_service import OpenClawSessionService
+from app.services.workspace.system_settings import get_effective_agent_backend
 
 
 class AgentRuntime(Protocol):
@@ -58,7 +59,9 @@ def create_agent_runtime(
 ) -> AgentRuntime:
     """Instantiate the configured backend runtime for a session/task pair."""
 
-    backend_name = (settings.ORCHESTRATOR_AGENT_BACKEND or "local_openclaw").strip()
+    backend_name = get_effective_agent_backend(
+        settings.ORCHESTRATOR_AGENT_BACKEND, db=db
+    ).strip()
     if backend_name == "local_openclaw":
         return OpenClawSessionService(
             db,

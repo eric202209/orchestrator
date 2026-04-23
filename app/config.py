@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     MOBILE_GATEWAY_API_KEY: str = ""
     ORCHESTRATOR_AGENT_BACKEND: str = "local_openclaw"
     ORCHESTRATOR_AGENT_MODEL_FAMILY: str = "local"
+    ORCHESTRATOR_ADMIN_EMAILS: str = ""
 
     # Mobile app configuration
     ORCHESTRATOR_MOBILE_BASE_URL: str = "http://localhost:8080/api/v1"

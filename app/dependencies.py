@@ -4,6 +4,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db
 from app.models import User
 from app.auth import verify_token
@@ -57,6 +58,40 @@ async def get_current_active_user(
         )
 
     return current_user
+
+
+def _configured_admin_emails() -> set[str]:
+    return {
+        email.strip().lower()
+        for email in (settings.ORCHESTRATOR_ADMIN_EMAILS or "").split(",")
+        if email.strip()
+    }
+
+
+async def get_current_admin_user(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+) -> User:
+    """
+    Get the current admin user.
+
+    Secure default:
+    - If explicit admin emails are configured, only those users are admins.
+    - Otherwise, only single-user deployments are allowed to access admin-only
+      endpoints to avoid silent multi-user authorization breaks.
+    """
+    admin_emails = _configured_admin_emails()
+    if current_user.email and current_user.email.lower() in admin_emails:
+        return current_user
+
+    active_user_count = db.query(User).filter(User.is_active.is_(True)).count()
+    if not admin_emails and active_user_count <= 1:
+        return current_user
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Admin privileges are required for this action",
+    )
 
 
 async def get_current_optional_user(

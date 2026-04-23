@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from app.models import Project, Session as SessionModel, Task, TaskStatus
-from app.services.openclaw_service import OpenClawSessionService
+from app.services.agents.openclaw_service import OpenClawSessionService
 
 
 def _seed_service_models(db_session):

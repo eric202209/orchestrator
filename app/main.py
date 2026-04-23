@@ -12,8 +12,8 @@ from sqlalchemy import text
 from app.config import settings, validate_runtime_secrets
 from app.api.v1.router import api_router
 from app.database import engine, init_db, get_db_session
-from app.services.checkpoint_service import CheckpointService
-from app.services.planning_session_service import PlanningSessionService
+from app.services.workspace.checkpoint_service import CheckpointService
+from app.services.planning.planning_session_service import PlanningSessionService
 
 logger = logging.getLogger(__name__)
 

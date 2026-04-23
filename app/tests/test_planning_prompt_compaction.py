@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from app.models import PlanningMessage, PlanningSession
-from app.services.openclaw_service import OpenClawSessionService
-from app.services.planning_session_service import PlanningSessionService
+from app.services.agents.openclaw_service import OpenClawSessionService
+from app.services.planning.planning_session_service import PlanningSessionService
 
 
 def test_context_overflow_detection_matches_embedded_agent_variant():

@@ -12,9 +12,9 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.models import LogEntry, Session as SessionModel, SessionTask, Task, TaskStatus
-from app.services.agent_runtime import create_agent_runtime
-from app.services.checkpoint_service import CheckpointError, CheckpointService
-from app.services.session_runtime_service import (
+from app.services.agents.agent_runtime import create_agent_runtime
+from app.services.workspace.checkpoint_service import CheckpointError, CheckpointService
+from app.services.session.session_runtime_service import (
     DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
     queue_task_for_session,
     reopen_failed_ordered_task_if_needed,

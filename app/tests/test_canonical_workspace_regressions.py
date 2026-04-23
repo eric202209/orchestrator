@@ -2,17 +2,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import app.services.project_isolation_service as project_isolation_service
+import app.services.workspace.project_isolation_service as project_isolation_service
 import app.services.prompt_templates as prompt_templates
-import app.services.system_settings as system_settings
+import app.services.workspace.system_settings as system_settings
 from app.models import Project, Session as SessionModel, Task, TaskStatus
-from app.services.openclaw_service import OpenClawSessionService
+from app.services.agents.openclaw_service import OpenClawSessionService
 from app.services.orchestration.task_rules import (
     get_task_report_path,
     should_execute_in_canonical_project_root,
 )
-from app.services.project_isolation_service import resolve_project_workspace_path
-from app.services.session_runtime_service import ensure_task_workspace
+from app.services.workspace.project_isolation_service import (
+    resolve_project_workspace_path,
+)
+from app.services.session.session_runtime_service import ensure_task_workspace
 
 
 def _patch_workspace_root(monkeypatch, root: Path) -> None:

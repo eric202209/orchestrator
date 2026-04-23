@@ -9,15 +9,15 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.models import LogEntry, Session as SessionModel
-from app.services.agent_runtime import create_agent_runtime
-from app.services.checkpoint_service import CheckpointService
+from app.services.agents.agent_runtime import create_agent_runtime
+from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.log_utils import deduplicate_logs
-from app.services.openclaw_service import OpenClawSessionError
-from app.services.overwrite_protection_service import (
+from app.services.agents.openclaw_service import OpenClawSessionError
+from app.services.workspace.overwrite_protection_service import (
     OverwriteProtectionError,
     OverwriteProtectionService,
 )
-from app.services.session_runtime_service import get_session_task_subfolder
+from app.services.session.session_runtime_service import get_session_task_subfolder
 
 
 def _get_session_or_404(db: Session, session_id: int) -> SessionModel:
@@ -203,6 +203,54 @@ def list_session_checkpoints_payload(db: Session, session_id: int) -> Dict[str, 
     }
 
 
+def inspect_session_checkpoint_payload(
+    db: Session, session_id: int, checkpoint_name: str
+) -> Dict[str, Any]:
+    _get_session_or_404(db, session_id)
+    checkpoint_service = CheckpointService(db)
+    payload = checkpoint_service.load_checkpoint(session_id, checkpoint_name)
+    orchestration_state = payload.get("orchestration_state", {}) or {}
+    validation_history = orchestration_state.get("validation_history", []) or []
+    plan = orchestration_state.get("plan", []) or []
+    step_results = payload.get("step_results", []) or []
+
+    latest_validation = validation_history[-1] if validation_history else None
+    latest_plan_validation = orchestration_state.get("last_plan_validation")
+    latest_completion_validation = orchestration_state.get("last_completion_validation")
+
+    return {
+        "session_id": session_id,
+        "checkpoint_name": payload.get("checkpoint_name", checkpoint_name),
+        "created_at": payload.get("created_at"),
+        "current_step_index": payload.get("current_step_index"),
+        "summary": {
+            "plan_step_count": len(plan),
+            "completed_step_count": len(step_results),
+            "execution_result_count": len(
+                orchestration_state.get("execution_results", []) or []
+            ),
+            "status": orchestration_state.get("status"),
+            "relaxed_mode": bool(orchestration_state.get("relaxed_mode")),
+            "completion_repair_attempts": int(
+                orchestration_state.get("completion_repair_attempts") or 0
+            ),
+        },
+        "context": {
+            "project_name": (payload.get("context", {}) or {}).get("project_name"),
+            "task_subfolder": (payload.get("context", {}) or {}).get("task_subfolder"),
+            "project_dir_override": (payload.get("context", {}) or {}).get(
+                "project_dir_override"
+            ),
+        },
+        "latest_validation": latest_validation,
+        "latest_plan_validation": latest_plan_validation,
+        "latest_completion_validation": latest_completion_validation,
+        "validation_history": validation_history[-10:],
+        "plan_preview": plan[:5],
+        "step_results_preview": step_results[-5:],
+    }
+
+
 async def load_session_checkpoint_payload(
     db: Session, session_id: int, checkpoint_name: str
 ) -> Dict[str, Any]:
@@ -221,6 +269,15 @@ async def load_session_checkpoint_payload(
         "message": f"Session resumed from checkpoint: {checkpoint_name}",
         "session_id": session_id,
     }
+
+
+async def replay_session_checkpoint_payload(
+    db: Session, session_id: int, checkpoint_name: str
+) -> Dict[str, Any]:
+    result = await load_session_checkpoint_payload(db, session_id, checkpoint_name)
+    result["replay_requested"] = True
+    result["message"] = f"Replay started from checkpoint: {checkpoint_name}"
+    return result
 
 
 def delete_session_checkpoint_payload(

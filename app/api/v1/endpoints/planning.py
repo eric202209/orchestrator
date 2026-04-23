@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import Field
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -19,14 +20,14 @@ from app.schemas import (
     PlanningSessionSummaryResponse,
     TaskResponse,
 )
-from app.services.planning_session_service import PlanningSessionService
+from app.services.planning.planning_session_service import PlanningSessionService
 
 router = APIRouter(prefix="/planning")
 
 
 class PlanningCommitResponse(PlanningSessionResponse):
     plan: Optional[PlanResponse] = None
-    tasks: List[TaskResponse] = []
+    tasks: List[TaskResponse] = Field(default_factory=list)
 
 
 @router.get("/sessions", response_model=List[PlanningSessionSummaryResponse])

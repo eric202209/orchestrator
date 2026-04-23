@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 from sqlalchemy.orm import Session
 
 from app.models import LogEntry, Session as SessionModel, TaskCheckpoint
-from app.services.checkpoint_service import CheckpointService
+from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.prompt_templates import OrchestrationState, StepResult
 
 from .types import ValidationVerdict

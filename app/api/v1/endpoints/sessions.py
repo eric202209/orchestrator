@@ -21,7 +21,6 @@ from app.schemas import (
     TaskExecuteRequest,
 )
 from app.services import (
-    OpenClawSessionService,
     PromptTemplates,
     check_session_overwrites_payload as _check_session_overwrites_payload,
     cleanup_orphaned_checkpoints_payload as _cleanup_orphaned_checkpoints_payload,
@@ -34,10 +33,12 @@ from app.services import (
     get_session_statistics_payload as _get_session_statistics_payload,
     get_sorted_logs_payload as _get_sorted_logs_payload,
     get_tool_execution_history_payload as _get_tool_execution_history_payload,
+    inspect_session_checkpoint_payload as _inspect_session_checkpoint_payload,
     list_session_checkpoints_payload as _list_session_checkpoints_payload,
     load_session_checkpoint_payload as _load_session_checkpoint_payload,
     maybe_queue_next_automatic_task as _maybe_queue_next_automatic_task,
     queue_task_for_session as _queue_task_for_session,
+    replay_session_checkpoint_payload as _replay_session_checkpoint_payload,
     save_session_checkpoint_payload as _save_session_checkpoint_payload,
     pause_session_lifecycle as _pause_session_lifecycle,
     resume_session_lifecycle as _resume_session_lifecycle,
@@ -349,7 +350,7 @@ def delete_session(
     """Delete a session"""
     import json
     from app.models import Session as SessionModel, LogEntry, TaskCheckpoint
-    from app.services.checkpoint_service import CheckpointService
+    from app.services.workspace.checkpoint_service import CheckpointService
 
     logger.info(f"DELETE /sessions/{session_id} - Starting deletion")
 
@@ -928,6 +929,24 @@ async def list_session_checkpoints(
         )
 
 
+@router.get("/sessions/{session_id}/checkpoints/{checkpoint_name}")
+async def inspect_session_checkpoint(
+    session_id: int,
+    checkpoint_name: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Return operator-friendly metadata for one checkpoint."""
+    try:
+        return _inspect_session_checkpoint_payload(db, session_id, checkpoint_name)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to inspect checkpoint: {str(e)}"
+        )
+
+
 @router.post("/sessions/{session_id}/checkpoint/load")
 async def load_session_checkpoint(
     session_id: int,
@@ -947,6 +966,17 @@ async def load_session_checkpoint(
         Resume result with new session key
     """
     return await _load_session_checkpoint_payload(db, session_id, checkpoint_name)
+
+
+@router.post("/sessions/{session_id}/checkpoints/{checkpoint_name}/replay")
+async def replay_session_checkpoint(
+    session_id: int,
+    checkpoint_name: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Resume execution from a selected checkpoint for operator replay."""
+    return await _replay_session_checkpoint_payload(db, session_id, checkpoint_name)
 
 
 @router.delete("/sessions/{session_id}/checkpoints/{checkpoint_name}")

@@ -359,6 +359,9 @@ class SystemSettingsUpdateRequest(BaseModel):
     workspace_root: Optional[str] = None
     mobile_api_key: Optional[str] = None
     rotate_mobile_api_key: bool = False
+    agent_backend: Optional[str] = None
+    agent_model_family: Optional[str] = None
+    orchestration_policy_profile: Optional[str] = None
 
 
 class AccountSettingsResponse(BaseModel):
@@ -376,6 +379,9 @@ class SystemSettingsResponse(BaseModel):
     agent_backend: str
     agent_model_family: str
     backend_capabilities: dict[str, Any]
+    supported_backends: list[dict[str, Any]] = []
+    orchestration_policy_profile: str
+    available_policy_profiles: list[dict[str, Any]] = []
 
 
 class AppSettingsResponse(BaseModel):

@@ -52,7 +52,7 @@ def _local_openclaw_descriptor() -> BackendDescriptor:
     return BackendDescriptor(
         name="local_openclaw",
         display_name="Local OpenClaw",
-        implementation="app.services.openclaw_service.OpenClawSessionService",
+        implementation="app.services.agents.openclaw_service.OpenClawSessionService",
         default_model_family="local",
         available=True,
         capabilities=BackendCapabilities(
@@ -70,15 +70,22 @@ def _local_openclaw_descriptor() -> BackendDescriptor:
     )
 
 
+_BACKEND_REGISTRY = {
+    descriptor.name: descriptor
+    for descriptor in [
+        _local_openclaw_descriptor(),
+    ]
+}
+
+
 def list_supported_backends() -> List[BackendDescriptor]:
     """Return the currently registered orchestration backends."""
 
-    return [_local_openclaw_descriptor()]
+    return list(_BACKEND_REGISTRY.values())
 
 
 def get_backend_descriptor(name: Optional[str]) -> BackendDescriptor:
     """Resolve a configured backend name to a concrete descriptor."""
 
-    registry = {descriptor.name: descriptor for descriptor in list_supported_backends()}
     normalized = (name or "local_openclaw").strip().lower()
-    return registry.get(normalized, registry["local_openclaw"])
+    return _BACKEND_REGISTRY.get(normalized, _BACKEND_REGISTRY["local_openclaw"])

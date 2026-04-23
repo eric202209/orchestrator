@@ -69,8 +69,10 @@ class MobilePermissionApproveBody(BaseModel):
     auto_approve_same: bool = False
 
 
-from app.services.project_isolation_service import resolve_project_workspace_path
-from app.services.system_settings import get_effective_mobile_gateway_key
+from app.services.workspace.project_isolation_service import (
+    resolve_project_workspace_path,
+)
+from app.services.workspace.system_settings import get_effective_mobile_gateway_key
 from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)

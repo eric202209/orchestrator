@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.auth import get_password_hash, verify_password
 from app.config import settings
 from app.database import get_db
-from app.dependencies import get_current_active_user
+from app.dependencies import get_current_active_user, get_current_admin_user
 from app.models import User
 from app.schemas import (
     AppSettingsResponse,
@@ -16,10 +16,23 @@ from app.schemas import (
     ProfileUpdateRequest,
     SystemSettingsUpdateRequest,
 )
-from app.services.agent_backends import get_backend_descriptor
-from app.services.system_settings import (
+from app.services.agents.agent_backends import (
+    get_backend_descriptor,
+    list_supported_backends,
+)
+from app.services.orchestration.policy import (
+    get_policy_profile,
+    list_policy_profiles,
+)
+from app.services.workspace.system_settings import (
+    AGENT_BACKEND_KEY,
+    AGENT_MODEL_FAMILY_KEY,
+    ORCHESTRATION_POLICY_PROFILE_KEY,
     WORKSPACE_ROOT_KEY,
+    get_effective_agent_backend,
+    get_effective_agent_model_family,
     get_effective_mobile_gateway_key,
+    get_effective_policy_profile,
     get_effective_workspace_root,
     set_setting_value,
 )
@@ -50,11 +63,20 @@ def _derive_mobile_base_url(request: Request) -> str:
 def get_app_settings(
     request: Request,
     current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
 ):
-    backend = get_backend_descriptor(settings.ORCHESTRATOR_AGENT_BACKEND)
+    effective_backend_name = get_effective_agent_backend(
+        settings.ORCHESTRATOR_AGENT_BACKEND, db=db
+    )
+    effective_model_family = get_effective_agent_model_family(
+        settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=db
+    )
+    effective_policy_profile = get_effective_policy_profile(db=db)
+    backend = get_backend_descriptor(effective_backend_name)
     mobile_key, key_source = get_effective_mobile_gateway_key(
         settings.MOBILE_GATEWAY_API_KEY,
         settings.OPENCLAW_API_KEY,
+        db=db,
     )
     return {
         "account": {
@@ -62,15 +84,24 @@ def get_app_settings(
             "name": current_user.name,
         },
         "system": {
-            "workspace_root": str(get_effective_workspace_root()),
+            "workspace_root": str(get_effective_workspace_root(db=db)),
             "mobile_base_url": _derive_mobile_base_url(request),
             "mobile_api_key_configured": bool(mobile_key),
             "mobile_api_key_preview": _mask_secret(mobile_key),
             "mobile_api_key_source": key_source,
             "openclaw_gateway_url": settings.OPENCLAW_GATEWAY_URL,
             "agent_backend": backend.name,
-            "agent_model_family": settings.ORCHESTRATOR_AGENT_MODEL_FAMILY,
+            "agent_model_family": effective_model_family,
             "backend_capabilities": backend.capabilities.to_dict(),
+            "supported_backends": [
+                descriptor.to_dict() for descriptor in list_supported_backends()
+            ],
+            "orchestration_policy_profile": get_policy_profile(
+                effective_policy_profile
+            ).name,
+            "available_policy_profiles": [
+                profile.to_dict() for profile in list_policy_profiles()
+            ],
         },
     }
 
@@ -86,7 +117,7 @@ def update_profile(
     db.add(current_user)
     db.commit()
     db.refresh(current_user)
-    return get_app_settings(request, current_user)
+    return get_app_settings(request, current_user, db)
 
 
 @router.post("/password")
@@ -117,7 +148,7 @@ def change_password(
 def update_system_settings(
     request: Request,
     payload: SystemSettingsUpdateRequest,
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ):
     if payload.rotate_mobile_api_key or payload.mobile_api_key is not None:
@@ -138,7 +169,42 @@ def update_system_settings(
             description="OpenClaw workspace root used for orchestration projects",
         )
 
-    return get_app_settings(request, current_user)
+    if payload.agent_backend is not None:
+        backend = get_backend_descriptor(payload.agent_backend)
+        set_setting_value(
+            db,
+            AGENT_BACKEND_KEY,
+            backend.name,
+            description="Operator-selected orchestration backend",
+        )
+
+        if payload.agent_model_family is None:
+            set_setting_value(
+                db,
+                AGENT_MODEL_FAMILY_KEY,
+                backend.default_model_family,
+                description="Operator-selected orchestration model family",
+            )
+
+    if payload.agent_model_family is not None:
+        set_setting_value(
+            db,
+            AGENT_MODEL_FAMILY_KEY,
+            payload.agent_model_family.strip()
+            or settings.ORCHESTRATOR_AGENT_MODEL_FAMILY,
+            description="Operator-selected orchestration model family",
+        )
+
+    if payload.orchestration_policy_profile is not None:
+        profile = get_policy_profile(payload.orchestration_policy_profile)
+        set_setting_value(
+            db,
+            ORCHESTRATION_POLICY_PROFILE_KEY,
+            profile.name,
+            description="Operator-selected orchestration policy profile",
+        )
+
+    return get_app_settings(request, current_user, db)
 
 
 @router.get("/mobile-secret")

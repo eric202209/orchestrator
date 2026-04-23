@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from app.database import get_db
 from app.models import Session as SessionModel
-from app.services.resume_service import ResumeSessionService, ResumeError
+from app.services.session.resume_service import ResumeSessionService, ResumeError
 
 logger = logging.getLogger(__name__)
 

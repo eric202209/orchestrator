@@ -1,10 +1,11 @@
 from app.config import settings
-from app.services.agent_runtime import (
+from app.services.agents.agent_runtime import (
     build_runtime_cli_agent_command,
     create_agent_runtime,
     runtime_reports_context_overflow,
 )
-from app.services.openclaw_service import OpenClawSessionService
+from app.services.agents.openclaw_service import OpenClawSessionService
+from app.services.workspace.system_settings import AGENT_BACKEND_KEY, set_setting_value
 
 
 def test_create_agent_runtime_uses_configured_local_backend(db_session):
@@ -16,6 +17,16 @@ def test_create_agent_runtime_uses_configured_local_backend(db_session):
 
 def test_create_agent_runtime_falls_back_for_unknown_backend(db_session, monkeypatch):
     monkeypatch.setattr(settings, "ORCHESTRATOR_AGENT_BACKEND", "unknown_backend")
+
+    runtime = create_agent_runtime(db_session, session_id=None)
+
+    assert isinstance(runtime, OpenClawSessionService)
+    assert runtime.backend_descriptor.name == "local_openclaw"
+
+
+def test_create_agent_runtime_uses_db_backend_override(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "ORCHESTRATOR_AGENT_BACKEND", "unknown_backend")
+    set_setting_value(db_session, AGENT_BACKEND_KEY, "local_openclaw")
 
     runtime = create_agent_runtime(db_session, session_id=None)
 

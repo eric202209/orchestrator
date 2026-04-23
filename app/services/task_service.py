@@ -10,7 +10,9 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session
 
 from app.models import Project, Task, TaskStatus
-from app.services.project_isolation_service import resolve_project_workspace_path
+from app.services.workspace.project_isolation_service import (
+    resolve_project_workspace_path,
+)
 
 
 HYDRATION_EXCLUDED_NAMES = {

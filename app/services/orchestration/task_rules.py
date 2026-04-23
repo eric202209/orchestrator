@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 from app.models import Project, Task, TaskStatus
-from app.services.project_isolation_service import resolve_project_workspace_path
+from app.services.workspace.project_isolation_service import (
+    resolve_project_workspace_path,
+)
 from app.services.task_service import TaskService
 
 

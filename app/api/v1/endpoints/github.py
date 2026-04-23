@@ -4,9 +4,11 @@ import hashlib
 import hmac
 from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from app.config import settings
+from app.dependencies import get_current_active_user
+from app.models import User
 from app.services.github_service import GitHubService
 from app.tasks.github_tasks import (
     process_github_issue_event,
@@ -20,7 +22,9 @@ router = APIRouter()
 def _verify_webhook_signature(body: bytes, signature: str | None) -> None:
     """Validate the GitHub webhook signature when a secret is configured."""
     if not settings.GITHUB_WEBHOOK_SECRET:
-        return
+        raise HTTPException(
+            status_code=503, detail="GitHub webhook secret is not configured"
+        )
 
     if not signature or not signature.startswith("sha256="):
         raise HTTPException(status_code=401, detail="Missing GitHub webhook signature")
@@ -134,6 +138,7 @@ async def create_github_issue(
     title: str,
     body: str,
     labels: Optional[list] = None,
+    current_user: User = Depends(get_current_active_user),
 ):
     """Create a GitHub issue"""
     try:

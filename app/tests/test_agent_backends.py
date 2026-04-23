@@ -1,4 +1,7 @@
-from app.services.agent_backends import get_backend_descriptor, list_supported_backends
+from app.services.agents.agent_backends import (
+    get_backend_descriptor,
+    list_supported_backends,
+)
 
 
 def test_default_backend_descriptor_is_local_openclaw():

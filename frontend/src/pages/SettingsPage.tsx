@@ -1,24 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Eye, KeyRound, Save, Shield, FolderCog, RefreshCw, UserCircle2 } from 'lucide-react';
 import { settingsAPI } from '../api/client';
-
-type SettingsResponse = {
-  account: {
-    email: string;
-    name?: string | null;
-  };
-  system: {
-    workspace_root: string;
-    mobile_base_url: string;
-    mobile_api_key_configured: boolean;
-    mobile_api_key_preview?: string | null;
-    mobile_api_key_source?: string | null;
-    openclaw_gateway_url: string;
-  };
-};
+import type { AppSettings } from '../types/api';
 
 export default function SettingsPage() {
-  const [settings, setSettings] = useState<SettingsResponse | null>(null);
+  const [settings, setSettings] = useState<AppSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [savingProfile, setSavingProfile] = useState(false);
   const [savingSystem, setSavingSystem] = useState(false);
@@ -29,6 +15,9 @@ export default function SettingsPage() {
   const [name, setName] = useState('');
   const [workspaceRoot, setWorkspaceRoot] = useState('');
   const [mobileApiKey, setMobileApiKey] = useState('');
+  const [agentBackend, setAgentBackend] = useState('');
+  const [agentModelFamily, setAgentModelFamily] = useState('');
+  const [policyProfile, setPolicyProfile] = useState('');
   const [revealedMobileSecret, setRevealedMobileSecret] = useState<string | null>(null);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -38,10 +27,13 @@ export default function SettingsPage() {
     setError(null);
     try {
       const response = await settingsAPI.get();
-      const data = response.data as SettingsResponse;
+      const data = response.data;
       setSettings(data);
       setName(data.account.name || '');
       setWorkspaceRoot(data.system.workspace_root || '');
+      setAgentBackend(data.system.agent_backend || '');
+      setAgentModelFamily(data.system.agent_model_family || '');
+      setPolicyProfile(data.system.orchestration_policy_profile || '');
       setMobileApiKey('');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load settings');
@@ -54,10 +46,13 @@ export default function SettingsPage() {
     loadSettings();
   }, []);
 
-  const refreshFromResponse = (data: SettingsResponse) => {
+  const refreshFromResponse = (data: AppSettings) => {
     setSettings(data);
     setName(data.account.name || '');
     setWorkspaceRoot(data.system.workspace_root || '');
+    setAgentBackend(data.system.agent_backend || '');
+    setAgentModelFamily(data.system.agent_model_family || '');
+    setPolicyProfile(data.system.orchestration_policy_profile || '');
     setMobileApiKey('');
   };
 
@@ -67,7 +62,7 @@ export default function SettingsPage() {
     setMessage(null);
     try {
       const response = await settingsAPI.updateProfile({ name: name.trim() || null });
-      refreshFromResponse(response.data as SettingsResponse);
+      refreshFromResponse(response.data);
       setMessage('Profile updated.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update profile');
@@ -85,8 +80,11 @@ export default function SettingsPage() {
         workspace_root: workspaceRoot.trim(),
         mobile_api_key: mobileApiKey.trim() || undefined,
         rotate_mobile_api_key: rotateMobileKey,
+        agent_backend: agentBackend || undefined,
+        agent_model_family: agentModelFamily.trim() || undefined,
+        orchestration_policy_profile: policyProfile || undefined,
       });
-      refreshFromResponse(response.data as SettingsResponse);
+      refreshFromResponse(response.data);
       setRevealedMobileSecret(null);
       setMessage(rotateMobileKey ? 'Mobile API key rotated.' : 'System settings updated.');
     } catch (err) {
@@ -120,7 +118,9 @@ export default function SettingsPage() {
     setError(null);
     try {
       const response = await settingsAPI.revealMobileSecret();
-      setRevealedMobileSecret(response.data.api_key);
+      setRevealedMobileSecret(
+        response.data.api_key_preview || response.data.detail || 'Secret is intentionally redacted by the API.'
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to reveal mobile API key');
     } finally {
@@ -188,6 +188,65 @@ export default function SettingsPage() {
             <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-4">
               <div className="text-sm text-slate-400">Recommended Mobile Base URL</div>
               <div className="mt-2 text-sm text-white break-all">{settings.system.mobile_base_url}</div>
+            </div>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <label className="block text-sm text-slate-400 mb-2">Agent Backend</label>
+              <select
+                value={agentBackend}
+                onChange={(e) => {
+                  const nextBackend = e.target.value;
+                  setAgentBackend(nextBackend);
+                  const selected = settings.system.supported_backends.find(
+                    (backend) => backend.name === nextBackend
+                  );
+                  if (selected) {
+                    setAgentModelFamily(selected.default_model_family);
+                  }
+                }}
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white"
+              >
+                {settings.system.supported_backends.map((backend) => (
+                  <option key={backend.name} value={backend.name}>
+                    {backend.display_name} {backend.available ? '' : '(Unavailable)'}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm text-slate-400 mb-2">Model Family</label>
+              <input
+                value={agentModelFamily}
+                onChange={(e) => setAgentModelFamily(e.target.value)}
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white"
+              />
+            </div>
+          </div>
+          <div>
+            <label className="block text-sm text-slate-400 mb-2">Policy Profile</label>
+            <select
+              value={policyProfile}
+              onChange={(e) => setPolicyProfile(e.target.value)}
+              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white"
+            >
+              {settings.system.available_policy_profiles.map((profile) => (
+                <option key={profile.name} value={profile.name}>
+                  {profile.display_name}
+                </option>
+              ))}
+            </select>
+            <p className="mt-2 text-xs text-slate-500">
+              {settings.system.available_policy_profiles.find((profile) => profile.name === policyProfile)?.description}
+            </p>
+          </div>
+          <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-4">
+            <div className="text-sm text-slate-400">Backend Capabilities</div>
+            <div className="mt-2 text-xs text-slate-300">
+              {Object.entries(settings.system.backend_capabilities)
+                .filter(([, value]) => value === true)
+                .map(([key]) => key.replace(/^supports_/, '').replace(/_/g, ' '))
+                .join(' • ') || 'No capabilities reported'}
             </div>
           </div>
         </div>

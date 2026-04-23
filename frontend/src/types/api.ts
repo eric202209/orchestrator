@@ -234,6 +234,73 @@ export interface Checkpoint {
   created_at: string | null;
   step_index?: number;
   completed_steps?: number;
+  progress_score?: number;
+  recommended?: boolean;
+}
+
+export interface CheckpointInspection {
+  session_id: number;
+  checkpoint_name: string;
+  created_at: string | null;
+  current_step_index?: number;
+  summary: {
+    plan_step_count: number;
+    completed_step_count: number;
+    execution_result_count: number;
+    status?: string | null;
+    relaxed_mode: boolean;
+    completion_repair_attempts: number;
+  };
+  context: {
+    project_name?: string | null;
+    task_subfolder?: string | null;
+    project_dir_override?: string | null;
+  };
+  latest_validation?: Record<string, unknown> | null;
+  latest_plan_validation?: Record<string, unknown> | null;
+  latest_completion_validation?: Record<string, unknown> | null;
+  validation_history: Record<string, unknown>[];
+  plan_preview: Array<Record<string, unknown>>;
+  step_results_preview: Array<Record<string, unknown>>;
+}
+
+export interface BackendDescriptor {
+  name: string;
+  display_name: string;
+  implementation: string;
+  default_model_family: string;
+  available: boolean;
+  capabilities: Record<string, boolean | number | string | null>;
+}
+
+export interface PolicyProfile {
+  name: string;
+  display_name: string;
+  description: string;
+  validation_severity: string;
+  completion_repair_budget: number;
+  workspace_restore_mode: string;
+}
+
+export interface AppSettings {
+  account: {
+    email: string;
+    name?: string | null;
+  };
+  system: {
+    workspace_root: string;
+    mobile_base_url: string;
+    mobile_api_key_configured: boolean;
+    mobile_api_key_preview?: string | null;
+    mobile_api_key_source?: string | null;
+    openclaw_gateway_url: string;
+    agent_backend: string;
+    agent_model_family: string;
+    backend_capabilities: Record<string, boolean | number | string | null>;
+    supported_backends: BackendDescriptor[];
+    orchestration_policy_profile: string;
+    available_policy_profiles: PolicyProfile[];
+  };
 }
 
 export interface SessionFilters {
