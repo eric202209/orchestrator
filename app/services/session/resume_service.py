@@ -10,7 +10,6 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
 from app.models import Session as SessionModel, SessionState, TaskCheckpoint
-from app.services.agents.openclaw_service import OpenClawSessionService
 
 logger = logging.getLogger(__name__)
 

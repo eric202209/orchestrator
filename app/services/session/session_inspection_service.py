@@ -11,11 +11,11 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models import LogEntry, Session as SessionModel
 from app.services.agents.agent_runtime import create_agent_runtime
+from app.services.agents.interfaces import AgentRuntimeError
 from app.services.model_adaptation import get_adaptation_profile
 from app.services.orchestration.policy import get_policy_profile
 from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.log_utils import deduplicate_logs
-from app.services.agents.openclaw_service import OpenClawSessionError
 from app.services.workspace.overwrite_protection_service import (
     OverwriteProtectionError,
     OverwriteProtectionService,
@@ -184,10 +184,10 @@ async def save_session_checkpoint_payload(
     db: Session, session_id: int
 ) -> Dict[str, Any]:
     _get_session_or_404(db, session_id)
-    openclaw_service = create_agent_runtime(db, session_id)
+    runtime = create_agent_runtime(db, session_id)
     try:
-        await openclaw_service.pause_session()
-    except OpenClawSessionError as exc:
+        await runtime.pause_session()
+    except AgentRuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     return {
@@ -306,12 +306,10 @@ async def load_session_checkpoint_payload(
     db: Session, session_id: int, checkpoint_name: str
 ) -> Dict[str, Any]:
     _get_session_or_404(db, session_id)
-    openclaw_service = create_agent_runtime(db, session_id)
+    runtime = create_agent_runtime(db, session_id)
     try:
-        session_key = await openclaw_service.resume_session(
-            checkpoint_name=checkpoint_name
-        )
-    except OpenClawSessionError as exc:
+        session_key = await runtime.resume_session(checkpoint_name=checkpoint_name)
+    except AgentRuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     return {

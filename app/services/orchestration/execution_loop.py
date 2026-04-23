@@ -10,7 +10,11 @@ from typing import Any, Callable, Dict, Optional
 
 from app.models import TaskStatus
 from app.services.orchestration.completion_flow import finalize_successful_task
-from app.services.orchestration.context_assembly import assemble_execution_prompt
+from app.services.orchestration.context_assembly import (
+    assemble_debugging_prompt,
+    assemble_execution_prompt,
+    assemble_plan_revision_prompt,
+)
 from app.services.orchestration.execution_flow import (
     assess_step_execution,
     determine_step_timeout,
@@ -38,11 +42,7 @@ from app.services.orchestration.workspace_guard import (
     summarize_step_changes,
 )
 from app.services.orchestration.validator import ValidatorService
-from app.services.prompt_templates import (
-    OrchestrationStatus,
-    PromptTemplates,
-    StepResult,
-)
+from app.services.prompt_templates import OrchestrationStatus, StepResult
 
 
 def execute_step_loop(
@@ -54,7 +54,7 @@ def execute_step_loop(
     workspace_violation_error_cls: type[Exception],
     get_next_pending_project_task_fn: Callable[..., Any],
     get_latest_session_task_link_fn: Callable[..., Any],
-    execute_openclaw_task_delay_fn: Callable[..., Any],
+    execute_orchestration_task_delay_fn: Callable[..., Any],
     build_task_report_payload_fn: Callable[..., Dict[str, Any]],
     render_task_report_fn: Callable[..., Dict[str, Any]],
     write_project_state_snapshot_fn: Callable[..., None],
@@ -72,7 +72,7 @@ def execute_step_loop(
     execution_profile = ctx.execution_profile
     validation_profile = ctx.validation_profile
     orchestration_state = ctx.orchestration_state
-    openclaw_service = ctx.openclaw_service
+    runtime_service = ctx.runtime_service
     task_service = ctx.task_service
     logger = ctx.logger
     emit_live = ctx.emit_live
@@ -162,7 +162,7 @@ def execute_step_loop(
                     },
                 )
                 repaired_step = repair_step_commands_with_self_correction(
-                    openclaw_service=openclaw_service,
+                    runtime_service=runtime_service,
                     db=db,
                     session_id=session_id,
                     task_id=task_id,
@@ -255,7 +255,7 @@ def execute_step_loop(
 
         step_started_at = datetime.now(timezone.utc)
         step_result = asyncio.run(
-            openclaw_service.execute_task(
+            runtime_service.execute_task(
                 execution_prompt,
                 timeout_seconds=step_timeout_seconds,
             )
@@ -589,21 +589,18 @@ def execute_step_loop(
             write_project_state_snapshot_fn(db, project, task, session_id)
             return {"status": "failed", "reason": "max_attempts_reached"}
 
-        debug_prompt = PromptTemplates.build_debugging_prompt(
+        debug_prompt = assemble_debugging_prompt(
+            ctx,
             step_description=step_description + extra_context,
             error_message=step_record.error_message,
             command_output=step_output,
             verification_output=step_record.verification_output,
             attempt_number=current_attempt,
             max_attempts=max_attempts,
-            prior_debug_attempts=orchestration_state.debug_attempts,
-            project_name=orchestration_state.project_name,
-            workspace_root=str(orchestration_state.workspace_root),
-            project_dir=str(orchestration_state.project_dir),
         )
 
         debug_result = asyncio.run(
-            openclaw_service.execute_task(
+            runtime_service.execute_task(
                 debug_prompt, timeout_seconds=DEBUG_TIMEOUT_SECONDS
             )
         )
@@ -623,21 +620,18 @@ def execute_step_loop(
                     "compact_retry": True,
                 },
             )
-            compact_debug_prompt = PromptTemplates.build_debugging_prompt(
+            compact_debug_prompt = assemble_debugging_prompt(
+                ctx,
                 step_description=step_description,
                 error_message=step_record.error_message,
                 command_output=step_output,
                 verification_output=step_record.verification_output,
                 attempt_number=current_attempt,
                 max_attempts=max_attempts,
-                prior_debug_attempts=orchestration_state.debug_attempts,
-                project_name=orchestration_state.project_name,
-                workspace_root=str(orchestration_state.workspace_root),
-                project_dir=str(orchestration_state.project_dir),
                 compact=True,
             )
             debug_result = asyncio.run(
-                openclaw_service.execute_task(
+                runtime_service.execute_task(
                     compact_debug_prompt, timeout_seconds=DEBUG_TIMEOUT_SECONDS
                 )
             )
@@ -664,16 +658,13 @@ def execute_step_loop(
                     "[ORCHESTRATION] Plan revision needed, entering PLAN_REVISION phase",
                     metadata={"phase": "plan_revision", "step_index": step_index + 1},
                 )
-                revise_prompt = PromptTemplates.build_plan_revision_prompt(
-                    original_plan=orchestration_state.plan,
+                revise_prompt = assemble_plan_revision_prompt(
+                    ctx,
                     failed_steps=[step_record],
                     debug_analysis=debug_result.get("output", ""),
-                    completed_steps=orchestration_state.completed_steps,
-                    workspace_root=str(orchestration_state.workspace_root),
-                    project_dir=str(orchestration_state.project_dir),
                 )
                 revise_result = asyncio.run(
-                    openclaw_service.execute_task(
+                    runtime_service.execute_task(
                         revise_prompt, timeout_seconds=DEBUG_TIMEOUT_SECONDS
                     )
                 )
@@ -837,7 +828,7 @@ def execute_step_loop(
         write_project_state_snapshot_fn=write_project_state_snapshot_fn,
         get_next_pending_project_task_fn=get_next_pending_project_task_fn,
         get_latest_session_task_link_fn=get_latest_session_task_link_fn,
-        execute_openclaw_task_delay_fn=execute_openclaw_task_delay_fn,
+        execute_orchestration_task_delay_fn=execute_orchestration_task_delay_fn,
         build_task_report_payload_fn=build_task_report_payload_fn,
         render_task_report_fn=render_task_report_fn,
     )

@@ -30,10 +30,12 @@ def test_supported_backends_contains_registered_future_metadata():
 
     assert "local_openclaw" in names
     assert "openai_responses_api" in names
-    planned = next(
+    backend = next(
         descriptor
         for descriptor in descriptors
         if descriptor.name == "openai_responses_api"
     )
-    assert planned.health.status == "not_implemented"
-    assert planned.health.errors
+    assert backend.implemented is True
+    assert backend.config.transport_mode == "api"
+    assert backend.config.supported_prompt_format == "structured_prompt_envelope"
+    assert backend.health.status in {"ready", "degraded"}

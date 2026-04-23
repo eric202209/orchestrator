@@ -137,9 +137,14 @@ def _check_local_openclaw_health(descriptor: BackendDescriptor) -> BackendHealth
         except ValueError as exc:
             warnings.append(f"OPENCLAW_CLI_ARGS could not be parsed cleanly: {exc}")
 
-    command_found = any(
-        candidate.exists() for candidate in _resolve_openclaw_command_candidates()
-    )
+    command_found = False
+    for candidate in _resolve_openclaw_command_candidates():
+        try:
+            if candidate.exists():
+                command_found = True
+                break
+        except OSError:
+            continue
     if not command_found:
         errors.append(
             "OpenClaw CLI was not found in PATH, OPENCLAW_CLI_PATH, or known install locations."
@@ -166,6 +171,22 @@ def _check_planned_backend_health(descriptor: BackendDescriptor) -> BackendHealt
             )
         ],
         warnings=[],
+    )
+
+
+def _check_openai_backend_health(descriptor: BackendDescriptor) -> BackendHealth:
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    if not (settings.OPENAI_API_KEY or "").strip():
+        errors.append("OPENAI_API_KEY is not configured.")
+
+    return BackendHealth(
+        available=not errors,
+        ready=not errors,
+        status="ready" if not errors else "degraded",
+        errors=errors,
+        warnings=warnings,
     )
 
 
@@ -266,7 +287,7 @@ _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
             display_name="OpenAI Responses API",
             implementation="app.services.agents.providers.openai_adapter.create_runtime",
             default_model_family="gpt-5",
-            implemented=False,
+            implemented=True,
             capabilities=BackendCapabilities(
                 supports_planning=True,
                 supports_step_execution=False,
@@ -289,7 +310,7 @@ _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
                 adaptation_profiles=["openai_responses_default"],
             ),
         ),
-        health_check=_check_planned_backend_health,
+        health_check=_check_openai_backend_health,
     ),
 }
 

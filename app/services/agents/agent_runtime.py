@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+import asyncio
+from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
@@ -12,69 +13,8 @@ from app.services.agents.agent_backends import (
     require_backend_descriptor,
 )
 from app.services.agents.interfaces import AgentRuntime
-from app.services.agents.providers.openai_adapter import (
-    create_runtime as create_openai_runtime,
-)
-from app.services.agents.providers.openclaw_adapter import (
-    create_runtime as create_openclaw_runtime,
-)
-from app.services.agents.providers.remote_openclaw_adapter import (
-    create_runtime as create_remote_openclaw_runtime,
-)
+from app.services.agents.providers import get_runtime_factory
 from app.services.workspace.system_settings import get_effective_agent_backend
-
-RuntimeFactory = Callable[
-    [Session, Optional[int], Optional[int], Optional[bool]], AgentRuntime
-]
-
-
-def _create_openclaw_runtime(
-    db: Session,
-    session_id: Optional[int],
-    task_id: Optional[int],
-    use_demo_mode: Optional[bool],
-) -> AgentRuntime:
-    return create_openclaw_runtime(
-        db,
-        session_id,
-        task_id,
-        use_demo_mode=use_demo_mode,
-    )
-
-
-def _create_remote_openclaw_runtime(
-    db: Session,
-    session_id: Optional[int],
-    task_id: Optional[int],
-    use_demo_mode: Optional[bool],
-) -> AgentRuntime:
-    return create_remote_openclaw_runtime(
-        db,
-        session_id,
-        task_id,
-        use_demo_mode=use_demo_mode,
-    )
-
-
-def _create_openai_runtime(
-    db: Session,
-    session_id: Optional[int],
-    task_id: Optional[int],
-    use_demo_mode: Optional[bool],
-) -> AgentRuntime:
-    return create_openai_runtime(
-        db,
-        session_id,
-        task_id,
-        use_demo_mode=use_demo_mode,
-    )
-
-
-_RUNTIME_FACTORIES: dict[str, RuntimeFactory] = {
-    "local_openclaw": _create_openclaw_runtime,
-    "remote_openclaw_gateway": _create_remote_openclaw_runtime,
-    "openai_responses_api": _create_openai_runtime,
-}
 
 
 def create_agent_runtime(
@@ -90,9 +30,14 @@ def create_agent_runtime(
         settings.ORCHESTRATOR_AGENT_BACKEND, db=db
     ).strip()
     descriptor = require_backend_descriptor(backend_name)
-    runtime_factory = _RUNTIME_FACTORIES.get(descriptor.name)
+    runtime_factory = get_runtime_factory(descriptor.name)
     if runtime_factory is not None:
-        return runtime_factory(db, session_id, task_id, use_demo_mode)
+        return runtime_factory(
+            db,
+            session_id,
+            task_id,
+            use_demo_mode=use_demo_mode,
+        )
 
     raise UnsupportedAgentBackendError(
         f"Backend '{descriptor.name}' does not have a registered runtime adapter."
@@ -117,6 +62,29 @@ def build_runtime_cli_agent_command(
         source_brain=source_brain,
         timeout_seconds=timeout_seconds,
         session_prefix=session_prefix,
+    )
+
+
+def invoke_runtime_prompt(
+    db: Session,
+    prompt: str,
+    *,
+    session_id: Optional[int] = None,
+    task_id: Optional[int] = None,
+    source_brain: str = "local",
+    timeout_seconds: int = 180,
+    session_prefix: str = "planning",
+) -> dict[str, Any]:
+    """Execute a one-shot runtime prompt across local or remote backends."""
+
+    runtime = create_agent_runtime(db, session_id, task_id)
+    return asyncio.run(
+        runtime.invoke_prompt(
+            prompt,
+            timeout_seconds=timeout_seconds,
+            source_brain=source_brain,
+            session_prefix=session_prefix,
+        )
     )
 
 

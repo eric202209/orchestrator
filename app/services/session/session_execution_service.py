@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.models import LogEntry, Session as SessionModel, SessionTask, TaskStatus
 from app.schemas import TaskExecuteRequest
 from app.services.agents.agent_runtime import create_agent_runtime
-from app.services.agents.openclaw_service import OpenClawSessionError
+from app.services.agents.interfaces import AgentRuntimeError
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
@@ -34,8 +34,8 @@ async def start_session_payload(
         raise HTTPException(status_code=404, detail="Session not found")
 
     try:
-        openclaw_service = create_agent_runtime(db, session_id, use_demo_mode=False)
-        session_key = await openclaw_service.create_session(task_description)
+        runtime = create_agent_runtime(db, session_id, use_demo_mode=False)
+        session_key = await runtime.create_session(task_description)
 
         db.add(
             LogEntry(
@@ -65,6 +65,16 @@ async def start_session_payload(
         )
         db.commit()
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+async def start_agent_session_payload(
+    db: Session, session_id: int, *, task_description: str
+) -> Dict[str, Any]:
+    """Primary backend-neutral alias for starting a runtime-backed session."""
+
+    return await start_session_payload(
+        db, session_id, task_description=task_description
+    )
 
 
 async def start_openclaw_session_payload(
@@ -143,7 +153,7 @@ async def execute_task_payload(
             )
             db.commit()
 
-        openclaw_service = create_agent_runtime(
+        runtime = create_agent_runtime(
             db,
             session_id,
             task_id=selected_task.id if selected_task else None,
@@ -155,7 +165,7 @@ async def execute_task_payload(
             if selected_task and selected_task.description
             else session.description or session.name
         )
-        await openclaw_service.create_session(task_description)
+        await runtime.create_session(task_description)
 
         orchestration_state = None
         if selected_task and task_workspace:
@@ -185,7 +195,7 @@ async def execute_task_payload(
                     "workspace_path"
                 ]
 
-        result = await openclaw_service.execute_task_with_orchestration(
+        result = await runtime.execute_task_with_orchestration(
             prompt, timeout_seconds, orchestration_state=orchestration_state
         )
 
@@ -228,7 +238,7 @@ async def execute_task_payload(
                 level="ERROR",
                 message=(
                     f"Task execution failed: {error_detail}"
-                    if isinstance(exc, OpenClawSessionError)
+                    if isinstance(exc, AgentRuntimeError)
                     else f"Task execution failed: {str(exc)}"
                 ),
                 log_metadata=json.dumps({"traceback": traceback_text}),
@@ -239,7 +249,7 @@ async def execute_task_payload(
             status_code=500,
             detail=(
                 error_detail
-                if isinstance(exc, OpenClawSessionError)
+                if isinstance(exc, AgentRuntimeError)
                 else "Task execution failed. Check session logs for details."
             ),
         )

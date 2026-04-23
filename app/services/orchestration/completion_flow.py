@@ -15,7 +15,9 @@ from app.services.error_handler import error_handler
 from app.services.orchestration.context_assembly import (
     assemble_completion_repair_inputs,
     assemble_execution_prompt,
+    assemble_task_summary_prompt,
     collect_workspace_inventory_paths,
+    render_adapted_runtime_prompt,
 )
 from app.services.orchestration.execution_flow import (
     assess_step_execution,
@@ -535,7 +537,7 @@ def _attempt_completion_repair(
     )
 
     repair_context = assemble_completion_repair_inputs(ctx, completion_validation)
-    repair_prompt = _build_completion_repair_prompt(
+    raw_repair_prompt = _build_completion_repair_prompt(
         task_prompt=ctx.prompt,
         completion_validation=completion_validation,
         project_dir=orchestration_state.project_dir,
@@ -544,8 +546,24 @@ def _attempt_completion_repair(
         next_step_number=next_step_number,
         workspace_inventory=repair_context["workspace_inventory"],
     )
+    repair_prompt = render_adapted_runtime_prompt(
+        ctx.db,
+        objective="Generate a minimal repair step that resolves task-completion validation failures.",
+        execution_mode="completion_repair",
+        prompt_body=raw_repair_prompt,
+        instructions=[
+            "Return one machine-runnable repair step only.",
+            "Use only inventory-confirmed paths or create new files explicitly.",
+        ],
+        context={
+            "Project Directory": str(orchestration_state.project_dir),
+            "Repair Attempt": orchestration_state.completion_repair_attempts,
+            "Next Step Number": next_step_number,
+        },
+        expected_output="JSON object describing one repair step.",
+    )
     repair_plan_result = asyncio.run(
-        ctx.openclaw_service.execute_task(repair_prompt, timeout_seconds=120)
+        ctx.runtime_service.execute_task(repair_prompt, timeout_seconds=120)
     )
     repair_output = extract_structured_text(repair_plan_result.get("output", "{}"))
     success, repair_data, strategy_info = error_handler.attempt_json_parsing(
@@ -617,7 +635,7 @@ def _attempt_completion_repair(
             + "\nReturn a replacement repair step that uses only inventory-confirmed paths or creates the referenced files first."
         )
         guarded_retry_result = asyncio.run(
-            ctx.openclaw_service.execute_task(guarded_retry_prompt, timeout_seconds=120)
+            ctx.runtime_service.execute_task(guarded_retry_prompt, timeout_seconds=120)
         )
         guarded_retry_output = extract_structured_text(
             guarded_retry_result.get("output", "{}")
@@ -698,7 +716,7 @@ def _attempt_completion_repair(
     )
     step_started_at = datetime.utcnow()
     repair_exec_result = asyncio.run(
-        ctx.openclaw_service.execute_task(
+        ctx.runtime_service.execute_task(
             execution_prompt,
             timeout_seconds=step_timeout_seconds,
         )
@@ -826,7 +844,7 @@ def _attempt_completion_repair(
 
 def _run_evaluator(
     *,
-    openclaw_service: Any,
+    runtime_service: Any,
     orchestration_state: Any,
     prompt: str,
     summary: str,
@@ -872,7 +890,7 @@ def _run_evaluator(
             "NOTES: one-sentence rationale\n"
         )
         eval_result = asyncio.run(
-            openclaw_service.execute_task(evaluator_prompt, timeout_seconds=120)
+            runtime_service.execute_task(evaluator_prompt, timeout_seconds=120)
         )
         eval_output = (
             eval_result.get("output", "")
@@ -966,12 +984,12 @@ def finalize_successful_task(
     ] = save_orchestration_checkpoint,
     get_next_pending_project_task_fn: Optional[Callable[..., Any]] = None,
     get_latest_session_task_link_fn: Optional[Callable[..., Any]] = None,
-    execute_openclaw_task_delay_fn: Optional[Callable[..., Any]] = None,
+    execute_orchestration_task_delay_fn: Optional[Callable[..., Any]] = None,
     build_task_report_payload_fn: Optional[Callable[..., Dict[str, Any]]] = None,
     render_task_report_fn: Optional[Callable[..., Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     db = ctx.db
-    openclaw_service = ctx.openclaw_service
+    runtime_service = ctx.runtime_service
     task_service = ctx.task_service
     session = ctx.session
     project = ctx.project
@@ -1003,19 +1021,9 @@ def finalize_successful_task(
         details={"phase": "task_summary"},
     )
 
-    from app.services import PromptTemplates
-
-    summary_prompt = PromptTemplates.build_task_summary(
-        task_description=prompt,
-        plan_summary=json.dumps(orchestration_state.plan, indent=2),
-        execution_results_summary=orchestration_state.prior_results_summary(),
-        changed_files=orchestration_state.changed_files,
-        num_debug_attempts=len(orchestration_state.debug_attempts),
-        final_status="success",
-        execution_profile=execution_profile,
-    )
+    summary_prompt = assemble_task_summary_prompt(ctx)
     summary_result = asyncio.run(
-        openclaw_service.execute_task(
+        runtime_service.execute_task(
             summary_prompt, timeout_seconds=SUMMARY_TIMEOUT_SECONDS
         )
     )
@@ -1407,14 +1415,14 @@ def finalize_successful_task(
                 "reason": "baseline_publish_validation_failed",
             }
 
-    _run_evaluator(
-        openclaw_service=openclaw_service,
-        orchestration_state=orchestration_state,
-        prompt=prompt,
-        summary=summary_result.get("output", ""),
-        emit_live=emit_live,
-        logger=logger,
-    )
+        _run_evaluator(
+            runtime_service=runtime_service,
+            orchestration_state=orchestration_state,
+            prompt=prompt,
+            summary=summary_result.get("output", ""),
+            emit_live=emit_live,
+            logger=logger,
+        )
 
     task.status = TaskStatus.DONE
     task.completed_at = datetime.utcnow()
@@ -1525,7 +1533,7 @@ def finalize_successful_task(
         session
         and next_task
         and get_latest_session_task_link_fn
-        and execute_openclaw_task_delay_fn
+        and execute_orchestration_task_delay_fn
     ):
         next_session_task_link = get_latest_session_task_link_fn(
             db, session_id, next_task.id
@@ -1567,7 +1575,7 @@ def finalize_successful_task(
             )
         )
         db.commit()
-        execute_openclaw_task_delay_fn(
+        execute_orchestration_task_delay_fn(
             session_id=session_id,
             task_id=next_task.id,
             prompt=next_task.description or next_task.title,

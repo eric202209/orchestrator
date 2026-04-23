@@ -237,7 +237,7 @@ def queue_task_for_session(
     task_id: int,
     timeout_seconds: int = DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
 ) -> Dict[str, Any]:
-    from app.tasks.worker import execute_openclaw_task
+    from app.tasks.worker import execute_orchestration_task
 
     task = (
         db.query(Task)
@@ -295,7 +295,7 @@ def queue_task_for_session(
         session.started_at = datetime.utcnow()
     set_session_alert(db, session, None, None)
 
-    result = execute_openclaw_task.delay(
+    result = execute_orchestration_task.delay(
         session_id=session.id,
         task_id=task.id,
         prompt=task_prompt,

@@ -177,7 +177,7 @@ Rules:
     @classmethod
     def retry_with_minimal_prompt(
         cls,
-        openclaw_service: Any,
+        runtime_service: Any,
         task_description: str,
         project_dir: Path,
         timeout_seconds: int,
@@ -201,7 +201,7 @@ Rules:
         )
         try:
             return asyncio.run(
-                openclaw_service.execute_task(
+                runtime_service.execute_task(
                     cls.build_minimal_planning_prompt(task_description, project_dir),
                     timeout_seconds=min(
                         timeout_seconds, MINIMAL_PLANNING_TIMEOUT_SECONDS
@@ -224,7 +224,7 @@ Rules:
                 },
             )
             return asyncio.run(
-                openclaw_service.execute_task(
+                runtime_service.execute_task(
                     cls.build_ultra_minimal_planning_prompt(
                         task_description, project_dir
                     ),
@@ -237,7 +237,7 @@ Rules:
     @classmethod
     def repair_output(
         cls,
-        openclaw_service: Any,
+        runtime_service: Any,
         task_description: str,
         malformed_output: str,
         project_dir: Path,
@@ -262,7 +262,7 @@ Rules:
         )
         try:
             return asyncio.run(
-                openclaw_service.execute_task(
+                runtime_service.execute_task(
                     cls.build_planning_repair_prompt(
                         task_description,
                         malformed_output,
@@ -290,7 +290,7 @@ Rules:
                 },
             )
             return asyncio.run(
-                openclaw_service.execute_task(
+                runtime_service.execute_task(
                     cls.build_ultra_minimal_planning_prompt(
                         task_description, project_dir
                     ),

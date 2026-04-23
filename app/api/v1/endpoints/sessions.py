@@ -1,4 +1,4 @@
-"""Sessions API endpoints with OpenClaw integration"""
+"""Sessions API endpoints for orchestration runtimes."""
 
 from fastapi import APIRouter, Depends, HTTPException, status, WebSocket
 from fastapi.requests import Request
@@ -22,6 +22,7 @@ from app.schemas import (
 )
 from app.services import (
     PromptTemplates,
+    start_agent_session_payload as _start_agent_session_payload,
     check_session_overwrites_payload as _check_session_overwrites_payload,
     cleanup_orphaned_checkpoints_payload as _cleanup_orphaned_checkpoints_payload,
     cleanup_session_checkpoints_payload as _cleanup_session_checkpoints_payload,
@@ -43,7 +44,6 @@ from app.services import (
     pause_session_lifecycle as _pause_session_lifecycle,
     resume_session_lifecycle as _resume_session_lifecycle,
     set_session_alert as _set_session_alert,
-    start_session_payload as _start_session_payload,
     start_session_lifecycle as _start_session_lifecycle,
     stop_session_lifecycle as _stop_session_lifecycle,
     stream_session_logs as _stream_session_logs,
@@ -67,7 +67,7 @@ def create_session(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """Create a new OpenClaw orchestration session"""
+    """Create a new orchestration session."""
     # Verify project exists
     from app.models import Project
 
@@ -405,37 +405,34 @@ def delete_session(
     return None
 
 
-class StartOpenClawRequest(BaseModel):
+class StartSessionRequest(BaseModel):
     task_description: str
 
 
 @router.post("/sessions/{session_id}/start")
 async def start_session_execution(
     session_id: int,
-    request: StartOpenClawRequest,
+    request: StartSessionRequest,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """Start a backend-neutral orchestration session for a task."""
 
-    return await _start_session_payload(
+    return await _start_agent_session_payload(
         db, session_id, task_description=request.task_description
     )
 
 
 @router.post("/sessions/{session_id}/start-openclaw")
-async def start_openclaw_session(
+async def start_openclaw_session_compat(
     session_id: int,
-    request: StartOpenClawRequest,
+    request: StartSessionRequest,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """
-    Start an OpenClaw session for a given task
+    """Backward-compatible alias for older OpenClaw-specific clients."""
 
-    Creates an OpenClaw session and begins task execution
-    """
-    return await _start_session_payload(
+    return await _start_agent_session_payload(
         db, session_id, task_description=request.task_description
     )
 
@@ -447,13 +444,7 @@ async def execute_task(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """
-    Execute a task via OpenClaw with multi-step orchestration
-
-    Args:
-        session_id: Session ID
-        task_request: Task execution request with task description and timeout
-    """
+    """Execute a task via the active orchestration runtime."""
     return await _execute_task_payload(db, session_id, task_request)
 
 
@@ -461,14 +452,7 @@ async def execute_task(
 async def websocket_log_stream(
     websocket: WebSocket, session_id: int, db: Session = Depends(get_db)
 ):
-    """
-    WebSocket endpoint for real-time log streaming with heartbeat mechanism
-
-    Clients can connect to receive live logs from an OpenClaw session.
-    Implements heartbeat (ping/pong) every 30 seconds to prevent timeout disconnects.
-
-    TIMEOUT FIX: Prevents 5-minute disconnect by maintaining connection activity
-    """
+    """WebSocket endpoint for real-time session log streaming."""
     await _stream_session_logs(websocket, session_id, db)
 
 
@@ -552,11 +536,7 @@ async def start_session_lifecycle_endpoint(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """
-    Start an OpenClaw session for a given session
-
-    Creates an OpenClaw session and begins task execution
-    """
+    """Start a session lifecycle and queue work when applicable."""
     return await _start_session_lifecycle(db, session_id)
 
 
@@ -567,13 +547,7 @@ async def stop_session(
     current_user=Depends(get_current_user),
     force: bool = False,
 ):
-    """
-    Stop an OpenClaw session gracefully
-
-    Args:
-        session_id: Session ID
-        force: If True, force stop without cleanup
-    """
+    """Stop a running session gracefully."""
     return await _stop_session_lifecycle(db, session_id, force=force)
 
 

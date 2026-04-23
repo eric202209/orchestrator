@@ -168,7 +168,7 @@ def _get_latest_session_task_link(
     soft_time_limit=1500,
     queue="celery",
 )
-def execute_openclaw_task(
+def execute_orchestration_task(
     self,
     session_id: int,
     task_id: int,
@@ -178,7 +178,7 @@ def execute_openclaw_task(
     resume_checkpoint_name: Optional[str] = None,
 ):
     """
-    Execute an OpenClaw task with multi-step orchestration
+    Execute an orchestration task with multi-step runtime coordination
 
     Workflow:
     1. PLANNING → Generate step plan
@@ -643,11 +643,11 @@ def execute_openclaw_task(
             metadata={"phase": "start"},
         )
 
-        # Initialize OpenClaw service
-        openclaw_service = create_agent_runtime(db, session_id, task_id)
+        # Initialize the active runtime service
+        runtime_service = create_agent_runtime(db, session_id, task_id)
 
         # Get session context
-        session_context = asyncio.run(openclaw_service.get_session_context())
+        session_context = asyncio.run(runtime_service.get_session_context())
 
         checkpoint_service = CheckpointService(db)
         resumed_from_checkpoint = False
@@ -1059,7 +1059,7 @@ def execute_openclaw_task(
             validation_profile=validation_profile,
             runs_in_canonical_baseline=runs_in_canonical_baseline,
             orchestration_state=orchestration_state,
-            openclaw_service=openclaw_service,
+            runtime_service=runtime_service,
             task_service=task_service,
             logger=logger,
             emit_live=emit_live,
@@ -1201,7 +1201,7 @@ def execute_openclaw_task(
             write_project_state_snapshot_fn=_write_project_state_snapshot,
             get_next_pending_project_task_fn=_get_next_pending_project_task,
             get_latest_session_task_link_fn=_get_latest_session_task_link,
-            execute_openclaw_task_delay_fn=execute_openclaw_task.delay,
+            execute_orchestration_task_delay_fn=execute_orchestration_task.delay,
             build_task_report_payload_fn=_build_task_report_payload,
             render_task_report_fn=_render_task_report,
             record_live_log_fn=_record_live_log,
@@ -1240,7 +1240,7 @@ def execute_openclaw_task(
                             else False
                         ),
                         orchestration_state=orchestration_state,
-                        openclaw_service=None,
+                        runtime_service=None,
                         task_service=None,
                         logger=logger,
                         emit_live=lambda *_args, **_kwargs: None,
@@ -1378,7 +1378,7 @@ def scheduled_task_execution(self, task_id: int, scheduled_time: str, prompt: st
             db.commit()
 
         # TODO: Implement actual scheduled execution
-        # This would integrate with OpenClaw session
+        # This will integrate with the active runtime session
 
         if task:
             task.status = TaskStatus.DONE
@@ -1435,6 +1435,10 @@ def cleanup_old_logs(self, days: int = 30, session_id: Optional[int] = None):
     except Exception as exc:
         logger.error(f"Log cleanup failed: {str(exc)}")
         raise self.retry(exc=exc, max_retries=3)
+
+
+# Backward-compatible alias for older imports and serialized task references.
+execute_openclaw_task = execute_orchestration_task
 
 
 @celery_app.task(bind=True)

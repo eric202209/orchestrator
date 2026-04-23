@@ -18,6 +18,11 @@ class RetryConfig:
 
     # Task-specific retry settings
     TASK_RETRY_SETTINGS = {
+        "execute_orchestration_task": {
+            "max_retries": 3,
+            "retry_delay": 60,
+            "retry_on": [Exception],  # Retry on any exception
+        },
         "execute_openclaw_task": {
             "max_retries": 3,
             "retry_delay": 60,

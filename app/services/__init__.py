@@ -5,7 +5,6 @@ All services and utilities are available from this package
 
 from .agents import (
     AgentRuntime,
-    OpenClawSessionService,
     create_agent_runtime,
 )
 from .task_service import TaskService
@@ -48,6 +47,7 @@ from .session import (
     execute_task_payload,
     get_session_statistics_payload,
     get_tool_execution_history_payload,
+    start_agent_session_payload,
     start_openclaw_session_payload,
     start_session_payload,
     track_tool_execution_payload,
@@ -59,7 +59,6 @@ from .workspace import ContextPreservationService, ProjectIsolationService
 __all__ = [
     "AgentRuntime",
     "create_agent_runtime",
-    "OpenClawSessionService",
     "TaskService",
     "ContextPreservationService",
     "PermissionApprovalService",
@@ -102,6 +101,7 @@ __all__ = [
     "execute_task_payload",
     "get_session_statistics_payload",
     "get_tool_execution_history_payload",
+    "start_agent_session_payload",
     "start_openclaw_session_payload",
     "start_session_payload",
     "track_tool_execution_payload",

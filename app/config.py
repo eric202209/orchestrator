@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     OPENCLAW_API_KEY: str = ""
     OPENCLAW_CLI_PATH: str = ""
     OPENCLAW_CLI_ARGS: str = ""
+    OPENAI_API_KEY: str = ""
+    OPENAI_BASE_URL: str = "https://api.openai.com/v1"
     MOBILE_GATEWAY_API_KEY: str = ""
     ORCHESTRATOR_AGENT_BACKEND: str = "local_openclaw"
     ORCHESTRATOR_AGENT_MODEL_FAMILY: str = "local"

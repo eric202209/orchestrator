@@ -5,6 +5,10 @@ from __future__ import annotations
 from typing import Any, Optional, Protocol
 
 
+class AgentRuntimeError(Exception):
+    """Backend-neutral runtime failure raised by provider adapters."""
+
+
 class AgentRuntime(Protocol):
     """Minimal runtime contract shared by orchestration entrypoints."""
 
@@ -29,6 +33,15 @@ class AgentRuntime(Protocol):
     async def stop_session(self) -> None: ...
 
     async def get_session_context(self) -> dict[str, Any]: ...
+
+    async def invoke_prompt(
+        self,
+        prompt: str,
+        *,
+        timeout_seconds: int = 180,
+        source_brain: str = "local",
+        session_prefix: str = "planning",
+    ) -> dict[str, Any]: ...
 
     def get_backend_metadata(self) -> dict[str, Any]: ...
 

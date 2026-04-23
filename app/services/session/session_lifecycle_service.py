@@ -99,7 +99,7 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
         session.instance_id = session_instance_id
         db.commit()
 
-        openclaw_service = create_agent_runtime(db, session_id, use_demo_mode=False)
+        runtime = create_agent_runtime(db, session_id, use_demo_mode=False)
         task_description = session.description or session.name
         logger.info(
             "Starting session %s with description: %s, instance: %s",
@@ -107,7 +107,7 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
             task_description[:50],
             session_instance_id,
         )
-        session_key = await openclaw_service.create_session(task_description)
+        session_key = await runtime.create_session(task_description)
 
         set_session_alert(db, session, None, None)
 
@@ -352,9 +352,9 @@ async def stop_session_lifecycle(
             checkpoint_name = None
 
         revoked_ids = revoke_session_celery_tasks(db, session_id, terminate=True)
-        openclaw_service = create_agent_runtime(db, session_id, use_demo_mode=False)
+        runtime = create_agent_runtime(db, session_id, use_demo_mode=False)
         if not force:
-            await openclaw_service.stop_session()
+            await runtime.stop_session()
 
         session.is_active = False
         session.stopped_at = datetime.now(timezone.utc)
@@ -426,8 +426,8 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                 step_results=latest_checkpoint.get("step_results", []),
             )
         except Exception:
-            openclaw_service = create_agent_runtime(db, session_id, use_demo_mode=False)
-            await openclaw_service.pause_session()
+            runtime = create_agent_runtime(db, session_id, use_demo_mode=False)
+            await runtime.pause_session()
 
         session.is_active = True
         session.status = "paused"
@@ -476,7 +476,7 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
 
 async def resume_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any]:
     """Resume a paused or stopped session from checkpoint."""
-    from app.tasks.worker import execute_openclaw_task
+    from app.tasks.worker import execute_orchestration_task
 
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
@@ -518,7 +518,7 @@ async def resume_session_lifecycle(db: Session, session_id: int) -> Dict[str, An
             )
 
         prompt = context_data.get("task_description") or task.description or task.title
-        result = execute_openclaw_task.delay(
+        result = execute_orchestration_task.delay(
             session_id=session_id,
             task_id=task.id,
             prompt=prompt,

@@ -1,6 +1,4 @@
-"""
-Celery tasks for executing OpenClaw sessions
-"""
+"""Celery task registration for orchestration runtimes."""
 
 from celery import Celery
 from .config import settings

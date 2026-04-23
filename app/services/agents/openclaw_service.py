@@ -55,11 +55,12 @@ from app.services.workspace.system_settings import (
     get_effective_agent_backend,
     get_effective_agent_model_family,
 )
+from app.services.agents.interfaces import AgentRuntimeError
 
 logger = logging.getLogger(__name__)
 
 
-class OpenClawSessionError(Exception):
+class OpenClawSessionError(AgentRuntimeError):
     """Custom exception for OpenClaw session errors"""
 
     pass
@@ -1622,6 +1623,36 @@ class OpenClawSessionService:
             "recent_logs": logs_data,
             "openclaw_session_key": self.openclaw_session_key,
         }
+
+    async def invoke_prompt(
+        self,
+        prompt: str,
+        *,
+        timeout_seconds: int = 180,
+        source_brain: str = "local",
+        session_prefix: str = "planning",
+    ) -> Dict[str, Any]:
+        """Run a one-shot prompt using the CLI request path."""
+
+        full_cmd = self.build_cli_agent_command(
+            prompt,
+            source_brain=source_brain,
+            timeout_seconds=timeout_seconds,
+            session_prefix=session_prefix,
+        )
+        try:
+            proc = await asyncio.to_thread(
+                subprocess.run,
+                full_cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds + 30,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise OpenClawSessionError(
+                f"Prompt invocation timed out after {timeout_seconds}s"
+            ) from exc
+        return self.parse_cli_response(proc)
 
     def _log_entry(
         self,

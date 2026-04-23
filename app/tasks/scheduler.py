@@ -188,10 +188,10 @@ def schedule_task_with_delay(
     task_name: str, task_id: int, delay_seconds: int, **kwargs
 ):
     """Schedule a task to run after a delay"""
-    from app.tasks.worker import execute_openclaw_task
+    from app.tasks.worker import execute_orchestration_task
 
     # Get the task function
-    task_func = execute_openclaw_task  # Example
+    task_func = execute_orchestration_task  # Example
 
     return task_func.apply_async(
         args=[task_id],

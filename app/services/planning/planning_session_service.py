@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess as _subprocess
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -26,13 +25,16 @@ from app.models import (
 from app.schemas import PlannerTaskCandidate
 from app.services.agents.agent_runtime import (
     build_runtime_cli_agent_command,
-    parse_runtime_cli_response,
+    invoke_runtime_prompt,
     runtime_reports_context_overflow,
 )
-from app.services.agents.openclaw_service import OpenClawSessionError
+from app.services.agents.interfaces import AgentRuntimeError
+from app.services.model_adaptation import render_prompt_for_profile
+from app.services.model_adaptation.schemas import PromptEnvelope
 from app.services.planning.plan_commit_service import PlanCommitService
 from app.services.planning.planner_service import PlannerService
 from app.services.performance_optimizations import optimize_prompt
+from app.services.workspace.system_settings import get_effective_adaptation_profile
 
 
 class PlanningSessionService:
@@ -477,28 +479,17 @@ class PlanningSessionService:
     ) -> dict[str, Any]:
         """Execute planning synthesis through the active backend runtime."""
         try:
-            full_cmd = self._build_openclaw_command(
+            return invoke_runtime_prompt(
+                self.db,
                 prompt,
+                session_id=None,
+                task_id=None,
                 source_brain=source_brain,
                 timeout_seconds=180,
+                session_prefix="planning",
             )
-        except OpenClawSessionError as exc:
+        except AgentRuntimeError as exc:
             raise RuntimeError(str(exc))
-        try:
-            proc = _subprocess.run(
-                full_cmd,
-                capture_output=True,
-                text=True,
-                timeout=210,
-            )
-        except _subprocess.TimeoutExpired:
-            raise RuntimeError("Planning synthesis timed out after 180s")
-        return parse_runtime_cli_response(
-            self.db,
-            proc,
-            session_id=None,
-            task_id=None,
-        )
 
     def _run_openclaw_with_fallback(
         self, prompt: str, *, source_brain: str = "local"
@@ -561,32 +552,27 @@ class PlanningSessionService:
     ) -> str:
         transcript = self._build_condensed_transcript(session)
         project_description = self._trim_text(project.description or "", 280)
-        prompt = f"""You are creating implementation-planning artifacts for a software project.
-
-Project: {project.name}
-Project description: {project_description or "None provided"}
-Planning prompt: {self._trim_text(session.prompt, 600)}
-
-Conversation transcript:
-{transcript}
-
-Return JSON only with exactly these keys:
-- requirements
-- design
-- implementation_plan
-- planner_markdown
-
-Artifact requirements:
-1. requirements must be markdown with goals, scope, constraints, and acceptance criteria.
-2. design must be markdown with architecture, interfaces, data flow, and risks.
-3. implementation_plan must be markdown with ordered steps and test strategy.
-4. planner_markdown must be markdown compatible with an Orchestrator task list using:
-   ## Task List
-   - [ ] TASK_START: Title | Description | order=1 | P1 | effort=medium | profile=full_lifecycle
-5. planner_markdown must contain between 3 and 8 concrete tasks.
-6. Prefer relative implementation detail grounded in the prompt and transcript.
-7. Do not include prose outside the JSON object.
-"""
+        prompt = self._render_adapted_prompt(
+            objective="Create implementation-planning artifacts for a software project.",
+            execution_mode="planning_synthesis",
+            instructions=[
+                "Return JSON only with exactly these keys: requirements, design, implementation_plan, planner_markdown.",
+                "requirements must be markdown with goals, scope, constraints, and acceptance criteria.",
+                "design must be markdown with architecture, interfaces, data flow, and risks.",
+                "implementation_plan must be markdown with ordered steps and test strategy.",
+                "planner_markdown must be markdown compatible with an Orchestrator task list using: ## Task List then - [ ] TASK_START: Title | Description | order=1 | P1 | effort=medium | profile=full_lifecycle.",
+                "planner_markdown must contain between 3 and 8 concrete tasks.",
+                "Prefer implementation detail grounded in the prompt and transcript.",
+                "Do not include prose outside the JSON object.",
+            ],
+            context={
+                "Project": project.name,
+                "Project description": project_description or "None provided",
+                "Planning prompt": self._trim_text(session.prompt, 600),
+                "Conversation transcript": transcript,
+            },
+            expected_output="A JSON object with requirements, design, implementation_plan, and planner_markdown.",
+        )
         return optimize_prompt(
             prompt,
             max_tokens=1400,
@@ -678,28 +664,48 @@ Artifact requirements:
     ) -> str:
         transcript = self._build_condensed_transcript(session)
         project_description = self._trim_text(project.description or "", 220)
-        prompt = f"""You are deciding whether a planning conversation needs one more clarifying question before final plan synthesis.
-
-Project: {project.name}
-Project description: {project_description or "None provided"}
-Planning prompt: {self._trim_text(session.prompt, 500)}
-
-Conversation transcript:
-{transcript}
-
-Return JSON only with exactly these keys:
-- needs_clarification
-- question
-
-Rules:
-1. Set needs_clarification to true only if one more user answer would materially improve implementation safety or task quality.
-2. If needs_clarification is false, set question to an empty string.
-3. If needs_clarification is true, question must be a single concrete question, under 30 words, focused on the most important missing constraint or acceptance criterion.
-4. Avoid repeating already-answered questions.
-5. If uncertain, prefer this fallback question:
-   {fallback_question}
-"""
+        prompt = self._render_adapted_prompt(
+            objective=(
+                "Decide whether a planning conversation needs one more clarifying "
+                "question before final plan synthesis."
+            ),
+            execution_mode="planning_clarification",
+            instructions=[
+                "Return JSON only with exactly these keys: needs_clarification, question.",
+                "Set needs_clarification to true only if one more user answer would materially improve implementation safety or task quality.",
+                "If needs_clarification is false, set question to an empty string.",
+                "If needs_clarification is true, question must be a single concrete question under 30 words, focused on the most important missing constraint or acceptance criterion.",
+                "Avoid repeating already-answered questions.",
+                f"If uncertain, prefer this fallback question: {fallback_question}",
+            ],
+            context={
+                "Project": project.name,
+                "Project description": project_description or "None provided",
+                "Planning prompt": self._trim_text(session.prompt, 500),
+                "Conversation transcript": transcript,
+            },
+            expected_output=("A JSON object with needs_clarification and question."),
+        )
         return optimize_prompt(prompt, max_tokens=500, hard_char_limit=2200)
+
+    def _render_adapted_prompt(
+        self,
+        *,
+        objective: str,
+        execution_mode: str,
+        instructions: list[str],
+        context: dict[str, Any],
+        expected_output: str,
+    ) -> str:
+        profile_name = get_effective_adaptation_profile(db=self.db)
+        envelope = PromptEnvelope(
+            objective=objective,
+            execution_mode=execution_mode,
+            instructions=instructions,
+            context=context,
+            expected_output=expected_output,
+        )
+        return render_prompt_for_profile(profile_name, envelope)
 
     def _parse_clarification_payload(
         self,

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional
 
-from .renderers import render_openclaw_prompt
+from .renderers import render_openai_responses_prompt, render_openclaw_prompt
 from .schemas import PromptEnvelope
 
 
@@ -43,9 +43,14 @@ _ADAPTATION_PROFILES = {
         backend="openai_responses_api",
         model_family="gpt-5",
         prompt_format="structured_prompt_envelope",
-        renderer="render_openclaw_prompt",
+        renderer="render_openai_responses_prompt",
         description="Planned profile for mapping neutral orchestration prompts into Responses-style inputs.",
     ),
+}
+
+_RENDERERS = {
+    "render_openclaw_prompt": render_openclaw_prompt,
+    "render_openai_responses_prompt": render_openai_responses_prompt,
 }
 
 
@@ -62,6 +67,5 @@ def get_adaptation_profile(name: Optional[str]) -> AdaptationProfile:
 
 def render_prompt_for_profile(name: Optional[str], envelope: PromptEnvelope) -> str:
     profile = get_adaptation_profile(name)
-    if profile.renderer == "render_openclaw_prompt":
-        return render_openclaw_prompt(envelope)
-    return render_openclaw_prompt(envelope)
+    renderer = _RENDERERS.get(profile.renderer, render_openclaw_prompt)
+    return renderer(envelope)

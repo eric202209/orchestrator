@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, Optional
 from sqlalchemy.orm import Session
 
 from app.services.error_handler import error_handler
+from app.services.orchestration.context_assembly import render_adapted_runtime_prompt
 
 
 def step_needs_command_repair(step: Dict[str, Any]) -> bool:
@@ -70,7 +71,7 @@ Example:
 
 def repair_step_commands_with_self_correction(
     *,
-    openclaw_service: Any,
+    runtime_service: Any,
     db: Session,
     session_id: int,
     task_id: int,
@@ -96,8 +97,23 @@ def repair_step_commands_with_self_correction(
         prior_results_summary=prior_results_summary,
         project_context=project_context,
     )
+    repair_prompt = render_adapted_runtime_prompt(
+        db,
+        objective="Repair a malformed execution step so it becomes machine-runnable.",
+        execution_mode="step_repair",
+        prompt_body=repair_prompt,
+        instructions=[
+            "Keep the step intent the same.",
+            "Return JSON only.",
+        ],
+        context={
+            "Project Directory": str(project_dir),
+            "Step Index": step_index + 1,
+        },
+        expected_output="JSON object containing the repaired step fields.",
+    )
     repair_result = asyncio.run(
-        openclaw_service.execute_task(repair_prompt, timeout_seconds=120)
+        runtime_service.execute_task(repair_prompt, timeout_seconds=120)
     )
     repair_output = extract_structured_text(repair_result.get("output", "{}"))
     success, repair_data, strategy_info = error_handler.attempt_json_parsing(

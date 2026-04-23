@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from app.services.model_adaptation import render_prompt_for_profile
+from app.services.model_adaptation.schemas import PromptEnvelope
 from app.services.prompt_templates import PromptTemplates, StepResult
+from app.services.workspace.system_settings import get_effective_adaptation_profile
 
 
 _IGNORED_PARTS = {"node_modules", ".openclaw", "__pycache__", ".git", "dist", "build"}
@@ -289,6 +293,28 @@ def _shape_project_context(
     return _trim_text("\n\n".join(parts), max_chars)
 
 
+def render_adapted_runtime_prompt(
+    db: Any,
+    *,
+    objective: str,
+    execution_mode: str,
+    prompt_body: str,
+    instructions: Optional[Iterable[str]] = None,
+    context: Optional[Dict[str, Any]] = None,
+    expected_output: Optional[str] = None,
+) -> str:
+    profile_name = get_effective_adaptation_profile(db=db)
+    envelope = PromptEnvelope(
+        objective=objective,
+        execution_mode=execution_mode,
+        instructions=[item for item in (instructions or []) if str(item or "").strip()],
+        context=context or {},
+        expected_output=expected_output,
+        prompt_body=prompt_body,
+    )
+    return render_prompt_for_profile(profile_name, envelope)
+
+
 def assemble_planning_prompt(ctx: Any, workspace_review: Dict[str, Any]) -> str:
     workspace_summary = build_workspace_inventory_summary(
         Path(ctx.orchestration_state.project_dir),
@@ -306,11 +332,26 @@ def assemble_planning_prompt(ctx: Any, workspace_review: Dict[str, Any]) -> str:
         ),
         max_chars=2200,
     )
-    return PromptTemplates.build_planning_prompt(
+    raw_prompt = PromptTemplates.build_planning_prompt(
         task_description=ctx.prompt,
         project_context=project_context,
         project_dir=str(ctx.orchestration_state.project_dir),
         execution_profile=ctx.execution_profile,
+    )
+    return render_adapted_runtime_prompt(
+        ctx.db,
+        objective="Generate a machine-runnable JSON execution plan for the requested task.",
+        execution_mode="planning",
+        prompt_body=raw_prompt,
+        instructions=[
+            "Do not implement anything yet.",
+            "Return a sequential JSON plan only.",
+        ],
+        context={
+            "Project Directory": str(ctx.orchestration_state.project_dir),
+            "Execution Profile": ctx.execution_profile,
+        },
+        expected_output="JSON array of orchestration step objects.",
     )
 
 
@@ -332,7 +373,7 @@ def assemble_execution_prompt(ctx: Any, step: Dict[str, Any]) -> str:
         ),
         max_chars=1500,
     )
-    return PromptTemplates.build_execution_prompt(
+    raw_prompt = PromptTemplates.build_execution_prompt(
         step_description=step.get("description", ""),
         step_commands=step.get("commands", []) or [],
         project_dir=str(ctx.orchestration_state.project_dir),
@@ -344,6 +385,137 @@ def assemble_execution_prompt(ctx: Any, step: Dict[str, Any]) -> str:
         ),
         project_context=project_context,
         execution_profile=ctx.execution_profile,
+    )
+    return render_adapted_runtime_prompt(
+        ctx.db,
+        objective=(
+            f"Execute orchestration step {step.get('step_number') or ctx.orchestration_state.current_step_index + 1} "
+            "inside the active task workspace."
+        ),
+        execution_mode="step_execution",
+        prompt_body=raw_prompt,
+        instructions=[
+            "Treat the provided step commands as the primary implementation plan for this step.",
+            "Ground your work in the current workspace state.",
+        ],
+        context={
+            "Project Directory": str(ctx.orchestration_state.project_dir),
+            "Verification Command": step.get("verification"),
+            "Rollback Command": step.get("rollback"),
+            "Expected Files": expected_files,
+            "Execution Profile": ctx.execution_profile,
+        },
+        expected_output=(
+            "Structured step result describing status, output, verification_output, "
+            "files_changed, and any error details."
+        ),
+    )
+
+
+def assemble_debugging_prompt(
+    ctx: Any,
+    *,
+    step_description: str,
+    error_message: str,
+    command_output: str,
+    verification_output: str,
+    attempt_number: int,
+    max_attempts: int,
+    compact: bool = False,
+) -> str:
+    raw_prompt = PromptTemplates.build_debugging_prompt(
+        step_description=step_description,
+        error_message=error_message,
+        command_output=command_output,
+        verification_output=verification_output,
+        attempt_number=attempt_number,
+        max_attempts=max_attempts,
+        prior_debug_attempts=ctx.orchestration_state.debug_attempts,
+        project_name=ctx.orchestration_state.project_name,
+        workspace_root=str(ctx.orchestration_state.workspace_root),
+        project_dir=str(ctx.orchestration_state.project_dir),
+        compact=compact,
+    )
+    return render_adapted_runtime_prompt(
+        ctx.db,
+        objective="Diagnose the failed orchestration step and return the next repair action.",
+        execution_mode="debugging",
+        prompt_body=raw_prompt,
+        instructions=[
+            "Base the diagnosis on the actual failure output and workspace state.",
+            "Return machine-parseable structured debugging guidance.",
+        ],
+        context={
+            "Project Directory": str(ctx.orchestration_state.project_dir),
+            "Attempt Number": attempt_number,
+            "Max Attempts": max_attempts,
+            "Compact Retry": compact,
+        },
+        expected_output=(
+            "JSON object with analysis, fix, confidence, and fix_type fields."
+        ),
+    )
+
+
+def assemble_plan_revision_prompt(
+    ctx: Any,
+    *,
+    failed_steps: List[StepResult],
+    debug_analysis: str,
+) -> str:
+    raw_prompt = PromptTemplates.build_plan_revision_prompt(
+        original_plan=ctx.orchestration_state.plan,
+        failed_steps=failed_steps,
+        debug_analysis=debug_analysis,
+        completed_steps=ctx.orchestration_state.completed_steps,
+        workspace_root=str(ctx.orchestration_state.workspace_root),
+        project_dir=str(ctx.orchestration_state.project_dir),
+    )
+    return render_adapted_runtime_prompt(
+        ctx.db,
+        objective="Revise the remaining orchestration plan without discarding completed work.",
+        execution_mode="plan_revision",
+        prompt_body=raw_prompt,
+        instructions=[
+            "Preserve completed steps.",
+            "Return only a revised machine-runnable plan payload.",
+        ],
+        context={
+            "Project Directory": str(ctx.orchestration_state.project_dir),
+            "Completed Step Count": len(ctx.orchestration_state.completed_steps),
+            "Original Plan Length": len(ctx.orchestration_state.plan),
+        },
+        expected_output="JSON object containing a revised_plan array.",
+    )
+
+
+def assemble_task_summary_prompt(ctx: Any) -> str:
+    raw_prompt = PromptTemplates.build_task_summary(
+        task_description=ctx.prompt,
+        plan_summary=_trim_text(
+            json.dumps(ctx.orchestration_state.plan, indent=2), 3000
+        ),
+        execution_results_summary=ctx.orchestration_state.prior_results_summary(),
+        changed_files=ctx.orchestration_state.changed_files,
+        num_debug_attempts=len(ctx.orchestration_state.debug_attempts),
+        final_status="success",
+        execution_profile=ctx.execution_profile,
+    )
+    return render_adapted_runtime_prompt(
+        ctx.db,
+        objective="Summarize the completed orchestration task accurately and concisely.",
+        execution_mode="task_summary",
+        prompt_body=raw_prompt,
+        instructions=[
+            "Ground the summary in the actual completed steps and changed files.",
+            "Do not claim work that was not completed.",
+        ],
+        context={
+            "Execution Profile": ctx.execution_profile,
+            "Changed Files Count": len(ctx.orchestration_state.changed_files),
+            "Debug Attempt Count": len(ctx.orchestration_state.debug_attempts),
+        },
+        expected_output="A concise completion summary for operators.",
     )
 
 

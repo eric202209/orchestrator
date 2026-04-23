@@ -14,10 +14,11 @@ from app.database import get_db
 from app.models import Task, TaskStatus, Project, LogEntry, SessionTask
 from app.schemas import TaskCreate, TaskUpdate, TaskResponse, TaskPromotionRequest
 from app.dependencies import get_current_active_user
-from app.services.agents.openclaw_service import OpenClawSessionService
+from app.services.agents.agent_runtime import create_agent_runtime
 from app.services.error_handler import EnhancedErrorHandler
 from app.services.log_utils import sort_logs
 from app.services.name_formatter import humanize_display_name
+from app.services.orchestration.context_assembly import render_adapted_runtime_prompt
 from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
@@ -96,7 +97,7 @@ def _queue_task_retry(
 ) -> dict:
     from app.models import Session as SessionModel
     from app.api.v1.endpoints.sessions import _ensure_unique_session_name
-    from app.tasks.worker import execute_openclaw_task
+    from app.tasks.worker import execute_orchestration_task
     from app.services.task_service import TaskService
 
     active_session_id = _get_active_task_session(db, task.id)
@@ -160,7 +161,7 @@ def _queue_task_retry(
     task.started_at = started_at
 
     try:
-        result = execute_openclaw_task.delay(
+        result = execute_orchestration_task.delay(
             session_id=new_session.id,
             task_id=task.id,
             prompt=prompt,
@@ -279,14 +280,14 @@ def get_project_tasks(
 
 
 @router.post("/tasks/{task_id}/execute")
-async def execute_task_with_openclaw(
+async def execute_task_with_runtime(
     task_id: int,
     request: Request,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
     """
-    Execute a task using OpenClaw AI agent with real-time log streaming
+    Execute a task through the active runtime with real-time log streaming
 
     Args:
         task_id: Task ID to execute
@@ -366,9 +367,9 @@ async def execute_task_with_openclaw(
         )
         db.add(session_task)
 
-        session_service = OpenClawSessionService(db, new_session.id, task_id)
+        runtime = create_agent_runtime(db, new_session.id, task_id)
         try:
-            await session_service.start_session(prompt)
+            await runtime.create_session(prompt)
         except Exception:
             db.rollback()
             raise
@@ -387,10 +388,25 @@ async def execute_task_with_openclaw(
             task_description=prompt + overwrite_warning,
             project_context=f"Project: {task.project.name if task.project else 'Unknown'} at {task.project.workspace_path if task.project and task.project.workspace_path else '/workspace'}",
         )
+        prompt_text = render_adapted_runtime_prompt(
+            db,
+            objective="Execute the requested task through the active runtime.",
+            execution_mode="direct_task_execution",
+            prompt_body=prompt_text,
+            instructions=[
+                "Use the current workspace as the source of truth.",
+                "Return a direct execution result for the requested task.",
+            ],
+            context={
+                "Task ID": task.id,
+                "Project ID": task.project_id,
+            },
+            expected_output="Execution result text or structured completion payload.",
+        )
 
         actual_timeout = max(timeout_seconds, 600)
 
-        result = await session_service.execute_task_with_streaming(
+        result = await runtime.execute_task(
             prompt=prompt_text,
             timeout_seconds=actual_timeout,
         )
@@ -425,6 +441,10 @@ async def execute_task_with_openclaw(
             task.error_message = f"{error_msg}\nRecommended action: {recovery_plan.get('recommended_action', 'manual_intervention')}"
             db.commit()
         raise HTTPException(status_code=500, detail=error_msg)
+
+
+# Backward-compatible alias for older imports/tests during the rename period.
+execute_task_with_openclaw = execute_task_with_runtime
 
 
 @router.get("/tasks/{task_id}", response_model=TaskResponse)

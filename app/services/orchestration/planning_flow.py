@@ -58,9 +58,7 @@ def execute_planning_phase(
         pass
 
     planning_prompt = (
-        assemble_planning_prompt(ctx, workspace_review)
-        if ctx.openclaw_service
-        else None
+        assemble_planning_prompt(ctx, workspace_review) if ctx.runtime_service else None
     )
     planning_prompt_tokens = estimate_token_count(planning_prompt or "")
 
@@ -110,7 +108,7 @@ def execute_planning_phase(
             },
         )
         planning_result = PlannerService.retry_with_minimal_prompt(
-            openclaw_service=ctx.openclaw_service,
+            runtime_service=ctx.runtime_service,
             task_description=ctx.prompt,
             project_dir=ctx.orchestration_state.project_dir,
             timeout_seconds=planning_timeout_seconds,
@@ -120,7 +118,7 @@ def execute_planning_phase(
         )
     else:
         planning_result = asyncio.run(
-            ctx.openclaw_service.execute_task(
+            ctx.runtime_service.execute_task(
                 planning_prompt, timeout_seconds=planning_timeout_seconds
             )
         )
@@ -149,7 +147,7 @@ def execute_planning_phase(
             },
         )
         planning_result = PlannerService.retry_with_minimal_prompt(
-            openclaw_service=ctx.openclaw_service,
+            runtime_service=ctx.runtime_service,
             task_description=ctx.prompt,
             project_dir=ctx.orchestration_state.project_dir,
             timeout_seconds=planning_timeout_seconds,
@@ -473,7 +471,7 @@ def __retry_with_minimal_prompt(
     reason: str,
 ) -> Dict[str, Any]:
     return PlannerService.retry_with_minimal_prompt(
-        openclaw_service=ctx.openclaw_service,
+        runtime_service=ctx.runtime_service,
         task_description=ctx.prompt,
         project_dir=ctx.orchestration_state.project_dir,
         timeout_seconds=planning_timeout_seconds,
@@ -492,7 +490,7 @@ def __repair_planning_output(
     rejection_reasons: list[str] | None = None,
 ) -> Dict[str, Any]:
     return PlannerService.repair_output(
-        openclaw_service=ctx.openclaw_service,
+        runtime_service=ctx.runtime_service,
         task_description=ctx.prompt,
         malformed_output=malformed_output,
         project_dir=ctx.orchestration_state.project_dir,

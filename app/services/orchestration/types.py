@@ -1,7 +1,11 @@
 """Shared orchestration types."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
+
+from app.services.agents.interfaces import AgentRuntime
 
 
 @dataclass
@@ -59,7 +63,7 @@ class OrchestrationRunContext:
     validation_profile: str
     runs_in_canonical_baseline: bool
     orchestration_state: Any
-    openclaw_service: Any
+    runtime_service: AgentRuntime
     task_service: Any
     logger: Any
     emit_live: Callable[..., None]
