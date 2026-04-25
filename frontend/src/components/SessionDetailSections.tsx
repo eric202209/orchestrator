@@ -404,14 +404,14 @@ export function SessionLogsPanel({
                 : 'Unavailable'}
             </span>
           </div>
-          {!stateDiff ? (
+          {!stateDiff || !stateDiff.delta ? (
             <p className="text-sm text-slate-500">
               Diff data appears after at least two state snapshots exist.
             </p>
           ) : (
             <div className="space-y-2 text-sm">
               <p className="text-slate-300">
-                Step index change: <span className="font-medium text-white">{stateDiff.delta.current_step_index.change}</span>
+                Step index change: <span className="font-medium text-white">{stateDiff.delta.current_step_index?.change ?? 'N/A'}</span>
               </p>
               <p className="text-slate-300">
                 Retry budget: <span className="font-medium text-white">{stateDiff.delta.retry_budget_remaining.from}</span> →{' '}

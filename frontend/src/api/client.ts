@@ -163,6 +163,9 @@ export const authAPI = {
 
   revokeApiKey: (id: number) =>
     apiClient.delete(`/auth/api-keys/${id}`),
+
+  refreshToken: (data: { refresh_token: string }) =>
+    axios.post<AuthTokens>(`${API_BASE_URL}/auth/refresh`, data),
 };
 
 export const settingsAPI = {

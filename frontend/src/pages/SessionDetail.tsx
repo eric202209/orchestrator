@@ -108,6 +108,9 @@ export default function SessionDetail() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const shouldReconnectRef = useRef(true);
+  const diffAvailableRef = useRef<boolean | null>(null); // null=unknown, true=has data, false=no snapshots
+  const tasksRef = useRef<Task[]>([]);
+  useEffect(() => { tasksRef.current = tasks; }, [tasks]);
   const seenOrchestrationTimelineKeysRef = useRef<Set<string>>(new Set());
 
   const parseApiDate = useCallback((value?: string | null): Date | null => {
@@ -564,6 +567,7 @@ export default function SessionDetail() {
   }, [buildOrchestrationTimelineKey, normalizeOrchestrationEvents, toTimelineEventFromOrchestrationEvent]);
 
   const loadStateDiff = useCallback(async (currentSessionId: number, sessionTasks: Task[] = []) => {
+    if (diffAvailableRef.current === false) return;
     try {
       const relevantTask = (sessionTasks || [])
         .filter((task) => task.session_id === currentSessionId)
@@ -571,8 +575,10 @@ export default function SessionDetail() {
       const response = await sessionsAPI.getSessionDiff(currentSessionId, {
         task_id: relevantTask?.id,
       });
+      diffAvailableRef.current = true;
       setStateDiff(response.data);
     } catch (loadError) {
+      diffAvailableRef.current = false;
       console.debug('State diff unavailable:', loadError);
       setStateDiff(null);
     }
@@ -739,13 +745,12 @@ export default function SessionDetail() {
       const events = responses.flatMap((response) => response.data.events || []);
       if (events.length > 0) {
         replaceTimelineWithOrchestrationEvents(events);
-        await loadStateDiff(currentSessionId, sessionTasks);
         await loadDivergenceCompare(currentSessionId);
       }
     } catch (loadError) {
       console.error('Failed to load orchestration event timeline:', loadError);
     }
-  }, [loadDivergenceCompare, loadStateDiff, replaceTimelineWithOrchestrationEvents]);
+  }, [loadDivergenceCompare, replaceTimelineWithOrchestrationEvents]);
 
   const loadCheckpointCount = useCallback(async (id: number) => {
     try {
@@ -772,6 +777,7 @@ export default function SessionDetail() {
 
   const setupWebSocket = useCallback((session_id: number) => {
     const token = localStorage.getItem('access_token');
+
     if (!token) {
       console.warn('No access token found, cannot connect WebSocket');
       return;
@@ -836,7 +842,7 @@ export default function SessionDetail() {
                 String(data.event_type || '')
               )
             ) {
-              void loadStateDiff(Number(sessionId), tasks);
+              void loadStateDiff(Number(sessionId), tasksRef.current);
             }
           } else if (data.type === 'ping') {
             console.debug('Received ping, sending pong');
@@ -845,6 +851,10 @@ export default function SessionDetail() {
             console.debug('Received pong');
           } else if (data.type === 'connected') {
             console.log('✅ WebSocket connected message received');
+          } else if (data.type === 'session_ended') {
+            console.log('Session ended via WebSocket, status:', data.status);
+            shouldReconnectRef.current = false;
+            setSession(prev => prev ? { ...prev, status: data.status } : prev);
           } else {
             console.debug('WebSocket message received:', data);
           }
@@ -880,7 +890,7 @@ export default function SessionDetail() {
       console.error('Failed to create WebSocket:', error);
       setWsConnected(false);
     }
-  }, [appendOrchestrationTimelineEvent, applyLogView, formatLogTimestamp, loadStateDiff, logVerbosity, logViewMode, sessionId, tasks]);
+  }, [appendOrchestrationTimelineEvent, applyLogView, formatLogTimestamp, loadStateDiff, logVerbosity, logViewMode, sessionId]);
 
   const scheduleWebSocketConnect = useCallback(
     (session_id: number, delayMs: number = 0) => {
@@ -917,7 +927,7 @@ export default function SessionDetail() {
         await loadStateDiff(updated.data.id, tasksRes.data || []);
       }
       await loadCheckpointCount(Number(sessionId));
-      if (!wsRef.current && (updated.data.status === 'running' || updated.data.status === 'paused')) {
+      if (!wsRef.current && updated.data.status === 'running') {
         scheduleWebSocketConnect(Number(sessionId), 1200);
       }
     } catch (error) {
@@ -935,26 +945,35 @@ export default function SessionDetail() {
       return;
     }
 
+    const abortController = new AbortController();
+
     const loadSessionData = async () => {
       try {
         const sessionRes = await sessionsAPI.getById(Number(sessionId));
         const tasksRes = await tasksAPI.getByProject(sessionRes.data.project_id || 0);
         const projectRes = await projectsAPI.getById(sessionRes.data.project_id || 0);
-        
+
+        if (abortController.signal.aborted) return;
+
         setSession(sessionRes.data);
         setTasks(tasksRes.data || []);
         setProject(projectRes.data);
         await loadCheckpointCount(Number(sessionId));
         await loadTimelineEvents(sessionRes.data.id, tasksRes.data || []);
-        await loadStateDiff(sessionRes.data.id, tasksRes.data || []);
-        
-        // Only connect WebSocket if session is running or paused
-        if (sessionRes.data.status === 'running' || sessionRes.data.status === 'paused') {
+        if (sessionRes.data.status === 'running') {
+          await loadStateDiff(sessionRes.data.id, tasksRes.data || []);
+        }
+
+        if (abortController.signal.aborted) return;
+
+        // Only connect WebSocket if session is running
+        if (sessionRes.data.status === 'running') {
           scheduleWebSocketConnect(sessionRes.data.id);
         } else {
           console.log(`Session is ${sessionRes.data.status}, not connecting WebSocket yet`);
         }
       } catch (err) {
+        if (abortController.signal.aborted) return;
         console.error('Failed to load session:', err);
         setError(err instanceof Error ? err.message : 'Failed to load session');
       } finally {
@@ -964,15 +983,17 @@ export default function SessionDetail() {
 
     // Load logs on initial load (after session data is loaded)
     const loadLogs = async () => {
-      if (!sessionId) return;
+      if (!sessionId || abortController.signal.aborted) return;
       try {
         const response = await sessionsAPI.getLogs(Number(sessionId));
+        if (abortController.signal.aborted) return;
         const loadedLogs = visibleLogs((response.data?.logs || []) as SessionLogItem[]);
         console.log(`Loaded ${loadedLogs.length} visible logs for session ${sessionId}`);
         const terminalLogs = loadedLogs.map(toTerminalLogEntry);
         setAllLogs(terminalLogs);
         applyLogView(terminalLogs, logViewMode);
       } catch (err) {
+        if (abortController.signal.aborted) return;
         console.error('Failed to load logs:', err);
       }
     };
@@ -984,20 +1005,23 @@ export default function SessionDetail() {
 
     // Poll for status updates every 5 seconds
     const statusPollInterval = setInterval(async () => {
-      if (!sessionId) return;
+      if (!sessionId || abortController.signal.aborted) return;
       try {
         const currentSession = await sessionsAPI.getById(Number(sessionId));
+        if (abortController.signal.aborted) return;
         const currentStatus = currentSession.data.status;
         setSession(currentSession.data);
 
         if (currentSession.data.project_id) {
           const currentTasks = await tasksAPI.getByProject(currentSession.data.project_id);
           setTasks(currentTasks.data || []);
-          await loadStateDiff(Number(sessionId), currentTasks.data || []);
+          if (currentStatus === 'running') {
+            await loadStateDiff(Number(sessionId), currentTasks.data || []);
+          }
         }
-        
-        // If session changed to running/paused, connect WebSocket
-        if ((currentStatus === 'running' || currentStatus === 'paused') && !wsRef.current) {
+
+        // If session changed to running, connect WebSocket
+        if (currentStatus === 'running' && !wsRef.current) {
           console.log(`Session is now ${currentStatus}, connecting WebSocket...`);
           scheduleWebSocketConnect(Number(sessionId), 1000);
         }
@@ -1006,12 +1030,14 @@ export default function SessionDetail() {
           await loadCheckpointCount(Number(sessionId));
         }
       } catch (err) {
+        if (abortController.signal.aborted) return;
         console.warn('Status poll error:', err);
       }
     }, 5000);
 
     // Cleanup WebSocket and interval on unmount
     return () => {
+      abortController.abort();
       shouldReconnectRef.current = false;
       if (wsRef.current) {
         wsRef.current.close();
@@ -1021,7 +1047,7 @@ export default function SessionDetail() {
       }
       clearInterval(statusPollInterval);
     };
-  }, [applyLogView, loadCheckpointCount, loadStateDiff, loadTimelineEvents, logVerbosity, logViewMode, scheduleWebSocketConnect, session?.status, sessionId, toTerminalLogEntry, visibleLogs]);
+  }, [applyLogView, loadCheckpointCount, loadStateDiff, loadTimelineEvents, logVerbosity, logViewMode, scheduleWebSocketConnect, sessionId, toTerminalLogEntry, visibleLogs]);
 
   const handleStartSession = async () => {
     if (!session || !sessionId) {
@@ -1032,6 +1058,7 @@ export default function SessionDetail() {
     
     console.log(`Starting session ${sessionId}...`);
     pushTimelineEvent(`Start requested for session ${sessionId}`, 'INFO');
+    diffAvailableRef.current = null;
     const previousSession = session;
     setSession((current) =>
       current
@@ -1049,7 +1076,7 @@ export default function SessionDetail() {
       const updated = await sessionsAPI.getById(Number(sessionId));
       console.log('Updated session:', updated.data);
       setSession(updated.data);
-      if (updated.data.status === 'running' || updated.data.status === 'paused') {
+      if (updated.data.status === 'running') {
         if (!wsRef.current) {
           scheduleWebSocketConnect(Number(sessionId), 1000);
         }
@@ -1163,6 +1190,7 @@ export default function SessionDetail() {
         : current
     );
     pushTimelineEvent(`Resume requested for session ${sessionId}`, 'INFO');
+    diffAvailableRef.current = null;
     try {
       await sessionsAPI.resume(Number(sessionId));
       const updated = await sessionsAPI.getById(Number(sessionId));
@@ -1171,10 +1199,9 @@ export default function SessionDetail() {
         const tasksRes = await tasksAPI.getByProject(updated.data.project_id);
         setTasks(tasksRes.data || []);
         await loadTimelineEvents(updated.data.id, tasksRes.data || []);
-        await loadStateDiff(updated.data.id, tasksRes.data || []);
       }
       await loadCheckpointCount(Number(sessionId));
-      if (!wsRef.current && (updated.data.status === 'running' || updated.data.status === 'paused')) {
+      if (!wsRef.current && updated.data.status === 'running') {
         scheduleWebSocketConnect(Number(sessionId), 1200);
       }
     } catch (error) {
