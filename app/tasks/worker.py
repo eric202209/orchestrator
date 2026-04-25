@@ -679,10 +679,11 @@ def execute_orchestration_task(
                 orchestration_state._task_subfolder_override = checkpoint_context.get(
                     "task_subfolder"
                 )
-            if checkpoint_context.get("project_dir_override"):
-                orchestration_state._project_dir_override = checkpoint_context.get(
-                    "project_dir_override"
-                )
+            # Do NOT restore _project_dir_override from checkpoint — it is always
+            # recomputed from current project settings (canonical baseline logic
+            # runs after checkpoint load). Restoring a stale saved path causes
+            # the wrong workspace (old host path, or path with task subfolder) to
+            # be used in prompts and tool calls.
 
             orchestration_state.plan = checkpoint_state.get("plan", []) or []
             orchestration_state.current_step_index = (

@@ -51,6 +51,9 @@ class EventType:
     REPAIR_REJECTED = "repair_rejected"
     EVALUATOR_RESULT = "evaluator_result"
 
+    # ── Tier 3 — Counterfactual replay ───────────────────────────────────────
+    COUNTERFACTUAL_REPLAY_STARTED = "counterfactual_replay_started"
+
     # ── Workspace ─────────────────────────────────────────────────────────────
     WORKSPACE_RESTORE_SKIPPED = "workspace_restore_skipped"
     WORKSPACE_PRESERVED = "workspace_preserved"

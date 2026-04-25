@@ -42,6 +42,7 @@ from app.services import (
     maybe_queue_next_automatic_task as _maybe_queue_next_automatic_task,
     queue_task_for_session as _queue_task_for_session,
     replay_session_checkpoint_payload as _replay_session_checkpoint_payload,
+    replay_session_checkpoint_counterfactual_payload as _replay_session_checkpoint_counterfactual_payload,
     save_session_checkpoint_payload as _save_session_checkpoint_payload,
     pause_session_lifecycle as _pause_session_lifecycle,
     resume_session_lifecycle as _resume_session_lifecycle,
@@ -1040,6 +1041,50 @@ async def replay_session_checkpoint(
 ):
     """Resume execution from a selected checkpoint for operator replay."""
     return await _replay_session_checkpoint_payload(db, session_id, checkpoint_name)
+
+
+class CounterfactualReplayRequest(BaseModel):
+    step_from_index: Optional[int] = None
+    policy_profile: Optional[str] = None
+    model_family: Optional[str] = None
+    adaptation_profile: Optional[str] = None
+
+
+@router.post(
+    "/sessions/{session_id}/checkpoints/{checkpoint_name}/counterfactual-replay"
+)
+async def counterfactual_replay_session_checkpoint(
+    session_id: int,
+    checkpoint_name: str,
+    request: CounterfactualReplayRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Replay a checkpoint with variable overrides for counterfactual root-cause analysis.
+
+    Accepts optional overrides:
+    - step_from_index: rewind execution to this step (0-based)
+    - policy_profile: swap orchestration policy for this replay
+    - model_family: swap model for this replay
+    - adaptation_profile: swap prompt adaptation profile for this replay
+
+    Applied overrides (step_from_index) are woven into the checkpoint state.
+    Deferred overrides (policy/model) are stored in context.replay_overrides and
+    require executor support to take full effect.
+    """
+    overrides = {
+        k: v
+        for k, v in {
+            "step_from_index": request.step_from_index,
+            "policy_profile": request.policy_profile,
+            "model_family": request.model_family,
+            "adaptation_profile": request.adaptation_profile,
+        }.items()
+        if v is not None
+    }
+    return await _replay_session_checkpoint_counterfactual_payload(
+        db, session_id, checkpoint_name, overrides=overrides
+    )
 
 
 @router.delete("/sessions/{session_id}/checkpoints/{checkpoint_name}")

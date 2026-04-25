@@ -32,6 +32,109 @@ def _orchestration_event_log_path(
     )
 
 
+def _session_fingerprint_index_path(workspace_path: Any, session_id: int) -> Path:
+    return (
+        Path(workspace_path)
+        / ".openclaw"
+        / "fingerprints"
+        / f"session_{session_id}.json"
+    )
+
+
+def write_session_fingerprint_index(
+    workspace_path: Any,
+    session_id: int,
+    fingerprint: Dict[str, Any],
+) -> None:
+    path = _session_fingerprint_index_path(workspace_path, session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {**fingerprint, "indexed_at": datetime.now(UTC).isoformat()}
+    try:
+        path.write_text(json.dumps(payload, default=str), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def read_session_fingerprint_index(
+    workspace_path: Any,
+    session_id: int,
+    *,
+    max_age_seconds: int = 300,
+) -> Optional[Dict[str, Any]]:
+    path = _session_fingerprint_index_path(workspace_path, session_id)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        indexed_at_str = data.get("indexed_at")
+        if indexed_at_str and max_age_seconds > 0:
+            try:
+                indexed_at = datetime.fromisoformat(indexed_at_str)
+                if indexed_at.tzinfo is None:
+                    indexed_at = indexed_at.replace(tzinfo=UTC)
+                age = (datetime.now(UTC) - indexed_at).total_seconds()
+                if age > max_age_seconds:
+                    return None
+            except ValueError:
+                return None
+        return data
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _apply_counterfactual_overrides_to_checkpoint(
+    checkpoint: Dict[str, Any],
+    *,
+    overrides: Dict[str, Any],
+) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    """Apply variable overrides to a checkpoint payload for counterfactual replay.
+
+    Returns (modified_checkpoint, applied_overrides, deferred_overrides).
+    applied_overrides: overrides woven directly into checkpoint state.
+    deferred_overrides: overrides stored in context.replay_overrides for the executor.
+    """
+    import copy
+
+    modified = copy.deepcopy(checkpoint)
+    applied: Dict[str, Any] = {}
+    deferred: Dict[str, Any] = {}
+
+    orchestration_state = modified.get("orchestration_state") or {}
+
+    step_from_index = overrides.get("step_from_index")
+    if step_from_index is not None:
+        plan = orchestration_state.get("plan") or []
+        clamped = max(0, min(int(step_from_index), max(0, len(plan) - 1)))
+        orchestration_state["current_step_index"] = clamped
+        orchestration_state["debug_attempts"] = []
+        orchestration_state["execution_results"] = [
+            r
+            for r in (orchestration_state.get("execution_results") or [])
+            if (int(r.get("step_number") or 1) - 1) < clamped
+        ]
+        modified["orchestration_state"] = orchestration_state
+        modified["current_step_index"] = clamped
+        modified["step_results"] = [
+            r
+            for r in (modified.get("step_results") or [])
+            if (int(r.get("step_number") or 1) - 1) < clamped
+        ]
+        applied["step_from_index"] = clamped
+
+    replay_overrides: Dict[str, Any] = {}
+    for key in ("policy_profile", "model_family", "adaptation_profile"):
+        val = overrides.get(key)
+        if val is not None:
+            replay_overrides[key] = val
+            deferred[key] = val
+    if replay_overrides:
+        context = dict(modified.get("context") or {})
+        context["replay_overrides"] = replay_overrides
+        modified["context"] = context
+
+    return modified, applied, deferred
+
+
 def _orchestration_state_snapshot_log_path(
     project_dir: Any, session_id: int, task_id: int
 ) -> Path:
@@ -633,9 +736,6 @@ def save_orchestration_checkpoint(
             "project_name": orchestration_state.project_name,
             "project_context": orchestration_state.project_context,
             "task_subfolder": orchestration_state.task_subfolder,
-            # Always persist the concrete resolved path so resume is stable
-            # regardless of workspace_root recalculation.
-            "project_dir_override": str(orchestration_state.project_dir),
             "workspace_path_override": (
                 str(orchestration_state._workspace_path_override)
                 if orchestration_state._workspace_path_override

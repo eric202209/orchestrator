@@ -19,6 +19,11 @@ from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.log_utils import deduplicate_logs
 from app.services.orchestration.persistence import diff_orchestration_state_snapshots
 from app.services.orchestration.persistence import read_orchestration_events
+from app.services.orchestration.persistence import (
+    read_session_fingerprint_index,
+    write_session_fingerprint_index,
+    _apply_counterfactual_overrides_to_checkpoint,
+)
 from app.services.workspace.overwrite_protection_service import (
     OverwriteProtectionError,
     OverwriteProtectionService,
@@ -71,12 +76,11 @@ def _session_task_event_roots(
         task = db.query(Task).filter(Task.id == link.task_id).first()
         if not task:
             continue
-        task_subfolder = str(task.task_subfolder or f"task-{task.id}")
         roots.append(
             {
                 "task_id": task.id,
                 "task_title": task.title,
-                "project_dir": project_root / task_subfolder,
+                "project_dir": project_root,
             }
         )
     return roots
@@ -175,9 +179,21 @@ def get_session_divergence_compare_payload(
     *,
     limit: int = 5,
 ) -> Dict[str, Any]:
+    from app.models import Project
+
     session = _get_session_or_404(db, session_id)
     current = _build_session_divergence_fingerprint(db, session)
     current_tags = set(current.get("anomaly_tags", []))
+
+    project = db.query(Project).filter(Project.id == session.project_id).first()
+    workspace_path = project.workspace_path if project else None
+
+    # Write current fingerprint to index so siblings can reference it later.
+    if workspace_path:
+        try:
+            write_session_fingerprint_index(workspace_path, session_id, current)
+        except Exception:
+            pass
 
     siblings = (
         db.query(SessionModel)
@@ -193,7 +209,25 @@ def get_session_divergence_compare_payload(
 
     matches: List[Dict[str, Any]] = []
     for candidate in siblings:
-        fingerprint = _build_session_divergence_fingerprint(db, candidate)
+        fingerprint = None
+        if workspace_path:
+            # Completed sessions: long TTL.  Running sessions: short TTL.
+            max_age = 300 if candidate.status in {"running", "active"} else 3600
+            try:
+                fingerprint = read_session_fingerprint_index(
+                    workspace_path, candidate.id, max_age_seconds=max_age
+                )
+            except Exception:
+                fingerprint = None
+        if fingerprint is None:
+            fingerprint = _build_session_divergence_fingerprint(db, candidate)
+            if workspace_path:
+                try:
+                    write_session_fingerprint_index(
+                        workspace_path, candidate.id, fingerprint
+                    )
+                except Exception:
+                    pass
         candidate_tags = set(fingerprint.get("anomaly_tags", []))
         union = current_tags | candidate_tags
         overlap_score = 0.0
@@ -604,6 +638,93 @@ async def replay_session_checkpoint_payload(
     return result
 
 
+async def replay_session_checkpoint_counterfactual_payload(
+    db: Session,
+    session_id: int,
+    checkpoint_name: str,
+    *,
+    overrides: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Replay a checkpoint with variable overrides for counterfactual root-cause analysis.
+
+    Applies overrides to the loaded checkpoint (e.g. rewind step, swap policy) then
+    saves a derived checkpoint and starts execution from it.  Records a
+    COUNTERFACTUAL_REPLAY_STARTED event in the event journal.
+    """
+    import uuid as _uuid
+    import json as _json
+    from pathlib import Path as _Path
+    from app.services.session.session_lifecycle_service import resume_session_lifecycle
+    from app.services.orchestration.event_types import EventType
+    from app.services.orchestration.persistence import append_orchestration_event
+
+    overrides = overrides or {}
+    session = _get_session_or_404(db, session_id)
+    _prepare_session_for_replay(db, session)
+
+    checkpoint_service = CheckpointService(db)
+    try:
+        payload = checkpoint_service.load_checkpoint(session_id, checkpoint_name)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=404, detail=f"Checkpoint not found: {exc}"
+        ) from exc
+
+    modified, applied, deferred = _apply_counterfactual_overrides_to_checkpoint(
+        payload, overrides=overrides
+    )
+
+    counterfactual_name = f"counterfactual_{checkpoint_name}_{_uuid.uuid4().hex[:8]}"
+    cp_path = _Path(
+        checkpoint_service._get_checkpoint_path(session_id, counterfactual_name)
+    )
+    cp_path.parent.mkdir(parents=True, exist_ok=True)
+    modified["checkpoint_name"] = counterfactual_name
+    modified["replay_mode"] = "counterfactual"
+    modified["_requested_checkpoint_name"] = checkpoint_name
+    modified["_resolved_checkpoint_name"] = counterfactual_name
+    cp_path.write_text(_json.dumps(modified, default=str), encoding="utf-8")
+
+    roots = _session_task_event_roots(db, session)
+    if roots:
+        task_root = roots[-1]
+        try:
+            append_orchestration_event(
+                project_dir=task_root["project_dir"],
+                session_id=session_id,
+                task_id=task_root["task_id"],
+                event_type=EventType.COUNTERFACTUAL_REPLAY_STARTED,
+                details={
+                    "source_checkpoint": checkpoint_name,
+                    "counterfactual_checkpoint": counterfactual_name,
+                    "applied_overrides": applied,
+                    "deferred_overrides": deferred,
+                },
+            )
+        except Exception:
+            pass
+
+    result = await resume_session_lifecycle(
+        db,
+        session_id,
+        checkpoint_name=counterfactual_name,
+    )
+    result["success"] = True
+    result["replay_requested"] = True
+    result["mode"] = "counterfactual"
+    result["replay_source"] = {
+        "source_checkpoint": checkpoint_name,
+        "counterfactual_checkpoint": counterfactual_name,
+        "mode": "counterfactual",
+        "applied_overrides": applied,
+        "deferred_overrides": deferred,
+    }
+    result["message"] = (
+        f"Counterfactual replay started from checkpoint: {checkpoint_name}"
+    )
+    return result
+
+
 def get_session_state_diff_payload(
     db: Session,
     session_id: int,
@@ -643,16 +764,20 @@ def get_session_state_diff_payload(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    project_dir = resolve_project_workspace_path(project.workspace_path, project.name)
     try:
         return diff_orchestration_state_snapshots(
-            project.workspace_path,
+            project_dir,
             session_id,
             task_id,
             from_checkpoint=from_checkpoint,
             to_checkpoint=to_checkpoint,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        msg = str(exc)
+        if "No orchestration state snapshots found" in msg:
+            raise HTTPException(status_code=404, detail=msg) from exc
+        raise HTTPException(status_code=400, detail=msg) from exc
 
 
 def delete_session_checkpoint_payload(

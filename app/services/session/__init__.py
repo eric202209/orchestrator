@@ -25,6 +25,7 @@ from .session_inspection_service import (
     list_session_checkpoints_payload,
     load_session_checkpoint_payload,
     replay_session_checkpoint_payload,
+    replay_session_checkpoint_counterfactual_payload,
     save_session_checkpoint_payload,
 )
 from .session_lifecycle_service import (
@@ -74,6 +75,7 @@ __all__ = [
     "list_session_checkpoints_payload",
     "load_session_checkpoint_payload",
     "replay_session_checkpoint_payload",
+    "replay_session_checkpoint_counterfactual_payload",
     "save_session_checkpoint_payload",
     "pause_session_lifecycle",
     "resume_session_lifecycle",

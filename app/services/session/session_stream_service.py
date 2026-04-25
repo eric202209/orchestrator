@@ -15,6 +15,9 @@ from sqlalchemy.orm import Session
 from app.auth import verify_token
 from app.database import get_db_session as create_db_session
 from app.models import LogEntry, Session as SessionModel, User
+from app.services.workspace.project_isolation_service import (
+    resolve_project_workspace_path,
+)
 from app.services.log_stream_service import LogStreamService
 from app.services.streaming_health import (
     record_stream_error,
@@ -194,7 +197,9 @@ async def stream_session_logs(
 
         _project = db.query(Project).filter(Project.id == session.project_id).first()
         if _project and _project.workspace_path:
-            _workspace_path = str(_project.workspace_path)
+            _workspace_path = str(
+                resolve_project_workspace_path(_project.workspace_path, _project.name)
+            )
 
     log_service = LogStreamService(db)
     recent_logs = log_service.get_recent_logs(
