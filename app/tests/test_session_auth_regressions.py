@@ -1,5 +1,8 @@
+from types import SimpleNamespace
+
 from app.services import session_auth
 from app.services import session_auth_service
+from app.services.session import session_stream_service
 
 
 def test_session_token_requires_active_session() -> None:
@@ -33,3 +36,13 @@ def test_websocket_ticket_is_single_use() -> None:
     assert first_use is not None
     assert first_use.user_id == 456
     assert second_use is None
+
+
+def test_websocket_query_param_token_is_rejected() -> None:
+    websocket = SimpleNamespace(
+        headers={},
+        query_params={"token": "legacy-bearer-token"},
+        cookies={},
+    )
+
+    assert session_stream_service._authenticate_websocket(websocket, db=None) is None

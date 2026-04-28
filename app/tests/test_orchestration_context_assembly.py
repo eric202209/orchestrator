@@ -110,10 +110,10 @@ def test_assembled_prompts_trim_dense_context_but_keep_workspace_inventory(tmp_p
 
     assert "Current workspace inventory:" in planning_prompt
     assert "src/main.ts" in planning_prompt
-    assert len(planning_prompt) < 5800
+    assert len(planning_prompt) < 6200
     assert "Current workspace inventory:" in execution_prompt
     assert "tests/main.test.ts" in execution_prompt
-    assert len(execution_prompt) < 6800
+    assert len(execution_prompt) < 7600
 
 
 def test_compact_execution_prompt_is_smaller_but_keeps_workspace_truth(tmp_path):
@@ -143,6 +143,8 @@ def test_compact_execution_prompt_is_smaller_but_keeps_workspace_truth(tmp_path)
 
     assert "Current workspace inventory:" in compact_prompt
     assert "tests/main.test.ts" in compact_prompt
+    assert "<<<HITL_REQUEST:" in compact_prompt
+    assert "authorization, destructive/risky actions" in compact_prompt
     assert len(compact_prompt) < len(regular_prompt)
 
 

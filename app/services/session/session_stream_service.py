@@ -107,14 +107,10 @@ def _remove_active_websocket(session_id: int, websocket: WebSocket) -> None:
         pass
 
 
-def _get_websocket_token(websocket: WebSocket) -> Optional[str]:
+def _get_websocket_bearer_token(websocket: WebSocket) -> Optional[str]:
     authorization = websocket.headers.get("authorization")
     if authorization and authorization.lower().startswith("bearer "):
         return authorization.split(" ", 1)[1].strip()
-
-    token = websocket.query_params.get("token")
-    if token:
-        return token.strip()
 
     return None
 
@@ -144,8 +140,9 @@ def _authenticate_websocket(websocket: WebSocket, db: Session) -> Optional[User]
             if user and user.is_active:
                 return user
 
-    # 3. Legacy: Bearer token in Authorization header or ?token= param
-    token = _get_websocket_token(websocket)
+    # 3. Legacy fallback: Bearer token in Authorization header only.
+    # Query-param bearer tokens are intentionally unsupported.
+    token = _get_websocket_bearer_token(websocket)
     if not token:
         return None
 

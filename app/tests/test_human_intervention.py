@@ -453,10 +453,11 @@ def api_project_and_session(authenticated_client: TestClient, db_session_factory
 
 
 class TestInterventionAPIEndpoints:
-    def test_request_intervention_returns_waiting_for_human(
+    def test_request_intervention_returns_intervention_payload(
         self, authenticated_client: TestClient, api_project_and_session: dict
     ):
         session_id = api_project_and_session["session_id"]
+        project_id = api_project_and_session["project_id"]
         with (
             patch(_REVOKE_PATH),
             patch(_CHECKPOINT_PATH) as mock_cs,
@@ -472,8 +473,14 @@ class TestInterventionAPIEndpoints:
 
         assert resp.status_code == 200
         data = resp.json()
-        assert data["status"] == "waiting_for_human"
-        assert "intervention_id" in data
+        assert data["session_id"] == session_id
+        assert data["project_id"] == project_id
+        assert data["status"] == "pending"
+        assert data["intervention_type"] == "guidance"
+        assert data["initiated_by"] == "human"
+        assert data["message"] == (
+            "Session 'api-hitl-session' is now waiting for human input"
+        )
 
     def test_request_intervention_bad_type(
         self, authenticated_client: TestClient, api_project_and_session: dict
@@ -506,7 +513,7 @@ class TestInterventionAPIEndpoints:
                 f"/api/v1/sessions/{session_id}/request-intervention",
                 json={"intervention_type": "guidance", "prompt": "What next?"},
             )
-        intervention_id = create_resp.json()["intervention_id"]
+        intervention_id = create_resp.json()["id"]
 
         with patch(_CHECKPOINT_PATH) as mock_cs:
             mock_cs.return_value.load_checkpoint.return_value = None
@@ -517,6 +524,7 @@ class TestInterventionAPIEndpoints:
 
         assert reply_resp.status_code == 200
         assert reply_resp.json()["status"] == "replied"
+        assert reply_resp.json()["session_id"] == session_id
 
     def test_list_interventions_after_create(
         self, authenticated_client: TestClient, api_project_and_session: dict
@@ -534,7 +542,9 @@ class TestInterventionAPIEndpoints:
 
         resp = authenticated_client.get(f"/api/v1/sessions/{session_id}/interventions")
         assert resp.status_code == 200
+        assert resp.json()["total"] == 1
         assert len(resp.json()["interventions"]) == 1
+        assert resp.json()["interventions"][0]["context_snapshot"] is None
 
     def test_approve_intervention_endpoint(
         self, authenticated_client: TestClient, api_project_and_session: dict
@@ -549,7 +559,7 @@ class TestInterventionAPIEndpoints:
                 f"/api/v1/sessions/{session_id}/request-intervention",
                 json={"intervention_type": "approval", "prompt": "Proceed?"},
             )
-        intervention_id = create_resp.json()["intervention_id"]
+        intervention_id = create_resp.json()["id"]
 
         with patch(_CHECKPOINT_PATH) as mock_cs:
             mock_cs.return_value.load_checkpoint.return_value = None
@@ -559,6 +569,7 @@ class TestInterventionAPIEndpoints:
 
         assert approve_resp.status_code == 200
         assert approve_resp.json()["status"] == "approved"
+        assert approve_resp.json()["session_id"] == session_id
 
     def test_deny_intervention_endpoint(
         self, authenticated_client: TestClient, api_project_and_session: dict
@@ -573,7 +584,7 @@ class TestInterventionAPIEndpoints:
                 f"/api/v1/sessions/{session_id}/request-intervention",
                 json={"intervention_type": "approval", "prompt": "Risky op?"},
             )
-        intervention_id = create_resp.json()["intervention_id"]
+        intervention_id = create_resp.json()["id"]
 
         with patch(_CHECKPOINT_PATH) as mock_cs:
             mock_cs.return_value.load_checkpoint.return_value = None
@@ -584,6 +595,7 @@ class TestInterventionAPIEndpoints:
 
         assert deny_resp.status_code == 200
         assert deny_resp.json()["status"] == "denied"
+        assert deny_resp.json()["session_id"] == session_id
 
     def test_pending_only_filter(
         self, authenticated_client: TestClient, api_project_and_session: dict
@@ -598,7 +610,7 @@ class TestInterventionAPIEndpoints:
                 f"/api/v1/sessions/{session_id}/request-intervention",
                 json={"intervention_type": "guidance", "prompt": "Pending item"},
             )
-        intervention_id = create_resp.json()["intervention_id"]
+        intervention_id = create_resp.json()["id"]
 
         with patch(_CHECKPOINT_PATH) as mock_cs:
             mock_cs.return_value.load_checkpoint.return_value = None
@@ -619,6 +631,76 @@ class TestInterventionAPIEndpoints:
             f"/api/v1/sessions/{session_id}/interventions"
         )
         assert len(all_resp.json()["interventions"]) == 1
+
+    def test_list_interventions_includes_context_and_initiator(
+        self, authenticated_client: TestClient, api_project_and_session: dict
+    ):
+        session_id = api_project_and_session["session_id"]
+        with (
+            patch(_REVOKE_PATH),
+            patch(_CHECKPOINT_PATH) as mock_cs,
+        ):
+            mock_cs.return_value.load_checkpoint.return_value = None
+            authenticated_client.post(
+                f"/api/v1/sessions/{session_id}/request-intervention",
+                json={
+                    "intervention_type": "guidance",
+                    "prompt": "Need project context",
+                    "context_snapshot": {"branch": "main"},
+                },
+            )
+
+        resp = authenticated_client.get(f"/api/v1/sessions/{session_id}/interventions")
+
+        assert resp.status_code == 200
+        item = resp.json()["interventions"][0]
+        assert item["initiated_by"] == "human"
+        assert json.loads(item["context_snapshot"]) == {"branch": "main"}
+
+    def test_reply_endpoint_rejects_cross_session_intervention_id(
+        self, authenticated_client: TestClient, db_session: Session
+    ):
+        project = Project(name="cross-session-project", workspace_path=None)
+        db_session.add(project)
+        db_session.commit()
+        db_session.refresh(project)
+
+        session_one = SessionModel(
+            project_id=project.id,
+            name="session-one",
+            status="running",
+            is_active=True,
+            instance_id="cross-1",
+        )
+        session_two = SessionModel(
+            project_id=project.id,
+            name="session-two",
+            status="running",
+            is_active=True,
+            instance_id="cross-2",
+        )
+        db_session.add_all([session_one, session_two])
+        db_session.commit()
+        db_session.refresh(session_one)
+        db_session.refresh(session_two)
+
+        with (
+            patch(_REVOKE_PATH),
+            patch(_CHECKPOINT_PATH) as mock_cs,
+        ):
+            mock_cs.return_value.load_checkpoint.return_value = None
+            create_resp = authenticated_client.post(
+                f"/api/v1/sessions/{session_one.id}/request-intervention",
+                json={"intervention_type": "guidance", "prompt": "Session one only"},
+            )
+
+        intervention_id = create_resp.json()["id"]
+        reply_resp = authenticated_client.post(
+            f"/api/v1/sessions/{session_two.id}/interventions/{intervention_id}/reply",
+            json={"reply": "wrong session"},
+        )
+
+        assert reply_resp.status_code == 404
 
 
 # ── DB migration test ─────────────────────────────────────────────────────────

@@ -13,7 +13,7 @@ import type {
   Task,
 } from '@/types/api';
 import type { TerminalLogEntry } from '@/components/TerminalViewer';
-import { LoadingSpinner } from '@/components/ui';
+import { Alert, LoadingSpinner } from '@/components/ui';
 import {
   HumanInterventionPanel,
   SessionConnectionNotice,
@@ -65,6 +65,12 @@ interface ApiErrorLike {
   message?: string;
 }
 
+interface InterventionToastState {
+  interventionId: number;
+  title: string;
+  message: string;
+}
+
 const NOISY_LOG_PATTERNS = [
   /^"[\w]+":\s?.*$/,
   /^[[\]{}],?$/,
@@ -109,6 +115,8 @@ export default function SessionDetail() {
   const [stateDiff, setStateDiff] = useState<SessionStateDiffResponse | null>(null);
   const [interventions, setInterventions] = useState<InterventionRequest[]>([]);
   const [showInterventionForm, setShowInterventionForm] = useState(false);
+  const [showAgentInterventionModal, setShowAgentInterventionModal] = useState(false);
+  const [interventionToast, setInterventionToast] = useState<InterventionToastState | null>(null);
   const [interventionPrompt, setInterventionPrompt] = useState('');
   const [interventionType, setInterventionType] = useState<'guidance' | 'approval'>('guidance');
   const [interventionSubmitting, setInterventionSubmitting] = useState(false);
@@ -119,6 +127,71 @@ export default function SessionDetail() {
   const tasksRef = useRef<Task[]>([]);
   useEffect(() => { tasksRef.current = tasks; }, [tasks]);
   const seenOrchestrationTimelineKeysRef = useRef<Set<string>>(new Set());
+  const lastAutoOpenedAgentInterventionRef = useRef<number | null>(null);
+  const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const pendingInterventions = interventions.filter((i) => i.status === 'pending');
+  const pendingAgentInterventions = pendingInterventions.filter((i) => i.initiated_by !== 'human');
+  const agentInterventionTimeline = interventions
+    .filter((i) => i.initiated_by !== 'human')
+    .slice()
+    .sort((a, b) => {
+      const left = new Date(b.created_at).getTime();
+      const right = new Date(a.created_at).getTime();
+      return left - right;
+    })
+    .slice(0, 5);
+
+  const dismissInterventionToast = useCallback(() => {
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+      toastTimeoutRef.current = null;
+    }
+    setInterventionToast(null);
+  }, []);
+
+  const playInterventionChime = useCallback(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const AudioContextCtor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextCtor) {
+      return;
+    }
+
+    try {
+      const audioContext = new AudioContextCtor();
+      const now = audioContext.currentTime;
+      const oscillatorA = audioContext.createOscillator();
+      const oscillatorB = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+
+      oscillatorA.type = 'triangle';
+      oscillatorA.frequency.setValueAtTime(740, now);
+      oscillatorB.type = 'sine';
+      oscillatorB.frequency.setValueAtTime(988, now + 0.08);
+
+      gainNode.gain.setValueAtTime(0.0001, now);
+      gainNode.gain.exponentialRampToValueAtTime(0.12, now + 0.03);
+      gainNode.gain.exponentialRampToValueAtTime(0.0001, now + 0.42);
+
+      oscillatorA.connect(gainNode);
+      oscillatorB.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+
+      oscillatorA.start(now);
+      oscillatorB.start(now + 0.08);
+      oscillatorA.stop(now + 0.22);
+      oscillatorB.stop(now + 0.42);
+
+      window.setTimeout(() => {
+        void audioContext.close().catch(() => undefined);
+      }, 600);
+    } catch {
+      // Ignore browser audio permission issues.
+    }
+  }, []);
 
   const parseApiDate = useCallback((value?: string | null): Date | null => {
     if (!value) return null;
@@ -1365,6 +1438,45 @@ export default function SessionDetail() {
     }
   };
 
+  useEffect(() => {
+    if (pendingAgentInterventions.length === 0) {
+      lastAutoOpenedAgentInterventionRef.current = null;
+      setShowAgentInterventionModal(false);
+      dismissInterventionToast();
+      return;
+    }
+
+    const newestPendingAgentIntervention = pendingAgentInterventions[0];
+    if (lastAutoOpenedAgentInterventionRef.current === newestPendingAgentIntervention.id) {
+      return;
+    }
+
+    lastAutoOpenedAgentInterventionRef.current = newestPendingAgentIntervention.id;
+    dismissInterventionToast();
+    setInterventionToast({
+      interventionId: newestPendingAgentIntervention.id,
+      title:
+        newestPendingAgentIntervention.intervention_type === 'approval'
+          ? 'OpenClaw wants approval'
+          : 'OpenClaw needs guidance',
+      message: newestPendingAgentIntervention.prompt,
+    });
+    toastTimeoutRef.current = setTimeout(() => {
+      setInterventionToast((current) =>
+        current?.interventionId === newestPendingAgentIntervention.id ? null : current
+      );
+      toastTimeoutRef.current = null;
+    }, 9000);
+    playInterventionChime();
+    setShowAgentInterventionModal(true);
+  }, [dismissInterventionToast, pendingAgentInterventions, playInterventionChime]);
+
+  useEffect(() => () => {
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+    }
+  }, []);
+
   const getActionButtons = () => {
     if (!session) return null;
 
@@ -1376,10 +1488,10 @@ export default function SessionDetail() {
               <button
                 onClick={() => setShowInterventionForm((v) => !v)}
                 className="flex items-center gap-2 px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm transition-colors"
-                title="Pause execution and request operator guidance"
+                title="You manually pause the run and create a review/guidance request yourself"
               >
                 <MessageCircle className="h-4 w-4" />
-                Request Review
+                Manual Intervention
               </button>
               <button
                 onClick={handlePauseSession}
@@ -1414,14 +1526,14 @@ export default function SessionDetail() {
                     <option value="guidance">Guidance</option>
                     <option value="approval">Approval</option>
                   </select>
-                  <span className="text-xs text-amber-300">Request operator input</span>
+                  <span className="text-xs text-amber-300">You are creating this request manually. Use it when you want to pause and intervene yourself.</span>
                 </div>
                 <textarea
                   autoFocus
                   rows={3}
                   value={interventionPrompt}
                   onChange={(e) => setInterventionPrompt(e.target.value)}
-                  placeholder="Describe what you need the operator to review or decide…"
+                  placeholder="Example: stop after migrations and wait for my review before editing production config"
                   className="w-full rounded border border-slate-600 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-amber-500 focus:outline-none resize-none"
                 />
                 <div className="flex items-center gap-2 justify-end">
@@ -1452,10 +1564,19 @@ export default function SessionDetail() {
               <MessageCircle className="h-4 w-4" />
               Waiting for Operator
             </span>
+            {pendingAgentInterventions.length > 0 && (
+              <button
+                onClick={() => setShowAgentInterventionModal(true)}
+                className="flex items-center gap-2 px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm transition-colors"
+              >
+                <MessageCircle className="h-4 w-4" />
+                Open Request
+              </button>
+            )}
             <button
               onClick={() => handleStopSession(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm transition-colors"
-            >
+                className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm transition-colors"
+              >
               <XCircle className="h-4 w-4" />
               Force Stop
             </button>
@@ -1548,6 +1669,100 @@ export default function SessionDetail() {
 
   return (
     <div className="p-6 space-y-6">
+      {showAgentInterventionModal && pendingAgentInterventions.length > 0 && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 py-6 backdrop-blur-sm">
+          <div className="w-full max-w-3xl rounded-2xl border border-amber-700/50 bg-slate-900 shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-800 px-6 py-4">
+              <div>
+                <p className="text-sm font-semibold text-amber-300">OpenClaw Needs Your Input</p>
+                <p className="mt-1 text-sm text-slate-300">
+                  OpenClaw paused execution and is waiting for your confirmation before it continues.
+                </p>
+              </div>
+              <button
+                onClick={() => setShowAgentInterventionModal(false)}
+                className="rounded-md px-2 py-1 text-sm text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200"
+              >
+                Later
+              </button>
+            </div>
+            <div className="max-h-[70vh] overflow-y-auto px-6 py-5">
+              <div className="mb-4 rounded-xl border border-amber-700/40 bg-amber-950/30 p-4">
+                <p className="text-sm font-medium text-amber-200">
+                  What this looks like now
+                </p>
+                <p className="mt-1 text-sm text-slate-300">
+                  OpenClaw will stop, open this panel, and ask in chat form. You can approve, deny, or reply with guidance, then the run continues from the paused step.
+                </p>
+              </div>
+              {agentInterventionTimeline.length > 0 && (
+                <div className="mb-4 rounded-xl border border-slate-800 bg-slate-950/70 p-4">
+                  <p className="text-sm font-medium text-slate-100">Recent intervention timeline</p>
+                  <div className="mt-3 space-y-3">
+                    {agentInterventionTimeline.map((item) => {
+                      const actionLabel =
+                        item.status === 'pending'
+                          ? 'OpenClaw asked'
+                          : item.status === 'approved'
+                            ? 'You approved'
+                            : item.status === 'denied'
+                              ? 'You denied'
+                              : item.status === 'replied'
+                                ? 'You replied'
+                                : item.status;
+
+                      const statusTone =
+                        item.status === 'approved'
+                          ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                          : item.status === 'denied'
+                            ? 'border-red-500/30 bg-red-500/10 text-red-300'
+                            : item.status === 'replied'
+                              ? 'border-blue-500/30 bg-blue-500/10 text-blue-300'
+                              : 'border-amber-500/30 bg-amber-500/10 text-amber-300';
+
+                      const happenedAt = item.replied_at || item.created_at;
+
+                      return (
+                        <div key={item.id} className="flex gap-3">
+                          <div className="flex flex-col items-center">
+                            <div className="mt-1 h-2.5 w-2.5 rounded-full bg-amber-400" />
+                            <div className="mt-1 h-full min-h-6 w-px bg-slate-800 last:hidden" />
+                          </div>
+                          <div className="flex-1 rounded-lg border border-slate-800 bg-slate-900/80 p-3">
+                            <div className="flex items-center justify-between gap-3">
+                              <p className="text-sm font-medium text-slate-100">{actionLabel}</p>
+                              <span className={`rounded-full border px-2 py-0.5 text-[11px] uppercase tracking-wide ${statusTone}`}>
+                                {item.status}
+                              </span>
+                            </div>
+                            <p className="mt-1 text-sm text-slate-300 line-clamp-2">
+                              {item.prompt}
+                            </p>
+                            <p className="mt-2 text-xs text-slate-500">
+                              {formatDateTime(happenedAt)}
+                              {item.status !== 'pending' && session.status === 'running'
+                                ? ' • session resumed'
+                                : ''}
+                            </p>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              <HumanInterventionPanel
+                interventions={pendingAgentInterventions}
+                onApprove={handleApproveIntervention}
+                onDeny={handleDenyIntervention}
+                onReply={handleSubmitReply}
+                variant="chat"
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
       <SessionHeader
         project={project}
         session={session}
@@ -1561,7 +1776,35 @@ export default function SessionDetail() {
         wsConnected={wsConnected}
       />
 
-      {(session.status === 'waiting_for_human' || interventions.some((i) => i.status === 'pending')) && (
+      {interventionToast && (
+        <div className="fixed right-4 top-4 z-50 w-full max-w-md animate-[slideIn_220ms_ease-out]">
+          <Alert
+            className="border-amber-600/40 bg-amber-950/90 text-amber-100 shadow-2xl backdrop-blur"
+            title={interventionToast.title}
+            description={interventionToast.message}
+          >
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  setShowAgentInterventionModal(true);
+                  dismissInterventionToast();
+                }}
+                className="rounded-md bg-amber-500 px-3 py-1.5 text-xs font-medium text-slate-950 transition-colors hover:bg-amber-400"
+              >
+                Open request
+              </button>
+              <button
+                onClick={dismissInterventionToast}
+                className="rounded-md px-3 py-1.5 text-xs text-amber-200 transition-colors hover:bg-white/10"
+              >
+                Dismiss
+              </button>
+            </div>
+          </Alert>
+        </div>
+      )}
+
+      {(session.status === 'waiting_for_human' || pendingInterventions.length > 0) && (
         <HumanInterventionPanel
           interventions={interventions}
           onApprove={handleApproveIntervention}

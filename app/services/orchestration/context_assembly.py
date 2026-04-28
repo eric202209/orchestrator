@@ -368,6 +368,13 @@ def assemble_execution_prompt(
     instructions = [
         "Treat the provided step commands as the primary implementation plan for this step.",
         "Ground your work in the current workspace state.",
+        (
+            "If you need human confirmation before continuing, output exactly one "
+            "sentinel in this format and stop: "
+            '<<<HITL_REQUEST:{"intervention_type":"approval","prompt":"...",'
+            '"context":{...}}>>>. Use this for authorization, destructive/risky '
+            "actions, missing credentials, or when operator intent is ambiguous."
+        ),
     ]
     if compact:
         instructions.append(

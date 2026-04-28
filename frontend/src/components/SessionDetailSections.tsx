@@ -920,6 +920,7 @@ interface HumanInterventionPanelProps {
   onApprove: (id: number) => Promise<void>;
   onDeny: (id: number, reason?: string) => Promise<void>;
   onReply: (id: number, reply: string) => Promise<void>;
+  variant?: 'default' | 'chat';
 }
 
 export function HumanInterventionPanel({
@@ -927,6 +928,7 @@ export function HumanInterventionPanel({
   onApprove,
   onDeny,
   onReply,
+  variant = 'default',
 }: HumanInterventionPanelProps) {
   const [replyText, setReplyText] = useState<Record<number, string>>({});
   const [denyReason, setDenyReason] = useState<Record<number, string>>({});
@@ -950,7 +952,7 @@ export function HumanInterventionPanel({
       {pending.map((intervention) => {
         let snapshotData: Record<string, string> = {};
         try { snapshotData = JSON.parse(intervention.context_snapshot || '{}'); } catch { /* ignore */ }
-        const isHumanInitiated = snapshotData.initiated_by === 'human';
+        const isHumanInitiated = intervention.initiated_by === 'human';
         const aiResponse: string | null = snapshotData.ai_response || null;
 
         return (
@@ -975,7 +977,30 @@ export function HumanInterventionPanel({
             )}
           </div>
 
-          <p className="mb-3 whitespace-pre-wrap text-sm text-slate-200">{intervention.prompt}</p>
+          {variant === 'chat' && !isHumanInitiated ? (
+            <div className="mb-4 space-y-3">
+              <div className="flex justify-start">
+                <div className="max-w-[85%] rounded-2xl rounded-bl-md border border-amber-600/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-50 shadow-sm">
+                  <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-amber-300">
+                    OpenClaw
+                  </p>
+                  <p className="whitespace-pre-wrap leading-6">{intervention.prompt}</p>
+                </div>
+              </div>
+              <div className="flex justify-end">
+                <div className="max-w-[78%] rounded-2xl rounded-br-md border border-slate-700 bg-slate-800/90 px-4 py-3 text-sm text-slate-200">
+                  <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                    You
+                  </p>
+                  <p className="text-slate-400">
+                    Reply below to approve, deny, or guide the next step.
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <p className="mb-3 whitespace-pre-wrap text-sm text-slate-200">{intervention.prompt}</p>
+          )}
 
           {isHumanInitiated && (
             <div className="mb-3 rounded-md border border-slate-700 bg-slate-900/60 p-3">
@@ -1005,47 +1030,59 @@ export function HumanInterventionPanel({
           )}
 
           {!isHumanInitiated && intervention.intervention_type === 'approval' ? (
-            <div className="flex items-start gap-3">
-              <input
-                type="text"
-                placeholder="Deny reason (optional)"
-                value={denyReason[intervention.id] || ''}
-                onChange={(e) =>
-                  setDenyReason((prev) => ({ ...prev, [intervention.id]: e.target.value }))
-                }
-                className="flex-1 rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-amber-500 focus:outline-none"
-              />
-              <button
-                disabled={submitting[intervention.id]}
-                onClick={async () => {
-                  setSubmitting((prev) => ({ ...prev, [intervention.id]: true }));
-                  try {
-                    await onApprove(intervention.id);
-                  } finally {
-                    setSubmitting((prev) => ({ ...prev, [intervention.id]: false }));
+            <div className="space-y-3">
+              {variant === 'chat' && (
+                <p className="text-xs text-amber-200/80">
+                  Approve to let OpenClaw continue this action. Deny to stop this path and send correction context back.
+                </p>
+              )}
+              <div className="flex items-start gap-3">
+                <input
+                  type="text"
+                  placeholder="Why deny? Optional note back to OpenClaw"
+                  value={denyReason[intervention.id] || ''}
+                  onChange={(e) =>
+                    setDenyReason((prev) => ({ ...prev, [intervention.id]: e.target.value }))
                   }
-                }}
-                className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-sm text-white transition-colors hover:bg-emerald-700 disabled:opacity-50"
-              >
-                Approve
-              </button>
-              <button
-                disabled={submitting[intervention.id]}
-                onClick={async () => {
-                  setSubmitting((prev) => ({ ...prev, [intervention.id]: true }));
-                  try {
-                    await onDeny(intervention.id, denyReason[intervention.id]);
-                  } finally {
-                    setSubmitting((prev) => ({ ...prev, [intervention.id]: false }));
-                  }
-                }}
-                className="flex items-center gap-1.5 rounded-lg bg-red-600 px-4 py-2 text-sm text-white transition-colors hover:bg-red-700 disabled:opacity-50"
-              >
-                Deny
-              </button>
+                  className="flex-1 rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-amber-500 focus:outline-none"
+                />
+                <button
+                  disabled={submitting[intervention.id]}
+                  onClick={async () => {
+                    setSubmitting((prev) => ({ ...prev, [intervention.id]: true }));
+                    try {
+                      await onApprove(intervention.id);
+                    } finally {
+                      setSubmitting((prev) => ({ ...prev, [intervention.id]: false }));
+                    }
+                  }}
+                  className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-sm text-white transition-colors hover:bg-emerald-700 disabled:opacity-50"
+                >
+                  Approve
+                </button>
+                <button
+                  disabled={submitting[intervention.id]}
+                  onClick={async () => {
+                    setSubmitting((prev) => ({ ...prev, [intervention.id]: true }));
+                    try {
+                      await onDeny(intervention.id, denyReason[intervention.id]);
+                    } finally {
+                      setSubmitting((prev) => ({ ...prev, [intervention.id]: false }));
+                    }
+                  }}
+                  className="flex items-center gap-1.5 rounded-lg bg-red-600 px-4 py-2 text-sm text-white transition-colors hover:bg-red-700 disabled:opacity-50"
+                >
+                  Deny
+                </button>
+              </div>
             </div>
           ) : !isHumanInitiated ? (
             <div className="space-y-2">
+              {variant === 'chat' && (
+                <p className="text-xs text-slate-400">
+                  Your reply is added to the session context and OpenClaw resumes from the paused step.
+                </p>
+              )}
               <textarea
                 rows={3}
                 placeholder={`Your ${intervention.intervention_type} reply...`}

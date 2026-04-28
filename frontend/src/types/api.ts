@@ -148,6 +148,7 @@ export interface InterventionRequest {
   task_id: number | null;
   project_id: number;
   intervention_type: 'guidance' | 'approval' | 'information';
+  initiated_by: 'ai' | 'human' | string;
   prompt: string;
   context_snapshot: string | null;
   status: 'pending' | 'replied' | 'approved' | 'denied' | 'expired';

@@ -13,7 +13,13 @@ import uuid
 from app.database import get_db
 
 logger = logging.getLogger(__name__)
-from app.models import Session as SessionModel, SessionTask, TaskStatus, LogEntry
+from app.models import (
+    InterventionRequest,
+    LogEntry,
+    Session as SessionModel,
+    SessionTask,
+    TaskStatus,
+)
 from app.schemas import (
     SessionCreate,
     SessionUpdate,
@@ -69,6 +75,42 @@ from app.dependencies import get_current_active_user, get_current_user
 router = APIRouter()
 
 DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS = 1800
+
+
+def _serialize_intervention(req: InterventionRequest) -> Dict[str, Any]:
+    return {
+        "id": req.id,
+        "session_id": req.session_id,
+        "task_id": req.task_id,
+        "project_id": req.project_id,
+        "intervention_type": req.intervention_type,
+        "initiated_by": req.initiated_by,
+        "prompt": req.prompt,
+        "context_snapshot": req.context_snapshot,
+        "status": req.status,
+        "operator_reply": req.operator_reply,
+        "operator_id": req.operator_id,
+        "created_at": req.created_at.isoformat() if req.created_at else None,
+        "replied_at": req.replied_at.isoformat() if req.replied_at else None,
+        "expires_at": req.expires_at.isoformat() if req.expires_at else None,
+        "updated_at": req.updated_at.isoformat() if req.updated_at else None,
+    }
+
+
+def _get_session_intervention_or_404(
+    db: Session, session_id: int, intervention_id: int
+) -> InterventionRequest:
+    intervention = (
+        db.query(InterventionRequest)
+        .filter(
+            InterventionRequest.id == intervention_id,
+            InterventionRequest.session_id == session_id,
+        )
+        .first()
+    )
+    if not intervention:
+        raise HTTPException(status_code=404, detail="Intervention request not found")
+    return intervention
 
 
 @router.post(
@@ -609,7 +651,7 @@ async def request_human_intervention(
     Sets session.status = 'waiting_for_human'. The session can be resumed
     once the operator submits a reply, approval, or denial.
     """
-    return await _request_human_intervention_lifecycle(
+    result = await _request_human_intervention_lifecycle(
         db,
         session_id,
         intervention_type=body.intervention_type,
@@ -618,6 +660,10 @@ async def request_human_intervention(
         context_snapshot=body.context_snapshot,
         expires_in_minutes=body.expires_in_minutes,
     )
+    req = _get_session_intervention_or_404(db, session_id, result["intervention_id"])
+    payload = _serialize_intervention(req)
+    payload["message"] = result["message"]
+    return payload
 
 
 @router.get("/sessions/{session_id}/interventions")
@@ -629,27 +675,22 @@ def list_session_interventions(
     current_user=Depends(get_current_user),
 ):
     """List intervention requests for a session (all or pending-only)."""
+    session = (
+        db.query(SessionModel)
+        .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
     if pending_only:
         items = _get_pending_interventions(db, session_id=session_id, limit=limit)
     else:
         items = _get_intervention_history(db, session_id=session_id, limit=limit)
     return {
         "session_id": session_id,
-        "interventions": [
-            {
-                "id": r.id,
-                "intervention_type": r.intervention_type,
-                "prompt": r.prompt,
-                "status": r.status,
-                "operator_reply": r.operator_reply,
-                "operator_id": r.operator_id,
-                "task_id": r.task_id,
-                "created_at": r.created_at.isoformat() if r.created_at else None,
-                "replied_at": r.replied_at.isoformat() if r.replied_at else None,
-                "expires_at": r.expires_at.isoformat() if r.expires_at else None,
-            }
-            for r in items
-        ],
+        "interventions": [_serialize_intervention(r) for r in items],
+        "total": len(items),
     }
 
 
@@ -667,6 +708,7 @@ def reply_to_intervention(
     transitions the session from 'waiting_for_human' → 'paused' so it can be
     resumed via the normal resume endpoint.
     """
+    _get_session_intervention_or_404(db, session_id, intervention_id)
     req = _submit_intervention_reply(
         db,
         intervention_id=intervention_id,
@@ -674,12 +716,9 @@ def reply_to_intervention(
         operator_id=getattr(current_user, "email", None)
         or getattr(current_user, "id", None),
     )
-    return {
-        "intervention_id": req.id,
-        "status": req.status,
-        "session_id": req.session_id,
-        "message": "Reply recorded. Session is now paused and ready to resume.",
-    }
+    payload = _serialize_intervention(req)
+    payload["message"] = "Reply recorded. Session is now paused and ready to resume."
+    return payload
 
 
 @router.post("/sessions/{session_id}/interventions/{intervention_id}/approve")
@@ -694,18 +733,18 @@ def approve_session_intervention(
     Injects approval context into the checkpoint and transitions session to
     'paused' so it can continue after the operator-proposed action.
     """
+    _get_session_intervention_or_404(db, session_id, intervention_id)
     req = _approve_intervention(
         db,
         intervention_id=intervention_id,
         operator_id=getattr(current_user, "email", None)
         or getattr(current_user, "id", None),
     )
-    return {
-        "intervention_id": req.id,
-        "status": req.status,
-        "session_id": req.session_id,
-        "message": "Intervention approved. Session is now paused and ready to resume.",
-    }
+    payload = _serialize_intervention(req)
+    payload["message"] = (
+        "Intervention approved. Session is now paused and ready to resume."
+    )
+    return payload
 
 
 @router.post("/sessions/{session_id}/interventions/{intervention_id}/deny")
@@ -721,6 +760,7 @@ def deny_session_intervention(
     Injects denial context into the checkpoint. The operator can steer the
     session toward an alternative approach via the resume endpoint.
     """
+    _get_session_intervention_or_404(db, session_id, intervention_id)
     req = _deny_intervention(
         db,
         intervention_id=intervention_id,
@@ -728,12 +768,11 @@ def deny_session_intervention(
         operator_id=getattr(current_user, "email", None)
         or getattr(current_user, "id", None),
     )
-    return {
-        "intervention_id": req.id,
-        "status": req.status,
-        "session_id": req.session_id,
-        "message": "Intervention denied. Session is paused; use resume to continue with updated context.",
-    }
+    payload = _serialize_intervention(req)
+    payload["message"] = (
+        "Intervention denied. Session is paused; use resume to continue with updated context."
+    )
+    return payload
 
 
 @router.get("/sessions/{session_id}/tasks/{task_id}/events")
