@@ -1241,6 +1241,13 @@ export default function SessionDetail() {
       const updated = await sessionsAPI.getById(Number(sessionId));
       console.log('Updated session:', updated.data);
       setSession(updated.data);
+      if (updated.data.project_id) {
+        const tasksRes = await tasksAPI.getByProject(updated.data.project_id);
+        setTasks(tasksRes.data || []);
+        await loadTimelineEvents(updated.data.id, tasksRes.data || []);
+        await loadStateDiff(updated.data.id, tasksRes.data || []);
+      }
+      await loadCheckpointCount(Number(sessionId));
       if (updated.data.status === 'running') {
         if (!wsRef.current) {
           scheduleWebSocketConnect(Number(sessionId), 1000);
@@ -1260,6 +1267,10 @@ export default function SessionDetail() {
   };
 
   const handleStartSession = async () => {
+    if (session?.execution_mode === 'manual') {
+      await handleStartSessionFresh();
+      return;
+    }
     const usefulCheckpoints = getUsefulCheckpoints();
     if (usefulCheckpoints.length > 0) {
       setCheckpointActionIntent('start');

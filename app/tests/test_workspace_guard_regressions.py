@@ -6,7 +6,7 @@ from app.services.orchestration.workspace_guard import normalize_command, normal
 
 
 def test_normalize_command_allows_dev_null_redirection(tmp_path):
-    project_dir = tmp_path / "skillsync"
+    project_dir = tmp_path / "project"
     project_dir.mkdir(parents=True)
 
     command = (
@@ -20,7 +20,7 @@ def test_normalize_command_allows_dev_null_redirection(tmp_path):
 
 
 def test_normalize_step_allows_verification_commands_that_sink_to_dev_null(tmp_path):
-    project_dir = tmp_path / "skillsync"
+    project_dir = tmp_path / "project"
     project_dir.mkdir(parents=True)
     logger = logging.getLogger("workspace-guard-test")
 
@@ -45,7 +45,7 @@ def test_normalize_step_allows_verification_commands_that_sink_to_dev_null(tmp_p
 
 
 def test_normalize_write_pseudo_command_allows_frontend_root_asset_literal(tmp_path):
-    project_dir = tmp_path / "skillsync"
+    project_dir = tmp_path / "project"
     project_dir.mkdir(parents=True)
 
     command = (
@@ -60,7 +60,7 @@ def test_normalize_write_pseudo_command_allows_frontend_root_asset_literal(tmp_p
 
 
 def test_normalize_write_pseudo_command_allows_http_route_literals(tmp_path):
-    project_dir = tmp_path / "skillsync"
+    project_dir = tmp_path / "project"
     project_dir.mkdir(parents=True)
 
     command = (
@@ -75,7 +75,7 @@ def test_normalize_write_pseudo_command_allows_http_route_literals(tmp_path):
 
 
 def test_normalize_step_coerces_verification_and_rollback_lists(tmp_path):
-    project_dir = tmp_path / "skillsync"
+    project_dir = tmp_path / "project"
     project_dir.mkdir(parents=True)
     logger = logging.getLogger("workspace-guard-test")
 
@@ -93,12 +93,12 @@ def test_normalize_step_coerces_verification_and_rollback_lists(tmp_path):
     assert normalized["verification"] == "test -f frontend/src/main.tsx && echo ready"
     assert (
         normalized["rollback"]
-        == "rm -f frontend/src/main.tsx && rmdir frontend/src || true"
+        == "( rm -f frontend/src/main.tsx ) && ( rmdir frontend/src || true )"
     )
 
 
 def test_normalize_step_strips_transient_expected_files(tmp_path):
-    project_dir = tmp_path / "skillsync"
+    project_dir = tmp_path / "project"
     project_dir.mkdir(parents=True)
     logger = logging.getLogger("workspace-guard-test")
 
@@ -119,3 +119,40 @@ def test_normalize_step_strips_transient_expected_files(tmp_path):
     normalized = normalize_step(step, project_dir, logger, step_index=4)
 
     assert normalized["expected_files"] == ["app/main.py", "frontend/src/main.tsx"]
+
+
+def test_normalize_step_preserves_root_for_each_list_verification_command(tmp_path):
+    project_dir = tmp_path / "project"
+    (project_dir / "frontend").mkdir(parents=True)
+    (project_dir / "backend").mkdir(parents=True)
+    logger = logging.getLogger("workspace-guard-test")
+
+    step = {
+        "step_number": 5,
+        "description": "Verify both TypeScript workspaces",
+        "commands": ["echo ok"],
+        "verification": [
+            "cd frontend && npx tsc --noEmit",
+            "cd backend && npx tsc --noEmit",
+            "echo 'Both TS checks passed'",
+        ],
+        "rollback": None,
+        "expected_files": ["frontend/src/main.tsx", "backend/src/index.ts"],
+    }
+
+    normalized = normalize_step(step, project_dir, logger, step_index=5)
+
+    assert normalized["verification"] == (
+        "( cd frontend && npx tsc --noEmit ) && "
+        "( cd backend && npx tsc --noEmit ) && "
+        "( echo 'Both TS checks passed' )"
+    )
+
+
+def test_normalize_command_repairs_workspace_relative_cd_target(tmp_path):
+    project_dir = tmp_path / "project"
+    (project_dir / "service").mkdir(parents=True)
+
+    normalized = normalize_command("cd ../service && npm install", project_dir)
+
+    assert normalized == "cd service && npm install"

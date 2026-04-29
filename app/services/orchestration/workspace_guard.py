@@ -160,6 +160,32 @@ def _looks_like_path_traversal_token(token: str) -> bool:
     return bool(re.fullmatch(r"\.\.(?:/[A-Za-z0-9._@:+-]+)+/?", stripped))
 
 
+def _repair_workspace_relative_cd_target(path_text: str, project_dir: Path) -> str:
+    """Rewrite mistaken `../name` cd targets back into the current workspace.
+
+    This is intentionally narrow:
+    - only one-segment paths like `../backend`
+    - only when `<project_dir>/<name>` exists
+    - only when a real sibling `<project_dir.parent>/<name>` does not exist
+    """
+
+    raw = (path_text or "").strip().strip("\"'")
+    if not raw.startswith("../"):
+        return path_text
+
+    candidate_name = raw[3:].strip("/")
+    if not candidate_name or "/" in candidate_name:
+        return path_text
+
+    in_workspace_candidate = project_dir / candidate_name
+    sibling_candidate = project_dir.parent / candidate_name
+
+    if in_workspace_candidate.exists() and not sibling_candidate.exists():
+        return candidate_name
+
+    return path_text
+
+
 def _normalize_write_pseudo_command(command: str, project_dir: Path) -> Optional[str]:
     """Normalize `write path: description` pseudo-commands without parsing prose as shell."""
 
@@ -205,7 +231,8 @@ def normalize_command(command: str, project_dir: Path) -> str:
         match = cd_pattern.match(current)
         if not match:
             break
-        target = normalize_path_reference(match.group(1), project_dir)
+        raw_target = _repair_workspace_relative_cd_target(match.group(1), project_dir)
+        target = normalize_path_reference(raw_target, project_dir)
         remainder = match.group(2).strip()
         if target in (".", "./"):
             current = remainder
@@ -303,14 +330,37 @@ def normalize_expected_files(
     return normalized_files
 
 
-def _coerce_optional_command_field(value: Any) -> Optional[str]:
+def _normalize_optional_command_field(
+    value: Any,
+    project_dir: Path,
+    step_label: str,
+    field_name: str,
+) -> Optional[str]:
     if value is None:
         return None
+
     if isinstance(value, list):
-        parts = [str(item).strip() for item in value if str(item).strip()]
-        if not parts:
+        normalized_parts: List[str] = []
+        for item_index, item in enumerate(value, start=1):
+            raw_item = str(item).strip()
+            if not raw_item:
+                continue
+            try:
+                normalized_item = normalize_command(raw_item, project_dir)
+            except TaskWorkspaceViolationError as exc:
+                raise TaskWorkspaceViolationError(
+                    f"{step_label} {field_name} item {item_index} blocked: {exc}. "
+                    f"Offending command: {raw_item}"
+                ) from exc
+            # Preserve root-relative semantics for each item in the original list.
+            normalized_parts.append(f"( {normalized_item} )")
+
+        if not normalized_parts:
             return None
-        return " && ".join(parts)
+        if len(normalized_parts) == 1:
+            return normalized_parts[0][2:-2]
+        return " && ".join(normalized_parts)
+
     rendered = str(value).strip()
     return rendered or None
 
@@ -343,7 +393,12 @@ def normalize_step(
             ) from exc
     normalized_step["commands"] = normalized_commands
 
-    raw_verification = _coerce_optional_command_field(step.get("verification"))
+    raw_verification = _normalize_optional_command_field(
+        step.get("verification"),
+        project_dir,
+        step_label,
+        "verification",
+    )
     if raw_verification:
         try:
             normalized_step["verification"] = normalize_command(
@@ -357,7 +412,12 @@ def normalize_step(
     else:
         normalized_step["verification"] = None
 
-    raw_rollback = _coerce_optional_command_field(step.get("rollback"))
+    raw_rollback = _normalize_optional_command_field(
+        step.get("rollback"),
+        project_dir,
+        step_label,
+        "rollback",
+    )
     if raw_rollback:
         try:
             normalized_step["rollback"] = normalize_command(raw_rollback, project_dir)

@@ -61,13 +61,7 @@ class ExecutorService:
         for failure in tool_failures:
             message = str(failure or "")
 
-            raw_params_match = re.search(r"raw_params=(\{.*\})", message)
-            raw_params: Dict[str, Any] = {}
-            if raw_params_match:
-                try:
-                    raw_params = json.loads(raw_params_match.group(1))
-                except json.JSONDecodeError:
-                    raw_params = {}
+            raw_params = ExecutorService._extract_tool_failure_raw_params(message)
 
             raw_path = str(raw_params.get("path") or "").strip()
             if raw_path and not Path(raw_path).is_absolute():
@@ -149,6 +143,52 @@ class ExecutorService:
                 seen.add(hint)
                 deduped.append(hint)
         return deduped
+
+    @staticmethod
+    def _extract_tool_failure_raw_params(message: str) -> Dict[str, Any]:
+        raw_params_match = re.search(r"raw_params=(\{.*\})", str(message or ""))
+        if not raw_params_match:
+            return {}
+        try:
+            return json.loads(raw_params_match.group(1))
+        except json.JSONDecodeError:
+            return {}
+
+    @staticmethod
+    def should_short_circuit_to_workspace_discovery(
+        tool_failures: List[str], project_dir: Path
+    ) -> bool:
+        normalized_project_dir = project_dir.resolve()
+
+        for failure in tool_failures:
+            message = str(failure or "")
+            lowered = message.lower()
+            if (
+                "read failed: eisdir" not in lowered
+                and "illegal operation on a directory, read" not in lowered
+            ):
+                continue
+
+            raw_params = ExecutorService._extract_tool_failure_raw_params(message)
+            raw_path = str(raw_params.get("path") or "").strip()
+            if not raw_path:
+                continue
+
+            try:
+                candidate = Path(raw_path).resolve()
+            except OSError:
+                continue
+
+            if not candidate.is_dir():
+                continue
+
+            if candidate == normalized_project_dir:
+                return True
+
+            if normalized_project_dir in candidate.parents:
+                return True
+
+        return False
 
     @staticmethod
     def _directory_read_recovery_hints(raw_path: Path, project_dir: Path) -> List[str]:

@@ -26,6 +26,7 @@ from app.services.session.session_lifecycle_service import (
     start_session_lifecycle,
     stop_session_lifecycle,
 )
+from app.services.workspace.checkpoint_service import CheckpointError
 from fastapi import HTTPException
 
 
@@ -508,6 +509,153 @@ def test_start_manual_session_with_no_tasks_starts_without_queuing(
     result = asyncio.run(start_session_lifecycle(db_session, session.id))
 
     assert result["status"] == "started"
+    db_session.refresh(session)
+    assert session.status == "running"
+
+
+def test_start_manual_session_requeues_last_selected_task(db_session, monkeypatch):
+    project = _make_project(db_session)
+    session = _make_session(
+        db_session, project, status="stopped", execution_mode="manual"
+    )
+    task = _make_task(db_session, project, status=TaskStatus.PENDING)
+    db_session.add(
+        SessionTask(
+            session_id=session.id,
+            task_id=task.id,
+            status=TaskStatus.PENDING,
+        )
+    )
+    db_session.commit()
+
+    captured = {}
+
+    class _FakeRuntime:
+        backend_descriptor = type("D", (), {"name": "local_openclaw"})()
+
+        async def create_session(self, task_description):
+            return "fake-key"
+
+    class _FakeCheckpointService:
+        def __init__(self, db):
+            self.db = db
+
+        def load_resume_checkpoint(self, session_id, checkpoint_name=None):
+            raise CheckpointError("no replayable checkpoint")
+
+    def _fake_queue_task_for_session(*, db, session, task_id, timeout_seconds=1800):
+        captured["queued_task"] = {
+            "session_id": session.id,
+            "task_id": task_id,
+            "timeout_seconds": timeout_seconds,
+        }
+        return {"task_id": task_id, "celery_id": "manual-requeue-1"}
+
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.create_agent_runtime",
+        lambda *a, **kw: _FakeRuntime(),
+    )
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.CheckpointService",
+        _FakeCheckpointService,
+    )
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.queue_task_for_session",
+        _fake_queue_task_for_session,
+    )
+
+    result = asyncio.run(start_session_lifecycle(db_session, session.id))
+
+    assert result["status"] == "started"
+    assert captured["queued_task"]["task_id"] == task.id
+    db_session.refresh(session)
+    assert session.status == "running"
+
+
+def test_start_manual_session_resumes_last_task_from_checkpoint(
+    db_session, monkeypatch
+):
+    project = _make_project(db_session)
+    session = _make_session(
+        db_session, project, status="stopped", execution_mode="manual"
+    )
+    task = _make_task(db_session, project, status=TaskStatus.PENDING)
+    db_session.add(
+        SessionTask(
+            session_id=session.id,
+            task_id=task.id,
+            status=TaskStatus.PENDING,
+        )
+    )
+    db_session.commit()
+
+    captured = {}
+
+    class _FakeRuntime:
+        backend_descriptor = type("D", (), {"name": "local_openclaw"})()
+
+        async def create_session(self, task_description):
+            return "fake-key"
+
+    class _FakeCheckpointService:
+        def __init__(self, db):
+            self.db = db
+
+        def load_resume_checkpoint(self, session_id, checkpoint_name=None):
+            return {
+                "_requested_checkpoint_name": checkpoint_name,
+                "_resolved_checkpoint_name": "stopped_20260428_120000",
+                "checkpoint_name": "stopped_20260428_120000",
+                "context": {
+                    "task_id": task.id,
+                    "task_description": "resume from checkpoint",
+                },
+                "orchestration_state": {
+                    "plan": [
+                        {
+                            "step_number": 1,
+                            "description": "Resume work",
+                            "commands": ["echo resume"],
+                            "verification": "test -n resume",
+                            "rollback": "true",
+                            "expected_files": [],
+                        }
+                    ],
+                    "current_step_index": 0,
+                    "execution_results": [],
+                },
+                "step_results": [],
+            }
+
+    class _FakeDelayResult:
+        id = "manual-resume-1"
+
+    class _FakeWorkerTask:
+        @staticmethod
+        def delay(**kwargs):
+            captured["delay_kwargs"] = kwargs
+            return _FakeDelayResult()
+
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.create_agent_runtime",
+        lambda *a, **kw: _FakeRuntime(),
+    )
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.CheckpointService",
+        _FakeCheckpointService,
+    )
+    monkeypatch.setattr(
+        "app.tasks.worker.execute_orchestration_task",
+        _FakeWorkerTask,
+    )
+
+    result = asyncio.run(start_session_lifecycle(db_session, session.id))
+
+    assert result["status"] == "started"
+    assert captured["delay_kwargs"]["task_id"] == task.id
+    assert (
+        captured["delay_kwargs"]["resume_checkpoint_name"] == "stopped_20260428_120000"
+    )
     db_session.refresh(session)
     assert session.status == "running"
 

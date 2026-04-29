@@ -813,6 +813,56 @@ def execute_step_loop(
             return {"status": "failed", "reason": "manual_review_required"}
 
         if (
+            step_status == "failed"
+            and current_attempt == 1
+            and tool_failures
+            and ExecutorService.should_short_circuit_to_workspace_discovery(
+                tool_failures, orchestration_state.project_dir
+            )
+        ):
+            decision = repeated_tool_path_failure_decision(
+                step_index=step_index,
+                execution_profile=execution_profile,
+                validation_profile=validation_profile,
+                expected_files=expected_files,
+                step=step,
+                project_dir=orchestration_state.project_dir,
+                error_message=step_record.error_message,
+                relaxed_mode=orchestration_state.relaxed_mode,
+            )
+            if decision.action == "rewrite_step":
+                rewritten_step = decision.rewritten_step or step
+                orchestration_state.plan[step_index] = rewritten_step
+                task.steps = json.dumps(orchestration_state.plan)
+                orchestration_state.debug_attempts.append(
+                    {
+                        "attempt": len(orchestration_state.debug_attempts) + 1,
+                        "fix_type": "command_fix",
+                        "fix": "Rewrote inspection step into workspace discovery commands after directory-read tool failure",
+                        "analysis": step_record.error_message[:500],
+                        "confidence": "HIGH",
+                        "error": step_record.error_message,
+                    }
+                )
+                save_orchestration_checkpoint(
+                    db, session_id, task_id, prompt, orchestration_state
+                )
+                db.commit()
+                emit_live(
+                    "WARN",
+                    (
+                        f"[ORCHESTRATION] Step {step_index + 1} hit a directory-read "
+                        "tool failure and was rewritten into a workspace-discovery step"
+                    ),
+                    metadata={
+                        "phase": "debugging",
+                        "step_index": step_index + 1,
+                        "reason": "directory_read_failure_rewritten_step",
+                    },
+                )
+                continue
+
+        if (
             current_attempt >= max_attempts
             and not orchestration_state.relaxed_mode
             and ctx.policy_profile_name != "strict"

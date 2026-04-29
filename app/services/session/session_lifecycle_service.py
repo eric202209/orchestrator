@@ -345,6 +345,111 @@ def _build_checkpoint_payload_from_session_state(
     return payload
 
 
+def _latest_session_task_link(db: Session, session_id: int) -> SessionTask | None:
+    return (
+        db.query(SessionTask)
+        .filter(SessionTask.session_id == session_id)
+        .order_by(SessionTask.started_at.desc().nullslast(), SessionTask.id.desc())
+        .first()
+    )
+
+
+def _maybe_resume_manual_session_work(
+    db: Session,
+    *,
+    session: SessionModel,
+    session_instance_id: str,
+) -> list[dict[str, Any]]:
+    """For manual-mode restart, continue the last selected task when possible."""
+
+    from app.tasks.worker import execute_orchestration_task
+
+    latest_link = _latest_session_task_link(db, session.id)
+    if not latest_link:
+        return []
+
+    task = db.query(Task).filter(Task.id == latest_link.task_id).first()
+    if not task:
+        return []
+
+    checkpoint_service = CheckpointService(db)
+    try:
+        checkpoint_data = _load_replayable_resume_checkpoint(
+            checkpoint_service, session.id
+        )
+    except CheckpointError:
+        checkpoint_data = None
+    resolved_checkpoint_name = None
+    resume_has_progress = _checkpoint_has_execution_progress(checkpoint_data)
+    if checkpoint_data is not None:
+        resolved_checkpoint_name = checkpoint_data.get(
+            "_resolved_checkpoint_name"
+        ) or checkpoint_data.get("checkpoint_name")
+        checkpoint_task_id = (checkpoint_data.get("context", {}) or {}).get("task_id")
+        if checkpoint_task_id:
+            checkpoint_task = (
+                db.query(Task).filter(Task.id == checkpoint_task_id).first()
+            )
+            if checkpoint_task:
+                task = checkpoint_task
+
+    _ensure_session_task_ready_for_resume(
+        db,
+        session=session,
+        task=task,
+        resumed_at=datetime.now(timezone.utc),
+    )
+
+    if resume_has_progress and resolved_checkpoint_name:
+        prompt = task.description or task.title
+        result = execute_orchestration_task.delay(
+            session_id=session.id,
+            task_id=task.id,
+            prompt=prompt,
+            timeout_seconds=DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
+            resume_checkpoint_name=resolved_checkpoint_name,
+            expected_session_instance_id=session_instance_id,
+        )
+        db.add(
+            LogEntry(
+                session_id=session.id,
+                session_instance_id=session_instance_id,
+                task_id=task.id,
+                level="INFO",
+                message=(
+                    f"Manual session restart resumed task {task.id} from checkpoint "
+                    f"{resolved_checkpoint_name}"
+                ),
+                log_metadata=json.dumps(
+                    {
+                        "celery_task_id": result.id,
+                        "dispatch_mode": "checkpoint_resume",
+                        "checkpoint_name": resolved_checkpoint_name,
+                    }
+                ),
+            )
+        )
+        db.commit()
+        return [
+            {
+                "task_id": task.id,
+                "task_name": task.title,
+                "celery_id": result.id,
+                "dispatch_mode": "checkpoint_resume",
+                "checkpoint_name": resolved_checkpoint_name,
+            }
+        ]
+
+    queued = queue_task_for_session(
+        db=db,
+        session=session,
+        task_id=task.id,
+        timeout_seconds=DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
+    )
+    queued["dispatch_mode"] = "fresh_requeue"
+    return [queued]
+
+
 def _load_replayable_resume_checkpoint(
     checkpoint_service: CheckpointService,
     session_id: int,
@@ -519,6 +624,11 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                     )
                     db.commit()
             else:
+                queued_tasks = _maybe_resume_manual_session_work(
+                    db,
+                    session=session,
+                    session_instance_id=session_instance_id,
+                )
                 session.status = "running"
                 session.is_active = True
                 db.add(
@@ -526,7 +636,14 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                         session_id=session_id,
                         session_instance_id=session_instance_id,
                         level="INFO",
-                        message="Session started in manual mode. Use the session task list to choose the next task to run.",
+                        message=(
+                            "Session started in manual mode."
+                            + (
+                                " Reused the last selected task automatically."
+                                if queued_tasks
+                                else " Use the session task list to choose the next task to run."
+                            )
+                        ),
                     )
                 )
                 db.commit()
