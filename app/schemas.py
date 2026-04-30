@@ -18,6 +18,7 @@ class TaskStatusEnum(str, Enum):
 class ProjectBase(BaseModel):
     name: str
     description: Optional[str] = None
+    project_rules: Optional[str] = None
     github_url: Optional[str] = None
     branch: Optional[str] = "main"
     workspace_path: Optional[str] = None
@@ -30,6 +31,7 @@ class ProjectCreate(ProjectBase):
 class ProjectUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
+    project_rules: Optional[str] = None
     github_url: Optional[str] = None
     branch: Optional[str] = None
     workspace_path: Optional[str] = None

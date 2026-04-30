@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.services.prompt_templates import PromptTemplates, StepResult
 from app.services.orchestration.execution.step_support import coerce_debug_step_result
 from app.services.orchestration.validation.parsing import (
+    extract_plan_steps_from_summary_text,
     extract_plan_steps,
     extract_structured_text,
 )
@@ -142,3 +143,27 @@ def test_extract_plan_steps_can_unwrap_stringified_wrapper_payload():
     assert plan is not None
     assert len(plan) == 1
     assert plan[0]["description"] == "x"
+
+
+def test_extract_plan_steps_from_summary_text_recovers_markdown_table_plan():
+    text = """
+Plan written -> `vault/projects/garden-story-microsite/plan.json`
+
+**5-step plan:**
+
+| # | Step | Files |
+|---|------|-------|
+| 1 | Create `css/` + `images/` dirs | — |
+| 2 | Generate `images/flower-bg.svg` (decorative botanical SVG) | `images/flower-bg.svg` |
+| 3 | Write `css/style.css` (SVG bg, centered overlay, CTA styles) | `css/style.css` |
+| 4 | Write `index.html` (title + intro + CTA section) | `index.html` |
+| 5 | Verify all files exist, non-empty, cross-references intact | — |
+"""
+
+    plan = extract_plan_steps_from_summary_text(text)
+
+    assert plan is not None
+    assert len(plan) == 5
+    assert plan[0]["commands"] == ["mkdir -p css/ images/"]
+    assert plan[1]["commands"][0].startswith("write images/flower-bg.svg:")
+    assert plan[3]["expected_files"] == ["index.html"]

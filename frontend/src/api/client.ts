@@ -153,7 +153,7 @@ export const projectsAPI = {
 
   getById: (id: number) => apiClient.get<Project>(`/projects/${id}`),
 
-  create: (data: { name: string; description?: string; github_url?: string; branch?: string; workspace_path?: string }) =>
+  create: (data: { name: string; description?: string; project_rules?: string; github_url?: string; branch?: string; workspace_path?: string }) =>
     apiClient.post<Project>('/projects', data),
 
   update: (id: number, data: Partial<Project>) =>

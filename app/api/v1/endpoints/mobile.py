@@ -415,6 +415,7 @@ def get_project_status(
         "project_id": project_id,
         "project_name": project.name,
         "description": project.description,
+        "project_rules": project.project_rules,
         "active_sessions": len(active_sessions),
         "recent_sessions": len(recent_sessions),
         "tasks": task_stats,

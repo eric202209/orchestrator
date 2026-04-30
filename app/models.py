@@ -35,6 +35,7 @@ class Project(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
+    project_rules = Column(Text, nullable=True)
     github_url = Column(String(512), nullable=True)
     branch = Column(String(255), default="main")
     workspace_path = Column(String(512), nullable=True)  # Project isolation workspace

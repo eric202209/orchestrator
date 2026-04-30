@@ -20,7 +20,9 @@ function ProjectsList() {
   const [showCreateProject, setShowCreateProject] = useState(false);
   const [editingProjectId, setEditingProjectId] = useState<number | null>(null);
   const [editingName, setEditingName] = useState('');
-   const [newProjectName, setNewProjectName] = useState('');
+  const [newProjectName, setNewProjectName] = useState('');
+  const [newProjectDescription, setNewProjectDescription] = useState('');
+  const [newProjectRules, setNewProjectRules] = useState('');
   const [creatingProject, setCreatingProject] = useState(false);
   const [updatingProject, setUpdatingProject] = useState(false);
 
@@ -39,7 +41,8 @@ function ProjectsList() {
     const optimisticProject: Project = {
       id: tempId,
       name: trimmedName,
-      description: null,
+      description: newProjectDescription.trim() || null,
+      project_rules: newProjectRules.trim() || null,
       github_url: null,
       branch: 'main',
       created_at: now,
@@ -48,11 +51,15 @@ function ProjectsList() {
 
     setProjects((current) => [optimisticProject, ...current]);
     setNewProjectName('');
+    setNewProjectDescription('');
+    setNewProjectRules('');
     setShowCreateProject(false);
 
     try {
       const response = await projectsAPI.create({ 
         name: trimmedName,
+        description: newProjectDescription.trim() || undefined,
+        project_rules: newProjectRules.trim() || undefined,
       });
       setProjects((current) =>
         current.map((project) => (project.id === tempId ? response.data : project))
@@ -60,6 +67,8 @@ function ProjectsList() {
     } catch (error) {
       setProjects((current) => current.filter((project) => project.id !== tempId));
       setNewProjectName(trimmedName);
+      setNewProjectDescription(optimisticProject.description || '');
+      setNewProjectRules(optimisticProject.project_rules || '');
       setShowCreateProject(true);
       console.error('Failed to create project:', error);
       alert('Failed to create project. Please try again.');
@@ -369,10 +378,37 @@ function ProjectsList() {
                     autoFocus
                   />
                 </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                    Project Brief
+                  </label>
+                  <textarea
+                    value={newProjectDescription}
+                    onChange={(e) => setNewProjectDescription(e.target.value)}
+                    className="min-h-[88px] w-full resize-y rounded-lg border border-slate-700 bg-slate-900/50 px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
+                    placeholder="What this project is for, scope, expected deliverable..."
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                    Project Rules
+                  </label>
+                  <textarea
+                    value={newProjectRules}
+                    onChange={(e) => setNewProjectRules(e.target.value)}
+                    className="min-h-[104px] w-full resize-y rounded-lg border border-slate-700 bg-slate-900/50 px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
+                    placeholder="Constraints, style rules, forbidden tools, must-keep architecture..."
+                  />
+                </div>
                 <div className="flex gap-3">
                   <button
                     type="button"
-                    onClick={() => setShowCreateProject(false)}
+                    onClick={() => {
+                      setShowCreateProject(false);
+                      setNewProjectName('');
+                      setNewProjectDescription('');
+                      setNewProjectRules('');
+                    }}
                     className="flex-1 bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg transition-all"
                   >
                     Cancel

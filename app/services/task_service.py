@@ -445,6 +445,8 @@ class TaskService:
             f"Project: {project.name}",
             f"Project description: {project.description or 'None provided'}",
         ]
+        if project.project_rules:
+            lines.append(f"Project rules: {project.project_rules}")
         baseline = self.get_project_baseline_overview(project)
         if baseline["exists"]:
             lines.append(

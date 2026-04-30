@@ -31,6 +31,9 @@ from app.services.orchestration.task_rules import get_workflow_profile
 from app.services.orchestration.workflow_profiles import get_workflow_phases
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.types import ReasoningArtifact
+from app.services.orchestration.validation.parsing import (
+    extract_plan_steps_from_summary_text,
+)
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.prompt_templates import OrchestrationStatus, estimate_token_count
 
@@ -391,6 +394,16 @@ def execute_planning_phase(
                 ctx.logger.warning(
                     "[ORCHESTRATION] JSON parse failed: %s", strategy_info
                 )
+                extracted_summary_plan = extract_plan_steps_from_summary_text(
+                    output_text
+                )
+                if extracted_summary_plan is not None:
+                    success = True
+                    plan_data = extracted_summary_plan
+                    strategy_info = "Recovered plan from prose summary text"
+                    ctx.logger.info(
+                        "[ORCHESTRATION] Recovered planning steps from prose summary output"
+                    )
 
             if (
                 PlannerService.should_retry_with_minimal_prompt(

@@ -50,6 +50,10 @@ function ProjectDetail() {
   const [editSteps, setEditSteps] = useState('');
   const [updatingTask, setUpdatingTask] = useState(false);
   const [savingGithubUrl, setSavingGithubUrl] = useState(false);
+  const [editingProjectMeta, setEditingProjectMeta] = useState(false);
+  const [projectDescriptionDraft, setProjectDescriptionDraft] = useState('');
+  const [projectRulesDraft, setProjectRulesDraft] = useState('');
+  const [savingProjectMeta, setSavingProjectMeta] = useState(false);
   const [rebuildingBaseline, setRebuildingBaseline] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -72,6 +76,8 @@ function ProjectDetail() {
         const workspaceRes = await projectsAPI.getWorkspaceOverview(Number(id));
         
         setProject(projectRes.data);
+        setProjectDescriptionDraft(projectRes.data.description || '');
+        setProjectRulesDraft(projectRes.data.project_rules || '');
         setTasks(tasksRes.data || []);
         setSessions(sessionsRes.data || []);
         setWorkspaceOverview(workspaceRes.data || null);
@@ -415,6 +421,27 @@ function ProjectDetail() {
     }
   };
 
+  const handleSaveProjectMeta = async () => {
+    if (!project) return;
+
+    setSavingProjectMeta(true);
+    try {
+      const response = await projectsAPI.update(project.id, {
+        description: projectDescriptionDraft.trim() || null,
+        project_rules: projectRulesDraft.trim() || null,
+      });
+      setProject(response.data);
+      setProjectDescriptionDraft(response.data.description || '');
+      setProjectRulesDraft(response.data.project_rules || '');
+      setEditingProjectMeta(false);
+    } catch (error) {
+      console.error('Failed to update project metadata:', error);
+      alert('Failed to update project brief/rules. Please try again.');
+    } finally {
+      setSavingProjectMeta(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-900">
@@ -495,6 +522,16 @@ function ProjectDetail() {
               )}
             </div>
             <div className="flex items-center gap-3">
+              <button
+                onClick={() => {
+                  setEditingProjectMeta((current) => !current);
+                  setProjectDescriptionDraft(project.description || '');
+                  setProjectRulesDraft(project.project_rules || '');
+                }}
+                className="text-sm text-slate-300 hover:text-white transition-colors"
+              >
+                {editingProjectMeta ? 'Close Brief' : 'Edit Brief'}
+              </button>
               {tasks.length > 0 && (
                 <button
                   onClick={async () => {
@@ -517,6 +554,72 @@ function ProjectDetail() {
                 </button>
               )}
             </div>
+          </div>
+          <div className="mb-6 rounded-2xl border border-slate-700 bg-slate-800/50 p-5">
+            <div className="mb-3 flex items-center justify-between gap-4">
+              <div>
+                <h2 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-300">Project Brief</h2>
+                <p className="mt-1 text-sm text-slate-500">Persistent project context for planning and execution.</p>
+              </div>
+            </div>
+            {editingProjectMeta ? (
+              <div className="space-y-4">
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-slate-300">Description</label>
+                  <textarea
+                    value={projectDescriptionDraft}
+                    onChange={(e) => setProjectDescriptionDraft(e.target.value)}
+                    className="min-h-[96px] w-full resize-y rounded-lg border border-slate-700 bg-slate-900/50 px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
+                    placeholder="Project brief, scope, expected outcome..."
+                  />
+                </div>
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-slate-300">Rules</label>
+                  <textarea
+                    value={projectRulesDraft}
+                    onChange={(e) => setProjectRulesDraft(e.target.value)}
+                    className="min-h-[120px] w-full resize-y rounded-lg border border-slate-700 bg-slate-900/50 px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
+                    placeholder="Constraints, must-follow instructions, architecture rules..."
+                  />
+                </div>
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingProjectMeta(false);
+                      setProjectDescriptionDraft(project.description || '');
+                      setProjectRulesDraft(project.project_rules || '');
+                    }}
+                    className="rounded-lg bg-slate-700 px-4 py-2 text-white transition-all hover:bg-slate-600"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveProjectMeta}
+                    disabled={savingProjectMeta}
+                    className="rounded-lg bg-primary-500 px-4 py-2 text-white transition-all hover:bg-primary-600 disabled:opacity-50"
+                  >
+                    {savingProjectMeta ? 'Saving...' : 'Save Brief'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="grid gap-4 md:grid-cols-2">
+                <div>
+                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Description</h3>
+                  <p className="whitespace-pre-wrap text-sm text-slate-300">
+                    {project.description || 'No project description yet.'}
+                  </p>
+                </div>
+                <div>
+                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Rules</h3>
+                  <p className="whitespace-pre-wrap text-sm text-slate-300">
+                    {project.project_rules || 'No project rules yet.'}
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-4 text-sm text-slate-400">
             <span className="flex items-center gap-1">

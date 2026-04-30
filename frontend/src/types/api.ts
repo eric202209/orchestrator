@@ -2,6 +2,7 @@ export interface Project {
   id: number;
   name: string;
   description: string | null;
+  project_rules?: string | null;
   github_url: string | null;
   branch: string;
   workspace_path?: string | null;

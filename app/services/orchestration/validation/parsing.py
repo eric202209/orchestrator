@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
@@ -70,6 +71,105 @@ def _parse_nested_json_text(text: str) -> Any:
         except json.JSONDecodeError:
             continue
     return None
+
+
+def _extract_backticked_paths(text: str) -> List[str]:
+    return [
+        match.strip()
+        for match in re.findall(r"`([^`]+)`", text or "")
+        if match.strip() and ("/" in match or "." in Path(match.strip()).name)
+    ]
+
+
+def extract_plan_steps_from_summary_text(text: str) -> Optional[List[Dict[str, Any]]]:
+    """Recover a rough machine plan from concise prose/table summaries.
+
+    Intended for local-model outputs like:
+    - "5-step plan:"
+    - markdown tables with columns # / Step / Files
+    - short numbered plan summaries
+    """
+
+    stripped = str(text or "").strip()
+    if not stripped:
+        return None
+    lowered = stripped.lower()
+    if (
+        "step plan" not in lowered
+        and "5-step plan" not in lowered
+        and "| # |" not in lowered
+    ):
+        return None
+
+    lines = [line.rstrip() for line in stripped.splitlines()]
+    plan: List[Dict[str, Any]] = []
+    row_pattern = re.compile(r"^\|\s*(\d+)\s*\|\s*(.+?)\s*\|\s*(.*?)\s*\|$")
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("|---"):
+            continue
+        match = row_pattern.match(line)
+        if not match:
+            continue
+        step_number = int(match.group(1))
+        step_text = match.group(2).strip()
+        files_text = match.group(3).strip()
+        expected_files = [
+            path
+            for path in _extract_backticked_paths(files_text)
+            if path not in {"—", "-"}
+        ]
+        command_candidates = _extract_backticked_paths(step_text)
+        description = re.sub(r"`([^`]+)`", r"\1", step_text).strip()
+
+        commands: List[str] = []
+        verification: Optional[str] = None
+        rollback: Optional[str] = None
+
+        if "create" in step_text.lower() and "dir" in step_text.lower():
+            dir_paths = _extract_backticked_paths(step_text)
+            if dir_paths:
+                commands = [f"mkdir -p {' '.join(dir_paths)}"]
+                verification = " && ".join(f"test -d {path}" for path in dir_paths)
+                expected_files = dir_paths
+        elif step_text.lower().startswith("generate ") or step_text.lower().startswith(
+            "write "
+        ):
+            target_path = (command_candidates or expected_files[:1] or [""])[0]
+            if target_path:
+                summary = description
+                summary = re.sub(
+                    r"^(generate|write)\s+", "", summary, flags=re.IGNORECASE
+                )
+                summary = summary.replace(target_path, "").strip(" :,-")
+                summary = summary or f"implement {target_path}"
+                commands = [f"write {target_path}: {summary}"]
+                verification = f"test -s {target_path}"
+                rollback = f"rm -f {target_path}"
+                expected_files = [target_path]
+        elif step_text.lower().startswith("verify "):
+            targets = expected_files[:]
+            if targets:
+                commands = [" && ".join(f"test -s {path}" for path in targets)]
+                verification = commands[0]
+            else:
+                commands = ["rg --files . | sort"]
+                verification = "test -d ."
+
+        if commands:
+            plan.append(
+                {
+                    "step_number": step_number,
+                    "description": description,
+                    "commands": commands,
+                    "verification": verification,
+                    "rollback": rollback,
+                    "expected_files": expected_files,
+                }
+            )
+
+    return plan or None
 
 
 def looks_like_truncated_multistep_plan(

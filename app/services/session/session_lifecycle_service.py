@@ -346,6 +346,7 @@ def _build_checkpoint_payload_from_session_state(
             "task_description": task.description or task.title,
             "project_name": project.name if project else None,
             "project_context": project.description if project else None,
+            "project_rules": project.project_rules if project else None,
             "task_subfolder": task.task_subfolder,
             "workspace_path_override": workspace_path_override,
             "project_dir_override": project_dir_override,

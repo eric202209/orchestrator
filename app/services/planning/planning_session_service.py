@@ -534,6 +534,7 @@ class PlanningSessionService:
     ) -> str:
         transcript = self._build_condensed_transcript(session)
         project_description = self._trim_text(project.description or "", 280)
+        project_rules = self._trim_text(project.project_rules or "", 280)
         prompt = self._render_adapted_prompt(
             objective="Create implementation-planning artifacts for a software project.",
             execution_mode="planning_synthesis",
@@ -550,6 +551,7 @@ class PlanningSessionService:
             context={
                 "Project": project.name,
                 "Project description": project_description or "None provided",
+                "Project rules": project_rules or "None provided",
                 "Planning prompt": self._trim_text(session.prompt, 600),
                 "Conversation transcript": transcript,
             },
@@ -646,6 +648,7 @@ class PlanningSessionService:
     ) -> str:
         transcript = self._build_condensed_transcript(session)
         project_description = self._trim_text(project.description or "", 220)
+        project_rules = self._trim_text(project.project_rules or "", 220)
         prompt = self._render_adapted_prompt(
             objective=(
                 "Decide whether a planning conversation needs one more clarifying "
@@ -663,6 +666,7 @@ class PlanningSessionService:
             context={
                 "Project": project.name,
                 "Project description": project_description or "None provided",
+                "Project rules": project_rules or "None provided",
                 "Planning prompt": self._trim_text(session.prompt, 500),
                 "Conversation transcript": transcript,
             },
