@@ -52,7 +52,7 @@ from app.services.orchestration.context_assembly import (
     collect_workspace_inventory_paths,
     sanitize_progress_notes_for_workspace,
 )
-from app.services.orchestration.event_types import EventType
+from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.persistence import (
     append_orchestration_event as _append_orchestration_event,
     find_latest_orchestration_event as _find_latest_orchestration_event,
@@ -62,7 +62,7 @@ from app.services.orchestration.persistence import (
     save_orchestration_checkpoint as _save_orchestration_checkpoint,
     set_session_alert as _set_session_alert,
 )
-from app.services.orchestration.runtime import (
+from app.services.orchestration.execution.runtime import (
     get_state_manager_path as _get_state_manager_path,
     restore_workspace_after_abort as _restore_workspace_after_abort,
     snapshot_workspace_before_run as _snapshot_workspace_before_run,
@@ -92,7 +92,9 @@ from app.services.workspace.system_settings import (
     get_effective_agent_model_family,
 )
 from app.config import settings
-from app.services.orchestration.workspace_guard import verify_workspace_contract
+from app.services.orchestration.validation.workspace_guard import (
+    verify_workspace_contract,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +113,14 @@ def _parse_event_timestamp(raw_timestamp: Optional[str]) -> Optional[datetime]:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+def _coerce_utc_datetime(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _inject_progress_notes_into_context(
@@ -435,7 +445,10 @@ def execute_orchestration_task(
             queued_at = _parse_event_timestamp((queued_event or {}).get("timestamp"))
             if queued_at is not None:
                 queue_latency_seconds = round(
-                    (datetime.now(timezone.utc) - queued_at).total_seconds(), 3
+                    (
+                        datetime.now(timezone.utc) - _coerce_utc_datetime(queued_at)
+                    ).total_seconds(),
+                    3,
                 )
         stale_dispatch_reason = _should_reject_stale_dispatch_claim(
             dispatch_project_dir=dispatch_project_dir,
@@ -894,7 +907,9 @@ def execute_orchestration_task(
         # legitimate resume after several minutes gets rejected before we even
         # load the saved orchestration state.
         if task.started_at and not is_resume_execution:
-            time_since_start = datetime.now(timezone.utc) - task.started_at
+            time_since_start = datetime.now(timezone.utc) - _coerce_utc_datetime(
+                task.started_at
+            )
             if time_since_start.total_seconds() > STALE_RUN_GUARD_SECONDS:
                 logger.warning(
                     f"[ORCHESTRATION] Task {task_id} already running for {time_since_start}, marking as failed"

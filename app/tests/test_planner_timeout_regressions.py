@@ -1,8 +1,9 @@
-from app.services.orchestration.planner import PlannerService
-from app.services.orchestration.planning_flow import (
+from app.services.orchestration.phases.planning_flow import (
     _compress_project_context_for_planning,
     _should_repair_truncated_single_step_plan,
 )
+from app.services.orchestration.planning.planner import PlannerService
+from app.services.orchestration.validation.validator import ValidatorService
 from app.services.orchestration.policy import (
     MINIMAL_PLANNING_TIMEOUT_SECONDS,
     ORCHESTRATION_TASK_SOFT_TIME_LIMIT_SECONDS,
@@ -116,6 +117,96 @@ def test_planner_flags_immediate_repair_issues_for_write_and_background_commands
         "non_runnable_steps": [1],
         "background_process_steps": [2],
     }
+
+
+def test_planner_flags_placeholder_only_implementation_and_weak_verification():
+    issues = PlannerService.find_immediate_repair_step_issues(
+        [
+            {
+                "step_number": 1,
+                "description": "Create the webpage files",
+                "commands": [
+                    "mkdir -p assets/css assets/js",
+                    "touch index.html assets/css/styles.css assets/js/app.js",
+                ],
+                "verification": "test -f index.html && test -f assets/css/styles.css",
+                "rollback": "rm -f index.html assets/css/styles.css assets/js/app.js",
+                "expected_files": [
+                    "index.html",
+                    "assets/css/styles.css",
+                    "assets/js/app.js",
+                ],
+            }
+        ]
+    )
+
+    assert issues == {
+        "placeholder_only_steps": [1],
+        "weak_verification_steps": [1],
+    }
+
+
+def test_minimal_planning_prompt_requires_real_content_and_strong_verification():
+    prompt = PlannerService.build_minimal_planning_prompt(
+        "Build a one-page site",
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+        workspace_has_existing_files=True,
+    )
+
+    assert "materially write or edit file contents" in prompt
+    assert "verification must prove behavior or content" in prompt
+    assert "inspect -> edit -> verify" in prompt
+
+
+def test_weak_verification_is_not_treated_as_blocking_immediate_repair_issue():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Build the page shell",
+            "commands": [
+                "mkdir -p assets/css",
+                "printf '<!doctype html>' > index.html",
+            ],
+            "verification": "test -f index.html",
+            "rollback": "rm -f index.html",
+            "expected_files": ["index.html"],
+        }
+    ]
+
+    issues = PlannerService.find_immediate_repair_step_issues(plan)
+    blocking_issue_keys = {
+        "non_runnable_steps",
+        "background_process_steps",
+        "placeholder_only_steps",
+    }
+    blocking = {
+        key: value for key, value in issues.items() if key in blocking_issue_keys
+    }
+
+    assert issues["weak_verification_steps"] == [1]
+    assert blocking == {}
+
+
+def test_validator_still_warns_on_weak_verification_for_implementation_plan(tmp_path):
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Build the page shell",
+                "commands": ["printf '<!doctype html>' > index.html"],
+                "verification": "test -f index.html",
+                "rollback": "rm -f index.html",
+                "expected_files": ["index.html"],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Build a one-page site",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.warning is True
+    assert "weak_verification_steps" in verdict.details
 
 
 def test_planning_repair_prompt_forbids_duplicated_workspace_roots():

@@ -10,20 +10,27 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
 from app.models import TaskStatus
-from app.services.orchestration.completion_flow import finalize_successful_task
 from app.services.orchestration.context_assembly import (
     assemble_debugging_prompt,
     assemble_execution_prompt,
     assemble_plan_revision_prompt,
 )
-from app.services.orchestration.execution_flow import (
+from app.services.orchestration.events.event_types import EventType
+from app.services.orchestration.events.telemetry import emit_phase_event
+from app.services.orchestration.execution import ExecutorService
+from app.services.orchestration.execution.execution_flow import (
     assess_step_execution,
     determine_step_timeout,
     repeated_tool_path_failure_decision,
 )
+from app.services.orchestration.execution.step_support import (
+    coerce_debug_step_result,
+    coerce_execution_step_result,
+    repair_step_commands_with_self_correction,
+    step_needs_command_repair,
+)
+from app.services.orchestration.phases.completion_flow import finalize_successful_task
 from app.services.orchestration.policy import DEBUG_TIMEOUT_SECONDS, MAX_STEP_ATTEMPTS
-from app.services.orchestration.executor import ExecutorService
-from app.services.orchestration.event_types import EventType
 from app.services.orchestration.persistence import (
     append_orchestration_event,
     attach_failure_envelope,
@@ -35,24 +42,17 @@ from app.services.orchestration.persistence import (
     set_session_alert,
     write_orchestration_state_snapshot,
 )
-from app.services.orchestration.step_support import (
-    coerce_debug_step_result,
-    coerce_execution_step_result,
-    repair_step_commands_with_self_correction,
-    step_needs_command_repair,
-)
-from app.services.orchestration.telemetry import emit_phase_event
 from app.services.orchestration.types import (
     FailureEnvelope,
     OrchestrationRunContext,
     classify_failure_root_cause,
 )
-from app.services.orchestration.workspace_guard import (
+from app.services.orchestration.validation.validator import ValidatorService
+from app.services.orchestration.validation.workspace_guard import (
     compute_workspace_checksum,
     detect_scope_violations,
     summarize_step_changes,
 )
-from app.services.orchestration.validator import ValidatorService
 from app.services.prompt_templates import OrchestrationStatus, StepResult
 
 

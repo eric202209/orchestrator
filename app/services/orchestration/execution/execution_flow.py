@@ -12,8 +12,8 @@ from sqlalchemy.orm import Session
 
 from .executor import ExecutorService
 from .runtime import build_workspace_discovery_step
-from .types import ValidationVerdict
-from .validator import ValidatorService
+from ..types import ValidationVerdict
+from ..validation.validator import ValidatorService
 
 
 @dataclass
@@ -239,11 +239,18 @@ def assess_step_execution(
             # Files exist on disk but have no real content — distinct from missing.
             step_status = "failed"
             stub_summary = ", ".join(stub_files[:6])
+            correction_hints = ExecutorService.stub_file_repair_hints(
+                project_dir,
+                stub_files,
+                str(step.get("verification") or ""),
+            )
             error_message = (
                 "Step produced empty or stub files that contain no real content: "
                 f"{stub_summary}. "
                 "The files EXIST on disk — write their bodies, do not recreate paths."
             )
+            if correction_hints:
+                error_message += " | Retry hints: " + " | ".join(correction_hints[:3])
 
     tool_failures = ExecutorService.recent_step_tool_failures(
         db,

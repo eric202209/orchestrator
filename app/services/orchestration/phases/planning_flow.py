@@ -14,24 +14,24 @@ from app.services.orchestration.context_assembly import (
     assemble_planning_prompt,
     compress_orchestration_context,
 )
-from app.services.orchestration.event_types import EventType
+from app.services.orchestration.events.event_types import EventType
+from app.services.orchestration.events.telemetry import emit_phase_event
 from app.services.orchestration.persistence import (
     append_orchestration_event,
     maybe_emit_divergence_detected,
     record_validation_verdict,
     write_orchestration_state_snapshot,
 )
-from app.services.orchestration.planner import PlannerService
+from app.services.orchestration.planning.planner import PlannerService
 from app.services.orchestration.policy import (
     PLANNING_REPAIR_TIMEOUT_SECONDS,
     clamp_planning_timeout,
 )
 from app.services.orchestration.task_rules import get_workflow_profile
 from app.services.orchestration.workflow_profiles import get_workflow_phases
-from app.services.orchestration.telemetry import emit_phase_event
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.types import ReasoningArtifact
-from app.services.orchestration.validator import ValidatorService
+from app.services.orchestration.validation.validator import ValidatorService
 from app.services.prompt_templates import OrchestrationStatus, estimate_token_count
 
 # Circuit breaker: abort planning after this many consecutive validation failures
@@ -611,17 +611,32 @@ def execute_planning_phase(
             immediate_repair_issues = PlannerService.find_immediate_repair_step_issues(
                 ctx.orchestration_state.plan
             )
-            if immediate_repair_issues and not retry_state.repair_prompt_used:
+            blocking_issue_keys = (
+                "non_runnable_steps",
+                "background_process_steps",
+                "placeholder_only_steps",
+            )
+            blocking_repair_issues = {
+                key: value
+                for key, value in immediate_repair_issues.items()
+                if key in blocking_issue_keys and value
+            }
+            if blocking_repair_issues and not retry_state.repair_prompt_used:
                 issue_fragments = []
-                if immediate_repair_issues.get("non_runnable_steps"):
+                if blocking_repair_issues.get("non_runnable_steps"):
                     issue_fragments.append(
                         "non-runnable pseudo-commands in steps "
-                        f"{immediate_repair_issues['non_runnable_steps'][:5]}"
+                        f"{blocking_repair_issues['non_runnable_steps'][:5]}"
                     )
-                if immediate_repair_issues.get("background_process_steps"):
+                if blocking_repair_issues.get("background_process_steps"):
                     issue_fragments.append(
                         "background processes in steps "
-                        f"{immediate_repair_issues['background_process_steps'][:5]}"
+                        f"{blocking_repair_issues['background_process_steps'][:5]}"
+                    )
+                if blocking_repair_issues.get("placeholder_only_steps"):
+                    issue_fragments.append(
+                        "placeholder-only implementation steps in steps "
+                        f"{blocking_repair_issues['placeholder_only_steps'][:5]}"
                     )
                 planning_result = __repair_planning_output(
                     ctx=ctx,
@@ -635,7 +650,7 @@ def execute_planning_phase(
                 retry_state.repair_prompt_used = True
                 retry_state.consecutive_failures += 1
                 continue
-            if immediate_repair_issues:
+            if blocking_repair_issues:
                 ctx.orchestration_state.status = OrchestrationStatus.ABORTED
                 ctx.orchestration_state.abort_reason = "Planning repair still produced non-runnable or long-running commands"
                 ctx.task.status = TaskStatus.FAILED
@@ -643,7 +658,7 @@ def execute_planning_phase(
                     "Planning repair still produced invalid commands: "
                     + "; ".join(
                         f"{key}={value[:5]}"
-                        for key, value in immediate_repair_issues.items()
+                        for key, value in blocking_repair_issues.items()
                     )
                 )
                 ctx.db.commit()

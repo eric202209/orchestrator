@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from app.services.orchestration.completion_flow import _run_evaluator
+from app.services.orchestration.phases.completion_flow import _run_evaluator
 
 
 class _Runtime:
@@ -22,7 +22,7 @@ def test_evaluator_prompt_includes_reasoning_artifact(monkeypatch):
         return {"event_id": "evt-1"}
 
     monkeypatch.setattr(
-        "app.services.orchestration.completion_flow.append_orchestration_event",
+        "app.services.orchestration.phases.completion_flow.append_orchestration_event",
         _append_event,
     )
     runtime = _Runtime()

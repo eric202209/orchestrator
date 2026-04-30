@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.services.orchestration.executor import ExecutorService
+from app.services.orchestration.execution.executor import ExecutorService
 
 
 def test_directory_read_failure_at_project_root_gets_inventory_first_hint(tmp_path):
@@ -74,3 +74,21 @@ def test_non_directory_tool_failure_does_not_short_circuit(tmp_path):
     )
 
     assert should_rewrite is False
+
+
+def test_stub_file_repair_hints_push_content_writes_over_touch_only_retries(tmp_path):
+    project_dir = tmp_path / "demo-project"
+    project_dir.mkdir()
+
+    hints = ExecutorService.stub_file_repair_hints(
+        project_dir,
+        ["index.html", "assets/css/styles.css"],
+        "test -f index.html && test -f assets/css/styles.css",
+    )
+
+    combined = " ".join(hints)
+
+    assert "empty or stubbed" in combined
+    assert "mkdir/touch" in combined
+    assert "content-aware verification command" in combined
+    assert str(project_dir / "index.html") in combined

@@ -5,7 +5,7 @@ from app.services.orchestration.policy import (
     get_policy_profile,
     should_restore_workspace_on_failure,
 )
-from app.services.orchestration.validator import ValidatorService
+from app.services.orchestration.validation.validator import ValidatorService
 from app.services.workspace.system_settings import (
     ADAPTATION_PROFILE_KEY,
     AGENT_BACKEND_KEY,
@@ -328,6 +328,77 @@ def test_validator_flags_write_pseudo_commands_and_background_processes():
     assert "background processes or long-running dev servers" in joined
     assert verdict.details["non_runnable_steps"] == [1]
     assert verdict.details["background_process_steps"] == [2]
+
+
+def test_validator_allows_static_site_asset_roots_without_nested_project_false_positive():
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Create asset folders",
+                "commands": ["mkdir -p assets/css assets/js"],
+                "verification": "ls -d assets/css assets/js",
+                "rollback": "rm -rf assets",
+                "expected_files": [],
+            },
+            {
+                "step_number": 2,
+                "description": "Create landing page files",
+                "commands": [
+                    "touch index.html",
+                    "touch assets/css/styles.css",
+                    "touch assets/js/main.js",
+                    "touch assets/flower-background.svg",
+                ],
+                "verification": (
+                    "test -f index.html && test -f assets/css/styles.css && "
+                    "test -f assets/js/main.js && test -f assets/flower-background.svg"
+                ),
+                "rollback": "rm -f index.html assets/css/styles.css assets/js/main.js assets/flower-background.svg",
+                "expected_files": [
+                    "index.html",
+                    "assets/css/styles.css",
+                    "assets/js/main.js",
+                    "assets/flower-background.svg",
+                ],
+            },
+        ],
+        output_text="[]",
+        task_prompt="Create a one-page flower website with static assets",
+        execution_profile="full_lifecycle",
+    )
+
+    assert "nested_project_root_steps" not in verdict.details
+    assert "nested project folder" not in " ".join(verdict.reasons)
+
+
+def test_validator_still_flags_true_nested_project_root_layouts():
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Create nested app inside the current workspace",
+                "commands": [
+                    "mkdir -p flower-site/src flower-site/public",
+                    "touch flower-site/package.json flower-site/src/main.js flower-site/public/index.html",
+                ],
+                "verification": "test -f flower-site/package.json && test -f flower-site/src/main.js",
+                "rollback": "rm -rf flower-site",
+                "expected_files": [
+                    "flower-site/package.json",
+                    "flower-site/src/main.js",
+                    "flower-site/public/index.html",
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Build a flower website in the current project workspace",
+        execution_profile="full_lifecycle",
+    )
+
+    assert verdict.repairable is True
+    assert verdict.details["nested_project_root_steps"] == [1]
+    assert "nested project folder" in " ".join(verdict.reasons)
 
 
 def test_policy_profile_lookup_falls_back_to_balanced():

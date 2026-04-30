@@ -31,8 +31,8 @@ from app.services.orchestration.persistence import (
     read_orchestration_events,
     read_orchestration_state_snapshots,
 )
-from app.services.orchestration.event_types import EventType
-from app.services.orchestration.observability import (
+from app.services.orchestration.events.event_types import EventType
+from app.services.orchestration.events.observability import (
     build_execution_dag,
     build_focus_mode_payload,
     build_mobile_interruption_cards,
@@ -1086,7 +1086,7 @@ async def replay_session_checkpoint_counterfactual_payload(
     import json as _json
     from pathlib import Path as _Path
     from app.services.session.session_lifecycle_service import resume_session_lifecycle
-    from app.services.orchestration.event_types import EventType
+    from app.services.orchestration.events.event_types import EventType
     from app.services.orchestration.persistence import append_orchestration_event
 
     overrides = overrides or {}

@@ -11,8 +11,8 @@ from typing import Any, Dict, Iterable, List, Optional
 from sqlalchemy.orm import Session
 
 from app.models import TaskCheckpoint
-from .policy import apply_validation_policy
-from .types import ValidationVerdict
+from ..policy import apply_validation_policy
+from ..types import ValidationVerdict
 
 
 SOURCE_EXTENSIONS = {".py", ".js", ".ts", ".tsx", ".jsx"}
@@ -30,7 +30,29 @@ ROOT_LEVEL_EXPECTED_DIRS = {
     "spec",
     "frontend",
     "backend",
+    "assets",
+    "public",
+    "static",
+    "images",
+    "img",
+    "css",
+    "js",
     ".github",
+}
+NESTED_PROJECT_STRUCTURAL_DIRS = {
+    "src",
+    "app",
+    "public",
+    "static",
+    "assets",
+    "frontend",
+    "backend",
+    "tests",
+    "test",
+    "docs",
+    "scripts",
+    "lib",
+    "spec",
 }
 WORKFLOW_PHASE_ORDER = {
     "fullstack_scaffold": [
@@ -680,7 +702,13 @@ class ValidatorService:
     def _plan_creates_nested_project_root(
         plan: List[Dict[str, Any]], project_dir: Optional[Path] = None
     ) -> List[int]:
-        """Detect plans that recreate a whole project under a new top-level folder."""
+        """Detect plans that recreate a whole project under one new top-level folder.
+
+        We only want to flag plans that appear to put the *entire deliverable*
+        under a new nested root like ``my-app/...`` inside the current workspace.
+        Normal static-site and asset layouts such as ``index.html`` plus
+        ``assets/...`` should not be treated as nested-project bugs.
+        """
 
         # Dirs that appear in project_dir path are legitimate prefixes in expected_files
         allowed_from_project = set()
@@ -690,6 +718,29 @@ class ValidatorService:
             except Exception:
                 pass
 
+        def looks_like_nested_project_scaffold(
+            root_name: str, paths: List[str]
+        ) -> bool:
+            root_level_files = [
+                path_text for path_text in paths if len(Path(path_text).parts) == 2
+            ]
+            second_level_dirs = {
+                Path(path_text).parts[1]
+                for path_text in paths
+                if len(Path(path_text).parts) > 2
+            }
+
+            if root_level_files:
+                return True
+
+            structural_dirs = second_level_dirs.intersection(
+                NESTED_PROJECT_STRUCTURAL_DIRS
+            )
+            if len(structural_dirs) >= 2:
+                return True
+
+            return False
+
         bad_steps: List[int] = []
         for step in plan:
             expected_files = [
@@ -697,19 +748,38 @@ class ValidatorService:
                 for path in (step.get("expected_files", []) or [])
                 if str(path or "").strip()
             ]
+            if len(expected_files) < 3:
+                continue
+
+            root_level_files = [
+                path_text
+                for path_text in expected_files
+                if len(Path(path_text).parts) == 1
+            ]
             top_levels = {
                 Path(path_text).parts[0]
                 for path_text in expected_files
                 if len(Path(path_text).parts) > 1
             }
-            suspicious = {
+            suspicious = [
                 top
-                for top in top_levels
-                if top not in ROOT_LEVEL_EXPECTED_DIRS
-                and top not in allowed_from_project
-                and not top.startswith(".")
-            }
-            if len(suspicious) == 1 and len(expected_files) >= 3:
+                for top in sorted(top_levels)
+                if top not in allowed_from_project and not top.startswith(".")
+            ]
+            # Only treat this as a nested-project root when the plan appears to
+            # put all materialized files under a single new folder and does not
+            # also create root-level deliverables like index.html or package.json.
+            if len(suspicious) == 1 and not root_level_files:
+                nested_root = suspicious[0]
+                nested_root_files = [
+                    path_text
+                    for path_text in expected_files
+                    if Path(path_text).parts[0] == nested_root
+                ]
+                if not looks_like_nested_project_scaffold(
+                    nested_root, nested_root_files
+                ):
+                    continue
                 bad_steps.append(step.get("step_number"))
         return [step for step in bad_steps if step is not None]
 
@@ -1108,11 +1178,20 @@ class ValidatorService:
         """Look one project-folder level deeper for misplaced generated files."""
 
         nested_matches: Dict[str, List[str]] = {}
+        expected_top_levels = {
+            Path(str(raw_path or "").strip().rstrip("/")).parts[0]
+            for raw_path in file_paths
+            if str(raw_path or "").strip().rstrip("/")
+            and len(Path(str(raw_path or "").strip().rstrip("/")).parts) > 1
+        }
         top_level_dirs = (
             [
                 child
                 for child in project_dir.iterdir()
-                if child.is_dir() and child.name not in ROOT_LEVEL_EXPECTED_DIRS
+                if child.is_dir()
+                and child.name not in ROOT_LEVEL_EXPECTED_DIRS
+                and child.name not in expected_top_levels
+                and not child.name.startswith(".")
             ]
             if project_dir.exists()
             else []

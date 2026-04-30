@@ -14,6 +14,8 @@ from typing import Any, Callable, Dict, Optional
 from app.models import LogEntry, SessionTask, Task, TaskStatus
 from app.config import settings
 from app.services.error_handler import error_handler
+from app.services.orchestration.events.event_types import EventType
+from app.services.orchestration.events.telemetry import emit_phase_event
 from app.services.orchestration.context_assembly import (
     assemble_completion_repair_inputs,
     assemble_execution_prompt,
@@ -21,12 +23,14 @@ from app.services.orchestration.context_assembly import (
     collect_workspace_inventory_paths,
     render_adapted_runtime_prompt,
 )
-from app.services.orchestration.execution_flow import (
+from app.services.orchestration.execution.execution_flow import (
     assess_step_execution,
     determine_step_timeout,
 )
-from app.services.orchestration.parsing import extract_structured_text
-from app.services.orchestration.event_types import EventType
+from app.services.orchestration.execution.runtime import write_project_state_snapshot
+from app.services.orchestration.execution.step_support import (
+    coerce_execution_step_result,
+)
 from app.services.orchestration.persistence import (
     append_orchestration_event,
     attach_failure_envelope,
@@ -38,15 +42,13 @@ from app.services.orchestration.policy import (
     COMPLETION_VERIFICATION_TIMEOUT_SECONDS,
     SUMMARY_TIMEOUT_SECONDS,
 )
-from app.services.orchestration.runtime import write_project_state_snapshot
-from app.services.orchestration.step_support import coerce_execution_step_result
-from app.services.orchestration.telemetry import emit_phase_event
 from app.services.orchestration.types import (
     FailureEnvelope,
     OrchestrationRunContext,
     ValidationVerdict,
 )
-from app.services.orchestration.validator import ValidatorService
+from app.services.orchestration.validation.parsing import extract_structured_text
+from app.services.orchestration.validation.validator import ValidatorService
 from app.services.prompt_templates import OrchestrationStatus, StepResult
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 

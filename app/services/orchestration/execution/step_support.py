@@ -68,6 +68,8 @@ Rules:
 6. expected_files must be a JSON array
 7. Keep the step intent the same
 8. Output JSON object only, no prose
+9. If expected_files already exist but are empty or stubbed, replace touch-only commands with commands that write real content into those files
+10. Use verification stronger than file-existence checks for implementation-heavy steps
 
 Example:
 {{

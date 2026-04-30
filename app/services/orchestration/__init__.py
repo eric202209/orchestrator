@@ -5,7 +5,6 @@ Internal cross-module calls inside the package should usually import directly
 from the concrete module they need.
 """
 
-from .completion_flow import finalize_successful_task
 from .context_assembly import (
     assemble_completion_repair_inputs,
     assemble_execution_prompt,
@@ -13,37 +12,39 @@ from .context_assembly import (
     build_workspace_inventory_summary,
     collect_workspace_inventory_paths,
 )
-from .execution_flow import (
+from .execution import (
+    ExecutorService,
     StepExecutionAssessment,
     ToolPathFailureDecision,
     assess_step_execution,
+    build_project_state_snapshot,
+    build_step_repair_prompt,
+    build_workspace_discovery_step,
+    coerce_execution_step_result,
     determine_step_timeout,
+    get_state_manager_path,
     is_long_running_verification_task,
     missing_expected_files,
+    repair_step_commands_with_self_correction,
     repeated_tool_path_failure_decision,
+    restore_workspace_after_abort,
+    snapshot_workspace_before_run,
+    step_needs_command_repair,
+    write_project_state_snapshot,
 )
-from .execution_loop import execute_step_loop
-from .executor import ExecutorService
-from .failure_flow import handle_task_failure
-from .parsing import (
-    extract_plan_steps,
-    extract_structured_text,
-    looks_like_truncated_multistep_plan,
+from .events import (
+    EventType,
+    build_trace_export,
+    emit_phase_event,
+    is_known_event_type,
+    record_phase_event,
 )
-from .policy import (
-    DEBUG_TIMEOUT_SECONDS,
-    MAX_STEP_ATTEMPTS,
-    MINIMAL_PLANNING_TIMEOUT_SECONDS,
-    PLANNING_TIMEOUT_MAX_SECONDS,
-    PLANNING_TIMEOUT_MIN_SECONDS,
-    PLANNING_REPAIR_TIMEOUT_SECONDS,
-    STALE_RUN_GUARD_SECONDS,
-    SUMMARY_TIMEOUT_SECONDS,
-    ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS,
-    clamp_planning_timeout,
-    should_restore_workspace_on_failure,
+from .phases import (
+    execute_planning_phase,
+    execute_step_loop,
+    finalize_successful_task,
+    handle_task_failure,
 )
-from .event_types import EventType, is_known_event_type
 from .persistence import (
     append_orchestration_event,
     diff_orchestration_state_snapshots,
@@ -60,23 +61,8 @@ from .persistence import (
     write_checkpoint_state_snapshot,
     write_orchestration_state_snapshot,
 )
-from .planner import PlannerService
-from .planning_flow import execute_planning_phase
+from .planning import PlannerService
 from .reporting import build_task_report_payload, render_task_report
-from .runtime import (
-    build_project_state_snapshot,
-    build_workspace_discovery_step,
-    get_state_manager_path,
-    restore_workspace_after_abort,
-    snapshot_workspace_before_run,
-    write_project_state_snapshot,
-)
-from .step_support import (
-    build_step_repair_prompt,
-    coerce_execution_step_result,
-    repair_step_commands_with_self_correction,
-    step_needs_command_repair,
-)
 from .task_rules import (
     get_workflow_profile,
     get_task_report_path,
@@ -85,13 +71,28 @@ from .task_rules import (
     should_execute_in_canonical_project_root,
     should_force_review_execution_profile,
 )
-from .telemetry import emit_phase_event, record_phase_event
 from .types import OrchestrationRunContext, ValidationVerdict
-from .validator import ValidatorService
-from .workspace_guard import (
+from .validation import (
     TaskWorkspaceViolationError,
+    extract_plan_steps,
+    extract_structured_text,
+    looks_like_truncated_multistep_plan,
     normalize_plan_with_live_logging,
     normalize_step,
+    ValidatorService,
+)
+from .policy import (
+    DEBUG_TIMEOUT_SECONDS,
+    MAX_STEP_ATTEMPTS,
+    MINIMAL_PLANNING_TIMEOUT_SECONDS,
+    PLANNING_TIMEOUT_MAX_SECONDS,
+    PLANNING_TIMEOUT_MIN_SECONDS,
+    PLANNING_REPAIR_TIMEOUT_SECONDS,
+    STALE_RUN_GUARD_SECONDS,
+    SUMMARY_TIMEOUT_SECONDS,
+    ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS,
+    clamp_planning_timeout,
+    should_restore_workspace_on_failure,
 )
 
 __all__ = [
@@ -162,6 +163,7 @@ __all__ = [
     "should_force_review_execution_profile",
     "record_phase_event",
     "emit_phase_event",
+    "build_trace_export",
     "OrchestrationRunContext",
     "build_task_report_payload",
     "render_task_report",

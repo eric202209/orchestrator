@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.models import LogEntry, Session as SessionModel, SessionTask, Task, TaskStatus
-from app.services.orchestration.event_types import EventType
+from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.persistence import append_orchestration_event
 from app.services.orchestration.task_rules import (
     should_execute_in_canonical_project_root,
@@ -136,7 +136,7 @@ def _runtime_selection_details(db: Session) -> Dict[str, Optional[str]]:
 
 def ensure_task_workspace(
     db: Session, session: SessionModel, task_id: int
-) -> Dict[str, str]:
+) -> Dict[str, Optional[str]]:
     """Ensure a selected task has a subfolder and workspace on disk."""
     from app.models import Project
 
@@ -195,12 +195,13 @@ def ensure_task_workspace(
         orchestration_state._task_subfolder_override = candidate
         db.flush()
 
-    if should_execute_in_canonical_project_root(
+    runs_in_canonical_workspace = should_execute_in_canonical_project_root(
         task,
         getattr(task, "execution_profile", None),
         task.title,
         task.description,
-    ):
+    )
+    if runs_in_canonical_workspace:
         workspace_path = Path(
             resolve_project_workspace_path(project.workspace_path, project.name)
         )
@@ -210,8 +211,14 @@ def ensure_task_workspace(
     workspace_path.mkdir(parents=True, exist_ok=True)
 
     return {
-        "task_subfolder": task.task_subfolder,
+        "task_subfolder": None if runs_in_canonical_workspace else task.task_subfolder,
+        "stored_task_subfolder": task.task_subfolder,
         "workspace_path": str(workspace_path),
+        "workspace_scope": (
+            "canonical_project_root"
+            if runs_in_canonical_workspace
+            else "isolated_task_workspace"
+        ),
     }
 
 
@@ -250,7 +257,11 @@ def get_session_task_subfolder(db: Session, session: SessionModel) -> str:
         task = db.query(Task).filter(Task.id == session_task.task_id).first()
         if task:
             workspace = ensure_task_workspace(db, session, task.id)
-            return workspace["task_subfolder"]
+            return str(
+                workspace.get("stored_task_subfolder")
+                or workspace.get("task_subfolder")
+                or f"task_{session.id}"
+            )
 
     return f"task_{session.id}"
 

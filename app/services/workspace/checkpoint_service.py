@@ -47,8 +47,15 @@ class CheckpointService:
     def _candidate_checkpoint_roots(self) -> List[Path]:
         roots = [self.checkpoint_dir]
         legacy_dir = Path(self.LEGACY_CHECKPOINT_DIR)
-        if legacy_dir != self.checkpoint_dir and legacy_dir.exists():
-            roots.append(legacy_dir)
+        if legacy_dir != self.checkpoint_dir:
+            try:
+                if legacy_dir.exists():
+                    roots.append(legacy_dir)
+            except OSError:
+                logger.debug(
+                    "Skipping unreadable legacy checkpoint directory: %s",
+                    legacy_dir,
+                )
         return roots
 
     def _session_checkpoint_dirs(self, session_id: int) -> List[Path]:

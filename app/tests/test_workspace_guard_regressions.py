@@ -4,7 +4,7 @@ import logging
 
 import pytest
 
-from app.services.orchestration.workspace_guard import (
+from app.services.orchestration.validation.workspace_guard import (
     TaskWorkspaceViolationError,
     normalize_command,
     normalize_step,

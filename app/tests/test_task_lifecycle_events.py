@@ -7,7 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.services.orchestration.event_types import EventType, is_known_event_type
+from app.services.orchestration.events.event_types import (
+    EventType,
+    is_known_event_type,
+)
 from app.services.orchestration.persistence import (
     append_orchestration_event,
     read_orchestration_events,
@@ -81,7 +84,7 @@ def test_task_started_event_contains_execution_profile(tmp_path):
 
 def test_failure_flow_imports_task_failed_event_type():
     """Ensure failure_flow.py is wired to emit TASK_FAILED events."""
-    import app.services.orchestration.failure_flow as ff
+    import app.services.orchestration.phases.failure_flow as ff
 
     assert hasattr(ff, "append_orchestration_event")
     assert hasattr(ff, "EventType")
@@ -90,7 +93,7 @@ def test_failure_flow_imports_task_failed_event_type():
 
 def test_failure_flow_emits_task_failed(monkeypatch, tmp_path):
     """The TASK_FAILED emission block in handle_task_failure fires when orchestration_state is set."""
-    import app.services.orchestration.failure_flow as ff
+    import app.services.orchestration.phases.failure_flow as ff
 
     captured = []
 

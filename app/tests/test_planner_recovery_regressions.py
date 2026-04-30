@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from app.models import Project, Session as SessionModel, Task, TaskStatus
-from app.services.orchestration.failure_flow import handle_task_failure
+from app.services.orchestration.phases.failure_flow import handle_task_failure
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.planning.planner_service import PlannerService
 from app.services.session.session_runtime_service import build_task_execution_prompt

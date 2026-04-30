@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from app.services.orchestration.policy import (
+from ..policy import (
     MINIMAL_PLANNING_TIMEOUT_SECONDS,
     PLANNING_REPAIR_TIMEOUT_SECONDS,
     ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS,
@@ -18,6 +18,45 @@ from app.services.workspace.path_display import render_workspace_path_for_prompt
 
 class PlannerService:
     """Planning-stage fallback and repair helpers."""
+
+    _NON_RUNNABLE_COMMAND_PREFIXES = (
+        "write ",
+        "edit ",
+        "verify ",
+        "check ",
+        "ensure ",
+        "confirm ",
+    )
+
+    _WEAK_VERIFICATION_MARKERS = (
+        "test -f",
+        "test -d",
+        "grep -q",
+        "ls ",
+        "echo ",
+        "cat ",
+        "find ",
+        "wc -l",
+    )
+
+    _STRONG_VERIFICATION_MARKERS = (
+        "pytest",
+        "python -m",
+        "python ",
+        "uv run",
+        "node -e",
+        "node ",
+        "npm test",
+        "npm run build",
+        "pnpm test",
+        "pnpm build",
+        "yarn test",
+        "yarn build",
+        "cargo test",
+        "go test",
+        "javac ",
+        "tsc",
+    )
 
     @staticmethod
     def _render_workflow_guidance(
@@ -178,26 +217,112 @@ class PlannerService:
         return any(marker in text for marker in background_markers)
 
     @staticmethod
+    def _command_is_placeholder_only(command: str) -> bool:
+        text = str(command or "").strip().lower()
+        if not text:
+            return True
+        placeholder_patterns = (
+            r"^mkdir(?:\s|$)",
+            r"^install\s+-d(?:\s|$)",
+            r"^touch(?:\s|$)",
+            r"^truncate\s+-s\s+0(?:\s|$)",
+            r"^cp\s+/dev/null(?:\s|$)",
+            r"^:\s*>\s*",
+            r"^true$",
+        )
+        if any(re.match(pattern, text) for pattern in placeholder_patterns):
+            return True
+        empty_write_patterns = (
+            r"^echo\s+(['\"]?\s*['\"]?)\s*(>|>>)\s+",
+            r"^printf\s+(['\"]?\s*['\"]?)\s*(>|>>)\s+",
+        )
+        return any(re.match(pattern, text) for pattern in empty_write_patterns)
+
+    @staticmethod
+    def _step_is_implementation_heavy(step: Dict[str, Any]) -> bool:
+        expected_files = [
+            str(path or "").strip()
+            for path in (step.get("expected_files", []) or [])
+            if str(path or "").strip()
+        ]
+        if any(not path.endswith("/") for path in expected_files):
+            return True
+
+        combined = " ".join(
+            [
+                str(step.get("description") or ""),
+                str(step.get("verification") or ""),
+            ]
+            + [str(command or "") for command in step.get("commands", []) or []]
+        ).lower()
+        implementation_markers = (
+            "create",
+            "implement",
+            "build",
+            "update",
+            "modify",
+            "wire",
+            "scaffold",
+            ".py",
+            ".js",
+            ".ts",
+            ".tsx",
+            ".jsx",
+            ".html",
+            ".css",
+        )
+        inspection_markers = (
+            "inspect",
+            "review",
+            "analyze",
+            "inventory",
+            "audit",
+            "list files",
+        )
+        return any(marker in combined for marker in implementation_markers) and not any(
+            marker in combined for marker in inspection_markers
+        )
+
+    @classmethod
+    def _verification_is_weak(cls, command: Optional[str]) -> bool:
+        text = str(command or "").strip().lower()
+        if not text:
+            return True
+        if any(marker in text for marker in cls._STRONG_VERIFICATION_MARKERS):
+            return False
+        return any(marker in text for marker in cls._WEAK_VERIFICATION_MARKERS)
+
+    @staticmethod
     def find_immediate_repair_step_issues(
         plan: Optional[List[Dict[str, Any]]],
     ) -> Dict[str, List[int]]:
         issues: Dict[str, List[int]] = {
             "non_runnable_steps": [],
             "background_process_steps": [],
+            "placeholder_only_steps": [],
+            "weak_verification_steps": [],
         }
         for index, step in enumerate(plan or [], start=1):
             step_number = int(step.get("step_number") or index)
-            for command in step.get("commands", []) or []:
+            commands = step.get("commands", []) or []
+            expected_files = step.get("expected_files", []) or []
+            for command in commands:
                 rendered = str(command or "").strip()
                 lowered = rendered.lower()
-                if lowered.startswith(
-                    ("write ", "edit ", "verify ", "check ", "ensure ", "confirm ")
-                ):
+                if lowered.startswith(PlannerService._NON_RUNNABLE_COMMAND_PREFIXES):
                     issues["non_runnable_steps"].append(step_number)
                     break
                 if PlannerService._uses_background_process(rendered):
                     issues["background_process_steps"].append(step_number)
                     break
+            if expected_files and PlannerService._step_is_implementation_heavy(step):
+                if commands and all(
+                    PlannerService._command_is_placeholder_only(command)
+                    for command in commands
+                ):
+                    issues["placeholder_only_steps"].append(step_number)
+                if PlannerService._verification_is_weak(step.get("verification")):
+                    issues["weak_verification_steps"].append(step_number)
         return {key: sorted(set(value)) for key, value in issues.items() if value}
 
     @staticmethod
@@ -241,6 +366,10 @@ Rules:
 14. Prefer one-shot verification commands like imports, builds, tests, grep, or short health checks
 15. Prefer package-manager/editor-friendly commands and one-file-at-a-time edits
 16. Output JSON array only
+17. If the workspace already has files, start by inspecting or extending them before re-scaffolding
+18. For implementation steps that list expected_files, at least one command must materially write or edit file contents; do not use touch-only or placeholder-only steps
+19. For implementation-heavy steps, verification must prove behavior or content, not only file existence
+20. Prefer an inspect -> edit -> verify sequence grounded in the current workspace
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 
@@ -279,6 +408,9 @@ Requirements:
 6. `verification` and `rollback` must each be one shell string or null
 7. No background processes or long-running servers
 8. Keep each command short and machine-runnable
+9. If the workspace already has files, inspect or extend them before re-scaffolding
+10. For implementation steps with expected_files, include at least one command that writes real file content, not just mkdir/touch
+11. For implementation-heavy steps, use verification stronger than file-existence checks
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 
@@ -349,6 +481,10 @@ Rules:
 15. expected_files must be a JSON array of relative file paths
 16. Never repeat workspace root segments inside a path, such as `frontend/src/frontend/src` or `backend/src/backend/src`
 17. Paths must be rooted exactly once from the canonical project workspace
+18. If the workspace already has files, inspect or extend them before re-scaffolding
+19. For implementation steps with expected_files, include at least one command that writes or edits real file contents
+20. Do not return placeholder-only steps that only mkdir, touch, or create empty files
+21. For implementation-heavy steps, verification must prove behavior or content, not only file existence
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 

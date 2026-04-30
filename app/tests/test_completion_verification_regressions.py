@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from app.services.orchestration.completion_flow import (
+from app.services.orchestration.phases.completion_flow import (
     _augment_completion_verification_command,
     _classify_completion_verification_failure,
     _execute_completion_verification,
 )
-from app.services.orchestration.validator import ValidatorService
+from app.services.orchestration.validation.validator import ValidatorService
 
 
 def test_missing_jest_binary_is_treated_as_repairable_completion_verification():

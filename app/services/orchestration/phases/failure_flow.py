@@ -6,15 +6,15 @@ from datetime import UTC, datetime
 from typing import Any, Callable, Optional
 
 from app.models import LogEntry, TaskStatus
-from app.services.orchestration.event_types import EventType
+from app.services.orchestration.events.event_types import EventType
+from app.services.orchestration.events.telemetry import record_phase_event
+from app.services.orchestration.execution.runtime import write_project_state_snapshot
 from app.services.orchestration.persistence import (
     append_orchestration_event,
     record_live_log,
     save_orchestration_checkpoint,
     set_session_alert,
 )
-from app.services.orchestration.runtime import write_project_state_snapshot
-from app.services.orchestration.telemetry import record_phase_event
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.prompt_templates import OrchestrationStatus
 

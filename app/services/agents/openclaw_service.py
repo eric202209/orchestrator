@@ -49,8 +49,8 @@ from app.services.workspace.project_isolation_service import (
 from app.services.orchestration.task_rules import (
     should_execute_in_canonical_project_root,
 )
-from app.services.orchestration.parsing import extract_structured_text
-from app.services.orchestration.event_types import EventType
+from app.services.orchestration.events.event_types import EventType
+from app.services.orchestration.validation.parsing import extract_structured_text
 from app.services.orchestration.persistence import append_orchestration_event
 from app.services.permission_service import PermissionApprovalService
 from app.services.task_service import TaskService
@@ -348,7 +348,16 @@ class OpenClawSessionService:
         project_dir = self._resolve_execution_cwd()
         if not project_dir:
             return
-        if getattr(self.task_model, "task_subfolder", None):
+        if (
+            self.task_model
+            and not should_execute_in_canonical_project_root(
+                self.task_model,
+                getattr(self.task_model, "execution_profile", None),
+                getattr(self.task_model, "title", None),
+                getattr(self.task_model, "description", None),
+            )
+            and getattr(self.task_model, "task_subfolder", None)
+        ):
             project_dir = str(
                 (Path(project_dir) / str(self.task_model.task_subfolder)).resolve()
             )
@@ -871,7 +880,9 @@ class OpenClawSessionService:
             ):
                 try:
                     stored_plan_payload = json.loads(self.task_model.steps)
-                    from app.services.orchestration.parsing import extract_plan_steps
+                    from app.services.orchestration.validation.parsing import (
+                        extract_plan_steps,
+                    )
 
                     stored_plan = extract_plan_steps(stored_plan_payload)
                     if stored_plan:
@@ -1957,10 +1968,19 @@ class OpenClawSessionService:
                             )
                         )
                         context_data["workspace_path_override"] = workspace_path
-                        if context_data.get("task_subfolder"):
+                        if context_data.get(
+                            "task_subfolder"
+                        ) and not should_execute_in_canonical_project_root(
+                            self.task_model,
+                            getattr(self.task_model, "execution_profile", None),
+                            getattr(self.task_model, "title", None),
+                            getattr(self.task_model, "description", None),
+                        ):
                             context_data["project_dir_override"] = str(
                                 Path(workspace_path) / context_data["task_subfolder"]
                             )
+                        else:
+                            context_data["project_dir_override"] = workspace_path
             elif task_context:
                 context_data["task_id"] = task_context.get("id")
                 context_data["task_description"] = task_context.get(

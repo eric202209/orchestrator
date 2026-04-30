@@ -18,7 +18,7 @@ from app.services.agents.agent_runtime import create_agent_runtime
 from app.services.error_handler import EnhancedErrorHandler
 from app.services.log_utils import sort_logs
 from app.services.name_formatter import humanize_display_name
-from app.services.orchestration.event_types import EventType
+from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.persistence import append_orchestration_event
 from app.services.orchestration.context_assembly import render_adapted_runtime_prompt
 from app.services.session.session_runtime_service import ensure_task_workspace

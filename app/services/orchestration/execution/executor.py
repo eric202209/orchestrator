@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -143,6 +142,41 @@ class ExecutorService:
                 seen.add(hint)
                 deduped.append(hint)
         return deduped
+
+    @staticmethod
+    def stub_file_repair_hints(
+        project_dir: Path,
+        stub_files: List[str],
+        verification_command: Optional[str] = None,
+    ) -> List[str]:
+        normalized_files = [
+            str(path or "").strip()
+            for path in (stub_files or [])
+            if str(path or "").strip()
+        ]
+        if not normalized_files:
+            return []
+
+        preview = ", ".join(normalized_files[:4])
+        hints = [
+            "These expected files already exist in the workspace but are still empty or stubbed: "
+            f"{preview}. Edit their bodies directly instead of rerunning mkdir/touch commands.",
+            "Replace placeholder-only commands with a real content-writing or file-editing command for each deliverable file.",
+        ]
+        lowered_verification = str(verification_command or "").strip().lower()
+        if not lowered_verification or any(
+            marker in lowered_verification
+            for marker in ("test -f", "test -d", "ls ", "echo ", "grep -q")
+        ):
+            hints.append(
+                "Use a content-aware verification command after writing the files. "
+                "Do not rely only on file-existence checks once the paths already exist."
+            )
+        hints.append(
+            "Before retrying, read the current stub file from the canonical workspace and overwrite it with real content, "
+            f"for example `{project_dir / normalized_files[0]}`."
+        )
+        return hints
 
     @staticmethod
     def _extract_tool_failure_raw_params(message: str) -> Dict[str, Any]:

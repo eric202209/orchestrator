@@ -19,7 +19,7 @@ from app.models import LogEntry, Session as SessionModel, TaskCheckpoint
 from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.prompt_templates import OrchestrationState, StepResult
 
-from .event_types import EventType
+from .events.event_types import EventType
 from .policy import MAX_STEP_ATTEMPTS
 from .types import FailureEnvelope, ValidationVerdict
 

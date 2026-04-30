@@ -107,7 +107,7 @@ def test_start_recovers_orphaned_planning_run_before_restarting(
             task_id=task.id,
             level="INFO",
             message="[ORCHESTRATION] Planning response received; parsing and validating plan",
-            created_at=datetime.now(UTC).replace(tzinfo=None),
+            created_at=datetime.now(UTC),
         )
     )
     db_session.commit()
@@ -430,9 +430,7 @@ def test_stop_session_saves_rich_checkpoint_when_latest_checkpoint_is_hollow(
     assert saved["context_data"]["task_id"] == task.id
     assert saved["context_data"]["task_subfolder"] == "apps/frontend"
     assert saved["context_data"]["workspace_path_override"].endswith("lc_test")
-    assert saved["context_data"]["project_dir_override"].endswith(
-        "lc_test/apps/frontend"
-    )
+    assert saved["context_data"]["project_dir_override"].endswith("lc_test")
     assert saved["orchestration_state"]["plan"][0]["description"] == "Create app shell"
     assert saved["current_step_index"] == 1
 
@@ -534,6 +532,7 @@ def test_pause_session_saves_rich_checkpoint_when_only_hollow_checkpoint_exists(
     saved = captured["saved"]
     assert saved["context_data"]["task_id"] == task.id
     assert saved["context_data"]["task_subfolder"] == "backend"
+    assert saved["context_data"]["project_dir_override"].endswith("lc_test")
     assert saved["orchestration_state"]["plan"][0]["description"] == "Bootstrap backend"
     assert saved["current_step_index"] == 0
 

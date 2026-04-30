@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from app.services.prompt_templates import PromptTemplates, StepResult
-from app.services.orchestration.step_support import coerce_debug_step_result
-from app.services.orchestration.parsing import extract_structured_text
+from app.services.orchestration.execution.step_support import coerce_debug_step_result
+from app.services.orchestration.validation.parsing import (
+    extract_plan_steps,
+    extract_structured_text,
+)
 from app.services.agents.openclaw_service import OpenClawSessionService
 
 
@@ -112,3 +115,30 @@ def test_openclaw_response_parser_recovers_final_assistant_visible_text():
 
     assert result["status"] == "completed"
     assert "step_number" in result["output"]
+
+
+def test_extract_plan_steps_can_unwrap_final_assistant_visible_text_string():
+    payload = {
+        "finalAssistantVisibleText": '```json\n[{"step_number":1,"description":"x","commands":[],"verification":null,"rollback":null,"expected_files":[]}]\n```'
+    }
+
+    plan = extract_plan_steps(payload)
+
+    assert plan is not None
+    assert len(plan) == 1
+    assert plan[0]["step_number"] == 1
+
+
+def test_extract_plan_steps_can_unwrap_stringified_wrapper_payload():
+    wrapped = (
+        '{"finalAssistantVisibleText":"```json\\n['
+        '{\\"step_number\\":1,\\"description\\":\\"x\\",\\"commands\\":[],'
+        '\\"verification\\":null,\\"rollback\\":null,\\"expected_files\\":[]}'
+        ']\\n```"}'
+    )
+
+    plan = extract_plan_steps(wrapped)
+
+    assert plan is not None
+    assert len(plan) == 1
+    assert plan[0]["description"] == "x"

@@ -25,12 +25,23 @@ from app.services.session.session_runtime_service import (
     revoke_session_celery_tasks,
     set_session_alert,
 )
+from app.services.orchestration.task_rules import (
+    should_execute_in_canonical_project_root,
+)
 from app.services.task_service import TaskService
 
 
 logger = logging.getLogger(__name__)
 
 _ORPHANED_PLANNING_RECOVERY_SECONDS = 120
+
+
+def _coerce_naive_utc_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(UTC).replace(tzinfo=None)
 
 
 def _reset_running_session_tasks(
@@ -124,7 +135,8 @@ def _recover_orphaned_running_session_if_needed(
         return False
 
     age_seconds = (
-        datetime.now(UTC).replace(tzinfo=None) - latest_log.created_at
+        datetime.now(UTC).replace(tzinfo=None)
+        - _coerce_naive_utc_datetime(latest_log.created_at)
     ).total_seconds()
     if age_seconds < _ORPHANED_PLANNING_RECOVERY_SECONDS:
         return False
@@ -296,14 +308,29 @@ def _build_checkpoint_payload_from_session_state(
                 project.workspace_path, project.name, db=db
             )
             workspace_path_override = str(workspace_root)
-            project_dir_override = str(
-                workspace_root / task.task_subfolder
-                if task.task_subfolder
-                else workspace_root
-            )
+            if should_execute_in_canonical_project_root(
+                task,
+                getattr(task, "execution_profile", None),
+                task.title,
+                task.description,
+            ):
+                project_dir_override = str(workspace_root)
+            else:
+                project_dir_override = str(
+                    workspace_root / task.task_subfolder
+                    if task.task_subfolder
+                    else workspace_root
+                )
         except Exception:
             workspace_path_override = project.workspace_path
-            if task.task_subfolder and project.workspace_path:
+            if should_execute_in_canonical_project_root(
+                task,
+                getattr(task, "execution_profile", None),
+                task.title,
+                task.description,
+            ):
+                project_dir_override = str(project.workspace_path)
+            elif task.task_subfolder and project.workspace_path:
                 project_dir_override = str(
                     Path(project.workspace_path) / task.task_subfolder
                 )

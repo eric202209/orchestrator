@@ -9,8 +9,11 @@ from typing import Any, Dict, List
 
 import pytest
 
-from app.services.orchestration.event_types import EventType, is_known_event_type
-from app.services.orchestration.observability import build_trace_export
+from app.services.orchestration.events.event_types import (
+    EventType,
+    is_known_event_type,
+)
+from app.services.orchestration.events.observability import build_trace_export
 from app.services.orchestration.persistence import (
     _apply_counterfactual_overrides_to_checkpoint,
     append_orchestration_event,

@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.models import Project, Session as SessionModel, SessionTask, Task, TaskStatus
-from app.services.orchestration.event_types import EventType
+from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.persistence import read_orchestration_events
-from app.services.orchestration.workspace_guard import verify_workspace_contract
+from app.services.orchestration.validation.workspace_guard import (
+    verify_workspace_contract,
+)
 from app.services.session.session_runtime_service import queue_task_for_session
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
+from app.tasks import worker as worker_module
 from app.tasks.worker import _claim_queued_task_for_worker
 from app.tasks.worker import _should_reject_stale_dispatch_claim
 
@@ -78,8 +82,7 @@ def test_queue_task_for_session_emits_queued_event_and_keeps_task_pending(
     workspace_root = resolve_project_workspace_path(
         project.workspace_path, project.name
     )
-    task_workspace = Path(workspace_root) / str(task.task_subfolder)
-    events = read_orchestration_events(task_workspace, session.id, task.id)
+    events = read_orchestration_events(Path(workspace_root), session.id, task.id)
     assert events[-1]["event_type"] == EventType.TASK_QUEUED
     assert events[-1]["details"]["session_instance_id"] == session.instance_id
 
@@ -211,6 +214,14 @@ def test_worker_claim_guard_rejects_stale_session_instance(db_session):
     assert reason == "session_instance_changed"
     assert task.status == TaskStatus.PENDING
     assert session_task.status == TaskStatus.PENDING
+
+
+def test_worker_coerces_naive_started_at_to_utc():
+    naive_started_at = datetime(2026, 4, 29, 22, 20, 56)
+    coerced = worker_module._coerce_utc_datetime(naive_started_at)
+
+    assert coerced is not None
+    assert coerced.tzinfo == timezone.utc
 
 
 def test_workspace_contract_detects_runtime_path_mismatch(tmp_path):
