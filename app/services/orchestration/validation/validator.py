@@ -558,7 +558,11 @@ class ValidatorService:
         text = str(command or "").strip().lower()
         if not text:
             return False
-        if re.search(r"(?<![&])&(\s|$)", text):
+        # Only check the first line for shell background operator (&).
+        # Heredoc bodies start on line 2+, so bare & in HTML content (e.g.
+        # "Flowers & Seasons") cannot trigger a false positive.
+        first_line = text.split("\n")[0]
+        if re.search(r"(?<![&])&(\s|$)", first_line):
             return True
         return any(
             marker in text

@@ -355,7 +355,7 @@ def test_validator_flags_write_pseudo_commands_and_background_processes():
 
 
 def test_validator_does_not_flag_html_entities_as_background_processes():
-    """HTML entities like &nbsp; inside heredoc commands must not trigger the background-process check."""
+    """HTML entities like &nbsp; and bare & in heredoc body must not trigger background-process check."""
     verdict = ValidatorService.validate_plan(
         [
             {
@@ -370,7 +370,20 @@ def test_validator_does_not_flag_html_entities_as_background_processes():
                 "verification": "test -f index.html && echo OK",
                 "rollback": "rm index.html",
                 "expected_files": ["index.html"],
-            }
+            },
+            {
+                "step_number": 2,
+                "description": "Create page with bare ampersand in title",
+                "commands": [
+                    "cat > index.html << 'htmleof'\n"
+                    "<!DOCTYPE html><html><head>"
+                    "<title>Flowers & Seasons</title>"
+                    "</head></html>\nhtmleof"
+                ],
+                "verification": "test -f index.html && echo OK",
+                "rollback": "rm index.html",
+                "expected_files": ["index.html"],
+            },
         ],
         output_text="[]",
         task_prompt="Create a flower landing page",

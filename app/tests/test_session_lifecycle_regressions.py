@@ -882,6 +882,111 @@ def test_resume_session_without_explicit_checkpoint_skips_hollow_checkpoint_repl
     assert metadata["resolved_checkpoint_name"] is None
 
 
+def test_resume_recovers_orphaned_planning_run_before_fresh_requeue(
+    db_session, monkeypatch
+):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="running", is_active=True)
+    task = _make_task(db_session, project, status=TaskStatus.RUNNING)
+    task.current_step = 0
+    db_session.commit()
+
+    db_session.add(
+        SessionTask(
+            session_id=session.id,
+            task_id=task.id,
+            status=TaskStatus.RUNNING,
+            started_at=None,
+        )
+    )
+    db_session.add(
+        LogEntry(
+            session_id=session.id,
+            task_id=task.id,
+            level="INFO",
+            message="[ORCHESTRATION] Planning response received; parsing and validating plan",
+            created_at=datetime(2026, 4, 28, 12, 0, 0),
+        )
+    )
+    db_session.commit()
+
+    captured = {"load_resume_checkpoint_calls": []}
+
+    class _FakeCheckpointService:
+        def __init__(self, db):
+            self.db = db
+
+        def load_resume_checkpoint(self, session_id, checkpoint_name=None):
+            captured["load_resume_checkpoint_calls"].append(checkpoint_name)
+            raise CheckpointError("missing checkpoint")
+
+    def _fake_queue_task_for_session(*, db, session, task_id, timeout_seconds=1800):
+        captured["queued_task"] = {
+            "session_id": session.id,
+            "task_id": task_id,
+            "timeout_seconds": timeout_seconds,
+        }
+        return {"celery_id": "celery-queued-after-recovery"}
+
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.CheckpointService",
+        _FakeCheckpointService,
+    )
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.queue_task_for_session",
+        _fake_queue_task_for_session,
+    )
+
+    result = asyncio.run(resume_session_lifecycle(db_session, session.id))
+
+    db_session.refresh(session)
+    db_session.refresh(task)
+    assert result["status"] == "resumed"
+    assert result["resolved_checkpoint_name"] is None
+    assert session.status == "running"
+    assert session.is_active is True
+    assert task.status == TaskStatus.PENDING
+    assert captured["queued_task"]["task_id"] == task.id
+    assert captured["load_resume_checkpoint_calls"] == [
+        "autosave_latest",
+        "autosave_error",
+        None,
+    ]
+
+
+def test_resume_does_not_recover_inflight_planning_request(db_session, monkeypatch):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="running", is_active=True)
+    task = _make_task(db_session, project, status=TaskStatus.RUNNING)
+    task.current_step = 0
+    db_session.commit()
+
+    db_session.add(
+        SessionTask(
+            session_id=session.id,
+            task_id=task.id,
+            status=TaskStatus.RUNNING,
+            started_at=None,
+        )
+    )
+    db_session.add(
+        LogEntry(
+            session_id=session.id,
+            task_id=task.id,
+            level="INFO",
+            message="[ORCHESTRATION] Phase 1: PLANNING - generating step plan",
+            created_at=datetime(2026, 4, 28, 12, 0, 0),
+        )
+    )
+    db_session.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(resume_session_lifecycle(db_session, session.id))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Session is not resumable"
+
+
 def test_resume_rotates_session_instance_id_before_checkpoint_resume(
     db_session, monkeypatch
 ):

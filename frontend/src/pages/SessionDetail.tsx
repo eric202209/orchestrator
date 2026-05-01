@@ -1512,10 +1512,6 @@ export default function SessionDetail() {
         await replayCheckpoint(fallbackResumableCheckpoint.name);
         return;
       }
-      if (checkpointCount > 0) {
-        alert('Resume could not find a replayable checkpoint. Pick one from the inspector or start fresh.');
-        return;
-      }
       await handleResumeSessionDefault();
       return;
     }

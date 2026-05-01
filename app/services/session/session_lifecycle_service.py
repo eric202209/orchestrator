@@ -1035,6 +1035,9 @@ async def resume_session_lifecycle(
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    if session.status == "running":
+        _recover_orphaned_running_session_if_needed(db, session=session)
+        db.refresh(session)
     if session.status not in ["paused", "stopped", "waiting_for_human"]:
         raise HTTPException(status_code=400, detail="Session is not resumable")
 
