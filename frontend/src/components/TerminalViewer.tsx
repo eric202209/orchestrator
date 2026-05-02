@@ -72,8 +72,8 @@ export function TerminalViewer({
     return lines.map((line, idx) => {
       const prefix = idx === 0 && timestamp
         ? (
-          <span className="text-slate-500 mr-3 shrink-0">
-            [{timestamp}]
+          <span className="text-slate-600 mr-2 shrink-0 select-none">
+            {timestamp}
           </span>
         )
         : null;
@@ -135,28 +135,24 @@ export function TerminalViewer({
       <div
         ref={containerRef}
         className={cn(
-          "overflow-y-auto rounded-lg border border-slate-700 bg-slate-900",
-          "scrollbar-thin scrollbar-thumb-slate-600 scrollbar-track-slate-800",
-          "scrollbar-hover"
+          "overflow-y-auto rounded-lg border border-slate-700 bg-slate-950",
+          "scrollbar-thin scrollbar-thumb-slate-600 scrollbar-track-slate-800"
         )}
         style={{ height }}
       >
         {logs.length === 0 ? (
-          <div className="flex items-center justify-center h-full text-slate-500">
+          <div className="flex items-center justify-center h-full text-slate-600">
             <div className="text-center">
-              <p className="text-sm">No logs yet</p>
-              <p className="text-xs mt-1">Logs will appear here when the session starts</p>
+              <p className="text-xs">No logs yet</p>
+              <p className="text-xs mt-0.5 text-slate-700">Logs appear when the session starts</p>
             </div>
           </div>
         ) : (
-          <div className="p-4 font-mono text-sm leading-relaxed">
+          <div className="p-3 font-mono text-[12px] leading-5">
             {logs.map((log, index) => (
               <div
                 key={index}
-                className={cn(
-                  "whitespace-pre-wrap break-words",
-                  "last:scroll-into-view"
-                )}
+                className="whitespace-pre-wrap break-words py-px"
               >
                 {colorizeLog(log)}
               </div>
@@ -169,17 +165,17 @@ export function TerminalViewer({
       {showScrollIndicator && (
         <button
           onClick={scrollToBottom}
-          className="absolute bottom-4 right-4 p-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg shadow-lg transition-colors"
+          className="absolute bottom-3 right-3 p-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-md shadow-lg transition-colors"
           title="Scroll to bottom"
         >
-          <ChevronDown className="h-5 w-5 animate-bounce" />
+          <ChevronDown className="h-4 w-4" />
         </button>
       )}
 
       {/* Log count badge */}
       {logs.length > 0 && (
-        <div className="absolute top-2 right-2 px-2 py-1 bg-slate-800 text-slate-400 text-xs rounded">
-          {logs.length} logs
+        <div className="absolute top-2 right-2 px-1.5 py-0.5 bg-slate-800/90 text-slate-500 text-[10px] rounded font-mono">
+          {logs.length}
         </div>
       )}
     </div>

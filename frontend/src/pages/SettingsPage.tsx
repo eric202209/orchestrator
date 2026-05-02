@@ -152,8 +152,8 @@ export default function SettingsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold text-white">Settings</h1>
-        <p className="text-slate-400 mt-2">
+        <h1 className="text-lg font-semibold text-white">Settings</h1>
+        <p className="text-sm text-slate-400 mt-0.5">
           Manage your account, workspace path, and ClawMobile/OpenClaw connection details.
         </p>
       </div>
@@ -161,10 +161,10 @@ export default function SettingsPage() {
       {message && <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-emerald-300">{message}</div>}
       {error && <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-red-300">{error}</div>}
 
-      <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6">
+      <section className="rounded-lg border border-slate-700 bg-slate-800 p-6">
         <div className="flex items-center gap-3 mb-4">
-          <UserCircle2 className="h-5 w-5 text-primary-400" />
-          <h2 className="text-xl font-semibold text-white">Account</h2>
+          <UserCircle2 className="h-5 w-5 text-sky-400" />
+          <h2 className="text-sm font-semibold text-white">Account</h2>
         </div>
         <div className="grid gap-4 md:grid-cols-2">
           <div>
@@ -176,29 +176,29 @@ export default function SettingsPage() {
             <input value={name} onChange={(e) => setName(e.target.value)} className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white" />
           </div>
         </div>
-        <button onClick={handleProfileSave} disabled={savingProfile} className="mt-4 inline-flex items-center gap-2 rounded-lg bg-primary-500 px-4 py-2 text-white hover:bg-primary-600 disabled:opacity-50">
+        <button onClick={handleProfileSave} disabled={savingProfile} className="mt-4 inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-white hover:bg-sky-500 disabled:opacity-50">
           <Save className="h-4 w-4" />
           {savingProfile ? 'Saving...' : 'Save Profile'}
         </button>
       </section>
 
-      <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6">
+      <section className="rounded-lg border border-slate-700 bg-slate-800 p-6">
         <div className="flex items-center gap-3 mb-4">
-          <FolderCog className="h-5 w-5 text-primary-400" />
-          <h2 className="text-xl font-semibold text-white">System</h2>
+          <FolderCog className="h-5 w-5 text-sky-400" />
+          <h2 className="text-sm font-semibold text-white">System</h2>
         </div>
         <div className="space-y-4">
           <div>
             <label className="block text-sm text-slate-400 mb-2">OpenClaw Workspace Root</label>
             <input value={workspaceRoot} onChange={(e) => setWorkspaceRoot(e.target.value)} className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white" />
-            <p className="mt-2 text-xs text-slate-500">This becomes the root path used for project workspaces and isolation checks.</p>
+            <p className="mt-2 text-xs text-slate-400">This becomes the root path used for project workspaces and isolation checks.</p>
           </div>
           <div className="grid gap-4 md:grid-cols-2">
-            <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-4">
+            <div className="rounded-lg border border-slate-700 bg-slate-950 p-4">
               <div className="text-sm text-slate-400">OpenClaw Gateway URL</div>
               <div className="mt-2 text-sm text-white break-all">{settings.system.openclaw_gateway_url}</div>
             </div>
-            <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-4">
+            <div className="rounded-lg border border-slate-700 bg-slate-950 p-4">
               <div className="text-sm text-slate-400">Recommended Mobile Base URL</div>
               <div className="mt-2 text-sm text-white break-all">{settings.system.mobile_base_url}</div>
             </div>
@@ -258,7 +258,7 @@ export default function SettingsPage() {
                   </option>
                 ))}
             </select>
-            <p className="mt-2 text-xs text-slate-500">
+            <p className="mt-2 text-xs text-slate-400">
               {settings.system.available_adaptation_profiles.find((profile) => profile.name === adaptationProfile)?.description}
             </p>
           </div>
@@ -275,14 +275,14 @@ export default function SettingsPage() {
                 </option>
               ))}
             </select>
-            <p className="mt-2 text-xs text-slate-500">
+            <p className="mt-2 text-xs text-slate-400">
               {settings.system.available_policy_profiles.find((profile) => profile.name === policyProfile)?.description}
             </p>
             <p className="mt-2 text-xs text-slate-400">
               {settings.system.available_policy_profiles.find((profile) => profile.name === policyProfile)?.effects?.restore_behavior_label}
             </p>
           </div>
-          <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-4">
+          <div className="rounded-lg border border-slate-700 bg-slate-950 p-4">
             <div className="text-sm text-slate-400">Backend Capabilities</div>
             <div className="mt-2 text-xs text-slate-300">
               {Object.entries(activeBackendCapabilities)
@@ -290,12 +290,12 @@ export default function SettingsPage() {
                 .map(([key]) => key.replace(/^supports_/, '').replace(/_/g, ' '))
                 .join(' • ') || 'No capabilities reported'}
             </div>
-            <div className="mt-2 text-xs text-slate-500">
+            <div className="mt-2 text-xs text-slate-400">
               MCP support: {activeBackendCapabilities.mcp_capable ? 'supported by descriptor' : 'not declared'}
             </div>
           </div>
           {activeBackendConfig && (
-            <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-4">
+            <div className="rounded-lg border border-slate-700 bg-slate-950 p-4">
               <div className="text-sm text-slate-400">Backend Configuration</div>
               <div className="mt-2 space-y-1 text-xs text-slate-300">
                 <div>Transport: {activeBackendConfig.transport_mode}</div>
@@ -311,7 +311,7 @@ export default function SettingsPage() {
               </div>
             </div>
           )}
-          <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-4">
+          <div className="rounded-lg border border-slate-700 bg-slate-950 p-4">
             <div className="text-sm text-slate-400">Backend Readiness</div>
             <div className="mt-2 text-sm text-white">
               {activeBackendHealth.ready ? 'Ready' : 'Unavailable'} ({activeBackendHealth.status})
@@ -333,22 +333,22 @@ export default function SettingsPage() {
             )}
           </div>
         </div>
-        <button onClick={() => handleSystemSave(false)} disabled={savingSystem} className="mt-4 inline-flex items-center gap-2 rounded-lg bg-primary-500 px-4 py-2 text-white hover:bg-primary-600 disabled:opacity-50">
+        <button onClick={() => handleSystemSave(false)} disabled={savingSystem} className="mt-4 inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-white hover:bg-sky-500 disabled:opacity-50">
           <Save className="h-4 w-4" />
           {savingSystem ? 'Saving...' : 'Save System Settings'}
         </button>
       </section>
 
-      <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6">
+      <section className="rounded-lg border border-slate-700 bg-slate-800 p-6">
         <div className="flex items-center gap-3 mb-4">
-          <Shield className="h-5 w-5 text-primary-400" />
-          <h2 className="text-xl font-semibold text-white">Mobile API Key</h2>
+          <Shield className="h-5 w-5 text-sky-400" />
+          <h2 className="text-sm font-semibold text-white">Mobile API Key</h2>
         </div>
         <div className="space-y-4">
-          <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-4">
+          <div className="rounded-lg border border-slate-700 bg-slate-950 p-4">
             <div className="text-sm text-slate-400">Current Key</div>
             <div className="mt-2 text-sm text-white">{settings.system.mobile_api_key_preview || 'Not configured'}</div>
-            <div className="mt-1 text-xs text-slate-500">Source: {settings.system.mobile_api_key_source || 'none'}</div>
+            <div className="mt-1 text-xs text-slate-400">Source: {settings.system.mobile_api_key_source || 'none'}</div>
           </div>
           <div>
             <label className="block text-sm text-slate-400 mb-2">Set Custom Mobile API Key</label>
@@ -369,7 +369,7 @@ export default function SettingsPage() {
               <RefreshCw className="h-4 w-4" />
               Rotate Key
             </button>
-            <button onClick={() => handleSystemSave(false)} disabled={savingSystem} className="inline-flex items-center gap-2 rounded-lg bg-primary-500 px-4 py-2 text-white hover:bg-primary-600 disabled:opacity-50">
+            <button onClick={() => handleSystemSave(false)} disabled={savingSystem} className="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-white hover:bg-sky-500 disabled:opacity-50">
               <KeyRound className="h-4 w-4" />
               Save Mobile Key
             </button>
@@ -377,10 +377,10 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6">
+      <section className="rounded-lg border border-slate-700 bg-slate-800 p-6">
         <div className="flex items-center gap-3 mb-4">
-          <Shield className="h-5 w-5 text-primary-400" />
-          <h2 className="text-xl font-semibold text-white">Password</h2>
+          <Shield className="h-5 w-5 text-sky-400" />
+          <h2 className="text-sm font-semibold text-white">Password</h2>
         </div>
         <div className="grid gap-4 md:grid-cols-2">
           <div>
@@ -392,7 +392,7 @@ export default function SettingsPage() {
             <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white" />
           </div>
         </div>
-        <button onClick={handlePasswordChange} disabled={changingPassword || !currentPassword || !newPassword} className="mt-4 inline-flex items-center gap-2 rounded-lg bg-primary-500 px-4 py-2 text-white hover:bg-primary-600 disabled:opacity-50">
+        <button onClick={handlePasswordChange} disabled={changingPassword || !currentPassword || !newPassword} className="mt-4 inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-white hover:bg-sky-500 disabled:opacity-50">
           <Save className="h-4 w-4" />
           {changingPassword ? 'Updating...' : 'Change Password'}
         </button>

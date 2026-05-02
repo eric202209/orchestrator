@@ -1,14 +1,13 @@
 import { useState, useEffect } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { projectsAPI } from '../api/client';
 import type { Project } from '../types/api';
-import { 
-  GitBranch, 
+import {
+  GitBranch,
   Plus,
   FileText,
   XCircle,
   ExternalLink,
-  ArrowLeft
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { EmptyState, Skeleton } from '../components/ui';
@@ -155,88 +154,33 @@ function ProjectsList() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-900">
-        <nav className="bg-slate-800/50 backdrop-blur border-b border-slate-700">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div className="flex items-center justify-between h-16">
-              <div className="flex items-center gap-2">
-                <Skeleton className="h-6 w-6" />
-                <Skeleton className="h-6 w-32" />
-              </div>
-              <div className="flex items-center gap-4">
-                <Skeleton className="h-4 w-40" />
-                <Skeleton className="h-4 w-24" />
-              </div>
-            </div>
-          </div>
-        </nav>
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-          <div className="flex items-center justify-between mb-8">
-            <div className="flex items-center gap-4">
-              <Skeleton className="h-5 w-5" />
-              <Skeleton className="h-8 w-32" />
-            </div>
-            <div className="flex items-center gap-3">
-              <Skeleton className="h-10 w-28" />
-            </div>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            <Skeleton className="h-48 w-full" />
-            <Skeleton className="h-48 w-full" />
-            <Skeleton className="h-48 w-full" />
-          </div>
+      <div className="space-y-5">
+        <div className="flex items-center justify-between">
+          <Skeleton className="h-6 w-24" />
+          <Skeleton className="h-9 w-28" />
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          <Skeleton className="h-36 w-full" />
+          <Skeleton className="h-36 w-full" />
+          <Skeleton className="h-36 w-full" />
         </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-slate-900">
-      {/* Navbar */}
-      <nav className="bg-slate-800/50 backdrop-blur border-b border-slate-700">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
-            <div className="flex items-center gap-2">
-              <GitBranch className="h-6 w-6 text-primary-500" />
-              <span className="text-xl font-bold text-white">Orchestrator</span>
-            </div>
-            
-            <div className="flex items-center gap-4">
-              <Link
-                to="/"
-                className="text-sm text-slate-400 hover:text-white transition-colors"
-              >
-                Back to Dashboard
-              </Link>
-            </div>
-          </div>
-        </div>
-      </nav>
-
-      {/* Main Content */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-8">
-          <div className="flex items-center gap-4">
-            <Link
-              to="/"
-              className="text-slate-400 hover:text-white transition-colors"
-              title="Back to Dashboard"
-            >
-              <ArrowLeft className="h-5 w-5" />
-            </Link>
-            <h1 className="text-3xl font-bold text-white">Projects</h1>
-          </div>
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => setShowCreateProject(true)}
-              className="flex items-center gap-2 bg-primary-500 hover:bg-primary-600 text-white px-4 py-2 rounded-lg transition-all"
-            >
-              <Plus className="h-4 w-4" />
-              New Project
-            </button>
-          </div>
-        </div>
+    <div>
+      {/* Header */}
+      <div className="flex items-center justify-between mb-5">
+        <h1 className="text-lg font-semibold text-white">Projects</h1>
+        <button
+          onClick={() => setShowCreateProject(true)}
+          className="flex items-center gap-1.5 bg-sky-600 hover:bg-sky-500 text-white text-sm px-3 py-1.5 rounded-md transition-colors"
+        >
+          <Plus className="h-4 w-4" />
+          New Project
+        </button>
+      </div>
 
         {/* Projects Grid */}
         {projects.length === 0 ? (
@@ -250,25 +194,25 @@ function ProjectsList() {
             }}
           />
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
             {projects.map((project) => (
               <div
                 key={project.id}
                 onClick={() => navigate(`/projects/${project.id}`)}
-                className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-6 hover:border-primary-500/50 transition-all group cursor-pointer"
+                className="bg-slate-800 rounded-lg border border-slate-700 p-4 hover:border-slate-600 transition-colors group cursor-pointer"
               >
-                <div className="flex items-start justify-between mb-4">
-                  <GitBranch className="h-6 w-6 text-primary-500" />
-                  <div className="flex gap-2">
+                <div className="flex items-start justify-between mb-3">
+                  <GitBranch className="h-4 w-4 text-slate-500 mt-0.5" />
+                  <div className="flex gap-1.5">
                     {project.github_url && (
                       <a
                         href={project.github_url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-slate-400 hover:text-primary-400 transition-colors"
+                        className="text-slate-500 hover:text-slate-300 transition-colors"
                         title="View GitHub"
                       >
-                        <ExternalLink className="h-4 w-4" />
+                        <ExternalLink className="h-3.5 w-3.5" />
                       </a>
                     )}
                     {editingProjectId === project.id ? (
@@ -279,13 +223,13 @@ function ProjectsList() {
                           handleUpdateProject(project.id);
                         }}
                         disabled={updatingProject}
-                        className="text-green-500 hover:text-green-600 transition-colors disabled:opacity-50"
+                        className="text-emerald-500 hover:text-emerald-400 transition-colors disabled:opacity-50"
                         title="Save changes"
                       >
                         {updatingProject ? (
-                          <div className="h-4 w-4 border-2 border-white/30 border-t-green-500 rounded-full animate-spin" />
+                          <div className="h-3.5 w-3.5 border-2 border-white/30 border-t-emerald-500 rounded-full animate-spin" />
                         ) : (
-                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                           </svg>
                         )}
@@ -297,10 +241,10 @@ function ProjectsList() {
                           e.stopPropagation();
                           startEditProject(project);
                         }}
-                        className="text-slate-400 hover:text-blue-400 transition-colors"
+                        className="text-slate-500 hover:text-slate-300 transition-colors"
                         title="Rename project"
                       >
-                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                         </svg>
                       </button>
@@ -311,10 +255,10 @@ function ProjectsList() {
                         e.stopPropagation();
                         handleDeleteProject(project.id);
                       }}
-                      className="text-slate-400 hover:text-red-400 transition-colors"
+                      className="text-slate-500 hover:text-red-400 transition-colors"
                       title="Delete project"
                     >
-                      <XCircle className="h-4 w-4" />
+                      <XCircle className="h-3.5 w-3.5" />
                     </button>
                   </div>
                 </div>
@@ -324,7 +268,7 @@ function ProjectsList() {
                       type="text"
                       value={editingName}
                       onChange={(e) => setEditingName(e.target.value)}
-                      className="w-full bg-slate-900/50 border border-primary-500 rounded-lg px-3 py-1 text-white mb-2 focus:outline-none focus:ring-2 focus:ring-primary-500"
+                      className="w-full bg-slate-950 border border-sky-500 rounded-md px-2.5 py-1 text-sm text-white mb-2 focus:outline-none focus:ring-1 focus:ring-sky-500"
                       autoFocus
                       onClick={(e) => e.stopPropagation()}
                       onKeyDown={(e) => {
@@ -338,14 +282,14 @@ function ProjectsList() {
                     />
                   </div>
                 ) : (
-                  <h3 className="text-lg font-semibold text-white mb-2 group-hover:text-primary-400 transition-colors">
+                  <h3 className="text-sm font-semibold text-white mb-1 group-hover:text-slate-200 transition-colors">
                     {project.name}
                   </h3>
                 )}
                 {project.description && (
-                  <p className="text-sm text-slate-400 mb-4 line-clamp-2">{project.description}</p>
+                  <p className="text-xs text-slate-400 mb-3 line-clamp-2">{project.description}</p>
                 )}
-                <div className="flex items-center justify-between text-sm text-slate-400">
+                <div className="flex items-center justify-between text-xs text-slate-500">
                   <span className="flex items-center gap-1">
                     <FileText className="h-3 w-3" />
                     {project.branch}
@@ -356,51 +300,49 @@ function ProjectsList() {
             ))}
           </div>
         )}
-      </div>
-
       {/* Create Project Modal */}
       {showCreateProject && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-slate-800 rounded-xl border border-slate-700 p-6 w-full max-w-md mx-4">
-            <h3 className="text-lg font-semibold text-white mb-4">Create New Project</h3>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-slate-900 rounded-lg border border-slate-700 p-5 w-full max-w-md mx-4 shadow-2xl">
+            <h3 className="text-sm font-semibold text-white mb-4">New Project</h3>
             <form onSubmit={handleCreateProject}>
-              <div className="space-y-4">
+              <div className="space-y-3">
                 <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                  <label className="block text-xs font-medium text-slate-400 mb-1.5">
                     Project Name
                   </label>
                   <input
                     type="text"
                     value={newProjectName}
                     onChange={(e) => setNewProjectName(e.target.value)}
-                    className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
-                    placeholder="My Awesome Project"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 focus:border-sky-500"
+                    placeholder="My Project"
                     autoFocus
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                  <label className="block text-xs font-medium text-slate-400 mb-1.5">
                     Project Brief
                   </label>
                   <textarea
                     value={newProjectDescription}
                     onChange={(e) => setNewProjectDescription(e.target.value)}
-                    className="min-h-[88px] w-full resize-y rounded-lg border border-slate-700 bg-slate-900/50 px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
+                    className="min-h-[80px] w-full resize-y rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 focus:border-sky-500"
                     placeholder="What this project is for, scope, expected deliverable..."
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                  <label className="block text-xs font-medium text-slate-400 mb-1.5">
                     Project Rules
                   </label>
                   <textarea
                     value={newProjectRules}
                     onChange={(e) => setNewProjectRules(e.target.value)}
-                    className="min-h-[104px] w-full resize-y rounded-lg border border-slate-700 bg-slate-900/50 px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
+                    className="min-h-[96px] w-full resize-y rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 focus:border-sky-500"
                     placeholder="Constraints, style rules, forbidden tools, must-keep architecture..."
                   />
                 </div>
-                <div className="flex gap-3">
+                <div className="flex gap-2 pt-1">
                   <button
                     type="button"
                     onClick={() => {
@@ -409,14 +351,14 @@ function ProjectsList() {
                       setNewProjectDescription('');
                       setNewProjectRules('');
                     }}
-                    className="flex-1 bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg transition-all"
+                    className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm px-3 py-2 rounded-md transition-colors"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
                     disabled={!newProjectName.trim() || creatingProject}
-                    className="flex-1 bg-primary-500 hover:bg-primary-600 text-white px-4 py-2 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    className="flex-1 bg-sky-600 hover:bg-sky-500 text-white text-sm px-3 py-2 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                   >
                     {creatingProject ? (
                       <>

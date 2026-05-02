@@ -92,7 +92,7 @@ export function SessionHeader({
               href={project.github_url}
               target="_blank"
               rel="noopener noreferrer"
-              className="ml-2 text-primary-400 hover:text-primary-300"
+              className="ml-2 text-sky-400 hover:text-sky-300"
             >
               <ExternalLink className="inline h-4 w-4" />
             </a>
@@ -161,38 +161,26 @@ export function SessionStats({
   tasksCount,
 }: SessionStatsProps) {
   return (
-    <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
-      <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4 backdrop-blur">
-        <p className="mb-1 flex items-center gap-2 text-sm text-slate-400">
-          <Activity className="h-4 w-4" />
-          Status
-        </p>
-        <p className="font-semibold capitalize text-white">{session.status}</p>
-        <p className="mt-1 text-xs uppercase tracking-wide text-slate-500">
+    <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+      <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
+        <p className="mb-1.5 text-xs text-slate-400">Status</p>
+        <p className="text-sm font-medium capitalize text-white">{session.status}</p>
+        <p className="mt-0.5 text-xs text-slate-400">
           {session.execution_mode} mode
         </p>
       </div>
-      <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4 backdrop-blur">
-        <p className="mb-1 flex items-center gap-2 text-sm text-slate-400">
-          <TerminalIcon className="h-4 w-4" />
-          Tasks
-        </p>
-        <p className="font-semibold text-white">{tasksCount}</p>
+      <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
+        <p className="mb-1.5 text-xs text-slate-400">Tasks</p>
+        <p className="text-sm font-medium text-white">{tasksCount}</p>
       </div>
-      <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4 backdrop-blur">
-        <p className="mb-1 flex items-center gap-2 text-sm text-slate-400">
-          <Clock className="h-4 w-4" />
-          Created
-        </p>
-        <p className="font-semibold text-white">{formatDateTime(session.created_at)}</p>
+      <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
+        <p className="mb-1.5 text-xs text-slate-400">Created</p>
+        <p className="text-sm font-medium text-white font-mono">{formatDateTime(session.created_at)}</p>
       </div>
       {session.started_at && (
-        <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4 backdrop-blur">
-          <p className="mb-1 flex items-center gap-2 text-sm text-slate-400">
-            <CheckCircle2 className="h-4 w-4" />
-            Started
-          </p>
-          <p className="font-semibold text-white">
+        <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
+          <p className="mb-1.5 text-xs text-slate-400">Started</p>
+          <p className="text-sm font-medium text-white font-mono">
             {formatDateTime(session.started_at)}
           </p>
         </div>
@@ -214,40 +202,40 @@ export function SessionTabs({
 }: SessionTabsProps) {
   return (
     <div className="border-b border-slate-700">
-      <nav className="flex gap-4">
+      <nav className="flex gap-0">
         <button
           onClick={() => onChange('logs')}
           className={cn(
-            'flex items-center gap-2 px-2 pb-2 text-sm font-medium',
+            'flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors',
             activeTab === 'logs'
-              ? 'border-b-2 border-blue-400 text-blue-400'
-              : 'text-slate-400 hover:text-slate-200'
+              ? 'border-sky-500 text-white'
+              : 'border-transparent text-slate-500 hover:text-slate-300'
           )}
         >
-          <TerminalIcon className="h-4 w-4" />
+          <TerminalIcon className="h-3.5 w-3.5" />
           Logs
         </button>
         <button
           onClick={() => onChange('tasks')}
           className={cn(
-            'px-2 pb-2 text-sm font-medium',
+            'px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors',
             activeTab === 'tasks'
-              ? 'border-b-2 border-blue-400 text-blue-400'
-              : 'text-slate-400 hover:text-slate-200'
+              ? 'border-sky-500 text-white'
+              : 'border-transparent text-slate-500 hover:text-slate-300'
           )}
         >
-          Tasks ({tasksCount})
+          Tasks {tasksCount > 0 && <span className="ml-1 text-xs text-slate-600">({tasksCount})</span>}
         </button>
         <button
           onClick={() => onChange('settings')}
           className={cn(
-            'flex items-center gap-2 px-2 pb-2 text-sm font-medium',
+            'flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors',
             activeTab === 'settings'
-              ? 'border-b-2 border-blue-400 text-blue-400'
-              : 'text-slate-400 hover:text-slate-200'
+              ? 'border-sky-500 text-white'
+              : 'border-transparent text-slate-500 hover:text-slate-300'
           )}
         >
-          <Settings className="h-4 w-4" />
+          <Settings className="h-3.5 w-3.5" />
           Settings
         </button>
       </nav>
@@ -318,16 +306,16 @@ export function SessionLogsPanel({
           <select
             value={logVerbosity}
             onChange={(e) => onLogVerbosityChange(e.target.value as 'clean' | 'verbose')}
-            className="rounded-lg bg-slate-700 px-3 py-1.5 text-sm text-white transition-colors hover:bg-slate-600"
+            className="rounded-md border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs text-slate-300 transition-colors hover:border-slate-600 focus:outline-none"
           >
-            <option value="clean">Clean Logs</option>
-            <option value="verbose">Verbose Logs</option>
+            <option value="clean">Clean</option>
+            <option value="verbose">Verbose</option>
           </select>
           <button
             onClick={handleRefreshLogs}
-            className="flex items-center gap-2 rounded-lg bg-slate-700 px-3 py-1.5 text-sm text-white transition-colors hover:bg-slate-600"
+            className="flex items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs text-slate-300 transition-colors hover:border-slate-600 hover:text-white"
           >
-            <RefreshCw className="h-4 w-4" />
+            <RefreshCw className="h-3.5 w-3.5" />
             Refresh
           </button>
           <select
@@ -337,28 +325,28 @@ export function SessionLogsPanel({
                 e.target.value as 'newest' | 'oldest' | 'success' | 'errors' | 'all'
               )
             }
-            className="rounded-lg bg-slate-700 px-3 py-1.5 text-sm text-white transition-colors hover:bg-slate-600"
+            className="rounded-md border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs text-slate-300 transition-colors hover:border-slate-600 focus:outline-none"
           >
-            <option value="newest">Sort: Newest First</option>
-            <option value="oldest">Sort: Oldest First</option>
-            <option value="success">Filter: Success Only</option>
-            <option value="errors">Filter: Errors Only</option>
-            <option value="all">Show All</option>
+            <option value="newest">Newest first</option>
+            <option value="oldest">Oldest first</option>
+            <option value="success">Success only</option>
+            <option value="errors">Errors only</option>
+            <option value="all">All</option>
           </select>
         </div>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-3 lg:grid-cols-2">
         <div
           className={cn(
             'rounded-lg border p-4',
             staleDispatch
-              ? 'border-amber-800/70 bg-amber-950/20'
-              : 'border-slate-700 bg-slate-900'
+              ? 'border-amber-800/60 bg-amber-950/20'
+              : 'border-slate-700 bg-slate-800'
           )}
         >
           <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-slate-200">Dispatch Watchdog</h3>
+            <h3 className="text-sm font-medium text-slate-300">Dispatch Watchdog</h3>
             <span
               className={cn(
                 'text-xs font-medium',
@@ -373,7 +361,7 @@ export function SessionLogsPanel({
             </span>
           </div>
           {!dispatchWatchdog ? (
-            <p className="text-sm text-slate-500">
+            <p className="text-sm text-slate-400">
               Queue/claim watchdog data appears after session events are indexed.
             </p>
           ) : (
@@ -405,7 +393,7 @@ export function SessionLogsPanel({
                   )}
                 </>
               ) : (
-                <p className="text-sm text-slate-500">
+                <p className="text-sm text-slate-400">
                   No queued dispatch has exceeded the watchdog SLA.
                 </p>
               )}
@@ -413,9 +401,9 @@ export function SessionLogsPanel({
           )}
         </div>
 
-        <div className="rounded-lg border border-slate-700 bg-slate-900 p-4">
+        <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
           <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-slate-200">Health Score</h3>
+            <h3 className="text-sm font-medium text-slate-300">Health Score</h3>
             {latestHealth ? (
               <span
                 className={cn(
@@ -430,11 +418,11 @@ export function SessionLogsPanel({
                 {latestHealth.score}/100
               </span>
             ) : (
-              <span className="text-xs text-slate-500">No score yet</span>
+              <span className="text-xs text-slate-400">No score yet</span>
             )}
           </div>
           {healthEvents.length === 0 ? (
-            <p className="text-sm text-slate-500">
+            <p className="text-sm text-slate-400">
               Health history appears after orchestration events start landing.
             </p>
           ) : (
@@ -442,11 +430,11 @@ export function SessionLogsPanel({
               {healthEvents.slice(-5).reverse().map((event) => (
                 <div
                   key={`${event.timestamp}-${event.score}`}
-                  className="flex items-center justify-between rounded-md border border-slate-800 px-3 py-2 text-sm"
+                  className="flex items-center justify-between rounded-md border border-slate-700 px-3 py-2 text-sm"
                 >
                   <div>
                     <p className="font-medium text-slate-200">{event.score}/100</p>
-                    <p className="text-xs text-slate-500">{formatDateTime(event.timestamp)}</p>
+                    <p className="text-xs text-slate-400">{formatDateTime(event.timestamp)}</p>
                   </div>
                   <span
                     className={cn(
@@ -468,17 +456,17 @@ export function SessionLogsPanel({
           )}
         </div>
 
-        <div className="rounded-lg border border-slate-700 bg-slate-900 p-4">
+        <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
           <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-slate-200">Latest State Diff</h3>
-            <span className="text-xs text-slate-500">
+            <h3 className="text-sm font-medium text-slate-300">Latest State Diff</h3>
+            <span className="text-xs text-slate-400">
               {stateDiff
                 ? `Snapshots ${stateDiff.from_checkpoint} → ${stateDiff.to_checkpoint}`
                 : 'Unavailable'}
             </span>
           </div>
           {!stateDiff || !stateDiff.delta ? (
-            <p className="text-sm text-slate-500">
+            <p className="text-sm text-slate-400">
               Diff data appears after at least two state snapshots exist.
             </p>
           ) : (
@@ -521,7 +509,7 @@ export function SessionLogsPanel({
               <div key={`${event.at}-${event.title}`} className="rounded-md border border-amber-900/60 px-3 py-2">
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-xs font-medium uppercase text-amber-300">{event.title}</span>
-                  <span className="text-xs text-slate-500">{formatDateTime(event.at)}</span>
+                  <span className="text-xs text-slate-400">{formatDateTime(event.at)}</span>
                 </div>
                 <p className="mt-1 text-sm text-slate-200">{event.detail}</p>
               </div>
@@ -531,14 +519,14 @@ export function SessionLogsPanel({
       )}
 
       {compareMatches && compareMatches.matches.length > 0 && (
-        <div className="rounded-lg border border-slate-700 bg-slate-900 p-4">
+        <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
           <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-slate-200">Similar Failed Sessions</h3>
+            <h3 className="text-sm font-medium text-slate-300">Similar Failed Sessions</h3>
             <span className="text-xs text-slate-400">{compareMatches.matches.length} matches</span>
           </div>
           <div className="space-y-2">
             {compareMatches.matches.slice(0, 3).map((match) => (
-              <div key={match.session_id} className="rounded-md border border-slate-800 p-3">
+              <div key={match.session_id} className="rounded-md border border-slate-700 p-3">
                 <div className="flex items-center justify-between gap-3">
                   <p className="text-sm font-medium text-slate-200">
                     #{match.session_id} {match.session_name}
@@ -547,7 +535,7 @@ export function SessionLogsPanel({
                     {(match.similarity_score * 100).toFixed(0)}% similar
                   </span>
                 </div>
-                <p className="mt-1 text-xs text-slate-500">
+                <p className="mt-1 text-xs text-slate-400">
                   Retries {match.retry_count} • Tool failures {match.tool_failure_count} • Intent gaps {match.intent_gap_count}
                 </p>
                 {match.shared_tags.length > 0 && (
@@ -561,19 +549,19 @@ export function SessionLogsPanel({
         </div>
       )}
 
-      <div className="rounded-lg border border-slate-700 bg-slate-900 p-4">
+      <div className="rounded-lg border border-slate-600 bg-slate-800 p-4">
         <div className="mb-3 flex items-center justify-between">
           <h3 className="text-sm font-semibold text-slate-200">Causal Spans</h3>
           <span className="text-xs text-slate-400">{timelineSpans.length} spans</span>
         </div>
         {timelineSpans.length === 0 ? (
-          <p className="text-sm text-slate-500">
+          <p className="text-sm text-slate-400">
             Span grouping appears when parent-linked orchestration events are present.
           </p>
         ) : (
           <div className="max-h-56 space-y-2 overflow-y-auto">
             {timelineSpans.slice().reverse().map((span) => (
-              <div key={span.id} className="rounded-md border border-slate-800 p-3">
+              <div key={span.id} className="rounded-md border border-slate-700 p-3">
                 <div className="flex items-center justify-between gap-3">
                   <div className="flex items-center gap-2">
                     <span
@@ -599,18 +587,18 @@ export function SessionLogsPanel({
                       {span.status}
                     </span>
                   </div>
-                  <span className="text-xs text-slate-500">{formatDateTime(span.started_at)}</span>
+                  <span className="text-xs text-slate-400">{formatDateTime(span.started_at)}</span>
                 </div>
                 <p className="mt-2 text-sm font-medium text-slate-200">{span.title}</p>
                 <p className="mt-1 text-sm text-slate-400">{span.summary}</p>
-                <p className="mt-1 text-xs text-slate-500">{span.event_count} linked events</p>
+                <p className="mt-1 text-xs text-slate-400">{span.event_count} linked events</p>
               </div>
             ))}
           </div>
         )}
       </div>
 
-      <div className="rounded-lg border border-slate-700 bg-slate-900 p-4">
+      <div className="rounded-lg border border-slate-600 bg-slate-800 p-4">
         <div className="mb-3 flex items-center justify-between">
           <h3 className="text-sm font-semibold text-slate-200">Execution Timeline</h3>
           <span className="text-xs text-slate-400">{timelineEvents.length} events</span>
@@ -625,7 +613,7 @@ export function SessionLogsPanel({
               .slice()
               .reverse()
               .map((event) => (
-                <div key={event.id} className="rounded-md border border-slate-800 p-2">
+                <div key={event.id} className="rounded-md border border-slate-700 p-2">
                   <div className="flex items-center justify-between">
                     <span
                       className={cn(
@@ -646,7 +634,7 @@ export function SessionLogsPanel({
                     >
                       {event.title}
                     </span>
-                    <span className="text-xs text-slate-500">
+                    <span className="text-xs text-slate-400">
                       {formatDateTime(event.at)}
                     </span>
                   </div>
@@ -700,7 +688,7 @@ export function SessionTasksPanel({
           <TerminalIcon className="mx-auto mb-4 h-12 w-12 text-slate-500" />
           <p className="text-slate-400">No tasks yet</p>
           {actionButtons && (
-            <p className="mt-2 text-sm text-slate-500">
+            <p className="mt-2 text-sm text-slate-400">
               Start the session to automatically execute tasks from your project
             </p>
           )}
@@ -709,12 +697,12 @@ export function SessionTasksPanel({
         tasks.map((task) => (
           <div
             key={task.id}
-            className="rounded-xl border border-slate-700 bg-slate-800/50 p-4 backdrop-blur transition-colors hover:border-slate-600"
+            className="rounded-xl border border-slate-600 bg-slate-800 p-4 transition-colors hover:border-slate-600"
           >
             <div className="mb-2 flex items-start justify-between">
               <div>
                 <h3 className="font-semibold text-white">{task.title}</h3>
-                <p className="mt-1 text-xs text-slate-500">
+                <p className="mt-1 text-xs text-slate-400">
                   Order: {task.plan_position ?? 'manual'} • Priority: {task.priority ?? 0}
                 </p>
                 {task.workspace_status && (
@@ -753,7 +741,7 @@ export function SessionTasksPanel({
                 </p>
               </div>
             )}
-            <div className="mt-3 flex items-center gap-4 text-xs text-slate-500">
+            <div className="mt-3 flex items-center gap-4 text-xs text-slate-400">
               {task.created_at && <span>Created: {formatDateTime(task.created_at)}</span>}
               {task.started_at && <span>Started: {formatDateTime(task.started_at)}</span>}
               {task.completed_at && (
@@ -792,7 +780,7 @@ export function SessionSettingsPanel({
 }: SessionSettingsPanelProps) {
   return (
     <div className="space-y-4">
-      <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4 backdrop-blur">
+      <div className="rounded-xl border border-slate-600 bg-slate-800 p-4">
         <p className="mb-2 text-sm text-slate-400">Execution Mode</p>
         <div className="flex items-center gap-2">
           <button
@@ -800,7 +788,7 @@ export function SessionSettingsPanel({
             className={cn(
               'rounded-lg px-3 py-2 text-sm transition-colors',
               session.execution_mode === 'automatic'
-                ? 'bg-primary-600 text-white'
+                ? 'bg-sky-600 text-white'
                 : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
             )}
           >
@@ -811,7 +799,7 @@ export function SessionSettingsPanel({
             className={cn(
               'rounded-lg px-3 py-2 text-sm transition-colors',
               session.execution_mode === 'manual'
-                ? 'bg-primary-600 text-white'
+                ? 'bg-sky-600 text-white'
                 : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
             )}
           >
@@ -827,43 +815,43 @@ export function SessionSettingsPanel({
           )}
         </div>
       </div>
-      <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4 backdrop-blur">
+      <div className="rounded-xl border border-slate-600 bg-slate-800 p-4">
         <p className="mb-1 text-sm text-slate-400">Session ID</p>
         <p className="font-mono text-sm text-white">{session.id}</p>
       </div>
-      <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4 backdrop-blur">
+      <div className="rounded-xl border border-slate-600 bg-slate-800 p-4">
         <p className="mb-1 text-sm text-slate-400">Project ID</p>
         <p className="font-mono text-sm text-white">{session.project_id}</p>
       </div>
-      <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4 backdrop-blur">
+      <div className="rounded-xl border border-slate-600 bg-slate-800 p-4">
         <p className="mb-1 text-sm text-slate-400">Created At</p>
         <p className="text-white">{formatDateTime(session.created_at)}</p>
       </div>
       {session.started_at && (
-        <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4 backdrop-blur">
+        <div className="rounded-xl border border-slate-600 bg-slate-800 p-4">
           <p className="mb-1 text-sm text-slate-400">Started At</p>
           <p className="text-white">{formatDateTime(session.started_at)}</p>
         </div>
       )}
       {session.stopped_at && (
-        <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4 backdrop-blur">
+        <div className="rounded-xl border border-slate-600 bg-slate-800 p-4">
           <p className="mb-1 text-sm text-slate-400">Stopped At</p>
           <p className="text-white">{formatDateTime(session.stopped_at)}</p>
         </div>
       )}
-      <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4 backdrop-blur">
+      <div className="rounded-xl border border-slate-600 bg-slate-800 p-4">
         <div className="mb-3 flex items-center justify-between">
           <p className="text-sm text-slate-400">Checkpoint Inspector</p>
-          <span className="text-xs text-slate-500">{checkpoints.length} stored</span>
+          <span className="text-xs text-slate-400">{checkpoints.length} stored</span>
         </div>
         {checkpoints.length === 0 ? (
-          <p className="text-sm text-slate-500">No checkpoints recorded for this session yet.</p>
+          <p className="text-sm text-slate-400">No checkpoints recorded for this session yet.</p>
         ) : (
           <div className="max-h-56 space-y-2 overflow-y-auto">
             {checkpoints.map((checkpoint) => (
               <div
                 key={checkpoint.name}
-                className="rounded-lg border border-slate-700 bg-slate-900/70 p-3"
+                className="rounded-lg border border-slate-600 bg-slate-700/60 p-3"
               >
                 <div className="flex items-center justify-between gap-3">
                   <div>
@@ -876,7 +864,7 @@ export function SessionSettingsPanel({
                         <span className="ml-2 text-xs text-amber-400">Metadata Only</span>
                       ) : null}
                     </p>
-                    <p className="text-xs text-slate-500">
+                    <p className="text-xs text-slate-400">
                       {formatDateTime(checkpoint.created_at)} • Step {checkpoint.step_index ?? 0} • Completed {checkpoint.completed_steps ?? 0}
                     </p>
                     {checkpoint.restore_fidelity ? (

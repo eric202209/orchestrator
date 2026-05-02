@@ -7,80 +7,63 @@ interface StatusBadgeProps {
   className?: string;
 }
 
-const statusColors: Record<string, { bg: string; text: string; icon: string }> = {
-  // Project statuses
-  'active': { bg: 'bg-green-500/10', text: 'text-green-400', icon: '✓' },
-  'pending': { bg: 'bg-yellow-500/10', text: 'text-yellow-400', icon: '⏳' },
-  'stopped': { bg: 'bg-slate-500/10', text: 'text-slate-400', icon: '⏸' },
-  
-  // Session statuses
-  'running': { bg: 'bg-blue-500/10', text: 'text-blue-400', icon: '▶' },
-  'paused': { bg: 'bg-yellow-500/10', text: 'text-yellow-400', icon: '⏸' },
-  'failed': { bg: 'bg-red-500/10', text: 'text-red-400', icon: '✗' },
-  'completed': { bg: 'bg-green-500/10', text: 'text-green-400', icon: '✓' },
-  'cancelled': { bg: 'bg-slate-500/10', text: 'text-slate-400', icon: '⏹' },
-  
-  // Task statuses
-  'todo': { bg: 'bg-slate-500/10', text: 'text-slate-400', icon: '□' },
-  'in_progress': { bg: 'bg-blue-500/10', text: 'text-blue-400', icon: '◐' },
-  'done': { bg: 'bg-green-500/10', text: 'text-green-400', icon: '✓' },
-  
-  // Default fallback
-  'default': { bg: 'bg-slate-500/10', text: 'text-slate-400', icon: '•' },
+const statusColors: Record<string, { bg: string; text: string; dot: string }> = {
+  'active':      { bg: 'bg-emerald-500/10', text: 'text-emerald-400', dot: 'bg-emerald-400' },
+  'pending':     { bg: 'bg-amber-500/10',   text: 'text-amber-400',   dot: 'bg-amber-400' },
+  'stopped':     { bg: 'bg-slate-500/10',   text: 'text-slate-400',   dot: 'bg-slate-500' },
+  'running':     { bg: 'bg-sky-500/10',     text: 'text-sky-400',     dot: 'bg-sky-400' },
+  'paused':      { bg: 'bg-amber-500/10',   text: 'text-amber-400',   dot: 'bg-amber-400' },
+  'failed':      { bg: 'bg-red-500/10',     text: 'text-red-400',     dot: 'bg-red-400' },
+  'completed':   { bg: 'bg-emerald-500/10', text: 'text-emerald-400', dot: 'bg-emerald-400' },
+  'cancelled':   { bg: 'bg-slate-500/10',   text: 'text-slate-400',   dot: 'bg-slate-500' },
+  'todo':        { bg: 'bg-slate-500/10',   text: 'text-slate-400',   dot: 'bg-slate-500' },
+  'in_progress': { bg: 'bg-sky-500/10',     text: 'text-sky-400',     dot: 'bg-sky-400' },
+  'done':        { bg: 'bg-emerald-500/10', text: 'text-emerald-400', dot: 'bg-emerald-400' },
+  'default':     { bg: 'bg-slate-500/10',   text: 'text-slate-400',   dot: 'bg-slate-500' },
 };
 
-export function StatusBadge({ 
-  status, 
-  size = 'md', 
-  variant = 'default', 
-  className 
+export function StatusBadge({
+  status,
+  size = 'md',
+  variant = 'default',
+  className,
 }: StatusBadgeProps) {
   const statusLower = status?.toLowerCase();
   const colors = statusColors[statusLower] || statusColors['default'];
-  
-  // Format status text: convert snake_case to Title Case
-  const formatStatusText = (statusText: string | undefined): string => {
-    if (!statusText) return 'unknown';
-    
-    // Handle special cases
-    const specialCases: Record<string, string> = {
-      'in_progress': 'In Progress',
-      'todo': 'To Do',
-      'done': 'Done',
+
+  const formatStatusText = (s: string | undefined): string => {
+    if (!s) return 'unknown';
+    const special: Record<string, string> = {
+      in_progress: 'In Progress',
+      todo: 'To Do',
+      done: 'Done',
     };
-    
-    if (specialCases[statusText]) {
-      return specialCases[statusText];
-    }
-    
-    // Convert snake_case to Title Case
-    return statusText
-      .split('_')
-      .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-      .join(' ');
+    return special[s] ?? s.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
   };
-  
+
   const sizeClasses = {
-    sm: 'px-2 py-1 text-xs min-h-[44px] min-w-[44px]',
-    md: 'px-2.5 py-1.5 text-sm min-h-[44px] min-w-[44px]',
-    lg: 'px-3 py-2 text-base min-h-[44px] min-w-[44px]',
+    sm: 'px-1.5 py-0.5 text-xs gap-1',
+    md: 'px-2 py-0.5 text-xs gap-1.5',
+    lg: 'px-2.5 py-1 text-sm gap-1.5',
   };
-  
-  const borderClasses = variant === 'outline' 
-    ? `border ${colors.bg.replace('/10', '')} ${colors.text}`
+
+  const dotSize = size === 'lg' ? 'h-2 w-2' : 'h-1.5 w-1.5';
+
+  const borderClasses = variant === 'outline'
+    ? `border border-current`
     : '';
-  
+
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1.5 font-medium rounded-full',
+        'inline-flex items-center font-medium rounded-md whitespace-nowrap',
         sizeClasses[size],
-        variant === 'default' ? `${colors.bg} ${colors.text}` : borderClasses,
+        variant === 'default' ? `${colors.bg} ${colors.text}` : `${colors.text} ${borderClasses}`,
         className
       )}
     >
-      <span className="text-xs">{colors.icon}</span>
-      <span className="capitalize">{formatStatusText(status)}</span>
+      <span className={cn('rounded-full flex-shrink-0', dotSize, colors.dot)} />
+      <span>{formatStatusText(status)}</span>
     </span>
   );
 }

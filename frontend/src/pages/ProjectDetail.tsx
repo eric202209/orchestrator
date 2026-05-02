@@ -3,8 +3,8 @@ import { useParams, Link, useNavigate } from 'react-router-dom';
 import { projectsAPI, tasksAPI, sessionsAPI } from '../api/client';
 import type { Project, Task, Session } from '../types/api';
 import { ProjectPlannerPanel } from '../components/ProjectPlannerPanel';
-import { 
-  GitBranch, 
+import {
+  GitBranch,
   FileText,
   XCircle,
   ArrowLeft,
@@ -21,7 +21,7 @@ import { StatusBadge, EmptyState } from '../components/ui';
 function ProjectDetail() {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
-  const id = projectId; // Keep consistent naming
+  const id = projectId;
   const [project, setProject] = useState<Project | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -64,17 +64,16 @@ function ProjectDetail() {
       setLoading(false);
       return;
     }
-    
+
     const loadProjectData = async () => {
       try {
-        // Fetch project, tasks, and sessions in parallel
         const [projectRes, tasksRes, sessionsRes] = await Promise.all([
           projectsAPI.getById(Number(id)),
           tasksAPI.getByProject(Number(id)),
           sessionsAPI.getByProject(Number(id))
         ]);
         const workspaceRes = await projectsAPI.getWorkspaceOverview(Number(id));
-        
+
         setProject(projectRes.data);
         setProjectDescriptionDraft(projectRes.data.description || '');
         setProjectRulesDraft(projectRes.data.project_rules || '');
@@ -82,27 +81,27 @@ function ProjectDetail() {
         setSessions(sessionsRes.data || []);
         setWorkspaceOverview(workspaceRes.data || null);
       } catch (err) {
-        console.error('❌ Failed to load project data:', err);
+        console.error('Failed to load project data:', err);
         setError(err instanceof Error ? err.message : 'Failed to load project data');
         navigate('/projects');
       } finally {
         setLoading(false);
       }
     };
-    
+
     loadProjectData();
   }, [id, navigate]);
 
   if (error) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-900">
+      <div className="flex items-center justify-center min-h-[400px]">
         <div className="text-center">
-          <XCircle className="h-16 w-16 text-red-500 mx-auto mb-4" />
-          <h2 className="text-xl font-semibold text-white mb-2">Error Loading Project</h2>
-          <p className="text-slate-400 mb-4">{error}</p>
+          <XCircle className="h-10 w-10 text-red-500 mx-auto mb-3" />
+          <h2 className="text-base font-semibold text-white mb-2">Error Loading Project</h2>
+          <p className="text-sm text-slate-400 mb-4">{error}</p>
           <button
             onClick={() => navigate('/projects')}
-            className="bg-primary-500 hover:bg-primary-600 text-white px-6 py-2 rounded-lg transition-colors"
+            className="bg-sky-600 hover:bg-sky-500 text-white px-4 py-2 rounded-md text-sm transition-colors"
           >
             Back to Projects
           </button>
@@ -111,7 +110,6 @@ function ProjectDetail() {
     );
   }
 
-  // Refresh tasks and sessions
   const fetchTasks = async () => {
     if (!id) return;
     try {
@@ -195,6 +193,7 @@ function ProjectDetail() {
       setRebuildingBaseline(false);
     }
   };
+
   const generateStepsFromDescription = async (description: string) => {
     setGeneratingSteps(true);
     try {
@@ -256,8 +255,7 @@ function ProjectDetail() {
         title: taskTitle,
         description: taskDescription || undefined,
       };
-      
-      // Include steps if provided (either auto-generated or manually entered)
+
       if (taskSteps.trim()) {
         payload.steps = taskSteps;
       }
@@ -284,26 +282,13 @@ function ProjectDetail() {
       return;
     }
 
-    console.log('Deleting task:', taskId);
     const previousTasks = tasks;
     setTasks((current) => current.filter((task) => task.id !== taskId));
     try {
-      // Use DELETE instead of PATCH with cancelled status
       await tasksAPI.delete(taskId);
-      console.log('Task deleted successfully');
     } catch (error) {
       setTasks(previousTasks);
       console.error('Failed to delete task:', error);
-      if (
-        typeof error === 'object' &&
-        error !== null &&
-        'response' in error &&
-        typeof error.response === 'object' &&
-        error.response !== null &&
-        'data' in error.response
-      ) {
-        console.error('Error response:', error.response.data);
-      }
       alert('Failed to delete task. Please try again.');
     }
   };
@@ -359,7 +344,6 @@ function ProjectDetail() {
           task.id === taskId ? response.data : task
         )
       );
-
     } catch (error) {
       setTasks(previousTasks);
       setEditingTaskId(taskId);
@@ -396,9 +380,7 @@ function ProjectDetail() {
       currentValue
     );
 
-    if (nextValue === null) {
-      return;
-    }
+    if (nextValue === null) return;
 
     const trimmedValue = nextValue.trim();
     if (trimmedValue && !/^https?:\/\/.+/i.test(trimmedValue)) {
@@ -444,249 +426,210 @@ function ProjectDetail() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-900">
-        <div className="h-8 w-8 border-2 border-primary-500/30 border-t-primary-500 rounded-full animate-spin" />
+      <div className="flex items-center justify-center min-h-[400px]">
+        <div className="h-8 w-8 border-2 border-sky-500/30 border-t-sky-500 rounded-full animate-spin" />
       </div>
     );
   }
 
   if (!project) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-900">
-        <p className="text-white">Project not found</p>
+      <div className="flex items-center justify-center min-h-[400px]">
+        <p className="text-sm text-white">Project not found</p>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-slate-900">
-      {/* Navbar */}
-      <nav className="bg-slate-800/50 backdrop-blur border-b border-slate-700">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
-            <div className="flex items-center gap-4">
-              <Link
-                to="/projects"
-                className="text-slate-400 hover:text-white transition-colors"
-                title="Back to Projects"
-              >
-                <ArrowLeft className="h-5 w-5" />
-              </Link>
-              <div className="flex items-center gap-2">
-                <GitBranch className="h-6 w-6 text-primary-500" />
-                <span className="text-xl font-bold text-white">{project.name}</span>
-              </div>
-            </div>
-            
-            <div className="flex items-center gap-3">
-              {project.github_url && (
-                <a
-                  href={project.github_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-slate-400 hover:text-white transition-colors"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    const repoUrl = project.github_url;
-                    if (repoUrl) {
-                      window.open(repoUrl, '_blank');
-                    }
-                  }}
-                  title={project.github_url}
-                >
-                  <ExternalLink className="h-5 w-5" />
-                </a>
-              )}
-              <button
-                onClick={handleUpdateGithubUrl}
-                disabled={savingGithubUrl}
-                className="text-sm text-slate-300 hover:text-white transition-colors disabled:opacity-50"
-                title={project.github_url ? 'Update GitHub repository link' : 'Link a GitHub repository'}
-              >
-                {project.github_url ? 'Edit Repo' : 'Link Repo'}
-              </button>
-            </div>
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <Link to="/projects" className="text-slate-400 hover:text-white transition-colors">
+            <ArrowLeft className="h-4 w-4" />
+          </Link>
+          <h1 className="text-lg font-semibold text-white">{project.name}</h1>
+          <span className="flex items-center gap-1 text-xs text-slate-500">
+            <GitBranch className="h-3.5 w-3.5" />
+            {project.branch}
+          </span>
+        </div>
+        <div className="flex items-center gap-3">
+          {project.github_url && (
+            <a
+              href={project.github_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-slate-400 hover:text-slate-200 transition-colors"
+              title={project.github_url}
+            >
+              <ExternalLink className="h-4 w-4" />
+            </a>
+          )}
+          <button
+            onClick={handleUpdateGithubUrl}
+            disabled={savingGithubUrl}
+            className="text-xs text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-50"
+          >
+            {project.github_url ? 'Edit Repo' : 'Link Repo'}
+          </button>
+          <button
+            onClick={() => {
+              setEditingProjectMeta((current) => !current);
+              setProjectDescriptionDraft(project.description || '');
+              setProjectRulesDraft(project.project_rules || '');
+            }}
+            className="text-xs text-slate-400 hover:text-slate-200 transition-colors"
+          >
+            {editingProjectMeta ? 'Close Brief' : 'Edit Brief'}
+          </button>
+          {tasks.length > 0 && (
+            <button
+              onClick={async () => {
+                if (!confirm('Delete all tasks in this project? This cannot be undone.')) return;
+                try {
+                  await Promise.all(tasks.map(task => tasksAPI.delete(task.id)));
+                  alert('All tasks deleted');
+                  fetchTasks();
+                } catch (error) {
+                  console.error('Failed to delete all tasks:', error);
+                  alert('Failed to delete all tasks. Please try again.');
+                }
+              }}
+              className="flex items-center gap-1 text-xs text-red-400 hover:text-red-300 transition-colors"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Delete All
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Project Brief */}
+      <div className="rounded-lg border border-slate-700 bg-slate-800 p-5">
+        <div className="mb-3 flex items-center justify-between gap-4">
+          <div>
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Project Brief</h2>
+            <p className="mt-0.5 text-xs text-slate-500">Persistent project context for planning and execution.</p>
           </div>
         </div>
-      </nav>
-
-      {/* Main Content */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Project Header */}
-        <div className="mb-8">
-          <div className="flex items-start justify-between mb-4">
+        {editingProjectMeta ? (
+          <div className="space-y-3">
             <div>
-              <h1 className="text-3xl font-bold text-white mb-2">{project.name}</h1>
-              {project.description && (
-                <p className="text-slate-400">{project.description}</p>
-              )}
+              <label className="mb-1.5 block text-xs font-medium text-slate-400">Description</label>
+              <textarea
+                value={projectDescriptionDraft}
+                onChange={(e) => setProjectDescriptionDraft(e.target.value)}
+                className="min-h-[80px] w-full resize-y rounded-md border border-slate-600 bg-slate-950 px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                placeholder="Project brief, scope, expected outcome..."
+              />
             </div>
-            <div className="flex items-center gap-3">
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-slate-400">Rules</label>
+              <textarea
+                value={projectRulesDraft}
+                onChange={(e) => setProjectRulesDraft(e.target.value)}
+                className="min-h-[96px] w-full resize-y rounded-md border border-slate-600 bg-slate-950 px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                placeholder="Constraints, must-follow instructions, architecture rules..."
+              />
+            </div>
+            <div className="flex gap-2">
               <button
+                type="button"
                 onClick={() => {
-                  setEditingProjectMeta((current) => !current);
+                  setEditingProjectMeta(false);
                   setProjectDescriptionDraft(project.description || '');
                   setProjectRulesDraft(project.project_rules || '');
                 }}
-                className="text-sm text-slate-300 hover:text-white transition-colors"
+                className="rounded-md bg-slate-700 px-3 py-1.5 text-sm text-white transition-colors hover:bg-slate-600"
               >
-                {editingProjectMeta ? 'Close Brief' : 'Edit Brief'}
+                Cancel
               </button>
-              {tasks.length > 0 && (
-                <button
-                  onClick={async () => {
-                    if (!confirm('Delete all tasks in this project? This cannot be undone.')) {
-                      return;
-                    }
-                    try {
-                      await Promise.all(tasks.map(task => tasksAPI.delete(task.id)));
-                      alert('All tasks deleted');
-                      fetchTasks();
-                    } catch (error) {
-                      console.error('Failed to delete all tasks:', error);
-                      alert('Failed to delete all tasks. Please try again.');
-                    }
-                  }}
-                  className="flex items-center gap-2 text-red-400 hover:text-red-300 px-4 py-2 rounded-lg transition-all"
-                >
-                  <Trash2 className="h-4 w-4" />
-                  Delete All
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={handleSaveProjectMeta}
+                disabled={savingProjectMeta}
+                className="rounded-md bg-sky-600 px-3 py-1.5 text-sm text-white transition-colors hover:bg-sky-500 disabled:opacity-50"
+              >
+                {savingProjectMeta ? 'Saving...' : 'Save Brief'}
+              </button>
             </div>
           </div>
-          <div className="mb-6 rounded-2xl border border-slate-700 bg-slate-800/50 p-5">
-            <div className="mb-3 flex items-center justify-between gap-4">
-              <div>
-                <h2 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-300">Project Brief</h2>
-                <p className="mt-1 text-sm text-slate-500">Persistent project context for planning and execution.</p>
-              </div>
+        ) : (
+          <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <h3 className="mb-1.5 text-xs font-medium uppercase tracking-wider text-slate-500">Description</h3>
+              <p className="whitespace-pre-wrap text-sm text-slate-300">
+                {project.description || 'No project description yet.'}
+              </p>
             </div>
-            {editingProjectMeta ? (
-              <div className="space-y-4">
-                <div>
-                  <label className="mb-2 block text-sm font-medium text-slate-300">Description</label>
-                  <textarea
-                    value={projectDescriptionDraft}
-                    onChange={(e) => setProjectDescriptionDraft(e.target.value)}
-                    className="min-h-[96px] w-full resize-y rounded-lg border border-slate-700 bg-slate-900/50 px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
-                    placeholder="Project brief, scope, expected outcome..."
-                  />
-                </div>
-                <div>
-                  <label className="mb-2 block text-sm font-medium text-slate-300">Rules</label>
-                  <textarea
-                    value={projectRulesDraft}
-                    onChange={(e) => setProjectRulesDraft(e.target.value)}
-                    className="min-h-[120px] w-full resize-y rounded-lg border border-slate-700 bg-slate-900/50 px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
-                    placeholder="Constraints, must-follow instructions, architecture rules..."
-                  />
-                </div>
-                <div className="flex gap-3">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEditingProjectMeta(false);
-                      setProjectDescriptionDraft(project.description || '');
-                      setProjectRulesDraft(project.project_rules || '');
-                    }}
-                    className="rounded-lg bg-slate-700 px-4 py-2 text-white transition-all hover:bg-slate-600"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleSaveProjectMeta}
-                    disabled={savingProjectMeta}
-                    className="rounded-lg bg-primary-500 px-4 py-2 text-white transition-all hover:bg-primary-600 disabled:opacity-50"
-                  >
-                    {savingProjectMeta ? 'Saving...' : 'Save Brief'}
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="grid gap-4 md:grid-cols-2">
-                <div>
-                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Description</h3>
-                  <p className="whitespace-pre-wrap text-sm text-slate-300">
-                    {project.description || 'No project description yet.'}
-                  </p>
-                </div>
-                <div>
-                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Rules</h3>
-                  <p className="whitespace-pre-wrap text-sm text-slate-300">
-                    {project.project_rules || 'No project rules yet.'}
-                  </p>
-                </div>
-              </div>
-            )}
-          </div>
-          <div className="flex items-center gap-4 text-sm text-slate-400">
-            <span className="flex items-center gap-1">
-              <GitBranch className="h-4 w-4" />
-              {project.branch}
-            </span>
-            {project.github_url && (
-              <span className="truncate max-w-[320px]">
-                Repo: {project.github_url}
-              </span>
-            )}
-            <span>{formatDistanceToNow(new Date(project.created_at), { addSuffix: true })}</span>
-            <span className="flex items-center gap-1">
-              <FileText className="h-4 w-4" />
-              {tasks.length} tasks
-            </span>
-            <span className="flex items-center gap-1">
-              <Terminal className="h-4 w-4" />
-              {sessions.length} sessions
-            </span>
-          </div>
-        </div>
-
-        <div className="mb-8 flex flex-wrap gap-2">
-          {[
-            { key: 'tasks', label: 'Task List' },
-            { key: 'planner', label: 'Project Architect' },
-            { key: 'sessions', label: 'AI Sessions' },
-          ].map((tab) => (
-            <button
-              key={tab.key}
-              type="button"
-              onClick={() => setActiveTab(tab.key as 'sessions' | 'tasks' | 'planner')}
-              className={`rounded-xl px-4 py-2 text-sm font-medium transition-all ${
-                activeTab === tab.key
-                  ? 'bg-primary-500 text-white shadow-lg shadow-primary-500/20'
-                  : 'bg-slate-800/70 text-slate-300 hover:bg-slate-700/80 hover:text-white'
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-
-        {activeTab === 'planner' && (
-          <div className="mb-8">
-            <ProjectPlannerPanel
-              project={project}
-              onTasksCommitted={(createdTasks) => {
-                setTasks((currentTasks) => [...createdTasks, ...currentTasks]);
-                setActiveTab('tasks');
-              }}
-            />
+            <div>
+              <h3 className="mb-1.5 text-xs font-medium uppercase tracking-wider text-slate-500">Rules</h3>
+              <p className="whitespace-pre-wrap text-sm text-slate-300">
+                {project.project_rules || 'No project rules yet.'}
+              </p>
+            </div>
           </div>
         )}
+      </div>
 
-        {/* Sessions Section */}
-        {activeTab === 'sessions' && (
-        <div className="mb-8">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-semibold text-white flex items-center gap-2">
-              <Terminal className="h-5 w-5" />
-              AI Sessions
-            </h2>
+      {/* Meta row */}
+      <div className="flex items-center gap-4 text-xs text-slate-500">
+        {project.github_url && (
+          <span className="truncate max-w-[280px]">Repo: {project.github_url}</span>
+        )}
+        <span>{formatDistanceToNow(new Date(project.created_at), { addSuffix: true })}</span>
+        <span className="flex items-center gap-1">
+          <FileText className="h-3 w-3" />
+          {tasks.length} tasks
+        </span>
+        <span className="flex items-center gap-1">
+          <Terminal className="h-3 w-3" />
+          {sessions.length} sessions
+        </span>
+      </div>
+
+      {/* Tabs */}
+      <div className="flex gap-0 border-b border-slate-700">
+        {[
+          { key: 'tasks', label: 'Tasks' },
+          { key: 'planner', label: 'Project Architect' },
+          { key: 'sessions', label: 'AI Sessions' },
+        ].map((tab) => (
+          <button
+            key={tab.key}
+            type="button"
+            onClick={() => setActiveTab(tab.key as 'sessions' | 'tasks' | 'planner')}
+            className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
+              activeTab === tab.key
+                ? 'text-white border-sky-500'
+                : 'text-slate-500 border-transparent hover:text-slate-300'
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Planner Tab */}
+      {activeTab === 'planner' && (
+        <ProjectPlannerPanel
+          project={project}
+          onTasksCommitted={(createdTasks) => {
+            setTasks((currentTasks) => [...createdTasks, ...currentTasks]);
+            setActiveTab('tasks');
+          }}
+        />
+      )}
+
+      {/* Sessions Tab */}
+      {activeTab === 'sessions' && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-medium text-white">AI Sessions</h2>
             <button
               onClick={() => navigate(`/sessions/new?project_id=${id}`)}
-              className="bg-primary-500 hover:bg-primary-600 text-white px-4 py-2 rounded-lg transition-all flex items-center gap-2"
+              className="flex items-center gap-1.5 bg-sky-600 hover:bg-sky-500 text-white text-sm px-3 py-1.5 rounded-md transition-colors"
             >
               <Plus className="h-4 w-4" />
               New Session
@@ -704,64 +647,53 @@ function ProjectDetail() {
               }}
             />
           ) : (
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <div className="bg-slate-800 rounded-lg border border-slate-700 divide-y divide-slate-700/60">
               {sessions.map((session) => (
-                <div key={session.id} className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-6 hover:border-slate-600 transition-all">
-                  <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                    <div className="flex min-w-0 items-start gap-4 flex-1">
-                      <div className="mt-1 rounded-lg bg-blue-400/10 p-2 text-blue-400">
-                        <Terminal className="h-5 w-5" />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <h3 className="mb-2 break-words text-lg font-semibold text-white">
-                          {session.name}
-                        </h3>
-                        {session.description && (
-                          <p className="mb-3 break-words text-sm text-slate-400">
-                            {session.description}
-                          </p>
-                        )}
-                        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-slate-500">
-                          <span className="flex items-center gap-1">
-                            <Clock className="h-3 w-3" />
-                            {formatDistanceToNow(new Date(session.created_at), { addSuffix: true })}
-                          </span>
-                          {session.started_at && <span>Started</span>}
-                        </div>
-                      </div>
+                <div key={session.id} className="flex items-center gap-4 px-4 py-3 hover:bg-slate-700/40 transition-colors">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-slate-200">{session.name}</p>
+                    {session.description && (
+                      <p className="text-xs text-slate-400 mt-0.5 line-clamp-1">{session.description}</p>
+                    )}
+                    <div className="flex items-center gap-3 mt-1 text-xs text-slate-500">
+                      <span className="flex items-center gap-1">
+                        <Clock className="h-3 w-3" />
+                        {formatDistanceToNow(new Date(session.created_at), { addSuffix: true })}
+                      </span>
+                      {session.started_at && <span>Started</span>}
                     </div>
-                    <div className="flex items-center justify-end gap-2 self-end sm:self-start">
-                      <StatusBadge status={session.status} size="sm" />
-                      <button
-                        onClick={() => handleDeleteSession(session.id)}
-                        className="text-slate-400 hover:text-red-400 transition-colors"
-                        title="Delete session"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
-                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <StatusBadge status={session.status} size="sm" />
+                    <button
+                      onClick={() => handleDeleteSession(session.id)}
+                      className="text-slate-500 hover:text-red-400 transition-colors"
+                      title="Delete session"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
                   </div>
                 </div>
               ))}
             </div>
           )}
         </div>
-        )}
+      )}
 
-        {/* Tasks Section */}
-        {activeTab === 'tasks' && (
-        <div>
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-semibold text-white">Tasks</h2>
+      {/* Tasks Tab */}
+      {activeTab === 'tasks' && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-medium text-white">Tasks</h2>
             <button
               onClick={() => setShowCreateTask(true)}
-              className="bg-primary-500 hover:bg-primary-600 text-white px-4 py-2 rounded-lg transition-all flex items-center gap-2"
+              className="flex items-center gap-1.5 bg-sky-600 hover:bg-sky-500 text-white text-sm px-3 py-1.5 rounded-md transition-colors"
             >
               <Plus className="h-4 w-4" />
               Add Task
             </button>
           </div>
-          
+
           {tasks.length === 0 ? (
             <EmptyState
               icon={FileText}
@@ -773,10 +705,10 @@ function ProjectDetail() {
               }}
             />
           ) : (
-            <div className="space-y-4">
+            <div className="space-y-3">
               {workspaceOverview && (
-                <div className="space-y-3 rounded-xl border border-slate-700 bg-slate-800/40 p-4">
-                  <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between mb-3">
                     <div>
                       <p className="text-xs uppercase tracking-wide text-slate-500">Canonical Baseline</p>
                       <p className="mt-1 text-sm text-slate-300">
@@ -785,176 +717,173 @@ function ProjectDetail() {
                           : 'No canonical baseline yet'}
                       </p>
                       {workspaceOverview.baseline.path && (
-                        <p className="mt-1 text-xs text-slate-500">{workspaceOverview.baseline.path}</p>
+                        <p className="mt-0.5 text-xs text-slate-500">{workspaceOverview.baseline.path}</p>
                       )}
                     </div>
                     <button
                       onClick={handleRebuildBaseline}
                       disabled={rebuildingBaseline || (workspaceOverview.baseline.promoted_task_count || 0) === 0}
-                      className="rounded-lg bg-slate-700 px-4 py-2 text-sm text-white transition-colors hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="rounded-md bg-slate-700 px-3 py-1.5 text-xs text-white transition-colors hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {rebuildingBaseline ? 'Rebuilding...' : 'Rebuild Baseline'}
                     </button>
                   </div>
                   <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-                  <div>
-                    <p className="text-xs uppercase tracking-wide text-slate-500">Ready</p>
-                    <p className="mt-1 text-xl font-semibold text-sky-300">{workspaceOverview.counts.ready || 0}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs uppercase tracking-wide text-slate-500">Promoted</p>
-                    <p className="mt-1 text-xl font-semibold text-emerald-300">{workspaceOverview.counts.promoted || 0}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs uppercase tracking-wide text-slate-500">Changes Requested</p>
-                    <p className="mt-1 text-xl font-semibold text-amber-300">{workspaceOverview.counts.changes_requested || 0}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs uppercase tracking-wide text-slate-500">Blocked</p>
-                    <p className="mt-1 text-xl font-semibold text-red-300">{workspaceOverview.counts.blocked || 0}</p>
-                  </div>
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-slate-500">Ready</p>
+                      <p className="mt-1 text-lg font-semibold text-sky-300">{workspaceOverview.counts.ready || 0}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-slate-500">Promoted</p>
+                      <p className="mt-1 text-lg font-semibold text-emerald-300">{workspaceOverview.counts.promoted || 0}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-slate-500">Changes Requested</p>
+                      <p className="mt-1 text-lg font-semibold text-amber-300">{workspaceOverview.counts.changes_requested || 0}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-slate-500">Blocked</p>
+                      <p className="mt-1 text-lg font-semibold text-red-300">{workspaceOverview.counts.blocked || 0}</p>
+                    </div>
                   </div>
                 </div>
               )}
-              {tasks.map((task) => (
-                <div key={task.id} className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-6 hover:border-slate-600 transition-all">
-                  <div className="flex items-start justify-between">
-                    <div className="flex items-start gap-4 flex-1">
-                      <div className="p-2 rounded-lg text-blue-400 bg-blue-400/10 mt-1">
-                        <Activity className="h-5 w-5" />
-                      </div>
-                      <div className="flex-1">
-                        <h3 className="text-lg font-semibold text-white mb-2">{task.title}</h3>
-                        {task.description && (
-                          <p className="text-sm text-slate-400 mb-3">{task.description}</p>
-                        )}
-                        <div className="mb-3 flex flex-wrap items-center gap-2">
-                          <span className={`rounded-full border px-2.5 py-1 text-xs font-medium capitalize ${getWorkspaceBadgeClass(task.workspace_status)}`}>
-                            Workspace: {formatWorkspaceStatus(task.workspace_status)}
-                          </span>
-                          {task.task_subfolder && (
-                            <span className="rounded-full border border-slate-700 px-2.5 py-1 text-xs text-slate-400">
-                              {task.task_subfolder}
+
+              <div className="bg-slate-800 rounded-lg border border-slate-700 divide-y divide-slate-700/60">
+                {tasks.map((task) => (
+                  <div key={task.id} className="px-4 py-4 hover:bg-slate-700/30 transition-colors">
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="flex items-start gap-3 flex-1 min-w-0">
+                        <div className="p-1.5 rounded-md text-blue-400 bg-blue-400/10 mt-0.5 shrink-0">
+                          <Activity className="h-4 w-4" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <h3 className="text-sm font-medium text-white">{task.title}</h3>
+                          {task.description && (
+                            <p className="text-xs text-slate-400 mt-0.5 line-clamp-2">{task.description}</p>
+                          )}
+                          <div className="mt-2 flex flex-wrap items-center gap-2">
+                            <span className={`rounded-full border px-2.5 py-0.5 text-xs font-medium capitalize ${getWorkspaceBadgeClass(task.workspace_status)}`}>
+                              {formatWorkspaceStatus(task.workspace_status)}
                             </span>
+                            {task.task_subfolder && (
+                              <span className="rounded-full border border-slate-600 px-2.5 py-0.5 text-xs text-slate-400">
+                                {task.task_subfolder}
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-3 mt-2 text-xs text-slate-500">
+                            <span className="flex items-center gap-1">
+                              <Clock className="h-3 w-3" />
+                              {formatDistanceToNow(new Date(task.created_at), { addSuffix: true })}
+                            </span>
+                            {task.current_step > 0 && <span>Step {task.current_step}</span>}
+                          </div>
+                          {task.promotion_note && (
+                            <p className="mt-2 text-xs text-slate-500">
+                              Review note: {task.promotion_note}
+                            </p>
                           )}
                         </div>
-                        <div className="flex items-center gap-4 text-sm text-slate-500">
-                          <span className="flex items-center gap-1">
-                            <Clock className="h-3 w-3" />
-                            {formatDistanceToNow(new Date(task.created_at), { addSuffix: true })}
-                          </span>
-                          {task.current_step > 0 && (
-                            <span>Step {task.current_step}</span>
-                          )}
-                        </div>
-                        {task.promotion_note && (
-                          <p className="mt-3 text-xs text-slate-500">
-                            Review note: {task.promotion_note}
-                          </p>
-                        )}
                       </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {task.status !== 'running' && (
+                      <div className="flex items-center gap-2 shrink-0">
+                        {task.status !== 'running' && (
+                          <button
+                            onClick={() => handleRerunTask(task)}
+                            className="rounded-md bg-blue-600/80 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-500"
+                          >
+                            {task.status === 'done' ? 'Run Again' : 'Run'}
+                          </button>
+                        )}
+                        {task.status === 'done' && task.task_subfolder && task.workspace_status !== 'promoted' && (
+                          <button
+                            onClick={() => handlePromoteTask(task)}
+                            className="rounded-md bg-emerald-600/80 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-emerald-500"
+                          >
+                            Promote
+                          </button>
+                        )}
+                        {task.task_subfolder && task.workspace_status !== 'promoted' && (
+                          <button
+                            onClick={() => handleRequestChanges(task)}
+                            className="rounded-md bg-amber-600/80 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-amber-500"
+                          >
+                            Changes
+                          </button>
+                        )}
                         <button
-                          onClick={() => handleRerunTask(task)}
-                          className="rounded-lg bg-blue-600/90 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-500"
-                          title={task.status === 'done' ? 'Run task again' : 'Run task'}
+                          onClick={() => startEditTask(task)}
+                          className="text-slate-400 hover:text-slate-200 transition-colors"
+                          title="Edit task"
                         >
-                          {task.status === 'done' ? 'Run Again' : 'Run'}
+                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                          </svg>
                         </button>
-                      )}
-                      {task.status === 'done' && task.task_subfolder && task.workspace_status !== 'promoted' && (
+                        <StatusBadge status={task.status} size="sm" />
                         <button
-                          onClick={() => handlePromoteTask(task)}
-                          className="rounded-lg bg-emerald-600/90 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-emerald-500"
-                          title="Promote workspace"
+                          onClick={() => handleDeleteTask(task.id)}
+                          className="text-slate-500 hover:text-red-400 transition-colors"
+                          title="Delete task"
                         >
-                          Promote
+                          <Trash2 className="h-3.5 w-3.5" />
                         </button>
-                      )}
-                      {task.task_subfolder && task.workspace_status !== 'promoted' && (
-                        <button
-                          onClick={() => handleRequestChanges(task)}
-                          className="rounded-lg bg-amber-600/90 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-amber-500"
-                          title="Request changes before promotion"
-                        >
-                          Request Changes
-                        </button>
-                      )}
-                      <button
-                        onClick={() => startEditTask(task)}
-                        className="text-slate-400 hover:text-blue-400 transition-colors"
-                        title="Edit task"
-                      >
-                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                        </svg>
-                      </button>
-                      <StatusBadge status={task.status} size="sm" />
-                      <button
-                        onClick={() => handleDeleteTask(task.id)}
-                        className="text-slate-400 hover:text-red-400 transition-colors"
-                        title="Delete task"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
           )}
         </div>
-        )}
-      </div>
+      )}
 
       {/* Create Task Modal */}
       {showCreateTask && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-slate-800 rounded-xl border border-slate-700 p-6 w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
-            <h3 className="text-lg font-semibold text-white mb-4">Create New Task</h3>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-slate-800 rounded-lg border border-slate-700 p-5 w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto shadow-2xl">
+            <h3 className="text-sm font-semibold text-white mb-4">Create New Task</h3>
             <form onSubmit={handleCreateTask}>
               <div className="space-y-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                  <label className="block text-xs font-medium text-slate-400 mb-1.5">
                     Task Title <span className="text-red-400">*</span>
                   </label>
                   <input
                     type="text"
                     value={taskTitle}
                     onChange={(e) => setTaskTitle(e.target.value)}
-                    className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
+                    className="w-full bg-slate-950 border border-slate-600 rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 focus:border-sky-500"
                     placeholder="e.g., Build a simple Vite website"
                     autoFocus
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                  <label className="block text-xs font-medium text-slate-400 mb-1.5">
                     Description
                   </label>
                   <textarea
                     value={taskDescription}
                     onChange={(e) => setTaskDescription(e.target.value)}
                     rows={3}
-                    className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500 resize-none"
+                    className="w-full bg-slate-950 border border-slate-600 rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 resize-none"
                     placeholder="Describe what needs to be done..."
                   />
                 </div>
                 <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <label className="block text-sm font-medium text-slate-300">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="block text-xs font-medium text-slate-400">
                       Step-by-Step Plan (JSON)
                     </label>
                     <button
                       type="button"
                       onClick={() => generateStepsFromDescription(taskDescription)}
                       disabled={generatingSteps || !taskDescription.trim()}
-                      className="text-xs bg-primary-500/20 hover:bg-primary-500/30 text-primary-400 px-3 py-1 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                      className="text-xs bg-sky-600/20 hover:bg-sky-600/30 text-sky-400 px-2.5 py-1 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
                     >
                       {generatingSteps ? (
                         <>
-                          <div className="h-3 w-3 border-2 border-primary-400/30 border-t-primary-400 rounded-full animate-spin" />
+                          <div className="h-3 w-3 border-2 border-sky-400/30 border-t-sky-400 rounded-full animate-spin" />
                           Generating...
                         </>
                       ) : (
@@ -969,29 +898,29 @@ function ProjectDetail() {
                     value={taskSteps}
                     onChange={(e) => setTaskSteps(e.target.value)}
                     rows={8}
-                    className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500 font-mono text-sm resize-none"
+                    className="w-full bg-slate-950 border border-slate-600 rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 font-mono resize-none"
                     placeholder='{"task_name": "...", "description": "...", "step_by_step_plan": [{"step": 1, "title": "...", "details": "..."}]}'
                   />
                   <p className="text-xs text-slate-500 mt-1">
                     Leave empty to auto-generate, or edit manually. Required for task execution.
                   </p>
                 </div>
-                <div className="flex gap-3">
+                <div className="flex gap-2 pt-1">
                   <button
                     type="button"
                     onClick={() => setShowCreateTask(false)}
-                    className="flex-1 bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg transition-all"
+                    className="flex-1 bg-slate-700 hover:bg-slate-600 text-white text-sm px-3 py-2 rounded-md transition-colors"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
                     disabled={!taskTitle.trim() || creatingTask}
-                    className="flex-1 bg-primary-500 hover:bg-primary-600 text-white px-4 py-2 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    className="flex-1 bg-sky-600 hover:bg-sky-500 text-white text-sm px-3 py-2 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                   >
                     {creatingTask ? (
                       <>
-                        <div className="h-4 w-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                        <div className="h-3.5 w-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                         Creating...
                       </>
                     ) : (
@@ -1007,65 +936,64 @@ function ProjectDetail() {
 
       {/* Edit Task Modal */}
       {editingTaskId && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-slate-800 rounded-xl border border-slate-700 p-6 w-full max-w-md mx-4">
-            <h3 className="text-lg font-semibold text-white mb-4">Edit Task</h3>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-slate-800 rounded-lg border border-slate-700 p-5 w-full max-w-md mx-4 shadow-2xl">
+            <h3 className="text-sm font-semibold text-white mb-4">Edit Task</h3>
             <form onSubmit={(e) => { e.preventDefault(); handleUpdateTask(editingTaskId); }}>
               <div className="space-y-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                  <label className="block text-xs font-medium text-slate-400 mb-1.5">
                     Task Title *
                   </label>
                   <input
                     type="text"
                     value={editTitle}
                     onChange={(e) => setEditTitle(e.target.value)}
-                    className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
+                    className="w-full bg-slate-950 border border-slate-600 rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 focus:border-sky-500"
                     placeholder="e.g., Design homepage"
                     autoFocus
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                  <label className="block text-xs font-medium text-slate-400 mb-1.5">
                     Description
                   </label>
                   <textarea
                     value={editDescription}
                     onChange={(e) => setEditDescription(e.target.value)}
                     rows={3}
-                    className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500 resize-none"
+                    className="w-full bg-slate-950 border border-slate-600 rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 resize-none"
                     placeholder="Describe what needs to be done..."
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                  <label className="block text-xs font-medium text-slate-400 mb-1.5">
                     Step-by-Step Plan (JSON)
                   </label>
                   <textarea
                     value={editSteps}
                     onChange={(e) => setEditSteps(e.target.value)}
                     rows={4}
-                    className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500 resize-none font-mono text-sm"
+                    className="w-full bg-slate-950 border border-slate-600 rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 resize-none font-mono"
                     placeholder='[{"step": 1, "action": "Create component"}, {"step": 2, "action": "Add styling"}]'
                   />
-                  <p className="text-xs text-slate-500 mt-1">Format: JSON array of steps with "step" and "action" fields</p>
                 </div>
-                <div className="flex gap-3">
+                <div className="flex gap-2 pt-1">
                   <button
                     type="button"
                     onClick={() => setEditingTaskId(null)}
-                    className="flex-1 bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg transition-all"
+                    className="flex-1 bg-slate-700 hover:bg-slate-600 text-white text-sm px-3 py-2 rounded-md transition-colors"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
                     disabled={!editTitle.trim() || updatingTask}
-                    className="flex-1 bg-primary-500 hover:bg-primary-600 text-white px-4 py-2 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    className="flex-1 bg-sky-600 hover:bg-sky-500 text-white text-sm px-3 py-2 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                   >
                     {updatingTask ? (
                       <>
-                        <div className="h-4 w-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                        <div className="h-3.5 w-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                         Saving...
                       </>
                     ) : (

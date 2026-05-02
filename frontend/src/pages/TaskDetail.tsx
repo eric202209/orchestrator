@@ -242,7 +242,7 @@ function TaskDetail() {
       )}
 
       {/* Task Content */}
-      <div className="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 p-8">
+      <div className="bg-slate-800 rounded-lg border border-slate-700 p-6">
         <div className="flex items-start justify-between mb-6">
           <div className="flex items-center gap-3">
             <div className={cn('p-3 rounded-lg', getStatusColor(task.status))}>
@@ -285,7 +285,7 @@ function TaskDetail() {
                 value={editForm.title}
                 onChange={(e) => setEditForm({ ...editForm, title: e.target.value })}
                 placeholder="Task title"
-                className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
               />
             </div>
 
@@ -327,7 +327,7 @@ function TaskDetail() {
                 type="number"
                 value={editForm.current_step}
                 onChange={(e) => setEditForm({ ...editForm, current_step: parseInt(e.target.value) || 0 })}
-                className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
               />
             </div>
           </div>
@@ -351,7 +351,7 @@ function TaskDetail() {
               </div>
             )}
 
-            <div className="rounded-lg border border-slate-700 bg-slate-900/70 p-4">
+            <div className="rounded-lg border border-slate-600 bg-slate-700/40 p-4">
               <h3 className="mb-2 text-sm font-medium text-slate-300">Workspace Review</h3>
               <div className="flex flex-wrap items-center gap-2">
                 <span className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1 text-xs capitalize text-slate-200">
@@ -396,13 +396,13 @@ function TaskDetail() {
                   <FileJson className="h-4 w-4" />
                   Step-by-Step Plan
                 </h3>
-                <pre className="bg-slate-900 p-4 rounded-lg text-sm text-slate-300 overflow-x-auto font-mono">
+                <pre className="bg-slate-950 border border-slate-700 p-4 rounded-lg text-sm text-slate-300 overflow-x-auto font-mono">
                   {typeof task.steps === 'string' ? task.steps : JSON.stringify(task.steps, null, 2)}
                 </pre>
               </div>
             )}
 
-            <div className="grid grid-cols-2 gap-4 pt-4 border-t border-slate-700">
+            <div className="grid grid-cols-2 gap-4 pt-4 border-t border-slate-600">
               <div>
                 <h3 className="text-sm font-medium text-slate-300 mb-1">Project ID</h3>
                 <p className="text-slate-400 text-sm">{task.project_id || 'N/A'}</p>

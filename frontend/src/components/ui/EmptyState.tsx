@@ -19,22 +19,18 @@ export default function EmptyState({
   className
 }: EmptyStateProps) {
   return (
-    <div className={`flex flex-col items-center justify-center py-12 ${className || ''}`}>
-      <div className="mb-4 text-slate-600">
-        {Icon ? (
-          <Icon className="h-16 w-16" />
-        ) : (
-          <div className="h-16 w-16 bg-slate-800 rounded-full flex items-center justify-center">
-            <span className="text-2xl">📭</span>
-          </div>
-        )}
-      </div>
-      <h3 className="text-xl font-semibold text-white mb-2">{title}</h3>
-      <p className="text-slate-400 text-center mb-6 max-w-md">{description}</p>
+    <div className={`flex flex-col items-center justify-center py-10 ${className || ''}`}>
+      {Icon && (
+        <div className="mb-3 text-slate-600">
+          <Icon className="h-8 w-8" />
+        </div>
+      )}
+      <p className="text-sm font-medium text-slate-300">{title}</p>
+      <p className="text-xs text-slate-500 text-center mt-1 max-w-xs">{description}</p>
       {action && (
         <button
           onClick={action.onClick}
-          className="bg-primary-500 hover:bg-primary-600 text-white px-6 py-2 rounded-lg transition-all"
+          className="mt-4 bg-sky-600 hover:bg-sky-500 text-white text-sm px-4 py-1.5 rounded-md transition-colors"
         >
           {action.label}
         </button>
