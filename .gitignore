@@ -105,6 +105,8 @@ alembic.ini
 .agents/
 plugins/
 CLAUDE.md
+CONTEXT.md
+skills-lock.json
 
 # graphify
 .graphify-venv/

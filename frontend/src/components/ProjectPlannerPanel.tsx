@@ -470,7 +470,7 @@ export function ProjectPlannerPanel({
   ) => {
     if (tasks.length === 0) {
       return (
-        <div className="rounded-xl border border-dashed border-slate-700 bg-slate-900/40 px-4 py-8 text-center text-sm text-slate-500">
+        <div className="rounded-xl border border-dashed border-slate-700/60 bg-slate-900/30 px-4 py-8 text-center text-sm text-slate-500">
           No parsed tasks yet.
         </div>
       )
@@ -481,7 +481,7 @@ export function ProjectPlannerPanel({
         {tasks.map((task, index) => (
           <div
             key={index}
-            className="rounded-xl border border-slate-700 bg-slate-900/60 p-4"
+            className="rounded-xl border border-slate-700/60 bg-slate-800/50 p-4"
           >
             <div className="flex items-start gap-3">
               <input
@@ -498,7 +498,7 @@ export function ProjectPlannerPanel({
               />
               <div className="min-w-0 flex-1">
                 <div className="text-sm font-medium text-white">{task.title || 'Untitled task'}</div>
-                <div className="mt-1 text-sm text-slate-400">
+                <div className="mt-1 text-sm text-slate-400 leading-relaxed">
                   {task.description || 'No description provided.'}
                 </div>
                 <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-500">
@@ -518,24 +518,24 @@ export function ProjectPlannerPanel({
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
-        <Card className="rounded-2xl border-slate-700/80 bg-slate-800/60 p-5">
-          <div className="mb-4 flex items-center gap-2 text-sm font-medium text-amber-300">
+        <Card className="rounded-2xl border-slate-700/50 bg-slate-900/80 p-5">
+          <div className="mb-5 pb-4 border-b border-slate-700/50 flex items-center gap-2 text-sm font-semibold text-amber-300">
             <Lightbulb className="h-4 w-4" />
             Interactive Planning
           </div>
           <div className="space-y-4">
             <div>
-              <label className="mb-2 block text-sm font-medium text-slate-300">
-                New planning prompt
+              <label className="mb-2 block text-xs font-semibold uppercase tracking-wider text-slate-400">
+                Planning prompt
               </label>
               <TextArea
                 value={newPrompt}
                 onChange={(event) => setNewPrompt(event.target.value)}
-                className="min-h-[140px]"
+                className="min-h-[140px] leading-relaxed px-4 py-3"
                 placeholder="Describe the feature, constraints, and what a good plan should optimize for."
               />
             </div>
-            <div className="grid gap-2">
+            <div className="grid gap-3">
               <button
                 type="button"
                 onClick={() => setSourceBrain('local')}
@@ -571,15 +571,15 @@ export function ProjectPlannerPanel({
             </Button>
           </div>
 
-          <div className="mt-6">
+          <div className="mt-8 pt-6 border-t border-slate-700/50">
             <div className="mb-3 flex items-center justify-between">
-              <div className="text-sm font-medium text-white">Planning Sessions</div>
+              <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">Planning Sessions</div>
               <div className="text-xs text-slate-500">{sessions.length}</div>
             </div>
             {loadingSessions ? (
               <div className="text-sm text-slate-500">Loading sessions...</div>
             ) : sessions.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-slate-700 bg-slate-900/40 px-4 py-6 text-sm text-slate-500">
+              <div className="rounded-xl border border-dashed border-slate-700/60 bg-slate-900/30 px-4 py-8 text-sm text-slate-500">
                 No planning sessions yet.
               </div>
             ) : (
@@ -591,8 +591,8 @@ export function ProjectPlannerPanel({
                     onClick={() => setActiveSessionId(session.id)}
                     className={`w-full rounded-xl border p-4 text-left transition-colors ${
                       activeSessionId === session.id
-                        ? 'border-primary-500 bg-primary-500/10'
-                        : 'border-slate-700 bg-slate-900/40 hover:border-slate-600'
+                        ? 'border-primary-500/70 bg-primary-500/10'
+                        : 'border-slate-700/60 bg-slate-900/30 hover:border-slate-600 hover:bg-slate-900/60'
                     }`}
                   >
                     <div className="flex items-start justify-between gap-3">
@@ -624,9 +624,9 @@ export function ProjectPlannerPanel({
         </Card>
 
         <div className="space-y-6">
-          <Card className="rounded-2xl border-slate-700/80 bg-slate-800/60 p-5">
+          <Card className="rounded-2xl border-slate-700/50 bg-slate-800/40 p-6">
             {!activeSession ? (
-              <div className="rounded-xl border border-dashed border-slate-700 bg-slate-900/40 px-4 py-12 text-center text-slate-500">
+              <div className="rounded-xl border border-dashed border-slate-700/60 bg-slate-900/30 px-6 py-16 text-center text-sm text-slate-500">
                 Select a planning session or start a new one to begin the interactive flow.
               </div>
             ) : (
@@ -638,7 +638,7 @@ export function ProjectPlannerPanel({
                       Session-first planning
                     </div>
                     <h2 className="text-2xl font-semibold text-white">{activeSession.title}</h2>
-                    <p className="mt-2 max-w-3xl text-sm text-slate-400">{activeSession.prompt}</p>
+                    <p className="mt-2 max-w-3xl text-sm text-slate-400 leading-relaxed">{activeSession.prompt}</p>
                   </div>
                   <div className="flex items-center gap-2">
                     <div
@@ -662,8 +662,8 @@ export function ProjectPlannerPanel({
 
                 <div className="grid gap-6 xl:grid-cols-[minmax(0,0.95fr)_minmax(380px,1.05fr)]">
                   <div className="space-y-4">
-                    <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
-                      <div className="mb-3 flex items-center gap-2 text-white">
+                    <div className="rounded-xl border border-slate-700/60 bg-slate-900/40 p-4">
+                      <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-white">
                         <MessageSquare className="h-4 w-4 text-primary-400" />
                         Conversation
                       </div>
@@ -685,7 +685,7 @@ export function ProjectPlannerPanel({
                               )}
                               {message.role}
                             </div>
-                            <div className="whitespace-pre-wrap text-sm">{message.content}</div>
+                            <div className="whitespace-pre-wrap text-sm leading-relaxed">{message.content}</div>
                           </div>
                         ))}
                       </div>
@@ -702,7 +702,7 @@ export function ProjectPlannerPanel({
                         <TextArea
                           value={reply}
                           onChange={(event) => setReply(event.target.value)}
-                          className="min-h-[120px]"
+                          className="min-h-[120px] leading-relaxed px-4 py-3"
                           placeholder="Answer with the constraints, desired outcomes, and acceptance criteria you want the plan to reflect."
                         />
                         <div className="mt-3 flex justify-end">
@@ -728,8 +728,8 @@ export function ProjectPlannerPanel({
                   </div>
 
                   <div className="space-y-4">
-                    <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
-                      <div className="mb-3 flex items-center gap-2 text-white">
+                    <div className="rounded-xl border border-slate-700/60 bg-slate-900/40 p-4">
+                      <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-white">
                         <FileText className="h-4 w-4 text-sky-400" />
                         Planning Artifacts
                       </div>
@@ -763,7 +763,7 @@ export function ProjectPlannerPanel({
                               }
                             }}
                             readOnly={selectedArtifact !== 'planner_markdown'}
-                            className="min-h-[280px] font-mono text-sm leading-6"
+                            className="min-h-[280px] font-mono text-sm leading-relaxed px-4 py-3"
                           />
                           {selectedArtifact === 'planner_markdown' && (
                             <div className="mt-3 flex justify-end">
@@ -776,9 +776,9 @@ export function ProjectPlannerPanel({
                       )}
                     </div>
 
-                    <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
-                      <div className="mb-3 flex items-center justify-between">
-                        <div className="flex items-center gap-2 text-white">
+                    <div className="rounded-xl border border-slate-700/60 bg-slate-900/40 p-4">
+                      <div className="mb-4 flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-sm font-semibold text-white">
                           <CheckSquare className="h-4 w-4 text-emerald-400" />
                           Task Preview
                         </div>
@@ -810,14 +810,14 @@ export function ProjectPlannerPanel({
             )}
           </Card>
 
-          <Card className="rounded-2xl border-slate-700/80 bg-slate-800/60 p-5">
-            <div className="mb-5 flex items-center justify-between gap-4">
+          <Card className="rounded-2xl border-slate-700/50 bg-slate-800/40 p-6">
+            <div className="mb-6 pb-4 border-b border-slate-700/50 flex items-center justify-between gap-4">
               <div>
-                <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-300">
-                  <PencilLine className="h-4 w-4" />
+                <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-200">
+                  <PencilLine className="h-4 w-4 text-slate-400" />
                   Legacy Markdown Planner
                 </div>
-                <p className="text-sm text-slate-400">
+                <p className="text-sm text-slate-400 leading-relaxed">
                   Keep using the old markdown-driven planner when you want direct editing without the interactive Q&A flow.
                 </p>
               </div>
@@ -831,10 +831,10 @@ export function ProjectPlannerPanel({
                 <TextArea
                   value={manualRequirement}
                   onChange={(event) => setManualRequirement(event.target.value)}
-                  className="min-h-[120px]"
+                  className="min-h-[120px] leading-relaxed px-4 py-3"
                   placeholder="Describe the outcome you want the legacy planner to turn into markdown."
                 />
-                <div className="flex flex-wrap gap-3">
+                <div className="flex flex-wrap items-center gap-3">
                   <Button onClick={handleGenerateLegacyPlan} disabled={manualGenerating}>
                     {manualGenerating ? 'Generating...' : 'Generate Manual Plan'}
                   </Button>
@@ -848,32 +848,35 @@ export function ProjectPlannerPanel({
                   >
                     {manualSaving ? 'Saving...' : 'Save'}
                   </Button>
-                  <Button onClick={handleCommitLegacyPlan} disabled={manualCommitting}>
+                  <Button onClick={handleCommitLegacyPlan} disabled={manualCommitting} className="ml-auto">
                     {manualCommitting ? 'Committing...' : 'Commit Manual Tasks'}
                   </Button>
                 </div>
                 <TextArea
                   value={manualMarkdown}
                   onChange={(event) => setManualMarkdown(event.target.value)}
-                  className="min-h-[280px] font-mono text-sm leading-6"
+                  className="min-h-[280px] font-mono text-sm leading-relaxed px-4 py-3"
                   placeholder="# Project: ...\n\n## Task List\n- [ ] TASK_START: ..."
                 />
                 {renderTaskPreview(manualDraftTasks, setManualDraftTasks)}
               </div>
 
               <div className="space-y-3">
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 pb-1">
+                  Saved Plans
+                </div>
                 {plans.length === 0 ? (
-                  <div className="rounded-xl border border-dashed border-slate-700 bg-slate-900/40 px-4 py-8 text-center text-sm text-slate-500">
+                  <div className="rounded-xl border border-dashed border-slate-700/60 bg-slate-900/30 px-4 py-10 text-center text-sm text-slate-500">
                     Saved manual plans will appear here.
                   </div>
                 ) : (
                   plans.map((plan) => (
                     <div
                       key={plan.id}
-                      className={`rounded-xl border p-4 ${
+                      className={`rounded-xl border p-4 transition-colors ${
                         activeLegacyPlan?.id === plan.id
-                          ? 'border-primary-500 bg-primary-500/10'
-                          : 'border-slate-700 bg-slate-900/40'
+                          ? 'border-primary-500/70 bg-primary-500/10'
+                          : 'border-slate-700/60 bg-slate-900/30 hover:border-slate-600 hover:bg-slate-900/60'
                       }`}
                     >
                       <button
