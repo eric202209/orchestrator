@@ -87,6 +87,17 @@ def respond_to_planning_session(
     return service.build_session_payload(session)
 
 
+@router.post("/sessions/{session_id}/retry", response_model=PlanningSessionResponse)
+def retry_planning_session(
+    session_id: int,
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_active_user),
+):
+    service = PlanningSessionService(db)
+    session = service.retry(session_id)
+    return service.build_session_payload(session)
+
+
 @router.post("/sessions/{session_id}/cancel", response_model=PlanningSessionResponse)
 def cancel_planning_session(
     session_id: int,

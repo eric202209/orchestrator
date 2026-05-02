@@ -9,6 +9,7 @@ import {
   MessageSquare,
   PencilLine,
   Play,
+  RefreshCw,
   Send,
   Sparkles,
   Trash2,
@@ -78,6 +79,7 @@ export function ProjectPlannerPanel({
   const [startingSession, setStartingSession] = useState(false)
   const [replying, setReplying] = useState(false)
   const [committingSession, setCommittingSession] = useState(false)
+  const [retryingSession, setRetryingSession] = useState(false)
   const [newPrompt, setNewPrompt] = useState(project.description || defaultPrompt)
   const [sourceBrain, setSourceBrain] = useState<'local' | 'cloud'>('local')
   const [reply, setReply] = useState('')
@@ -242,6 +244,23 @@ export function ProjectPlannerPanel({
       alert('Failed to submit your response.')
     } finally {
       setReplying(false)
+    }
+  }
+
+  const handleRetrySession = async () => {
+    if (!activeSession) {
+      return
+    }
+    try {
+      setRetryingSession(true)
+      const response = await planningAPI.retry(activeSession.id)
+      setActiveSession(response.data)
+      await loadSessions()
+    } catch (error) {
+      console.error('Failed to retry planning session:', error)
+      alert('Failed to retry the planning session.')
+    } finally {
+      setRetryingSession(false)
     }
   }
 
@@ -720,9 +739,20 @@ export function ProjectPlannerPanel({
                       </div>
                     )}
 
-                    {activeSession.status === 'failed' && activeSession.last_error && (
-                      <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-100">
-                        {activeSession.last_error}
+                    {activeSession.status === 'failed' && (
+                      <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 space-y-3">
+                        {activeSession.last_error && (
+                          <div className="text-sm text-red-100">{activeSession.last_error}</div>
+                        )}
+                        <div className="flex justify-end">
+                          <Button
+                            onClick={handleRetrySession}
+                            disabled={retryingSession}
+                          >
+                            <RefreshCw className="mr-2 h-4 w-4" />
+                            {retryingSession ? 'Retrying...' : 'Retry Synthesis'}
+                          </Button>
+                        </div>
                       </div>
                     )}
                   </div>

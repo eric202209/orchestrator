@@ -25,6 +25,7 @@ import type {
   SessionDivergenceCompareResponse,
   AppSettings,
   InterventionRequest,
+  ExecutionFailureSummary,
 } from '../types/api';
 
 const API_BASE_URL =
@@ -274,6 +275,9 @@ export const planningAPI = {
 
   cancel: (sessionId: number) =>
     apiClient.post<PlanningSession>(`/planning/sessions/${sessionId}/cancel`),
+
+  retry: (sessionId: number) =>
+    apiClient.post<PlanningSession>(`/planning/sessions/${sessionId}/retry`),
 
   commit: (
     sessionId: number,
@@ -580,6 +584,20 @@ export const sessionsAPI = {
     apiClient.post<InterventionRequest>(
       `/sessions/${sessionId}/interventions/${interventionId}/deny`,
       data || {}
+    ),
+
+  // Replan flow endpoints
+  getFailureSummary: (sessionId: number) =>
+    apiClient.get<ExecutionFailureSummary>(`/sessions/${sessionId}/failure-summary`, {
+      timeout: 120000, // LLM summary generation can take up to 2 min
+    }),
+
+  submitOperatorFeedback: (sessionId: number, feedback: string) =>
+    apiClient.post<ExecutionFailureSummary>(`/sessions/${sessionId}/operator-feedback`, { feedback }),
+
+  replanSession: (sessionId: number) =>
+    apiClient.post<{ planning_session_id: number; session_id: number; message: string }>(
+      `/sessions/${sessionId}/replan`
     ),
 
   // Get sorted logs (with sorting and deduplication options)

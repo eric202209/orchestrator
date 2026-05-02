@@ -70,7 +70,11 @@ class PlanningSessionService:
         return session
 
     def start_session(
-        self, project: Project, prompt: str, source_brain: str = "local"
+        self,
+        project: Project,
+        prompt: str,
+        source_brain: str = "local",
+        skip_clarification: bool = False,
     ) -> PlanningSession:
         existing = (
             self.db.query(PlanningSession)
@@ -103,7 +107,10 @@ class PlanningSessionService:
                 detail="This project already has an active planning session",
             ) from exc
 
-        self._add_message(session, "user", prompt.strip(), metadata={"kind": "prompt"})
+        msg_metadata: dict = {"kind": "prompt"}
+        if skip_clarification:
+            msg_metadata["skip_clarification"] = True
+        self._add_message(session, "user", prompt.strip(), metadata=msg_metadata)
         self.db.commit()
         self.schedule_processing(session.id)
         self.db.refresh(session)
@@ -125,6 +132,23 @@ class PlanningSessionService:
         )
         session.current_prompt_id = None
         session.status = "active"
+        session.processing_token = None
+        session.processing_started_at = None
+        session.updated_at = datetime.now(timezone.utc)
+        self.db.commit()
+        self.schedule_processing(session.id)
+        self.db.refresh(session)
+        return session
+
+    def retry(self, session_id: int) -> PlanningSession:
+        session = self.get_session(session_id)
+        if session.status != "failed":
+            raise HTTPException(
+                status_code=409,
+                detail="Only failed planning sessions can be retried",
+            )
+        session.status = "active"
+        session.last_error = None
         session.processing_token = None
         session.processing_started_at = None
         session.updated_at = datetime.now(timezone.utc)
@@ -381,6 +405,16 @@ class PlanningSessionService:
         return settings.ORCHESTRATOR_FORCE_INLINE_PLANNING
 
     def _advance_or_finalize(self, session: PlanningSession, project: Project) -> None:
+        # Skip Q&A entirely for sessions that carry full context (e.g. replan).
+        first_msg = session.messages[0] if session.messages else None
+        if (
+            first_msg
+            and isinstance(getattr(first_msg, "metadata_json", None), dict)
+            and first_msg.metadata_json.get("skip_clarification")
+        ):
+            self._finalize_session(session, project)
+            return
+
         question_count = len([m for m in session.messages if m.role == "assistant"])
         decision = self._decide_clarification(session, project)
         if decision["needs_clarification"] and question_count < self.MAX_QUESTIONS:
@@ -409,12 +443,22 @@ class PlanningSessionService:
             artifacts = self._parse_finalization_payload(result)
         except HTTPException:
             raise
-        except Exception as exc:
-            session.status = "failed"
-            session.last_error = str(exc)
-            session.current_prompt_id = None
-            session.updated_at = datetime.now(timezone.utc)
-            return
+        except Exception:
+            # First attempt failed (e.g. OpenClaw returned empty output). Retry with compact prompt.
+            try:
+                compact = self._build_compact_synthesis_prompt(prompt)
+                result = self._invoke_openclaw(
+                    compact, source_brain=session.source_brain
+                )
+                artifacts = self._parse_finalization_payload(result)
+            except HTTPException:
+                raise
+            except Exception as exc:
+                session.status = "failed"
+                session.last_error = str(exc)
+                session.current_prompt_id = None
+                session.updated_at = datetime.now(timezone.utc)
+                return
 
         planner_markdown = artifacts.get("planner_markdown", "")
         parsed_tasks = PlannerService.parse_markdown(planner_markdown)

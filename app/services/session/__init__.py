@@ -64,6 +64,11 @@ from .session_runtime_service import (
     set_session_alert,
     slugify_task_name,
 )
+from .replan_service import (
+    get_or_generate_failure_summary,
+    store_operator_feedback,
+    trigger_replan,
+)
 from .session_stream_service import stream_session_logs, stream_session_status
 
 __all__ = [
@@ -124,4 +129,7 @@ __all__ = [
     "slugify_task_name",
     "stream_session_logs",
     "stream_session_status",
+    "get_or_generate_failure_summary",
+    "store_operator_feedback",
+    "trigger_replan",
 ]

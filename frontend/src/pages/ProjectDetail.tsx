@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useParams, Link, useNavigate } from 'react-router-dom';
+import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { projectsAPI, tasksAPI, sessionsAPI } from '../api/client';
 import type { Project, Task, Session } from '../types/api';
 import { ProjectPlannerPanel } from '../components/ProjectPlannerPanel';
@@ -21,6 +21,7 @@ import { StatusBadge, EmptyState } from '../components/ui';
 function ProjectDetail() {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const id = projectId;
   const [project, setProject] = useState<Project | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -36,7 +37,12 @@ function ProjectDetail() {
     promoted_tasks: Array<{ id: number; title: string; promoted_at?: string | null }>;
     ready_task_ids: number[];
   } | null>(null);
-  const [activeTab, setActiveTab] = useState<'sessions' | 'tasks' | 'planner'>('tasks');
+  const initialTab = (['sessions', 'tasks', 'planner'] as const).includes(
+    searchParams.get('tab') as 'sessions' | 'tasks' | 'planner'
+  )
+    ? (searchParams.get('tab') as 'sessions' | 'tasks' | 'planner')
+    : 'tasks';
+  const [activeTab, setActiveTab] = useState<'sessions' | 'tasks' | 'planner'>(initialTab);
   const [loading, setLoading] = useState(true);
   const [showCreateTask, setShowCreateTask] = useState(false);
   const [taskTitle, setTaskTitle] = useState('');

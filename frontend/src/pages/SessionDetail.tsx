@@ -4,6 +4,7 @@ import { sessionsAPI, tasksAPI, projectsAPI } from '@/api/client';
 import type {
   Checkpoint,
   CheckpointInspection,
+  ExecutionFailureSummary,
   InterventionRequest,
   OrchestrationEvent,
   Project,
@@ -16,6 +17,7 @@ import type {
 import type { TerminalLogEntry } from '@/components/TerminalViewer';
 import { Alert, LoadingSpinner } from '@/components/ui';
 import {
+  FailureSummaryPanel,
   HumanInterventionPanel,
   SessionConnectionNotice,
   SessionHeader,
@@ -101,6 +103,8 @@ export default function SessionDetail() {
   const [dispatchWatchdog, setDispatchWatchdog] = useState<SessionDispatchWatchdogResponse | null>(null);
   const [stateDiff, setStateDiff] = useState<SessionStateDiffResponse | null>(null);
   const [interventions, setInterventions] = useState<InterventionRequest[]>([]);
+  const [failureSummary, setFailureSummary] = useState<ExecutionFailureSummary | null>(null);
+  const [failureSummaryLoading, setFailureSummaryLoading] = useState(false);
   const [showInterventionForm, setShowInterventionForm] = useState(false);
   const [showAgentInterventionModal, setShowAgentInterventionModal] = useState(false);
   const [interventionToast, setInterventionToast] = useState<InterventionToastState | null>(null);
@@ -936,6 +940,31 @@ export default function SessionDetail() {
     }
   }, []);
 
+  const loadFailureSummary = useCallback(async (id: number) => {
+    setFailureSummaryLoading(true);
+    try {
+      const res = await sessionsAPI.getFailureSummary(id);
+      setFailureSummary(res.data);
+    } catch {
+      setFailureSummary(null);
+    } finally {
+      setFailureSummaryLoading(false);
+    }
+  }, []);
+
+  const handleFeedbackSubmit = useCallback(async (feedbackText: string) => {
+    if (!sessionId) return;
+    const res = await sessionsAPI.submitOperatorFeedback(Number(sessionId), feedbackText);
+    setFailureSummary(res.data);
+  }, [sessionId]);
+
+  const handleReplan = useCallback(async () => {
+    if (!sessionId || !project) return;
+    const res = await sessionsAPI.replanSession(Number(sessionId));
+    setFailureSummary((prev) => prev ? { ...prev, replan_planning_session_id: res.data.planning_session_id } : prev);
+    navigate(`/projects/${project.id}?tab=planner`);
+  }, [sessionId, project, navigate]);
+
   const handleSubmitReply = useCallback(async (interventionId: number, reply: string) => {
     if (!sessionId) return;
     try {
@@ -1224,6 +1253,9 @@ export default function SessionDetail() {
         }
         if (sessionRes.data.status === 'waiting_for_human') {
           await loadInterventions(sessionRes.data.id);
+        }
+        if (sessionRes.data.status === 'stopped') {
+          void loadFailureSummary(sessionRes.data.id);
         }
       } catch (err) {
         if (abortController.signal.aborted) return;
@@ -2057,6 +2089,15 @@ export default function SessionDetail() {
           onApprove={handleApproveIntervention}
           onDeny={handleDenyIntervention}
           onReply={handleSubmitReply}
+        />
+      )}
+
+      {session.status === 'stopped' && (
+        <FailureSummaryPanel
+          summary={failureSummary}
+          loading={failureSummaryLoading}
+          onFeedbackSubmit={handleFeedbackSubmit}
+          onReplan={handleReplan}
         />
       )}
 

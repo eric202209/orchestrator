@@ -35,6 +35,9 @@ from app.services import (
     get_pending_interventions as _get_pending_interventions,
     request_human_intervention_lifecycle as _request_human_intervention_lifecycle,
     submit_intervention_reply as _submit_intervention_reply,
+    get_or_generate_failure_summary as _get_or_generate_failure_summary,
+    store_operator_feedback as _store_operator_feedback,
+    trigger_replan as _trigger_replan,
     start_agent_session_payload as _start_agent_session_payload,
     check_session_overwrites_payload as _check_session_overwrites_payload,
     cleanup_orphaned_checkpoints_payload as _cleanup_orphaned_checkpoints_payload,
@@ -791,6 +794,79 @@ def deny_session_intervention(
         "Intervention denied. Session is paused; use resume to continue with updated context."
     )
     return payload
+
+
+# ── Replan flow endpoints ─────────────────────────────────────────────────────
+
+
+def _serialize_failure_summary(record) -> Dict[str, Any]:
+    from app.models import ExecutionFailureSummary as _EFS
+
+    return {
+        "session_id": record.session_id,
+        "summary": record.summary,
+        "operator_feedback": record.operator_feedback,
+        "generated_at": (
+            record.generated_at.isoformat() if record.generated_at else None
+        ),
+        "feedback_at": record.feedback_at.isoformat() if record.feedback_at else None,
+        "replan_planning_session_id": record.replan_planning_session_id,
+    }
+
+
+@router.get("/sessions/{session_id}/failure-summary")
+def get_failure_summary(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Return the execution failure summary for a stopped/failed session.
+
+    Generates the summary on first call via the agent LLM (falls back to log
+    scraping if the LLM is unavailable). Idempotent — subsequent calls return
+    the cached record.
+    """
+    record = _get_or_generate_failure_summary(db, session_id)
+    return _serialize_failure_summary(record)
+
+
+class OperatorFeedbackBody(BaseModel):
+    feedback: str
+
+
+@router.post("/sessions/{session_id}/operator-feedback")
+def submit_operator_feedback(
+    session_id: int,
+    body: OperatorFeedbackBody,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Store operator free-text feedback on the failure summary.
+
+    Feedback is combined with the agent-generated summary when the operator
+    triggers the replan endpoint.
+    """
+    if not body.feedback.strip():
+        raise HTTPException(status_code=400, detail="feedback must not be empty")
+    record = _store_operator_feedback(db, session_id, body.feedback)
+    payload = _serialize_failure_summary(record)
+    payload["message"] = "Operator feedback saved."
+    return payload
+
+
+@router.post("/sessions/{session_id}/replan")
+def replan_session(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Seed a new PlanningSession from the failure summary + operator feedback.
+
+    Operator-triggered only. The agent summarizes; the human decides whether to
+    replan or retry. Returns the new planning_session_id so the frontend can
+    navigate to Project Architect.
+    """
+    return _trigger_replan(db, session_id)
 
 
 @router.get("/sessions/{session_id}/tasks/{task_id}/events")

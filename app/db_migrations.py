@@ -567,6 +567,40 @@ def _migration_008_intervention_initiated_by(engine: Engine) -> None:
             )
 
 
+def _migration_009_execution_failure_summaries(engine: Engine) -> None:
+    table_names = _table_names(engine)
+    if "execution_failure_summaries" not in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE execution_failure_summaries (
+                        id INTEGER PRIMARY KEY,
+                        session_id INTEGER NOT NULL UNIQUE,
+                        summary TEXT NOT NULL,
+                        operator_feedback TEXT,
+                        generated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        feedback_at DATETIME,
+                        replan_planning_session_id INTEGER,
+                        FOREIGN KEY(session_id) REFERENCES sessions (id),
+                        FOREIGN KEY(replan_planning_session_id) REFERENCES planning_sessions (id)
+                    )
+                    """
+                )
+            )
+    with engine.begin() as connection:
+        if not _has_index(
+            engine,
+            "execution_failure_summaries",
+            "ix_execution_failure_summaries_session_id",
+        ):
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX ix_execution_failure_summaries_session_id ON execution_failure_summaries (session_id)"
+                )
+            )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -607,6 +641,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="008_intervention_initiated_by",
         description="Add initiated_by column to intervention_requests",
         upgrade=_migration_008_intervention_initiated_by,
+    ),
+    Migration(
+        version="009_execution_failure_summaries",
+        description="Create execution_failure_summaries table for replan flow",
+        upgrade=_migration_009_execution_failure_summaries,
     ),
 )
 

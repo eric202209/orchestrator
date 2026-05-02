@@ -472,3 +472,26 @@ class InterventionRequest(Base):
     replied_at = Column(DateTime(timezone=True), nullable=True)
     expires_at = Column(DateTime(timezone=True), nullable=True)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class ExecutionFailureSummary(Base):
+    """Agent-generated summary of a failed execution session.
+
+    Created on first GET /sessions/{id}/failure-summary. One per session.
+    The summary is bounded to ~500 tokens so it safely seeds a new PlanningSession.
+    operator_feedback is operator free-text added before replanning.
+    """
+
+    __tablename__ = "execution_failure_summaries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(
+        Integer, ForeignKey("sessions.id"), nullable=False, unique=True, index=True
+    )
+    summary = Column(Text, nullable=False)
+    operator_feedback = Column(Text, nullable=True)
+    generated_at = Column(DateTime(timezone=True), server_default=func.now())
+    feedback_at = Column(DateTime(timezone=True), nullable=True)
+    replan_planning_session_id = Column(
+        Integer, ForeignKey("planning_sessions.id"), nullable=True
+    )

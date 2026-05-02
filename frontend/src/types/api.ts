@@ -161,6 +161,16 @@ export interface InterventionRequest {
   updated_at: string | null;
 }
 
+export interface ExecutionFailureSummary {
+  session_id: number;
+  summary: string;
+  operator_feedback: string | null;
+  generated_at: string | null;
+  feedback_at: string | null;
+  replan_planning_session_id: number | null;
+  message?: string;
+}
+
 export interface LogEntry {
   id: number;
   session_id: number | null;

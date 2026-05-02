@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import type {
   Checkpoint,
   CheckpointInspection,
+  ExecutionFailureSummary,
   InterventionRequest,
   Project,
   Session,
@@ -16,6 +17,7 @@ import { TerminalViewer } from '@/components/TerminalViewer';
 import { StatusBadge } from '@/components/ui';
 import {
   Activity,
+  AlertTriangle,
   ExternalLink,
   MessageCircle,
   RefreshCw,
@@ -1229,6 +1231,122 @@ export function HumanInterventionPanel({
         </div>
         );
       })}
+    </div>
+  );
+}
+
+interface FailureSummaryPanelProps {
+  summary: ExecutionFailureSummary | null;
+  loading: boolean;
+  onFeedbackSubmit: (feedback: string) => Promise<void>;
+  onReplan: () => Promise<void>;
+}
+
+export function FailureSummaryPanel({
+  summary,
+  loading,
+  onFeedbackSubmit,
+  onReplan,
+}: FailureSummaryPanelProps) {
+  const [feedback, setFeedback] = useState('');
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
+  const [replanning, setReplanning] = useState(false);
+
+  if (loading) {
+    return (
+      <div className="rounded-lg border border-red-800/50 bg-red-900/10 p-4">
+        <p className="flex items-center gap-2 text-sm text-red-300">
+          <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-red-400 border-t-transparent" />
+          Generating failure summary…
+        </p>
+      </div>
+    );
+  }
+
+  if (!summary) return null;
+
+  const alreadyReplanned = summary.replan_planning_session_id !== null;
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-lg border border-red-800/50 bg-red-900/10 p-4">
+        <div className="mb-3 flex items-center gap-2">
+          <AlertTriangle className="h-5 w-5 text-red-400" />
+          <span className="font-semibold text-red-200">Execution Failure Summary</span>
+          {alreadyReplanned && (
+            <span className="rounded bg-emerald-800/50 px-2 py-0.5 text-xs text-emerald-300">
+              Replanned
+            </span>
+          )}
+        </div>
+        <pre className="whitespace-pre-wrap rounded bg-slate-950/60 p-3 text-sm leading-6 text-slate-200">
+          {summary.summary}
+        </pre>
+      </div>
+
+      {summary.operator_feedback && (
+        <div className="rounded-lg border border-slate-700 bg-slate-800/40 p-4">
+          <p className="mb-1 text-xs font-medium text-slate-400">Saved Operator Feedback</p>
+          <p className="whitespace-pre-wrap text-sm text-slate-200">{summary.operator_feedback}</p>
+        </div>
+      )}
+
+      {!alreadyReplanned && (
+        <div className="rounded-lg border border-slate-700 bg-slate-800/30 p-4 space-y-3">
+          <p className="text-sm font-medium text-slate-300">Operator Feedback (optional)</p>
+          <p className="text-xs text-slate-400">
+            Add high-level direction before replanning. The agent receives both the failure
+            summary and your guidance when creating the revised plan.
+          </p>
+          <textarea
+            rows={3}
+            value={feedback}
+            onChange={(e) => setFeedback(e.target.value)}
+            placeholder="e.g. Focus on fixing the database migration — the schema change was wrong."
+            className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-red-500 focus:outline-none resize-none"
+          />
+          <div className="flex items-center gap-3">
+            {feedback.trim() && (
+              <button
+                disabled={feedbackSubmitting}
+                onClick={async () => {
+                  setFeedbackSubmitting(true);
+                  try {
+                    await onFeedbackSubmit(feedback.trim());
+                    setFeedback('');
+                  } finally {
+                    setFeedbackSubmitting(false);
+                  }
+                }}
+                className="rounded-lg border border-slate-600 px-4 py-2 text-sm text-slate-300 transition-colors hover:border-slate-500 hover:text-white disabled:opacity-50"
+              >
+                {feedbackSubmitting ? 'Saving…' : 'Save Feedback'}
+              </button>
+            )}
+            <button
+              disabled={replanning}
+              onClick={async () => {
+                setReplanning(true);
+                try {
+                  await onReplan();
+                } finally {
+                  setReplanning(false);
+                }
+              }}
+              className="flex items-center gap-1.5 rounded-lg bg-red-700 px-4 py-2 text-sm text-white transition-colors hover:bg-red-600 disabled:opacity-50"
+            >
+              {replanning ? 'Starting replan…' : 'Send to Project Architect'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {alreadyReplanned && (
+        <p className="text-xs text-slate-400">
+          Replan started as planning session #{summary.replan_planning_session_id}. Open Project
+          Architect to review and commit the revised plan.
+        </p>
+      )}
     </div>
   );
 }
