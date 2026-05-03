@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from app.models import SystemSetting
 from app.services.orchestration.context_assembly import (
+    DebugPromptInputs,
     assemble_debugging_prompt,
     assemble_execution_prompt,
     assemble_task_summary_prompt,
@@ -44,6 +45,7 @@ def _build_ctx(tmp_path, *, db=None):
         db=db,
         prompt="Improve auth retries and session recovery.",
         execution_profile="full_lifecycle",
+        workflow_profile="default",
         orchestration_state=_State(),
     )
 
@@ -89,12 +91,14 @@ def test_assemble_debugging_prompt_uses_db_selected_adaptation_profile(
     payload = json.loads(
         assemble_debugging_prompt(
             ctx,
-            step_description="Implement auth retry handling",
-            error_message="pytest failed with import error",
-            command_output="Traceback: import error",
-            verification_output="FAILED tests/test_auth.py",
-            attempt_number=2,
-            max_attempts=3,
+            DebugPromptInputs(
+                step_description="Implement auth retry handling",
+                error_message="pytest failed with import error",
+                command_output="Traceback: import error",
+                verification_output="FAILED tests/test_auth.py",
+                attempt_number=2,
+                max_attempts=3,
+            ),
         )
     )
 

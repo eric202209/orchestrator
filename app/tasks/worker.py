@@ -36,6 +36,7 @@ from app.services.orchestration import (
     build_task_report_payload as _build_task_report_payload,
     execute_planning_phase,
     execute_step_loop,
+    finalize_successful_task,
     extract_plan_steps as _extract_plan_steps,
     extract_structured_text as _extract_structured_text,
     handle_task_failure,
@@ -1411,7 +1412,7 @@ def execute_orchestration_task(
                     session_id,
                     task_id,
                     orchestration_state,
-                    resume_plan_verdict,
+                    resume_plan_verdict.verdict,
                 )
                 db.commit()
                 if not resume_plan_verdict.accepted:
@@ -1593,7 +1594,7 @@ def execute_orchestration_task(
                         session_id,
                         task_id,
                         orchestration_state,
-                        stored_plan_verdict,
+                        stored_plan_verdict.verdict,
                     )
                     db.commit()
                     if not stored_plan_verdict.accepted:
@@ -1721,11 +1722,6 @@ def execute_orchestration_task(
                 normalize_plan_with_live_logging=_normalize_plan_with_live_logging,
                 workspace_violation_error_cls=TaskWorkspaceViolationError,
                 write_project_state_snapshot_fn=_write_project_state_snapshot,
-                get_next_pending_project_task_fn=_get_next_pending_project_task,
-                get_latest_session_task_link_fn=_get_latest_session_task_link,
-                execute_orchestration_task_delay_fn=execute_orchestration_task.delay,
-                build_task_report_payload_fn=_build_task_report_payload,
-                render_task_report_fn=_render_task_report,
                 record_live_log_fn=_record_live_log,
             )
             update_langfuse_observation(
@@ -1740,6 +1736,41 @@ def execute_orchestration_task(
                 level=("ERROR" if step_loop_result.get("status") == "failed" else None),
                 status_message=str(step_loop_result.get("reason") or "")[:500] or None,
             )
+        if step_loop_result.get("status") == "completed":
+            with start_langfuse_observation(
+                name="task-summary-phase",
+                as_type="span",
+                input={
+                    "completed_steps": len(
+                        getattr(orchestration_state, "completed_steps", []) or []
+                    ),
+                    "execution_results": len(
+                        orchestration_state.execution_results or []
+                    ),
+                },
+                metadata={
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "phase": "task_summary",
+                    "execution_profile": execution_profile,
+                },
+            ) as task_summary_observation:
+                step_loop_result = finalize_successful_task(
+                    ctx=run_ctx,
+                    write_project_state_snapshot_fn=_write_project_state_snapshot,
+                    get_next_pending_project_task_fn=_get_next_pending_project_task,
+                    get_latest_session_task_link_fn=_get_latest_session_task_link,
+                    execute_orchestration_task_delay_fn=execute_orchestration_task.delay,
+                    build_task_report_payload_fn=_build_task_report_payload,
+                    render_task_report_fn=_render_task_report,
+                )
+                update_langfuse_observation(
+                    task_summary_observation,
+                    output=step_loop_result,
+                    metadata={"phase": "task_summary"},
+                    level="ERROR" if step_loop_result.get("status") == "failed" else None,
+                    status_message=str(step_loop_result.get("reason") or "")[:500] or None,
+                )
         update_langfuse_observation(
             trace_observation,
             output=step_loop_result,

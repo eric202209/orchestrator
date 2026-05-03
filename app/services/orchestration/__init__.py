@@ -6,6 +6,8 @@ from the concrete module they need.
 """
 
 from .context_assembly import (
+    DebugPromptInputs,
+    OrchestrationContext,
     assemble_completion_repair_inputs,
     assemble_execution_prompt,
     assemble_planning_prompt,
@@ -46,6 +48,8 @@ from .phases import (
     handle_task_failure,
 )
 from .persistence import (
+    CheckpointContext,
+    CheckpointData,
     append_orchestration_event,
     diff_orchestration_state_snapshots,
     emit_intent_outcome_mismatch,
@@ -71,7 +75,14 @@ from .task_rules import (
     should_execute_in_canonical_project_root,
     should_force_review_execution_profile,
 )
-from .types import OrchestrationRunContext, ValidationVerdict
+from .types import (
+    OrchestrationRunContext,
+    PlanAccepted,
+    PlanOutcome,
+    PlanRejected,
+    PlanRepairRequired,
+    ValidationVerdict,
+)
 from .validation import (
     TaskWorkspaceViolationError,
     extract_plan_steps,
@@ -98,6 +109,10 @@ from .policy import (
 __all__ = [
     "EventType",
     "is_known_event_type",
+    "PlanAccepted",
+    "PlanOutcome",
+    "PlanRejected",
+    "PlanRepairRequired",
     "ValidationVerdict",
     "PlannerService",
     "append_orchestration_event",
@@ -107,6 +122,8 @@ __all__ = [
     "maybe_emit_divergence_detected",
     "read_orchestration_events",
     "read_orchestration_state_snapshots",
+    "DebugPromptInputs",
+    "OrchestrationContext",
     "assemble_completion_repair_inputs",
     "assemble_execution_prompt",
     "assemble_planning_prompt",
@@ -117,6 +134,8 @@ __all__ = [
     "record_live_log",
     "record_validation_verdict",
     "restore_step_result",
+    "CheckpointContext",
+    "CheckpointData",
     "save_orchestration_checkpoint",
     "set_session_alert",
     "write_checkpoint_state_snapshot",

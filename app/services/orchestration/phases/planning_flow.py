@@ -75,7 +75,7 @@ def _build_reasoning_artifact(
     workspace_facts = [
         f"project_dir={ctx.orchestration_state.project_dir}",
         f"execution_profile={ctx.execution_profile}",
-        f"workflow_profile={getattr(ctx, 'workflow_profile', 'default')}",
+        f"workflow_profile={ctx.workflow_profile}",
     ]
     if workspace_review.get("has_existing_files"):
         workspace_facts.append("workspace already contains project files")
@@ -280,7 +280,7 @@ def execute_planning_phase(
             emit_live=ctx.emit_live,
             reason="dense_planning_context",
             prompt_profile=prompt_profile,
-            workflow_profile=getattr(ctx, "workflow_profile", "default"),
+            workflow_profile=ctx.workflow_profile,
             workflow_phases=getattr(ctx, "workflow_phases", []),
             workspace_has_existing_files=getattr(
                 ctx, "workspace_has_existing_files", False
@@ -340,7 +340,7 @@ def execute_planning_phase(
             emit_live=ctx.emit_live,
             reason=(planning_result.get("error") or initial_output_text),
             prompt_profile=prompt_profile,
-            workflow_profile=getattr(ctx, "workflow_profile", "default"),
+            workflow_profile=ctx.workflow_profile,
             workflow_phases=getattr(ctx, "workflow_phases", []),
             workspace_has_existing_files=getattr(
                 ctx, "workspace_has_existing_files", False
@@ -695,14 +695,14 @@ def execute_planning_phase(
                 title=ctx.task.title if ctx.task else None,
                 description=ctx.task.description if ctx.task else None,
                 validation_severity=ctx.validation_severity,
-                workflow_profile=getattr(ctx, "workflow_profile", None),
+                workflow_profile=ctx.workflow_profile,
             )
             record_validation_verdict(
                 ctx.db,
                 ctx.session_id,
                 ctx.task_id,
                 ctx.orchestration_state,
-                plan_verdict,
+                plan_verdict.verdict,
                 parent_event_id=(planning_phase_event or {}).get("event_id"),
             )
             if not plan_verdict.accepted or plan_verdict.warning:
@@ -1081,7 +1081,7 @@ def __retry_with_minimal_prompt(
         emit_live=ctx.emit_live,
         reason=reason,
         prompt_profile=prompt_profile,
-        workflow_profile=getattr(ctx, "workflow_profile", "default"),
+        workflow_profile=ctx.workflow_profile,
         workflow_phases=getattr(ctx, "workflow_phases", []),
         workspace_has_existing_files=getattr(
             ctx, "workspace_has_existing_files", False
@@ -1109,7 +1109,7 @@ def __repair_planning_output(
         reason=reason,
         rejection_reasons=rejection_reasons,
         prompt_profile=prompt_profile,
-        workflow_profile=getattr(ctx, "workflow_profile", "default"),
+        workflow_profile=ctx.workflow_profile,
         workflow_phases=getattr(ctx, "workflow_phases", []),
         workspace_has_existing_files=getattr(
             ctx, "workspace_has_existing_files", False

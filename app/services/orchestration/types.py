@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from app.services.agents.interfaces import AgentRuntime
 from app.services.orchestration.policy import PolicyProfile, get_policy_profile
@@ -48,6 +48,61 @@ class ValidationVerdict:
             "used_small_model": self.used_small_model,
             "confidence": self.confidence,
         }
+
+
+class _PlanOutcomeBase:
+    """Delegate properties so callers can access verdict fields directly."""
+
+    verdict: ValidationVerdict
+
+    @property
+    def accepted(self) -> bool:
+        return self.verdict.accepted
+
+    @property
+    def rejected(self) -> bool:
+        return self.verdict.rejected
+
+    @property
+    def repairable(self) -> bool:
+        return self.verdict.repairable
+
+    @property
+    def warning(self) -> bool:
+        return self.verdict.warning
+
+    @property
+    def status(self) -> str:
+        return self.verdict.status
+
+    @property
+    def reasons(self) -> List[str]:
+        return self.verdict.reasons
+
+    @property
+    def details(self) -> Dict[str, Any]:
+        return self.verdict.details
+
+    def to_dict(self) -> Dict[str, Any]:
+        return self.verdict.to_dict()
+
+
+@dataclass
+class PlanAccepted(_PlanOutcomeBase):
+    verdict: ValidationVerdict
+
+
+@dataclass
+class PlanRepairRequired(_PlanOutcomeBase):
+    verdict: ValidationVerdict
+
+
+@dataclass
+class PlanRejected(_PlanOutcomeBase):
+    verdict: ValidationVerdict
+
+
+PlanOutcome = Union[PlanAccepted, PlanRepairRequired, PlanRejected]
 
 
 @dataclass
@@ -176,6 +231,7 @@ class OrchestrationRunContext:
     policy_profile_name: str = "balanced"
     validation_severity: str = "standard"
     completion_repair_budget: int = 1
+    workflow_profile: str = "default"
     restore_workspace_snapshot_if_needed: Optional[Callable[[str], Any]] = None
 
     @property

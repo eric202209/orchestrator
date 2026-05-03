@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
 from app.models import TaskStatus
 from app.services.orchestration.context_assembly import (
+    DebugPromptInputs,
     assemble_debugging_prompt,
     assemble_execution_prompt,
     assemble_plan_revision_prompt,
@@ -29,7 +29,6 @@ from app.services.orchestration.execution.step_support import (
     repair_step_commands_with_self_correction,
     step_needs_command_repair,
 )
-from app.services.orchestration.phases.completion_flow import finalize_successful_task
 from app.services.orchestration.policy import (
     DEBUG_TIMEOUT_SECONDS,
     MAX_STEP_ATTEMPTS,
@@ -56,29 +55,8 @@ from app.services.orchestration.validation.workspace_guard import (
     detect_scope_violations,
     summarize_step_changes,
 )
-from app.services.observability import (
-    start_langfuse_observation,
-    update_langfuse_observation,
-)
+from app.services.orchestration.hitl_sentinel import parse as _parse_hitl_sentinel
 from app.services.prompt_templates import OrchestrationStatus, StepResult
-
-
-# Sentinel the agent emits to request human confirmation mid-step.
-# Format: <<<HITL_REQUEST:{"intervention_type": "approval", "prompt": "...", "context": {...}}>>>
-# The agent system prompt must instruct the agent to use this format when it
-# wants to pause and ask the operator before proceeding.
-_HITL_SENTINEL_RE = re.compile(r"<<<HITL_REQUEST:(\{.*?\})>>>", re.DOTALL)
-
-
-def _extract_hitl_sentinel(output: str) -> Dict[str, Any] | None:
-    """Return the parsed HITL request dict if the agent output contains the sentinel."""
-    m = _HITL_SENTINEL_RE.search(output or "")
-    if not m:
-        return None
-    try:
-        return json.loads(m.group(1))
-    except Exception:
-        return None
 
 
 def execute_step_loop(
@@ -88,11 +66,6 @@ def execute_step_loop(
     normalize_step: Callable[..., Dict[str, Any]],
     normalize_plan_with_live_logging: Callable[..., Any],
     workspace_violation_error_cls: type[Exception],
-    get_next_pending_project_task_fn: Callable[..., Any],
-    get_latest_session_task_link_fn: Callable[..., Any],
-    execute_orchestration_task_delay_fn: Callable[..., Any],
-    build_task_report_payload_fn: Callable[..., Dict[str, Any]],
-    render_task_report_fn: Callable[..., Dict[str, Any]],
     write_project_state_snapshot_fn: Callable[..., None],
     record_live_log_fn: Callable[..., None],
 ) -> Dict[str, Any]:
@@ -422,7 +395,7 @@ def execute_step_loop(
         # confirmation before I proceed." We pause the session here; on resume
         # the operator's decision will be in context["human_guidance"] and the
         # agent retries the same step with that guidance.
-        hitl_request = _extract_hitl_sentinel(step_result.get("output", ""))
+        hitl_request = _parse_hitl_sentinel(step_result.get("output", ""))
         if hitl_request:
             intervention_type = hitl_request.get("intervention_type", "approval")
             if intervention_type not in {"guidance", "approval", "information"}:
@@ -1063,8 +1036,7 @@ def execute_step_loop(
             write_project_state_snapshot_fn(db, project, task, session_id)
             return {"status": "failed", "reason": "max_attempts_reached"}
 
-        debug_prompt = assemble_debugging_prompt(
-            ctx,
+        debug_inputs = DebugPromptInputs(
             step_description=step_description + extra_context,
             error_message=step_record.error_message,
             command_output=step_output,
@@ -1073,6 +1045,7 @@ def execute_step_loop(
             max_attempts=max_attempts,
             failure_envelope=failure_envelope,
         )
+        debug_prompt = assemble_debugging_prompt(ctx, debug_inputs)
 
         debug_result = asyncio.run(
             runtime_service.execute_task(
@@ -1097,14 +1070,16 @@ def execute_step_loop(
             )
             compact_debug_prompt = assemble_debugging_prompt(
                 ctx,
-                step_description=step_description,
-                error_message=step_record.error_message,
-                command_output=step_output,
-                verification_output=step_record.verification_output,
-                attempt_number=current_attempt,
-                max_attempts=max_attempts,
-                compact=True,
-                failure_envelope=failure_envelope,
+                DebugPromptInputs(
+                    step_description=step_description,
+                    error_message=step_record.error_message,
+                    command_output=step_output,
+                    verification_output=step_record.verification_output,
+                    attempt_number=current_attempt,
+                    max_attempts=max_attempts,
+                    compact=True,
+                    failure_envelope=failure_envelope,
+                ),
             )
             debug_result = asyncio.run(
                 runtime_service.execute_task(
@@ -1248,7 +1223,7 @@ def execute_step_loop(
                     session_id,
                     task_id,
                     orchestration_state,
-                    revised_plan_verdict,
+                    revised_plan_verdict.verdict,
                     parent_event_id=(plan_revision_phase_event or {}).get("event_id"),
                 )
                 db.commit()
@@ -1516,36 +1491,4 @@ def execute_step_loop(
     except Exception:
         pass
 
-    with start_langfuse_observation(
-        name="task-summary-phase",
-        as_type="span",
-        input={
-            "completed_steps": len(
-                getattr(orchestration_state, "completed_steps", []) or []
-            ),
-            "execution_results": len(orchestration_state.execution_results or []),
-        },
-        metadata={
-            "session_id": session_id,
-            "task_id": task_id,
-            "phase": "task_summary",
-            "execution_profile": execution_profile,
-        },
-    ) as task_summary_observation:
-        completion_result = finalize_successful_task(
-            ctx=ctx,
-            write_project_state_snapshot_fn=write_project_state_snapshot_fn,
-            get_next_pending_project_task_fn=get_next_pending_project_task_fn,
-            get_latest_session_task_link_fn=get_latest_session_task_link_fn,
-            execute_orchestration_task_delay_fn=execute_orchestration_task_delay_fn,
-            build_task_report_payload_fn=build_task_report_payload_fn,
-            render_task_report_fn=render_task_report_fn,
-        )
-        update_langfuse_observation(
-            task_summary_observation,
-            output=completion_result,
-            metadata={"phase": "task_summary"},
-            level="ERROR" if completion_result.get("status") == "failed" else None,
-            status_message=str(completion_result.get("reason") or "")[:500] or None,
-        )
-        return completion_result
+    return {"status": "completed"}

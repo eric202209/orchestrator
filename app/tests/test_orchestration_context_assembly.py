@@ -69,6 +69,7 @@ def _make_ctx(tmp_path):
         db=None,
         prompt="Build a TypeScript module with tests in the current workspace",
         execution_profile="full_lifecycle",
+        workflow_profile="default",
         orchestration_state=state,
     )
 

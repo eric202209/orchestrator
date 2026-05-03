@@ -167,19 +167,22 @@ def create_intervention_request(
 
     checkpoint_name: Optional[str] = None
     try:
+        from app.services.orchestration.persistence import CheckpointData
+
         checkpoint_service = CheckpointService(db)
-        latest = checkpoint_service.load_checkpoint(session_id)
-        if latest:
+        raw = checkpoint_service.load_checkpoint(session_id)
+        if raw:
+            data = CheckpointData.from_dict(raw)
             checkpoint_name = (
                 f"intervention_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
             )
             checkpoint_service.save_checkpoint(
                 session_id=session_id,
                 checkpoint_name=checkpoint_name,
-                context_data=latest.get("context", {}),
-                orchestration_state=latest.get("orchestration_state", {}),
-                current_step_index=latest.get("current_step_index"),
-                step_results=latest.get("step_results", []),
+                context_data=data.context.to_dict(),
+                orchestration_state=data.orchestration_state,
+                current_step_index=data.current_step_index,
+                step_results=data.step_results,
             )
     except Exception:
         checkpoint_name = None
@@ -245,18 +248,20 @@ def _inject_reply_into_checkpoint(
     intervention_id: int,
 ) -> Optional[str]:
     """Prepend operator guidance into the latest checkpoint context."""
+    from app.services.orchestration.persistence import CheckpointData
     from app.services.workspace.checkpoint_service import CheckpointService
 
     try:
         checkpoint_service = CheckpointService(db)
-        latest = checkpoint_service.load_checkpoint(session_id)
-        if not latest:
+        raw = checkpoint_service.load_checkpoint(session_id)
+        if not raw:
             return None
-        ctx = latest.get("context", {}) or {}
-        existing_guidance = ctx.get("human_guidance", "")
+        data = CheckpointData.from_dict(raw)
         entry = f"[Operator {intervention_type} #{intervention_id}]: {reply_text}"
-        ctx["human_guidance"] = (
-            (existing_guidance + "\n" + entry).strip() if existing_guidance else entry
+        data.context.human_guidance = (
+            (data.context.human_guidance + "\n" + entry).strip()
+            if data.context.human_guidance
+            else entry
         )
         reply_checkpoint_name = (
             f"intervention_reply_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
@@ -264,10 +269,10 @@ def _inject_reply_into_checkpoint(
         checkpoint_service.save_checkpoint(
             session_id=session_id,
             checkpoint_name=reply_checkpoint_name,
-            context_data=ctx,
-            orchestration_state=latest.get("orchestration_state", {}),
-            current_step_index=latest.get("current_step_index"),
-            step_results=latest.get("step_results", []),
+            context_data=data.context.to_dict(),
+            orchestration_state=data.orchestration_state,
+            current_step_index=data.current_step_index,
+            step_results=data.step_results,
         )
         return reply_checkpoint_name
     except Exception as exc:

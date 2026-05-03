@@ -13,7 +13,13 @@ from sqlalchemy.orm import Session
 
 from app.models import TaskCheckpoint
 from ..policy import apply_validation_policy
-from ..types import ValidationVerdict
+from ..types import (
+    PlanAccepted,
+    PlanOutcome,
+    PlanRejected,
+    PlanRepairRequired,
+    ValidationVerdict,
+)
 
 
 SOURCE_EXTENSIONS = {
@@ -1019,7 +1025,7 @@ class ValidatorService:
         description: Optional[str] = None,
         validation_severity: str = "standard",
         workflow_profile: Optional[str] = None,
-    ) -> ValidationVerdict:
+    ) -> PlanOutcome:
         profile = cls.infer_validation_profile(
             task_prompt, execution_profile, title=title, description=description
         )
@@ -1176,7 +1182,7 @@ class ValidatorService:
             )
             details["stack_conflict"] = True
 
-        return ValidationVerdict(
+        verdict = ValidationVerdict(
             stage="plan",
             status=cls._select_status(
                 warnings=warnings,
@@ -1191,6 +1197,11 @@ class ValidatorService:
             ),
             details=details,
         )
+        if verdict.rejected:
+            return PlanRejected(verdict=verdict)
+        if verdict.repairable:
+            return PlanRepairRequired(verdict=verdict)
+        return PlanAccepted(verdict=verdict)
 
     @staticmethod
     def _iter_candidate_files(

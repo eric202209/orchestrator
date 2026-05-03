@@ -161,11 +161,11 @@ def handle_task_failure(
         )
 
     if has_retry_capacity and session and task:
-        task.status = TaskStatus.RUNNING
+        task.status = TaskStatus.PENDING
         task.completed_at = None
         task.workspace_status = "in_progress" if task.task_subfolder else "not_created"
         if session_task_link:
-            session_task_link.status = TaskStatus.RUNNING
+            session_task_link.status = TaskStatus.PENDING
             session_task_link.completed_at = None
         session.status = "running"
         session.is_active = True

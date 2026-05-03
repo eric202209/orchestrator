@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+from typing import Protocol, runtime_checkable
 
 from app.services.model_adaptation import render_prompt_for_profile
 from app.services.model_adaptation.schemas import PromptEnvelope
+from app.services.orchestration.hitl_sentinel import render as render_hitl_sentinel
 from app.services.orchestration.workflow_profiles import get_workflow_phases
 from app.services.prompt_templates import PromptTemplates, StepResult
 from app.services.workspace.path_display import render_workspace_path_for_prompt
@@ -20,6 +23,31 @@ _IGNORED_PARTS = {"node_modules", ".openclaw", "__pycache__", ".git", "dist", "b
 _PATH_TOKEN_RE = re.compile(
     r"(?<![\w./-])([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+\.[A-Za-z0-9_.-]+)(?![\w./-])"
 )
+
+
+@runtime_checkable
+class OrchestrationContext(Protocol):
+    """Narrow interface required by context_assembly functions."""
+
+    orchestration_state: Any
+    db: Any
+    execution_profile: str
+    prompt: str
+    workflow_profile: str
+
+
+@dataclass
+class DebugPromptInputs:
+    """All step-level inputs needed to assemble a debugging prompt."""
+
+    step_description: str
+    error_message: str
+    command_output: str
+    verification_output: str
+    attempt_number: int
+    max_attempts: int
+    compact: bool = False
+    failure_envelope: Any = None
 
 
 def _trim_text(text: Any, max_chars: int) -> str:
@@ -327,7 +355,7 @@ def render_adapted_runtime_prompt(
     return render_prompt_for_profile(profile_name, envelope)
 
 
-def assemble_planning_prompt(ctx: Any, workspace_review: Dict[str, Any]) -> str:
+def assemble_planning_prompt(ctx: OrchestrationContext, workspace_review: Dict[str, Any]) -> str:
     prompt_project_dir = render_workspace_path_for_prompt(
         ctx.orchestration_state.project_dir, db=ctx.db
     )
@@ -352,10 +380,8 @@ def assemble_planning_prompt(ctx: Any, workspace_review: Dict[str, Any]) -> str:
         project_context=project_context,
         project_dir=prompt_project_dir,
         execution_profile=ctx.execution_profile,
-        workflow_profile=getattr(ctx, "workflow_profile", "default"),
-        workflow_phases=get_workflow_phases(
-            getattr(ctx, "workflow_profile", "default")
-        ),
+        workflow_profile=ctx.workflow_profile,
+        workflow_phases=get_workflow_phases(ctx.workflow_profile),
     )
     return render_adapted_runtime_prompt(
         ctx.db,
@@ -376,7 +402,7 @@ def assemble_planning_prompt(ctx: Any, workspace_review: Dict[str, Any]) -> str:
 
 
 def assemble_execution_prompt(
-    ctx: Any, step: Dict[str, Any], *, compact: bool = False
+    ctx: OrchestrationContext, step: Dict[str, Any], *, compact: bool = False
 ) -> str:
     prompt_project_dir = render_workspace_path_for_prompt(
         ctx.orchestration_state.project_dir, db=ctx.db
@@ -394,8 +420,10 @@ def assemble_execution_prompt(
         (
             "If you need human confirmation before continuing, output exactly one "
             "sentinel in this format and stop: "
-            '<<<HITL_REQUEST:{"intervention_type":"approval","prompt":"...",'
-            '"context":{...}}>>>. Use this for authorization, destructive/risky '
+            + render_hitl_sentinel(
+                {"intervention_type": "approval", "prompt": "...", "context": {}}
+            )
+            + ". Use this for authorization, destructive/risky "
             "actions, missing credentials, or when operator intent is ambiguous."
         ),
     ]
@@ -462,37 +490,31 @@ def assemble_execution_prompt(
 
 
 def assemble_debugging_prompt(
-    ctx: Any,
-    *,
-    step_description: str,
-    error_message: str,
-    command_output: str,
-    verification_output: str,
-    attempt_number: int,
-    max_attempts: int,
-    compact: bool = False,
-    failure_envelope: Any = None,
+    ctx: OrchestrationContext,
+    inputs: DebugPromptInputs,
 ) -> str:
     prompt_project_dir = render_workspace_path_for_prompt(
         ctx.orchestration_state.project_dir, db=ctx.db
     )
     raw_prompt = PromptTemplates.build_debugging_prompt(
-        step_description=step_description,
-        error_message=error_message,
-        command_output=command_output,
-        verification_output=verification_output,
-        attempt_number=attempt_number,
-        max_attempts=max_attempts,
+        step_description=inputs.step_description,
+        error_message=inputs.error_message,
+        command_output=inputs.command_output,
+        verification_output=inputs.verification_output,
+        attempt_number=inputs.attempt_number,
+        max_attempts=inputs.max_attempts,
         prior_debug_attempts=ctx.orchestration_state.debug_attempts,
         project_name=ctx.orchestration_state.project_name,
         workspace_root=str(ctx.orchestration_state.workspace_root),
         project_dir=prompt_project_dir,
-        compact=compact,
+        compact=inputs.compact,
     )
-    if failure_envelope is not None and hasattr(failure_envelope, "to_prompt_block"):
+    if inputs.failure_envelope is not None and hasattr(
+        inputs.failure_envelope, "to_prompt_block"
+    ):
         raw_prompt += (
             "\n\nNormalized execution error:\n"
-            + failure_envelope.to_prompt_block(max_chars=1800)
+            + inputs.failure_envelope.to_prompt_block(max_chars=1800)
         )
     return render_adapted_runtime_prompt(
         ctx.db,
@@ -505,9 +527,9 @@ def assemble_debugging_prompt(
         ],
         context={
             "Project Directory": prompt_project_dir,
-            "Attempt Number": attempt_number,
-            "Max Attempts": max_attempts,
-            "Compact Retry": compact,
+            "Attempt Number": inputs.attempt_number,
+            "Max Attempts": inputs.max_attempts,
+            "Compact Retry": inputs.compact,
         },
         expected_output=(
             "JSON object with analysis, fix, confidence, and fix_type fields."
@@ -516,7 +538,7 @@ def assemble_debugging_prompt(
 
 
 def assemble_plan_revision_prompt(
-    ctx: Any,
+    ctx: OrchestrationContext,
     *,
     failed_steps: List[StepResult],
     debug_analysis: str,
@@ -550,7 +572,7 @@ def assemble_plan_revision_prompt(
     )
 
 
-def assemble_task_summary_prompt(ctx: Any) -> str:
+def assemble_task_summary_prompt(ctx: OrchestrationContext) -> str:
     raw_prompt = PromptTemplates.build_task_summary(
         task_description=ctx.prompt,
         plan_summary=_trim_text(
@@ -581,7 +603,7 @@ def assemble_task_summary_prompt(ctx: Any) -> str:
 
 
 def assemble_completion_repair_inputs(
-    ctx: Any,
+    ctx: OrchestrationContext,
     completion_validation: Any,
     *,
     max_inventory_files: int = 80,

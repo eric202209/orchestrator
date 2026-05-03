@@ -9,6 +9,7 @@ import re
 import time
 import uuid
 import tempfile
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -22,6 +23,55 @@ from app.services.prompt_templates import OrchestrationState, StepResult
 from .events.event_types import EventType
 from .policy import MAX_STEP_ATTEMPTS
 from .types import FailureEnvelope, ValidationVerdict
+
+
+@dataclass
+class CheckpointContext:
+    task_id: Optional[int] = None
+    task_description: Optional[str] = None
+    project_name: Optional[str] = None
+    project_context: Optional[str] = None
+    task_subfolder: Optional[str] = None
+    workspace_path_override: Optional[str] = None
+    human_guidance: str = ""
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "CheckpointContext":
+        return cls(
+            task_id=d.get("task_id"),
+            task_description=d.get("task_description"),
+            project_name=d.get("project_name"),
+            project_context=d.get("project_context"),
+            task_subfolder=d.get("task_subfolder"),
+            workspace_path_override=d.get("workspace_path_override"),
+            human_guidance=d.get("human_guidance", ""),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class CheckpointData:
+    session_id: int
+    checkpoint_name: str
+    context: CheckpointContext
+    orchestration_state: Dict[str, Any]
+    current_step_index: Optional[int] = None
+    step_results: List[Dict[str, Any]] = field(default_factory=list)
+    created_at: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "CheckpointData":
+        return cls(
+            session_id=d.get("session_id", 0),
+            checkpoint_name=d.get("checkpoint_name", "autosave_latest"),
+            context=CheckpointContext.from_dict(d.get("context", {}) or {}),
+            orchestration_state=d.get("orchestration_state", {}) or {},
+            current_step_index=d.get("current_step_index"),
+            step_results=d.get("step_results", []) or [],
+            created_at=d.get("created_at"),
+        )
 
 
 def _orchestration_event_log_path(
