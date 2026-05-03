@@ -601,6 +601,15 @@ def _migration_009_execution_failure_summaries(engine: Engine) -> None:
             )
 
 
+def _migration_010_rename_awaiting_input(engine: Engine) -> None:
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE sessions SET status = 'awaiting_input' WHERE status = 'waiting_for_human'"
+            )
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -646,6 +655,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="009_execution_failure_summaries",
         description="Create execution_failure_summaries table for replan flow",
         upgrade=_migration_009_execution_failure_summaries,
+    ),
+    Migration(
+        version="010_rename_awaiting_input",
+        description="Rename session status waiting_for_human to awaiting_input",
+        upgrade=_migration_010_rename_awaiting_input,
     ),
 )
 

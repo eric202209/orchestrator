@@ -278,7 +278,7 @@ def _claim_queued_task_for_worker(
         db.rollback()
         return False, "session_instance_changed", None, session_task_link
 
-    if session.status not in {"pending", "running", "paused", "waiting_for_human"}:
+    if session.status not in {"pending", "running", "paused", "awaiting_input"}:
         db.rollback()
         return False, f"session_not_runnable:{session.status}", None, session_task_link
 

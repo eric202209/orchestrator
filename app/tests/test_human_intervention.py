@@ -4,8 +4,8 @@ Covers:
 - Service: create_intervention_request, submit_intervention_reply,
            approve_intervention, deny_intervention
 - API: POST /request-intervention, GET /interventions, reply/approve/deny
-- Session status transitions: running → waiting_for_human → paused
-- Resume from waiting_for_human status
+- Session status transitions: running → awaiting_input → paused
+- Resume from awaiting_input status
 - Error cases: bad type, double-reply, approve non-approval-type
 """
 
@@ -111,7 +111,7 @@ class TestCreateInterventionRequest:
         assert req.intervention_type == "guidance"
         assert req.prompt == "Need guidance here"
 
-    def test_session_transitions_to_waiting_for_human(
+    def test_session_transitions_to_awaiting_input(
         self, db_session: Session, running_session: SessionModel, project: Project
     ):
         with (
@@ -128,7 +128,7 @@ class TestCreateInterventionRequest:
             )
 
         db_session.refresh(running_session)
-        assert running_session.status == "waiting_for_human"
+        assert running_session.status == "awaiting_input"
 
     def test_rejects_unknown_intervention_type(
         self, db_session: Session, running_session: SessionModel, project: Project
@@ -207,7 +207,7 @@ class TestSubmitInterventionReply:
         pending_intervention: InterventionRequest,
     ):
         db_session.refresh(running_session)
-        # session is now waiting_for_human
+        # session is now awaiting_input
         with patch(_CHECKPOINT_PATH) as mock_cs:
             mock_cs.return_value.load_checkpoint.return_value = None
             req = submit_intervention_reply(

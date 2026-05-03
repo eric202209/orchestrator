@@ -485,7 +485,7 @@ def test_session_focus_and_mobile_interruption_endpoints(
 ):
     with tempfile.TemporaryDirectory() as tmpdir:
         project = _make_project(db_session, workspace_path=tmpdir)
-        session = _make_session(db_session, project, status="waiting_for_human")
+        session = _make_session(db_session, project, status="awaiting_input")
         session.is_active = True
         db_session.commit()
 

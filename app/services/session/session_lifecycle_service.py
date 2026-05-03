@@ -1015,7 +1015,7 @@ async def request_human_intervention_lifecycle(
     )
 
     return {
-        "status": "waiting_for_human",
+        "status": "awaiting_input",
         "session_id": session_id,
         "intervention_id": req.id,
         "intervention_type": req.intervention_type,
@@ -1029,7 +1029,7 @@ async def resume_session_lifecycle(
     *,
     checkpoint_name: str | None = None,
 ) -> Dict[str, Any]:
-    """Resume a paused, stopped, or waiting_for_human session from checkpoint."""
+    """Resume a paused, stopped, or awaiting_input session from checkpoint."""
     from app.tasks.worker import execute_orchestration_task
 
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
@@ -1038,7 +1038,7 @@ async def resume_session_lifecycle(
     if session.status == "running":
         _recover_orphaned_running_session_if_needed(db, session=session)
         db.refresh(session)
-    if session.status not in ["paused", "stopped", "waiting_for_human"]:
+    if session.status not in ["paused", "stopped", "awaiting_input"]:
         raise HTTPException(status_code=400, detail="Session is not resumable")
 
     try:

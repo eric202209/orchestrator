@@ -131,7 +131,7 @@ class PermissionApprovalService:
                 if session and session.status in {
                     "running",
                     "paused",
-                    "waiting_for_human",
+                    "awaiting_input",
                 }:
                     create_intervention_request(
                         self.db,

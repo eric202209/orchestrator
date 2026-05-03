@@ -1246,12 +1246,12 @@ export default function SessionDetail() {
 
         if (abortController.signal.aborted) return;
 
-        if (sessionRes.data.status === 'running' || sessionRes.data.status === 'waiting_for_human') {
+        if (sessionRes.data.status === 'running' || sessionRes.data.status === 'awaiting_input') {
           scheduleWebSocketConnect(sessionRes.data.id);
         } else {
           console.log(`Session is ${sessionRes.data.status}, not connecting WebSocket yet`);
         }
-        if (sessionRes.data.status === 'waiting_for_human') {
+        if (sessionRes.data.status === 'awaiting_input') {
           await loadInterventions(sessionRes.data.id);
         }
         if (sessionRes.data.status === 'stopped') {
@@ -1310,14 +1310,14 @@ export default function SessionDetail() {
         }
 
         if (
-          (currentStatus === 'running' || currentStatus === 'waiting_for_human') &&
+          (currentStatus === 'running' || currentStatus === 'awaiting_input') &&
           !wsRef.current
         ) {
           console.log(`Session is now ${currentStatus}, connecting WebSocket...`);
           scheduleWebSocketConnect(Number(sessionId), 1000);
         }
 
-        if (currentStatus === 'waiting_for_human') {
+        if (currentStatus === 'awaiting_input') {
           await loadInterventions(Number(sessionId));
         }
 
@@ -1759,7 +1759,7 @@ export default function SessionDetail() {
           </div>
         );
 
-      case 'waiting_for_human':
+      case 'awaiting_input':
         return (
           <div className="flex items-center gap-2">
             <span className="flex items-center gap-2 rounded-lg border border-amber-700/50 bg-amber-900/30 px-3 py-2 text-sm text-amber-300">
@@ -2083,7 +2083,7 @@ export default function SessionDetail() {
         </div>
       )}
 
-      {(session.status === 'waiting_for_human' || pendingInterventions.length > 0) && (
+      {(session.status === 'awaiting_input' || pendingInterventions.length > 0) && (
         <HumanInterventionPanel
           interventions={interventions}
           onApprove={handleApproveIntervention}

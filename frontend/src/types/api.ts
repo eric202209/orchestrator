@@ -141,7 +141,7 @@ export interface PlanningCommitPreview extends PlanningSession {
   tasks: Task[];
 }
 
-export type SessionStatus = 'pending' | 'running' | 'paused' | 'stopped' | 'completed' | 'waiting_for_human';
+export type SessionStatus = 'pending' | 'running' | 'paused' | 'stopped' | 'completed' | 'awaiting_input';
 
 export interface InterventionRequest {
   id: number;

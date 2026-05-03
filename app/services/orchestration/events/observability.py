@@ -335,7 +335,7 @@ def build_mobile_interruption_cards(
         getattr(session, "status", "")
     ).lower() in {
         "running",
-        "waiting_for_human",
+        "awaiting_input",
     }:
         cards.append(
             {

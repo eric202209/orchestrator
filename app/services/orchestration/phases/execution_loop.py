@@ -208,7 +208,7 @@ def execute_step_loop(
         step = orchestration_state.plan[step_index]
         db.refresh(session)
         if (
-            session.status in ["stopped", "paused", "waiting_for_human"]
+            session.status in ["stopped", "paused", "awaiting_input"]
             or not session.is_active
         ):
             logger.info(
@@ -470,7 +470,7 @@ def execute_step_loop(
             )
             db.commit()
             return {
-                "status": "waiting_for_human",
+                "status": "awaiting_input",
                 "task_id": task_id,
                 "session_id": session_id,
                 "step_index": step_index,

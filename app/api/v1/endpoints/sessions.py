@@ -669,7 +669,7 @@ async def request_human_intervention(
 ):
     """Pause execution and register a human-in-the-loop intervention request.
 
-    Sets session.status = 'waiting_for_human'. The session can be resumed
+    Sets session.status = 'awaiting_input'. The session can be resumed
     once the operator submits a reply, approval, or denial.
     """
     result = await _request_human_intervention_lifecycle(
@@ -726,7 +726,7 @@ def reply_to_intervention(
     """Submit operator guidance/reply for a pending intervention.
 
     Records the reply, injects it into the latest checkpoint context, and
-    transitions the session from 'waiting_for_human' → 'paused' so it can be
+    transitions the session from 'awaiting_input' → 'paused' so it can be
     resumed via the normal resume endpoint.
     """
     _get_session_intervention_or_404(db, session_id, intervention_id)

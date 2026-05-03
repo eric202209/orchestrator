@@ -2,7 +2,7 @@
 
 Lifecycle:
   1. Runtime (or operator) calls ``create_intervention_request`` — session
-     transitions to ``waiting_for_human``, Celery tasks are revoked, a
+     transitions to ``awaiting_input``, Celery tasks are revoked, a
      checkpoint is saved, and a HUMAN_INTERVENTION_REQUESTED event is appended.
   2. Operator submits a reply, approval, or denial via one of the reply helpers
      — the InterventionRequest is updated, the operator guidance is injected
@@ -135,7 +135,7 @@ def create_intervention_request(
 ) -> InterventionRequest:
     """Pause session execution and persist a HITL intervention request.
 
-    Sets session.status = 'waiting_for_human', revokes any running Celery
+    Sets session.status = 'awaiting_input', revokes any running Celery
     tasks, saves the current checkpoint, and emits an event.
 
     Pass revoke_running_tasks=False when calling from inside the Celery task
@@ -150,7 +150,7 @@ def create_intervention_request(
 
     session = _get_session_or_404(db, session_id)
 
-    if session.status not in {"running", "paused", "waiting_for_human"}:
+    if session.status not in {"running", "paused", "awaiting_input"}:
         raise HTTPException(
             status_code=400,
             detail=f"Cannot request intervention for session in state '{session.status}'",
@@ -199,7 +199,7 @@ def create_intervention_request(
     )
     db.add(req)
 
-    session.status = "waiting_for_human"
+    session.status = "awaiting_input"
     session.is_active = True
     db.commit()
     db.refresh(req)
@@ -400,7 +400,7 @@ def submit_intervention_reply(
     )
 
     session = db.query(SessionModel).filter(SessionModel.id == req.session_id).first()
-    if session and session.status == "waiting_for_human":
+    if session and session.status == "awaiting_input":
         session.status = "paused"
         session.paused_at = now
         db.commit()
@@ -467,7 +467,7 @@ def approve_intervention(
     )
 
     session = db.query(SessionModel).filter(SessionModel.id == req.session_id).first()
-    if session and session.status == "waiting_for_human":
+    if session and session.status == "awaiting_input":
         session.status = "paused"
         session.paused_at = now
         db.commit()
@@ -532,7 +532,7 @@ def deny_intervention(
     )
 
     session = db.query(SessionModel).filter(SessionModel.id == req.session_id).first()
-    if session and session.status == "waiting_for_human":
+    if session and session.status == "awaiting_input":
         session.status = "paused"
         session.paused_at = now
         db.commit()
