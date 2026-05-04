@@ -1,4 +1,5 @@
 """Tests for hitl_sentinel.py — render/parse symmetry and edge cases."""
+
 from __future__ import annotations
 
 import pytest
@@ -17,7 +18,11 @@ class TestRender:
         assert " " not in result
 
     def test_roundtrip(self):
-        payload = {"intervention_type": "guidance", "prompt": "What path?", "context": {"step": 3}}
+        payload = {
+            "intervention_type": "guidance",
+            "prompt": "What path?",
+            "context": {"step": 3},
+        }
         assert parse(render(payload)) == payload
 
 
@@ -32,10 +37,14 @@ class TestParse:
     def test_extracts_approval(self):
         sentinel = '<<<HITL_REQUEST:{"intervention_type":"approval","prompt":"Delete prod?","context":{}}>>>'
         result = parse(sentinel)
-        assert result == {"intervention_type": "approval", "prompt": "Delete prod?", "context": {}}
+        assert result == {
+            "intervention_type": "approval",
+            "prompt": "Delete prod?",
+            "context": {},
+        }
 
     def test_extracts_from_surrounding_text(self):
-        output = "I need confirmation.\n<<<HITL_REQUEST:{\"intervention_type\":\"approval\",\"prompt\":\"proceed?\",\"context\":{}}>>>\nwaiting."
+        output = 'I need confirmation.\n<<<HITL_REQUEST:{"intervention_type":"approval","prompt":"proceed?","context":{}}>>>\nwaiting.'
         result = parse(output)
         assert result is not None
         assert result["intervention_type"] == "approval"

@@ -53,6 +53,7 @@ prepare_logs() {
     : > "${LOG_DIR}/backend.log"
     : > "${LOG_DIR}/worker.log"
     : > "${LOG_DIR}/frontend.log"
+    : > "${LOG_DIR}/qdrant.log"
 }
 
 cleanup_pid_file() {
@@ -215,6 +216,50 @@ start_redis() {
         echo -e "${GREEN}✅ Redis started (working dir: /tmp)${NC}"
     else
         echo -e "${GREEN}✅ Redis already running${NC}"
+    fi
+    echo ""
+}
+
+# Function to start Qdrant
+start_qdrant() {
+    echo -e "${BLUE}🔍 Starting Qdrant...${NC}"
+
+    if curl -fsS http://localhost:6333/health > /dev/null 2>&1; then
+        echo -e "${GREEN}✅ Qdrant already running${NC}"
+        echo ""
+        return 0
+    fi
+
+    local QDRANT_BIN="${PROJECT_ROOT}/bin/qdrant"
+    local QDRANT_STORAGE="${PROJECT_ROOT}/data/qdrant"
+    mkdir -p "${QDRANT_STORAGE}"
+
+    if [ ! -x "${QDRANT_BIN}" ]; then
+        echo -e "${RED}❌ Qdrant binary not found at ${QDRANT_BIN} — knowledge layer unavailable${NC}"
+        echo ""
+        return 0
+    fi
+
+    QDRANT__STORAGE__STORAGE_PATH="${QDRANT_STORAGE}" \
+        nohup "${QDRANT_BIN}" \
+        >> "${LOG_DIR}/qdrant.log" 2>&1 &
+    echo $! > "${PID_DIR}/qdrant.pid"
+
+    local qdrant_ok=false
+    for _ in {1..15}; do
+        if curl -fsS http://localhost:6333/health > /dev/null 2>&1; then
+            qdrant_ok=true
+            break
+        fi
+        sleep 1
+    done
+
+    if [ "${qdrant_ok}" = true ]; then
+        echo -e "${GREEN}✅ Qdrant started on port 6333${NC}"
+        echo -e "${GREEN}📝 Qdrant logs: tail -f logs/qdrant.log${NC}"
+    else
+        echo -e "${RED}❌ Qdrant failed to start — knowledge layer unavailable${NC}"
+        echo -e "${YELLOW}Check logs: cat logs/qdrant.log${NC}"
     fi
     echo ""
 }
@@ -411,6 +456,13 @@ check_health() {
         echo -e "${RED}❌ Redis is not responding${NC}"
         success=false
     fi
+
+    # Check Qdrant
+    if curl -fsS http://localhost:6333/health > /dev/null 2>&1; then
+        echo -e "${GREEN}✅ Qdrant is responding${NC}"
+    else
+        echo -e "${YELLOW}⚠️  Qdrant is not responding (knowledge layer degraded)${NC}"
+    fi
     
     echo ""
     
@@ -448,6 +500,7 @@ main() {
 
     # Start all services in order
     start_redis
+    start_qdrant
     start_backend
     start_workers
     start_frontend
@@ -474,6 +527,7 @@ main() {
     echo "  pkill -f 'uvicorn app.main:app'"
     echo "  pkill -f 'celery -A app.celery_app worker'"
     echo "  pkill -f 'vite'"
+    echo "  docker compose stop qdrant   # stop Qdrant (data kept in volume)"
     echo ""
 }
 

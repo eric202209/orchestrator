@@ -1,4 +1,5 @@
 """Tests for CheckpointContext and CheckpointData typed schema."""
+
 from __future__ import annotations
 
 import pytest
@@ -21,9 +22,15 @@ class TestCheckpointContext:
         assert ctx.human_guidance == "use X"
 
     def test_to_dict_roundtrip(self):
-        original = {"task_id": 1, "task_description": "foo", "human_guidance": "bar",
-                    "project_name": None, "project_context": None,
-                    "task_subfolder": None, "workspace_path_override": None}
+        original = {
+            "task_id": 1,
+            "task_description": "foo",
+            "human_guidance": "bar",
+            "project_name": None,
+            "project_context": None,
+            "task_subfolder": None,
+            "workspace_path_override": None,
+        }
         ctx = CheckpointContext.from_dict(original)
         assert ctx.to_dict() == original
 
@@ -88,7 +95,9 @@ class TestCheckpointData:
             if data.context.human_guidance
             else entry
         )
-        assert data.context.human_guidance == "first hint\n[Operator approval #7]: proceed"
+        assert (
+            data.context.human_guidance == "first hint\n[Operator approval #7]: proceed"
+        )
         saved_ctx = data.context.to_dict()
         assert saved_ctx["human_guidance"] == data.context.human_guidance
 

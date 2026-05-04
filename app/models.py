@@ -1,7 +1,10 @@
 """Database models"""
 
+import uuid
+
 from sqlalchemy import (
     Column,
+    Float,
     Integer,
     String,
     Text,
@@ -495,3 +498,51 @@ class ExecutionFailureSummary(Base):
     replan_planning_session_id = Column(
         Integer, ForeignKey("planning_sessions.id"), nullable=True
     )
+
+
+class KnowledgeItem(Base):
+    __tablename__ = "knowledge_items"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    title = Column(String(255), nullable=False)
+    content = Column(Text, nullable=False)
+    source_path = Column(String(512), nullable=True)
+    knowledge_type = Column(String(50), nullable=False)
+    tags = Column(JSON, nullable=True)
+    project_scope = Column(String(255), nullable=True)
+    applies_to = Column(JSON, nullable=True)
+    failure_signature = Column(String(255), nullable=True)
+    tool_name = Column(String(255), nullable=True)
+    priority = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
+    version = Column(Integer, default=1)
+    checksum = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    usage_logs = relationship(
+        "KnowledgeUsageLog",
+        back_populates="knowledge_item",
+        cascade="all, delete-orphan",
+    )
+
+
+class KnowledgeUsageLog(Base):
+    __tablename__ = "knowledge_usage_logs"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id = Column(Integer, ForeignKey("sessions.id"), nullable=False, index=True)
+    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=True, index=True)
+    knowledge_item_id = Column(
+        String(36), ForeignKey("knowledge_items.id"), nullable=False, index=True
+    )
+    trigger_phase = Column(String(50), nullable=False)
+    retrieval_reason = Column(String(512), nullable=False)
+    retrieval_query = Column(String(512), nullable=True)
+    confidence = Column(Float, nullable=False)
+    rank = Column(Integer, nullable=False)
+    used_in_prompt = Column(Boolean, nullable=False)
+    was_effective = Column(Boolean, nullable=True, default=None)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    knowledge_item = relationship("KnowledgeItem", back_populates="usage_logs")

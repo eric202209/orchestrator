@@ -75,6 +75,12 @@ dump.rdb
 # Checkpoint files (runtime state)
 checkpoints/
 
+# Qdrant binary and data
+bin/
+data/qdrant/
+knowledge/
+*.qdrant-initialized
+
 # Documentation
 docs/
 
@@ -100,12 +106,13 @@ alembic
 alembic.ini
 
 # ai agent
-.codex
 .claude/
-.agents/
-plugins/
 CLAUDE.md
 CONTEXT.md
+.codex
+AGENTS.md
+plugins/
+.agents/
 skills-lock.json
 
 # graphify

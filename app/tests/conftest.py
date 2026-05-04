@@ -37,6 +37,14 @@ def reset_runtime_flags():
         clear_auth_rate_limits()
 
 
+@pytest.fixture()
+def qdrant_memory(monkeypatch):
+    """Set QDRANT_URL to ':memory:' for tests that instantiate KnowledgeService via settings."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "QDRANT_URL", ":memory:")
+
+
 @pytest.fixture
 def db_session_factory():
     engine = create_engine(

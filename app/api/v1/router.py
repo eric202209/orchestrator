@@ -15,6 +15,7 @@ from app.api.v1.endpoints import (
     admin,
 )
 from app.api.v1.endpoints import isolation, permissions, context
+from app.api.v1.endpoints.knowledge import router as knowledge_router
 from app.api.v1.endpoints.project_logs import router as project_logs_router
 from app.dependencies import get_current_active_user
 
@@ -143,5 +144,13 @@ api_router.include_router(
 # Admin diagnostics
 api_router.include_router(
     admin.router,
+    dependencies=[Depends(get_current_active_user)],
+)
+
+# Knowledge Layer
+api_router.include_router(
+    knowledge_router,
+    prefix="/knowledge",
+    tags=["knowledge"],
     dependencies=[Depends(get_current_active_user)],
 )

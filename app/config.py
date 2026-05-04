@@ -99,6 +99,14 @@ class Settings(BaseSettings):
         30  # Automatically purge soft-deleted projects after 30 days
     )
 
+    # Knowledge Layer
+    QDRANT_URL: str = "http://localhost:6333"
+    QDRANT_COLLECTION_NAME: str = "knowledge"
+    OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
+    KNOWLEDGE_CONTENT_MAX_CHARS: int = 800
+    KNOWLEDGE_MAX_ITEMS: int = 3
+    KNOWLEDGE_MAX_TOTAL_CHARS: int = 2000
+
 
 settings = Settings()
 

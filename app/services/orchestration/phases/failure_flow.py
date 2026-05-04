@@ -5,7 +5,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any, Callable, Optional
 
-from app.models import LogEntry, TaskStatus
+from app.models import InterventionRequest, LogEntry, TaskStatus
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.events.telemetry import record_phase_event
 from app.services.orchestration.execution.runtime import write_project_state_snapshot
@@ -160,7 +160,16 @@ def handle_task_failure(
             str(checkpoint_error),
         )
 
-    if has_retry_capacity and session and task:
+    knowledge_halted = _apply_knowledge_halt(
+        ctx=ctx,
+        exc=exc,
+        retry_count=retry_count,
+        session_id=session_id,
+        task_id=task_id,
+        logger=logger,
+    )
+
+    if not knowledge_halted and has_retry_capacity and session and task:
         task.status = TaskStatus.PENDING
         task.completed_at = None
         task.workspace_status = "in_progress" if task.task_subfolder else "not_created"
@@ -295,3 +304,96 @@ def handle_task_failure(
         raise exc
 
     raise exc
+
+
+def _apply_knowledge_halt(
+    *,
+    ctx: Optional[Any],
+    exc: Exception,
+    retry_count: int,
+    session_id: Optional[int],
+    task_id: Optional[int],
+    logger: logging.Logger,
+) -> bool:
+    """Return True and create InterventionRequest when a known failure memory says stop.
+
+    Wraps all knowledge calls in try/except so failures here never break the normal
+    retry path.
+    """
+    if ctx is None:
+        return False
+    db = getattr(ctx, "db", None)
+    task = getattr(ctx, "task", None)
+    project = getattr(ctx, "project", None)
+    orchestration_state = getattr(ctx, "orchestration_state", None)
+
+    if db is None or task is None or project is None:
+        return False
+
+    try:
+        from app.config import settings
+        from app.services.knowledge import failure_signature_service, usage_log_service
+        from app.services.knowledge.knowledge_service import KnowledgeService
+
+        phase = getattr(orchestration_state, "current_phase", None) or "execution"
+        sig = failure_signature_service.extract(
+            exc=exc,
+            phase=phase,
+            tool_name=None,
+            retry_count=retry_count,
+        )
+
+        svc = KnowledgeService(
+            qdrant_url=settings.QDRANT_URL,
+            collection_name=settings.QDRANT_COLLECTION_NAME,
+            embedding_model=settings.OPENAI_EMBEDDING_MODEL,
+        )
+        knowledge_ctx = svc.retrieve(
+            query=sig.normalized_message,
+            trigger_phase="failure",
+            knowledge_types=["failure_memory", "debug_case"],
+            failure_signature=sig.signature_hash(),
+            db=db,
+        )
+        usage_log_service.log_usage(
+            context=knowledge_ctx,
+            session_id=session_id,
+            task_id=task_id,
+            used_in_prompt=False,
+            db=db,
+        )
+
+        if knowledge_ctx.matched_failure_memory and retry_count >= 2:
+            top_title = (
+                knowledge_ctx.retrieved_items[0].title
+                if knowledge_ctx.retrieved_items
+                else "known failure"
+            )
+            prompt_body = (
+                f"Task halted after {retry_count} retries: matched known failure memory "
+                f"'{top_title}'. Recommended action: {knowledge_ctx.recommended_action.value}."
+            )
+            db.add(
+                InterventionRequest(
+                    session_id=session_id,
+                    task_id=task_id,
+                    project_id=project.id,
+                    intervention_type="guidance",
+                    initiated_by="ai",
+                    prompt=prompt_body,
+                )
+            )
+            task.status = TaskStatus.FAILED
+            db.commit()
+            logger.warning(
+                "[KNOWLEDGE] Halt: matched failure memory '%s' at retry_count=%d; "
+                "InterventionRequest created",
+                top_title,
+                retry_count,
+            )
+            return True
+
+    except Exception as knowledge_exc:
+        logger.debug("[KNOWLEDGE] Halt check skipped: %s", knowledge_exc)
+
+    return False

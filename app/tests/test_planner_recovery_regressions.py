@@ -229,8 +229,8 @@ def test_celery_retry_leaves_task_pending_so_claim_can_succeed(db_session):
     # Task must be PENDING so the retry's claim guard can succeed.
     # If RUNNING, _claim_queued_task_for_worker returns task_not_claimable:running
     # and the session stays stuck forever.
-    assert task.status == TaskStatus.PENDING, (
-        f"task.status={task.status!r} — retry will fail with task_not_claimable:running"
-    )
+    assert (
+        task.status == TaskStatus.PENDING
+    ), f"task.status={task.status!r} — retry will fail with task_not_claimable:running"
     assert session.status == "running"
     assert session.is_active is True

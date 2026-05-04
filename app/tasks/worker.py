@@ -1768,8 +1768,11 @@ def execute_orchestration_task(
                     task_summary_observation,
                     output=step_loop_result,
                     metadata={"phase": "task_summary"},
-                    level="ERROR" if step_loop_result.get("status") == "failed" else None,
-                    status_message=str(step_loop_result.get("reason") or "")[:500] or None,
+                    level=(
+                        "ERROR" if step_loop_result.get("status") == "failed" else None
+                    ),
+                    status_message=str(step_loop_result.get("reason") or "")[:500]
+                    or None,
                 )
         update_langfuse_observation(
             trace_observation,

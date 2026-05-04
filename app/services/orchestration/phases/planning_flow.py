@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict
 from celery.exceptions import SoftTimeLimitExceeded
 
 from app.models import TaskStatus
+from app.schemas.knowledge import KnowledgeContext
 from app.services.orchestration.context_assembly import (
     assemble_planning_prompt,
     compress_orchestration_context,
@@ -207,8 +208,21 @@ def execute_planning_phase(
                 "[ORCHESTRATION] Compressed oversized planning context before first prompt (%d chars)",
                 len(compressed_context),
             )
+    planning_knowledge_ctx = _retrieve_knowledge(
+        ctx, trigger_phase="planning", knowledge_types=["format_guide", "task_example"]
+    )
     planning_prompt = (
-        assemble_planning_prompt(ctx, workspace_review) if ctx.runtime_service else None
+        assemble_planning_prompt(
+            ctx,
+            workspace_review,
+            knowledge_context=(
+                planning_knowledge_ctx
+                if planning_knowledge_ctx and planning_knowledge_ctx.retrieved_items
+                else None
+            ),
+        )
+        if ctx.runtime_service
+        else None
     )
     runtime_metadata = (
         ctx.runtime_service.get_backend_metadata()
@@ -223,6 +237,10 @@ def execute_planning_phase(
         planning_prompt = PlannerService.apply_prompt_profile(
             planning_prompt,
             prompt_profile=prompt_profile,
+        )
+    if planning_knowledge_ctx:
+        _log_knowledge_usage(
+            ctx, planning_knowledge_ctx, used_in_prompt=bool(planning_prompt)
         )
     planning_prompt_tokens = estimate_token_count(planning_prompt or "")
 
@@ -751,6 +769,15 @@ def execute_planning_phase(
                     "[ORCHESTRATION] Plan validation failed, calling repair (failure_count=%d)",
                     retry_state.consecutive_failures,
                 )
+                validation_knowledge_ctx = _retrieve_knowledge(
+                    ctx,
+                    trigger_phase="validation",
+                    knowledge_types=["format_guide", "debug_case"],
+                )
+                if validation_knowledge_ctx:
+                    _log_knowledge_usage(
+                        ctx, validation_knowledge_ctx, used_in_prompt=True
+                    )
                 planning_result = __repair_planning_output(
                     ctx=ctx,
                     planning_timeout_seconds=planning_timeout_seconds,
@@ -759,6 +786,14 @@ def execute_planning_phase(
                     + "; ".join(plan_verdict.reasons[:3]),
                     rejection_reasons=plan_verdict.reasons,
                     prompt_profile=prompt_profile,
+                    knowledge_context=(
+                        validation_knowledge_ctx
+                        if (
+                            validation_knowledge_ctx
+                            and validation_knowledge_ctx.retrieved_items
+                        )
+                        else None
+                    ),
                 )
                 retry_state.repair_prompt_used = True
                 retry_state.consecutive_failures += 1
@@ -1097,6 +1132,7 @@ def __repair_planning_output(
     reason: str,
     rejection_reasons: list[str] | None = None,
     prompt_profile: str = "default",
+    knowledge_context: KnowledgeContext | None = None,
 ) -> Dict[str, Any]:
     return PlannerService.repair_output(
         runtime_service=ctx.runtime_service,
@@ -1114,6 +1150,7 @@ def __repair_planning_output(
         workspace_has_existing_files=getattr(
             ctx, "workspace_has_existing_files", False
         ),
+        knowledge_context=knowledge_context,
     )
 
 
@@ -1182,3 +1219,49 @@ def __strip_markdown_fences(output_text: str) -> str:
 
     markdown_pattern = r"^\s*```(?:json)?\s*|\s*```$"
     return re.sub(markdown_pattern, "", output_text.strip())
+
+
+def _retrieve_knowledge(
+    ctx: OrchestrationRunContext,
+    trigger_phase: str,
+    knowledge_types: list[str],
+) -> KnowledgeContext | None:
+    """Retrieve knowledge context; returns None on any error so failures don't break the flow."""
+    try:
+        from app.config import settings
+        from app.services.knowledge.knowledge_service import KnowledgeService
+
+        svc = KnowledgeService(
+            qdrant_url=settings.QDRANT_URL,
+            collection_name=settings.QDRANT_COLLECTION_NAME,
+            embedding_model=settings.OPENAI_EMBEDDING_MODEL,
+        )
+        return svc.retrieve(
+            query=ctx.prompt or "",
+            trigger_phase=trigger_phase,
+            knowledge_types=knowledge_types,
+            db=ctx.db,
+        )
+    except Exception as exc:
+        ctx.logger.debug("[KNOWLEDGE] Retrieval skipped (%s): %s", trigger_phase, exc)
+        return None
+
+
+def _log_knowledge_usage(
+    ctx: OrchestrationRunContext,
+    knowledge_ctx: KnowledgeContext,
+    *,
+    used_in_prompt: bool,
+) -> None:
+    try:
+        from app.services.knowledge import usage_log_service
+
+        usage_log_service.log_usage(
+            context=knowledge_ctx,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            used_in_prompt=used_in_prompt,
+            db=ctx.db,
+        )
+    except Exception as exc:
+        ctx.logger.debug("[KNOWLEDGE] Usage log skipped: %s", exc)
