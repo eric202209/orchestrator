@@ -6,6 +6,7 @@ import type {
   CheckpointInspection,
   ExecutionFailureSummary,
   InterventionRequest,
+  KnowledgeUsageEntry,
   OrchestrationEvent,
   Project,
   Session,
@@ -19,6 +20,7 @@ import { Alert, LoadingSpinner } from '@/components/ui';
 import {
   FailureSummaryPanel,
   HumanInterventionPanel,
+  KnowledgeUsagePanel,
   SessionConnectionNotice,
   SessionHeader,
   SessionLogsPanel,
@@ -104,6 +106,7 @@ export default function SessionDetail() {
   const [stateDiff, setStateDiff] = useState<SessionStateDiffResponse | null>(null);
   const [interventions, setInterventions] = useState<InterventionRequest[]>([]);
   const [failureSummary, setFailureSummary] = useState<ExecutionFailureSummary | null>(null);
+  const [knowledgeUsage, setKnowledgeUsage] = useState<Record<string, KnowledgeUsageEntry[]>>({});
   const [failureSummaryLoading, setFailureSummaryLoading] = useState(false);
   const [showInterventionForm, setShowInterventionForm] = useState(false);
   const [showAgentInterventionModal, setShowAgentInterventionModal] = useState(false);
@@ -1240,6 +1243,12 @@ export default function SessionDetail() {
         await loadCheckpointCount(Number(sessionId));
         await loadTimelineEvents(sessionRes.data.id, tasksRes.data || []);
         await loadDispatchWatchdog(sessionRes.data.id);
+        try {
+          const kuRes = await sessionsAPI.getKnowledgeUsage(Number(sessionId));
+          setKnowledgeUsage(kuRes.data.phases || {});
+        } catch {
+          setKnowledgeUsage({});
+        }
         if (sessionRes.data.status === 'running') {
           await loadStateDiff(sessionRes.data.id, tasksRes.data || []);
         }
@@ -2161,6 +2170,8 @@ export default function SessionDetail() {
           />
         )}
       </div>
+
+      <KnowledgeUsagePanel phases={knowledgeUsage} />
     </div>
   );
 }

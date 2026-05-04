@@ -41,8 +41,8 @@ class Settings(BaseSettings):
         ]
 
     # Database
-    # Located in root directory (relative to where app is started)
-    DATABASE_URL: str = "sqlite:///./orchestrator.db"
+    # Absolute path derived from config.py location — CWD-independent.
+    DATABASE_URL: str = f"sqlite:///{BASE_DIR}/orchestrator.db"
 
     # Auth
     SECRET_KEY: str = "your-secret-key-change-in-production"

@@ -26,6 +26,7 @@ import type {
   AppSettings,
   InterventionRequest,
   ExecutionFailureSummary,
+  KnowledgeUsageResponse,
 } from '../types/api';
 
 const API_BASE_URL =
@@ -599,6 +600,9 @@ export const sessionsAPI = {
     apiClient.post<{ planning_session_id: number; session_id: number; message: string }>(
       `/sessions/${sessionId}/replan`
     ),
+
+  getKnowledgeUsage: (sessionId: number) =>
+    apiClient.get<KnowledgeUsageResponse>(`/sessions/${sessionId}/knowledge-usage`),
 
   // Get sorted logs (with sorting and deduplication options)
   getSortedLogs: (

@@ -5,6 +5,7 @@ import type {
   CheckpointInspection,
   ExecutionFailureSummary,
   InterventionRequest,
+  KnowledgeUsageEntry,
   Project,
   Session,
   SessionDispatchWatchdogResponse,
@@ -1231,6 +1232,58 @@ export function HumanInterventionPanel({
         </div>
         );
       })}
+    </div>
+  );
+}
+
+interface KnowledgeUsagePanelProps {
+  phases: Record<string, KnowledgeUsageEntry[]>;
+}
+
+export function KnowledgeUsagePanel({ phases }: KnowledgeUsagePanelProps) {
+  const phaseKeys = Object.keys(phases);
+  if (phaseKeys.length === 0) return null;
+
+  return (
+    <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
+      <h3 className="mb-3 text-sm font-semibold text-slate-200">Knowledge References Used</h3>
+      <div className="space-y-4">
+        {phaseKeys.map((phase) => (
+          <div key={phase}>
+            <p className="mb-2 text-xs font-medium uppercase tracking-wide text-slate-400 capitalize">
+              {phase}
+            </p>
+            <div className="space-y-2">
+              {phases[phase].map((entry, i) => (
+                <div
+                  key={`${entry.knowledge_item_id}-${i}`}
+                  className="rounded-md border border-slate-700 px-3 py-2"
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-medium text-slate-200">{entry.title}</p>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-xs text-slate-400">
+                        {(entry.confidence * 100).toFixed(0)}%
+                      </span>
+                      <span
+                        className={cn(
+                          'text-xs font-medium',
+                          entry.used_in_prompt ? 'text-emerald-400' : 'text-slate-500'
+                        )}
+                      >
+                        {entry.used_in_prompt ? 'injected' : 'retrieved'}
+                      </span>
+                    </div>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-400">
+                    {entry.knowledge_type} • {entry.retrieval_reason}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

@@ -563,3 +563,19 @@ export interface LogFilters {
   session_id?: number;
   task_id?: number;
 }
+
+export interface KnowledgeUsageEntry {
+  knowledge_item_id: string;
+  title: string;
+  knowledge_type: string;
+  confidence: number;
+  retrieval_reason: string;
+  used_in_prompt: boolean;
+  created_at: string | null;
+  task_id: number | null;
+}
+
+export interface KnowledgeUsageResponse {
+  session_id: number;
+  phases: Record<string, KnowledgeUsageEntry[]>;
+}

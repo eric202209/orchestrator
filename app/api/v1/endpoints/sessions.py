@@ -1500,6 +1500,48 @@ async def cleanup_session_checkpoints(
         )
 
 
+@router.get("/sessions/{session_id}/knowledge-usage")
+def get_session_knowledge_usage(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Return knowledge references used in a session, grouped by trigger_phase."""
+    from app.models import KnowledgeItem, KnowledgeUsageLog as KUL
+
+    session = (
+        db.query(SessionModel)
+        .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    rows = (
+        db.query(KUL, KnowledgeItem)
+        .join(KnowledgeItem, KUL.knowledge_item_id == KnowledgeItem.id)
+        .filter(KUL.session_id == session_id)
+        .order_by(KUL.created_at)
+        .all()
+    )
+
+    phases: Dict[str, list] = {}
+    for log, item in rows:
+        entry = {
+            "knowledge_item_id": log.knowledge_item_id,
+            "title": item.title,
+            "knowledge_type": item.knowledge_type,
+            "confidence": log.confidence,
+            "retrieval_reason": log.retrieval_reason,
+            "used_in_prompt": log.used_in_prompt,
+            "created_at": log.created_at.isoformat() if log.created_at else None,
+            "task_id": log.task_id,
+        }
+        phases.setdefault(log.trigger_phase, []).append(entry)
+
+    return {"session_id": session_id, "phases": phases}
+
+
 @router.post("/checkpoints/orphaned/cleanup")
 async def cleanup_orphaned_checkpoints(
     db: Session = Depends(get_db),
