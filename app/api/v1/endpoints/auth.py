@@ -44,7 +44,7 @@ from app.auth import (
 )
 from app.dependencies import get_current_user, get_current_active_user
 from app.services.auth_rate_limit import enforce_auth_rate_limit
-from app.services.session_auth import (
+from app.services.session.auth import (
     generate_session_token,
     verify_session_token,
     store_session,
@@ -508,7 +508,7 @@ def session_logout(request: Request, response: Response):
 @router.post("/ws-ticket")
 def get_ws_ticket(current_user: User = Depends(get_current_active_user)):
     """Issue a short-lived WebSocket ticket for the authenticated user."""
-    from app.services.session_auth_service import create_websocket_ticket
+    from app.services.session.auth_service import create_websocket_ticket
 
     ticket = create_websocket_ticket(
         current_user.id,

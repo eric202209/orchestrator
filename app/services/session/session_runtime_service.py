@@ -364,6 +364,26 @@ def queue_task_for_session(
         session.started_at = datetime.now(UTC)
     set_session_alert(db, session, None, None)
 
+    event_project_dir = Path(task_workspace["workspace_path"])
+    if task_workspace.get("task_subfolder"):
+        event_project_dir = event_project_dir / str(task_workspace["task_subfolder"])
+
+    # Write TASK_QUEUED to disk before dispatching so the worker's stale-dispatch
+    # check always finds this fresh event instead of a stale one from a prior run.
+    append_orchestration_event(
+        project_dir=event_project_dir,
+        session_id=session.id,
+        task_id=task.id,
+        event_type=EventType.TASK_QUEUED,
+        details={
+            "session_instance_id": session.instance_id,
+            "project_dir": task_workspace["workspace_path"],
+            "task_title": task.title,
+            "execution_profile": task.execution_profile,
+            **_runtime_selection_details(db),
+        },
+    )
+
     result = execute_orchestration_task.delay(
         session_id=session.id,
         task_id=task.id,
@@ -391,26 +411,6 @@ def queue_task_for_session(
         )
     )
     db.commit()
-
-    queued_at = _utc_now_iso()
-    event_project_dir = Path(task_workspace["workspace_path"])
-    if task_workspace.get("task_subfolder"):
-        event_project_dir = event_project_dir / str(task_workspace["task_subfolder"])
-    append_orchestration_event(
-        project_dir=event_project_dir,
-        session_id=session.id,
-        task_id=task.id,
-        event_type=EventType.TASK_QUEUED,
-        details={
-            "queued_at": queued_at,
-            "session_instance_id": session.instance_id,
-            "celery_task_id": result.id,
-            "project_dir": task_workspace["workspace_path"],
-            "task_title": task.title,
-            "execution_profile": task.execution_profile,
-            **_runtime_selection_details(db),
-        },
-    )
 
     return {
         "task_id": task.id,

@@ -338,6 +338,332 @@ def _claim_queued_task_for_worker(
     return True, "claimed", claim_started_at, latest_link
 
 
+def _build_base_project_context(
+    task_service: Any,
+    project: Any,
+    task: Any,
+    hydration_result: Dict[str, Any],
+    max_chars: int = 5000,
+) -> str:
+    context = task_service.build_project_execution_context(
+        project=project,
+        current_task=task,
+    )
+    if hydration_result.get("hydrated"):
+        hydrated_sources = ", ".join(
+            f"#{item.get('task_id')} {item.get('title')}"
+            for item in hydration_result.get("source_tasks", [])[:6]
+        )
+        context = (
+            f"{context}\n"
+            f"Hydrated baseline sources available directly in this workspace: {hydrated_sources}"
+        )[:max_chars]
+    return context
+
+
+def _restore_workspace_snapshot_if_needed(
+    reason: str,
+    *,
+    project: Any,
+    session_id: int,
+    task_id: int,
+    orchestration_state: Any,
+    policy_profile_name: str,
+    runs_in_canonical_baseline: bool,
+    task_service: Any,
+    emit_live: Any,
+) -> Optional[Dict[str, Any]]:
+    if not project:
+        return None
+    should_restore = should_restore_workspace_on_failure(
+        reason, policy_profile=policy_profile_name
+    )
+    if not should_restore:
+        logger.warning(
+            "[ORCHESTRATION] Preserved workspace for task %s after %s; automatic restore is limited to isolation-violation failures",
+            task_id,
+            reason,
+        )
+        emit_live(
+            "WARN",
+            (
+                "[ORCHESTRATION] Preserved the current workspace after "
+                f"{reason}; automatic restore is only applied for "
+                "workspace-isolation violations"
+            ),
+            metadata={
+                "phase": "workspace_restore",
+                "reason": reason,
+                "restore_skipped": True,
+                "policy": policy_profile_name,
+            },
+        )
+        _append_orchestration_event(
+            project_dir=orchestration_state.project_dir,
+            session_id=session_id,
+            task_id=task_id,
+            event_type=EventType.WORKSPACE_RESTORE_SKIPPED,
+            details={
+                "reason": reason,
+                "policy": "preserve_on_non_isolation_failures",
+            },
+        )
+        return {
+            "restored": False,
+            "reason": "preserved_non_isolation_failure",
+            "target_path": str(orchestration_state.project_dir),
+        }
+    restore_result = _restore_workspace_after_abort(
+        task_service,
+        project,
+        task_id,
+        orchestration_state.project_dir,
+        preserve_project_root_rules=runs_in_canonical_baseline,
+    )
+    if restore_result and restore_result.get("restored"):
+        logger.warning(
+            "[ORCHESTRATION] Restored workspace snapshot for task %s after %s (%s files)",
+            task_id,
+            reason,
+            restore_result.get("files_restored", 0),
+        )
+        emit_live(
+            "WARN",
+            (
+                "[ORCHESTRATION] Restored workspace to the pre-run snapshot "
+                f"after {reason} ({restore_result.get('files_restored', 0)} files)"
+            ),
+            metadata={
+                "phase": "workspace_restore",
+                "reason": reason,
+                "snapshot_path": restore_result.get("snapshot_path"),
+                "target_path": restore_result.get("target_path"),
+            },
+        )
+    elif (
+        restore_result
+        and restore_result.get("reason")
+        == "empty_snapshot_preserved_existing_workspace"
+    ):
+        logger.warning(
+            "[ORCHESTRATION] Skipped destructive restore for task %s after %s because snapshot was empty and workspace already had files",
+            task_id,
+            reason,
+        )
+        emit_live(
+            "WARN",
+            (
+                "[ORCHESTRATION] Skipped restoring an empty pre-run snapshot "
+                f"after {reason} to preserve the current workspace "
+                f"({restore_result.get('current_workspace_files', 0)} files)"
+            ),
+            metadata={
+                "phase": "workspace_restore",
+                "reason": reason,
+                "snapshot_path": restore_result.get("snapshot_path"),
+                "target_path": restore_result.get("target_path"),
+                "current_workspace_files": restore_result.get(
+                    "current_workspace_files", 0
+                ),
+                "restore_skipped": True,
+            },
+        )
+        _append_orchestration_event(
+            project_dir=orchestration_state.project_dir,
+            session_id=session_id,
+            task_id=task_id,
+            event_type=EventType.WORKSPACE_RESTORE_SKIPPED,
+            details={
+                "reason": reason,
+                "policy": "empty_snapshot_preserved_existing_workspace",
+            },
+        )
+    elif restore_result and restore_result.get("restored"):
+        _append_orchestration_event(
+            project_dir=orchestration_state.project_dir,
+            session_id=session_id,
+            task_id=task_id,
+            event_type=EventType.WORKSPACE_PRESERVED,
+            details={
+                "reason": reason,
+                "restored_files": restore_result.get("files_restored", 0),
+            },
+        )
+    return restore_result
+
+
+def _apply_checkpoint_payload(
+    checkpoint_payload: Dict[str, Any],
+    *,
+    orchestration_state: Any,
+    task: Any,
+    session_id: int,
+    task_id: int,
+    prompt: str,
+    emit_live: Any,
+) -> tuple:
+    """Apply checkpoint data to orchestration_state. Returns (updated_prompt, compatibility)."""
+    checkpoint_context = checkpoint_payload.get("context", {}) or {}
+    checkpoint_state = checkpoint_payload.get("orchestration_state", {}) or {}
+
+    prompt = checkpoint_context.get("task_description", prompt) or prompt
+    orchestration_state.project_name = checkpoint_context.get(
+        "project_name", orchestration_state.project_name
+    )
+    orchestration_state.project_context = checkpoint_context.get(
+        "project_context", orchestration_state.project_context
+    )
+    if checkpoint_context.get("task_subfolder"):
+        orchestration_state._task_subfolder_override = checkpoint_context.get(
+            "task_subfolder"
+        )
+    # Do NOT restore _project_dir_override from checkpoint — it is always
+    # recomputed from current project settings (canonical baseline logic
+    # runs after checkpoint load). Restoring a stale saved path causes
+    # the wrong workspace (old host path, or path with task subfolder) to
+    # be used in prompts and tool calls.
+
+    orchestration_state.plan = checkpoint_state.get("plan", []) or []
+    orchestration_state.reasoning_artifact = checkpoint_state.get("reasoning_artifact")
+    orchestration_state.current_step_index = (
+        checkpoint_state.get(
+            "current_step_index",
+            checkpoint_payload.get("current_step_index", 0) or 0,
+        )
+        or 0
+    )
+    orchestration_state.debug_attempts = (
+        checkpoint_state.get("debug_attempts", []) or []
+    )
+    orchestration_state.changed_files = checkpoint_state.get("changed_files", []) or []
+    orchestration_state.validation_history = (
+        checkpoint_state.get("validation_history", []) or []
+    )
+    orchestration_state.phase_history = checkpoint_state.get("phase_history", []) or []
+    orchestration_state.last_plan_validation = checkpoint_state.get(
+        "last_plan_validation"
+    )
+    orchestration_state.last_completion_validation = checkpoint_state.get(
+        "last_completion_validation"
+    )
+    orchestration_state.relaxed_mode = bool(checkpoint_state.get("relaxed_mode", False))
+    orchestration_state.completion_repair_attempts = int(
+        checkpoint_state.get("completion_repair_attempts", 0) or 0
+    )
+    orchestration_state.execution_results = [
+        _restore_step_result(item)
+        for item in checkpoint_state.get(
+            "execution_results", checkpoint_payload.get("step_results", [])
+        )
+    ]
+    # Restore execution status: if a plan exists with pending steps, mark
+    # as EXECUTING so downstream checkpoint saves reflect the real phase.
+    # Never restore ABORTED/DONE — those are terminal states from a prior
+    # run and we are actively resuming.
+    raw_status = checkpoint_state.get("status", "")
+    if raw_status in ("executing", "debugging", "revising_plan"):
+        try:
+            orchestration_state.status = OrchestrationStatus(raw_status)
+        except ValueError:
+            pass
+    elif orchestration_state.plan and orchestration_state.current_step_index < len(
+        orchestration_state.plan
+    ):
+        orchestration_state.status = OrchestrationStatus.EXECUTING
+    _append_orchestration_event(
+        project_dir=orchestration_state.project_dir,
+        session_id=session_id,
+        task_id=task_id,
+        event_type=EventType.CHECKPOINT_LOADED,
+        details={
+            "checkpoint_name": checkpoint_payload.get("_resolved_checkpoint_name")
+            or checkpoint_payload.get("checkpoint_name"),
+            "requested_checkpoint_name": checkpoint_payload.get(
+                "_requested_checkpoint_name"
+            ),
+        },
+    )
+    if (
+        orchestration_state.completion_repair_attempts > 0
+        and orchestration_state.plan
+        and len(orchestration_state.execution_results)
+        == int(orchestration_state.current_step_index or 0)
+        and int(orchestration_state.current_step_index or 0)
+        == len(orchestration_state.plan) - 1
+    ):
+        stale_repair_step = orchestration_state.plan[-1]
+        orchestration_state.plan = orchestration_state.plan[
+            : orchestration_state.current_step_index
+        ]
+        orchestration_state.completion_repair_attempts = 0
+        task.steps = json.dumps(orchestration_state.plan)
+        emit_live(
+            "WARN",
+            "[ORCHESTRATION] Dropped a stale pending completion-repair step from the resume checkpoint and reset the repair budget",
+            metadata={
+                "phase": "resume",
+                "stale_completion_repair_step": stale_repair_step.get(
+                    "description", ""
+                ),
+            },
+        )
+    completed_step_count = max(
+        len(orchestration_state.execution_results),
+        int(orchestration_state.current_step_index or 0),
+    )
+    compatibility = (
+        ValidatorService.assess_plan_workspace_compatibility(
+            project_dir=orchestration_state.project_dir,
+            plan=orchestration_state.plan,
+            completed_step_count=completed_step_count,
+        )
+        if orchestration_state.plan
+        else {"compatible": True}
+    )
+    if orchestration_state.plan and orchestration_state.current_step_index >= len(
+        orchestration_state.plan
+    ):
+        orchestration_state.completion_repair_attempts = 0
+    return prompt, compatibility
+
+
+def _emit_dispatch_rejected(
+    *,
+    reason: str,
+    log_message: str,
+    db: Session,
+    session: SessionModel,
+    session_id: int,
+    task_id: int,
+    dispatch_project_dir: Optional[Path],
+    expected_session_instance_id: Optional[str],
+    celery_task_id: Optional[str],
+    queue_latency_seconds: Optional[float],
+    queued_event: Optional[Dict[str, Any]],
+    emit_live: Any,
+) -> Dict[str, Any]:
+    reject_details = {
+        "reason": reason,
+        "session_instance_id": session.instance_id,
+        "expected_session_instance_id": expected_session_instance_id,
+        "project_dir": str(dispatch_project_dir) if dispatch_project_dir else None,
+        "celery_task_id": celery_task_id,
+        "queue_latency_seconds": queue_latency_seconds,
+        "queued_event_id": (queued_event or {}).get("event_id"),
+        **_runtime_selection_details(db),
+    }
+    if dispatch_project_dir:
+        _append_orchestration_event(
+            project_dir=dispatch_project_dir,
+            session_id=session_id,
+            task_id=task_id,
+            event_type=EventType.TASK_DISPATCH_REJECTED,
+            details=reject_details,
+        )
+    emit_live("WARN", log_message, metadata=reject_details)
+    return {"status": "ignored", "reason": reason}
+
+
 @celery_app.task(
     bind=True,
     max_retries=3,
@@ -380,6 +706,12 @@ def execute_orchestration_task(
     session_task_link: Optional[SessionTask] = None
     trace_context_manager = None
     trace_observation = None
+    run_ctx: Optional[OrchestrationRunContext] = None
+    execution_profile: str = "full_lifecycle"
+    validation_profile: str = "implementation"
+    runs_in_canonical_baseline: bool = False
+    active_policy = None
+    restore_workspace_snapshot_if_needed = None
 
     try:
         # Get session and task
@@ -475,32 +807,20 @@ def execute_orchestration_task(
             resume_checkpoint_name=resume_checkpoint_name,
         )
         if stale_dispatch_reason:
-            reject_details = {
-                "reason": stale_dispatch_reason,
-                "session_instance_id": session.instance_id,
-                "expected_session_instance_id": expected_session_instance_id,
-                "project_dir": (
-                    str(dispatch_project_dir) if dispatch_project_dir else None
-                ),
-                "celery_task_id": getattr(getattr(self, "request", None), "id", None),
-                "queue_latency_seconds": queue_latency_seconds,
-                "queued_event_id": (queued_event or {}).get("event_id"),
-                **_runtime_selection_details(db),
-            }
-            if dispatch_project_dir:
-                _append_orchestration_event(
-                    project_dir=dispatch_project_dir,
-                    session_id=session_id,
-                    task_id=task_id,
-                    event_type=EventType.TASK_DISPATCH_REJECTED,
-                    details=reject_details,
-                )
-            emit_live(
-                "WARN",
-                f"[ORCHESTRATION] Rejected stale queued dispatch before claim: {stale_dispatch_reason}",
-                metadata=reject_details,
+            return _emit_dispatch_rejected(
+                reason=stale_dispatch_reason,
+                log_message=f"[ORCHESTRATION] Rejected stale queued dispatch before claim: {stale_dispatch_reason}",
+                db=db,
+                session=session,
+                session_id=session_id,
+                task_id=task_id,
+                dispatch_project_dir=dispatch_project_dir,
+                expected_session_instance_id=expected_session_instance_id,
+                celery_task_id=getattr(getattr(self, "request", None), "id", None),
+                queue_latency_seconds=queue_latency_seconds,
+                queued_event=queued_event,
+                emit_live=emit_live,
             )
-            return {"status": "ignored", "reason": stale_dispatch_reason}
 
         session_task_link = _get_latest_session_task_link(db, session_id, task_id)
         claim_ok = False
@@ -528,32 +848,20 @@ def execute_orchestration_task(
                 break
             time.sleep(0.2)
         if not claim_ok:
-            reject_details = {
-                "reason": claim_reason,
-                "session_instance_id": session.instance_id,
-                "expected_session_instance_id": expected_session_instance_id,
-                "project_dir": (
-                    str(dispatch_project_dir) if dispatch_project_dir else None
-                ),
-                "celery_task_id": getattr(getattr(self, "request", None), "id", None),
-                "queue_latency_seconds": queue_latency_seconds,
-                "queued_event_id": (queued_event or {}).get("event_id"),
-                **_runtime_selection_details(db),
-            }
-            if dispatch_project_dir:
-                _append_orchestration_event(
-                    project_dir=dispatch_project_dir,
-                    session_id=session_id,
-                    task_id=task_id,
-                    event_type=EventType.TASK_DISPATCH_REJECTED,
-                    details=reject_details,
-                )
-            emit_live(
-                "WARN",
-                f"[ORCHESTRATION] Rejected stale or duplicate task dispatch: {claim_reason}",
-                metadata=reject_details,
+            return _emit_dispatch_rejected(
+                reason=claim_reason,
+                log_message=f"[ORCHESTRATION] Rejected stale or duplicate task dispatch: {claim_reason}",
+                db=db,
+                session=session,
+                session_id=session_id,
+                task_id=task_id,
+                dispatch_project_dir=dispatch_project_dir,
+                expected_session_instance_id=expected_session_instance_id,
+                celery_task_id=getattr(getattr(self, "request", None), "id", None),
+                queue_latency_seconds=queue_latency_seconds,
+                queued_event=queued_event,
+                emit_live=emit_live,
             )
-            return {"status": "ignored", "reason": claim_reason}
 
         claimed_details = {
             "session_instance_id": session.instance_id,
@@ -783,141 +1091,23 @@ def execute_orchestration_task(
                     },
                 )
 
-        def restore_workspace_snapshot_if_needed(
-            reason: str,
-        ) -> Optional[Dict[str, Any]]:
-            if not project:
-                return None
-            should_restore = should_restore_workspace_on_failure(
-                reason, policy_profile=active_policy.name
+        restore_workspace_snapshot_if_needed = (
+            lambda reason: _restore_workspace_snapshot_if_needed(
+                reason,
+                project=project,
+                session_id=session_id,
+                task_id=task_id,
+                orchestration_state=orchestration_state,
+                policy_profile_name=active_policy.name,
+                runs_in_canonical_baseline=runs_in_canonical_baseline,
+                task_service=task_service,
+                emit_live=emit_live,
             )
-            if not should_restore:
-                logger.warning(
-                    "[ORCHESTRATION] Preserved workspace for task %s after %s; automatic restore is limited to isolation-violation failures",
-                    task_id,
-                    reason,
-                )
-                emit_live(
-                    "WARN",
-                    (
-                        "[ORCHESTRATION] Preserved the current workspace after "
-                        f"{reason}; automatic restore is only applied for "
-                        "workspace-isolation violations"
-                    ),
-                    metadata={
-                        "phase": "workspace_restore",
-                        "reason": reason,
-                        "restore_skipped": True,
-                        "policy": active_policy.name,
-                    },
-                )
-                _append_orchestration_event(
-                    project_dir=orchestration_state.project_dir,
-                    session_id=session_id,
-                    task_id=task_id,
-                    event_type=EventType.WORKSPACE_RESTORE_SKIPPED,
-                    details={
-                        "reason": reason,
-                        "policy": "preserve_on_non_isolation_failures",
-                    },
-                )
-                return {
-                    "restored": False,
-                    "reason": "preserved_non_isolation_failure",
-                    "target_path": str(orchestration_state.project_dir),
-                }
-            restore_result = _restore_workspace_after_abort(
-                task_service,
-                project,
-                task_id,
-                orchestration_state.project_dir,
-                preserve_project_root_rules=runs_in_canonical_baseline,
-            )
-            if restore_result and restore_result.get("restored"):
-                logger.warning(
-                    "[ORCHESTRATION] Restored workspace snapshot for task %s after %s (%s files)",
-                    task_id,
-                    reason,
-                    restore_result.get("files_restored", 0),
-                )
-                emit_live(
-                    "WARN",
-                    (
-                        "[ORCHESTRATION] Restored workspace to the pre-run snapshot "
-                        f"after {reason} ({restore_result.get('files_restored', 0)} files)"
-                    ),
-                    metadata={
-                        "phase": "workspace_restore",
-                        "reason": reason,
-                        "snapshot_path": restore_result.get("snapshot_path"),
-                        "target_path": restore_result.get("target_path"),
-                    },
-                )
-            elif (
-                restore_result
-                and restore_result.get("reason")
-                == "empty_snapshot_preserved_existing_workspace"
-            ):
-                logger.warning(
-                    "[ORCHESTRATION] Skipped destructive restore for task %s after %s because snapshot was empty and workspace already had files",
-                    task_id,
-                    reason,
-                )
-                emit_live(
-                    "WARN",
-                    (
-                        "[ORCHESTRATION] Skipped restoring an empty pre-run snapshot "
-                        f"after {reason} to preserve the current workspace "
-                        f"({restore_result.get('current_workspace_files', 0)} files)"
-                    ),
-                    metadata={
-                        "phase": "workspace_restore",
-                        "reason": reason,
-                        "snapshot_path": restore_result.get("snapshot_path"),
-                        "target_path": restore_result.get("target_path"),
-                        "current_workspace_files": restore_result.get(
-                            "current_workspace_files", 0
-                        ),
-                        "restore_skipped": True,
-                    },
-                )
-                _append_orchestration_event(
-                    project_dir=orchestration_state.project_dir,
-                    session_id=session_id,
-                    task_id=task_id,
-                    event_type=EventType.WORKSPACE_RESTORE_SKIPPED,
-                    details={
-                        "reason": reason,
-                        "policy": "empty_snapshot_preserved_existing_workspace",
-                    },
-                )
-            elif restore_result and restore_result.get("restored"):
-                _append_orchestration_event(
-                    project_dir=orchestration_state.project_dir,
-                    session_id=session_id,
-                    task_id=task_id,
-                    event_type=EventType.WORKSPACE_PRESERVED,
-                    details={
-                        "reason": reason,
-                        "restored_files": restore_result.get("files_restored", 0),
-                    },
-                )
-            return restore_result
-
-        project_context_summary = task_service.build_project_execution_context(
-            project=project,
-            current_task=task,
         )
-        if hydration_result.get("hydrated"):
-            hydrated_sources = ", ".join(
-                f"#{item.get('task_id')} {item.get('title')}"
-                for item in hydration_result.get("source_tasks", [])[:6]
-            )
-            project_context_summary = (
-                f"{project_context_summary}\n"
-                f"Hydrated baseline sources available directly in this workspace: {hydrated_sources}"
-            )[:5000]
-        orchestration_state.project_context = project_context_summary
+
+        orchestration_state.project_context = _build_base_project_context(
+            task_service, project, task, hydration_result
+        )
 
         # Check if task has been running too long (safety check).
         # Skip this stale-run guard for explicit checkpoint resumes, otherwise a
@@ -1070,145 +1260,6 @@ def execute_orchestration_task(
         checkpoint_service = CheckpointService(db)
         resumed_from_checkpoint = False
 
-        def _apply_checkpoint_payload(checkpoint_payload: Dict[str, Any]) -> str:
-            checkpoint_context = checkpoint_payload.get("context", {}) or {}
-            checkpoint_state = checkpoint_payload.get("orchestration_state", {}) or {}
-
-            nonlocal prompt
-            prompt = checkpoint_context.get("task_description", prompt) or prompt
-            orchestration_state.project_name = checkpoint_context.get(
-                "project_name", orchestration_state.project_name
-            )
-            orchestration_state.project_context = checkpoint_context.get(
-                "project_context", orchestration_state.project_context
-            )
-            if checkpoint_context.get("task_subfolder"):
-                orchestration_state._task_subfolder_override = checkpoint_context.get(
-                    "task_subfolder"
-                )
-            # Do NOT restore _project_dir_override from checkpoint — it is always
-            # recomputed from current project settings (canonical baseline logic
-            # runs after checkpoint load). Restoring a stale saved path causes
-            # the wrong workspace (old host path, or path with task subfolder) to
-            # be used in prompts and tool calls.
-
-            orchestration_state.plan = checkpoint_state.get("plan", []) or []
-            orchestration_state.reasoning_artifact = checkpoint_state.get(
-                "reasoning_artifact"
-            )
-            orchestration_state.current_step_index = (
-                checkpoint_state.get(
-                    "current_step_index",
-                    checkpoint_payload.get("current_step_index", 0) or 0,
-                )
-                or 0
-            )
-            orchestration_state.debug_attempts = (
-                checkpoint_state.get("debug_attempts", []) or []
-            )
-            orchestration_state.changed_files = (
-                checkpoint_state.get("changed_files", []) or []
-            )
-            orchestration_state.validation_history = (
-                checkpoint_state.get("validation_history", []) or []
-            )
-            orchestration_state.phase_history = (
-                checkpoint_state.get("phase_history", []) or []
-            )
-            orchestration_state.last_plan_validation = checkpoint_state.get(
-                "last_plan_validation"
-            )
-            orchestration_state.last_completion_validation = checkpoint_state.get(
-                "last_completion_validation"
-            )
-            orchestration_state.relaxed_mode = bool(
-                checkpoint_state.get("relaxed_mode", False)
-            )
-            orchestration_state.completion_repair_attempts = int(
-                checkpoint_state.get("completion_repair_attempts", 0) or 0
-            )
-            orchestration_state.execution_results = [
-                _restore_step_result(item)
-                for item in checkpoint_state.get(
-                    "execution_results", checkpoint_payload.get("step_results", [])
-                )
-            ]
-            # Restore execution status: if a plan exists with pending steps, mark
-            # as EXECUTING so downstream checkpoint saves reflect the real phase.
-            # Never restore ABORTED/DONE — those are terminal states from a prior
-            # run and we are actively resuming.
-            raw_status = checkpoint_state.get("status", "")
-            if raw_status in ("executing", "debugging", "revising_plan"):
-                try:
-                    orchestration_state.status = OrchestrationStatus(raw_status)
-                except ValueError:
-                    pass
-            elif (
-                orchestration_state.plan
-                and orchestration_state.current_step_index
-                < len(orchestration_state.plan)
-            ):
-                orchestration_state.status = OrchestrationStatus.EXECUTING
-            _append_orchestration_event(
-                project_dir=orchestration_state.project_dir,
-                session_id=session_id,
-                task_id=task_id,
-                event_type=EventType.CHECKPOINT_LOADED,
-                details={
-                    "checkpoint_name": checkpoint_payload.get(
-                        "_resolved_checkpoint_name"
-                    )
-                    or checkpoint_payload.get("checkpoint_name"),
-                    "requested_checkpoint_name": checkpoint_payload.get(
-                        "_requested_checkpoint_name"
-                    ),
-                },
-            )
-            if (
-                orchestration_state.completion_repair_attempts > 0
-                and orchestration_state.plan
-                and len(orchestration_state.execution_results)
-                == int(orchestration_state.current_step_index or 0)
-                and int(orchestration_state.current_step_index or 0)
-                == len(orchestration_state.plan) - 1
-            ):
-                stale_repair_step = orchestration_state.plan[-1]
-                orchestration_state.plan = orchestration_state.plan[
-                    : orchestration_state.current_step_index
-                ]
-                orchestration_state.completion_repair_attempts = 0
-                task.steps = json.dumps(orchestration_state.plan)
-                emit_live(
-                    "WARN",
-                    "[ORCHESTRATION] Dropped a stale pending completion-repair step from the resume checkpoint and reset the repair budget",
-                    metadata={
-                        "phase": "resume",
-                        "stale_completion_repair_step": stale_repair_step.get(
-                            "description", ""
-                        ),
-                    },
-                )
-            completed_step_count = max(
-                len(orchestration_state.execution_results),
-                int(orchestration_state.current_step_index or 0),
-            )
-            compatibility = (
-                ValidatorService.assess_plan_workspace_compatibility(
-                    project_dir=orchestration_state.project_dir,
-                    plan=orchestration_state.plan,
-                    completed_step_count=completed_step_count,
-                )
-                if orchestration_state.plan
-                else {"compatible": True}
-            )
-            if (
-                orchestration_state.plan
-                and orchestration_state.current_step_index
-                >= len(orchestration_state.plan)
-            ):
-                orchestration_state.completion_repair_attempts = 0
-            return compatibility
-
         def _clear_resume_execution_state(error_message: str) -> None:
             orchestration_state.plan = []
             orchestration_state.current_step_index = 0
@@ -1254,7 +1305,15 @@ def execute_orchestration_task(
                     },
                 )
             explicit_resume_request = bool(requested_resume_checkpoint_name)
-            resume_workspace_compatibility = _apply_checkpoint_payload(checkpoint_data)
+            prompt, resume_workspace_compatibility = _apply_checkpoint_payload(
+                checkpoint_data,
+                orchestration_state=orchestration_state,
+                task=task,
+                session_id=session_id,
+                task_id=task_id,
+                prompt=prompt,
+                emit_live=emit_live,
+            )
             if orchestration_state.plan and not resume_workspace_compatibility.get(
                 "compatible", True
             ):
@@ -1272,8 +1331,14 @@ def execute_orchestration_task(
                             )
                         except Exception:
                             continue
-                        fallback_compatibility = _apply_checkpoint_payload(
-                            fallback_data
+                        prompt, fallback_compatibility = _apply_checkpoint_payload(
+                            fallback_data,
+                            orchestration_state=orchestration_state,
+                            task=task,
+                            session_id=session_id,
+                            task_id=task_id,
+                            prompt=prompt,
+                            emit_live=emit_live,
                         )
                         if fallback_compatibility.get("compatible", True):
                             emit_live(
@@ -1434,24 +1499,7 @@ def execute_orchestration_task(
                             "reasons": resume_plan_verdict.reasons[:10],
                         },
                     )
-                    orchestration_state.plan = []
-                    orchestration_state.current_step_index = 0
-                    orchestration_state.debug_attempts = []
-                    orchestration_state.execution_results = []
-                    orchestration_state.changed_files = []
-                    orchestration_state.status = OrchestrationStatus.PLANNING
-                    orchestration_state.abort_reason = ""
-                    task.steps = None
-                    task.current_step = 0
-                    task.error_message = None
-                    if session_task_link:
-                        session_task_link.status = TaskStatus.RUNNING
-                        session_task_link.started_at = task.started_at
-                        session_task_link.completed_at = None
-                    session.status = "running"
-                    session.is_active = True
-                    _set_session_alert(session, "warn", resume_error[:2000])
-                    db.commit()
+                    _clear_resume_execution_state(resume_error)
 
             resumed_from_checkpoint = bool(orchestration_state.plan)
             if resumed_from_checkpoint:
@@ -1468,19 +1516,9 @@ def execute_orchestration_task(
                     },
                 )
 
-        refreshed_project_context = task_service.build_project_execution_context(
-            project=project,
-            current_task=task,
+        refreshed_project_context = _build_base_project_context(
+            task_service, project, task, hydration_result
         )
-        if hydration_result.get("hydrated"):
-            hydrated_sources = ", ".join(
-                f"#{item.get('task_id')} {item.get('title')}"
-                for item in hydration_result.get("source_tasks", [])[:6]
-            )
-            refreshed_project_context = (
-                f"{refreshed_project_context}\n"
-                f"Hydrated baseline sources available directly in this workspace: {hydrated_sources}"
-            )[:5000]
         workspace_review = task_service.review_existing_workspace(
             project=project,
             current_task=task,
@@ -1794,7 +1832,7 @@ def execute_orchestration_task(
             self_task=self,
             ctx=(
                 run_ctx
-                if "run_ctx" in locals()
+                if run_ctx is not None
                 else (
                     OrchestrationRunContext(
                         db=db,
@@ -1806,21 +1844,9 @@ def execute_orchestration_task(
                         task_id=task_id,
                         prompt=prompt,
                         timeout_seconds=timeout_seconds,
-                        execution_profile=(
-                            execution_profile
-                            if "execution_profile" in locals()
-                            else "full_lifecycle"
-                        ),
-                        validation_profile=(
-                            validation_profile
-                            if "validation_profile" in locals()
-                            else "implementation"
-                        ),
-                        runs_in_canonical_baseline=(
-                            runs_in_canonical_baseline
-                            if "runs_in_canonical_baseline" in locals()
-                            else False
-                        ),
+                        execution_profile=execution_profile,
+                        validation_profile=validation_profile,
+                        runs_in_canonical_baseline=runs_in_canonical_baseline,
                         orchestration_state=orchestration_state,
                         runtime_service=None,
                         task_service=None,
@@ -1829,24 +1855,20 @@ def execute_orchestration_task(
                         error_handler=error_handler,
                         policy_profile_name=(
                             active_policy.name
-                            if "active_policy" in locals()
+                            if active_policy is not None
                             else "balanced"
                         ),
                         validation_severity=(
                             active_policy.validation_severity
-                            if "active_policy" in locals()
+                            if active_policy is not None
                             else "standard"
                         ),
                         completion_repair_budget=(
                             active_policy.completion_repair_budget
-                            if "active_policy" in locals()
+                            if active_policy is not None
                             else 1
                         ),
-                        restore_workspace_snapshot_if_needed=(
-                            restore_workspace_snapshot_if_needed
-                            if "restore_workspace_snapshot_if_needed" in locals()
-                            else None
-                        ),
+                        restore_workspace_snapshot_if_needed=restore_workspace_snapshot_if_needed,
                     )
                     if session and task
                     else None
@@ -1864,187 +1886,16 @@ def execute_orchestration_task(
         db.close()
 
 
-@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
-def process_github_webhook(
-    self, webhook_data: Dict[str, Any], repo_owner: str, repo_name: str
-):
-    """
-    Process GitHub webhook in the background
-
-    Args:
-        webhook_data: GitHub webhook payload
-        repo_owner: Repository owner
-        repo_name: Repository name
-    """
-    try:
-        # Get or create project
-        db = get_db_session()
-
-        project = (
-            db.query(Project)
-            .filter(Project.github_url.ilike(f"%{repo_owner}/{repo_name}%"))
-            .first()
-        )
-
-        if not project:
-            # Create new project from webhook
-            project = Project(
-                name=f"{repo_owner}/{repo_name}",
-                github_url=f"https://github.com/{repo_owner}/{repo_name}",
-                description="Auto-created from GitHub webhook",
-            )
-            db.add(project)
-            db.commit()
-            db.refresh(project)
-
-        # Process webhook based on type
-        webhook_type = webhook_data.get("type", "Unknown")
-
-        if webhook_type == "PushEvent":
-            # Handle push events
-            logger.info(f"Processing push event for {repo_owner}/{repo_name}")
-            # TODO: Create task for code analysis
-
-        elif webhook_type == "PullRequestEvent":
-            # Handle PR events
-            logger.info(f"Processing PR event for {repo_owner}/{repo_name}")
-            # TODO: Create task for PR review
-
-        elif webhook_type == "IssueEvent":
-            # Handle issue events
-            logger.info(f"Processing issue event for {repo_owner}/{repo_name}")
-            # TODO: Create task from issue
-
-        db.close()
-
-        return {
-            "status": "processed",
-            "webhook_type": webhook_type,
-            "project_id": project.id if project else None,
-        }
-
-    except Exception as exc:
-        logger.error(f"Webhook processing failed: {str(exc)}")
-        raise self.retry(exc=exc)
-
-
-@celery_app.task(bind=True, max_retries=5, default_retry_delay=30)
-def scheduled_task_execution(self, task_id: int, scheduled_time: str, prompt: str):
-    """
-    Execute a task at a scheduled time
-
-    Args:
-        task_id: Task ID
-        scheduled_time: ISO format scheduled time
-        prompt: Task prompt
-    """
-    from datetime import datetime as dt
-
-    try:
-        # Check if it's time to execute
-        now = dt.utcnow()
-        schedule_dt = dt.fromisoformat(scheduled_time.replace("Z", "+00:00"))
-
-        if now < schedule_dt:
-            # Not time yet, reschedule
-            delay_seconds = (schedule_dt - now).total_seconds()
-            logger.info(
-                f"Task {task_id} scheduled for later, retrying in {delay_seconds}s"
-            )
-            raise self.retry(countdown=delay_seconds)
-
-        # Execute the task
-        db = get_db_session()
-
-        task = db.query(Task).filter(Task.id == task_id).first()
-        if task:
-            task.status = TaskStatus.RUNNING
-            task.started_at = dt.utcnow()
-            db.commit()
-
-        # TODO: Implement actual scheduled execution
-        # This will integrate with the active runtime session
-
-        if task:
-            task.status = TaskStatus.DONE
-            task.completed_at = dt.utcnow()
-            db.commit()
-
-        db.close()
-
-        return {
-            "status": "completed",
-            "task_id": task_id,
-            "executed_at": dt.utcnow().isoformat(),
-        }
-
-    except Exception as exc:
-        logger.error(f"Scheduled task {task_id} failed: {str(exc)}")
-        raise self.retry(exc=exc, max_retries=3)
-
-
-@celery_app.task(bind=True)
-def cleanup_old_logs(self, days: int = 30, session_id: Optional[int] = None):
-    """
-    Clean up old log entries
-
-    Args:
-        days: Delete logs older than this many days
-        session_id: Optional session filter
-    """
-    try:
-        db = get_db_session()
-
-        from datetime import datetime, timedelta
-
-        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
-
-        query = db.query(LogEntry).filter(LogEntry.created_at < cutoff_date)
-        if session_id:
-            query = query.filter(LogEntry.session_id == session_id)
-
-        deleted_count = query.delete(synchronize_session=False)
-        db.commit()
-
-        logger.info(f"Deleted {deleted_count} old log entries")
-
-        db.close()
-
-        return {
-            "status": "completed",
-            "deleted_count": deleted_count,
-            "days": days,
-            "session_id": session_id,
-        }
-
-    except Exception as exc:
-        logger.error(f"Log cleanup failed: {str(exc)}")
-        raise self.retry(exc=exc, max_retries=3)
-
-
 # Backward-compatible alias for older imports and serialized task references.
 execute_openclaw_task = execute_orchestration_task
 
-
-@celery_app.task(bind=True)
-def generate_task_report(self, task_id: int, output_format: str = "json"):
-    """
-    Generate a report for a completed task
-
-    Args:
-        task_id: Task ID
-        output_format: Output format (json, markdown, html)
-    """
-    try:
-        db = get_db_session()
-        report = _build_task_report_payload(db, task_id)
-        return _render_task_report(report, output_format=output_format)
-
-    except Exception as exc:
-        logger.error(f"Report generation failed: {str(exc)}")
-        raise self.retry(exc=exc, max_retries=3)
-    finally:
-        db.close()
+# Maintenance tasks re-exported for backward compatibility with older imports.
+from app.tasks.maintenance import (  # noqa: E402
+    cleanup_old_logs,
+    generate_task_report,
+    process_github_webhook,
+    scheduled_task_execution,
+)
 
 
 @celery_app.task(bind=True, max_retries=1, default_retry_delay=5)

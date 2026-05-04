@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
-from app.services import session_auth
-from app.services import session_auth_service
+from app.services.session import auth as session_auth
+from app.services.session import auth_service as session_auth_service
 from app.services.session import session_stream_service
 
 

@@ -1,5 +1,26 @@
-"""Session lifecycle, execution, inspection, and streaming helpers."""
+"""Session lifecycle, execution, inspection, streaming, and auth helpers."""
 
+from .auth import (
+    generate_session_token,
+    verify_session_token,
+    store_session,
+    invalidate_session,
+    is_session_active,
+    cleanup_expired_sessions,
+)
+from .auth_service import (
+    SessionRecord,
+    RefreshTokenRecord,
+    WebSocketTicket,
+    create_session,
+    get_session_by_id,
+    delete_session,
+    get_session_by_token,
+    create_refresh_token_record,
+    rotate_refresh_token,
+    create_websocket_ticket,
+    verify_websocket_ticket,
+)
 from .resume_service import ResumeError, ResumeSessionService
 from .session_execution_service import (
     execute_task_payload,
@@ -72,6 +93,26 @@ from .replan_service import (
 from .session_stream_service import stream_session_logs, stream_session_status
 
 __all__ = [
+    # auth
+    "generate_session_token",
+    "verify_session_token",
+    "store_session",
+    "invalidate_session",
+    "is_session_active",
+    "cleanup_expired_sessions",
+    # auth_service
+    "SessionRecord",
+    "RefreshTokenRecord",
+    "WebSocketTicket",
+    "create_session",
+    "get_session_by_id",
+    "delete_session",
+    "get_session_by_token",
+    "create_refresh_token_record",
+    "rotate_refresh_token",
+    "create_websocket_ticket",
+    "verify_websocket_ticket",
+    # resume
     "ResumeError",
     "ResumeSessionService",
     "approve_intervention",

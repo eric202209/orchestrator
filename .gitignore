@@ -78,7 +78,6 @@ checkpoints/
 # Qdrant binary and data
 bin/
 data/qdrant/
-knowledge/
 *.qdrant-initialized
 
 # Documentation

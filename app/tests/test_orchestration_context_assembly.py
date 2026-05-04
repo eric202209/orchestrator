@@ -234,14 +234,13 @@ def test_assembled_prompts_do_not_leak_host_workspace_paths(monkeypatch, tmp_pat
         ),
     )
 
+    host_prefix = "/home/ci-runner/host-workspace/vault/projects"
     ctx = _make_ctx(tmp_path)
-    ctx.orchestration_state._project_dir_override = (
-        "/home/ericgx10/ai/openclaw-test/persist/workspace/vault/projects/skillsync"
-    )
+    ctx.orchestration_state._project_dir_override = f"{host_prefix}/skillsync"
 
     planning_prompt = assemble_planning_prompt(
         ctx,
         {"file_count": 2, "source_file_count": 2, "placeholder_issue_count": 0},
     )
 
-    assert "/home/ericgx10" not in planning_prompt
+    assert host_prefix not in planning_prompt

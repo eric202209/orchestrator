@@ -224,7 +224,7 @@ start_redis() {
 start_qdrant() {
     echo -e "${BLUE}🔍 Starting Qdrant...${NC}"
 
-    if curl -fsS http://localhost:6333/health > /dev/null 2>&1; then
+    if curl -fsS http://localhost:6333/healthz > /dev/null 2>&1; then
         echo -e "${GREEN}✅ Qdrant already running${NC}"
         echo ""
         return 0
@@ -247,7 +247,7 @@ start_qdrant() {
 
     local qdrant_ok=false
     for _ in {1..15}; do
-        if curl -fsS http://localhost:6333/health > /dev/null 2>&1; then
+        if curl -fsS http://localhost:6333/healthz > /dev/null 2>&1; then
             qdrant_ok=true
             break
         fi
@@ -458,7 +458,7 @@ check_health() {
     fi
 
     # Check Qdrant
-    if curl -fsS http://localhost:6333/health > /dev/null 2>&1; then
+    if curl -fsS http://localhost:6333/healthz > /dev/null 2>&1; then
         echo -e "${GREEN}✅ Qdrant is responding${NC}"
     else
         echo -e "${YELLOW}⚠️  Qdrant is not responding (knowledge layer degraded)${NC}"

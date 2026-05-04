@@ -8,7 +8,7 @@ from app.config import settings
 from app.database import get_db
 from app.models import User
 from app.auth import verify_token
-from app.services.session_auth import verify_session_token
+from app.services.session.auth import verify_session_token
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/v1/auth/login", auto_error=False)
 optional_oauth2_scheme = OAuth2PasswordBearer(

@@ -117,8 +117,8 @@ def _get_websocket_bearer_token(websocket: WebSocket) -> Optional[str]:
 
 def _authenticate_websocket(websocket: WebSocket, db: Session) -> Optional[User]:
     from app.config import settings as _settings
-    from app.services.session_auth import verify_session_token
-    from app.services.session_auth_service import verify_websocket_ticket
+    from app.services.session.auth import verify_session_token
+    from app.services.session.auth_service import verify_websocket_ticket
 
     # 1. Session cookie (auto-sent by browsers for same-origin WS)
     session_cookie = websocket.cookies.get(_settings.SESSION_COOKIE_NAME)
