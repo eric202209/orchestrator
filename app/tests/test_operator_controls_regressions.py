@@ -154,6 +154,8 @@ def test_validator_rejects_non_consecutive_steps_missing_commands_and_unsafe_pat
                 "step_number": 2,
                 "description": "",
                 "commands": [],
+                "verification": "python -m pytest",
+                "rollback": "git checkout -- .",
                 "expected_files": ["../escape.py"],
             }
         ],
@@ -185,6 +187,7 @@ def test_verification_plan_flags_invented_workspace_files(tmp_path):
                 "description": "Verify expected tests exist",
                 "commands": ["ls test", "ls tests"],
                 "verification": "test -f test/replay.spec.ts",
+                "rollback": "true",
                 "expected_files": ["test/replay.spec.ts", "tests/index.test.js"],
             }
         ],
@@ -480,6 +483,7 @@ def test_policy_profiles_change_validation_outcomes():
             "description": "Update src/app.py",
             "commands": ["python -m pytest"],
             "verification": "echo done",
+            "rollback": "git checkout -- src/app.py",
             "expected_files": ["src/app.py"],
         }
     ]
