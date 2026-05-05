@@ -2,6 +2,7 @@ import logging
 import json
 from unittest.mock import MagicMock
 
+from app.models import TaskStatus
 from app.services.orchestration.phases.planning_flow import (
     _compress_project_context_for_planning,
     _should_repair_truncated_single_step_plan,
@@ -20,6 +21,7 @@ from app.services.orchestration.policy import (
     ORCHESTRATION_TASK_SOFT_TIME_LIMIT_SECONDS,
     ORCHESTRATION_TASK_TIME_LIMIT_SECONDS,
     PLANNING_REPAIR_TIMEOUT_SECONDS,
+    STRICT_JSON_RETRY_TIMEOUT_SECONDS,
     ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS,
 )
 from app.tasks.worker import execute_orchestration_task
@@ -47,7 +49,8 @@ def test_true_inspection_task_still_starts_minimal_first():
 
 def test_planning_fallback_timeouts_are_relaxed_for_local_models():
     assert MINIMAL_PLANNING_TIMEOUT_SECONDS == 300
-    assert PLANNING_REPAIR_TIMEOUT_SECONDS == 300
+    assert STRICT_JSON_RETRY_TIMEOUT_SECONDS == 180
+    assert PLANNING_REPAIR_TIMEOUT_SECONDS == 180
     assert ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS == 240
 
 
@@ -531,6 +534,57 @@ def test_planning_repair_uses_isolated_one_shot_prompt_when_available():
     assert captured["kwargs"]["session_prefix"] == "planning-repair"
 
 
+def test_planning_repair_timeout_is_capped_below_full_local_planning_budget():
+    captured = {}
+
+    class Runtime:
+        async def invoke_prompt(self, prompt, **kwargs):
+            captured["timeout_seconds"] = kwargs["timeout_seconds"]
+            return {"output": '[{"step_number":1}]'}
+
+    PlannerService.repair_output(
+        runtime_service=Runtime(),
+        task_description="Build a page",
+        malformed_output='[{"step_number":1,"commands":["touch index.html"]}]',
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+        timeout_seconds=300,
+        logger=__import__("logging").getLogger("test"),
+        emit_live=lambda *a, **kw: None,
+        reason="plan_validation_failed",
+        rejection_reasons=["Plan contains brittle heredoc-heavy commands"],
+        knowledge_context=None,
+        session_id=1,
+        task_id=2,
+    )
+
+    assert captured["timeout_seconds"] == PLANNING_REPAIR_TIMEOUT_SECONDS
+    assert captured["timeout_seconds"] < MINIMAL_PLANNING_TIMEOUT_SECONDS
+
+
+def test_minimal_first_logging_is_not_strict_json_retry():
+    events = []
+
+    class Runtime:
+        async def execute_task(self, prompt, timeout_seconds=300, **kwargs):
+            return {"output": '[{"step_number":1}]'}
+
+    PlannerService.retry_with_minimal_prompt(
+        runtime_service=Runtime(),
+        task_description="Build a page",
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+        timeout_seconds=300,
+        logger=__import__("logging").getLogger("test"),
+        emit_live=lambda level, message, metadata=None: events.append(
+            (level, message, metadata or {})
+        ),
+        reason="dense_planning_context",
+    )
+
+    warn_messages = [message for level, message, _ in events if level == "WARN"]
+    assert any("Planning context is dense" in message for message in warn_messages)
+    assert all("strict JSON retry" not in message for message in warn_messages)
+
+
 def test_planning_repair_budget_fails_fast_without_retry():
     runtime = type(
         "Runtime",
@@ -663,13 +717,17 @@ def test_planning_uses_workspace_plan_json_before_strict_retry(tmp_path, monkeyp
 
     runtime_service = MagicMock()
     runtime_service.get_backend_metadata.return_value = {}
-    runtime_service.execute_task.return_value = {
-        "status": "completed",
-        "returncode": 0,
-        "output": "",
-        "stderr": "Recovered structured response from stderr",
-        "finalAssistantVisibleText": "Validated the JSON. Plan written to `plan.json` - 7 steps",
-    }
+
+    async def execute_task(*args, **kwargs):
+        return {
+            "status": "completed",
+            "returncode": 0,
+            "output": "",
+            "stderr": "Recovered structured response from stderr",
+            "finalAssistantVisibleText": "Validated the JSON. Plan written to `plan.json` - 7 steps",
+        }
+
+    runtime_service.execute_task = execute_task
 
     task = MagicMock()
     task.title = "Recover planner output"
@@ -785,6 +843,247 @@ def test_planning_uses_workspace_plan_json_before_strict_retry(tmp_path, monkeyp
     assert result == {"status": "completed"}
     assert ctx.orchestration_state.plan == plan
     assert json.loads(task.steps) == plan
+
+
+def test_planning_validation_failure_after_repair_marks_session_not_running(
+    tmp_path, monkeypatch
+):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Inspect files",
+            "commands": ["ls"],
+            "verification": "echo ok",
+            "rollback": None,
+            "expected_files": [],
+        }
+    ]
+
+    orchestration_state = MagicMock()
+    orchestration_state.project_dir = tmp_path
+    orchestration_state.project_context = ""
+    orchestration_state.plan = []
+    orchestration_state.current_step_index = 0
+    orchestration_state.reasoning_artifact = None
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {}
+
+        async def execute_task(self, *args, **kwargs):
+            return {"status": "completed", "output": json.dumps(plan)}
+
+    task = MagicMock()
+    task.title = "Reject repaired plan"
+    task.description = "Reject repaired plan"
+    session = MagicMock()
+    session.status = "running"
+    session.is_active = True
+    session_task_link = MagicMock()
+
+    ctx = OrchestrationRunContext(
+        db=MagicMock(),
+        session=session,
+        project=MagicMock(),
+        task=task,
+        session_task_link=session_task_link,
+        session_id=46,
+        task_id=5,
+        prompt="Reject repaired plan",
+        timeout_seconds=300,
+        execution_profile="full_lifecycle",
+        validation_profile="standard",
+        runs_in_canonical_baseline=False,
+        orchestration_state=orchestration_state,
+        runtime_service=Runtime(),
+        task_service=MagicMock(),
+        logger=logging.getLogger("test.planner_validation_failure"),
+        emit_live=lambda *args, **kwargs: None,
+        error_handler=MagicMock(),
+    )
+    ctx.error_handler.attempt_json_parsing = lambda output, **kwargs: (
+        True,
+        json.loads(output),
+        "json",
+    )
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.append_orchestration_event",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.write_orchestration_state_snapshot",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.emit_phase_event",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.assemble_planning_prompt",
+        lambda *args, **kwargs: "mock planning prompt",
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow._retrieve_knowledge",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.record_validation_verdict",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.maybe_emit_divergence_detected",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "should_start_with_minimal_prompt",
+        staticmethod(lambda *args, **kwargs: False),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "repair_output",
+        classmethod(lambda cls, *args, **kwargs: {"output": json.dumps(plan)}),
+    )
+    monkeypatch.setattr(
+        ValidatorService,
+        "validate_plan",
+        staticmethod(
+            lambda *args, **kwargs: type(
+                "Verdict",
+                (),
+                {
+                    "accepted": False,
+                    "warning": False,
+                    "status": "rejected",
+                    "reasons": ["Plan contains brittle commands"],
+                    "details": {},
+                    "verdict": {"status": "rejected"},
+                },
+            )()
+        ),
+    )
+
+    result = execute_planning_phase(
+        ctx=ctx,
+        workspace_review={"has_existing_files": False},
+        extract_structured_text=extract_structured_text,
+        extract_plan_steps=lambda value: value if isinstance(value, list) else None,
+        looks_like_truncated_multistep_plan=lambda text, plan: False,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: args[3],
+        workspace_violation_error_cls=RuntimeError,
+    )
+
+    assert result == {
+        "status": "failed",
+        "reason": "planning_validation_failed_after_repair",
+    }
+    assert task.status == TaskStatus.FAILED
+    assert task.completed_at is not None
+    assert session_task_link.status == TaskStatus.FAILED
+    assert session_task_link.completed_at is not None
+    assert session.status == "paused"
+    assert session.is_active is False
+    assert session.paused_at is not None
+
+
+def test_minimal_first_timeout_is_finalized_without_outer_retry(tmp_path, monkeypatch):
+    orchestration_state = MagicMock()
+    orchestration_state.project_dir = tmp_path
+    orchestration_state.project_context = "dense context"
+    orchestration_state.plan = []
+    orchestration_state.current_step_index = 0
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {}
+
+        async def execute_task(self, *args, **kwargs):
+            return {
+                "status": "failed",
+                "output": "Request timed out before a response was generated.",
+                "error": "Task timed out after 5 minutes",
+            }
+
+    task = MagicMock()
+    task.title = "Timeout planning"
+    task.description = "Timeout planning"
+    session = MagicMock()
+    session.status = "running"
+    session.is_active = True
+    session_task_link = MagicMock()
+    restored = []
+
+    ctx = OrchestrationRunContext(
+        db=MagicMock(),
+        session=session,
+        project=MagicMock(),
+        task=task,
+        session_task_link=session_task_link,
+        session_id=48,
+        task_id=5,
+        prompt="Timeout planning",
+        timeout_seconds=300,
+        execution_profile="full_lifecycle",
+        validation_profile="standard",
+        runs_in_canonical_baseline=False,
+        orchestration_state=orchestration_state,
+        runtime_service=Runtime(),
+        task_service=MagicMock(),
+        logger=logging.getLogger("test.planner_minimal_timeout"),
+        emit_live=lambda *args, **kwargs: None,
+        error_handler=MagicMock(),
+        restore_workspace_snapshot_if_needed=lambda reason: restored.append(reason),
+    )
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.append_orchestration_event",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.write_orchestration_state_snapshot",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.emit_phase_event",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.assemble_planning_prompt",
+        lambda *args, **kwargs: "mock planning prompt",
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow._retrieve_knowledge",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow._log_knowledge_usage",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow._finalize_planning_timeout_failure",
+        lambda **kwargs: True,
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "should_start_with_minimal_prompt",
+        staticmethod(lambda *args, **kwargs: True),
+    )
+
+    result = execute_planning_phase(
+        ctx=ctx,
+        workspace_review={"has_existing_files": False},
+        extract_structured_text=extract_structured_text,
+        extract_plan_steps=lambda value: value if isinstance(value, list) else None,
+        looks_like_truncated_multistep_plan=lambda text, plan: False,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: args[3],
+        workspace_violation_error_cls=RuntimeError,
+    )
+
+    assert result == {"status": "failed", "reason": "planning_timeout"}
+    assert orchestration_state.status.value == "aborted"
+    assert "Planning timed out" in orchestration_state.abort_reason
+    assert restored == ["planning timeout or context overflow"]
 
 
 def test_local_qwen_single_step_plan_is_routed_to_repair():

@@ -430,9 +430,31 @@ def execute_planning_phase(
         planning_result, initial_output_text
     ) and not PlannerService.looks_salvageable_planning_output(initial_output_text):
         if used_minimal_planning_prompt:
-            raise TimeoutError(
-                f"Planning timed out or exceeded context after {planning_timeout_seconds}s"
+            failure_reason = f"Planning timed out or exceeded context after {planning_timeout_seconds}s"
+            ctx.logger.error(
+                "[ORCHESTRATION] Planning timed out before a salvageable response was produced: %s",
+                failure_reason,
             )
+            ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+            ctx.orchestration_state.abort_reason = failure_reason
+            emit_phase_event(
+                ctx.orchestration_state,
+                ctx.emit_live,
+                level="ERROR",
+                phase="planning",
+                message=f"[ORCHESTRATION] Planning timed out or exceeded context: {failure_reason}",
+                details={"reason": "planning_timeout"},
+            )
+            _finalize_planning_timeout_failure(
+                ctx=ctx,
+                failure_type="planning_timeout",
+                failure_reason=failure_reason,
+            )
+            if ctx.restore_workspace_snapshot_if_needed:
+                ctx.restore_workspace_snapshot_if_needed(
+                    "planning timeout or context overflow"
+                )
+            return {"status": "failed", "reason": "planning_timeout"}
         ctx.logger.warning(
             "[ORCHESTRATION] Planning failed on the first pass; retrying with minimal prompt"
         )
@@ -934,6 +956,7 @@ def execute_planning_phase(
                 # Repair already attempted and validation still fails — abort
                 # instead of looping through more repair calls (prevents the
                 # plan→error→repair→retry chain from burning minutes of budget).
+                completed_at = datetime.now(UTC)
                 ctx.orchestration_state.status = OrchestrationStatus.ABORTED
                 ctx.orchestration_state.abort_reason = (
                     "Planning validation failed after repair: "
@@ -959,6 +982,19 @@ def execute_planning_phase(
                     "Plan validation failed after repair: "
                     + "; ".join(plan_verdict.reasons[:4])
                 )
+                ctx.task.completed_at = completed_at
+                if ctx.session_task_link:
+                    ctx.session_task_link.status = TaskStatus.FAILED
+                    ctx.session_task_link.completed_at = completed_at
+                if ctx.session:
+                    ctx.session.status = "paused"
+                    ctx.session.is_active = False
+                    ctx.session.paused_at = completed_at
+                    set_session_alert(
+                        ctx.session,
+                        "error",
+                        ctx.task.error_message[:2000],
+                    )
                 ctx.db.commit()
                 if ctx.restore_workspace_snapshot_if_needed:
                     ctx.restore_workspace_snapshot_if_needed(

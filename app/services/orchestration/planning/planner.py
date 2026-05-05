@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from ..policy import (
     MINIMAL_PLANNING_TIMEOUT_SECONDS,
     PLANNING_REPAIR_TIMEOUT_SECONDS,
+    STRICT_JSON_RETRY_TIMEOUT_SECONDS,
     ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS,
 )
 from app.services.workspace.path_display import render_workspace_path_for_prompt
@@ -409,6 +410,8 @@ class PlannerService:
             ]
 
             verification = step.get("verification")
+            if verification is not None and not isinstance(verification, str):
+                verification = None
             if verification is not None:
                 verification = str(verification).strip() or None
 
@@ -826,20 +829,32 @@ Rules:
         workflow_phases: Optional[List[str]] = None,
         workspace_has_existing_files: bool = False,
     ) -> Dict[str, Any]:
+        minimal_first = reason == "dense_planning_context"
         logger.warning(
-            "[ORCHESTRATION] Planning output was not machine-parseable; "
-            f"retrying with minimal prompt ({reason})"
+            (
+                "[ORCHESTRATION] Planning context selected minimal prompt first"
+                if minimal_first
+                else "[ORCHESTRATION] Planning output was not machine-parseable; retrying with minimal prompt"
+            )
+            + f" ({reason})"
         )
-        minimal_timeout = min(timeout_seconds, MINIMAL_PLANNING_TIMEOUT_SECONDS)
+        minimal_timeout_limit = (
+            MINIMAL_PLANNING_TIMEOUT_SECONDS
+            if minimal_first
+            else STRICT_JSON_RETRY_TIMEOUT_SECONDS
+        )
+        minimal_timeout = min(timeout_seconds, minimal_timeout_limit)
+        retry_message = (
+            "[ORCHESTRATION] Planning context is dense; starting minimal prompt attempt"
+            if minimal_first
+            else "[ORCHESTRATION] Planning output needed a strict JSON retry; starting minimal prompt attempt"
+        )
         emit_live(
             "WARN",
-            (
-                "[ORCHESTRATION] Planning output needed a strict JSON retry; "
-                f"starting minimal prompt attempt (timeout: {minimal_timeout}s)"
-            ),
+            f"{retry_message} (timeout: {minimal_timeout}s)",
             metadata={
                 "phase": "planning",
-                "retry": "minimal_prompt",
+                "retry": "minimal_prompt_first" if minimal_first else "minimal_prompt",
                 "reason": reason[:240],
                 "timeout_seconds": minimal_timeout,
             },
