@@ -13,6 +13,8 @@ gitpython>=3.1.40
 pynacl>=1.5.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
+black>=24.2.0
+flake8>=7.0.0
 email-validator>=2.3.0
 
 # Celery Task Queue

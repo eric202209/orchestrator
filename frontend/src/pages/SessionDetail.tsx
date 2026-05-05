@@ -10,6 +10,7 @@ import type {
   OrchestrationEvent,
   Project,
   Session,
+  SessionDecisionEvent,
   SessionDispatchWatchdogResponse,
   SessionDivergenceCompareResponse,
   SessionStateDiffResponse,
@@ -96,6 +97,7 @@ export default function SessionDetail() {
   const [logViewMode, setLogViewMode] = useState<'newest' | 'oldest' | 'success' | 'errors' | 'all'>('newest');
   const [logVerbosity, setLogVerbosity] = useState<'clean' | 'verbose'>('clean');
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
+  const [decisionEvents, setDecisionEvents] = useState<SessionDecisionEvent[]>([]);
   const [orchestrationEvents, setOrchestrationEvents] = useState<OrchestrationEvent[]>([]);
   const [checkpointCount, setCheckpointCount] = useState(0);
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
@@ -756,6 +758,16 @@ export default function SessionDetail() {
     }
   }, []);
 
+  const loadDecisionTimeline = useCallback(async (currentSessionId: number) => {
+    try {
+      const response = await sessionsAPI.getDecisionTimeline(currentSessionId);
+      setDecisionEvents(response.data.events || []);
+    } catch (loadError) {
+      console.debug('Decision timeline unavailable:', loadError);
+      setDecisionEvents([]);
+    }
+  }, []);
+
   const healthEvents = orchestrationEvents
     .filter((event) => event.event_type === 'health_score_updated')
     .map((event) => {
@@ -973,39 +985,42 @@ export default function SessionDetail() {
     try {
       await sessionsAPI.replyToIntervention(Number(sessionId), interventionId, { reply });
       await loadInterventions(Number(sessionId));
+      await loadDecisionTimeline(Number(sessionId));
       const updated = await sessionsAPI.getById(Number(sessionId));
       setSession(updated.data);
     } catch (error) {
       console.error('Failed to submit reply:', error);
       alert('Failed to submit reply');
     }
-  }, [loadInterventions, sessionId]);
+  }, [loadDecisionTimeline, loadInterventions, sessionId]);
 
   const handleApproveIntervention = useCallback(async (interventionId: number) => {
     if (!sessionId) return;
     try {
       await sessionsAPI.approveIntervention(Number(sessionId), interventionId);
       await loadInterventions(Number(sessionId));
+      await loadDecisionTimeline(Number(sessionId));
       const updated = await sessionsAPI.getById(Number(sessionId));
       setSession(updated.data);
     } catch (error) {
       console.error('Failed to approve intervention:', error);
       alert('Failed to approve intervention');
     }
-  }, [loadInterventions, sessionId]);
+  }, [loadDecisionTimeline, loadInterventions, sessionId]);
 
   const handleDenyIntervention = useCallback(async (interventionId: number, reason?: string) => {
     if (!sessionId) return;
     try {
       await sessionsAPI.denyIntervention(Number(sessionId), interventionId, reason ? { reason } : {});
       await loadInterventions(Number(sessionId));
+      await loadDecisionTimeline(Number(sessionId));
       const updated = await sessionsAPI.getById(Number(sessionId));
       setSession(updated.data);
     } catch (error) {
       console.error('Failed to deny intervention:', error);
       alert('Failed to deny intervention');
     }
-  }, [loadInterventions, sessionId]);
+  }, [loadDecisionTimeline, loadInterventions, sessionId]);
 
   const inspectCheckpoint = useCallback(async (checkpointName: string) => {
     if (!sessionId) return;
@@ -1088,6 +1103,9 @@ export default function SessionDetail() {
             });
           } else if (data.type === 'orchestration_event') {
             appendOrchestrationTimelineEvent(data as OrchestrationEvent);
+            if (sessionId) {
+              void loadDecisionTimeline(Number(sessionId));
+            }
             if (
               sessionId &&
               ['phase_finished', 'checkpoint_saved', 'retry_entered', 'tool_failed', 'validation_result', 'reasoning_artifact_generated'].includes(
@@ -1146,7 +1164,7 @@ export default function SessionDetail() {
           setupWebSocket(session_id);
         }, 3000);
       };
-  }, [appendOrchestrationTimelineEvent, applyLogView, formatLogTimestamp, loadDispatchWatchdog, loadStateDiff, logVerbosity, logViewMode, sessionId]);
+  }, [appendOrchestrationTimelineEvent, applyLogView, formatLogTimestamp, loadDecisionTimeline, loadDispatchWatchdog, loadStateDiff, logVerbosity, logViewMode, sessionId]);
 
   const scheduleWebSocketConnect = useCallback(
     (session_id: number, delayMs: number = 0) => {
@@ -1242,6 +1260,7 @@ export default function SessionDetail() {
         setProject(projectRes.data);
         await loadCheckpointCount(Number(sessionId));
         await loadTimelineEvents(sessionRes.data.id, tasksRes.data || []);
+        await loadDecisionTimeline(sessionRes.data.id);
         await loadDispatchWatchdog(sessionRes.data.id);
         try {
           const kuRes = await sessionsAPI.getKnowledgeUsage(Number(sessionId));
@@ -1351,7 +1370,7 @@ export default function SessionDetail() {
       }
       clearInterval(statusPollInterval);
     };
-  }, [applyLogView, loadCheckpointCount, loadDispatchWatchdog, loadFailureSummary, loadInterventions, loadStateDiff, loadTimelineEvents, logVerbosity, logViewMode, scheduleWebSocketConnect, sessionId, toTerminalLogEntry, visibleLogs]);
+  }, [applyLogView, loadCheckpointCount, loadDecisionTimeline, loadDispatchWatchdog, loadFailureSummary, loadInterventions, loadStateDiff, loadTimelineEvents, logVerbosity, logViewMode, scheduleWebSocketConnect, sessionId, toTerminalLogEntry, visibleLogs]);
 
   const handleStartSessionFresh = async () => {
     if (!session || !sessionId) {
@@ -1640,6 +1659,7 @@ export default function SessionDetail() {
       ]);
       setSession(updatedSession.data);
       setInterventions(interventionsRes.data.interventions || []);
+      await loadDecisionTimeline(Number(sessionId));
       setInterventionPrompt('');
       setShowInterventionForm(false);
     } catch (error) {
@@ -2139,6 +2159,7 @@ export default function SessionDetail() {
               setLogViewMode(mode);
               applyLogView(allLogs, mode);
             }}
+            decisionEvents={decisionEvents}
             stateDiff={stateDiff}
             timelineEvents={timelineEvents}
             timelineSpans={timelineSpans}

@@ -367,6 +367,44 @@ export interface OrchestrationEvent {
   details: Record<string, unknown>;
 }
 
+export type SessionDecisionPhase =
+  | 'planning'
+  | 'validation'
+  | 'execution'
+  | 'failure'
+  | 'completion'
+  | 'system';
+
+export type SessionDecisionSeverity = 'info' | 'warning' | 'error' | string;
+
+export interface SessionDecisionEvent {
+  id: string;
+  session_id: number;
+  task_id: number | null;
+  timestamp: string;
+  phase: SessionDecisionPhase;
+  event_type: string;
+  decision_type: string;
+  title: string;
+  summary: string;
+  status: string;
+  severity: SessionDecisionSeverity;
+  source: string;
+  parent_event_id?: string | null;
+  related_event_ids: string[];
+  knowledge_usage_ids: string[];
+  intervention_id?: number | null;
+  details: Record<string, unknown>;
+}
+
+export interface SessionDecisionTimelineResponse {
+  session_id: number;
+  events: SessionDecisionEvent[];
+  counts: Record<string, number>;
+  truncated: boolean;
+  limit: number;
+}
+
 export interface SessionStateDiffResponse {
   session_id: number;
   task_id: number | null;

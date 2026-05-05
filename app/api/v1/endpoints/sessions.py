@@ -1,6 +1,6 @@
 """Sessions API endpoints for orchestration runtimes."""
 
-from fastapi import APIRouter, Depends, HTTPException, status, WebSocket
+from fastapi import APIRouter, Depends, HTTPException, Query, status, WebSocket
 from fastapi.requests import Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -78,6 +78,10 @@ from app.services import (
 )
 from app.services.name_formatter import humanize_display_name
 from app.services.auth_rate_limit import enforce_api_rate_limit
+from app.services.orchestration.decision_timeline import (
+    DEFAULT_TIMELINE_LIMIT,
+    get_session_decision_timeline_payload,
+)
 
 
 def _serialize_session_timestamp(value: datetime | None) -> str | None:
@@ -922,6 +926,24 @@ def get_session_task_events(
         event_type_filter=event_type,
     )
     return {"session_id": session_id, "task_id": task_id, "events": events}
+
+
+@router.get("/sessions/{session_id}/decision-timeline")
+def get_session_decision_timeline(
+    session_id: int,
+    phase: Optional[str] = None,
+    limit: int = Query(DEFAULT_TIMELINE_LIMIT, ge=1),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Return a read-only normalized decision timeline for a session."""
+
+    return get_session_decision_timeline_payload(
+        db,
+        session_id,
+        phase=phase,
+        limit=limit,
+    )
 
 
 @router.get("/sessions/{session_id}/diff")

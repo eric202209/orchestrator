@@ -21,6 +21,7 @@ import type {
   CheckpointInspection,
   OrchestrationEvent,
   SessionDispatchWatchdogResponse,
+  SessionDecisionTimelineResponse,
   SessionStateDiffResponse,
   SessionDivergenceCompareResponse,
   AppSettings,
@@ -454,6 +455,11 @@ export const sessionsAPI = {
     }>(`/sessions/${sessionId}/tasks/${taskId}/events`, {
       params: eventType ? { event_type: eventType } : undefined,
     }),
+
+  getDecisionTimeline: (sessionId: number) =>
+    apiClient.get<SessionDecisionTimelineResponse>(
+      `/sessions/${sessionId}/decision-timeline`
+    ),
 
   getSessionDiff: (
     sessionId: number,

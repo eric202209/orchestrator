@@ -8,6 +8,7 @@ import type {
   KnowledgeUsageEntry,
   Project,
   Session,
+  SessionDecisionEvent,
   SessionDispatchWatchdogResponse,
   SessionDivergenceCompareResponse,
   SessionStateDiffResponse,
@@ -257,6 +258,7 @@ interface SessionLogsPanelProps {
   onLogVerbosityChange: (mode: 'clean' | 'verbose') => void;
   onLogViewModeChange: (mode: 'newest' | 'oldest' | 'success' | 'errors' | 'all') => void;
   timelineSpans?: TimelineSpan[];
+  decisionEvents?: SessionDecisionEvent[];
   stateDiff?: SessionStateDiffResponse | null;
   timelineEvents: TimelineEvent[];
   wsConnected: boolean;
@@ -275,6 +277,7 @@ export function SessionLogsPanel({
   onLogVerbosityChange,
   onLogViewModeChange,
   timelineSpans = [],
+  decisionEvents = [],
   stateDiff,
   timelineEvents,
   wsConnected,
@@ -549,6 +552,70 @@ export function SessionLogsPanel({
           </div>
         </div>
       )}
+
+      <div className="rounded-lg border border-slate-600 bg-slate-800 p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-slate-200">Decision Timeline</h3>
+          <span className="text-xs text-slate-400">{decisionEvents.length} events</span>
+        </div>
+        <div className="max-h-72 space-y-2 overflow-y-auto text-sm">
+          {decisionEvents.length === 0 ? (
+            <p className="text-slate-500">
+              No decision timeline events yet.
+            </p>
+          ) : (
+            decisionEvents
+              .slice()
+              .reverse()
+              .map((event) => (
+                <div key={event.id} className="rounded-md border border-slate-700 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span
+                        className={cn(
+                          'text-xs font-medium uppercase',
+                          event.severity === 'error' && 'text-red-400',
+                          event.severity === 'warning' && 'text-amber-400',
+                          event.severity !== 'error' &&
+                            event.severity !== 'warning' &&
+                            'text-sky-400'
+                        )}
+                      >
+                        {event.title}
+                      </span>
+                      <span className="rounded-sm border border-slate-700 px-1.5 py-0.5 text-xs uppercase text-slate-400">
+                        {event.phase}
+                      </span>
+                      {event.task_id !== null && event.task_id !== undefined && (
+                        <span className="text-xs text-slate-500">
+                          Task {event.task_id}
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-xs text-slate-400">
+                      {formatDateTime(event.timestamp)}
+                    </span>
+                  </div>
+                  <p className="mt-1 break-words text-slate-300">{event.summary}</p>
+                  {(event.knowledge_usage_ids.length > 0 || event.intervention_id) && (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {event.knowledge_usage_ids.length > 0 && (
+                        <span className="rounded-sm border border-violet-900/70 bg-violet-950/30 px-1.5 py-0.5 text-xs text-violet-300">
+                          Knowledge phase context
+                        </span>
+                      )}
+                      {event.intervention_id && (
+                        <span className="rounded-sm border border-amber-900/70 bg-amber-950/30 px-1.5 py-0.5 text-xs text-amber-300">
+                          Intervention #{event.intervention_id}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))
+          )}
+        </div>
+      </div>
 
       <div className="rounded-lg border border-slate-600 bg-slate-800 p-4">
         <div className="mb-3 flex items-center justify-between">
