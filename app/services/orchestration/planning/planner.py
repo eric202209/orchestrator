@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -1055,17 +1056,55 @@ Rules:
                 "timeout_seconds": repair_timeout,
             },
         )
+        repair_started_at = time.monotonic()
         try:
-            return asyncio.run(
+            result = asyncio.run(
                 cls._invoke_repair_prompt(
                     runtime_service,
                     repair_prompt,
                     repair_timeout,
                 )
             )
+            repair_duration_seconds = time.monotonic() - repair_started_at
+            logger.info(
+                "[ORCHESTRATION] Planning repair completed in %.2fs "
+                "(timeout=%ss session_id=%s task_id=%s)",
+                repair_duration_seconds,
+                repair_timeout,
+                session_id,
+                task_id,
+            )
+            emit_live(
+                "INFO",
+                (
+                    "[ORCHESTRATION] Planning repair completed "
+                    f"in {repair_duration_seconds:.2f}s"
+                ),
+                metadata={
+                    "phase": "planning",
+                    "attempt": "repair",
+                    "strategy": "repair_prompt",
+                    "timeout_seconds": repair_timeout,
+                    "duration_seconds": round(repair_duration_seconds, 3),
+                },
+            )
+            return result
         except Exception as exc:
+            repair_duration_seconds = time.monotonic() - repair_started_at
             if cls._looks_like_timeout_error(exc):
                 logger.warning(
-                    "[ORCHESTRATION] Planning repair prompt timed out; stopping instead of retrying repair"
+                    "[ORCHESTRATION] Planning repair prompt timed out after %.2fs; "
+                    "stopping instead of retrying repair",
+                    repair_duration_seconds,
+                )
+            else:
+                logger.warning(
+                    "[ORCHESTRATION] Planning repair failed after %.2fs "
+                    "(timeout=%ss session_id=%s task_id=%s): %s",
+                    repair_duration_seconds,
+                    repair_timeout,
+                    session_id,
+                    task_id,
+                    exc,
                 )
             raise

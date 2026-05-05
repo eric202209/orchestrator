@@ -7,6 +7,7 @@ still exist because log_usage(db.commit) runs before execute_task is called.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -528,6 +529,172 @@ def test_planning_repair_timeout_records_failure_knowledge(mem_db, monkeypatch):
     assert logs[0].retrieval_reason == "semantic_retrieval"
     assert logs[0].used_in_prompt is False
     assert logs[0].knowledge_item_id == item.id
+
+
+def test_planning_validation_failure_records_planning_validation_and_failure_knowledge(
+    mem_db, monkeypatch
+):
+    project, session, task, link, item = _seed_db(mem_db)
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create app output",
+            "commands": ["printf 'ok\\n' > app.py"],
+            "verification": "grep -q ok app.py",
+            "rollback": "rm -f app.py",
+            "expected_files": ["app.py"],
+        }
+    ]
+    planning_ctx = _knowledge_ctx_for(item)
+    validation_ctx = KnowledgeContext(
+        retrieved_items=planning_ctx.retrieved_items,
+        query="validation failure",
+        trigger_phase="validation",
+        retrieval_reason="semantic_retrieval",
+        confidence=0.89,
+        matched_failure_memory=False,
+        recommended_action=RecommendedAction.none,
+    )
+    failure_ctx = KnowledgeContext(
+        retrieved_items=planning_ctx.retrieved_items,
+        query="planning validation failed after repair",
+        trigger_phase="failure",
+        retrieval_reason="semantic_retrieval",
+        confidence=0.9,
+        matched_failure_memory=False,
+        recommended_action=RecommendedAction.none,
+    )
+    ctx = _build_ctx(mem_db, session, task, link, item)
+
+    async def _execute_task(*args, **kwargs):
+        return {"status": "completed", "output": json.dumps(plan)}
+
+    ctx.runtime_service.execute_task = _execute_task
+    ctx.error_handler.attempt_json_parsing = lambda output, **kwargs: (
+        True,
+        json.loads(output),
+        "json",
+    )
+
+    def _retrieve_by_phase(*args, **kwargs):
+        if kwargs.get("trigger_phase") == "validation":
+            return validation_ctx
+        return planning_ctx
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow._retrieve_knowledge",
+        _retrieve_by_phase,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.assemble_planning_prompt",
+        lambda *a, **kw: "mock planning prompt",
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.append_orchestration_event",
+        lambda *a, **kw: {},
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.write_orchestration_state_snapshot",
+        lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.emit_phase_event",
+        lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.record_validation_verdict",
+        lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.maybe_emit_divergence_detected",
+        lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(
+        "app.services.session.replan_service.get_or_generate_failure_summary",
+        lambda *a, **kw: None,
+    )
+
+    from app.services.orchestration.planning.planner import PlannerService
+    from app.services.orchestration.validation.validator import ValidatorService
+
+    monkeypatch.setattr(
+        PlannerService,
+        "should_start_with_minimal_prompt",
+        staticmethod(lambda *a, **kw: False),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "retry_with_minimal_prompt",
+        classmethod(
+            lambda cls, *a, **kw: (_ for _ in ()).throw(
+                AssertionError("hidden minimal-prompt retry should not run")
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "repair_output",
+        classmethod(lambda cls, *a, **kw: {"output": json.dumps(plan)}),
+    )
+    monkeypatch.setattr(
+        ValidatorService,
+        "validate_plan",
+        staticmethod(
+            lambda *a, **kw: type(
+                "Verdict",
+                (),
+                {
+                    "accepted": False,
+                    "warning": False,
+                    "status": "rejected",
+                    "reasons": ["Plan contains placeholder-only implementation"],
+                    "details": {},
+                    "verdict": {"status": "rejected"},
+                },
+            )()
+        ),
+    )
+
+    with patch(
+        "app.services.knowledge.knowledge_service.KnowledgeService"
+    ) as MockSvc, patch(
+        "app.services.knowledge.failure_signature_service.extract"
+    ) as mock_extract:
+        mock_extract.return_value = MagicMock(
+            normalized_message="planning validation failed after repair",
+            signature_hash=lambda: "facefeed" * 8,
+        )
+        MockSvc.return_value.retrieve.return_value = failure_ctx
+
+        result = execute_planning_phase(
+            ctx=ctx,
+            workspace_review={},
+            extract_structured_text=lambda x: str(x),
+            extract_plan_steps=lambda value: value if isinstance(value, list) else None,
+            looks_like_truncated_multistep_plan=lambda text, plan: False,
+            normalize_plan_with_live_logging=lambda *a, **kw: a[3],
+            workspace_violation_error_cls=RuntimeError,
+        )
+
+    mem_db.refresh(session)
+    mem_db.refresh(task)
+    mem_db.refresh(link)
+    assert result == {
+        "status": "failed",
+        "reason": "planning_validation_failed_after_repair",
+    }
+    assert session.status == "paused"
+    assert session.is_active is False
+    assert task.status == TaskStatus.FAILED
+    assert link.status == TaskStatus.FAILED
+    phases = [
+        row.trigger_phase
+        for row in mem_db.query(KnowledgeUsageLog)
+        .filter_by(session_id=session.id, task_id=task.id)
+        .order_by(KnowledgeUsageLog.id.asc())
+        .all()
+    ]
+    assert sorted(phases) == ["failure", "planning", "validation"]
 
 
 def test_oversized_planning_repair_prompt_skips_repair_and_records_failure_knowledge(

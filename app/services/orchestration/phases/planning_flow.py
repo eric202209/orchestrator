@@ -176,11 +176,12 @@ def _classify_planning_timeout_failure(
     return "planning_repair_timeout"
 
 
-def _finalize_planning_timeout_failure(
+def _finalize_planning_terminal_failure(
     *,
     ctx: OrchestrationRunContext,
     failure_type: str,
     failure_reason: str,
+    generate_failure_summary: bool = False,
 ) -> bool:
     completed_at = datetime.now(UTC)
     if ctx.task:
@@ -196,16 +197,19 @@ def _finalize_planning_timeout_failure(
         ctx.session.paused_at = completed_at
         set_session_alert(ctx.session, "error", failure_reason[:2000])
     ctx.db.commit()
-    try:
-        from app.services.session.replan_service import get_or_generate_failure_summary
+    if generate_failure_summary:
+        try:
+            from app.services.session.replan_service import (
+                get_or_generate_failure_summary,
+            )
 
-        get_or_generate_failure_summary(ctx.db, ctx.session_id)
-    except Exception as summary_exc:
-        ctx.logger.debug(
-            "[ORCHESTRATION] Failed to create/update failure summary for session=%s: %s",
-            ctx.session_id,
-            summary_exc,
-        )
+            get_or_generate_failure_summary(ctx.db, ctx.session_id)
+        except Exception as summary_exc:
+            ctx.logger.debug(
+                "[ORCHESTRATION] Failed to create/update failure summary for session=%s: %s",
+                ctx.session_id,
+                summary_exc,
+            )
 
     knowledge_recorded = False
     try:
@@ -242,6 +246,20 @@ def _finalize_planning_timeout_failure(
         knowledge_recorded,
     )
     return knowledge_recorded
+
+
+def _finalize_planning_timeout_failure(
+    *,
+    ctx: OrchestrationRunContext,
+    failure_type: str,
+    failure_reason: str,
+) -> bool:
+    return _finalize_planning_terminal_failure(
+        ctx=ctx,
+        failure_type=failure_type,
+        failure_reason=failure_reason,
+        generate_failure_summary=True,
+    )
 
 
 def execute_planning_phase(
@@ -507,12 +525,14 @@ def execute_planning_phase(
                     ),
                     details={"reason": "planning_circuit_breaker_opened"},
                 )
-                ctx.task.status = TaskStatus.FAILED
-                ctx.task.error_message = (
-                    f"Planning failed {MAX_PLANNING_RETRIES} consecutive times. "
-                    "The agent was unable to produce a valid execution plan."
+                _finalize_planning_terminal_failure(
+                    ctx=ctx,
+                    failure_type="planning_circuit_breaker_opened",
+                    failure_reason=(
+                        f"Planning failed {MAX_PLANNING_RETRIES} consecutive times. "
+                        "The agent was unable to produce a valid execution plan."
+                    ),
                 )
-                ctx.db.commit()
                 if ctx.restore_workspace_snapshot_if_needed:
                     ctx.restore_workspace_snapshot_if_needed(
                         "planning circuit breaker opened"
@@ -631,12 +651,14 @@ def execute_planning_phase(
                     message=f"[ORCHESTRATION] Planning JSON parse failed: {strategy_info}",
                     details={"reason": "planning_json_error"},
                 )
-                ctx.task.status = TaskStatus.FAILED
-                ctx.task.error_message = (
-                    f"Planning JSON parse failed: {strategy_info}. "
-                    f"Raw output: {output_text[:500]}"
+                _finalize_planning_terminal_failure(
+                    ctx=ctx,
+                    failure_type="planning_json_error",
+                    failure_reason=(
+                        f"Planning JSON parse failed: {strategy_info}. "
+                        f"Raw output: {output_text[:500]}"
+                    ),
                 )
-                ctx.db.commit()
                 if ctx.restore_workspace_snapshot_if_needed:
                     ctx.restore_workspace_snapshot_if_needed(
                         "planning JSON parse failure"
@@ -751,12 +773,14 @@ def execute_planning_phase(
                     message="[ORCHESTRATION] Planning output was truncated into a single-step plan",
                     details={"reason": "truncated_multistep_plan_after_retry"},
                 )
-                ctx.task.status = TaskStatus.FAILED
-                ctx.task.error_message = (
-                    "Planning output collapsed a multi-step plan into a single "
-                    "step after retry. The run was stopped to avoid a false success."
+                _finalize_planning_terminal_failure(
+                    ctx=ctx,
+                    failure_type="truncated_multistep_plan_after_retry",
+                    failure_reason=(
+                        "Planning output collapsed a multi-step plan into a single "
+                        "step after retry. The run was stopped to avoid a false success."
+                    ),
                 )
-                ctx.db.commit()
                 if ctx.restore_workspace_snapshot_if_needed:
                     ctx.restore_workspace_snapshot_if_needed(
                         "truncated multi-step plan"
@@ -833,15 +857,18 @@ def execute_planning_phase(
             if blocking_repair_issues:
                 ctx.orchestration_state.status = OrchestrationStatus.ABORTED
                 ctx.orchestration_state.abort_reason = "Planning repair still produced non-runnable or long-running commands"
-                ctx.task.status = TaskStatus.FAILED
-                ctx.task.error_message = (
+                failure_reason = (
                     "Planning repair still produced invalid commands: "
                     + "; ".join(
                         f"{key}={value[:5]}"
                         for key, value in blocking_repair_issues.items()
                     )
                 )
-                ctx.db.commit()
+                _finalize_planning_terminal_failure(
+                    ctx=ctx,
+                    failure_type="planning_invalid_commands_after_repair",
+                    failure_reason=failure_reason,
+                )
                 return {
                     "status": "failed",
                     "reason": "planning_invalid_commands_after_repair",
@@ -956,7 +983,6 @@ def execute_planning_phase(
                 # Repair already attempted and validation still fails — abort
                 # instead of looping through more repair calls (prevents the
                 # plan→error→repair→retry chain from burning minutes of budget).
-                completed_at = datetime.now(UTC)
                 ctx.orchestration_state.status = OrchestrationStatus.ABORTED
                 ctx.orchestration_state.abort_reason = (
                     "Planning validation failed after repair: "
@@ -977,25 +1003,14 @@ def execute_planning_phase(
                         "validation_reasons": plan_verdict.reasons[:5],
                     },
                 )
-                ctx.task.status = TaskStatus.FAILED
-                ctx.task.error_message = (
-                    "Plan validation failed after repair: "
-                    + "; ".join(plan_verdict.reasons[:4])
+                failure_reason = "Plan validation failed after repair: " + "; ".join(
+                    plan_verdict.reasons[:4]
                 )
-                ctx.task.completed_at = completed_at
-                if ctx.session_task_link:
-                    ctx.session_task_link.status = TaskStatus.FAILED
-                    ctx.session_task_link.completed_at = completed_at
-                if ctx.session:
-                    ctx.session.status = "paused"
-                    ctx.session.is_active = False
-                    ctx.session.paused_at = completed_at
-                    set_session_alert(
-                        ctx.session,
-                        "error",
-                        ctx.task.error_message[:2000],
-                    )
-                ctx.db.commit()
+                _finalize_planning_terminal_failure(
+                    ctx=ctx,
+                    failure_type="planning_validation_failed_after_repair",
+                    failure_reason=failure_reason,
+                )
                 if ctx.restore_workspace_snapshot_if_needed:
                     ctx.restore_workspace_snapshot_if_needed(
                         "planning validation failure"
@@ -1041,12 +1056,15 @@ def execute_planning_phase(
                         "validation_status": reasoning_verdict.status,
                     },
                 )
-                ctx.task.status = TaskStatus.FAILED
-                ctx.task.error_message = (
+                failure_reason = (
                     "Structured reasoning artifact failed validation: "
                     + "; ".join(reasoning_verdict.reasons[:4])
                 )
-                ctx.db.commit()
+                _finalize_planning_terminal_failure(
+                    ctx=ctx,
+                    failure_type="reasoning_artifact_validation_failed",
+                    failure_reason=failure_reason,
+                )
                 if ctx.restore_workspace_snapshot_if_needed:
                     ctx.restore_workspace_snapshot_if_needed(
                         "reasoning artifact validation failed"
@@ -1141,9 +1159,11 @@ def execute_planning_phase(
             message=f"[ORCHESTRATION] Planning output blocked: {exc}",
             details={"reason": "workspace_isolation_violation"},
         )
-        ctx.task.status = TaskStatus.FAILED
-        ctx.task.error_message = str(exc)
-        ctx.db.commit()
+        _finalize_planning_terminal_failure(
+            ctx=ctx,
+            failure_type="workspace_isolation_violation",
+            failure_reason=str(exc),
+        )
         if ctx.restore_workspace_snapshot_if_needed:
             ctx.restore_workspace_snapshot_if_needed("workspace isolation violation")
         return {"status": "failed", "reason": "workspace_isolation_violation"}
@@ -1294,9 +1314,11 @@ def execute_planning_phase(
                 "[ORCHESTRATION] Failed to persist planning parse-error phase-finish snapshot: %s",
                 exc,
             )
-        ctx.task.status = TaskStatus.FAILED
-        ctx.task.error_message = str(exc)
-        ctx.db.commit()
+        _finalize_planning_terminal_failure(
+            ctx=ctx,
+            failure_type="planning_parse_error",
+            failure_reason=str(exc),
+        )
         if ctx.restore_workspace_snapshot_if_needed:
             ctx.restore_workspace_snapshot_if_needed("planning parse error")
         return {"status": "failed", "reason": "planning_parse_error"}

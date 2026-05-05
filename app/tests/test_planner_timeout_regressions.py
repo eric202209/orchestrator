@@ -49,8 +49,8 @@ def test_true_inspection_task_still_starts_minimal_first():
 
 def test_planning_fallback_timeouts_are_relaxed_for_local_models():
     assert MINIMAL_PLANNING_TIMEOUT_SECONDS == 300
-    assert STRICT_JSON_RETRY_TIMEOUT_SECONDS == 180
-    assert PLANNING_REPAIR_TIMEOUT_SECONDS == 180
+    assert STRICT_JSON_RETRY_TIMEOUT_SECONDS == 120
+    assert PLANNING_REPAIR_TIMEOUT_SECONDS == 90
     assert ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS == 240
 
 
@@ -559,6 +559,43 @@ def test_planning_repair_timeout_is_capped_below_full_local_planning_budget():
 
     assert captured["timeout_seconds"] == PLANNING_REPAIR_TIMEOUT_SECONDS
     assert captured["timeout_seconds"] < MINIMAL_PLANNING_TIMEOUT_SECONDS
+
+
+def test_planning_repair_logs_duration(caplog):
+    events = []
+
+    class Runtime:
+        async def invoke_prompt(self, prompt, **kwargs):
+            return {"output": '[{"step_number":1}]'}
+
+    caplog.set_level(logging.INFO, logger="test.planning_repair_duration")
+
+    PlannerService.repair_output(
+        runtime_service=Runtime(),
+        task_description="Build a page",
+        malformed_output='[{"step_number":1,"commands":["touch index.html"]}]',
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+        timeout_seconds=300,
+        logger=logging.getLogger("test.planning_repair_duration"),
+        emit_live=lambda *args, **kwargs: events.append((args, kwargs)),
+        reason="plan_validation_failed",
+        rejection_reasons=["Plan contains brittle heredoc-heavy commands"],
+        knowledge_context=None,
+        session_id=1,
+        task_id=2,
+    )
+
+    assert "Planning repair completed in" in caplog.text
+    duration_events = [
+        kwargs["metadata"]
+        for args, kwargs in events
+        if args
+        and args[0] == "INFO"
+        and str(args[1]).startswith("[ORCHESTRATION] Planning repair completed in ")
+    ]
+    assert duration_events
+    assert duration_events[0]["duration_seconds"] >= 0
+    assert duration_events[0]["timeout_seconds"] == PLANNING_REPAIR_TIMEOUT_SECONDS
 
 
 def test_minimal_first_logging_is_not_strict_json_retry():
