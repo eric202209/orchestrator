@@ -26,6 +26,15 @@ def test_task_retry_rolls_back_session_creation_when_queueing_fails(
     from app.tasks import worker as worker_module
 
     monkeypatch.setattr(
+        "app.api.v1.endpoints.tasks.ensure_task_workspace",
+        lambda *a, **kw: {
+            "workspace_path": "/tmp/rollback-project",
+            "task_subfolder": None,
+            "stored_task_subfolder": "retry-me-1",
+            "workspace_scope": "isolated_task_workspace",
+        },
+    )
+    monkeypatch.setattr(
         worker_module.execute_orchestration_task,
         "delay",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("broker down")),

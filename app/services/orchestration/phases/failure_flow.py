@@ -394,6 +394,72 @@ def _apply_knowledge_halt(
             return True
 
     except Exception as knowledge_exc:
-        logger.debug("[KNOWLEDGE] Halt check skipped: %s", knowledge_exc)
+        logger.warning(
+            "[KNOWLEDGE] Halt check skipped session=%s task=%s: %s",
+            session_id,
+            task_id,
+            knowledge_exc,
+        )
 
     return False
+
+
+def record_failure_knowledge_for_stopped_session(
+    *,
+    db: Any,
+    session_id: int,
+    task_id: int,
+    failure_reason: str,
+    logger: logging.Logger,
+) -> None:
+    """Record KnowledgeUsageLog for a session stopped by a runtime failure.
+
+    Called from stop paths that bypass handle_task_failure() (orphan recovery,
+    hard time-limit kill). Never modifies task or session status.
+    """
+    try:
+        from app.config import settings
+        from app.services.knowledge import failure_signature_service, usage_log_service
+        from app.services.knowledge.knowledge_service import KnowledgeService
+
+        sig = failure_signature_service.extract(
+            exc=RuntimeError(failure_reason),
+            phase="execution",
+            tool_name=None,
+            retry_count=0,
+        )
+        svc = KnowledgeService(
+            qdrant_url=settings.QDRANT_URL,
+            collection_name=settings.QDRANT_COLLECTION_NAME,
+            embedding_model=settings.OPENAI_EMBEDDING_MODEL,
+        )
+        knowledge_ctx = svc.retrieve(
+            query=sig.normalized_message,
+            trigger_phase="failure",
+            knowledge_types=["failure_memory", "debug_case"],
+            failure_signature=sig.signature_hash(),
+            db=db,
+        )
+        usage_log_service.log_usage(
+            context=knowledge_ctx,
+            session_id=session_id,
+            task_id=task_id,
+            used_in_prompt=False,
+            db=db,
+        )
+        logger.info(
+            "[KNOWLEDGE] Recorded failure knowledge for stopped session=%s task=%s "
+            "items=%d retrieval_reason=%s",
+            session_id,
+            task_id,
+            len(knowledge_ctx.retrieved_items),
+            knowledge_ctx.retrieval_reason,
+        )
+    except Exception as record_exc:
+        logger.warning(
+            "[KNOWLEDGE] record_failure_knowledge_for_stopped_session failed "
+            "session=%s task=%s: %s",
+            session_id,
+            task_id,
+            record_exc,
+        )

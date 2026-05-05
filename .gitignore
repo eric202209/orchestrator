@@ -79,6 +79,8 @@ checkpoints/
 bin/
 data/qdrant/
 *.qdrant-initialized
+knowledge/failure/
+knowledge/seed/
 
 # Documentation
 docs/

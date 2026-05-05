@@ -89,15 +89,22 @@ class KnowledgeService:
         top_k: int = settings.KNOWLEDGE_MAX_ITEMS,
         db: Session = None,
     ) -> KnowledgeContext:
-        vector = self._embed(query)
-        hits = self._search(
-            vector=vector,
-            trigger_phase=trigger_phase,
-            knowledge_types=knowledge_types,
-            failure_signature=failure_signature,
-            tool_name=tool_name,
-            top_k=top_k,
-        )
+        try:
+            vector = self._embed(query)
+        except Exception:
+            return self._sqlite_fallback(trigger_phase, knowledge_types, top_k, db)
+
+        try:
+            hits = self._search(
+                vector=vector,
+                trigger_phase=trigger_phase,
+                knowledge_types=knowledge_types,
+                failure_signature=failure_signature,
+                tool_name=tool_name,
+                top_k=top_k,
+            )
+        except Exception:
+            return self._sqlite_fallback(trigger_phase, knowledge_types, top_k, db)
 
         if not hits:
             return self._build_context([], query, trigger_phase, "no_results")
@@ -208,6 +215,31 @@ class KnowledgeService:
         if last_space > 0:
             truncated = truncated[:last_space]
         return truncated
+
+    def _sqlite_fallback(
+        self,
+        trigger_phase: str,
+        knowledge_types: list[str],
+        top_k: int,
+        db: Session,
+    ) -> KnowledgeContext:
+        reason = "sqlite_fallback_qdrant_or_embedding_unavailable"
+        if db is None:
+            return self._build_context([], None, trigger_phase, reason)
+        rows = (
+            db.query(KnowledgeItem)
+            .filter(KnowledgeItem.knowledge_type.in_(knowledge_types))
+            .order_by(KnowledgeItem.priority.desc(), KnowledgeItem.updated_at.desc())
+            .all()
+        )
+        filtered = [
+            r
+            for r in rows
+            if r.applies_to and (trigger_phase in r.applies_to or "all" in r.applies_to)
+        ][:top_k]
+        scored = [(item, 0.3) for item in filtered]
+        scored = self._apply_budget(scored, None)
+        return self._build_context(scored, None, trigger_phase, reason)
 
     def _embed(self, text: str) -> list[float]:
         response = self._openai.embeddings.create(

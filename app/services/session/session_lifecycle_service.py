@@ -173,6 +173,31 @@ def _recover_orphaned_running_session_if_needed(
         )
     )
     db.commit()
+    logger.warning(
+        "[STOP] session=%s task_id=%s stop_reason=orphaned_planning_stall "
+        "handle_task_failure=False knowledge_failure_recording=triggered",
+        session.id,
+        task.id,
+    )
+    try:
+        from app.services.orchestration.phases.failure_flow import (
+            record_failure_knowledge_for_stopped_session,
+        )
+
+        record_failure_knowledge_for_stopped_session(
+            db=db,
+            session_id=session.id,
+            task_id=task.id,
+            failure_reason="orphaned planning run stalled after planning-response handling",
+            logger=logger,
+        )
+    except Exception as knowledge_exc:
+        logger.warning(
+            "[STOP] record_failure_knowledge_for_stopped_session failed session=%s task=%s: %s",
+            session.id,
+            task.id,
+            knowledge_exc,
+        )
     return True
 
 
@@ -824,6 +849,22 @@ async def stop_session_lifecycle(
         session.is_active = False
         session.stopped_at = datetime.now(timezone.utc)
         session.status = "stopped"
+        _running_link = (
+            db.query(SessionTask)
+            .filter(
+                SessionTask.session_id == session_id,
+                SessionTask.status == TaskStatus.RUNNING,
+            )
+            .first()
+        )
+        logger.info(
+            "[STOP] session=%s task_id=%s initiated_by=%s source=%s "
+            "handle_task_failure=False knowledge_failure_recording=skipped_manual_stop",
+            session_id,
+            _running_link.task_id if _running_link else None,
+            initiated_by,
+            source,
+        )
         reset_count = _reset_running_session_tasks(
             db,
             session_id=session_id,

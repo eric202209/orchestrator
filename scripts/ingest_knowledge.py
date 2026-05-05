@@ -81,7 +81,7 @@ def _collect_files(source_dir: Path) -> list[Path]:
     knowledge_dir = source_dir / "knowledge"
     knowledge_dir.mkdir(exist_ok=True)
     for suffix in ("*.md", "*.json"):
-        files.extend(sorted(knowledge_dir.glob(suffix)))
+        files.extend(sorted(knowledge_dir.rglob(suffix)))
 
     return files
 
@@ -208,9 +208,11 @@ def run(source_dir: Path, db_url: str, qdrant_url: str) -> None:
                     item = KnowledgeItem(**data, checksum=checksum)
                     db.add(item)
 
-                db.flush()
-                svc.ingest(item)
                 db.commit()
+                try:
+                    svc.ingest(item)
+                except Exception as embed_exc:
+                    warnings.warn(f"WARN {rel}: vector embedding skipped: {embed_exc}")
                 print(f"  ingested   {rel}")
                 ingested += 1
 
