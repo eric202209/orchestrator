@@ -29,6 +29,7 @@ from app.services.orchestration.task_rules import (
     should_execute_in_canonical_project_root,
 )
 from app.services.task_service import TaskService
+from app.services.task_execution_service import create_task_execution
 
 
 logger = logging.getLogger(__name__)
@@ -599,6 +600,11 @@ def _maybe_resume_manual_session_work(
 
     if resume_has_progress and resolved_checkpoint_name:
         prompt = task.description or task.title
+        task_execution = create_task_execution(
+            db,
+            session_id=session.id,
+            task_id=task.id,
+        )
         result = execute_orchestration_task.delay(
             session_id=session.id,
             task_id=task.id,
@@ -606,12 +612,14 @@ def _maybe_resume_manual_session_work(
             timeout_seconds=DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
             resume_checkpoint_name=resolved_checkpoint_name,
             expected_session_instance_id=session_instance_id,
+            task_execution_id=task_execution.id,
         )
         db.add(
             LogEntry(
                 session_id=session.id,
                 session_instance_id=session_instance_id,
                 task_id=task.id,
+                task_execution_id=task_execution.id,
                 level="INFO",
                 message=(
                     f"Manual session restart resumed task {task.id} from checkpoint "
@@ -620,6 +628,7 @@ def _maybe_resume_manual_session_work(
                 log_metadata=json.dumps(
                     {
                         "celery_task_id": result.id,
+                        "task_execution_id": task_execution.id,
                         "dispatch_mode": "checkpoint_resume",
                         "checkpoint_name": resolved_checkpoint_name,
                     }
@@ -631,6 +640,7 @@ def _maybe_resume_manual_session_work(
             {
                 "task_id": task.id,
                 "task_name": task.title,
+                "task_execution_id": task_execution.id,
                 "celery_id": result.id,
                 "dispatch_mode": "checkpoint_resume",
                 "checkpoint_name": resolved_checkpoint_name,

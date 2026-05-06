@@ -82,6 +82,10 @@ from app.services.prompt_templates import (
 from app.services.session.session_runtime_service import (
     queue_task_for_session as _queue_task_for_session,
 )
+from app.services.task_execution_service import (
+    create_task_execution,
+    get_task_execution,
+)
 from app.services.orchestration.policy import get_policy_profile
 from app.services.orchestration.policy import (
     ORCHESTRATION_TASK_SOFT_TIME_LIMIT_SECONDS,
@@ -336,6 +340,67 @@ def _claim_queued_task_for_worker(
     db.refresh(task)
     latest_link = _get_latest_session_task_link(db, session.id, task.id)
     return True, "claimed", claim_started_at, latest_link
+
+
+def _sync_task_execution_state(
+    db: Session,
+    task_execution_id: Optional[int],
+    *,
+    status: TaskStatus,
+    started_at: Optional[datetime] = None,
+    completed_at: Optional[datetime] = None,
+) -> None:
+    task_execution = get_task_execution(db, task_execution_id)
+    if not task_execution:
+        return
+    task_execution.status = status
+    if started_at is not None:
+        task_execution.started_at = started_at
+    if completed_at is not None:
+        task_execution.completed_at = completed_at
+    db.commit()
+
+
+def _sync_task_execution_from_task_state(
+    db: Session,
+    task_execution_id: Optional[int],
+    *,
+    task: Optional[Task],
+    session_task_link: Optional[SessionTask],
+) -> None:
+    task_execution = get_task_execution(db, task_execution_id)
+    if not task_execution:
+        return
+
+    current_status = (
+        getattr(session_task_link, "status", None)
+        or getattr(task, "status", None)
+        or task_execution.status
+    )
+    if task_execution.status in {
+        TaskStatus.DONE,
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
+    } and current_status not in {
+        TaskStatus.DONE,
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
+    }:
+        return
+    task_execution.status = current_status
+    if getattr(session_task_link, "started_at", None) or getattr(
+        task, "started_at", None
+    ):
+        task_execution.started_at = getattr(
+            session_task_link, "started_at", None
+        ) or getattr(task, "started_at", None)
+    if current_status in {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED}:
+        task_execution.completed_at = (
+            getattr(session_task_link, "completed_at", None)
+            or getattr(task, "completed_at", None)
+            or datetime.now(timezone.utc)
+        )
+    db.commit()
 
 
 def _build_base_project_context(
@@ -681,6 +746,7 @@ def execute_orchestration_task(
     context: Optional[Dict[str, Any]] = None,
     resume_checkpoint_name: Optional[str] = None,
     expected_session_instance_id: Optional[str] = None,
+    task_execution_id: Optional[int] = None,
 ):
     """
     Execute an orchestration task with multi-step runtime coordination
@@ -721,9 +787,19 @@ def execute_orchestration_task(
         if not session or not task:
             raise ValueError("Session or task not found")
 
+        if task_execution_id is None:
+            task_execution = create_task_execution(
+                db,
+                session_id=session_id,
+                task_id=task_id,
+            )
+            task_execution_id = task_execution.id
+
         def emit_live(
             level: str, message: str, metadata: Optional[Dict[str, Any]] = None
         ) -> None:
+            metadata_with_execution = dict(metadata or {})
+            metadata_with_execution.setdefault("task_execution_id", task_execution_id)
             _record_live_log(
                 db,
                 session_id,
@@ -731,7 +807,8 @@ def execute_orchestration_task(
                 level,
                 message,
                 session_instance_id=session.instance_id,
-                metadata=metadata,
+                metadata=metadata_with_execution,
+                task_execution_id=task_execution_id,
             )
 
         execution_profile = (
@@ -807,6 +884,12 @@ def execute_orchestration_task(
             resume_checkpoint_name=resume_checkpoint_name,
         )
         if stale_dispatch_reason:
+            _sync_task_execution_state(
+                db,
+                task_execution_id,
+                status=TaskStatus.CANCELLED,
+                completed_at=datetime.now(timezone.utc),
+            )
             return _emit_dispatch_rejected(
                 reason=stale_dispatch_reason,
                 log_message=f"[ORCHESTRATION] Rejected stale queued dispatch before claim: {stale_dispatch_reason}",
@@ -848,6 +931,12 @@ def execute_orchestration_task(
                 break
             time.sleep(0.2)
         if not claim_ok:
+            _sync_task_execution_state(
+                db,
+                task_execution_id,
+                status=TaskStatus.CANCELLED,
+                completed_at=datetime.now(timezone.utc),
+            )
             return _emit_dispatch_rejected(
                 reason=claim_reason,
                 log_message=f"[ORCHESTRATION] Rejected stale or duplicate task dispatch: {claim_reason}",
@@ -867,6 +956,7 @@ def execute_orchestration_task(
             "session_instance_id": session.instance_id,
             "expected_session_instance_id": expected_session_instance_id,
             "celery_task_id": getattr(getattr(self, "request", None), "id", None),
+            "task_execution_id": task_execution_id,
             "project_dir": str(dispatch_project_dir) if dispatch_project_dir else None,
             "queue_latency_seconds": queue_latency_seconds,
             "queued_event_id": (queued_event or {}).get("event_id"),
@@ -1146,6 +1236,12 @@ def execute_orchestration_task(
             session_task_link.status = TaskStatus.RUNNING
             session_task_link.started_at = claim_started_at or task.started_at
             session_task_link.completed_at = None
+        _sync_task_execution_state(
+            db,
+            task_execution_id,
+            status=TaskStatus.RUNNING,
+            started_at=claim_started_at or task.started_at,
+        )
         db.commit()
         _write_project_state_snapshot(db, project, task, session_id)
 
@@ -1186,6 +1282,7 @@ def execute_orchestration_task(
                 "project_name": project.name if project else None,
                 "session_id": session_id,
                 "task_id": task_id,
+                "task_execution_id": task_execution_id,
                 "execution_profile": execution_profile,
                 "resume_checkpoint_name": resume_checkpoint_name,
                 "backend": runtime_metadata.get("backend"),
@@ -1571,6 +1668,7 @@ def execute_orchestration_task(
             policy_profile_name=active_policy.name,
             validation_severity=active_policy.validation_severity,
             completion_repair_budget=active_policy.completion_repair_budget,
+            task_execution_id=task_execution_id,
             restore_workspace_snapshot_if_needed=restore_workspace_snapshot_if_needed,
         )
 
@@ -1868,6 +1966,7 @@ def execute_orchestration_task(
                             if active_policy is not None
                             else 1
                         ),
+                        task_execution_id=task_execution_id,
                         restore_workspace_snapshot_if_needed=restore_workspace_snapshot_if_needed,
                     )
                     if session and task
@@ -1880,6 +1979,19 @@ def execute_orchestration_task(
         )
 
     finally:
+        try:
+            _sync_task_execution_from_task_state(
+                db,
+                task_execution_id,
+                task=task,
+                session_task_link=session_task_link,
+            )
+        except Exception as sync_exc:
+            logger.warning(
+                "[ORCHESTRATION] Failed to sync task execution %s: %s",
+                task_execution_id,
+                sync_exc,
+            )
         if trace_context_manager is not None:
             trace_context_manager.__exit__(None, None, None)
         flush_langfuse()

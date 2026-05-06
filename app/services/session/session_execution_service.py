@@ -20,6 +20,7 @@ from app.services.workspace.project_isolation_service import (
 )
 from app.services.prompt_templates import OrchestrationState
 from app.services.session.session_runtime_service import ensure_task_workspace
+from app.services.task_execution_service import create_task_execution
 from app.services.tool_tracking_service import ToolTrackingService
 
 
@@ -101,6 +102,7 @@ async def execute_task_payload(
 
     selected_task = None
     task_workspace = None
+    task_execution = None
 
     try:
         if task_request.task_id:
@@ -138,6 +140,13 @@ async def execute_task_payload(
                         started_at=datetime.utcnow(),
                     )
                 )
+            task_execution = create_task_execution(
+                db,
+                session_id=session_id,
+                task_id=selected_task.id,
+                status=TaskStatus.RUNNING,
+                started_at=datetime.utcnow(),
+            )
 
             selected_task.status = TaskStatus.RUNNING
             selected_task.started_at = datetime.utcnow()
@@ -149,9 +158,15 @@ async def execute_task_payload(
                     session_id=session_id,
                     session_instance_id=session.instance_id,
                     task_id=selected_task.id,
+                    task_execution_id=task_execution.id,
                     level="INFO",
                     message=f"Prepared task workspace: {task_workspace['workspace_path']}",
-                    log_metadata=json.dumps(task_workspace),
+                    log_metadata=json.dumps(
+                        {
+                            **task_workspace,
+                            "task_execution_id": task_execution.id,
+                        }
+                    ),
                 )
             )
             db.commit()
@@ -201,11 +216,16 @@ async def execute_task_payload(
         result = await runtime.execute_task_with_orchestration(
             prompt, timeout_seconds, orchestration_state=orchestration_state
         )
+        if task_execution:
+            task_execution.status = TaskStatus.DONE
+            task_execution.completed_at = datetime.utcnow()
+            db.commit()
 
         return {
             "status": "completed",
             "result": result,
             "execution_id": f"exec_{session_id}_{datetime.utcnow().timestamp()}",
+            "task_execution_id": task_execution.id if task_execution else None,
             "task_id": selected_task.id if selected_task else None,
             "task_subfolder": (
                 task_workspace["task_subfolder"] if task_workspace else None
@@ -221,6 +241,9 @@ async def execute_task_payload(
             selected_task.status = TaskStatus.FAILED
             selected_task.error_message = str(exc)
             selected_task.completed_at = datetime.utcnow()
+        if task_execution:
+            task_execution.status = TaskStatus.FAILED
+            task_execution.completed_at = datetime.utcnow()
 
         session.is_active = False
         session.status = "stopped"
@@ -238,6 +261,7 @@ async def execute_task_payload(
             LogEntry(
                 session_id=session_id,
                 task_id=selected_task.id if selected_task else None,
+                task_execution_id=task_execution.id if task_execution else None,
                 level="ERROR",
                 message=(
                     f"Task execution failed: {error_detail}"

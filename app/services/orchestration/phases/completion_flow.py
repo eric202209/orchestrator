@@ -1785,12 +1785,22 @@ def finalize_successful_task(
         next_task.completed_at = None
         next_task.error_message = None
         next_task.current_step = 0
+        from app.services.task_execution_service import create_task_execution
+
+        next_task_execution = create_task_execution(
+            db,
+            session_id=session_id,
+            task_id=next_task.id,
+            status=TaskStatus.RUNNING,
+            started_at=next_task.started_at,
+        )
 
         db.add(
             LogEntry(
                 session_id=session_id,
                 session_instance_id=session.instance_id,
                 task_id=next_task.id,
+                task_execution_id=next_task_execution.id,
                 level="INFO",
                 message=(
                     f"[ORCHESTRATION] Auto-advancing to next task {next_task.id}: {next_task.title}"
@@ -1798,6 +1808,7 @@ def finalize_successful_task(
                 log_metadata=json.dumps(
                     {
                         "auto_advance": True,
+                        "task_execution_id": next_task_execution.id,
                         "plan_position": getattr(next_task, "plan_position", None),
                     }
                 ),
@@ -1809,6 +1820,7 @@ def finalize_successful_task(
             task_id=next_task.id,
             prompt=next_task.description or next_task.title,
             timeout_seconds=900,
+            task_execution_id=next_task_execution.id,
         )
 
     if build_task_report_payload_fn and render_task_report_fn:

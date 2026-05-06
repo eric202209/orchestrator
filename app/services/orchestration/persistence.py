@@ -1125,11 +1125,13 @@ def record_live_log(
     message: str,
     session_instance_id: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    task_execution_id: Optional[int] = None,
 ) -> None:
     db.add(
         LogEntry(
             session_id=session_id,
             task_id=task_id,
+            task_execution_id=task_execution_id,
             level=level,
             message=message,
             session_instance_id=session_instance_id,
