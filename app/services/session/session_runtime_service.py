@@ -27,6 +27,7 @@ from app.services.workspace.system_settings import (
     get_effective_agent_backend,
     get_effective_agent_model_family,
 )
+from app.services.task_execution_service import create_task_execution
 
 
 DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS = 1800
@@ -348,6 +349,11 @@ def queue_task_for_session(
         session_task_link.status = TaskStatus.PENDING
         session_task_link.started_at = None
         session_task_link.completed_at = None
+    task_execution = create_task_execution(
+        db,
+        session_id=session.id,
+        task_id=task.id,
+    )
 
     prior_status = task.status
     should_clear_saved_plan = prior_status in (
@@ -390,6 +396,7 @@ def queue_task_for_session(
         prompt=task_prompt,
         timeout_seconds=timeout_seconds,
         expected_session_instance_id=session.instance_id,
+        task_execution_id=task_execution.id,
     )
 
     db.add(
@@ -397,11 +404,13 @@ def queue_task_for_session(
             session_id=session.id,
             session_instance_id=session.instance_id,
             task_id=task.id,
+            task_execution_id=task_execution.id,
             level="INFO",
             message=f"Queued task {task.id}: {task.title}",
             log_metadata=json.dumps(
                 {
                     "celery_task_id": result.id,
+                    "task_execution_id": task_execution.id,
                     "task_workspace": task_workspace["workspace_path"],
                     "plan_position": getattr(task, "plan_position", None),
                     "execution_mode": session.execution_mode,
@@ -415,6 +424,7 @@ def queue_task_for_session(
     return {
         "task_id": task.id,
         "task_name": task.title,
+        "task_execution_id": task_execution.id,
         "celery_id": result.id,
         "plan_position": getattr(task, "plan_position", None),
     }

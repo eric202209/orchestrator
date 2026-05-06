@@ -338,6 +338,7 @@ class TaskExecution(Base):
 
     session = relationship("Session", back_populates="task_executions")
     task = relationship("Task", back_populates="executions")
+    logs = relationship("LogEntry", back_populates="task_execution")
 
 
 class TaskCheckpoint(Base):
@@ -402,6 +403,9 @@ class LogEntry(Base):
     id = Column(Integer, primary_key=True, index=True)
     session_id = Column(Integer, ForeignKey("sessions.id"), nullable=True, index=True)
     task_id = Column(Integer, ForeignKey("tasks.id"), nullable=True, index=True)
+    task_execution_id = Column(
+        Integer, ForeignKey("task_executions.id"), nullable=True, index=True
+    )
     level = Column(String(50), nullable=False)  # INFO, WARNING, ERROR
     message = Column(Text, nullable=False)
     log_metadata = Column(
@@ -412,6 +416,8 @@ class LogEntry(Base):
     session_instance_id = Column(
         String(36), nullable=True, index=True
     )  # UUID matching session.instance_id
+
+    task_execution = relationship("TaskExecution", back_populates="logs")
 
 
 class User(Base):

@@ -1,9 +1,39 @@
 """Read-only helpers for task execution attempts."""
 
+from datetime import datetime
+
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models import TaskExecution
+from app.models import TaskExecution, TaskStatus
+
+
+def create_task_execution(
+    db: Session,
+    *,
+    session_id: int,
+    task_id: int,
+    status: TaskStatus = TaskStatus.PENDING,
+    started_at: datetime | None = None,
+) -> TaskExecution:
+    execution = TaskExecution(
+        session_id=session_id,
+        task_id=task_id,
+        attempt_number=next_attempt_number(db, session_id, task_id),
+        status=status,
+        started_at=started_at,
+    )
+    db.add(execution)
+    db.flush()
+    return execution
+
+
+def get_task_execution(
+    db: Session, task_execution_id: int | None
+) -> TaskExecution | None:
+    if not task_execution_id:
+        return None
+    return db.query(TaskExecution).filter(TaskExecution.id == task_execution_id).first()
 
 
 def next_attempt_number(db: Session, session_id: int, task_id: int) -> int:

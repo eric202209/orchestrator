@@ -22,6 +22,7 @@ from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.persistence import append_orchestration_event
 from app.services.orchestration.context_assembly import render_adapted_runtime_prompt
 from app.services.session.session_runtime_service import ensure_task_workspace
+from app.services.task_execution_service import create_task_execution
 from app.services.task_service import TaskService
 from app.services.workspace.system_settings import (
     get_effective_agent_backend,
@@ -158,6 +159,11 @@ def _queue_task_retry(
         started_at=None,
     )
     db.add(session_task)
+    task_execution = create_task_execution(
+        db,
+        session_id=new_session.id,
+        task_id=task.id,
+    )
 
     should_clear_saved_plan = task.status in (
         TaskStatus.DONE,
@@ -174,6 +180,7 @@ def _queue_task_retry(
             prompt=prompt,
             timeout_seconds=timeout_seconds,
             expected_session_instance_id=new_session.instance_id,
+            task_execution_id=task_execution.id,
         )
     except Exception:
         db.rollback()
@@ -188,11 +195,13 @@ def _queue_task_retry(
             session_id=new_session.id,
             session_instance_id=new_session.instance_id,
             task_id=task.id,
+            task_execution_id=task_execution.id,
             level="INFO",
             message=f"Task queued: {task.title}",
             log_metadata=json.dumps(
                 {
                     "celery_task_id": result.id,
+                    "task_execution_id": task_execution.id,
                     "retry": True,
                     "cleared_saved_plan": should_clear_saved_plan,
                 }
@@ -204,6 +213,7 @@ def _queue_task_retry(
             session_id=new_session.id,
             session_instance_id=new_session.instance_id,
             task_id=task.id,
+            task_execution_id=task_execution.id,
             level="INFO",
             message=f"Session started: {new_session.name}",
         )
@@ -231,6 +241,7 @@ def _queue_task_retry(
         "status": "started",
         "task_id": task.id,
         "session_id": new_session.id,
+        "task_execution_id": task_execution.id,
         "celery_task_id": result.id,
         "message": f"Task '{task.title}' restarted successfully",
     }
@@ -413,6 +424,11 @@ async def execute_task_with_runtime(
             task_id=task.id,
         )
         db.add(session_task)
+        task_execution = create_task_execution(
+            db,
+            session_id=new_session.id,
+            task_id=task.id,
+        )
 
         runtime = create_agent_runtime(db, new_session.id, task_id)
         try:
@@ -424,6 +440,8 @@ async def execute_task_with_runtime(
         new_session.status = "running"
         new_session.is_active = True
         new_session.started_at = datetime.now(UTC)
+        task_execution.status = TaskStatus.RUNNING
+        task_execution.started_at = new_session.started_at
         db.commit()
         db.refresh(new_session)
 
@@ -462,13 +480,17 @@ async def execute_task_with_runtime(
         if result["status"] == "completed":
             task.status = TaskStatus.DONE
             task.error_message = None
+            task_execution.status = TaskStatus.DONE
         else:
             task.status = TaskStatus.FAILED
             task.error_message = result.get("error", "Unknown error")
+            task_execution.status = TaskStatus.FAILED
+        task_execution.completed_at = datetime.now(UTC)
 
         db.commit()
         db.refresh(task)
 
+        result["task_execution_id"] = task_execution.id
         return result
 
     except Exception as e:
@@ -486,6 +508,10 @@ async def execute_task_with_runtime(
         if task:
             task.status = TaskStatus.FAILED
             task.error_message = f"{error_msg}\nRecommended action: {recovery_plan.get('recommended_action', 'manual_intervention')}"
+            task_execution = locals().get("task_execution")
+            if task_execution:
+                task_execution.status = TaskStatus.FAILED
+                task_execution.completed_at = datetime.now(UTC)
             db.commit()
         raise HTTPException(status_code=500, detail=error_msg)
 

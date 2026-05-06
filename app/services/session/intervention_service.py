@@ -354,6 +354,13 @@ def _dispatch_resume(
         task.started_at = None
         task.completed_at = None
         task.error_message = None
+        from app.services.task_execution_service import create_task_execution
+
+        task_execution = create_task_execution(
+            db,
+            session_id=session.id,
+            task_id=task.id,
+        )
         db.commit()
         execute_orchestration_task.delay(
             session_id=session.id,
@@ -362,6 +369,7 @@ def _dispatch_resume(
             timeout_seconds=1800,
             resume_checkpoint_name=checkpoint_name,
             expected_session_instance_id=session.instance_id,
+            task_execution_id=task_execution.id,
         )
         session.status = "running"
         session.is_active = True
