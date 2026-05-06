@@ -97,6 +97,9 @@ class Task(Base):
     sessions = relationship(
         "SessionTask", back_populates="task", cascade="all, delete-orphan"
     )
+    executions = relationship(
+        "TaskExecution", back_populates="task", cascade="all, delete-orphan"
+    )
     permission_requests = relationship(
         "PermissionRequest", back_populates="task", cascade="all, delete-orphan"
     )
@@ -145,6 +148,9 @@ class Session(Base):
     project = relationship("Project", back_populates="sessions")
     tasks = relationship(
         "SessionTask", back_populates="session", cascade="all, delete-orphan"
+    )
+    task_executions = relationship(
+        "TaskExecution", back_populates="session", cascade="all, delete-orphan"
     )
     permission_requests = relationship(
         "PermissionRequest", back_populates="session", cascade="all, delete-orphan"
@@ -306,6 +312,32 @@ class SessionTask(Base):
 
     session = relationship("Session", back_populates="tasks")
     task = relationship("Task", back_populates="sessions")
+
+
+class TaskExecution(Base):
+    __tablename__ = "task_executions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(Integer, ForeignKey("sessions.id"), nullable=False, index=True)
+    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False, index=True)
+    attempt_number = Column(Integer, nullable=False)
+    status = Column(Enum(TaskStatus), default=TaskStatus.PENDING, nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id",
+            "task_id",
+            "attempt_number",
+            name="uq_task_executions_session_task_attempt",
+        ),
+    )
+
+    session = relationship("Session", back_populates="task_executions")
+    task = relationship("Task", back_populates="executions")
 
 
 class TaskCheckpoint(Base):

@@ -15,6 +15,9 @@ build/
 .pytest_cache/
 .mypy_cache/
 .git/
+htmlcov/
+.coverage
+coverage.xml
 
 # Node.js
 node_modules/
