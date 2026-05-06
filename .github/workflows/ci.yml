@@ -82,9 +82,13 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
+    - name: Run replay and simulation semantic contracts
+      run: |
+        pytest app/tests/test_orchestration_replay_fixtures.py app/tests/test_policy_simulation_regressions.py -v
+
     - name: Run tests
       run: |
-        pytest app/tests/ -v --cov=app --cov-report=xml || true
+        pytest app/tests/ -v --cov=app --cov-report=xml
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v3

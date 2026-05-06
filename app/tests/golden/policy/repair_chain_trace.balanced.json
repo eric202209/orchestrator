@@ -1,0 +1,62 @@
+{
+  "authoritative_inputs": {
+    "current_step_index": 0,
+    "intervention_status": null,
+    "latest_divergence_event_id": null,
+    "latest_failure_event_id": "repair-rejected",
+    "phase": "completion",
+    "repair_count": 3,
+    "retry_count": 0,
+    "status": "repair_rejected",
+    "validation_verdict_status_history": []
+  },
+  "budgets": {
+    "max_policy_evidence_events": 12,
+    "max_policy_evidence_gaps": 10,
+    "max_policy_findings": 20,
+    "max_policy_reason_codes": 5
+  },
+  "compatibility": {
+    "evidence_gaps": [],
+    "findings": [],
+    "reducer_version_supported": "phase4a-v1",
+    "replay_compatibility_supported": "phase4a-compat-v1",
+    "version": "phase5a-policy-compat-v1"
+  },
+  "findings": [
+    {
+      "severity": "info",
+      "type": "policy_determinism_bounded"
+    }
+  ],
+  "policy": {
+    "checksum": "71580d89e26d9faf",
+    "family": "orchestration-safety",
+    "profile": "balanced",
+    "version": "orchestration-safety:balanced:v1"
+  },
+  "policy_determinism": {
+    "level": "bounded",
+    "nondeterministic_inputs": [
+      "replay_determinism:bounded"
+    ]
+  },
+  "recommendation": {
+    "action": "halt",
+    "confidence": "high",
+    "evidence_event_ids": [
+      "repair-rejected"
+    ],
+    "evidence_gaps": [],
+    "reason_codes": [
+      "repair_budget_exhausted"
+    ]
+  },
+  "simulation_version": "phase5a-sim-v1",
+  "supporting_inputs": {
+    "determinism_level": "bounded",
+    "drift_finding_count": 0,
+    "integrity_confidence": "high",
+    "workspace_evidence_status": "not_requested"
+  }
+}

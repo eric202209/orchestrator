@@ -73,6 +73,11 @@ from .replay import (
     reconstruct_execution_state,
     reduce_replay_events,
 )
+from .policy_simulation import (
+    SIMULATION_VERSION,
+    compare_policy_simulations,
+    simulate_policy_from_replay,
+)
 from .task_rules import (
     get_workflow_profile,
     get_task_report_path,
@@ -143,6 +148,9 @@ __all__ = [
     "REDUCER_VERSION",
     "reconstruct_execution_state",
     "reduce_replay_events",
+    "SIMULATION_VERSION",
+    "compare_policy_simulations",
+    "simulate_policy_from_replay",
     "restore_step_result",
     "CheckpointContext",
     "CheckpointData",

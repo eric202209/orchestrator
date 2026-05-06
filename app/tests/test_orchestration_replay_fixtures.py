@@ -14,6 +14,7 @@ from app.tests.replay_fixture_corpus import (
     assert_replay_fixture_expectations,
     materialize_replay_fixture,
 )
+from app.tests.report_semantic_assertions import assert_replay_matches_golden
 
 
 @pytest.mark.parametrize(
@@ -34,6 +35,7 @@ def test_replay_fixture_corpus_regression(tmp_path, fixture):
     )
 
     assert_replay_fixture_expectations(report, fixture)
+    assert_replay_matches_golden(fixture.fixture_id, report)
 
 
 def test_replay_fixtures_pin_current_reducer_and_compatibility_versions():

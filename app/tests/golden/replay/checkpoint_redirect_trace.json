@@ -1,0 +1,88 @@
+{
+  "artifact_state": {
+    "changed_files": [],
+    "plan_step_count": null,
+    "reasoning_artifact_types": [],
+    "tool_event_types": [],
+    "workspace_evidence_status": "not_requested",
+    "workspace_hashes": []
+  },
+  "boundary": {
+    "mode": "to_checkpoint_name",
+    "requested": "autosave_latest",
+    "resolved": true,
+    "resolved_checkpoint_name": "autosave_latest",
+    "resolved_event_id": "checkpoint-redirected"
+  },
+  "checkpoint_comparison": {
+    "checkpoint_name": "autosave_latest",
+    "mismatches": [],
+    "status": "match"
+  },
+  "compatibility_version": "phase4a-compat-v1",
+  "determinism": {
+    "artifact_gaps": 1,
+    "level": "bounded",
+    "notes": [
+      "workspace content is not reconstructable from replay evidence"
+    ],
+    "workspace_reconstructable": false
+  },
+  "drift_findings": [],
+  "field_classification": {
+    "artifacts": [
+      "timestamps",
+      "workspace_hashes",
+      "changed_files",
+      "tool_events",
+      "reasoning_artifacts",
+      "checkpoint_payloads",
+      "current_workspace_observations",
+      "causal_links",
+      "knowledge_usage_associations",
+      "plan_metadata"
+    ],
+    "authoritative": [
+      "session_id",
+      "task_id",
+      "phase",
+      "status",
+      "current_step_index",
+      "retry_count",
+      "repair_count",
+      "latest_checkpoint_name",
+      "latest_checkpoint_event_id",
+      "latest_failure_event_id",
+      "latest_divergence_event_id",
+      "validation_verdict_status_history",
+      "intervention_status"
+    ]
+  },
+  "integrity": {
+    "confidence": "high",
+    "event_count_applied": 2,
+    "event_count_read": 2,
+    "findings": [],
+    "malformed_line_count": 0,
+    "unknown_event_types": []
+  },
+  "reducer_version": "phase4a-v1",
+  "state": {
+    "current_step_index": 2,
+    "intervention_status": null,
+    "latest_checkpoint_event_id": "checkpoint-redirected",
+    "latest_checkpoint_name": "autosave_latest",
+    "latest_divergence_event_id": null,
+    "latest_failure_event_id": null,
+    "phase": "execution",
+    "repair_count": 0,
+    "retry_count": 0,
+    "session_id": 900,
+    "status": "running",
+    "task_id": 901,
+    "validation_verdict_status_history": []
+  },
+  "workspace_evidence": {
+    "status": "not_requested"
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "authoritative_inputs": {
+    "current_step_index": 0,
+    "intervention_status": null,
+    "latest_divergence_event_id": null,
+    "latest_failure_event_id": null,
+    "phase": "completion",
+    "repair_count": 0,
+    "retry_count": 0,
+    "status": "completed",
+    "validation_verdict_status_history": []
+  },
+  "budgets": {
+    "max_policy_evidence_events": 12,
+    "max_policy_evidence_gaps": 10,
+    "max_policy_findings": 20,
+    "max_policy_reason_codes": 5
+  },
+  "compatibility": {
+    "evidence_gaps": [
+      "malformed_jsonl"
+    ],
+    "findings": [
+      {
+        "count": 1,
+        "severity": "warning",
+        "type": "malformed_event_lines"
+      }
+    ],
+    "reducer_version_supported": "phase4a-v1",
+    "replay_compatibility_supported": "phase4a-compat-v1",
+    "version": "phase5a-policy-compat-v1"
+  },
+  "findings": [
+    {
+      "count": 1,
+      "severity": "warning",
+      "type": "malformed_event_lines"
+    },
+    {
+      "severity": "info",
+      "type": "policy_determinism_bounded"
+    }
+  ],
+  "policy": {
+    "checksum": "71580d89e26d9faf",
+    "family": "orchestration-safety",
+    "profile": "balanced",
+    "version": "orchestration-safety:balanced:v1"
+  },
+  "policy_determinism": {
+    "level": "degraded",
+    "nondeterministic_inputs": [
+      "replay_determinism:degraded",
+      "malformed_jsonl"
+    ]
+  },
+  "recommendation": {
+    "action": "accept",
+    "confidence": "high",
+    "evidence_event_ids": [],
+    "evidence_gaps": [
+      "malformed_jsonl"
+    ],
+    "reason_codes": [
+      "task_completed"
+    ]
+  },
+  "simulation_version": "phase5a-sim-v1",
+  "supporting_inputs": {
+    "determinism_level": "degraded",
+    "drift_finding_count": 1,
+    "integrity_confidence": "medium",
+    "workspace_evidence_status": "not_requested"
+  }
+}
