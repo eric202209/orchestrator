@@ -436,6 +436,66 @@ def test_stop_session_saves_rich_checkpoint_when_latest_checkpoint_is_hollow(
     assert saved["current_step_index"] == 1
 
 
+def test_stop_session_cancels_active_task_execution_and_clears_running_task(
+    db_session, monkeypatch
+):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="running", is_active=True)
+    task = _make_task(db_session, project, status=TaskStatus.RUNNING)
+    link = SessionTask(
+        session_id=session.id,
+        task_id=task.id,
+        status=TaskStatus.PENDING,
+        started_at=datetime.now(UTC).replace(tzinfo=None),
+    )
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.RUNNING,
+        started_at=datetime.now(UTC).replace(tzinfo=None),
+    )
+    db_session.add_all([link, execution])
+    db_session.commit()
+
+    class _FakeRuntime:
+        async def stop_session(self):
+            return None
+
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.create_agent_runtime",
+        lambda *a, **kw: _FakeRuntime(),
+    )
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.revoke_session_celery_tasks",
+        lambda *a, **kw: [],
+    )
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.CheckpointService",
+        type(
+            "FakeCS",
+            (),
+            {
+                "__init__": lambda self, db: None,
+                "load_checkpoint": lambda self, sid: (_ for _ in ()).throw(
+                    Exception("no checkpoint")
+                ),
+            },
+        ),
+    )
+
+    result = asyncio.run(stop_session_lifecycle(db_session, session.id))
+
+    db_session.refresh(task)
+    db_session.refresh(link)
+    db_session.refresh(execution)
+    assert result["status"] == "stopped"
+    assert task.status != TaskStatus.RUNNING
+    assert link.status != TaskStatus.RUNNING
+    assert execution.status == TaskStatus.CANCELLED
+    assert execution.completed_at is not None
+
+
 # ── pause boundary conditions ─────────────────────────────────────────────────
 
 

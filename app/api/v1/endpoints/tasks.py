@@ -302,6 +302,13 @@ def _queue_task_retry(
                     "celery_task_id": result.id,
                     "task_execution_id": task_execution.id,
                     "retry": True,
+                    "execution_scope": (
+                        "isolated_session"
+                        if explicit_new_session
+                        else "workflow_session"
+                    ),
+                    "isolated_session": explicit_new_session,
+                    "legacy_isolated_session": explicit_new_session,
                     "cleared_saved_plan": should_clear_saved_plan,
                 }
             ),
@@ -343,6 +350,10 @@ def _queue_task_retry(
         "session_id": selected_session.id,
         "task_execution_id": task_execution.id,
         "celery_task_id": result.id,
+        "execution_scope": (
+            "isolated_session" if explicit_new_session else "workflow_session"
+        ),
+        "isolated_session": explicit_new_session,
         "message": f"Task '{task.title}' restarted successfully",
     }
 
@@ -531,6 +542,8 @@ async def execute_task_with_runtime(
         )
 
         runtime = create_agent_runtime(db, new_session.id, task_id)
+        if hasattr(runtime, "task_execution_id"):
+            runtime.task_execution_id = task_execution.id
         try:
             await runtime.create_session(prompt)
         except Exception:

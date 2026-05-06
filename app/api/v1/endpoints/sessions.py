@@ -85,6 +85,9 @@ from app.services.orchestration.decision_timeline import (
     get_session_decision_timeline_payload,
 )
 from app.services.orchestration.replay import reconstruct_execution_state
+from app.services.workspace.project_isolation_service import (
+    resolve_project_workspace_path,
+)
 
 
 def _serialize_session_timestamp(value: datetime | None) -> str | None:
@@ -920,8 +923,11 @@ def get_session_task_events(
 
     from app.services.orchestration import read_orchestration_events
 
+    project_dir = str(
+        resolve_project_workspace_path(project.workspace_path, project.name, db=db)
+    )
     events = read_orchestration_events(
-        project.workspace_path,
+        project_dir,
         session_id,
         task_id,
         event_type_filter=event_type,
@@ -1105,8 +1111,11 @@ def get_session_replay_reconstruction(
         snapshot_index=snapshot_index,
         checkpoint_name=checkpoint_name,
     )
+    project_dir = str(
+        resolve_project_workspace_path(project.workspace_path, project.name, db=db)
+    )
     report = reconstruct_execution_state(
-        project_dir=project.workspace_path,
+        project_dir=project_dir,
         session_id=session_id,
         task_id=resolved_task_id,
         boundary=boundary,

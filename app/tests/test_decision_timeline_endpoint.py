@@ -247,6 +247,41 @@ def test_decision_timeline_merges_multi_task_events_sorted_by_timestamp(
         ]
 
 
+def test_decision_timeline_resolves_relative_project_workspace_path(
+    authenticated_client, db_session, tmp_path, monkeypatch
+):
+    workspace_root = tmp_path / "vault" / "projects"
+    project_dir = workspace_root / "microsite"
+    monkeypatch.setattr(
+        "app.services.workspace.project_isolation_service.get_effective_workspace_root",
+        lambda db=None: workspace_root,
+    )
+
+    project = _make_project(db_session, workspace_path="microsite")
+    session = _make_session(db_session, project)
+    task = _make_task(db_session, project, session)
+    _write_events(
+        str(project_dir),
+        session.id,
+        task.id,
+        [
+            _event(
+                event_id="relative-path-event",
+                session_id=session.id,
+                task_id=task.id,
+                event_type="task_started",
+                timestamp=datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
+            )
+        ],
+    )
+
+    resp = authenticated_client.get(f"/api/v1/sessions/{session.id}/decision-timeline")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [event["id"] for event in body["events"]] == ["relative-path-event"]
+
+
 def test_decision_timeline_ignores_malformed_jsonl(authenticated_client, db_session):
     with tempfile.TemporaryDirectory() as tmpdir:
         project = _make_project(db_session, workspace_path=tmpdir)

@@ -165,6 +165,51 @@ def test_session_replay_endpoint_is_read_only(authenticated_client, db_session):
         assert before == after
 
 
+def test_session_replay_endpoint_resolves_relative_project_workspace_path(
+    authenticated_client, db_session, tmp_path, monkeypatch
+):
+    workspace_root = tmp_path / "vault" / "projects"
+    project_dir = workspace_root / "microsite"
+    monkeypatch.setattr(
+        "app.services.workspace.project_isolation_service.get_effective_workspace_root",
+        lambda db=None: workspace_root,
+    )
+    project = _make_replay_project(db_session, workspace_path="microsite")
+    session = _make_replay_session(db_session, project)
+    task = _make_replay_task(db_session, project, session)
+    _write_replay_events(
+        str(project_dir),
+        session.id,
+        task.id,
+        [
+            _event(
+                event_id="task-started",
+                session_id=session.id,
+                task_id=task.id,
+                event_type=EventType.TASK_STARTED,
+                timestamp=datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
+            ),
+            _event(
+                event_id="task-completed",
+                session_id=session.id,
+                task_id=task.id,
+                event_type=EventType.TASK_COMPLETED,
+                timestamp=datetime(2026, 5, 5, 12, 0, 1, tzinfo=UTC),
+            ),
+        ],
+    )
+
+    response = authenticated_client.get(
+        f"/api/v1/sessions/{session.id}/replay",
+        params={"task_id": task.id},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["state"]["status"] == "completed"
+    assert body["integrity"]["event_count_read"] == 2
+
+
 def test_session_replay_endpoint_handles_malformed_and_unknown_events(
     authenticated_client, db_session
 ):

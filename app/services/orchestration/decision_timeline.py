@@ -23,6 +23,9 @@ from app.models import (
     Session as SessionModel,
     SessionTask,
 )
+from app.services.workspace.project_isolation_service import (
+    resolve_project_workspace_path,
+)
 
 from .events.event_types import EventType
 from .persistence import read_orchestration_events
@@ -67,9 +70,12 @@ def get_session_decision_timeline_payload(
     events: List[Dict[str, Any]] = []
 
     if project and project.workspace_path:
+        project_dir = str(
+            resolve_project_workspace_path(project.workspace_path, project.name, db=db)
+        )
         for task_id in task_ids:
             for raw_event in read_orchestration_events(
-                project.workspace_path,
+                project_dir,
                 session_id,
                 task_id,
             ):

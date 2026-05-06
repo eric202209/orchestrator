@@ -12,7 +12,14 @@ from typing import Any, Dict
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.models import LogEntry, Session as SessionModel, SessionTask, Task, TaskStatus
+from app.models import (
+    LogEntry,
+    Session as SessionModel,
+    SessionTask,
+    Task,
+    TaskExecution,
+    TaskStatus,
+)
 from app.services.agents.agent_runtime import create_agent_runtime
 from app.services.workspace.checkpoint_service import CheckpointError, CheckpointService
 from app.services.workspace.project_isolation_service import (
@@ -54,6 +61,20 @@ def _reset_running_session_tasks(
 ) -> int:
     """Normalize tasks/links after pause/stop so resume does not inherit RUNNING state."""
 
+    now = datetime.now(timezone.utc)
+    running_executions = (
+        db.query(TaskExecution)
+        .filter(
+            TaskExecution.session_id == session_id,
+            TaskExecution.status == TaskStatus.RUNNING,
+        )
+        .all()
+    )
+    execution_task_ids = {execution.task_id for execution in running_executions}
+    for execution in running_executions:
+        execution.status = TaskStatus.CANCELLED
+        execution.completed_at = execution.completed_at or now
+
     running_links = (
         db.query(SessionTask)
         .filter(
@@ -79,6 +100,26 @@ def _reset_running_session_tasks(
             task.status = next_status
             task.completed_at = None
             task.error_message = None
+
+    for task_id in execution_task_ids - seen_task_ids:
+        task = db.query(Task).filter(Task.id == task_id).first()
+        if task and task.status == TaskStatus.RUNNING:
+            task.status = next_status
+            task.completed_at = None
+            task.error_message = None
+        latest_link = (
+            db.query(SessionTask)
+            .filter(
+                SessionTask.session_id == session_id,
+                SessionTask.task_id == task_id,
+            )
+            .order_by(SessionTask.id.desc())
+            .first()
+        )
+        if latest_link and latest_link.status == TaskStatus.RUNNING:
+            latest_link.status = next_status
+            latest_link.completed_at = None
+            updated += 1
 
     return updated
 

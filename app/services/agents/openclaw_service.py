@@ -131,6 +131,7 @@ class OpenClawSessionService:
         session_id: int,
         task_id: Optional[int] = None,
         use_demo_mode: Optional[bool] = None,
+        task_execution_id: Optional[int] = None,
     ):
         self.db = db
         self.session_id = session_id
@@ -145,6 +146,7 @@ class OpenClawSessionService:
         self.task_model = (
             db.query(Task).filter(Task.id == task_id).first() if task_id else None
         )
+        self.task_execution_id = task_execution_id
         self._safety_prompt_injected = False
         self.openclaw_session_key: Optional[str] = None
         self._task_session_id: Optional[str] = None
@@ -1977,6 +1979,7 @@ class OpenClawSessionService:
             session_id=self.session_id,
             session_instance_id=session_instance_id,
             task_id=self.task_id,
+            task_execution_id=self.task_execution_id,
             level=level,
             message=message,
             log_metadata=metadata,

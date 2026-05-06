@@ -1771,17 +1771,17 @@ def finalize_successful_task(
             next_session_task_link = SessionTask(
                 session_id=session_id,
                 task_id=next_task.id,
-                status=TaskStatus.RUNNING,
-                started_at=datetime.now(UTC),
+                status=TaskStatus.PENDING,
+                started_at=None,
             )
             db.add(next_session_task_link)
         else:
-            next_session_task_link.status = TaskStatus.RUNNING
-            next_session_task_link.started_at = datetime.now(UTC)
+            next_session_task_link.status = TaskStatus.PENDING
+            next_session_task_link.started_at = None
             next_session_task_link.completed_at = None
 
-        next_task.status = TaskStatus.RUNNING
-        next_task.started_at = datetime.now(UTC)
+        next_task.status = TaskStatus.PENDING
+        next_task.started_at = None
         next_task.completed_at = None
         next_task.error_message = None
         next_task.current_step = 0
@@ -1791,8 +1791,8 @@ def finalize_successful_task(
             db,
             session_id=session_id,
             task_id=next_task.id,
-            status=TaskStatus.RUNNING,
-            started_at=next_task.started_at,
+            status=TaskStatus.PENDING,
+            started_at=None,
         )
 
         db.add(

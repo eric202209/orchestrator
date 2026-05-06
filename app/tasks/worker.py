@@ -19,6 +19,7 @@ from app.models import (
     Session as SessionModel,
     SessionTask,
     Task,
+    TaskExecution,
     TaskStatus,
     LogEntry,
     Project,
@@ -361,6 +362,49 @@ def _sync_task_execution_state(
     db.commit()
 
 
+def _clear_orphaned_running_state_without_active_execution(
+    db: Session,
+    *,
+    session_id: int,
+    task_id: int,
+) -> None:
+    """A task/link cannot remain RUNNING after its only active execution is terminal."""
+
+    active_execution = (
+        db.query(TaskExecution)
+        .filter(
+            TaskExecution.session_id == session_id,
+            TaskExecution.task_id == task_id,
+            TaskExecution.status == TaskStatus.RUNNING,
+        )
+        .first()
+    )
+    if active_execution:
+        return
+
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if task and task.status == TaskStatus.RUNNING:
+        task.status = TaskStatus.PENDING
+        task.started_at = None
+        task.completed_at = None
+
+    running_links = (
+        db.query(SessionTask)
+        .filter(
+            SessionTask.session_id == session_id,
+            SessionTask.task_id == task_id,
+            SessionTask.status == TaskStatus.RUNNING,
+        )
+        .all()
+    )
+    for link in running_links:
+        link.status = TaskStatus.PENDING
+        link.started_at = None
+        link.completed_at = None
+
+    db.commit()
+
+
 def _sync_task_execution_from_task_state(
     db: Session,
     task_execution_id: Optional[int],
@@ -700,6 +744,7 @@ def _emit_dispatch_rejected(
     session: SessionModel,
     session_id: int,
     task_id: int,
+    task_execution_id: Optional[int],
     dispatch_project_dir: Optional[Path],
     expected_session_instance_id: Optional[str],
     celery_task_id: Optional[str],
@@ -713,6 +758,7 @@ def _emit_dispatch_rejected(
         "expected_session_instance_id": expected_session_instance_id,
         "project_dir": str(dispatch_project_dir) if dispatch_project_dir else None,
         "celery_task_id": celery_task_id,
+        "task_execution_id": task_execution_id,
         "queue_latency_seconds": queue_latency_seconds,
         "queued_event_id": (queued_event or {}).get("event_id"),
         **_runtime_selection_details(db),
@@ -724,6 +770,12 @@ def _emit_dispatch_rejected(
             task_id=task_id,
             event_type=EventType.TASK_DISPATCH_REJECTED,
             details=reject_details,
+        )
+    if task_execution_id:
+        _clear_orphaned_running_state_without_active_execution(
+            db,
+            session_id=session_id,
+            task_id=task_id,
         )
     emit_live("WARN", log_message, metadata=reject_details)
     return {"status": "ignored", "reason": reason}
@@ -897,6 +949,7 @@ def execute_orchestration_task(
                 session=session,
                 session_id=session_id,
                 task_id=task_id,
+                task_execution_id=task_execution_id,
                 dispatch_project_dir=dispatch_project_dir,
                 expected_session_instance_id=expected_session_instance_id,
                 celery_task_id=getattr(getattr(self, "request", None), "id", None),
@@ -944,6 +997,7 @@ def execute_orchestration_task(
                 session=session,
                 session_id=session_id,
                 task_id=task_id,
+                task_execution_id=task_execution_id,
                 dispatch_project_dir=dispatch_project_dir,
                 expected_session_instance_id=expected_session_instance_id,
                 celery_task_id=getattr(getattr(self, "request", None), "id", None),
@@ -1268,6 +1322,8 @@ def execute_orchestration_task(
 
         # Initialize the active runtime service
         runtime_service = create_agent_runtime(db, session_id, task_id)
+        if hasattr(runtime_service, "task_execution_id"):
+            runtime_service.task_execution_id = task_execution_id
         runtime_metadata = (
             runtime_service.get_backend_metadata()
             if hasattr(runtime_service, "get_backend_metadata")
