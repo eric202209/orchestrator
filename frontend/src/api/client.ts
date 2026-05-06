@@ -22,6 +22,7 @@ import type {
   OrchestrationEvent,
   SessionDispatchWatchdogResponse,
   SessionDecisionTimelineResponse,
+  SessionReplayResponse,
   SessionStateDiffResponse,
   SessionDivergenceCompareResponse,
   AppSettings,
@@ -460,6 +461,21 @@ export const sessionsAPI = {
     apiClient.get<SessionDecisionTimelineResponse>(
       `/sessions/${sessionId}/decision-timeline`
     ),
+
+  getReplay: (
+    sessionId: number,
+    params?: {
+      task_id?: number;
+      boundary_mode?: string;
+      event_id?: string;
+      timestamp?: string;
+      snapshot_index?: number;
+      checkpoint_name?: string;
+    }
+  ) =>
+    apiClient.get<SessionReplayResponse>(`/sessions/${sessionId}/replay`, {
+      params,
+    }),
 
   getSessionDiff: (
     sessionId: number,

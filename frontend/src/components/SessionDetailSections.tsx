@@ -11,6 +11,7 @@ import type {
   SessionDecisionEvent,
   SessionDispatchWatchdogResponse,
   SessionDivergenceCompareResponse,
+  SessionReplayResponse,
   SessionStateDiffResponse,
   Task,
 } from '@/types/api';
@@ -259,6 +260,7 @@ interface SessionLogsPanelProps {
   onLogViewModeChange: (mode: 'newest' | 'oldest' | 'success' | 'errors' | 'all') => void;
   timelineSpans?: TimelineSpan[];
   decisionEvents?: SessionDecisionEvent[];
+  replayInvestigation?: SessionReplayResponse | null;
   stateDiff?: SessionStateDiffResponse | null;
   timelineEvents: TimelineEvent[];
   wsConnected: boolean;
@@ -278,6 +280,7 @@ export function SessionLogsPanel({
   onLogViewModeChange,
   timelineSpans = [],
   decisionEvents = [],
+  replayInvestigation,
   stateDiff,
   timelineEvents,
   wsConnected,
@@ -521,6 +524,93 @@ export function SessionLogsPanel({
           </div>
         </div>
       )}
+
+      <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-medium text-slate-300">Replay Investigation</h3>
+          <span className="text-xs text-slate-400">
+            {replayInvestigation
+              ? replayInvestigation.compatibility_version
+              : 'Unavailable'}
+          </span>
+        </div>
+        {!replayInvestigation ? (
+          <p className="text-sm text-slate-400">
+            Replay reconstruction appears after orchestration evidence exists.
+          </p>
+        ) : (
+          <div className="space-y-3 text-sm">
+            <div className="grid gap-2 sm:grid-cols-3">
+              <div>
+                <p className="text-xs text-slate-500">Integrity</p>
+                <p
+                  className={cn(
+                    'font-medium capitalize',
+                    replayInvestigation.integrity.confidence === 'high' &&
+                      'text-emerald-400',
+                    replayInvestigation.integrity.confidence === 'medium' &&
+                      'text-amber-300',
+                    replayInvestigation.integrity.confidence !== 'high' &&
+                      replayInvestigation.integrity.confidence !== 'medium' &&
+                      'text-red-400'
+                  )}
+                >
+                  {replayInvestigation.integrity.confidence}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-slate-500">Determinism</p>
+                <p className="font-medium capitalize text-slate-200">
+                  {replayInvestigation.determinism.level}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-slate-500">Boundary</p>
+                <p className="font-medium text-slate-200">
+                  {String(replayInvestigation.boundary.mode || 'full')}
+                </p>
+              </div>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-3">
+              <p className="text-slate-300">
+                Phase:{' '}
+                <span className="font-medium text-white">
+                  {replayInvestigation.state.phase || 'unknown'}
+                </span>
+              </p>
+              <p className="text-slate-300">
+                Status:{' '}
+                <span className="font-medium text-white">
+                  {replayInvestigation.state.status || 'unknown'}
+                </span>
+              </p>
+              <p className="text-slate-300">
+                Step:{' '}
+                <span className="font-medium text-white">
+                  {replayInvestigation.state.current_step_index ?? 0}
+                </span>
+              </p>
+            </div>
+            <p className="text-xs text-slate-400">
+              Events applied: {replayInvestigation.integrity.event_count_applied} /{' '}
+              {replayInvestigation.integrity.event_count_read} • Workspace:{' '}
+              {replayInvestigation.workspace_evidence.status}
+            </p>
+            {replayInvestigation.drift_findings.length > 0 && (
+              <div className="space-y-1">
+                {replayInvestigation.drift_findings.slice(0, 3).map((finding, idx) => (
+                  <p
+                    key={`${String(finding.type || 'finding')}-${idx}`}
+                    className="rounded-md border border-slate-700 px-2 py-1 text-xs text-slate-300"
+                  >
+                    {String(finding.type || 'finding')}: {String(finding.summary || '')}
+                  </p>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       {compareMatches && compareMatches.matches.length > 0 && (
         <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">

@@ -67,6 +67,12 @@ from .persistence import (
 )
 from .planning import PlannerService
 from .reporting import build_task_report_payload, render_task_report
+from .replay import (
+    COMPATIBILITY_VERSION,
+    REDUCER_VERSION,
+    reconstruct_execution_state,
+    reduce_replay_events,
+)
 from .task_rules import (
     get_workflow_profile,
     get_task_report_path,
@@ -133,6 +139,10 @@ __all__ = [
     "ValidatorService",
     "record_live_log",
     "record_validation_verdict",
+    "COMPATIBILITY_VERSION",
+    "REDUCER_VERSION",
+    "reconstruct_execution_state",
+    "reduce_replay_events",
     "restore_step_result",
     "CheckpointContext",
     "CheckpointData",

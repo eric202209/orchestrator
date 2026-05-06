@@ -13,6 +13,7 @@ import type {
   SessionDecisionEvent,
   SessionDispatchWatchdogResponse,
   SessionDivergenceCompareResponse,
+  SessionReplayResponse,
   SessionStateDiffResponse,
   Task,
 } from '@/types/api';
@@ -105,6 +106,7 @@ export default function SessionDetail() {
   const [checkpointInspection, setCheckpointInspection] = useState<CheckpointInspection | null>(null);
   const [compareMatches, setCompareMatches] = useState<SessionDivergenceCompareResponse | null>(null);
   const [dispatchWatchdog, setDispatchWatchdog] = useState<SessionDispatchWatchdogResponse | null>(null);
+  const [replayInvestigation, setReplayInvestigation] = useState<SessionReplayResponse | null>(null);
   const [stateDiff, setStateDiff] = useState<SessionStateDiffResponse | null>(null);
   const [interventions, setInterventions] = useState<InterventionRequest[]>([]);
   const [failureSummary, setFailureSummary] = useState<ExecutionFailureSummary | null>(null);
@@ -768,6 +770,16 @@ export default function SessionDetail() {
     }
   }, []);
 
+  const loadReplayInvestigation = useCallback(async (currentSessionId: number) => {
+    try {
+      const response = await sessionsAPI.getReplay(currentSessionId);
+      setReplayInvestigation(response.data);
+    } catch (loadError) {
+      console.debug('Replay investigation unavailable:', loadError);
+      setReplayInvestigation(null);
+    }
+  }, []);
+
   const healthEvents = orchestrationEvents
     .filter((event) => event.event_type === 'health_score_updated')
     .map((event) => {
@@ -1261,6 +1273,7 @@ export default function SessionDetail() {
         await loadCheckpointCount(Number(sessionId));
         await loadTimelineEvents(sessionRes.data.id, tasksRes.data || []);
         await loadDecisionTimeline(sessionRes.data.id);
+        await loadReplayInvestigation(sessionRes.data.id);
         await loadDispatchWatchdog(sessionRes.data.id);
         try {
           const kuRes = await sessionsAPI.getKnowledgeUsage(Number(sessionId));
@@ -1335,6 +1348,7 @@ export default function SessionDetail() {
           if (currentStatus === 'running') {
             await loadStateDiff(Number(sessionId), currentTasks.data || []);
           }
+          await loadReplayInvestigation(Number(sessionId));
         }
 
         if (
@@ -1370,7 +1384,7 @@ export default function SessionDetail() {
       }
       clearInterval(statusPollInterval);
     };
-  }, [applyLogView, loadCheckpointCount, loadDecisionTimeline, loadDispatchWatchdog, loadFailureSummary, loadInterventions, loadStateDiff, loadTimelineEvents, logVerbosity, logViewMode, scheduleWebSocketConnect, sessionId, toTerminalLogEntry, visibleLogs]);
+  }, [applyLogView, loadCheckpointCount, loadDecisionTimeline, loadDispatchWatchdog, loadFailureSummary, loadInterventions, loadReplayInvestigation, loadStateDiff, loadTimelineEvents, logVerbosity, logViewMode, scheduleWebSocketConnect, sessionId, toTerminalLogEntry, visibleLogs]);
 
   const handleStartSessionFresh = async () => {
     if (!session || !sessionId) {
@@ -2160,6 +2174,7 @@ export default function SessionDetail() {
               applyLogView(allLogs, mode);
             }}
             decisionEvents={decisionEvents}
+            replayInvestigation={replayInvestigation}
             stateDiff={stateDiff}
             timelineEvents={timelineEvents}
             timelineSpans={timelineSpans}

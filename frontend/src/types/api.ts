@@ -435,6 +435,52 @@ export interface SessionStateDiffResponse {
   } | null;
 }
 
+export interface ReplayDeterminism {
+  level: 'strong' | 'bounded' | 'degraded' | 'failed' | string;
+  artifact_gaps: number;
+  workspace_reconstructable: boolean;
+  notes: string[];
+}
+
+export interface SessionReplayResponse {
+  reducer_version: string;
+  compatibility_version: string;
+  session_id: number;
+  task_id: number;
+  boundary: Record<string, unknown>;
+  state: {
+    phase?: string | null;
+    status?: string | null;
+    current_step_index?: number | null;
+    retry_count?: number | null;
+    repair_count?: number | null;
+    latest_checkpoint_name?: string | null;
+    latest_failure_event_id?: string | null;
+    workspace_evidence_status?: string | null;
+    [key: string]: unknown;
+  };
+  field_classification?: {
+    authoritative: string[];
+    artifacts: string[];
+  };
+  integrity: {
+    confidence: 'high' | 'medium' | 'low' | 'failed' | string;
+    event_count_read: number;
+    event_count_applied: number;
+    malformed_line_count: number;
+    unknown_event_types: string[];
+    finding_count?: number;
+    findings: Array<Record<string, unknown>>;
+  };
+  determinism: ReplayDeterminism;
+  drift_findings: Array<Record<string, unknown>>;
+  workspace_evidence: {
+    status: string;
+    [key: string]: unknown;
+  };
+  checkpoint_comparison?: Record<string, unknown> | null;
+}
+
 export interface SessionDivergenceCompareResponse {
   session_id: number;
   project_id: number;

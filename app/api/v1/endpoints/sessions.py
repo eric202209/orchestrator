@@ -16,8 +16,10 @@ logger = logging.getLogger(__name__)
 from app.models import (
     InterventionRequest,
     LogEntry,
+    Project,
     Session as SessionModel,
     SessionTask,
+    Task,
     TaskStatus,
 )
 from app.schemas import (
@@ -82,6 +84,7 @@ from app.services.orchestration.decision_timeline import (
     DEFAULT_TIMELINE_LIMIT,
     get_session_decision_timeline_payload,
 )
+from app.services.orchestration.replay import reconstruct_execution_state
 
 
 def _serialize_session_timestamp(value: datetime | None) -> str | None:
@@ -903,8 +906,6 @@ def get_session_task_events(
             detail=f"Unknown event_type '{event_type}'",
         )
 
-    from app.models import Project
-
     session = (
         db.query(SessionModel)
         .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
@@ -944,6 +945,175 @@ def get_session_decision_timeline(
         phase=phase,
         limit=limit,
     )
+
+
+def _resolve_replay_task_id(
+    db: Session, session_id: int, requested_task_id: Optional[int]
+) -> int:
+    query = db.query(SessionTask).filter(SessionTask.session_id == session_id)
+    if requested_task_id is not None:
+        link = query.filter(SessionTask.task_id == requested_task_id).first()
+        if not link:
+            raise HTTPException(
+                status_code=404,
+                detail="Task is not linked to this session",
+            )
+        return int(requested_task_id)
+
+    link = query.order_by(
+        SessionTask.started_at.desc().nullslast(),
+        SessionTask.id.desc(),
+    ).first()
+    if link and link.task_id is not None:
+        return int(link.task_id)
+
+    log_task_id = (
+        db.query(LogEntry.task_id)
+        .filter(LogEntry.session_id == session_id, LogEntry.task_id.isnot(None))
+        .order_by(LogEntry.id.desc())
+        .first()
+    )
+    if log_task_id and log_task_id[0] is not None:
+        return int(log_task_id[0])
+    raise HTTPException(status_code=404, detail="No task found for replay")
+
+
+def _build_replay_boundary(
+    *,
+    boundary_mode: Optional[str],
+    event_id: Optional[str],
+    timestamp: Optional[str],
+    snapshot_index: Optional[int],
+    checkpoint_name: Optional[str],
+) -> Dict[str, Any]:
+    mode = boundary_mode or "full"
+    allowed_modes = {
+        "full",
+        "to_event_id",
+        "to_timestamp",
+        "to_snapshot_index",
+        "to_checkpoint_name",
+    }
+    if mode not in allowed_modes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown boundary_mode '{mode}'",
+        )
+    if mode == "full":
+        return {"mode": "full"}
+    if mode == "to_event_id":
+        if not event_id:
+            raise HTTPException(
+                status_code=400,
+                detail="event_id is required for to_event_id replay",
+            )
+        return {"mode": mode, "requested": event_id}
+    if mode == "to_timestamp":
+        if not timestamp:
+            raise HTTPException(
+                status_code=400,
+                detail="timestamp is required for to_timestamp replay",
+            )
+        return {"mode": mode, "requested": timestamp}
+    if mode == "to_snapshot_index":
+        if snapshot_index is None:
+            raise HTTPException(
+                status_code=400,
+                detail="snapshot_index is required for to_snapshot_index replay",
+            )
+        return {"mode": mode, "requested": snapshot_index}
+    if not checkpoint_name:
+        raise HTTPException(
+            status_code=400,
+            detail="checkpoint_name is required for to_checkpoint_name replay",
+        )
+    return {"mode": mode, "requested": checkpoint_name}
+
+
+def _truncate_replay_report(report: Dict[str, Any]) -> Dict[str, Any]:
+    state = dict(report.get("state") or {})
+    for key in ("timestamps", "tool_events", "reasoning_artifacts"):
+        values = state.get(key)
+        if isinstance(values, list) and len(values) > 20:
+            state[key] = values[-20:]
+    values = state.get("validation_verdict_status_history")
+    if isinstance(values, list) and len(values) > 20:
+        state["validation_verdict_status_history"] = values[-20:]
+
+    integrity = dict(report.get("integrity") or {})
+    findings = integrity.get("findings")
+    if isinstance(findings, list):
+        integrity["finding_count"] = len(findings)
+        integrity["findings"] = findings[:25]
+
+    drift_findings = report.get("drift_findings") or []
+    return {
+        "reducer_version": report.get("reducer_version"),
+        "compatibility_version": report.get("compatibility_version"),
+        "session_id": report.get("session_id"),
+        "task_id": report.get("task_id"),
+        "boundary": report.get("boundary"),
+        "state": state,
+        "field_classification": report.get("field_classification"),
+        "integrity": integrity,
+        "determinism": report.get("determinism"),
+        "drift_findings": drift_findings[:25],
+        "workspace_evidence": report.get("workspace_evidence"),
+        "checkpoint_comparison": report.get("checkpoint_comparison"),
+    }
+
+
+@router.get("/sessions/{session_id}/replay")
+def get_session_replay_reconstruction(
+    session_id: int,
+    task_id: Optional[int] = None,
+    boundary_mode: Optional[str] = None,
+    event_id: Optional[str] = None,
+    timestamp: Optional[str] = None,
+    snapshot_index: Optional[int] = None,
+    checkpoint_name: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Return a bounded read-only replay reconstruction report.
+
+    This endpoint does not execute replay, load checkpoint payloads, resume
+    sessions, emit events, write database rows, or influence runtime control.
+    """
+
+    session = (
+        db.query(SessionModel)
+        .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    project = db.query(Project).filter(Project.id == session.project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    resolved_task_id = _resolve_replay_task_id(db, session_id, task_id)
+    task = db.query(Task).filter(Task.id == resolved_task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    boundary = _build_replay_boundary(
+        boundary_mode=boundary_mode,
+        event_id=event_id,
+        timestamp=timestamp,
+        snapshot_index=snapshot_index,
+        checkpoint_name=checkpoint_name,
+    )
+    report = reconstruct_execution_state(
+        project_dir=project.workspace_path,
+        session_id=session_id,
+        task_id=resolved_task_id,
+        boundary=boundary,
+        checkpoint_dir=None,
+        compare_workspace=False,
+    )
+    return _truncate_replay_report(report)
 
 
 @router.get("/sessions/{session_id}/diff")

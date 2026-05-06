@@ -100,6 +100,7 @@ def _event(
     event_type: str,
     timestamp: datetime,
     details: dict | None = None,
+    parent_event_id: str | None = None,
 ):
     return {
         "event_id": event_id,
@@ -107,6 +108,7 @@ def _event(
         "event_type": event_type,
         "session_id": session_id,
         "task_id": task_id,
+        "parent_event_id": parent_event_id,
         "details": details or {},
     }
 
@@ -500,3 +502,339 @@ def test_decision_timeline_endpoint_is_read_only(authenticated_client, db_sessio
             "session_tasks": db_session.query(SessionTask).count(),
         }
         assert after == before
+
+
+def test_decision_timeline_surfaces_explicit_parent_links(
+    authenticated_client, db_session
+):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        project = _make_project(db_session, workspace_path=tmpdir)
+        session = _make_session(db_session, project)
+        task = _make_task(db_session, project, session)
+        base = datetime(2026, 5, 5, 12, 0, tzinfo=UTC)
+
+        _write_events(
+            tmpdir,
+            session.id,
+            task.id,
+            [
+                _event(
+                    event_id="phase",
+                    session_id=session.id,
+                    task_id=task.id,
+                    event_type="phase_started",
+                    timestamp=base,
+                    details={"phase": "execution"},
+                ),
+                _event(
+                    event_id="step",
+                    session_id=session.id,
+                    task_id=task.id,
+                    event_type="step_started",
+                    timestamp=base + timedelta(seconds=1),
+                    parent_event_id="phase",
+                ),
+            ],
+        )
+
+        resp = authenticated_client.get(
+            f"/api/v1/sessions/{session.id}/decision-timeline"
+        )
+
+        assert resp.status_code == 200
+        step_event = resp.json()["events"][1]
+        assert step_event["parent_event_id"] == "phase"
+        assert step_event["related_event_ids"] == ["phase"]
+        assert step_event["details"]["causal_links"] == [
+            {
+                "relation": "explicit_parent",
+                "event_id": "phase",
+                "inferred": False,
+                "confidence": "exact",
+            }
+        ]
+
+
+def test_decision_timeline_links_retry_chain(authenticated_client, db_session):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        project = _make_project(db_session, workspace_path=tmpdir)
+        session = _make_session(db_session, project)
+        task = _make_task(db_session, project, session)
+        base = datetime(2026, 5, 5, 12, 0, tzinfo=UTC)
+
+        _write_events(
+            tmpdir,
+            session.id,
+            task.id,
+            [
+                _event(
+                    event_id="tool-failed",
+                    session_id=session.id,
+                    task_id=task.id,
+                    event_type="tool_failed",
+                    timestamp=base,
+                ),
+                _event(
+                    event_id="retry-1",
+                    session_id=session.id,
+                    task_id=task.id,
+                    event_type="retry_entered",
+                    timestamp=base + timedelta(seconds=1),
+                ),
+                _event(
+                    event_id="retry-2",
+                    session_id=session.id,
+                    task_id=task.id,
+                    event_type="retry_entered",
+                    timestamp=base + timedelta(seconds=2),
+                ),
+            ],
+        )
+
+        resp = authenticated_client.get(
+            f"/api/v1/sessions/{session.id}/decision-timeline"
+        )
+
+        assert resp.status_code == 200
+        retry_1 = resp.json()["events"][1]
+        retry_2 = resp.json()["events"][2]
+        assert retry_1["related_event_ids"] == ["tool-failed"]
+        assert retry_1["details"]["causal_links"] == [
+            {
+                "relation": "retry_after_failure",
+                "event_id": "tool-failed",
+                "inferred": True,
+                "confidence": "high",
+            }
+        ]
+        assert retry_2["related_event_ids"] == ["retry-1", "tool-failed"]
+        assert retry_2["details"]["causal_links"] == [
+            {
+                "relation": "previous_retry",
+                "event_id": "retry-1",
+                "inferred": True,
+                "confidence": "high",
+            },
+            {
+                "relation": "retry_after_failure",
+                "event_id": "tool-failed",
+                "inferred": True,
+                "confidence": "high",
+            },
+        ]
+
+
+def test_decision_timeline_links_validation_repair_validation_flow(
+    authenticated_client, db_session
+):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        project = _make_project(db_session, workspace_path=tmpdir)
+        session = _make_session(db_session, project)
+        task = _make_task(db_session, project, session)
+        base = datetime(2026, 5, 5, 12, 0, tzinfo=UTC)
+
+        _write_events(
+            tmpdir,
+            session.id,
+            task.id,
+            [
+                _event(
+                    event_id="validation-rejected",
+                    session_id=session.id,
+                    task_id=task.id,
+                    event_type="validation_result",
+                    timestamp=base,
+                    details={"stage": "task_completion", "status": "rejected"},
+                ),
+                _event(
+                    event_id="repair-generated",
+                    session_id=session.id,
+                    task_id=task.id,
+                    event_type="repair_generated",
+                    timestamp=base + timedelta(seconds=1),
+                ),
+                _event(
+                    event_id="validation-accepted",
+                    session_id=session.id,
+                    task_id=task.id,
+                    event_type="validation_result",
+                    timestamp=base + timedelta(seconds=2),
+                    details={"stage": "task_completion", "status": "accepted"},
+                ),
+            ],
+        )
+
+        resp = authenticated_client.get(
+            f"/api/v1/sessions/{session.id}/decision-timeline"
+        )
+
+        assert resp.status_code == 200
+        repair_event = resp.json()["events"][1]
+        accepted_event = resp.json()["events"][2]
+        assert repair_event["related_event_ids"] == ["validation-rejected"]
+        assert repair_event["details"]["causal_links"] == [
+            {
+                "relation": "repair_for_validation",
+                "event_id": "validation-rejected",
+                "inferred": True,
+                "confidence": "medium",
+            }
+        ]
+        assert accepted_event["related_event_ids"] == ["repair-generated"]
+        assert accepted_event["details"]["causal_links"] == [
+            {
+                "relation": "validation_after_repair",
+                "event_id": "repair-generated",
+                "inferred": True,
+                "confidence": "medium",
+            }
+        ]
+
+
+def test_decision_timeline_links_task_failure_to_latest_cause(
+    authenticated_client, db_session
+):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        project = _make_project(db_session, workspace_path=tmpdir)
+        session = _make_session(db_session, project)
+        task = _make_task(db_session, project, session)
+        base = datetime(2026, 5, 5, 12, 0, tzinfo=UTC)
+
+        _write_events(
+            tmpdir,
+            session.id,
+            task.id,
+            [
+                _event(
+                    event_id="validation-rejected",
+                    session_id=session.id,
+                    task_id=task.id,
+                    event_type="validation_result",
+                    timestamp=base,
+                    details={"stage": "task_completion", "status": "rejected"},
+                ),
+                _event(
+                    event_id="task-failed",
+                    session_id=session.id,
+                    task_id=task.id,
+                    event_type="task_failed",
+                    timestamp=base + timedelta(seconds=1),
+                ),
+            ],
+        )
+
+        resp = authenticated_client.get(
+            f"/api/v1/sessions/{session.id}/decision-timeline"
+        )
+
+        assert resp.status_code == 200
+        failed_event = resp.json()["events"][1]
+        assert failed_event["related_event_ids"] == ["validation-rejected"]
+        assert failed_event["details"]["causal_links"] == [
+            {
+                "relation": "task_failed_because",
+                "event_id": "validation-rejected",
+                "inferred": True,
+                "confidence": "medium",
+            }
+        ]
+
+
+def test_decision_timeline_links_intervention_to_latest_failure(
+    authenticated_client, db_session
+):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        project = _make_project(db_session, workspace_path=tmpdir)
+        session = _make_session(db_session, project, status="awaiting_input")
+        task = _make_task(db_session, project, session)
+        base = datetime(2026, 5, 5, 12, 0, tzinfo=UTC)
+
+        _write_events(
+            tmpdir,
+            session.id,
+            task.id,
+            [
+                _event(
+                    event_id="tool-failed",
+                    session_id=session.id,
+                    task_id=task.id,
+                    event_type="tool_failed",
+                    timestamp=base,
+                )
+            ],
+        )
+        intervention = InterventionRequest(
+            session_id=session.id,
+            task_id=task.id,
+            project_id=project.id,
+            intervention_type="guidance",
+            initiated_by="system",
+            prompt="Need operator input",
+            status="pending",
+            created_at=base + timedelta(seconds=1),
+        )
+        db_session.add(intervention)
+        db_session.commit()
+
+        resp = authenticated_client.get(
+            f"/api/v1/sessions/{session.id}/decision-timeline"
+        )
+
+        assert resp.status_code == 200
+        intervention_event = resp.json()["events"][1]
+        assert intervention_event["event_type"] == "human_intervention_requested"
+        assert intervention_event["related_event_ids"] == ["tool-failed"]
+        assert intervention_event["details"]["causal_links"] == [
+            {
+                "relation": "intervention_after_failure",
+                "event_id": "tool-failed",
+                "inferred": True,
+                "confidence": "medium",
+            }
+        ]
+
+
+def test_decision_timeline_keeps_knowledge_attachment_non_causal(
+    authenticated_client, db_session
+):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        project = _make_project(db_session, workspace_path=tmpdir)
+        session = _make_session(db_session, project)
+        task = _make_task(db_session, project, session)
+        item = _make_knowledge_item(db_session)
+        usage = _make_usage_log(
+            db_session,
+            session,
+            item,
+            task_id=task.id,
+            phase="validation",
+        )
+
+        _write_events(
+            tmpdir,
+            session.id,
+            task.id,
+            [
+                _event(
+                    event_id="validation-accepted",
+                    session_id=session.id,
+                    task_id=task.id,
+                    event_type="validation_result",
+                    timestamp=datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
+                    details={"stage": "plan", "status": "accepted"},
+                )
+            ],
+        )
+
+        resp = authenticated_client.get(
+            f"/api/v1/sessions/{session.id}/decision-timeline"
+        )
+
+        assert resp.status_code == 200
+        event = resp.json()["events"][0]
+        assert event["knowledge_usage_ids"] == [usage.id]
+        assert event["related_event_ids"] == []
+        assert "causal_links" not in event["details"]
+        knowledge = event["details"]["knowledge_used_during_phase"][0]
+        assert knowledge["association"] == "knowledge used during this phase"
+        assert knowledge["causal"] is False

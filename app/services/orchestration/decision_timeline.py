@@ -30,6 +30,14 @@ from .persistence import read_orchestration_events
 KNOWN_PHASES = ("planning", "validation", "execution", "failure", "completion")
 DEFAULT_TIMELINE_LIMIT = 300
 MAX_TIMELINE_LIMIT = 300
+FAILURE_LIKE_EVENT_TYPES = frozenset(
+    {
+        EventType.TOOL_FAILED,
+        EventType.REPAIR_REJECTED,
+        EventType.COMPLETION_EVIDENCE_FAILED,
+        EventType.WAITING_FOR_INPUT,
+    }
+)
 
 
 def get_session_decision_timeline_payload(
@@ -82,6 +90,7 @@ def get_session_decision_timeline_payload(
         )
     )
     events.sort(key=_timeline_sort_key)
+    _apply_causal_links(events)
 
     if phase is not None:
         events = [event for event in events if event["phase"] == phase]
@@ -275,6 +284,169 @@ def _knowledge_for_event(
     exact = knowledge_by_task_phase.get((task_id, phase), [])
     session_phase = knowledge_by_task_phase.get((None, phase), [])
     return [*exact, *session_phase]
+
+
+def _apply_causal_links(events: List[Dict[str, Any]]) -> None:
+    """Infer bounded causal links between already-normalized timeline events."""
+
+    latest_retry_by_task: Dict[Optional[int], str] = {}
+    latest_failure_like_by_task: Dict[Optional[int], str] = {}
+    latest_validation_issue_by_task: Dict[Optional[int], str] = {}
+    latest_repair_by_task: Dict[Optional[int], str] = {}
+
+    for event in events:
+        event_id = str(event.get("id") or "")
+        if not event_id:
+            continue
+        event_type = str(event.get("event_type") or "")
+        task_id = _coerce_optional_int(event.get("task_id"))
+        parent_event_id = event.get("parent_event_id")
+
+        if parent_event_id:
+            _add_causal_link(
+                event,
+                relation="explicit_parent",
+                target_event_id=str(parent_event_id),
+                inferred=False,
+                confidence="exact",
+            )
+
+        if event_type == EventType.RETRY_ENTERED:
+            previous_retry = latest_retry_by_task.get(task_id)
+            if previous_retry:
+                _add_causal_link(
+                    event,
+                    relation="previous_retry",
+                    target_event_id=previous_retry,
+                    inferred=True,
+                    confidence="high",
+                )
+            latest_failure = latest_failure_like_by_task.get(task_id)
+            if latest_failure:
+                _add_causal_link(
+                    event,
+                    relation="retry_after_failure",
+                    target_event_id=latest_failure,
+                    inferred=True,
+                    confidence="high",
+                )
+            latest_retry_by_task[task_id] = event_id
+
+        if event_type in {
+            EventType.REPAIR_GENERATED,
+            EventType.REPAIR_APPLIED,
+            EventType.REPAIR_REJECTED,
+        }:
+            validation_issue = latest_validation_issue_by_task.get(task_id)
+            if validation_issue:
+                _add_causal_link(
+                    event,
+                    relation="repair_for_validation",
+                    target_event_id=validation_issue,
+                    inferred=True,
+                    confidence="medium",
+                )
+            latest_repair_by_task[task_id] = event_id
+
+        if event_type == EventType.VALIDATION_RESULT:
+            latest_repair = latest_repair_by_task.get(task_id)
+            if latest_repair:
+                _add_causal_link(
+                    event,
+                    relation="validation_after_repair",
+                    target_event_id=latest_repair,
+                    inferred=True,
+                    confidence="medium",
+                )
+            if _is_problem_status(event):
+                latest_validation_issue_by_task[task_id] = event_id
+
+        if event_type == EventType.TASK_FAILED:
+            latest_failure = latest_failure_like_by_task.get(task_id)
+            if latest_failure:
+                _add_causal_link(
+                    event,
+                    relation="task_failed_because",
+                    target_event_id=latest_failure,
+                    inferred=True,
+                    confidence="medium",
+                )
+
+        if (
+            event_type == EventType.HUMAN_INTERVENTION_REQUESTED
+            or event.get("source") == "intervention_request"
+        ):
+            latest_failure = latest_failure_like_by_task.get(task_id)
+            if latest_failure:
+                _add_causal_link(
+                    event,
+                    relation="intervention_after_failure",
+                    target_event_id=latest_failure,
+                    inferred=True,
+                    confidence="medium",
+                )
+
+        if _is_failure_like_event(event):
+            latest_failure_like_by_task[task_id] = event_id
+
+
+def _add_causal_link(
+    event: Dict[str, Any],
+    *,
+    relation: str,
+    target_event_id: str,
+    inferred: bool,
+    confidence: str,
+) -> None:
+    if not target_event_id or target_event_id == event.get("id"):
+        return
+
+    related_event_ids = event.setdefault("related_event_ids", [])
+    if target_event_id not in related_event_ids:
+        related_event_ids.append(target_event_id)
+        del related_event_ids[10:]
+
+    details = event.setdefault("details", {})
+    if not isinstance(details, dict):
+        details = {}
+        event["details"] = details
+
+    links = details.setdefault("causal_links", [])
+    if not isinstance(links, list):
+        links = []
+        details["causal_links"] = links
+    if any(
+        isinstance(link, dict)
+        and link.get("relation") == relation
+        and link.get("event_id") == target_event_id
+        for link in links
+    ):
+        return
+    links.append(
+        {
+            "relation": relation,
+            "event_id": target_event_id,
+            "inferred": inferred,
+            "confidence": confidence,
+        }
+    )
+    del links[8:]
+
+
+def _is_problem_status(event: Dict[str, Any]) -> bool:
+    status = str(event.get("status") or "").lower()
+    return status in {"failed", "rejected", "repair_required", "error"}
+
+
+def _is_failure_like_event(event: Dict[str, Any]) -> bool:
+    event_type = str(event.get("event_type") or "")
+    if event_type in FAILURE_LIKE_EVENT_TYPES:
+        return True
+    if event_type == EventType.STEP_FINISHED and _is_problem_status(event):
+        return True
+    if event_type == EventType.VALIDATION_RESULT and _is_problem_status(event):
+        return True
+    return False
 
 
 def _phase_for_event(event_type: str, details: Dict[str, Any]) -> str:
