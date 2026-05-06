@@ -303,7 +303,14 @@ export const tasksAPI = {
     apiClient.put<Task>(`/tasks/${id}`, data),
 
   delete: (id: number) => apiClient.delete(`/tasks/${id}`),
-  retry: (id: number) => apiClient.post(`/tasks/${id}/retry`),
+  retry: (
+    id: number,
+    data?: {
+      session_id?: number;
+      execution_scope?: 'workflow_session' | 'new_session';
+      create_new_session?: boolean;
+    }
+  ) => apiClient.post(`/tasks/${id}/retry`, data || {}),
   promoteWorkspace: (id: number, note?: string) =>
     apiClient.post<Task>(`/tasks/${id}/promote`, { note }),
   requestWorkspaceChanges: (id: number, note: string) =>

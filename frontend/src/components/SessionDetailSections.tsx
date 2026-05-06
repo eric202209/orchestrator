@@ -825,6 +825,13 @@ export function SessionTasksPanel({
 }: SessionTasksPanelProps) {
   return (
     <div className="space-y-4">
+      <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
+        <p className="text-sm font-medium text-slate-200">Workflow session tasks</p>
+        <p className="mt-1 text-sm text-slate-400">
+          These tasks and rerun attempts belong to this workflow session. Running a task again adds a new attempt here instead of creating a separate task session.
+        </p>
+      </div>
+
       {actionButtons && session.status !== 'running' && (
         <div className="mb-4 rounded-lg border border-blue-700/50 bg-blue-900/20 p-4">
           <p className="mb-2 text-sm text-blue-400">
@@ -883,7 +890,9 @@ export function SessionTasksPanel({
                     disabled={task.status === 'running'}
                     className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    {task.status === 'done' ? 'Run Again' : 'Run Task'}
+                    {task.status === 'done'
+                      ? 'Run again in workflow session'
+                      : 'Run in workflow session'}
                   </button>
                 )}
               </div>

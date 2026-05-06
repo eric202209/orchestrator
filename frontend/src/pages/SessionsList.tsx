@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { sessionsAPI, projectsAPI } from '../api/client';
-import type { Session, Project } from '../types/api';
+import { sessionsAPI, projectsAPI, tasksAPI } from '../api/client';
+import type { Session, Project, Task } from '../types/api';
+import { isLegacyTaskExecutionSession } from '../lib/sessionIdentity';
 import {
   Terminal,
   Plus,
@@ -13,6 +14,7 @@ import { EmptyState, StatusBadge, Skeleton } from '../components/ui';
 function SessionsList() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [projects, setProjects] = useState<Record<number, Project>>({});
+  const [tasksByProject, setTasksByProject] = useState<Record<number, Task[]>>({});
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -37,8 +39,22 @@ function SessionsList() {
           }
         });
 
-        const allSessionsArrays = await Promise.all(sessionPromises);
+        const taskPromises = allProjects.map(async (project) => {
+          try {
+            const tasksResponse = await tasksAPI.getByProject(project.id);
+            return [project.id, tasksResponse.data || []] as const;
+          } catch (error) {
+            console.error(`Failed to fetch tasks for project ${project.id}:`, error);
+            return [project.id, []] as const;
+          }
+        });
+
+        const [allSessionsArrays, taskEntries] = await Promise.all([
+          Promise.all(sessionPromises),
+          Promise.all(taskPromises),
+        ]);
         setSessions(allSessionsArrays.flat());
+        setTasksByProject(Object.fromEntries(taskEntries));
       } catch (error) {
         console.error('Failed to fetch sessions:', error);
       } finally {
@@ -88,6 +104,10 @@ function SessionsList() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
           {sessions.map((session) => {
             const project = projects[session.project_id || 0];
+            const isLegacySession = isLegacyTaskExecutionSession(
+              session,
+              (tasksByProject[session.project_id] || []).map((task) => task.title)
+            );
             return (
               <Link
                 key={session.id}
@@ -101,9 +121,16 @@ function SessionsList() {
                   )}
                 </div>
 
-                <h3 className="text-sm font-medium text-slate-200 mb-1 group-hover:text-white transition-colors line-clamp-1">
-                  {session.name}
-                </h3>
+                <div className="mb-1 flex flex-wrap items-center gap-2">
+                  <h3 className="text-sm font-medium text-slate-200 group-hover:text-white transition-colors line-clamp-1">
+                    {session.name}
+                  </h3>
+                  {isLegacySession && (
+                    <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-300">
+                      Legacy task execution session
+                    </span>
+                  )}
+                </div>
 
                 {session.description && (
                   <p className="text-xs text-slate-400 mb-3 line-clamp-2">

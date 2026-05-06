@@ -3,6 +3,7 @@ import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { projectsAPI, tasksAPI, sessionsAPI } from '../api/client';
 import type { Project, Task, Session } from '../types/api';
 import { ProjectPlannerPanel } from '../components/ProjectPlannerPanel';
+import { isLegacyTaskExecutionSession } from '../lib/sessionIdentity';
 import {
   GitBranch,
   FileText,
@@ -299,12 +300,21 @@ function ProjectDetail() {
     }
   };
 
-  const handleRerunTask = async (task: Task) => {
+  const handleRerunTask = async (task: Task, isolated = false) => {
     if (task.status === 'running') return;
     try {
-      await tasksAPI.retry(task.id);
+      await tasksAPI.retry(
+        task.id,
+        isolated ? { execution_scope: 'new_session', create_new_session: true } : undefined
+      );
       await fetchTasks();
-      alert(task.status === 'done' ? 'Task queued to run again' : 'Task queued');
+      alert(
+        isolated
+          ? 'Task queued in a new isolated session'
+          : task.status === 'done'
+            ? 'Task queued to run again in the workflow session'
+            : 'Task queued in the workflow session'
+      );
     } catch (error) {
       console.error('Failed to rerun task:', error);
       alert('Failed to queue the task. Please try again.');
@@ -654,10 +664,22 @@ function ProjectDetail() {
             />
           ) : (
             <div className="bg-slate-800 rounded-lg border border-slate-700 divide-y divide-slate-700/60">
-              {sessions.map((session) => (
+              {sessions.map((session) => {
+                const isLegacySession = isLegacyTaskExecutionSession(
+                  session,
+                  tasks.map((task) => task.title)
+                );
+                return (
                 <div key={session.id} className="flex items-center gap-4 px-4 py-3 hover:bg-slate-700/40 transition-colors">
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-slate-200">{session.name}</p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-sm font-medium text-slate-200">{session.name}</p>
+                      {isLegacySession && (
+                        <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-300">
+                          Legacy task execution session
+                        </span>
+                      )}
+                    </div>
                     {session.description && (
                       <p className="text-xs text-slate-400 mt-0.5 line-clamp-1">{session.description}</p>
                     )}
@@ -680,7 +702,8 @@ function ProjectDetail() {
                     </button>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
@@ -794,12 +817,22 @@ function ProjectDetail() {
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
                         {task.status !== 'running' && (
-                          <button
-                            onClick={() => handleRerunTask(task)}
-                            className="rounded-md bg-blue-600/80 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-500"
-                          >
-                            {task.status === 'done' ? 'Run Again' : 'Run'}
-                          </button>
+                          <>
+                            <button
+                              onClick={() => handleRerunTask(task)}
+                              className="rounded-md bg-blue-600/80 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-500"
+                            >
+                              {task.status === 'done'
+                                ? 'Run again in workflow session'
+                                : 'Run in workflow session'}
+                            </button>
+                            <button
+                              onClick={() => handleRerunTask(task, true)}
+                              className="rounded-md border border-slate-600 px-2.5 py-1 text-xs font-medium text-slate-300 transition-colors hover:border-slate-500 hover:text-white"
+                            >
+                              Run in new isolated session
+                            </button>
+                          </>
                         )}
                         {task.status === 'done' && task.task_subfolder && task.workspace_status !== 'promoted' && (
                           <button
