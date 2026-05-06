@@ -3,11 +3,13 @@
 import logging
 import json
 import time
+import uuid
 from datetime import UTC, datetime
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -49,6 +51,12 @@ class BackupResponse(BaseModel):
     backup_path: Optional[str] = None
     files_backed_up: Optional[int] = None
     error: Optional[str] = None
+
+
+class TaskRetryRequest(BaseModel):
+    session_id: Optional[int] = None
+    execution_scope: Optional[str] = None
+    create_new_session: bool = False
 
 
 router = APIRouter()
@@ -102,19 +110,13 @@ def _get_active_task_session(db: Session, task_id: int) -> Optional[int]:
 def _queue_task_retry(
     db: Session,
     task: Task,
+    retry_request: Optional[TaskRetryRequest] = None,
     timeout_seconds: int = DEFAULT_TASK_RETRY_TIMEOUT_SECONDS,
 ) -> dict:
     from app.models import Session as SessionModel
     from app.api.v1.endpoints.sessions import _ensure_unique_session_name
     from app.tasks.worker import execute_orchestration_task
     from app.services.task_service import TaskService
-
-    active_session_id = _get_active_task_session(db, task.id)
-    if active_session_id:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Task already has an active session ({active_session_id}). Open the session to resume or stop it first.",
-        )
 
     blocking_tasks = TaskService(db).get_blocking_prior_tasks(task)
     if blocking_tasks:
@@ -136,32 +138,129 @@ def _queue_task_retry(
             status_code=400, detail="Task is missing a description or title to execute"
         )
 
-    new_session = SessionModel(
-        name=_ensure_unique_session_name(
-            db,
-            task.project_id,
-            humanize_display_name(f"{task.title} session"),
-        ),
-        description=prompt[:500],
-        project_id=task.project_id,
-        status="pending",
-        default_execution_profile=getattr(task, "execution_profile", "full_lifecycle"),
-        is_active=False,
-        instance_id=f"orchestrator-task-{task.id}-{int(time.time())}",
+    retry_request = retry_request or TaskRetryRequest()
+    explicit_new_session = (
+        retry_request.create_new_session
+        or str(retry_request.execution_scope or "").lower() == "new_session"
     )
-    db.add(new_session)
+
+    if explicit_new_session:
+        selected_session = SessionModel(
+            name=_ensure_unique_session_name(
+                db,
+                task.project_id,
+                humanize_display_name(f"{task.title} session"),
+            ),
+            description=prompt[:500],
+            project_id=task.project_id,
+            status="pending",
+            default_execution_profile=getattr(
+                task, "execution_profile", "full_lifecycle"
+            ),
+            is_active=False,
+            instance_id=f"orchestrator-task-{task.id}-{int(time.time())}",
+        )
+        db.add(selected_session)
+    elif retry_request.session_id is not None:
+        selected_session = (
+            db.query(SessionModel)
+            .filter(
+                SessionModel.id == retry_request.session_id,
+                SessionModel.project_id == task.project_id,
+                SessionModel.deleted_at.is_(None),
+            )
+            .first()
+        )
+        if not selected_session:
+            raise HTTPException(
+                status_code=404,
+                detail="Requested retry session was not found for this task project",
+            )
+    else:
+        selected_session = (
+            db.query(SessionModel)
+            .join(SessionTask, SessionTask.session_id == SessionModel.id)
+            .filter(
+                SessionTask.task_id == task.id,
+                SessionModel.project_id == task.project_id,
+                SessionModel.deleted_at.is_(None),
+                SessionModel.is_active.is_(True),
+            )
+            .order_by(
+                SessionTask.started_at.desc().nullslast(),
+                SessionTask.completed_at.desc().nullslast(),
+                SessionTask.id.desc(),
+            )
+            .first()
+        )
+
+        if not selected_session:
+            selected_session = (
+                db.query(SessionModel)
+                .filter(
+                    SessionModel.project_id == task.project_id,
+                    SessionModel.deleted_at.is_(None),
+                    or_(
+                        SessionModel.instance_id.is_(None),
+                        ~SessionModel.instance_id.like("orchestrator-task-%"),
+                    ),
+                )
+                .order_by(
+                    SessionModel.started_at.desc().nullslast(),
+                    SessionModel.created_at.desc().nullslast(),
+                    SessionModel.id.desc(),
+                )
+                .first()
+            )
+
+        if not selected_session:
+            selected_session = SessionModel(
+                name=_ensure_unique_session_name(
+                    db,
+                    task.project_id,
+                    "Project workflow",
+                ),
+                description="Default project workflow session",
+                project_id=task.project_id,
+                status="pending",
+                default_execution_profile=getattr(
+                    task, "execution_profile", "full_lifecycle"
+                ),
+                is_active=False,
+                instance_id=str(uuid.uuid4()),
+            )
+            db.add(selected_session)
+
+    if not selected_session.instance_id:
+        selected_session.instance_id = str(uuid.uuid4())
+
     db.flush()
 
-    session_task = SessionTask(
-        session_id=new_session.id,
-        task_id=task.id,
-        status=TaskStatus.PENDING,
-        started_at=None,
+    session_task = (
+        db.query(SessionTask)
+        .filter(
+            SessionTask.session_id == selected_session.id,
+            SessionTask.task_id == task.id,
+        )
+        .order_by(SessionTask.id.desc())
+        .first()
     )
-    db.add(session_task)
+    if not session_task:
+        session_task = SessionTask(
+            session_id=selected_session.id,
+            task_id=task.id,
+            status=TaskStatus.PENDING,
+            started_at=None,
+        )
+        db.add(session_task)
+    else:
+        session_task.status = TaskStatus.PENDING
+        session_task.started_at = None
+        session_task.completed_at = None
+
     task_execution = create_task_execution(
         db,
-        session_id=new_session.id,
+        session_id=selected_session.id,
         task_id=task.id,
     )
 
@@ -171,29 +270,29 @@ def _queue_task_retry(
         TaskStatus.CANCELLED,
     )
     _prepare_task_for_fresh_execution(task, clear_saved_plan=should_clear_saved_plan)
-    task_workspace = ensure_task_workspace(db, new_session, task.id)
+    task_workspace = ensure_task_workspace(db, selected_session, task.id)
 
     try:
         result = execute_orchestration_task.delay(
-            session_id=new_session.id,
+            session_id=selected_session.id,
             task_id=task.id,
             prompt=prompt,
             timeout_seconds=timeout_seconds,
-            expected_session_instance_id=new_session.instance_id,
+            expected_session_instance_id=selected_session.instance_id,
             task_execution_id=task_execution.id,
         )
     except Exception:
         db.rollback()
         raise
 
-    new_session.status = "running"
-    new_session.is_active = True
-    new_session.started_at = datetime.now(UTC)
+    selected_session.status = "running"
+    selected_session.is_active = True
+    selected_session.started_at = selected_session.started_at or datetime.now(UTC)
 
     db.add(
         LogEntry(
-            session_id=new_session.id,
-            session_instance_id=new_session.instance_id,
+            session_id=selected_session.id,
+            session_instance_id=selected_session.instance_id,
             task_id=task.id,
             task_execution_id=task_execution.id,
             level="INFO",
@@ -210,23 +309,24 @@ def _queue_task_retry(
     )
     db.add(
         LogEntry(
-            session_id=new_session.id,
-            session_instance_id=new_session.instance_id,
+            session_id=selected_session.id,
+            session_instance_id=selected_session.instance_id,
             task_id=task.id,
             task_execution_id=task_execution.id,
             level="INFO",
-            message=f"Session started: {new_session.name}",
+            message=f"Session started: {selected_session.name}",
         )
     )
     db.commit()
     append_orchestration_event(
         project_dir=task_workspace["workspace_path"],
-        session_id=new_session.id,
+        session_id=selected_session.id,
         task_id=task.id,
         event_type=EventType.TASK_QUEUED,
         details={
-            "session_instance_id": new_session.instance_id,
+            "session_instance_id": selected_session.instance_id,
             "celery_task_id": result.id,
+            "task_execution_id": task_execution.id,
             "project_dir": task_workspace["workspace_path"],
             "backend": get_effective_agent_backend(
                 settings.ORCHESTRATOR_AGENT_BACKEND, db=db
@@ -240,7 +340,7 @@ def _queue_task_retry(
     return {
         "status": "started",
         "task_id": task.id,
-        "session_id": new_session.id,
+        "session_id": selected_session.id,
         "task_execution_id": task_execution.id,
         "celery_task_id": result.id,
         "message": f"Task '{task.title}' restarted successfully",
@@ -614,7 +714,11 @@ def get_project_workspace_overview(project_id: int, db: Session = Depends(get_db
 
 
 @router.post("/tasks/{task_id}/retry")
-def retry_task(task_id: int, db: Session = Depends(get_db)):
+def retry_task(
+    task_id: int,
+    retry_request: Optional[TaskRetryRequest] = None,
+    db: Session = Depends(get_db),
+):
     """Queue a fresh execution for a failed or timed-out task."""
     task = db.query(Task).filter(Task.id == task_id).first()
     if not task:
@@ -626,7 +730,7 @@ def retry_task(task_id: int, db: Session = Depends(get_db)):
             detail="Task is already running. Open the linked session to monitor it.",
         )
 
-    return _queue_task_retry(db, task)
+    return _queue_task_retry(db, task, retry_request=retry_request)
 
 
 @router.post("/tasks/{task_id}/promote", response_model=TaskResponse)

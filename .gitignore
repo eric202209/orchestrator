@@ -82,8 +82,20 @@ checkpoints/
 bin/
 data/qdrant/
 *.qdrant-initialized
-knowledge/failure/
-knowledge/seed/
+knowledge/failure/*
+!knowledge/failure/
+!knowledge/failure/backend_timeout.md
+!knowledge/failure/invalid_planning_output.md
+!knowledge/failure/openai_401.md
+!knowledge/failure/openclaw_timeout.md
+!knowledge/failure/qdrant_connection_refused.md
+!knowledge/failure/websocket_disconnect.md
+!knowledge/failure/worker_timeout.md
+knowledge/seed/*
+!knowledge/seed/
+!knowledge/seed/format_guides/
+knowledge/seed/format_guides/*
+!knowledge/seed/format_guides/shell-safe-command.md
 
 # Documentation
 docs/

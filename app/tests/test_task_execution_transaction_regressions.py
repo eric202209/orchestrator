@@ -12,6 +12,32 @@ from app.models import (
 )
 
 
+class _FakeAsyncResult:
+    id = "celery-123"
+
+
+def _stub_retry_dispatch(monkeypatch, captured_kwargs: dict | None = None):
+    from app.tasks import worker as worker_module
+
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.tasks.ensure_task_workspace",
+        lambda *a, **kw: {
+            "workspace_path": "/tmp/retry-project",
+            "task_subfolder": None,
+            "stored_task_subfolder": "retry-task-1",
+            "workspace_scope": "isolated_task_workspace",
+        },
+    )
+
+    def _fake_delay(**kwargs):
+        if captured_kwargs is not None:
+            captured_kwargs.clear()
+            captured_kwargs.update(kwargs)
+        return _FakeAsyncResult()
+
+    monkeypatch.setattr(worker_module.execute_orchestration_task, "delay", _fake_delay)
+
+
 def test_task_retry_rolls_back_session_creation_when_queueing_fails(
     authenticated_client, db_session, monkeypatch
 ):
@@ -75,27 +101,8 @@ def test_task_retry_dual_writes_pending_task_execution(
     db_session.commit()
     db_session.refresh(task)
 
-    class _FakeAsyncResult:
-        id = "celery-123"
-
     captured_kwargs = {}
-
-    def _fake_delay(**kwargs):
-        captured_kwargs.update(kwargs)
-        return _FakeAsyncResult()
-
-    from app.tasks import worker as worker_module
-
-    monkeypatch.setattr(
-        "app.api.v1.endpoints.tasks.ensure_task_workspace",
-        lambda *a, **kw: {
-            "workspace_path": "/tmp/dual-write-project",
-            "task_subfolder": None,
-            "stored_task_subfolder": "retry-with-execution-1",
-            "workspace_scope": "isolated_task_workspace",
-        },
-    )
-    monkeypatch.setattr(worker_module.execute_orchestration_task, "delay", _fake_delay)
+    _stub_retry_dispatch(monkeypatch, captured_kwargs)
 
     response = authenticated_client.post(f"/api/v1/tasks/{task.id}/retry")
 
@@ -108,6 +115,150 @@ def test_task_retry_dual_writes_pending_task_execution(
     assert task_execution.task_id == task.id
     assert task_execution.attempt_number == 1
     assert task_execution.status == TaskStatus.PENDING
+
+
+def test_task_retry_default_reuses_latest_project_session_without_duplicates(
+    authenticated_client, db_session, monkeypatch
+):
+    project = Project(name="Workflow Retry Project")
+    db_session.add(project)
+    db_session.commit()
+
+    older_session = SessionModel(
+        project_id=project.id,
+        name="Older workflow",
+        status="stopped",
+        is_active=False,
+    )
+    workflow_session = SessionModel(
+        project_id=project.id,
+        name="Project workflow",
+        status="stopped",
+        is_active=False,
+        instance_id="workflow-instance",
+    )
+    old_isolated_session = SessionModel(
+        project_id=project.id,
+        name="Retry without duplicates session",
+        status="stopped",
+        is_active=False,
+        instance_id="orchestrator-task-999-123",
+    )
+    task = Task(
+        project_id=project.id,
+        title="Retry without duplicates",
+        description="retry prompt",
+        status=TaskStatus.FAILED,
+    )
+    db_session.add_all([older_session, workflow_session, old_isolated_session, task])
+    db_session.commit()
+    db_session.refresh(workflow_session)
+    db_session.refresh(task)
+
+    captured_kwargs = {}
+    _stub_retry_dispatch(monkeypatch, captured_kwargs)
+
+    first = authenticated_client.post(f"/api/v1/tasks/{task.id}/retry")
+    second = authenticated_client.post(f"/api/v1/tasks/{task.id}/retry")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["session_id"] == workflow_session.id
+    assert second.json()["session_id"] == workflow_session.id
+    assert db_session.query(SessionModel).count() == 3
+    assert db_session.query(SessionTask).count() == 1
+    assert db_session.query(TaskExecution).count() == 2
+    assert captured_kwargs["session_id"] == workflow_session.id
+    assert captured_kwargs["task_execution_id"] == second.json()["task_execution_id"]
+
+
+def test_task_retry_uses_requested_session_when_valid(
+    authenticated_client, db_session, monkeypatch
+):
+    project = Project(name="Requested Session Project")
+    db_session.add(project)
+    db_session.commit()
+
+    requested_session = SessionModel(
+        project_id=project.id,
+        name="Requested workflow",
+        status="stopped",
+        is_active=False,
+    )
+    other_session = SessionModel(
+        project_id=project.id,
+        name="Other workflow",
+        status="stopped",
+        is_active=False,
+    )
+    task = Task(
+        project_id=project.id,
+        title="Retry requested session",
+        description="retry prompt",
+        status=TaskStatus.FAILED,
+    )
+    db_session.add_all([requested_session, other_session, task])
+    db_session.commit()
+    db_session.refresh(requested_session)
+    db_session.refresh(task)
+
+    captured_kwargs = {}
+    _stub_retry_dispatch(monkeypatch, captured_kwargs)
+
+    response = authenticated_client.post(
+        f"/api/v1/tasks/{task.id}/retry",
+        json={"session_id": requested_session.id},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["session_id"] == requested_session.id
+    assert captured_kwargs["session_id"] == requested_session.id
+    task_execution = db_session.query(TaskExecution).one()
+    assert task_execution.session_id == requested_session.id
+
+
+def test_task_retry_explicit_new_session_preserves_legacy_isolated_session_creation(
+    authenticated_client, db_session, monkeypatch
+):
+    project = Project(name="Explicit New Session Project")
+    db_session.add(project)
+    db_session.commit()
+
+    workflow_session = SessionModel(
+        project_id=project.id,
+        name="Project workflow",
+        status="stopped",
+        is_active=False,
+    )
+    task = Task(
+        project_id=project.id,
+        title="Retry isolated",
+        description="retry prompt",
+        status=TaskStatus.FAILED,
+    )
+    db_session.add_all([workflow_session, task])
+    db_session.commit()
+    db_session.refresh(workflow_session)
+    db_session.refresh(task)
+
+    _stub_retry_dispatch(monkeypatch)
+
+    response = authenticated_client.post(
+        f"/api/v1/tasks/{task.id}/retry",
+        json={"execution_scope": "new_session"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["session_id"] != workflow_session.id
+    assert db_session.query(SessionModel).count() == 2
+    new_session = (
+        db_session.query(SessionModel)
+        .filter(SessionModel.id == payload["session_id"])
+        .one()
+    )
+    assert new_session.name == "Retry isolated session"
 
 
 @pytest.mark.asyncio
