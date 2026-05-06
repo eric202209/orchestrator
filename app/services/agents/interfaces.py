@@ -81,7 +81,13 @@ class AgentRuntime(Protocol):
     ) -> str: ...
 
     async def execute_task(
-        self, prompt: str, timeout_seconds: int = 300, log_callback: Any = None
+        self,
+        prompt: str,
+        timeout_seconds: int = 300,
+        log_callback: Any = None,
+        *,
+        diagnostic_label: Optional[str] = None,
+        diagnostic_metadata: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]: ...
 
     async def execute_task_with_orchestration(
@@ -104,6 +110,7 @@ class AgentRuntime(Protocol):
         source_brain: str = "local",
         session_prefix: str = "planning",
         isolate_workspace_context: bool = False,
+        no_output_timeout_seconds: Optional[int] = None,
     ) -> dict[str, Any]: ...
 
     def get_backend_metadata(self) -> dict[str, Any]: ...

@@ -289,12 +289,12 @@ class PromptTemplates:
 **Requirements:**
 1. Create 3-8 sequential steps
 2. Each step: atomic, verifiable, rollback-safe
-3. Output JSON array with: step_number, description, commands[], verification?, rollback?, expected_files[]
+3. Output JSON array only. The first non-whitespace character must be `[` and the last must be `]`
 4. Do NOT create documentation files unless the task explicitly asks for them
 5. Avoid README files, notes files, summaries, or explanation documents unless required by the task
 6. Prefer the smallest workable plan; each step should change one concern only
 7. `step_number` values must be unique integers and exactly 1, 2, 3... in order
-8. Every step object must include all six keys exactly once: step_number, description, commands, verification, rollback, expected_files
+8. Every step object must include exactly these six keys and no extra keys: step_number, description, commands, verification, rollback, expected_files
 9. `commands` must be a JSON array of non-empty strings
 10. `verification` must always be present and must be one shell string or null
 11. `rollback` must always be present and must be one shell string or null
@@ -314,17 +314,41 @@ class PromptTemplates:
 **Workflow Phases:**
 {workflow_guidance}
 
-**Output (JSON ONLY):**
+**Invalid Output Examples:**
+- Markdown fences around JSON
+- Prose before or after the JSON array
+- Objects like {{"steps": [...]}} instead of a top-level array
+- Fields such as `payloads`, `text`, `finalAssistantVisibleText`, `notes`, `rationale`, or `status`
+
+**Valid Minimal JSON Example:**
 [
   {{
     "step_number": 1,
-    "description": "...",
-    "commands": ["..."],
-    "verification": null,
+    "description": "Inspect the current workspace",
+    "commands": ["rg --files . | sort"],
+    "verification": "test -d .",
     "rollback": null,
-    "expected_files": ["..."]
+    "expected_files": []
+  }},
+  {{
+    "step_number": 2,
+    "description": "Create the smallest required implementation files",
+    "commands": ["write src/App.tsx: implement the requested UI"],
+    "verification": "test -s src/App.tsx",
+    "rollback": "rm -f src/App.tsx",
+    "expected_files": ["src/App.tsx"]
+  }},
+  {{
+    "step_number": 3,
+    "description": "Run a one-shot verification",
+    "commands": ["npm run build"],
+    "verification": "npm run build",
+    "rollback": null,
+    "expected_files": []
   }}
 ]
+
+Return only a JSON array matching this shape. No markdown. No prose.
 """
 
     # ── 2. STEP EXECUTION (Concise) ───────────────────────────────────────────

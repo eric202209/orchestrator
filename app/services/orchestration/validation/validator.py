@@ -136,6 +136,7 @@ class ValidatorService:
         invalid_rollback: List[int] = []
         invalid_expected_files: List[int] = []
         missing_required_fields: Dict[int, List[str]] = {}
+        extra_fields: Dict[int, List[str]] = {}
         required_fields = {
             "step_number",
             "description",
@@ -152,6 +153,9 @@ class ValidatorService:
             missing_fields = sorted(required_fields.difference(step.keys()))
             if missing_fields:
                 missing_required_fields[index] = missing_fields
+            extras = sorted(set(step.keys()).difference(required_fields))
+            if extras:
+                extra_fields[index] = extras
             if not isinstance(step.get("step_number"), int):
                 invalid_step_numbers.append(index)
             if not isinstance(step.get("description", ""), str):
@@ -191,6 +195,9 @@ class ValidatorService:
                 "Plan steps must include step_number, description, commands, verification, rollback, and expected_files"
             )
             details["missing_required_fields"] = missing_required_fields
+        if extra_fields:
+            errors.append("Plan steps must not include extra keys")
+            details["extra_fields"] = extra_fields
         if invalid_verification:
             errors.append("Plan step verification values must be strings or null")
             details["invalid_verification_steps"] = invalid_verification

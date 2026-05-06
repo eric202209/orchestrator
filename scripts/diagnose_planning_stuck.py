@@ -11,9 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = (
-    REPO_ROOT / "app" / "services" / "orchestration" / "stuck_diagnostics.py"
-)
+MODULE_PATH = REPO_ROOT / "app" / "services" / "orchestration" / "stuck_diagnostics.py"
 SPEC = importlib.util.spec_from_file_location("stuck_diagnostics", MODULE_PATH)
 if SPEC is None or SPEC.loader is None:
     raise SystemExit(f"Unable to load diagnosis module from {MODULE_PATH}")
@@ -31,14 +29,14 @@ def _parse_db_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(
-            tzinfo=None
-        )
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
     except ValueError:
         return None
 
 
-def _fetch_one(conn: sqlite3.Connection, query: str, params: tuple) -> sqlite3.Row | None:
+def _fetch_one(
+    conn: sqlite3.Connection, query: str, params: tuple
+) -> sqlite3.Row | None:
     return conn.execute(query, params).fetchone()
 
 

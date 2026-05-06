@@ -17,6 +17,7 @@ import json
 import subprocess
 import logging
 import asyncio
+import contextlib
 import os
 import shutil
 import shlex
@@ -117,6 +118,14 @@ class OpenClawSessionError(AgentRuntimeError):
     """Custom exception for OpenClaw session errors"""
 
     pass
+
+
+class OpenClawNoOutputTimeoutError(OpenClawSessionError):
+    """Raised when a one-shot OpenClaw prompt produces no output before its guard."""
+
+    def __init__(self, message: str, diagnostics: Dict[str, Any]):
+        super().__init__(message)
+        self.runtime_diagnostics = diagnostics
 
 
 class OpenClawSessionService:
@@ -243,6 +252,329 @@ class OpenClawSessionService:
             ]
         )
         return full_cmd
+
+    @staticmethod
+    def _estimate_token_count(text: str) -> int:
+        """Return a deterministic rough token estimate for diagnostics only."""
+
+        if not text:
+            return 0
+        return max(1, (len(text) + 3) // 4)
+
+    @staticmethod
+    def _stream_diagnostics_summary(diagnostics: Dict[str, Any]) -> str:
+        first_output_after = diagnostics.get("first_output_after_seconds")
+        last_output_after = diagnostics.get("last_output_after_seconds")
+        max_silent_gap = diagnostics.get("max_silent_gap_seconds")
+        planning_prompt_size = diagnostics.get("planning_prompt_size")
+        first_rendered = (
+            "none" if first_output_after is None else f"{first_output_after:.2f}s"
+        )
+        last_rendered = (
+            "none" if last_output_after is None else f"{last_output_after:.2f}s"
+        )
+        gap_rendered = "none" if max_silent_gap is None else f"{max_silent_gap:.2f}s"
+        parts = []
+        if planning_prompt_size is not None:
+            parts.append(f"planning_prompt_size={planning_prompt_size}")
+        parts.extend(
+            [
+                f"duration={diagnostics.get('duration_seconds', 0):.2f}s "
+                f"timeout={diagnostics.get('timeout_seconds')}s",
+                f"timed_out={diagnostics.get('timed_out')}",
+                f"cancelled={diagnostics.get('cancelled')}",
+                f"return_code={diagnostics.get('return_code')}",
+                f"first_output_after={first_rendered}",
+                f"last_output_after={last_rendered}",
+                f"max_silent_gap={gap_rendered}",
+                f"no_output_timeout={diagnostics.get('no_output_timeout')}",
+                f"stdout_chars={diagnostics.get('stdout_chars', 0)}",
+                f"stderr_chars={diagnostics.get('stderr_chars', 0)}",
+                f"output_token_estimate={diagnostics.get('output_token_estimate', 0)}",
+                f"stdout_lines={diagnostics.get('stdout_lines', 0)}",
+                f"stderr_lines={diagnostics.get('stderr_lines', 0)}",
+                f"output_channel_used={diagnostics.get('output_channel_used')}",
+                "stderr_contains_model_content="
+                f"{diagnostics.get('stderr_contains_model_content')}",
+                f"stderr_contains_only_logs={diagnostics.get('stderr_contains_only_logs')}",
+                f"stream_stalled={diagnostics.get('stream_stalled')}",
+                f"truncated={diagnostics.get('truncated')}",
+                f"contract_violation_type={diagnostics.get('contract_violation_type')}",
+            ]
+        )
+        return " ".join(parts)
+
+    @staticmethod
+    def _looks_like_openclaw_diagnostic_payload(payload: Dict[str, Any]) -> bool:
+        diagnostic_keys = {
+            "aborted",
+            "source",
+            "generatedAt",
+            "workspaceDir",
+            "systemPrompt",
+            "sandbox",
+            "bootstrapMaxChars",
+            "projectContextChars",
+            "nonProjectContextChars",
+            "lastCallUsage",
+            "agentMeta",
+            "durationMs",
+            "stopReason",
+            "livenessState",
+        }
+        return bool(set(payload.keys()) & diagnostic_keys) and not bool(
+            {"payloads", "finalAssistantVisibleText", "text"} & set(payload.keys())
+        )
+
+    @classmethod
+    def _payload_contains_model_content(cls, payload: Any) -> bool:
+        if isinstance(payload, dict):
+            if cls._looks_like_openclaw_diagnostic_payload(payload):
+                return False
+            final_text = payload.get("finalAssistantVisibleText")
+            if isinstance(final_text, str) and final_text.strip():
+                return True
+            text = payload.get("text")
+            if isinstance(text, str) and text.strip():
+                return True
+            payloads = payload.get("payloads")
+            if isinstance(payloads, list):
+                return any(
+                    cls._payload_contains_model_content(item) for item in payloads
+                )
+            return False
+        if isinstance(payload, list):
+            return any(cls._payload_contains_model_content(item) for item in payload)
+        return False
+
+    @classmethod
+    def _text_contains_model_content(cls, text: str) -> bool:
+        candidate = (text or "").strip()
+        if not candidate:
+            return False
+        try:
+            return cls._payload_contains_model_content(json.loads(candidate))
+        except json.JSONDecodeError:
+            return False
+
+    @classmethod
+    def _channel_metadata(cls, stdout_text: str, stderr_text: str) -> Dict[str, Any]:
+        stdout_has_content = bool((stdout_text or "").strip())
+        stderr_has_content = bool((stderr_text or "").strip())
+        stderr_contains_model_content = bool(
+            cls._text_contains_model_content(stderr_text)
+            or cls._recover_json_like_output_from_stderr(stderr_text)
+        )
+        stderr_contains_only_logs = bool(
+            stderr_has_content and not stderr_contains_model_content
+        )
+
+        if stdout_has_content and stderr_contains_model_content:
+            output_channel_used = "mixed"
+        elif stdout_has_content:
+            output_channel_used = "stdout"
+        elif stderr_contains_model_content:
+            output_channel_used = "stderr"
+        else:
+            output_channel_used = "none"
+
+        return {
+            "output_channel_used": output_channel_used,
+            "stderr_contains_model_content": stderr_contains_model_content,
+            "stderr_contains_only_logs": stderr_contains_only_logs,
+        }
+
+    async def _run_cli_prompt_with_diagnostics(
+        self,
+        full_cmd: List[str],
+        *,
+        timeout_seconds: int,
+        cwd: Optional[str],
+        no_output_timeout_seconds: Optional[int] = None,
+    ) -> tuple[subprocess.CompletedProcess[str], Dict[str, Any]]:
+        started_at = time.monotonic()
+        first_output_at: Optional[float] = None
+        last_output_at: Optional[float] = None
+        previous_output_at: Optional[float] = None
+        max_silent_gap: Optional[float] = None
+        stdout_chunks: List[str] = []
+        stderr_chunks: List[str] = []
+        first_output_event = asyncio.Event()
+        diagnostics: Dict[str, Any] = {
+            "timeout_seconds": timeout_seconds,
+            "timeout_with_cleanup_seconds": timeout_seconds + 30,
+            "no_output_timeout_seconds": no_output_timeout_seconds,
+            "no_output_timeout": False,
+            "timed_out": False,
+            "cancelled": False,
+            "return_code": None,
+            "stream_stalled": None,
+            "truncated": False,
+            "timeout_boundary": None,
+        }
+
+        process = await asyncio.create_subprocess_exec(
+            *full_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            limit=self.STREAM_READ_LIMIT,
+            cwd=cwd,
+        )
+
+        async def collect_stream(stream, chunks: List[str], stream_name: str) -> None:
+            nonlocal first_output_at, last_output_at, previous_output_at, max_silent_gap
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+
+                now = time.monotonic()
+                if first_output_at is None:
+                    first_output_at = now
+                    first_output_event.set()
+                if previous_output_at is not None:
+                    gap = now - previous_output_at
+                    max_silent_gap = (
+                        gap if max_silent_gap is None else max(max_silent_gap, gap)
+                    )
+                previous_output_at = now
+                last_output_at = now
+
+                line_text = line.decode("utf-8", errors="replace").strip()
+                chunks.append(line_text)
+
+                if (
+                    stream_name == "stderr"
+                    and line_text
+                    and self._should_emit_stderr_line(line_text)
+                ):
+                    self._log_entry("WARN", line_text, commit=True)
+
+        stream_task = asyncio.ensure_future(
+            asyncio.gather(
+                collect_stream(process.stdout, stdout_chunks, "stdout"),
+                collect_stream(process.stderr, stderr_chunks, "stderr"),
+            )
+        )
+        try:
+            if no_output_timeout_seconds:
+                first_output_task = asyncio.create_task(first_output_event.wait())
+                try:
+                    done, _ = await asyncio.wait(
+                        {first_output_task, stream_task},
+                        timeout=no_output_timeout_seconds,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if first_output_task not in done and stream_task not in done:
+                        diagnostics["no_output_timeout"] = True
+                        diagnostics["timed_out"] = True
+                        diagnostics["cancelled"] = True
+                        diagnostics["timeout_boundary"] = "repair_no_output"
+                        try:
+                            process.kill()
+                        except ProcessLookupError:
+                            pass
+                        await process.wait()
+                        diagnostics["return_code"] = process.returncode
+                        stream_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await stream_task
+                        raise OpenClawNoOutputTimeoutError(
+                            (
+                                "OpenClaw prompt produced no output before "
+                                f"{no_output_timeout_seconds}s"
+                            ),
+                            diagnostics,
+                        )
+                finally:
+                    first_output_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await first_output_task
+            await asyncio.wait_for(stream_task, timeout=timeout_seconds + 30)
+            return_code = await asyncio.wait_for(
+                process.wait(), timeout=timeout_seconds + 30
+            )
+            diagnostics["return_code"] = return_code
+        except asyncio.TimeoutError:
+            diagnostics["timed_out"] = True
+            diagnostics["timeout_boundary"] = (
+                diagnostics.get("timeout_boundary") or "process_timeout"
+            )
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.wait()
+            diagnostics["return_code"] = process.returncode
+            raise
+        except asyncio.CancelledError:
+            diagnostics["cancelled"] = True
+            diagnostics["timeout_boundary"] = (
+                diagnostics.get("timeout_boundary") or "caller_cancelled"
+            )
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.wait()
+            diagnostics["return_code"] = process.returncode
+            raise
+        finally:
+            stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
+            stderr_text = "\n".join(filter(None, stderr_chunks)).strip()
+            duration_seconds = time.monotonic() - started_at
+            channel_metadata = self._channel_metadata(stdout_text, stderr_text)
+            diagnostics.update(
+                {
+                    "duration_seconds": round(duration_seconds, 3),
+                    "first_output_after_seconds": (
+                        None
+                        if first_output_at is None
+                        else round(first_output_at - started_at, 3)
+                    ),
+                    "last_output_after_seconds": (
+                        None
+                        if last_output_at is None
+                        else round(last_output_at - started_at, 3)
+                    ),
+                    "max_silent_gap_seconds": (
+                        None if max_silent_gap is None else round(max_silent_gap, 3)
+                    ),
+                    "stdout_chars": len(stdout_text),
+                    "stderr_chars": len(stderr_text),
+                    "stdout_lines": len([line for line in stdout_chunks if line]),
+                    "stderr_lines": len([line for line in stderr_chunks if line]),
+                    **channel_metadata,
+                    "output_token_estimate": self._estimate_token_count(
+                        f"{stdout_text}\n{stderr_text}".strip()
+                    ),
+                    "stream_stalled": bool(
+                        first_output_at is not None
+                        and last_output_at is not None
+                        and (time.monotonic() - last_output_at) >= 10
+                    ),
+                    "truncated": "truncated" in f"{stdout_text}\n{stderr_text}".lower(),
+                }
+            )
+            self._log_entry(
+                "INFO",
+                "[OPENCLAW][REPAIR_DIAGNOSTICS] "
+                + self._stream_diagnostics_summary(diagnostics),
+                metadata=json.dumps(diagnostics),
+                commit=True,
+            )
+
+        stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
+        stderr_text = "\n".join(filter(None, stderr_chunks)).strip()
+        return (
+            subprocess.CompletedProcess(
+                args=full_cmd,
+                returncode=int(diagnostics.get("return_code") or 0),
+                stdout=stdout_text,
+                stderr=stderr_text,
+            ),
+            diagnostics,
+        )
 
     def parse_cli_response(
         self, proc: subprocess.CompletedProcess[str]
@@ -481,6 +813,8 @@ class OpenClawSessionService:
         log_callback: Optional[Callable[..., None]] = None,
         *,
         reuse_task_session: bool = True,
+        diagnostic_label: Optional[str] = None,
+        diagnostic_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Execute a task via OpenClaw session (legacy single-mode)
@@ -532,11 +866,22 @@ class OpenClawSessionService:
                     result["status"] = "completed"
                 else:
                     # REAL MODE: Execute task via OpenClaw HTTP API
+                    diagnostics_kwargs: Dict[str, Any] = {}
+                    if diagnostic_label:
+                        diagnostics_kwargs = {
+                            "diagnostic_label": diagnostic_label,
+                            "diagnostic_metadata": {
+                                **(diagnostic_metadata or {}),
+                                "original_prompt_size": len(prompt or ""),
+                                "optimized_prompt_size": len(optimized_prompt or ""),
+                            },
+                        }
                     result = await self.execute_task_with_streaming(
                         optimized_prompt,
                         timeout_seconds,
                         log_callback,
                         reuse_task_session=reuse_task_session,
+                        **diagnostics_kwargs,
                     )
                     if self._is_context_overflow_result(result):
                         retry_prompt = optimize_prompt(
@@ -545,6 +890,19 @@ class OpenClawSessionService:
                             hard_char_limit=1800,
                         )
                         if retry_prompt != optimized_prompt:
+                            retry_diagnostics_kwargs: Dict[str, Any] = {}
+                            if diagnostic_label:
+                                retry_diagnostics_kwargs = {
+                                    "diagnostic_label": diagnostic_label,
+                                    "diagnostic_metadata": {
+                                        **(diagnostic_metadata or {}),
+                                        "original_prompt_size": len(prompt or ""),
+                                        "optimized_prompt_size": len(
+                                            retry_prompt or ""
+                                        ),
+                                        "context_overflow_retry": True,
+                                    },
+                                }
                             self._log_entry(
                                 "WARN",
                                 "[OPENCLAW] Context overflow detected; retrying once with a compact prompt",
@@ -554,6 +912,7 @@ class OpenClawSessionService:
                                 timeout_seconds,
                                 log_callback,
                                 reuse_task_session=reuse_task_session,
+                                **retry_diagnostics_kwargs,
                             )
 
                 # OPTIMIZATION: Log performance metrics
@@ -1399,6 +1758,7 @@ class OpenClawSessionService:
             stdout = result.stdout.strip()
             stderr = result.stderr.strip()
             return_code = result.returncode
+            channel_metadata = self._channel_metadata(stdout, stderr)
 
             if return_code != 0 and stderr:
                 self._log_entry("ERROR", f"OpenClaw CLI error: {stderr[:500]}")
@@ -1407,6 +1767,7 @@ class OpenClawSessionService:
             stdout = result.strip()
             return_code = 0
             stderr = ""
+            channel_metadata = self._channel_metadata(stdout, stderr)
 
         cli_error_message = self._summarize_cli_error(stderr) if stderr else ""
         cli_error_lower = cli_error_message.lower()
@@ -1420,6 +1781,7 @@ class OpenClawSessionService:
                 "mode": "real",
                 "output": stdout,
                 "error": "Context window exceeded",
+                **channel_metadata,
                 "logs": [
                     {
                         "level": "ERROR",
@@ -1432,9 +1794,11 @@ class OpenClawSessionService:
         if (not stdout or stdout in ['""', "''", '"', "'"]) and stderr:
             recovered_output = self._recover_json_like_output_from_stderr(stderr)
             if recovered_output:
+                channel_metadata = self._channel_metadata("", recovered_output)
                 self._log_entry(
                     "WARN",
-                    "[OPENCLAW] stdout was empty; recovered structured response from stderr",
+                    "[OPENCLAW] stdout was empty; normalized model response from stderr",
+                    metadata=json.dumps(channel_metadata),
                 )
                 stdout = recovered_output
 
@@ -1447,6 +1811,7 @@ class OpenClawSessionService:
                 "output": "",
                 "error": cli_error_message
                 or "Empty or invalid response from OpenClaw CLI",
+                **channel_metadata,
                 "logs": [],
             }
 
@@ -1486,6 +1851,7 @@ class OpenClawSessionService:
                     "mode": "real",
                     "output": output_text,
                     "error": timeout_error,
+                    **channel_metadata,
                     "logs": [],
                 }
 
@@ -1494,6 +1860,7 @@ class OpenClawSessionService:
                 "mode": "real",
                 "output": output_text,
                 "error": cli_error_message if return_code != 0 else "",
+                **channel_metadata,
                 "logs": [],
             }
 
@@ -1518,6 +1885,7 @@ class OpenClawSessionService:
                     "mode": "real",
                     "output": "",
                     "error": "Execution failed with unclear error (garbled output detected). See logs for details.",
+                    **channel_metadata,
                     "logs": [
                         {
                             "level": "ERROR",
@@ -1535,6 +1903,7 @@ class OpenClawSessionService:
                 "mode": "real",
                 "output": stdout,
                 "error": cli_error_message if return_code != 0 else "",
+                **channel_metadata,
                 "logs": [],
             }
 
@@ -1548,6 +1917,7 @@ class OpenClawSessionService:
                     "status": "failed",
                     "mode": "real",
                     "output": "Context window exceeded. Prompt is too long for the model.",
+                    **channel_metadata,
                     "logs": [
                         {
                             "level": "ERROR",
@@ -1565,6 +1935,7 @@ class OpenClawSessionService:
                     "status": "failed",
                     "mode": "real",
                     "output": f"Process was killed: {error_str}",
+                    **channel_metadata,
                     "logs": [
                         {
                             "level": "ERROR",
@@ -1583,6 +1954,7 @@ class OpenClawSessionService:
                     "status": "failed",
                     "mode": "real",
                     "output": f"Execution error: {error_str}",
+                    **channel_metadata,
                     "logs": [
                         {
                             "level": "ERROR",
@@ -1594,7 +1966,8 @@ class OpenClawSessionService:
                     "error": error_str,
                 }
 
-    def _recover_json_like_output_from_stderr(self, stderr: str) -> str:
+    @classmethod
+    def _recover_json_like_output_from_stderr(cls, stderr: str) -> str:
         """Recover a structured JSON-ish payload from stderr when stdout is empty."""
         ansi_pattern = re.compile(r"\x1B\[[0-9;]*[A-Za-z]")
         lines = []
@@ -1613,16 +1986,24 @@ class OpenClawSessionService:
             or line.startswith("{")
             or line.startswith("[")
             or line.startswith('"payloads"')
-            or line.startswith('"stopReason"')
+            or line.startswith('"finalAssistantVisibleText"')
         ]
 
         for index in reversed(candidate_indexes):
             candidate = "\n".join(lines[index:]).strip()
-            try:
-                json.loads(candidate)
-                return candidate
-            except Exception:
-                continue
+            candidates = [candidate]
+            if candidate.startswith('"payloads"') or candidate.startswith(
+                '"finalAssistantVisibleText"'
+            ):
+                candidates.append("{" + candidate.rstrip().rstrip(",") + "}")
+
+            for normalized_candidate in candidates:
+                try:
+                    parsed = json.loads(normalized_candidate)
+                except Exception:
+                    continue
+                if cls._payload_contains_model_content(parsed):
+                    return normalized_candidate
 
         return ""
 
@@ -1679,6 +2060,8 @@ class OpenClawSessionService:
         log_callback: Optional[Callable] = None,
         *,
         reuse_task_session: bool = True,
+        diagnostic_label: Optional[str] = None,
+        diagnostic_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Execute task via OpenClaw CLI with real-time log streaming (optimized)"""
 
@@ -1698,6 +2081,16 @@ class OpenClawSessionService:
         try:
             openclaw_command = self._resolve_openclaw_command()
             execution_cwd = self._resolve_execution_cwd()
+            started_at = time.monotonic()
+            first_output_at: Optional[float] = None
+            last_output_at: Optional[float] = None
+            previous_output_at: Optional[float] = None
+            max_silent_gap: Optional[float] = None
+            return_code: Optional[int] = None
+            timed_out = False
+            cancelled = False
+            timeout_boundary: Optional[str] = None
+
             process = await asyncio.create_subprocess_exec(
                 *openclaw_command,
                 "agent",
@@ -1724,10 +2117,23 @@ class OpenClawSessionService:
                 chunks: List[str],
                 emit_live_logs: bool = True,
             ) -> None:
+                nonlocal first_output_at, last_output_at
+                nonlocal previous_output_at, max_silent_gap
                 while True:
                     line = await stream.readline()
                     if not line:
                         break
+
+                    now = time.monotonic()
+                    if first_output_at is None:
+                        first_output_at = now
+                    if previous_output_at is not None:
+                        gap = now - previous_output_at
+                        max_silent_gap = (
+                            gap if max_silent_gap is None else max(max_silent_gap, gap)
+                        )
+                    previous_output_at = now
+                    last_output_at = now
 
                     line_text = line.decode("utf-8", errors="replace").strip()
                     chunks.append(line_text)
@@ -1745,24 +2151,113 @@ class OpenClawSessionService:
                             if log_callback:
                                 await log_callback(level, line_text)
 
-            await asyncio.wait_for(
-                asyncio.gather(
-                    # OpenClaw emits its final machine-readable JSON on stdout.
-                    # Buffer it for parsing, but don't flood Live Logs with raw JSON lines.
-                    stream_output(
-                        process.stdout, "INFO", stdout_chunks, emit_live_logs=False
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        # OpenClaw emits its final machine-readable JSON on stdout.
+                        # Buffer it for parsing, but don't flood Live Logs with raw JSON lines.
+                        stream_output(
+                            process.stdout,
+                            "INFO",
+                            stdout_chunks,
+                            emit_live_logs=False,
+                        ),
+                        # Keep stderr visible because it contains actionable warnings/errors.
+                        stream_output(
+                            process.stderr,
+                            "WARN",
+                            stderr_chunks,
+                            emit_live_logs=True,
+                        ),
                     ),
-                    # Keep stderr visible because it contains actionable warnings/errors.
-                    stream_output(
-                        process.stderr, "WARN", stderr_chunks, emit_live_logs=True
-                    ),
-                ),
-                timeout=timeout_seconds + 30,
-            )
+                    timeout=timeout_seconds + 30,
+                )
 
-            return_code = await asyncio.wait_for(
-                process.wait(), timeout=timeout_seconds + 30
-            )
+                return_code = await asyncio.wait_for(
+                    process.wait(), timeout=timeout_seconds + 30
+                )
+            except asyncio.TimeoutError:
+                timed_out = True
+                timeout_boundary = "planning_wait_for"
+                try:
+                    process.kill()
+                    await process.wait()
+                    return_code = process.returncode
+                except Exception as exc:
+                    logger.debug(
+                        "[OPENCLAW] Failed to terminate timed out process cleanly: %s",
+                        exc,
+                    )
+                raise OpenClawSessionError(f"Task timed out after {timeout_seconds}s")
+            except asyncio.CancelledError:
+                cancelled = True
+                timeout_boundary = "caller_cancelled"
+                try:
+                    process.kill()
+                    await process.wait()
+                    return_code = process.returncode
+                except Exception as exc:
+                    logger.debug(
+                        "[OPENCLAW] Failed to terminate cancelled process cleanly: %s",
+                        exc,
+                    )
+                raise
+            finally:
+                if diagnostic_label:
+                    stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
+                    stderr_text = "\n".join(filter(None, stderr_chunks)).strip()
+                    duration_seconds = time.monotonic() - started_at
+                    truncated = "truncated" in (f"{stdout_text}\n{stderr_text}".lower())
+                    channel_metadata = self._channel_metadata(stdout_text, stderr_text)
+                    diagnostics: Dict[str, Any] = {
+                        **(diagnostic_metadata or {}),
+                        "diagnostic_label": diagnostic_label,
+                        "timeout_seconds": timeout_seconds,
+                        "timeout_with_cleanup_seconds": timeout_seconds + 30,
+                        "planning_prompt_size": len(prompt or ""),
+                        "planning_duration": round(duration_seconds, 3),
+                        "duration_seconds": round(duration_seconds, 3),
+                        "first_output_after_seconds": (
+                            None
+                            if first_output_at is None
+                            else round(first_output_at - started_at, 3)
+                        ),
+                        "last_output_after_seconds": (
+                            None
+                            if last_output_at is None
+                            else round(last_output_at - started_at, 3)
+                        ),
+                        "max_silent_gap_seconds": (
+                            None if max_silent_gap is None else round(max_silent_gap, 3)
+                        ),
+                        "stdout_chars": len(stdout_text),
+                        "stderr_chars": len(stderr_text),
+                        "stdout_lines": len([line for line in stdout_chunks if line]),
+                        "stderr_lines": len([line for line in stderr_chunks if line]),
+                        **channel_metadata,
+                        "output_token_estimate": self._estimate_token_count(
+                            f"{stdout_text}\n{stderr_text}".strip()
+                        ),
+                        "stream_stalled": bool(
+                            first_output_at is not None
+                            and last_output_at is not None
+                            and (time.monotonic() - last_output_at) >= 10
+                        ),
+                        "truncated": truncated,
+                        "truncated_output_detected": truncated,
+                        "timed_out": timed_out,
+                        "cancelled": cancelled,
+                        "return_code": return_code,
+                        "timeout_boundary": timeout_boundary,
+                        "contract_violation_type": None,
+                    }
+                    self._log_entry(
+                        "INFO",
+                        f"[OPENCLAW][{diagnostic_label}_DIAGNOSTICS] "
+                        + self._stream_diagnostics_summary(diagnostics),
+                        metadata=json.dumps(diagnostics),
+                        commit=True,
+                    )
             stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
             stderr_text = "\n".join(filter(None, stderr_chunks)).strip()
 
@@ -1913,6 +2408,7 @@ class OpenClawSessionService:
         source_brain: str = "local",
         session_prefix: str = "planning",
         isolate_workspace_context: bool = False,
+        no_output_timeout_seconds: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Run a one-shot prompt using the CLI request path."""
 
@@ -1923,31 +2419,39 @@ class OpenClawSessionService:
             session_prefix=session_prefix,
         )
         try:
+            isolated_temp_dir = None
             if isolate_workspace_context:
-                with tempfile.TemporaryDirectory(
+                isolated_temp_dir = tempfile.TemporaryDirectory(
                     prefix="openclaw-planning-repair-"
-                ) as isolated_cwd:
-                    proc = await asyncio.to_thread(
-                        subprocess.run,
-                        full_cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=timeout_seconds + 30,
-                        cwd=isolated_cwd,
-                    )
-            else:
-                proc = await asyncio.to_thread(
-                    subprocess.run,
-                    full_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout_seconds + 30,
                 )
+                cwd = isolated_temp_dir.name
+            else:
+                cwd = None
+            try:
+                proc, diagnostics = await self._run_cli_prompt_with_diagnostics(
+                    full_cmd,
+                    timeout_seconds=timeout_seconds,
+                    cwd=cwd,
+                    no_output_timeout_seconds=no_output_timeout_seconds,
+                )
+            finally:
+                if isolated_temp_dir is not None:
+                    isolated_temp_dir.cleanup()
         except subprocess.TimeoutExpired as exc:
             raise OpenClawSessionError(
                 f"Prompt invocation timed out after {timeout_seconds}s"
             ) from exc
-        return self.parse_cli_response(proc)
+        except asyncio.TimeoutError as exc:
+            raise OpenClawSessionError(
+                f"Prompt invocation timed out after {timeout_seconds}s"
+            ) from exc
+        except OpenClawNoOutputTimeoutError:
+            raise
+        except asyncio.CancelledError:
+            raise
+        result = self.parse_cli_response(proc)
+        result["runtime_diagnostics"] = diagnostics
+        return result
 
     def _log_entry(
         self,

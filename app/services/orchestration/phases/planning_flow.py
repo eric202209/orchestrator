@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any, Callable, Dict
 
@@ -28,6 +29,7 @@ from app.services.orchestration.persistence import (
 from app.services.orchestration.planning.planner import (
     PlannerService,
     PlanningRepairBudgetExceeded,
+    PlanningRepairNoOutputTimeout,
 )
 from app.services.orchestration.policy import (
     PLANNING_REPAIR_TIMEOUT_SECONDS,
@@ -138,6 +140,63 @@ def _should_repair_truncated_single_step_plan(
     )
 
 
+def _normalize_contract_violation_type(
+    contract_violations: list[str] | None, default: str
+) -> str:
+    if not contract_violations:
+        return default
+    first = str(contract_violations[0] or "").strip().lower()
+    if "multi-step prose" in first or "multi_step_prose" in first:
+        return "multi_step_prose_summary"
+    if "markdown" in first:
+        return "markdown_wrapped_json"
+    if "object wrapper" in first:
+        return "object_wrapper_instead_of_top_level_array"
+    if "extra keys" in first:
+        return "extra_step_keys"
+    if "missing" in first and "required" in first:
+        return "missing_required_fields"
+    if "background process" in first:
+        return "background_process_command"
+    if "non-runnable" in first:
+        return "non_runnable_command"
+    if "placeholder" in first:
+        return "placeholder_only_step"
+    normalized = re.sub(r"[^a-z0-9]+", "_", first).strip("_")
+    return normalized[:80] or default
+
+
+def _emit_planning_diagnostics_contract_violation(
+    ctx: OrchestrationRunContext,
+    *,
+    reason: str,
+    contract_violations: list[str] | None = None,
+    output_text: str = "",
+    strategy_info: str = "",
+) -> None:
+    violation_type = _normalize_contract_violation_type(
+        contract_violations, reason or "planning_contract_violation"
+    )
+    ctx.emit_live(
+        "WARN",
+        "[OPENCLAW][PLANNING_DIAGNOSTICS] contract violation detected",
+        metadata={
+            "session_id": ctx.session_id,
+            "task_id": ctx.task_id,
+            "task_execution_id": ctx.task_execution_id,
+            "contract_violation_type": violation_type,
+            "reason": reason,
+            "strategy_info": strategy_info,
+            "output_chars": len(output_text or ""),
+            "truncated_output_detected": (
+                "truncated" in str(output_text or "").lower()
+                or "truncated_multistep_plan" in str(reason or "")
+            ),
+            "contract_violations": list(contract_violations or [])[:8],
+        },
+    )
+
+
 class _PlanningRetryState:
     """Track retry/repair attempts to implement circuit breaking."""
 
@@ -164,6 +223,8 @@ def _classify_planning_timeout_failure(
         and "repair" in message
         and (retry_state.repair_prompt_used or bool(retry_state.last_repair_reason))
     ):
+        if isinstance(exc, PlanningRepairNoOutputTimeout) or "no output" in message:
+            return "planning_repair_no_output_timeout"
         if any(
             marker in (retry_state.last_repair_reason or "")
             for marker in (
@@ -428,6 +489,16 @@ def execute_planning_phase(
                 planning_prompt,
                 timeout_seconds=planning_timeout_seconds,
                 reuse_task_session=False,
+                diagnostic_label="PLANNING",
+                diagnostic_metadata={
+                    "session_id": ctx.session_id,
+                    "task_id": ctx.task_id,
+                    "task_execution_id": ctx.task_execution_id,
+                    "workflow_profile": ctx.workflow_profile,
+                    "prompt_profile": prompt_profile,
+                    "planning_prompt_tokens": planning_prompt_tokens,
+                    "planning_attempt": "initial",
+                },
             )
         )
 
@@ -564,25 +635,24 @@ def execute_planning_phase(
                     output_text
                 )
                 if extracted_summary_plan is not None:
+                    strategy_info = (
+                        "planning_contract_violation: multi_step_prose_summary"
+                    )
+                    ctx.logger.warning(
+                        "[ORCHESTRATION] Planning output was multi-step prose instead of JSON; routing to fallback/repair"
+                    )
+                workspace_plan = PlannerService.maybe_load_workspace_plan(
+                    output_text=output_text,
+                    project_dir=ctx.orchestration_state.project_dir,
+                    logger=ctx.logger,
+                )
+                if workspace_plan is not None:
                     success = True
-                    plan_data = extracted_summary_plan
-                    strategy_info = "Recovered plan from prose summary text"
+                    plan_data = workspace_plan
+                    strategy_info = "Recovered plan from workspace plan.json"
                     ctx.logger.info(
-                        "[ORCHESTRATION] Recovered planning steps from prose summary output"
+                        "[ORCHESTRATION] Planning output referenced plan.json; using workspace file instead of strict JSON retry"
                     )
-                else:
-                    workspace_plan = PlannerService.maybe_load_workspace_plan(
-                        output_text=output_text,
-                        project_dir=ctx.orchestration_state.project_dir,
-                        logger=ctx.logger,
-                    )
-                    if workspace_plan is not None:
-                        success = True
-                        plan_data = workspace_plan
-                        strategy_info = "Recovered plan from workspace plan.json"
-                        ctx.logger.info(
-                            "[ORCHESTRATION] Planning output referenced plan.json; using workspace file instead of strict JSON retry"
-                        )
 
             if (
                 PlannerService.should_retry_with_minimal_prompt(
@@ -596,6 +666,24 @@ def execute_planning_phase(
                 )
 
             if not success and not retry_state.minimal_prompt_used:
+                contract_violations = (
+                    PlannerService.describe_planning_contract_violations(
+                        output_text=output_text,
+                        parse_success=False,
+                        strategy_info=strategy_info,
+                    )
+                )
+                ctx.logger.warning(
+                    "[ORCHESTRATION] Planning contract violation before minimal retry: %s",
+                    "; ".join(contract_violations),
+                )
+                _emit_planning_diagnostics_contract_violation(
+                    ctx,
+                    reason="json_parse_failed_before_minimal",
+                    contract_violations=contract_violations,
+                    output_text=output_text,
+                    strategy_info=strategy_info,
+                )
                 ctx.logger.info(
                     "[ORCHESTRATION] JSON parse failed, switching to minimal prompt"
                 )
@@ -610,6 +698,13 @@ def execute_planning_phase(
                 continue
 
             if not success and not retry_state.repair_prompt_used:
+                contract_violations = (
+                    PlannerService.describe_planning_contract_violations(
+                        output_text=output_text,
+                        parse_success=False,
+                        strategy_info=strategy_info,
+                    )
+                )
                 emit_phase_event(
                     ctx.orchestration_state,
                     ctx.emit_live,
@@ -621,7 +716,19 @@ def execute_planning_phase(
                             :240
                         ],
                         "output_chars": len(output_text or ""),
+                        "contract_violations": contract_violations[:8],
                     },
+                )
+                ctx.logger.warning(
+                    "[ORCHESTRATION] Planning contract violation before repair: %s",
+                    "; ".join(contract_violations),
+                )
+                _emit_planning_diagnostics_contract_violation(
+                    ctx,
+                    reason="json_parse_failed_after_minimal",
+                    contract_violations=contract_violations,
+                    output_text=output_text,
+                    strategy_info=strategy_info,
                 )
                 ctx.logger.info(
                     "[ORCHESTRATION] Calling repair pass for planning output"
@@ -669,6 +776,25 @@ def execute_planning_phase(
 
             extracted_plan = extract_plan_steps(plan_data)
             if extracted_plan is None and not retry_state.minimal_prompt_used:
+                contract_violations = (
+                    PlannerService.describe_planning_contract_violations(
+                        output_text=output_text,
+                        parse_success=True,
+                        strategy_info="unexpected_plan_shape",
+                        plan_data=plan_data,
+                    )
+                )
+                ctx.logger.warning(
+                    "[ORCHESTRATION] Planning contract violation before minimal retry: %s",
+                    "; ".join(contract_violations),
+                )
+                _emit_planning_diagnostics_contract_violation(
+                    ctx,
+                    reason="unexpected_plan_shape_before_minimal",
+                    contract_violations=contract_violations,
+                    output_text=output_text,
+                    strategy_info="unexpected_plan_shape",
+                )
                 ctx.logger.info(
                     "[ORCHESTRATION] Plan extraction failed, switching to minimal prompt"
                 )
@@ -683,6 +809,25 @@ def execute_planning_phase(
                 continue
 
             if extracted_plan is None and not retry_state.repair_prompt_used:
+                contract_violations = (
+                    PlannerService.describe_planning_contract_violations(
+                        output_text=output_text,
+                        parse_success=True,
+                        strategy_info="unexpected_plan_shape_after_minimal",
+                        plan_data=plan_data,
+                    )
+                )
+                ctx.logger.warning(
+                    "[ORCHESTRATION] Planning contract violation before repair: %s",
+                    "; ".join(contract_violations),
+                )
+                _emit_planning_diagnostics_contract_violation(
+                    ctx,
+                    reason="unexpected_plan_shape_after_minimal",
+                    contract_violations=contract_violations,
+                    output_text=output_text,
+                    strategy_info="unexpected_plan_shape_after_minimal",
+                )
                 ctx.logger.info(
                     "[ORCHESTRATION] Plan extraction failed, calling repair"
                 )
@@ -722,6 +867,15 @@ def execute_planning_phase(
                             "model_profile": prompt_profile,
                         },
                     )
+                    _emit_planning_diagnostics_contract_violation(
+                        ctx,
+                        reason="truncated_multistep_plan_detected",
+                        contract_violations=[
+                            "truncated multi-step plan collapsed into a single step"
+                        ],
+                        output_text=output_text,
+                        strategy_info="truncated_multistep_plan_repair_requested",
+                    )
                     retry_state.last_repair_reason = "truncated_multistep_plan_detected"
                     planning_result = __repair_planning_output(
                         ctx=ctx,
@@ -734,6 +888,15 @@ def execute_planning_phase(
                     retry_state.consecutive_failures += 1
                     continue
                 else:
+                    _emit_planning_diagnostics_contract_violation(
+                        ctx,
+                        reason="truncated_multistep_plan_detected",
+                        contract_violations=[
+                            "truncated multi-step plan collapsed into a single step"
+                        ],
+                        output_text=output_text,
+                        strategy_info="truncated_multistep_plan_minimal_retry",
+                    )
                     planning_result = __retry_with_minimal_prompt(
                         ctx=ctx,
                         planning_timeout_seconds=planning_timeout_seconds,
@@ -748,6 +911,15 @@ def execute_planning_phase(
                 looks_like_truncated_multistep_plan(output_text, extracted_plan)
                 and not retry_state.repair_prompt_used
             ):
+                _emit_planning_diagnostics_contract_violation(
+                    ctx,
+                    reason="truncated_multistep_plan_after_minimal",
+                    contract_violations=[
+                        "truncated multi-step plan collapsed into a single step"
+                    ],
+                    output_text=output_text,
+                    strategy_info="truncated_multistep_plan_after_minimal",
+                )
                 retry_state.last_repair_reason = (
                     "truncated_multistep_plan_after_minimal"
                 )
@@ -827,6 +999,16 @@ def execute_planning_phase(
                 if key in blocking_issue_keys and value
             }
             if blocking_repair_issues and not retry_state.repair_prompt_used:
+                contract_violations = (
+                    PlannerService.describe_planning_contract_violations(
+                        output_text=output_text,
+                        parse_success=True,
+                        strategy_info="plan_contains_immediate_repair_issues",
+                        plan_data=plan_data,
+                        extracted_plan=ctx.orchestration_state.plan,
+                        immediate_repair_issues=blocking_repair_issues,
+                    )
+                )
                 issue_fragments = []
                 if blocking_repair_issues.get("non_runnable_steps"):
                     issue_fragments.append(
@@ -844,6 +1026,28 @@ def execute_planning_phase(
                         f"{blocking_repair_issues['placeholder_only_steps'][:5]}"
                     )
                 retry_state.last_repair_reason = "plan_contains_immediate_repair_issues"
+                emit_phase_event(
+                    ctx.orchestration_state,
+                    ctx.emit_live,
+                    level="WARN",
+                    phase="planning",
+                    message="[ORCHESTRATION] Planning output violated the runnable-step contract; starting repair pass",
+                    details={
+                        "reason": "plan_contains_immediate_repair_issues",
+                        "contract_violations": contract_violations[:8],
+                    },
+                )
+                ctx.logger.warning(
+                    "[ORCHESTRATION] Planning contract violation before repair: %s",
+                    "; ".join(contract_violations),
+                )
+                _emit_planning_diagnostics_contract_violation(
+                    ctx,
+                    reason="plan_contains_immediate_repair_issues",
+                    contract_violations=contract_violations,
+                    output_text=output_text,
+                    strategy_info="plan_contains_immediate_repair_issues",
+                )
                 planning_result = __repair_planning_output(
                     ctx=ctx,
                     planning_timeout_seconds=planning_timeout_seconds,
@@ -1172,7 +1376,10 @@ def execute_planning_phase(
     except TimeoutError as exc:
         timeout_exc = exc
         failure_type = _classify_planning_timeout_failure(exc, retry_state)
-        is_repair_timeout = "repair_timeout" in failure_type
+        is_repair_timeout = (
+            "repair_timeout" in failure_type
+            or failure_type == "planning_repair_no_output_timeout"
+        )
         if is_repair_timeout:
             ctx.logger.error(
                 "[ORCHESTRATION] Planning repair timed out before a valid plan was produced: %s",

@@ -12,17 +12,18 @@ from typing import Any, Dict, List, Optional
 
 from ..policy import (
     MINIMAL_PLANNING_TIMEOUT_SECONDS,
+    PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS,
     PLANNING_REPAIR_TIMEOUT_SECONDS,
     STRICT_JSON_RETRY_TIMEOUT_SECONDS,
     ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS,
 )
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 
-PLANNING_REPAIR_MAX_KNOWLEDGE_ITEMS = 2
-PLANNING_REPAIR_MAX_KNOWLEDGE_ITEM_CHARS = 500
-PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS = 3500
-PLANNING_REPAIR_MAX_VALIDATION_ERROR_CHARS = 800
-REPAIR_PROMPT_MAX_CHARS = 12000
+PLANNING_REPAIR_MAX_KNOWLEDGE_ITEMS = 0
+PLANNING_REPAIR_MAX_KNOWLEDGE_ITEM_CHARS = 0
+PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS = 1800
+PLANNING_REPAIR_MAX_VALIDATION_ERROR_CHARS = 500
+REPAIR_PROMPT_MAX_CHARS = 6000
 PLANNING_REPAIR_PROMPT_MAX_CHARS = REPAIR_PROMPT_MAX_CHARS
 PLANNING_REPAIR_ALLOWED_KNOWLEDGE_TYPES = {"format_guide", "task_example"}
 PLANNING_REPAIR_STRIP_FIELD_NAMES = {
@@ -43,6 +44,40 @@ PLANNING_REPAIR_STRIP_FIELD_NAMES = {
 WORKSPACE_PLAN_REFERENCE_RE = re.compile(
     r"(?i)(?:^|[\s`'\"(])(?:[A-Za-z0-9_./-]*/)?plan\.json(?:$|[\s`'\":,.)])"
 )
+PLANNING_STEP_REQUIRED_KEYS = (
+    "step_number",
+    "description",
+    "commands",
+    "verification",
+    "rollback",
+    "expected_files",
+)
+PLANNING_VALID_MINIMAL_JSON_EXAMPLE = """[
+  {
+    "step_number": 1,
+    "description": "Inspect the current workspace",
+    "commands": ["rg --files . | sort"],
+    "verification": "test -d .",
+    "rollback": null,
+    "expected_files": []
+  },
+  {
+    "step_number": 2,
+    "description": "Create the smallest required implementation files",
+    "commands": ["write src/App.tsx: implement the requested UI"],
+    "verification": "test -s src/App.tsx",
+    "rollback": "rm -f src/App.tsx",
+    "expected_files": ["src/App.tsx"]
+  },
+  {
+    "step_number": 3,
+    "description": "Run a one-shot verification",
+    "commands": ["npm run build"],
+    "verification": "npm run build",
+    "rollback": null,
+    "expected_files": []
+  }
+]"""
 
 
 def _render_knowledge_block(knowledge_context: Any) -> str:
@@ -62,30 +97,22 @@ def _render_knowledge_block(knowledge_context: Any) -> str:
 
 
 def _render_repair_knowledge_block(knowledge_context: Any) -> str:
-    if not knowledge_context or not getattr(knowledge_context, "retrieved_items", None):
-        return ""
-    allowed_items = [
-        item
-        for item in knowledge_context.retrieved_items
-        if str(getattr(item, "knowledge_type", "") or "")
-        in PLANNING_REPAIR_ALLOWED_KNOWLEDGE_TYPES
-    ][:PLANNING_REPAIR_MAX_KNOWLEDGE_ITEMS]
-    if not allowed_items:
-        return ""
-    lines = [
-        "## RELEVANT REFERENCES",
-        "Use these only if they help repair the malformed plan.",
-        "",
-    ]
-    for idx, item in enumerate(allowed_items, start=1):
-        lines.append(f"[{idx}] [{item.knowledge_type}] {item.title}")
-        lines.append(
-            str(getattr(item, "content", "") or "")[
-                :PLANNING_REPAIR_MAX_KNOWLEDGE_ITEM_CHARS
-            ]
-        )
-        lines.append("")
-    return "\n".join(lines).strip()
+    del knowledge_context
+    return ""
+
+
+def _compact_invalid_output_excerpt(malformed_output: str) -> str:
+    sanitized = _sanitize_malformed_repair_output(malformed_output)
+    if len(sanitized) <= PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS:
+        return sanitized
+
+    head_chars = PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS // 2
+    tail_chars = PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS - head_chars - 80
+    return (
+        sanitized[:head_chars].rstrip()
+        + "\n...<truncated malformed planning output>...\n"
+        + sanitized[-tail_chars:].lstrip()
+    )
 
 
 def _strip_repair_context_fields(value: Any) -> Any:
@@ -126,6 +153,14 @@ def _sanitize_malformed_repair_output(malformed_output: str) -> str:
 
 class PlanningRepairBudgetExceeded(RuntimeError):
     """Raised when the repair prompt exceeds the safe repair budget."""
+
+
+class PlanningRepairNoOutputTimeout(TimeoutError):
+    """Raised when a repair call produces no output before the no-output guard."""
+
+    def __init__(self, message: str, diagnostics: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.runtime_diagnostics = diagnostics or {}
 
 
 class PlannerService:
@@ -550,6 +585,63 @@ class PlannerService:
         return {key: sorted(set(value)) for key, value in issues.items() if value}
 
     @staticmethod
+    def describe_planning_contract_violations(
+        *,
+        output_text: str = "",
+        parse_success: Optional[bool] = None,
+        strategy_info: str = "",
+        plan_data: Any = None,
+        extracted_plan: Optional[List[Dict[str, Any]]] = None,
+        immediate_repair_issues: Optional[Dict[str, List[int]]] = None,
+    ) -> List[str]:
+        violations: List[str] = []
+        text = str(output_text or "").strip()
+        lowered = text.lower()
+        if parse_success is False:
+            if text.startswith("```") or "```json" in lowered:
+                violations.append("markdown-wrapped JSON")
+            elif text and not text.startswith(("[", "{")):
+                violations.append("non-JSON prose")
+            else:
+                violations.append(f"json_parse_failed: {strategy_info[:160]}")
+        if isinstance(plan_data, dict):
+            if any(
+                key in plan_data for key in ("payloads", "finalAssistantVisibleText")
+            ):
+                violations.append("OpenClaw wrapper fields instead of top-level plan")
+            elif "steps" in plan_data or "plan" in plan_data:
+                violations.append("object wrapper instead of top-level JSON array")
+            else:
+                violations.append("object instead of top-level JSON array")
+        if isinstance(plan_data, list) and not plan_data:
+            violations.append("empty JSON array")
+        for index, step in enumerate(extracted_plan or [], start=1):
+            if not isinstance(step, dict):
+                violations.append(f"non-object step at position {index}")
+                continue
+            missing = [key for key in PLANNING_STEP_REQUIRED_KEYS if key not in step]
+            extra = [
+                key for key in step.keys() if key not in PLANNING_STEP_REQUIRED_KEYS
+            ]
+            if missing:
+                violations.append(
+                    f"step {index} missing required keys: {', '.join(missing)}"
+                )
+            if extra:
+                violations.append(f"step {index} has extra keys: {', '.join(extra)}")
+        for issue_key, steps in (immediate_repair_issues or {}).items():
+            if not steps:
+                continue
+            label = {
+                "non_runnable_steps": "non-runnable pseudo-command",
+                "background_process_steps": "background process command",
+                "placeholder_only_steps": "placeholder-only implementation step",
+                "weak_verification_steps": "weak verification command",
+            }.get(issue_key, issue_key)
+            violations.append(f"{label} in steps {steps[:5]}")
+        return list(dict.fromkeys(violations))
+
+    @staticmethod
     def build_minimal_planning_prompt(
         task_description: str,
         project_dir: Path,
@@ -579,7 +671,7 @@ Rules:
 3. If a step will later need file-read or file-write tools, keep the planned path relative; the executor will expand it to an absolute path under {display_project_dir}
 4. Do not use absolute paths, .., or ~
 5. Return 3 to 6 small sequential steps
-6. Each step must include: step_number, description, commands, verification, rollback, expected_files
+6. Each step must include exactly these keys and no extra keys: step_number, description, commands, verification, rollback, expected_files
 7. `step_number` must be a unique integer and the sequence must be exactly 1, 2, 3...
 8. Do not omit keys and do not invent extra keys inside step objects
 9. `commands` must be an array of non-empty strings
@@ -598,6 +690,17 @@ Rules:
 22. For implementation steps that list expected_files, at least one command must materially write or edit file contents; do not use touch-only or placeholder-only steps
 23. For implementation-heavy steps, verification must prove behavior or content, not only file existence
 24. Prefer an inspect -> edit -> verify sequence grounded in the current workspace
+
+Invalid outputs:
+- Markdown fences around JSON
+- Prose before or after the JSON array
+- Objects like {{"steps": [...]}} instead of a top-level array
+- Fields such as payloads, text, finalAssistantVisibleText, notes, rationale, or status
+
+Valid minimal JSON example:
+{PLANNING_VALID_MINIMAL_JSON_EXAMPLE}
+
+Return only a JSON array matching this shape. No markdown. No prose.
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 
@@ -633,7 +736,7 @@ Requirements:
 4. No long inline source dumps, no absolute paths, no .., no ~
 5. For inline Python, prefer `python3 - <<'PY'` heredoc or a script file over `python3 -c`
 6. Avoid nested shell quoting in inline Python commands
-7. Each step must contain exactly these keys:
+7. Each step must contain exactly these keys and no extra keys:
    step_number, description, commands, verification, rollback, expected_files
 8. step_number values must be unique integers and exactly 1, 2, 3... in order
 9. commands must be a JSON array of non-empty strings
@@ -643,6 +746,17 @@ Requirements:
 13. If the workspace already has files, inspect or extend them before re-scaffolding
 14. For implementation steps with expected_files, include at least one command that writes real file content, not just mkdir/touch
 15. For implementation-heavy steps, use verification stronger than file-existence checks
+
+Invalid outputs:
+- Markdown fences around JSON
+- Prose before or after the JSON array
+- Objects like {{"steps": [...]}} instead of a top-level array
+- Fields such as payloads, text, finalAssistantVisibleText, notes, rationale, or status
+
+Valid minimal JSON example:
+{PLANNING_VALID_MINIMAL_JSON_EXAMPLE}
+
+Return only a JSON array matching this shape. No markdown. No prose.
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 
@@ -733,6 +847,7 @@ Requirements:
                 source_brain="local",
                 session_prefix="planning-repair",
                 isolate_workspace_context=True,
+                no_output_timeout_seconds=PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS,
             )
 
         return await runtime_service.execute_task(
@@ -740,6 +855,21 @@ Requirements:
             timeout_seconds=repair_timeout,
             reuse_task_session=False,
         )
+
+    @staticmethod
+    def _get_runtime_diagnostics(exc: Exception) -> Dict[str, Any]:
+        diagnostics = getattr(exc, "runtime_diagnostics", None)
+        return diagnostics if isinstance(diagnostics, dict) else {}
+
+    @classmethod
+    def _is_no_output_repair_timeout(cls, exc: Exception) -> bool:
+        diagnostics = cls._get_runtime_diagnostics(exc)
+        if diagnostics.get("no_output_timeout") is True:
+            return True
+        if diagnostics.get("timeout_boundary") == "repair_no_output":
+            return True
+        message = str(exc).lower()
+        return "no output" in message and "openclaw" in message
 
     @staticmethod
     def build_planning_repair_prompt(
@@ -758,59 +888,40 @@ Requirements:
         del workflow_profile
         del workflow_phases
         del workspace_has_existing_files
-        broken_output = _sanitize_malformed_repair_output(malformed_output)[
-            :PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS
-        ]
+        del knowledge_context
+        broken_output = _compact_invalid_output_excerpt(malformed_output)
         validation_error = ""
         if rejection_reasons:
             reason_lines = "\n".join(
-                f"- {reason[:300]}" for reason in rejection_reasons[:8]
+                f"- {reason[:180]}" for reason in rejection_reasons[:5]
             )
             validation_error = "Validation error:\n" f"{reason_lines}\n"
         validation_error = validation_error[:PLANNING_REPAIR_MAX_VALIDATION_ERROR_CHARS]
-        knowledge_block = _render_repair_knowledge_block(knowledge_context)
-        prompt_prefix = f"{knowledge_block}\n" if knowledge_block else ""
         default_validation_error = (
             "Validation error:\n- malformed or non-runnable planning output\n"
         )
-        prompt = f"""{prompt_prefix}Repair this malformed planning output into valid machine-runnable JSON.
+        prompt = f"""Repair this malformed planning output into valid machine-runnable JSON.
 
-Malformed planning output:
+Malformed output excerpt:
 {broken_output}
 
 {validation_error or default_validation_error}
 
-Required JSON schema:
-- Return a JSON array only
-- 3 to 8 sequential steps
-- Each step must include: step_number, description, commands, verification, rollback, expected_files
-- commands: array of shell strings
-- verification: one shell string or null
-- rollback: one shell string or null
-- expected_files: array of relative file paths
+Strict output schema:
+Return only a JSON array. Each step object must contain exactly:
+step_number, description, commands, verification, rollback, expected_files.
 
-Rules:
-1. Return a JSON array only
-2. Keep 3 to 8 sequential steps
-3. Each step must include: step_number, description, commands, verification, rollback, expected_files
-4. `commands` must be an array of strings
-5. `verification` must be one shell string or null
-6. `rollback` must be one shell string or null
-7. Use relative paths only in shell commands and expected_files
-8. If a step will later use file-read or file-write tools, keep that path relative here
-9. Do not use absolute paths, .., or ~
-10. Prefer `python3 - <<'PY'` heredoc or a script file over brittle `python3 -c` quoting
-11. Reject nested shell quoting patterns in inline Python commands
-12. Do not join separate shell commands with commas
-13. Do not use background processes, `&`, `nohup`, `disown`, or long-running dev servers
-14. Prefer short setup/edit commands over dumping full source files in planning output
-15. If the malformed output contains oversized inline file content, replace it with smaller setup/edit commands that preserve the same step intent
-16. expected_files must be a JSON array of relative file paths
-17. Never repeat workspace root segments inside a path, such as `frontend/src/frontend/src` or `backend/src/backend/src`
-18. Paths must be rooted exactly once from the project workspace
-19. For implementation steps with expected_files, include at least one command that writes or edits real file contents
-20. Do not return placeholder-only steps that only mkdir, touch, or create empty files
-21. For implementation-heavy steps, verification must prove behavior or content, not only file existence
+Repair rules:
+1. Use 3 to 6 sequential steps, numbered 1..N.
+2. commands must be an array of short shell strings.
+3. verification and rollback must each be one shell string or null.
+4. expected_files must be an array of relative paths.
+5. Use relative paths only; no absolute paths, .., ~, or duplicated roots like frontend/src/frontend/src or backend/src/backend/src. Paths must be rooted exactly once from the project workspace.
+6. No background processes, &, nohup, disown, dev servers, or long-running commands.
+7. No prose, markdown, payloads, logs, session history, or extra JSON keys.
+8. Replace oversized inline source dumps with short setup/edit commands.
+9. Implementation steps with expected_files must write or edit real file contents.
+10. Verification must prove behavior or content, not only file existence.
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 
@@ -958,6 +1069,7 @@ Rules:
         session_id: Optional[int] = None,
         task_id: Optional[int] = None,
     ) -> Dict[str, Any]:
+        repair_build_started_at = time.monotonic()
         logger.warning(
             "[ORCHESTRATION] Planning output was malformed but salvageable; "
             f"attempting repair ({reason})"
@@ -975,33 +1087,32 @@ Rules:
             knowledge_context=knowledge_context,
         )
         validation_error_chars = sum(
-            len(str(reason_text or "")[:300])
-            for reason_text in (rejection_reasons or [])[:8]
+            len(str(reason_text or "")[:180])
+            for reason_text in (rejection_reasons or [])[:5]
         )
         knowledge_context_chars = len(_render_repair_knowledge_block(knowledge_context))
+        compact_malformed_output_chars = len(
+            _compact_invalid_output_excerpt(malformed_output)
+        )
+        repair_prompt_build_seconds = time.monotonic() - repair_build_started_at
         logger.warning(
             "[ORCHESTRATION] session_id=%s task_id=%s repair_prompt_chars=%s "
             "malformed_output_chars=%s validation_error_chars=%s knowledge_context_chars=%s "
-            "includes_project_context=false includes_non_project_context=false",
+            "includes_project_context=false includes_non_project_context=false "
+            "repair_reason=%s repair_prompt_build_seconds=%.3f repair_attempts=1",
             session_id,
             task_id,
             len(repair_prompt),
-            len(
-                _sanitize_malformed_repair_output(malformed_output)[
-                    :PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS
-                ]
-            ),
+            compact_malformed_output_chars,
             validation_error_chars,
             knowledge_context_chars,
+            reason[:120],
+            repair_prompt_build_seconds,
         )
         if len(repair_prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS:
             budget_error = cls._build_repair_prompt_budget_error(
                 repair_prompt_chars=len(repair_prompt),
-                malformed_output_chars=len(
-                    _sanitize_malformed_repair_output(malformed_output)[
-                        :PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS
-                    ]
-                ),
+                malformed_output_chars=compact_malformed_output_chars,
                 validation_error_chars=validation_error_chars,
                 knowledge_context_chars=knowledge_context_chars,
             )
@@ -1020,13 +1131,13 @@ Rules:
                     "phase": "planning",
                     "reason": "planning_repair_prompt_too_large",
                     "repair_prompt_chars": len(repair_prompt),
-                    "malformed_output_chars": len(
-                        _sanitize_malformed_repair_output(malformed_output)[
-                            :PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS
-                        ]
-                    ),
+                    "malformed_output_chars": compact_malformed_output_chars,
                     "validation_error_chars": validation_error_chars,
                     "knowledge_context_chars": knowledge_context_chars,
+                    "repair_prompt_build_seconds": round(
+                        repair_prompt_build_seconds, 3
+                    ),
+                    "repair_attempts": 0,
                 },
             )
             raise PlanningRepairBudgetExceeded(budget_error)
@@ -1041,6 +1152,10 @@ Rules:
                 "retry": "repair_prompt",
                 "reason": reason[:240],
                 "timeout_seconds": repair_timeout,
+                "repair_prompt_chars": len(repair_prompt),
+                "malformed_output_chars": compact_malformed_output_chars,
+                "repair_prompt_build_seconds": round(repair_prompt_build_seconds, 3),
+                "repair_attempts": 1,
             },
         )
         emit_live(
@@ -1054,9 +1169,14 @@ Rules:
                 "attempt": "repair",
                 "strategy": "repair_prompt",
                 "timeout_seconds": repair_timeout,
+                "repair_prompt_chars": len(repair_prompt),
+                "malformed_output_chars": compact_malformed_output_chars,
+                "repair_prompt_build_seconds": round(repair_prompt_build_seconds, 3),
+                "repair_attempts": 1,
             },
         )
         repair_started_at = time.monotonic()
+        invoke_started_at = repair_started_at
         try:
             result = asyncio.run(
                 asyncio.wait_for(
@@ -1069,6 +1189,12 @@ Rules:
                 )
             )
             repair_duration_seconds = time.monotonic() - repair_started_at
+            parser_started_at = time.monotonic()
+            repair_output_text = str(result.get("output") or "")
+            repair_output_chars = len(repair_output_text)
+            repair_output_token_estimate = max(0, (repair_output_chars + 3) // 4)
+            repair_truncated = "...<truncated" in repair_output_text.lower()
+            parser_validation_seconds = time.monotonic() - parser_started_at
             if repair_duration_seconds > repair_timeout:
                 raise TimeoutError(
                     f"Planning repair timed out after {repair_timeout:g}s "
@@ -1076,11 +1202,16 @@ Rules:
                 )
             logger.info(
                 "[ORCHESTRATION] Planning repair completed in %.2fs "
-                "(timeout=%ss session_id=%s task_id=%s)",
+                "(timeout=%ss session_id=%s task_id=%s output_chars=%s "
+                "output_token_estimate=%s truncated=%s parser_validation_seconds=%.3f)",
                 repair_duration_seconds,
                 repair_timeout,
                 session_id,
                 task_id,
+                repair_output_chars,
+                repair_output_token_estimate,
+                repair_truncated,
+                parser_validation_seconds,
             )
             emit_live(
                 "INFO",
@@ -1094,11 +1225,83 @@ Rules:
                     "strategy": "repair_prompt",
                     "timeout_seconds": repair_timeout,
                     "duration_seconds": round(repair_duration_seconds, 3),
+                    "openclaw_request_seconds": round(
+                        repair_duration_seconds - parser_validation_seconds,
+                        3,
+                    ),
+                    "repair_prompt_build_seconds": round(
+                        repair_prompt_build_seconds, 3
+                    ),
+                    "parser_validation_seconds": round(parser_validation_seconds, 3),
+                    "repair_output_chars": repair_output_chars,
+                    "repair_output_token_estimate": repair_output_token_estimate,
+                    "repair_output_truncated": repair_truncated,
+                    "repair_attempts": 1,
                 },
             )
             return result
         except Exception as exc:
             repair_duration_seconds = time.monotonic() - repair_started_at
+            openclaw_request_seconds = time.monotonic() - invoke_started_at
+            if cls._is_no_output_repair_timeout(exc):
+                diagnostics = cls._get_runtime_diagnostics(exc)
+                timeout_exc = PlanningRepairNoOutputTimeout(
+                    (
+                        "Planning repair produced no output before "
+                        f"{PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS:g}s "
+                        f"(duration={repair_duration_seconds:.2f}s)"
+                    ),
+                    diagnostics,
+                )
+                logger.warning(
+                    "[ORCHESTRATION] Planning repair produced no output before %.2fs; "
+                    "stopping instead of retrying repair "
+                    "(first_output_after=%s stdout_chars=%s stderr_chars=%s "
+                    "return_code=%s cancelled=%s timeout_boundary=%s "
+                    "repair_prompt_chars=%s malformed_output_chars=%s reason=%s)",
+                    repair_duration_seconds,
+                    diagnostics.get("first_output_after_seconds"),
+                    diagnostics.get("stdout_chars", 0),
+                    diagnostics.get("stderr_chars", 0),
+                    diagnostics.get("return_code"),
+                    diagnostics.get("cancelled"),
+                    diagnostics.get("timeout_boundary") or "repair_no_output",
+                    len(repair_prompt),
+                    compact_malformed_output_chars,
+                    reason[:120],
+                )
+                emit_live(
+                    "ERROR",
+                    (
+                        "[ORCHESTRATION] Repair prompt was built, but OpenClaw "
+                        "produced no output before timeout."
+                    ),
+                    metadata={
+                        "phase": "planning",
+                        "reason": "planning_repair_no_output_timeout",
+                        "timeout_seconds": PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS,
+                        "duration_seconds": round(repair_duration_seconds, 3),
+                        "repair_prompt_build_seconds": round(
+                            repair_prompt_build_seconds, 3
+                        ),
+                        "openclaw_request_seconds": round(openclaw_request_seconds, 3),
+                        "repair_prompt_chars": len(repair_prompt),
+                        "malformed_output_chars": compact_malformed_output_chars,
+                        "repair_reason": reason[:240],
+                        "repair_attempts": 1,
+                        "first_output_delay": diagnostics.get(
+                            "first_output_after_seconds"
+                        ),
+                        "stdout_chars": diagnostics.get("stdout_chars", 0),
+                        "stderr_chars": diagnostics.get("stderr_chars", 0),
+                        "return_code": diagnostics.get("return_code"),
+                        "cancelled": diagnostics.get("cancelled"),
+                        "timeout_boundary": diagnostics.get("timeout_boundary")
+                        or "repair_no_output",
+                        "parser_validation_seconds": None,
+                    },
+                )
+                raise timeout_exc from exc
             if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
                 timeout_exc = TimeoutError(
                     f"Planning repair timed out after {repair_timeout:g}s "
@@ -1106,24 +1309,65 @@ Rules:
                 )
                 logger.warning(
                     "[ORCHESTRATION] Planning repair prompt timed out after %.2fs; "
-                    "stopping instead of retrying repair",
+                    "stopping instead of retrying repair "
+                    "(repair_prompt_chars=%s malformed_output_chars=%s reason=%s "
+                    "repair_prompt_build_seconds=%.3f openclaw_request_seconds=%.3f "
+                    "repair_attempts=1 timeout_seconds=%s)",
                     repair_duration_seconds,
+                    len(repair_prompt),
+                    compact_malformed_output_chars,
+                    reason[:120],
+                    repair_prompt_build_seconds,
+                    openclaw_request_seconds,
+                    repair_timeout,
+                )
+                emit_live(
+                    "ERROR",
+                    "[ORCHESTRATION] Planning repair diagnostics captured timeout boundary",
+                    metadata={
+                        "phase": "planning",
+                        "reason": "malformed_planning_output_repair_timeout",
+                        "timeout_seconds": repair_timeout,
+                        "duration_seconds": round(repair_duration_seconds, 3),
+                        "repair_prompt_build_seconds": round(
+                            repair_prompt_build_seconds, 3
+                        ),
+                        "openclaw_request_seconds": round(openclaw_request_seconds, 3),
+                        "repair_prompt_chars": len(repair_prompt),
+                        "malformed_output_chars": compact_malformed_output_chars,
+                        "repair_reason": reason[:240],
+                        "repair_attempts": 1,
+                        "timeout_boundary": "planner_wait_for",
+                    },
                 )
                 raise timeout_exc from exc
             if cls._looks_like_timeout_error(exc):
                 logger.warning(
                     "[ORCHESTRATION] Planning repair prompt timed out after %.2fs; "
-                    "stopping instead of retrying repair",
+                    "stopping instead of retrying repair "
+                    "(repair_prompt_chars=%s malformed_output_chars=%s reason=%s "
+                    "repair_prompt_build_seconds=%.3f openclaw_request_seconds=%.3f "
+                    "repair_attempts=1 timeout_seconds=%s)",
                     repair_duration_seconds,
+                    len(repair_prompt),
+                    compact_malformed_output_chars,
+                    reason[:120],
+                    repair_prompt_build_seconds,
+                    openclaw_request_seconds,
+                    repair_timeout,
                 )
             else:
                 logger.warning(
                     "[ORCHESTRATION] Planning repair failed after %.2fs "
-                    "(timeout=%ss session_id=%s task_id=%s): %s",
+                    "(timeout=%ss session_id=%s task_id=%s "
+                    "repair_prompt_build_seconds=%.3f openclaw_request_seconds=%.3f "
+                    "repair_attempts=1): %s",
                     repair_duration_seconds,
                     repair_timeout,
                     session_id,
                     task_id,
+                    repair_prompt_build_seconds,
+                    openclaw_request_seconds,
                     exc,
                 )
             raise

@@ -15,7 +15,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 try:
-    from app.services.orchestration.validator import ValidatorService as _ValidatorService
+    from app.services.orchestration.validator import (
+        ValidatorService as _ValidatorService,
+    )
 except Exception:
     _ValidatorService = None
 
@@ -53,7 +55,14 @@ def _lite_infer_phase(step: dict) -> str | None:
     )
     has_backend_markers = any(
         marker in text
-        for marker in ("backend", "fastapi", "requirements.txt", "pip install", "app/main.py", "pytest")
+        for marker in (
+            "backend",
+            "fastapi",
+            "requirements.txt",
+            "pip install",
+            "app/main.py",
+            "pytest",
+        )
     )
     if any(
         marker in text

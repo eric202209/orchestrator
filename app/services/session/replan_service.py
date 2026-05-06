@@ -23,6 +23,7 @@ from app.models import (
     Project,
     Session as SessionModel,
     Task,
+    TaskExecution,
     SessionTask,
     TaskStatus,
 )
@@ -129,6 +130,22 @@ def _build_fallback_summary(db: DBSession, session_id: int) -> str:
     return "\n".join(parts)[:_SUMMARY_CHAR_LIMIT]
 
 
+def _latest_failed_task_execution(
+    db: DBSession, session_id: int
+) -> TaskExecution | None:
+    return (
+        db.query(TaskExecution)
+        .filter(
+            TaskExecution.session_id == session_id,
+            TaskExecution.status == TaskStatus.FAILED,
+        )
+        .order_by(
+            TaskExecution.completed_at.desc().nullslast(), TaskExecution.id.desc()
+        )
+        .first()
+    )
+
+
 def _generate_summary_via_llm(db: DBSession, session_id: int) -> Optional[str]:
     """Call the LLM to produce a compact failure summary. Returns None on failure."""
     try:
@@ -178,10 +195,13 @@ def _generate_summary_via_llm(db: DBSession, session_id: int) -> Optional[str]:
             f"## Error Logs\n{log_block}"
         )
 
+        task_execution = _latest_failed_task_execution(db, session_id)
         result = invoke_runtime_prompt(
             db,
             prompt,
             session_id=session_id,
+            task_id=task_execution.task_id if task_execution else None,
+            task_execution_id=task_execution.id if task_execution else None,
             timeout_seconds=60,
             session_prefix="failure_summary",
         )

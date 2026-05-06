@@ -52,8 +52,16 @@ class OpenAIResponsesRuntime:
         return self.response_session_key
 
     async def execute_task(
-        self, prompt: str, timeout_seconds: int = 300, log_callback: Any = None
+        self,
+        prompt: str,
+        timeout_seconds: int = 300,
+        log_callback: Any = None,
+        *,
+        diagnostic_label: Optional[str] = None,
+        diagnostic_metadata: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
+        del diagnostic_label
+        del diagnostic_metadata
         return await self.invoke_prompt(
             prompt,
             timeout_seconds=timeout_seconds,
@@ -69,8 +77,10 @@ class OpenAIResponsesRuntime:
         source_brain: str = "local",
         session_prefix: str = "planning",
         isolate_workspace_context: bool = False,
+        no_output_timeout_seconds: Optional[int] = None,
     ) -> dict[str, Any]:
         del isolate_workspace_context
+        del no_output_timeout_seconds
         api_key = (settings.OPENAI_API_KEY or "").strip()
         if not api_key:
             raise AgentRuntimeError(

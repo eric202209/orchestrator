@@ -36,6 +36,7 @@ from app.services.knowledge.knowledge_service import KnowledgeService
 # Frontmatter parsing
 # ---------------------------------------------------------------------------
 
+
 def _parse_markdown(text: str) -> tuple[dict, str]:
     """Return (frontmatter_dict, body) from a markdown string.
 
@@ -47,7 +48,7 @@ def _parse_markdown(text: str) -> tuple[dict, str]:
     if end == -1:
         return {}, text
     fm_block = text[3:end].strip()
-    body = text[end + 4:].strip()
+    body = text[end + 4 :].strip()
     try:
         fm = yaml.safe_load(fm_block) or {}
     except yaml.YAMLError as exc:
@@ -63,6 +64,7 @@ def _sha256(content: str) -> str:
 # ---------------------------------------------------------------------------
 # File discovery
 # ---------------------------------------------------------------------------
+
 
 def _collect_files(source_dir: Path) -> list[Path]:
     files: list[Path] = []
@@ -90,13 +92,16 @@ def _collect_files(source_dir: Path) -> list[Path]:
 # Per-file processing
 # ---------------------------------------------------------------------------
 
+
 def _process_markdown(path: Path, source_dir: Path) -> Optional[dict]:
     text = path.read_text(encoding="utf-8")
     fm, body = _parse_markdown(text)
 
     knowledge_type = fm.get("type")
     if not knowledge_type:
-        warnings.warn(f"SKIP {path.relative_to(source_dir)}: missing 'type' in frontmatter")
+        warnings.warn(
+            f"SKIP {path.relative_to(source_dir)}: missing 'type' in frontmatter"
+        )
         return None
 
     applies_to = fm.get("applies_to")
@@ -149,6 +154,7 @@ def _process_json(path: Path, source_dir: Path) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def run(source_dir: Path, db_url: str, qdrant_url: str) -> None:
     svc = KnowledgeService(
