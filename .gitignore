@@ -13,6 +13,7 @@ dist/
 build/
 .black
 .pytest_cache/
+pytest.ini
 .mypy_cache/
 .git/
 htmlcov/

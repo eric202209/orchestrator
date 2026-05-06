@@ -76,6 +76,25 @@ def build_task_subfolder_name(title: str, task_id: int) -> str:
     return f"task-{slug}" if slug else f"task-{task_id}"
 
 
+def _resolve_task_workspace_path(project_workspace: Path, task_subfolder: str) -> Path:
+    """Resolve a task workspace and reject subfolders outside the project."""
+    project_root = project_workspace.resolve()
+    task_workspace = (project_root / task_subfolder).resolve()
+    try:
+        task_workspace.relative_to(project_root)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Task subfolder must stay within the project workspace",
+        ) from exc
+    if task_workspace == project_root:
+        raise HTTPException(
+            status_code=400,
+            detail="Task subfolder must stay within the project workspace",
+        )
+    return task_workspace
+
+
 def prepare_task_for_fresh_execution(
     task: Task, clear_saved_plan: bool = False
 ) -> None:
@@ -164,13 +183,13 @@ def ensure_task_workspace(
         task_id=task.id,
     )
 
-    if project.workspace_path:
-        workspace_path = str(
-            resolve_project_workspace_path(project.workspace_path, project.name)
-        )
-        orchestration_state._workspace_path_override = workspace_path
+    project_workspace_path = Path(
+        resolve_project_workspace_path(project.workspace_path, project.name)
+    )
+    orchestration_state._workspace_path_override = str(project_workspace_path)
 
     if task.task_subfolder:
+        _resolve_task_workspace_path(project_workspace_path, task.task_subfolder)
         orchestration_state._task_subfolder_override = task.task_subfolder
     else:
         base_subfolder = build_task_subfolder_name(task.title, task.id)
@@ -193,6 +212,7 @@ def ensure_task_workspace(
             suffix += 1
 
         task.task_subfolder = candidate
+        _resolve_task_workspace_path(project_workspace_path, candidate)
         orchestration_state._task_subfolder_override = candidate
         db.flush()
 
@@ -203,12 +223,12 @@ def ensure_task_workspace(
         task.description,
     )
     if runs_in_canonical_workspace:
-        workspace_path = Path(
-            resolve_project_workspace_path(project.workspace_path, project.name)
-        )
+        workspace_path = project_workspace_path
         orchestration_state._project_dir_override = str(workspace_path)
     else:
-        workspace_path = Path(orchestration_state.project_dir)
+        workspace_path = _resolve_task_workspace_path(
+            project_workspace_path, task.task_subfolder
+        )
     workspace_path.mkdir(parents=True, exist_ok=True)
 
     return {

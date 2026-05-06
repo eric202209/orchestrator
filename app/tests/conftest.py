@@ -17,6 +17,83 @@ from app.models import Base, User
 from app.services.auth_rate_limit import clear_auth_rate_limits
 
 
+SEMANTIC_TEST_MODULES = {
+    "test_orchestration_replay_fixtures.py",
+    "test_policy_simulation_regressions.py",
+}
+
+SLOW_TEST_NODEIDS = {
+    "test_admin_diagnostics.py::test_diagnostics_endpoint_returns_expected_shape",
+    "test_admin_diagnostics.py::test_diagnostics_backends_list_includes_registered_providers",
+    "test_admin_diagnostics.py::test_diagnostics_overall_status_is_valid_string",
+    "test_admin_diagnostics.py::test_diagnostics_queue_shape",
+    "test_admin_diagnostics.py::test_diagnostics_streaming_shape",
+    "test_admin_diagnostics.py::test_diagnostics_streaming_recent_errors_are_reported",
+    "test_admin_diagnostics.py::test_diagnostics_sessions_shape",
+    "test_admin_diagnostics.py::test_diagnostics_recent_audit_events_only_returns_structured",
+    "test_planning_knowledge_logging.py::test_malformed_planning_output_repair_timeout_does_not_leave_session_running",
+    "test_planning_knowledge_logging.py::test_planning_repair_timeout_records_failure_knowledge",
+    "test_planning_knowledge_logging.py::test_oversized_planning_repair_prompt_skips_repair_and_records_failure_knowledge",
+}
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "unit: fast pure logic tests")
+    config.addinivalue_line(
+        "markers", "integration: database/API/service integration tests"
+    )
+    config.addinivalue_line("markers", "semantic: replay/policy golden contract tests")
+    config.addinivalue_line("markers", "live: requires running backend/worker/OpenClaw")
+    config.addinivalue_line("markers", "slow: long-running tests")
+
+
+INTEGRATION_TEST_MODULE_KEYWORDS = (
+    "_api",
+    "_endpoint",
+    "_endpoints",
+    "admin_diagnostics",
+    "canonical_workspace",
+    "execution_reliability",
+    "github",
+    "knowledge_service",
+    "knowledge_usage",
+    "langfuse",
+    "operator_controls",
+    "orchestration_without_langfuse",
+    "phase6a_runtime",
+    "planner_recovery",
+    "planning_background",
+    "planning_knowledge",
+    "planning_sessions",
+    "project_tasks",
+    "replan_flow",
+    "schema_migrations",
+    "security",
+    "session_auth",
+    "session_execution_service",
+    "session_lifecycle",
+    "stopped_session",
+    "task_execution_transaction",
+    "workspace_restore",
+)
+
+
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        module_name = item.path.name
+        module_nodeid = f"{module_name}::{item.name}"
+        if module_nodeid in SLOW_TEST_NODEIDS:
+            item.add_marker(pytest.mark.slow)
+        if module_name in SEMANTIC_TEST_MODULES:
+            item.add_marker(pytest.mark.semantic)
+        elif any(
+            keyword in module_name for keyword in INTEGRATION_TEST_MODULE_KEYWORDS
+        ):
+            item.add_marker(pytest.mark.integration)
+        else:
+            item.add_marker(pytest.mark.unit)
+
+
 @pytest.fixture(autouse=True)
 def reset_runtime_flags():
     original_force_inline = settings.ORCHESTRATOR_FORCE_INLINE_PLANNING
