@@ -148,13 +148,17 @@ def _get_session_intervention_or_404(
 def create_session(
     session: SessionCreate,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_active_user),
 ):
     """Create a new orchestration session."""
     # Verify project exists
     from app.models import Project
 
-    project = db.query(Project).filter(Project.id == session.project_id).first()
+    project = (
+        db.query(Project)
+        .filter(Project.id == session.project_id, Project.deleted_at.is_(None))
+        .first()
+    )
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
