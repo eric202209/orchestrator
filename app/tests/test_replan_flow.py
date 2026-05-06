@@ -36,6 +36,15 @@ _LLM_PATH = "app.services.session.replan_service._generate_summary_via_llm"
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def isolated_workspace_root(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENCLAW_WORKSPACE", str(tmp_path / "projects"))
+    monkeypatch.setattr(
+        "app.services.planning.planning_session_service.PlanningSessionService.schedule_processing",
+        lambda self, session_id: None,
+    )
+
+
 @pytest.fixture()
 def project(db_session: Session) -> Project:
     p = Project(name="replan-project", workspace_path=None)

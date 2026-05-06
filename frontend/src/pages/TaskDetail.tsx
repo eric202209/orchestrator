@@ -115,11 +115,14 @@ function TaskDetail() {
     }
   };
 
-  const handleRerun = async () => {
+  const handleRerun = async (isolated = false) => {
     if (!task || task.status === 'running') return;
     try {
       setSaveError(null);
-      await tasksAPI.retry(task.id);
+      await tasksAPI.retry(
+        task.id,
+        isolated ? { execution_scope: 'new_session', create_new_session: true } : undefined
+      );
       await fetchTask();
     } catch (error) {
       console.error('Failed to rerun task:', error);
@@ -373,9 +376,16 @@ function TaskDetail() {
               )}
               <div className="mt-4 flex flex-wrap gap-2">
                 {task.status !== 'running' && (
-                  <Button size="sm" variant="outline" onClick={handleRerun}>
-                    {task.status === 'done' ? 'Run Again' : 'Run Task'}
-                  </Button>
+                  <>
+                    <Button size="sm" variant="outline" onClick={() => handleRerun()}>
+                      {task.status === 'done'
+                        ? 'Run again in workflow session'
+                        : 'Run in workflow session'}
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => handleRerun(true)}>
+                      Run in new isolated session
+                    </Button>
+                  </>
                 )}
                 {task.status === 'done' && task.task_subfolder && task.workspace_status !== 'promoted' && (
                   <Button size="sm" onClick={handlePromote}>
@@ -408,7 +418,7 @@ function TaskDetail() {
                 <p className="text-slate-400 text-sm">{task.project_id || 'N/A'}</p>
               </div>
               <div>
-                <h3 className="text-sm font-medium text-slate-300 mb-1">Linked Session ID</h3>
+                <h3 className="text-sm font-medium text-slate-300 mb-1">Latest execution session</h3>
                 <p className="text-slate-400 text-sm">{task.session_id || 'N/A'}</p>
               </div>
               <div>
