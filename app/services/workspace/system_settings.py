@@ -5,6 +5,7 @@ import secrets
 from pathlib import Path
 from typing import Optional
 
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.database import get_db_session
@@ -18,10 +19,19 @@ ADAPTATION_PROFILE_KEY = "orchestrator_adaptation_profile"
 ORCHESTRATION_POLICY_PROFILE_KEY = "orchestration_policy_profile"
 
 
+def _is_missing_system_settings_table(exc: OperationalError) -> bool:
+    return "system_settings" in str(exc).lower() and "no such table" in str(exc).lower()
+
+
 def get_setting_value(
     db: Session, key: str, default: Optional[str] = None
 ) -> Optional[str]:
-    record = db.query(SystemSetting).filter(SystemSetting.key == key).first()
+    try:
+        record = db.query(SystemSetting).filter(SystemSetting.key == key).first()
+    except OperationalError as exc:
+        if not _is_missing_system_settings_table(exc):
+            raise
+        return default
     if not record or record.value in {None, ""}:
         return default
     return record.value

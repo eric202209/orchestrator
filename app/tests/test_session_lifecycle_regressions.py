@@ -18,6 +18,7 @@ from app.models import (
     Session as SessionModel,
     SessionTask,
     Task,
+    TaskExecution,
     TaskStatus,
 )
 from app.services.session.session_lifecycle_service import (
@@ -1064,6 +1065,12 @@ def test_resume_rotates_session_instance_id_before_checkpoint_resume(
     assert (
         captured["delay_kwargs"]["expected_session_instance_id"] == session.instance_id
     )
+    task_execution = db_session.query(TaskExecution).one()
+    assert captured["delay_kwargs"]["task_execution_id"] == task_execution.id
+    assert task_execution.session_id == session.id
+    assert task_execution.task_id == task.id
+    assert task_execution.attempt_number == 1
+    assert task_execution.status == TaskStatus.PENDING
 
 
 def test_resume_requested_checkpoint_does_not_silently_switch_to_fallback(

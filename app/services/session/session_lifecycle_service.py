@@ -557,6 +557,7 @@ def _maybe_resume_manual_session_work(
     *,
     session: SessionModel,
     session_instance_id: str,
+    allow_checkpoint_resume: bool = True,
 ) -> list[dict[str, Any]]:
     """For manual-mode restart, continue the last selected task when possible."""
 
@@ -598,7 +599,7 @@ def _maybe_resume_manual_session_work(
         resumed_at=datetime.now(timezone.utc),
     )
 
-    if resume_has_progress and resolved_checkpoint_name:
+    if allow_checkpoint_resume and resume_has_progress and resolved_checkpoint_name:
         prompt = task.description or task.title
         task_execution = create_task_execution(
             db,
@@ -839,6 +840,7 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                     db,
                     session=session,
                     session_instance_id=session_instance_id,
+                    allow_checkpoint_resume=not recovered_orphaned_run,
                 )
                 session.status = "running"
                 session.is_active = True
@@ -1353,6 +1355,11 @@ async def resume_session_lifecycle(
         resume_has_progress = _checkpoint_has_execution_progress(checkpoint_data)
 
         if resume_has_progress:
+            task_execution = create_task_execution(
+                db,
+                session_id=session_id,
+                task_id=task.id,
+            )
             result = execute_orchestration_task.delay(
                 session_id=session_id,
                 task_id=task.id,
@@ -1360,8 +1367,10 @@ async def resume_session_lifecycle(
                 timeout_seconds=DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
                 resume_checkpoint_name=resolved_checkpoint_name,
                 expected_session_instance_id=session.instance_id,
+                task_execution_id=task_execution.id,
             )
             dispatch_mode = "checkpoint_resume"
+            task_execution_id = task_execution.id
         else:
             queued = queue_task_for_session(
                 db=db,
@@ -1375,6 +1384,7 @@ async def resume_session_lifecycle(
 
             result = _QueuedResult()
             dispatch_mode = "fresh_requeue"
+            task_execution_id = queued.get("task_execution_id")
 
         session.status = "running"
         session.is_active = True
@@ -1384,6 +1394,7 @@ async def resume_session_lifecycle(
         db.add(
             LogEntry(
                 session_id=session_id,
+                task_execution_id=task_execution_id,
                 level="INFO",
                 message=(
                     f"Session resumed: {session.name}"
@@ -1406,6 +1417,7 @@ async def resume_session_lifecycle(
                         "checkpoint_name": resolved_checkpoint_name,
                         "resolved_checkpoint_name": resolved_checkpoint_name,
                         "celery_task_id": result.id,
+                        "task_execution_id": task_execution_id,
                         "task_id": task.id,
                         "restore_fidelity": restore_fidelity,
                         "dispatch_mode": dispatch_mode,

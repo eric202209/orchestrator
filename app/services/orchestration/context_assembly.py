@@ -36,6 +36,17 @@ class OrchestrationContext(Protocol):
     workflow_profile: str
 
 
+OrchestrationContext.__protocol_attrs__ = frozenset(
+    {
+        "orchestration_state",
+        "db",
+        "execution_profile",
+        "prompt",
+        "workflow_profile",
+    }
+)
+
+
 @dataclass
 class DebugPromptInputs:
     """All step-level inputs needed to assemble a debugging prompt."""
