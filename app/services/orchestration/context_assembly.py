@@ -8,7 +8,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
-from typing import Protocol, runtime_checkable
+
+from typing_extensions import Protocol, runtime_checkable
 
 from app.services.model_adaptation import render_prompt_for_profile
 from app.services.model_adaptation.schemas import PromptEnvelope
