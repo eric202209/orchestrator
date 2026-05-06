@@ -82,13 +82,17 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Run replay and simulation semantic contracts
+    - name: Run fast backend tests
       run: |
-        PYTHONPATH=. python -m pytest app/tests/test_orchestration_replay_fixtures.py app/tests/test_policy_simulation_regressions.py -v
+        PYTHONPATH=. python -m pytest app/tests/ -m "unit and not semantic and not slow and not live" -v
 
-    - name: Run tests
+    - name: Run replay and policy semantic contracts
       run: |
-        PYTHONPATH=. python -m pytest app/tests/ -v --cov=app --cov-report=xml
+        PYTHONPATH=. python -m pytest app/tests/ -m "semantic and not live" -v
+
+    - name: Run full backend tests
+      run: |
+        PYTHONPATH=. python -m pytest app/tests/ -m "not live" -v --cov=app --cov-report=xml
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v3
@@ -114,6 +118,16 @@ jobs:
       run: |
         cd frontend
         npm install --legacy-peer-deps
+
+    - name: Run type check
+      run: |
+        cd frontend
+        npm run type-check
+
+    - name: Run build
+      run: |
+        cd frontend
+        npm run build
 
     - name: Run tests
       run: |

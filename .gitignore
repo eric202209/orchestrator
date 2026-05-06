@@ -13,7 +13,6 @@ dist/
 build/
 .black
 .pytest_cache/
-pytest.ini
 .mypy_cache/
 .git/
 htmlcov/
@@ -85,7 +84,7 @@ data/qdrant/
 *.qdrant-initialized
 
 # Documentation
-docs/
+docs/*
 
 # Scripts to stop services (should be run locally)
 stop_all.sh

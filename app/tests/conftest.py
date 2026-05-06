@@ -18,8 +18,13 @@ from app.services.auth_rate_limit import clear_auth_rate_limits
 
 
 SEMANTIC_TEST_MODULES = {
+    "test_decision_timeline_endpoint.py",
+    "test_orchestration_event_journal.py",
+    "test_orchestration_replay.py",
     "test_orchestration_replay_fixtures.py",
     "test_policy_simulation_regressions.py",
+    "test_session_events_endpoint.py",
+    "test_session_replay_endpoint.py",
 }
 
 SLOW_TEST_NODEIDS = {
@@ -38,13 +43,9 @@ SLOW_TEST_NODEIDS = {
 
 
 def pytest_configure(config):
-    config.addinivalue_line("markers", "unit: fast pure logic tests")
-    config.addinivalue_line(
-        "markers", "integration: database/API/service integration tests"
-    )
-    config.addinivalue_line("markers", "semantic: replay/policy golden contract tests")
-    config.addinivalue_line("markers", "live: requires running backend/worker/OpenClaw")
-    config.addinivalue_line("markers", "slow: long-running tests")
+    # Marker definitions live in pytest.ini so CI, local pytest, and future
+    # Codex sessions share one visible test-tier contract.
+    return None
 
 
 INTEGRATION_TEST_MODULE_KEYWORDS = (
