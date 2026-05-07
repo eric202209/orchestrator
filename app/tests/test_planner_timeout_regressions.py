@@ -9,6 +9,7 @@ import pytest
 from app.models import TaskStatus
 from app.services.orchestration.phases.planning_flow import (
     _compress_project_context_for_planning,
+    _emit_planning_diagnostics_contract_violation,
     _should_repair_truncated_single_step_plan,
     execute_planning_phase,
 )
@@ -49,7 +50,7 @@ def _valid_three_step_plan():
             "step_number": 2,
             "description": "Update planner timeout handling",
             "commands": ["printf 'ok\\n' > planner_timeout_marker.txt"],
-            "verification": "test -s planner_timeout_marker.txt",
+            "verification": "python3 - <<'PY'\nfrom pathlib import Path\nassert Path('planner_timeout_marker.txt').read_text() == 'ok\\n'\nPY",
             "rollback": "rm -f planner_timeout_marker.txt",
             "expected_files": ["planner_timeout_marker.txt"],
         },
@@ -120,8 +121,8 @@ def test_true_inspection_task_still_starts_minimal_first():
 def test_planning_fallback_timeouts_are_relaxed_for_local_models():
     assert MINIMAL_PLANNING_TIMEOUT_SECONDS == 300
     assert STRICT_JSON_RETRY_TIMEOUT_SECONDS == 120
-    assert PLANNING_REPAIR_TIMEOUT_SECONDS == 90
-    assert PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS == 30
+    assert PLANNING_REPAIR_TIMEOUT_SECONDS == 240
+    assert PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS == 200
     assert ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS == 240
 
 
@@ -218,13 +219,15 @@ def test_large_planning_context_is_compressed_before_first_attempt():
     assert "Very long planning context" in compressed
 
 
-def test_planner_allows_write_pseudo_commands_but_flags_background_commands():
+def test_planner_rejects_pseudo_commands_and_flags_background_commands():
     issues = PlannerService.find_immediate_repair_step_issues(
         [
             {
                 "step_number": 1,
                 "description": "Write file",
                 "commands": ["write frontend/src/App.tsx: render root shell"],
+                "verification": "python3 -m py_compile frontend/src/App.tsx",
+                "expected_files": ["frontend/src/App.tsx"],
             },
             {
                 "step_number": 2,
@@ -235,6 +238,7 @@ def test_planner_allows_write_pseudo_commands_but_flags_background_commands():
     )
 
     assert issues == {
+        "non_runnable_steps": [1],
         "background_process_steps": [2],
     }
 
@@ -275,8 +279,13 @@ def test_minimal_planning_prompt_requires_real_content_and_strong_verification()
 
     assert "materially write or edit file contents" in prompt
     assert "verification must prove behavior or content" in prompt
+    assert "Commands must be runnable shell, not prose" in prompt
+    assert "Do not create or cd into a nested project folder" in prompt
+    assert "Return 3 or 4 small sequential steps maximum" in prompt
+    assert "Keep each command under 900 characters" in prompt
+    assert "Include exactly one final meaningful verification/build step" in prompt
     assert "inspect -> edit -> verify" in prompt
-    assert "prefer `python3 - <<'PY'` heredoc" in prompt
+    assert "Do not use heredoc-heavy commands" in prompt
     assert "never emit `python -c` commands" in prompt
     assert (
         "Each step must include exactly these keys and no extra keys: step_number, description, commands, verification, rollback, expected_files"
@@ -286,7 +295,7 @@ def test_minimal_planning_prompt_requires_real_content_and_strong_verification()
     assert "Do not omit keys" in prompt
 
 
-def test_weak_verification_is_not_treated_as_blocking_immediate_repair_issue():
+def test_weak_verification_is_treated_as_blocking_immediate_repair_issue():
     plan = [
         {
             "step_number": 1,
@@ -302,20 +311,10 @@ def test_weak_verification_is_not_treated_as_blocking_immediate_repair_issue():
     ]
 
     issues = PlannerService.find_immediate_repair_step_issues(plan)
-    blocking_issue_keys = {
-        "non_runnable_steps",
-        "background_process_steps",
-        "placeholder_only_steps",
-    }
-    blocking = {
-        key: value for key, value in issues.items() if key in blocking_issue_keys
-    }
-
     assert issues["weak_verification_steps"] == [1]
-    assert blocking == {}
 
 
-def test_validator_still_warns_on_weak_verification_for_implementation_plan(tmp_path):
+def test_validator_rejects_weak_verification_for_implementation_plan(tmp_path):
     verdict = ValidatorService.validate_plan(
         [
             {
@@ -333,8 +332,86 @@ def test_validator_still_warns_on_weak_verification_for_implementation_plan(tmp_
         project_dir=tmp_path,
     )
 
-    assert verdict.warning is True
+    assert verdict.repairable is True
     assert "weak_verification_steps" in verdict.details
+    assert "weak_verification" in verdict.details["semantic_violation_codes"]
+
+
+def test_validator_rejects_non_runnable_pseudo_command_with_code(tmp_path):
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Create the landing page",
+                "commands": ["create files for the board game cafe landing page"],
+                "verification": "python3 - <<'PY'\nprint('ok')\nPY",
+                "rollback": None,
+                "expected_files": ["src/App.tsx"],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Build a board game cafe landing page",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.repairable is True
+    assert verdict.details["non_runnable_steps"] == [1]
+    assert "non_runnable_command" in verdict.details["semantic_violation_codes"]
+
+
+def test_validator_rejects_nested_project_folder_command_with_code(tmp_path):
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Create a nested Vite app",
+                "commands": [
+                    "npm create vite@latest board-game-cafe -- --template react"
+                ],
+                "verification": "npm run build",
+                "rollback": "rm -rf board-game-cafe",
+                "expected_files": [
+                    "board-game-cafe/package.json",
+                    "board-game-cafe/src/App.tsx",
+                    "board-game-cafe/index.html",
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Build a board game cafe landing page",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.repairable is True
+    assert verdict.details["nested_project_root_steps"] == [1]
+    assert (
+        "nested_project_folder_command" in verdict.details["semantic_violation_codes"]
+    )
+
+
+def test_validator_rejects_missing_verification_with_code(tmp_path):
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Build the page shell",
+                "commands": ["printf '<main>Board Game Cafe</main>' > index.html"],
+                "verification": None,
+                "rollback": "rm -f index.html",
+                "expected_files": ["index.html"],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Build a board game cafe landing page",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.repairable is True
+    assert verdict.details["missing_verification_steps"] == [1]
+    assert "missing_verification_command" in verdict.details["semantic_violation_codes"]
 
 
 def test_schema_valid_planner_output_passes_validator_without_repair(tmp_path):
@@ -376,6 +453,171 @@ def test_schema_valid_planner_output_passes_validator_without_repair(tmp_path):
     assert verdict.accepted is True
     assert verdict.repairable is False
     assert verdict.rejected is False
+    assert verdict.details["step_count"] == 3
+    assert verdict.details["max_command_length"] > 0
+    assert verdict.details["heredoc_command_count"] == 0
+    assert verdict.details["command_total_chars"] > 0
+
+
+def test_validator_rejects_too_many_initial_plan_steps(tmp_path):
+    plan = [
+        {
+            "step_number": index,
+            "description": f"Inspect area {index}",
+            "commands": ["rg --files . | sort"],
+            "verification": "python3 -c \"print('ok')\"",
+            "rollback": None,
+            "expected_files": [],
+        }
+        for index in range(1, 6)
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Inspect the current project",
+        execution_profile="review_only",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.repairable is True
+    assert verdict.details["step_count"] == 5
+    assert verdict.details["max_steps"] == 4
+    assert "too many steps" in " ".join(verdict.reasons).lower()
+
+
+def test_validator_rejects_huge_heredoc_command_with_budget_diagnostics(tmp_path):
+    huge_body = "\n".join(f"line {index}" for index in range(120))
+    command = f"cat > src/App.tsx << 'EOF'\n{huge_body}\nEOF"
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Write oversized component inline",
+            "commands": ["mkdir -p src", command],
+            "verification": "python3 -c \"print('ok')\"",
+            "rollback": "rm -f src/App.tsx",
+            "expected_files": ["src/App.tsx"],
+        },
+        {
+            "step_number": 2,
+            "description": "Run build",
+            "commands": ["npm run build"],
+            "verification": "npm run build",
+            "rollback": None,
+            "expected_files": [],
+        },
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Build a React landing page",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.repairable is True
+    assert "brittle heredoc-heavy" in " ".join(verdict.reasons)
+    assert verdict.details["step_count"] == 2
+    assert verdict.details["max_command_length"] == len(command)
+    assert verdict.details["heredoc_command_count"] == 1
+    assert verdict.details["command_total_chars"] >= len(command)
+    assert verdict.details["oversized_command_steps"] == [1]
+
+
+def test_validator_accepts_concise_three_step_react_vite_landing_page_plan(tmp_path):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create package files and source directory at the project root",
+            "commands": [
+                'mkdir -p src && printf \'{"scripts":{"build":"vite --host 0.0.0.0"},"dependencies":{"@vitejs/plugin-react":"latest","vite":"latest","react":"latest","react-dom":"latest","typescript":"latest"},"devDependencies":{}}\\n\' > package.json'
+            ],
+            "verification": "node -e \"const p=require('./package.json'); if(!p.scripts.build) process.exit(1)\"",
+            "rollback": "rm -rf src package.json",
+            "expected_files": ["package.json"],
+        },
+        {
+            "step_number": 2,
+            "description": "Write the board game cafe React landing page",
+            "commands": [
+                'printf \'export default function App() { return <main>Board Game Cafe</main>; }\\n\' > src/App.tsx && printf \'<div id="root"></div><script type="module" src="src/App.tsx"></script>\\n\' > index.html'
+            ],
+            "verification": "node -e \"const fs=require('fs'); if(!fs.readFileSync('src/App.tsx','utf8').includes('Board Game Cafe')) process.exit(1)\"",
+            "rollback": "rm -f src/App.tsx index.html",
+            "expected_files": ["src/App.tsx", "index.html"],
+        },
+        {
+            "step_number": 3,
+            "description": "Run the project build",
+            "commands": ["npm run build"],
+            "verification": "npm run build",
+            "rollback": None,
+            "expected_files": [],
+        },
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Build a simple landing page for a board game cafe with React/Vite.",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.accepted is True
+    assert verdict.details.get("semantic_violation_codes") is None
+    assert verdict.details["step_count"] == 3
+    assert verdict.details["max_command_length"] < 900
+    assert verdict.details["heredoc_command_count"] == 0
+
+
+def test_semantic_violation_metadata_is_logged_with_task_execution_id():
+    events = []
+    ctx = MagicMock(
+        session_id=55,
+        task_id=10,
+        task_execution_id=21,
+        emit_live=lambda level, message, metadata=None: events.append(
+            (level, message, metadata or {})
+        ),
+    )
+
+    _emit_planning_diagnostics_contract_violation(
+        ctx,
+        reason="plan_validation_failed",
+        contract_violations=[
+            "Plan contains non-runnable pseudo-commands such as `edit` or prose instructions (steps: [1])"
+        ],
+        semantic_violation_codes=["non_runnable_command"],
+        output_text='[{"step_number":1}]',
+        strategy_info="plan_validation_failed",
+    )
+
+    assert events == [
+        (
+            "WARN",
+            "[OPENCLAW][PLANNING_DIAGNOSTICS] contract violation detected",
+            {
+                "session_id": 55,
+                "task_id": 10,
+                "task_execution_id": 21,
+                "contract_violation_type": "non_runnable_command",
+                "reason": "plan_validation_failed",
+                "strategy_info": "plan_validation_failed",
+                "output_chars": 19,
+                "truncated_output_detected": False,
+                "contract_violations": [
+                    "Plan contains non-runnable pseudo-commands such as `edit` or prose instructions (steps: [1])"
+                ],
+                "semantic_violation_codes": ["non_runnable_command"],
+                "step_count": None,
+                "max_command_length": None,
+                "heredoc_command_count": None,
+                "command_total_chars": None,
+            },
+        )
+    ]
 
 
 def test_planner_sanitizes_common_local_model_static_site_plan_issues():
@@ -651,7 +893,7 @@ def test_planning_repair_still_succeeds_for_small_malformed_output():
     assert len(captured["prompt"]) < PLANNING_REPAIR_PROMPT_MAX_CHARS
 
 
-def test_planning_repair_uses_isolated_one_shot_prompt_when_available():
+def test_planning_repair_uses_task_workspace_one_shot_prompt_when_available():
     captured = {}
 
     class Runtime:
@@ -678,8 +920,44 @@ def test_planning_repair_uses_isolated_one_shot_prompt_when_available():
     assert result == {"output": '[{"step_number":1}]'}
     assert "projectContext" not in captured["prompt"]
     assert "nonProjectContext" not in captured["prompt"]
-    assert captured["kwargs"]["isolate_workspace_context"] is True
+    assert captured["kwargs"]["isolate_workspace_context"] is False
     assert captured["kwargs"]["session_prefix"] == "planning-repair"
+
+
+def test_openclaw_invocation_metadata_redacts_prompt_and_captures_flags():
+    metadata = OpenClawSessionService._openclaw_invocation_metadata(
+        full_cmd=[
+            "/usr/bin/openclaw",
+            "agent",
+            "--local",
+            "--session-id",
+            "planning-repair-123",
+            "--message",
+            "secret prompt",
+            "--json",
+            "--timeout",
+            "240",
+        ],
+        prompt="secret prompt",
+        timeout_seconds=240,
+        cwd="/tmp/isolated",
+        invocation_kind="planning-repair",
+        isolate_workspace_context=True,
+        no_output_timeout_seconds=200,
+    )
+
+    assert metadata["executable_path"] == "/usr/bin/openclaw"
+    assert metadata["subcommand"] == "agent"
+    assert metadata["has_local_flag"] is True
+    assert metadata["has_json_flag"] is True
+    assert metadata["timeout_arg"] == "240"
+    assert metadata["session_id_prefix"] == "planning-repair"
+    assert metadata["session_id_shape"] == "planning-repair-000"
+    assert metadata["cwd"] == "/tmp/isolated"
+    assert metadata["isolate_workspace_context"] is True
+    assert metadata["prompt_size"] == len("secret prompt")
+    assert metadata["no_output_timeout_seconds"] == 200
+    assert "secret prompt" not in json.dumps(metadata)
 
 
 def test_planning_repair_timeout_is_capped_below_full_local_planning_budget():

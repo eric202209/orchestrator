@@ -503,7 +503,8 @@ def test_policy_profiles_change_validation_outcomes():
         validation_severity="high",
     )
 
-    assert balanced.status == "warning"
+    assert balanced.status == "repair_required"
+    assert "weak_verification" in balanced.details["semantic_violation_codes"]
     assert strict.status == "rejected"
 
 

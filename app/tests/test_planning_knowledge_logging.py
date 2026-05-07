@@ -540,7 +540,7 @@ def test_planning_validation_failure_records_planning_validation_and_failure_kno
             "step_number": 1,
             "description": "Create app output",
             "commands": ["printf 'ok\\n' > app.py"],
-            "verification": "grep -q ok app.py",
+            "verification": "python3 - <<'PY'\nfrom pathlib import Path\nassert Path('app.py').read_text() == 'ok\\n'\nPY",
             "rollback": "rm -f app.py",
             "expected_files": ["app.py"],
         }

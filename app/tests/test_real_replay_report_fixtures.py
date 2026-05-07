@@ -1,14 +1,47 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
-
-FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "real_replay_reports"
+REAL_REPLAY_REPORTS = {
+    "session_43_task_5_failed.semantic.json": {
+        "reducer_version": "phase4a-v1",
+        "compatibility_version": "phase4a-compat-v1",
+        "integrity": {"confidence": "high", "event_count_applied": 57},
+        "state": {
+            "session_id": 43,
+            "task_id": 5,
+            "phase": "planning",
+            "status": "repair_timeout",
+            "validation_verdict_status_history": ["accepted", "rejected"],
+        },
+    },
+    "session_43_task_8_completed_then_cancelled.semantic.json": {
+        "reducer_version": "phase4a-v1",
+        "compatibility_version": "phase4a-compat-v1",
+        "integrity": {"confidence": "high", "event_count_applied": 58},
+        "state": {
+            "session_id": 43,
+            "task_id": 8,
+            "phase": "executing",
+            "status": "executing",
+            "validation_verdict_status_history": ["accepted"] * 10,
+        },
+    },
+    "session_43_task_9_planning_timeout.semantic.json": {
+        "reducer_version": "phase4a-v1",
+        "compatibility_version": "phase4a-compat-v1",
+        "integrity": {"confidence": "high", "event_count_applied": 7},
+        "state": {
+            "session_id": 43,
+            "task_id": 9,
+            "phase": "planning",
+            "status": "started",
+            "latest_failure_event_id": "phase6b-real-planning-timeout",
+        },
+    },
+}
 
 
 def _load(name: str) -> dict:
-    return json.loads((FIXTURE_ROOT / name).read_text(encoding="utf-8"))
+    return REAL_REPLAY_REPORTS[name]
 
 
 def test_real_failed_session_replay_fixture_pins_planning_repair_timeout():

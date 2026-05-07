@@ -287,7 +287,7 @@ class PromptTemplates:
 6. Assume the working directory is already `{project_dir}`
 
 **Requirements:**
-1. Create 3-8 sequential steps
+1. Create 3 or 4 sequential steps maximum
 2. Each step: atomic, verifiable, rollback-safe
 3. Output JSON array only. The first non-whitespace character must be `[` and the last must be `]`
 4. Do NOT create documentation files unless the task explicitly asks for them
@@ -301,12 +301,15 @@ class PromptTemplates:
 12. `expected_files` must always be present and must be a JSON array of relative path strings (or [])
 
 **Planning Rules:**
-1. Short targeted shell commands only. For source files, describe the implementation in `commands` (e.g. `"write src/foo.js: exports X"`); bare `touch` is forbidden.
+1. Short targeted runnable shell commands only. `commands` must not be prose or pseudo-commands such as `"write src/foo.js: exports X"`, `"create files"`, `"set up project"`, or `"implement component"`.
 2. Incremental: create dirs first, one file at a time, install deps in a separate step from code changes.
-3. Relative paths everywhere — no `..`, `~`, absolute paths, `cd ... && ...`, or `{project_dir}/` prefixes in `expected_files`.
+3. Relative paths everywhere — no `..`, `~`, absolute paths, `cd ... && ...`, nested project folders, or `{project_dir}/` prefixes in `expected_files`.
 4. No background commands (`&`, `nohup`, `disown`). One-shot verification only (no long-running servers).
 5. Don't assume files exist; inspect before editing. Each command is a standalone shell command (no comma-joining).
 6. If prior artifacts are mentioned in context, extend them instead of recreating parallel implementations.
+7. Avoid heredoc-heavy commands and long generated code inside planning output. Keep each command under 900 characters.
+8. Prefer concise runnable shell or generating a small script/file during execution over embedding full source bodies in plan JSON.
+9. Include exactly one final meaningful verification/build step such as `npm run build`, `pytest`, or a targeted content check.
 
 **Execution Profile Rules:**
 {execution_profile_rules}
@@ -326,15 +329,15 @@ class PromptTemplates:
     "step_number": 1,
     "description": "Inspect the current workspace",
     "commands": ["rg --files . | sort"],
-    "verification": "test -d .",
+    "verification": "node -e \\"console.log('workspace ok')\\"",
     "rollback": null,
     "expected_files": []
   }},
   {{
     "step_number": 2,
     "description": "Create the smallest required implementation files",
-    "commands": ["write src/App.tsx: implement the requested UI"],
-    "verification": "test -s src/App.tsx",
+    "commands": ["mkdir -p src && printf 'export default function App() {{ return <main>Board Game Cafe</main>; }}\\\\n' > src/App.tsx"],
+    "verification": "node -e \\"const fs=require('fs'); if(!fs.readFileSync('src/App.tsx','utf8').includes('Board Game Cafe')) process.exit(1)\\"",
     "rollback": "rm -f src/App.tsx",
     "expected_files": ["src/App.tsx"]
   }},

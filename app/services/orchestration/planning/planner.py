@@ -57,15 +57,15 @@ PLANNING_VALID_MINIMAL_JSON_EXAMPLE = """[
     "step_number": 1,
     "description": "Inspect the current workspace",
     "commands": ["rg --files . | sort"],
-    "verification": "test -d .",
+    "verification": "node -e \\"console.log('workspace ok')\\"",
     "rollback": null,
     "expected_files": []
   },
   {
     "step_number": 2,
     "description": "Create the smallest required implementation files",
-    "commands": ["write src/App.tsx: implement the requested UI"],
-    "verification": "test -s src/App.tsx",
+    "commands": ["mkdir -p src && printf 'export default function App() { return <main>Board Game Cafe</main>; }\\\\n' > src/App.tsx"],
+    "verification": "node -e \\"const fs=require('fs'); if(!fs.readFileSync('src/App.tsx','utf8').includes('Board Game Cafe')) process.exit(1)\\"",
     "rollback": "rm -f src/App.tsx",
     "expected_files": ["src/App.tsx"]
   },
@@ -167,7 +167,15 @@ class PlannerService:
     """Planning-stage fallback and repair helpers."""
 
     _NON_RUNNABLE_COMMAND_PREFIXES = (
+        "write ",
         "edit ",
+        "create files",
+        "create file",
+        "set up ",
+        "setup ",
+        "implement ",
+        "add component",
+        "update component",
         "verify ",
         "check ",
         "ensure ",
@@ -177,6 +185,7 @@ class PlannerService:
     _WEAK_VERIFICATION_MARKERS = (
         "test -f",
         "test -d",
+        "test -s",
         "grep -q",
         "ls ",
         "echo ",
@@ -370,7 +379,13 @@ class PlannerService:
         text = str(command or "").strip().lower()
         if not text:
             return False
-        return text.startswith("file ") and " should be " in text
+        if text.startswith("file ") and " should be " in text:
+            return True
+        if re.match(
+            r"^(create|build|make)\s+(the\s+)?(app|page|site|ui|component)\b", text
+        ):
+            return True
+        return False
 
     @staticmethod
     def _looks_like_preview_only_step(
@@ -670,7 +685,7 @@ Rules:
 2. Use relative paths only in shell commands and expected_files
 3. If a step will later need file-read or file-write tools, keep the planned path relative; the executor will expand it to an absolute path under {display_project_dir}
 4. Do not use absolute paths, .., or ~
-5. Return 3 to 6 small sequential steps
+5. Return 3 or 4 small sequential steps maximum
 6. Each step must include exactly these keys and no extra keys: step_number, description, commands, verification, rollback, expected_files
 7. `step_number` must be a unique integer and the sequence must be exactly 1, 2, 3...
 8. Do not omit keys and do not invent extra keys inside step objects
@@ -678,18 +693,21 @@ Rules:
 10. `verification` must be a single shell string or null
 11. `rollback` must be a single shell string or null
 12. expected_files must be relative file paths or []
-13. Do not use `cat > file <<EOF` or large multi-line inline file creation in planning output
-14. For inline Python, prefer `python3 - <<'PY'` heredoc or a script file over `python3 -c`
-15. Avoid complex nested shell quoting; never emit `python -c` commands with f-strings, JSON strings, semicolons, or mixed quote escaping
-16. Do not join separate shell commands with commas
-17. Do not use background processes, `&`, `nohup`, `disown`, or long-running dev servers
-18. Prefer one-shot verification commands like imports, builds, tests, grep, or short health checks
-19. Prefer package-manager/editor-friendly commands and one-file-at-a-time edits
-20. Output JSON array only
-21. If the workspace already has files, start by inspecting or extending them before re-scaffolding
-22. For implementation steps that list expected_files, at least one command must materially write or edit file contents; do not use touch-only or placeholder-only steps
-23. For implementation-heavy steps, verification must prove behavior or content, not only file existence
-24. Prefer an inspect -> edit -> verify sequence grounded in the current workspace
+13. Do not use heredoc-heavy commands, `cat > file <<EOF`, or large generated code inside planning output
+14. Keep each command under 900 characters; planning describes runnable shell actions, not full source files
+15. Prefer concise `printf`, package-manager commands, or generating a small script/file during execution over embedding big file bodies in the plan JSON
+16. Avoid complex nested shell quoting; never emit `python -c` commands with f-strings, JSON strings, semicolons, or mixed quote escaping
+17. Do not join separate shell commands with commas
+18. Do not use background processes, `&`, `nohup`, `disown`, or long-running dev servers
+19. Commands must be runnable shell, not prose. Do not emit pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
+20. Do not create or cd into a nested project folder; run directly from {display_project_dir}
+21. Include exactly one final meaningful verification/build step such as `npm run build`, `pytest`, or a targeted content check
+22. Prefer package-manager/editor-friendly commands and one-file-at-a-time edits
+23. Output JSON array only
+24. If the workspace already has files, start by inspecting or extending them before re-scaffolding
+25. For implementation steps that list expected_files, at least one command must materially write or edit file contents; do not use touch-only or placeholder-only steps
+26. For implementation-heavy steps, verification must prove behavior or content, not only file existence
+27. Prefer an inspect -> edit -> verify sequence grounded in the current workspace
 
 Invalid outputs:
 - Markdown fences around JSON
@@ -730,12 +748,12 @@ Workflow:
 {workflow_guidance or "No explicit workflow phases."}
 
 Requirements:
-1. 2 to 5 steps only
+1. 2 to 4 steps only
 2. Use short relative shell commands only, and keep expected_files relative
 3. If a step will later use file-read or file-write tools, keep that path relative in the plan; execution will expand it under {display_project_dir}
-4. No long inline source dumps, no absolute paths, no .., no ~
-5. For inline Python, prefer `python3 - <<'PY'` heredoc or a script file over `python3 -c`
-6. Avoid nested shell quoting in inline Python commands
+4. No long inline source dumps, no heredoc-heavy commands, no absolute paths, no .., no ~
+5. Keep each command under 900 characters and avoid embedding generated source bodies in the JSON
+6. Prefer concise shell commands or creating a small script/file during execution over inline code dumps
 7. Each step must contain exactly these keys and no extra keys:
    step_number, description, commands, verification, rollback, expected_files
 8. step_number values must be unique integers and exactly 1, 2, 3... in order
@@ -746,6 +764,9 @@ Requirements:
 13. If the workspace already has files, inspect or extend them before re-scaffolding
 14. For implementation steps with expected_files, include at least one command that writes real file content, not just mkdir/touch
 15. For implementation-heavy steps, use verification stronger than file-existence checks
+16. Commands must be runnable shell, not pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
+17. Do not create or cd into a nested project folder; run directly from {display_project_dir}
+18. Include exactly one final meaningful verification/build step
 
 Invalid outputs:
 - Markdown fences around JSON
@@ -846,7 +867,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
                 timeout_seconds=repair_timeout,
                 source_brain="local",
                 session_prefix="planning-repair",
-                isolate_workspace_context=True,
+                isolate_workspace_context=False,
                 no_output_timeout_seconds=PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS,
             )
 

@@ -254,6 +254,73 @@ class OpenClawSessionService:
         return full_cmd
 
     @staticmethod
+    def _openclaw_invocation_metadata(
+        *,
+        full_cmd: List[str],
+        prompt: str,
+        timeout_seconds: int,
+        cwd: Optional[str],
+        invocation_kind: str,
+        isolate_workspace_context: bool = False,
+        no_output_timeout_seconds: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Return comparable OpenClaw subprocess metadata without logging prompt text."""
+
+        try:
+            agent_index = full_cmd.index("agent")
+        except ValueError:
+            agent_index = 1 if len(full_cmd) > 1 else 0
+
+        executable_parts = full_cmd[:agent_index] or full_cmd[:1]
+        args = full_cmd[agent_index:]
+        flags: Dict[str, Any] = {}
+        redacted_args: List[str] = []
+        index = 0
+        while index < len(args):
+            token = args[index]
+            if token == "--message":
+                flags[token] = "<redacted>"
+                redacted_args.extend([token, "<redacted>"])
+                index += 2
+                continue
+            if token.startswith("--"):
+                next_value = args[index + 1] if index + 1 < len(args) else None
+                if next_value is not None and not str(next_value).startswith("--"):
+                    flags[token] = next_value
+                    redacted_args.extend([token, str(next_value)])
+                    index += 2
+                else:
+                    flags[token] = True
+                    redacted_args.append(token)
+                    index += 1
+                continue
+            redacted_args.append(token)
+            index += 1
+
+        session_id = str(flags.get("--session-id") or "")
+        session_id_shape = re.sub(r"\d", "0", session_id)
+        session_id_prefix = (
+            session_id.rsplit("-", 1)[0] if "-" in session_id else session_id
+        )
+
+        return {
+            "invocation_kind": invocation_kind,
+            "executable_path": executable_parts[0] if executable_parts else None,
+            "executable_args": executable_parts[1:],
+            "subcommand": "agent" if "agent" in args else (args[0] if args else None),
+            "args_redacted": redacted_args,
+            "has_local_flag": "--local" in flags,
+            "has_json_flag": "--json" in flags,
+            "timeout_arg": str(flags.get("--timeout") or timeout_seconds),
+            "session_id_prefix": session_id_prefix,
+            "session_id_shape": session_id_shape,
+            "cwd": cwd,
+            "isolate_workspace_context": isolate_workspace_context,
+            "prompt_size": len(prompt or ""),
+            "no_output_timeout_seconds": no_output_timeout_seconds,
+        }
+
+    @staticmethod
     def _estimate_token_count(text: str) -> int:
         """Return a deterministic rough token estimate for diagnostics only."""
 
@@ -277,6 +344,19 @@ class OpenClawSessionService:
         parts = []
         if planning_prompt_size is not None:
             parts.append(f"planning_prompt_size={planning_prompt_size}")
+        invocation = diagnostics.get("invocation") or {}
+        if invocation:
+            parts.extend(
+                [
+                    f"invocation_kind={invocation.get('invocation_kind')}",
+                    f"invocation_cwd={invocation.get('cwd')}",
+                    "invocation_isolated="
+                    f"{invocation.get('isolate_workspace_context')}",
+                    f"invocation_timeout_arg={invocation.get('timeout_arg')}",
+                    "invocation_no_output_timeout="
+                    f"{invocation.get('no_output_timeout_seconds')}",
+                ]
+            )
         parts.extend(
             [
                 f"duration={diagnostics.get('duration_seconds', 0):.2f}s "
@@ -390,6 +470,9 @@ class OpenClawSessionService:
         *,
         timeout_seconds: int,
         cwd: Optional[str],
+        prompt: str = "",
+        invocation_kind: str = "prompt",
+        isolate_workspace_context: bool = False,
         no_output_timeout_seconds: Optional[int] = None,
     ) -> tuple[subprocess.CompletedProcess[str], Dict[str, Any]]:
         started_at = time.monotonic()
@@ -411,6 +494,15 @@ class OpenClawSessionService:
             "stream_stalled": None,
             "truncated": False,
             "timeout_boundary": None,
+            "invocation": self._openclaw_invocation_metadata(
+                full_cmd=full_cmd,
+                prompt=prompt,
+                timeout_seconds=timeout_seconds,
+                cwd=cwd,
+                invocation_kind=invocation_kind,
+                isolate_workspace_context=isolate_workspace_context,
+                no_output_timeout_seconds=no_output_timeout_seconds,
+            ),
         }
 
         process = await asyncio.create_subprocess_exec(
@@ -2081,6 +2173,18 @@ class OpenClawSessionService:
         try:
             openclaw_command = self._resolve_openclaw_command()
             execution_cwd = self._resolve_execution_cwd()
+            full_cmd = [
+                *openclaw_command,
+                "agent",
+                "--local",
+                "--session-id",
+                new_session_id,
+                "--message",
+                prompt,
+                "--json",
+                "--timeout",
+                str(timeout_seconds),
+            ]
             started_at = time.monotonic()
             first_output_at: Optional[float] = None
             last_output_at: Optional[float] = None
@@ -2092,16 +2196,7 @@ class OpenClawSessionService:
             timeout_boundary: Optional[str] = None
 
             process = await asyncio.create_subprocess_exec(
-                *openclaw_command,
-                "agent",
-                "--local",
-                "--session-id",
-                new_session_id,
-                "--message",
-                prompt,
-                "--json",
-                "--timeout",
-                str(timeout_seconds),
+                *full_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=self.STREAM_READ_LIMIT,
@@ -2250,6 +2345,15 @@ class OpenClawSessionService:
                         "return_code": return_code,
                         "timeout_boundary": timeout_boundary,
                         "contract_violation_type": None,
+                        "invocation": self._openclaw_invocation_metadata(
+                            full_cmd=full_cmd,
+                            prompt=prompt,
+                            timeout_seconds=timeout_seconds,
+                            cwd=execution_cwd,
+                            invocation_kind="planning",
+                            isolate_workspace_context=False,
+                            no_output_timeout_seconds=None,
+                        ),
                     }
                     self._log_entry(
                         "INFO",
@@ -2268,13 +2372,7 @@ class OpenClawSessionService:
             )
 
             completed = subprocess.CompletedProcess(
-                args=[
-                    *openclaw_command,
-                    "agent",
-                    "--local",
-                    "--session-id",
-                    new_session_id,
-                ],
+                args=full_cmd,
                 returncode=return_code,
                 stdout=stdout_text,
                 stderr=stderr_text,
@@ -2426,12 +2524,15 @@ class OpenClawSessionService:
                 )
                 cwd = isolated_temp_dir.name
             else:
-                cwd = None
+                cwd = self._resolve_execution_cwd()
             try:
                 proc, diagnostics = await self._run_cli_prompt_with_diagnostics(
                     full_cmd,
                     timeout_seconds=timeout_seconds,
                     cwd=cwd,
+                    prompt=prompt,
+                    invocation_kind=session_prefix,
+                    isolate_workspace_context=isolate_workspace_context,
                     no_output_timeout_seconds=no_output_timeout_seconds,
                 )
             finally:

@@ -171,9 +171,12 @@ def _emit_planning_diagnostics_contract_violation(
     *,
     reason: str,
     contract_violations: list[str] | None = None,
+    semantic_violation_codes: list[str] | None = None,
+    contract_diagnostics: dict[str, Any] | None = None,
     output_text: str = "",
     strategy_info: str = "",
 ) -> None:
+    diagnostics = dict(contract_diagnostics or {})
     violation_type = _normalize_contract_violation_type(
         contract_violations, reason or "planning_contract_violation"
     )
@@ -193,8 +196,30 @@ def _emit_planning_diagnostics_contract_violation(
                 or "truncated_multistep_plan" in str(reason or "")
             ),
             "contract_violations": list(contract_violations or [])[:8],
+            "semantic_violation_codes": list(semantic_violation_codes or [])[:8],
+            "step_count": diagnostics.get("step_count"),
+            "max_command_length": diagnostics.get("max_command_length"),
+            "heredoc_command_count": diagnostics.get("heredoc_command_count"),
+            "command_total_chars": diagnostics.get("command_total_chars"),
         },
     )
+
+
+def _semantic_codes_for_immediate_repair_issues(
+    issues: dict[str, list[int]] | None,
+) -> list[str]:
+    codes: list[str] = []
+    issue_map = {
+        "non_runnable_steps": "non_runnable_command",
+        "nested_workspace_steps": "nested_project_folder_command",
+        "nested_project_root_steps": "nested_project_folder_command",
+        "weak_verification_steps": "weak_verification",
+        "missing_verification_steps": "missing_verification_command",
+    }
+    for issue_key, code in issue_map.items():
+        if (issues or {}).get(issue_key) and code not in codes:
+            codes.append(code)
+    return codes
 
 
 class _PlanningRetryState:
@@ -992,6 +1017,7 @@ def execute_planning_phase(
                 "non_runnable_steps",
                 "background_process_steps",
                 "placeholder_only_steps",
+                "weak_verification_steps",
             )
             blocking_repair_issues = {
                 key: value
@@ -1025,7 +1051,15 @@ def execute_planning_phase(
                         "placeholder-only implementation steps in steps "
                         f"{blocking_repair_issues['placeholder_only_steps'][:5]}"
                     )
+                if blocking_repair_issues.get("weak_verification_steps"):
+                    issue_fragments.append(
+                        "weak verification commands in steps "
+                        f"{blocking_repair_issues['weak_verification_steps'][:5]}"
+                    )
                 retry_state.last_repair_reason = "plan_contains_immediate_repair_issues"
+                semantic_violation_codes = _semantic_codes_for_immediate_repair_issues(
+                    blocking_repair_issues
+                )
                 emit_phase_event(
                     ctx.orchestration_state,
                     ctx.emit_live,
@@ -1035,6 +1069,7 @@ def execute_planning_phase(
                     details={
                         "reason": "plan_contains_immediate_repair_issues",
                         "contract_violations": contract_violations[:8],
+                        "semantic_violation_codes": semantic_violation_codes,
                     },
                 )
                 ctx.logger.warning(
@@ -1045,6 +1080,7 @@ def execute_planning_phase(
                     ctx,
                     reason="plan_contains_immediate_repair_issues",
                     contract_violations=contract_violations,
+                    semantic_violation_codes=semantic_violation_codes,
                     output_text=output_text,
                     strategy_info="plan_contains_immediate_repair_issues",
                 )
@@ -1150,6 +1186,27 @@ def execute_planning_phase(
                 )
 
             if not plan_verdict.accepted and not retry_state.repair_prompt_used:
+                contract_diagnostics = {
+                    key: (plan_verdict.details or {}).get(key)
+                    for key in (
+                        "step_count",
+                        "max_command_length",
+                        "heredoc_command_count",
+                        "command_total_chars",
+                    )
+                }
+                semantic_violation_codes = list(
+                    (plan_verdict.details or {}).get("semantic_violation_codes") or []
+                )
+                _emit_planning_diagnostics_contract_violation(
+                    ctx,
+                    reason="plan_validation_failed",
+                    contract_violations=plan_verdict.reasons,
+                    semantic_violation_codes=semantic_violation_codes,
+                    contract_diagnostics=contract_diagnostics,
+                    output_text=output_text,
+                    strategy_info="plan_validation_failed",
+                )
                 ctx.logger.warning(
                     "[ORCHESTRATION] Plan validation failed, calling repair (failure_count=%d)",
                     retry_state.consecutive_failures,

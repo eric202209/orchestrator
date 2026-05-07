@@ -80,6 +80,8 @@ WORKFLOW_PHASE_ORDER = {
         "verify_dev_startup",
     ]
 }
+MAX_INITIAL_PLAN_STEPS = 4
+MAX_PLANNING_COMMAND_CHARS = 900
 
 
 class ValidatorService:
@@ -373,10 +375,24 @@ class ValidatorService:
             "go test",
             "python ",
             "uv run",
+            "npm run build",
+            "pnpm build",
+            "yarn build",
+            "tsc",
         )
         if any(marker in text for marker in meaningful_markers):
             return False
-        weak_markers = ("test -f", "test -d", "grep -q", "ls ", "echo ", "cat ")
+        weak_markers = (
+            "test -f",
+            "test -d",
+            "test -s",
+            "grep -q",
+            "ls ",
+            "echo ",
+            "cat ",
+            "find ",
+            "wc -l",
+        )
         return any(marker in text for marker in weak_markers)
 
     @staticmethod
@@ -557,38 +573,72 @@ class ValidatorService:
     def _plan_contains_brittle_commands(
         extracted_plan: Optional[List[Dict[str, Any]]], output_text: str = ""
     ) -> bool:
+        diagnostics = ValidatorService._plan_command_budget_diagnostics(
+            extracted_plan, output_text
+        )
+        return bool(diagnostics.get("has_brittle_commands"))
+
+    @staticmethod
+    def _plan_command_budget_diagnostics(
+        extracted_plan: Optional[List[Dict[str, Any]]], output_text: str = ""
+    ) -> Dict[str, Any]:
         if not extracted_plan:
-            return False
+            return {
+                "step_count": 0,
+                "max_command_length": 0,
+                "heredoc_command_count": 0,
+                "command_total_chars": 0,
+                "oversized_command_steps": [],
+                "has_brittle_commands": False,
+            }
 
         heredoc_count = 0
+        max_command_length = 0
+        command_total_chars = 0
+        oversized_command_steps: List[int] = []
+        has_brittle_commands = False
         for step in extracted_plan:
             commands = step.get("commands", [])
             if not isinstance(commands, list):
-                return True
+                has_brittle_commands = True
+                continue
+            step_number = step.get("step_number")
             for command in commands:
                 raw_command = str(command or "")
                 lowered = raw_command.lower()
+                command_length = len(raw_command)
+                command_total_chars += command_length
+                max_command_length = max(max_command_length, command_length)
                 if ValidatorService._uses_brittle_python_inline_command(raw_command):
-                    return True
+                    has_brittle_commands = True
                 if "cat >" in lowered and "<< 'eof'" in lowered:
                     heredoc_count += 1
                 if "cat >" in lowered and "<< eof" in lowered:
                     heredoc_count += 1
                 if re.search(r"mkdir\s+-p\s+[^|;&\n]+\s*(?:&&|\|)\s*cat\s+>", lowered):
-                    return True
+                    has_brittle_commands = True
                 if raw_command.count("\n") > 25:
-                    return True
-                if len(raw_command) > 1200:
-                    return True
+                    has_brittle_commands = True
+                if command_length > MAX_PLANNING_COMMAND_CHARS:
+                    has_brittle_commands = True
+                    if step_number is not None:
+                        oversized_command_steps.append(step_number)
 
         if heredoc_count >= 2:
-            return True
+            has_brittle_commands = True
 
         lowered_output = (output_text or "").lower()
         if lowered_output.count("cat >") >= 2 and "```json" in lowered_output:
-            return True
+            has_brittle_commands = True
 
-        return False
+        return {
+            "step_count": len(extracted_plan),
+            "max_command_length": max_command_length,
+            "heredoc_command_count": heredoc_count,
+            "command_total_chars": command_total_chars,
+            "oversized_command_steps": sorted(set(oversized_command_steps)),
+            "has_brittle_commands": has_brittle_commands,
+        }
 
     @staticmethod
     def _uses_brittle_python_inline_command(command: str) -> bool:
@@ -620,17 +670,29 @@ class ValidatorService:
         lowered = text.lower()
         if not text:
             return True
-        if lowered.startswith("write "):
-            return True
-        if lowered.startswith("edit "):
-            return True
-        if lowered.startswith("verify "):
+        non_runnable_prefixes = (
+            "write ",
+            "edit ",
+            "create files",
+            "create file",
+            "set up ",
+            "setup ",
+            "implement ",
+            "add component",
+            "update component",
+            "verify ",
+        )
+        if lowered.startswith(non_runnable_prefixes):
             return True
         if lowered.startswith("check ") and "test " not in lowered:
             return True
         if lowered.startswith("ensure "):
             return True
         if lowered.startswith("confirm "):
+            return True
+        if re.match(
+            r"^(create|build|make)\s+(the\s+)?(app|page|site|ui|component)\b", lowered
+        ):
             return True
         return False
 
@@ -683,6 +745,15 @@ class ValidatorService:
                     bad_steps.append(step.get("step_number"))
                     break
         return [step for step in bad_steps if step is not None]
+
+    @staticmethod
+    def _plan_missing_verification_steps(plan: List[Dict[str, Any]]) -> List[int]:
+        missing_steps: List[int] = []
+        for index, step in enumerate(plan, start=1):
+            step_number = step.get("step_number", index)
+            if not str(step.get("verification") or "").strip():
+                missing_steps.append(step_number)
+        return [step for step in missing_steps if step is not None]
 
     @staticmethod
     def _plan_missing_required_fields(
@@ -1103,7 +1174,24 @@ class ValidatorService:
             rejected.extend(schema_validation["errors"])
             details.update(schema_validation["details"])
 
-        if cls._plan_contains_brittle_commands(plan, output_text):
+        command_budget = cls._plan_command_budget_diagnostics(plan, output_text)
+        details["step_count"] = command_budget["step_count"]
+        details["max_command_length"] = command_budget["max_command_length"]
+        details["heredoc_command_count"] = command_budget["heredoc_command_count"]
+        details["command_total_chars"] = command_budget["command_total_chars"]
+        if command_budget.get("oversized_command_steps"):
+            details["oversized_command_steps"] = command_budget[
+                "oversized_command_steps"
+            ]
+
+        if len(plan) > MAX_INITIAL_PLAN_STEPS:
+            repairable.append(
+                f"Plan contains too many steps for the initial planning budget "
+                f"(max: {MAX_INITIAL_PLAN_STEPS}, actual: {len(plan)})"
+            )
+            details["max_steps"] = MAX_INITIAL_PLAN_STEPS
+
+        if command_budget.get("has_brittle_commands"):
             repairable.append(
                 "Plan contains brittle heredoc-heavy or malformed commands"
             )
@@ -1211,13 +1299,22 @@ class ValidatorService:
                 ]
 
         if profile == "implementation":
+            missing_verification_steps = cls._plan_missing_verification_steps(plan)
+            if missing_verification_steps:
+                repairable.append(
+                    "Plan is missing verification commands for implementation-heavy work "
+                    f"(steps: {missing_verification_steps[:5]})"
+                )
+                details["missing_verification_steps"] = missing_verification_steps
+
             weak_verification_steps = [
                 step.get("step_number")
                 for step in plan
-                if cls._verification_is_weak(step.get("verification"))
+                if step.get("step_number") not in missing_verification_steps
+                and cls._verification_is_weak(step.get("verification"))
             ]
             if weak_verification_steps:
-                warnings.append(
+                repairable.append(
                     "Plan uses weak verification for implementation-heavy work "
                     f"(steps: {weak_verification_steps[:5]})"
                 )
@@ -1245,6 +1342,18 @@ class ValidatorService:
                 "Plan mixes inconsistent implementation stacks for one task"
             )
             details["stack_conflict"] = True
+
+        semantic_violation_codes: List[str] = []
+        if non_runnable_steps:
+            semantic_violation_codes.append("non_runnable_command")
+        if nested_workspace_steps or nested_project_root_steps:
+            semantic_violation_codes.append("nested_project_folder_command")
+        if details.get("missing_verification_steps"):
+            semantic_violation_codes.append("missing_verification_command")
+        if details.get("weak_verification_steps"):
+            semantic_violation_codes.append("weak_verification")
+        if semantic_violation_codes:
+            details["semantic_violation_codes"] = semantic_violation_codes
 
         verdict = ValidationVerdict(
             stage="plan",

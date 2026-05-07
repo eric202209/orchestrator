@@ -119,7 +119,7 @@ def test_assembled_prompts_trim_dense_context_but_keep_workspace_inventory(tmp_p
     assert "2. create_backend_skeleton" in planning_prompt
     assert "3. wire_api_config" in planning_prompt
     assert "4. verify_dev_startup" in planning_prompt
-    assert len(planning_prompt) < 6200
+    assert len(planning_prompt) < 6500
     assert "Current workspace inventory:" in execution_prompt
     assert "tests/main.test.ts" in execution_prompt
     assert len(execution_prompt) < 7600
