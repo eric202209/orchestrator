@@ -479,9 +479,8 @@ class ValidatorService:
             ):
                 seen_python = True
             if any(
-                token in text
-                for token in ("package.json", "npm ", "pnpm ", "node ", ".js", ".ts")
-            ):
+                token in text for token in ("package.json", "npm ", "pnpm ", "node ")
+            ) or re.search(r"\.(?:js|ts)(?![a-z0-9_])", text):
                 seen_node = True
         return seen_python and seen_node
 
@@ -558,11 +557,9 @@ class ValidatorService:
                     "npm ",
                     "pnpm ",
                     "node ",
-                    ".js",
-                    ".ts",
                     "tsconfig.json",
                 )
-            ):
+            ) or re.search(r"\.(?:js|ts)(?![a-z0-9_])", text):
                 seen_node = True
         if seen_python and seen_node:
             return "mixed"
@@ -1452,9 +1449,10 @@ class ValidatorService:
                 details["weak_verification_steps"] = weak_verification_steps
 
             if cls._plan_contains_placeholder_intent(plan):
-                rejected.append(
+                repairable.append(
                     "Plan appears to generate placeholder or stub implementations"
                 )
+                details["placeholder_only_implementation"] = True
         elif profile == "verification":
             missing_workspace_files = cls._verification_plan_missing_workspace_files(
                 plan, project_dir
