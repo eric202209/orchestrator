@@ -14,10 +14,12 @@ from app.services.orchestration.phases.planning_flow import (
     _plan_contract_diagnostics,
     _should_repair_truncated_single_step_plan,
     _terminal_validation_failure_details,
+    TRUNCATED_PLAN_REPAIR_REJECTION_REASON,
     execute_planning_phase,
 )
 from app.services.orchestration.planning.planner import (
     PlannerService,
+    MINIMAL_PLANNING_PROMPT_TOKEN_DIAGNOSTIC_THRESHOLD,
     PlanningRepairBudgetExceeded,
     PlanningRepairNoOutputTimeout,
     PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS,
@@ -204,6 +206,109 @@ def test_minimal_and_ultra_minimal_planning_prompts_include_contract_example():
         assert "No markdown. No prose." in prompt
 
 
+def test_minimal_prompt_retry_emits_prompt_size_diagnostics(tmp_path):
+    events = []
+    captured = {}
+
+    class Runtime:
+        async def execute_task(self, prompt, **kwargs):
+            captured["prompt"] = prompt
+            captured["kwargs"] = kwargs
+            return {"status": "completed", "output": "[]"}
+
+    PlannerService.retry_with_minimal_prompt(
+        runtime_service=Runtime(),
+        task_description="Build a small Python health checker",
+        project_dir=tmp_path,
+        timeout_seconds=300,
+        logger=logging.getLogger("test.minimal_prompt_size_diagnostics"),
+        emit_live=lambda level, message, metadata=None: events.append(
+            (level, message, metadata or {})
+        ),
+        reason="dense_planning_context",
+        workflow_profile="default",
+    )
+
+    retry_metadata = next(
+        metadata
+        for _, _, metadata in events
+        if metadata.get("retry") == "minimal_prompt_first"
+    )
+    attempt_metadata = next(
+        metadata
+        for _, _, metadata in events
+        if metadata.get("strategy") == "minimal_prompt" and metadata.get("attempt") == 2
+    )
+
+    assert retry_metadata["minimal_prompt_chars"] == len(captured["prompt"])
+    assert (
+        retry_metadata["minimal_prompt_estimated_tokens"]
+        == (len(captured["prompt"]) + 3) // 4
+    )
+    assert retry_metadata["minimal_prompt_token_threshold"] == (
+        MINIMAL_PLANNING_PROMPT_TOKEN_DIAGNOSTIC_THRESHOLD
+    )
+    assert retry_metadata["ultra_dense_planning_context"] is False
+    assert (
+        attempt_metadata["minimal_prompt_estimated_tokens"]
+        == retry_metadata["minimal_prompt_estimated_tokens"]
+    )
+    assert captured["kwargs"]["diagnostic_label"] == "MINIMAL_PLANNING"
+    assert captured["kwargs"]["diagnostic_metadata"]["planning_attempt"] == "minimal"
+    assert (
+        captured["kwargs"]["diagnostic_metadata"]["minimal_prompt_estimated_tokens"]
+        == retry_metadata["minimal_prompt_estimated_tokens"]
+    )
+
+
+def test_minimal_prompt_retry_flags_ultra_dense_prompt_without_changing_retry(
+    tmp_path,
+    monkeypatch,
+):
+    events = []
+    captured = {}
+    huge_prompt = "x" * (MINIMAL_PLANNING_PROMPT_TOKEN_DIAGNOSTIC_THRESHOLD * 4 + 1)
+
+    class Runtime:
+        async def execute_task(self, prompt, **kwargs):
+            captured["prompt"] = prompt
+            captured["kwargs"] = kwargs
+            return {"status": "completed", "output": "[]"}
+
+    monkeypatch.setattr(
+        PlannerService,
+        "build_minimal_planning_prompt",
+        staticmethod(lambda *args, **kwargs: huge_prompt),
+    )
+
+    PlannerService.retry_with_minimal_prompt(
+        runtime_service=Runtime(),
+        task_description="Build a small Python health checker",
+        project_dir=tmp_path,
+        timeout_seconds=300,
+        logger=logging.getLogger("test.ultra_dense_minimal_prompt_diagnostics"),
+        emit_live=lambda level, message, metadata=None: events.append(
+            (level, message, metadata or {})
+        ),
+        reason="dense_planning_context",
+        workflow_profile="default",
+    )
+
+    ultra_dense_events = [
+        metadata
+        for _, _, metadata in events
+        if metadata.get("reason") == "ultra_dense_planning_context"
+    ]
+
+    assert ultra_dense_events
+    assert ultra_dense_events[0]["ultra_dense_planning_context"] is True
+    assert ultra_dense_events[0]["minimal_prompt_estimated_tokens"] > (
+        MINIMAL_PLANNING_PROMPT_TOKEN_DIAGNOSTIC_THRESHOLD
+    )
+    assert captured["prompt"] == huge_prompt
+    assert captured["kwargs"]["diagnostic_label"] == "MINIMAL_PLANNING"
+
+
 def test_minimal_planning_prompt_keeps_workflow_rules_for_existing_fullstack_workspace():
     prompt = PlannerService.build_minimal_planning_prompt(
         "Bring the existing frontend and backend to dev-ready state",
@@ -290,6 +395,52 @@ def test_planner_flags_placeholder_only_implementation_and_weak_verification():
         "placeholder_only_steps": [1],
         "weak_verification_steps": [1],
     }
+
+
+def test_planner_allows_scaffold_only_structurally_empty_files():
+    issues = PlannerService.find_immediate_repair_step_issues(
+        [
+            {
+                "step_number": 1,
+                "description": "Create project directory structure",
+                "commands": [
+                    "mkdir -p orchestrator tests",
+                    "touch orchestrator/__init__.py tests/__init__.py",
+                ],
+                "verification": 'python3 -c "import orchestrator, tests"',
+                "rollback": "rm -rf orchestrator tests",
+                "expected_files": [
+                    "orchestrator/__init__.py",
+                    "tests/__init__.py",
+                ],
+            }
+        ]
+    )
+
+    assert "placeholder_only_steps" not in issues
+
+
+def test_planner_still_flags_scaffold_only_normal_files():
+    issues = PlannerService.find_immediate_repair_step_issues(
+        [
+            {
+                "step_number": 1,
+                "description": "Create service files",
+                "commands": [
+                    "mkdir -p services tests",
+                    "touch services/health.py tests/test_health.py",
+                ],
+                "verification": "python3 -m py_compile services/health.py",
+                "rollback": "rm -rf services tests",
+                "expected_files": [
+                    "services/health.py",
+                    "tests/test_health.py",
+                ],
+            }
+        ]
+    )
+
+    assert issues["placeholder_only_steps"] == [1]
 
 
 def test_minimal_planning_prompt_requires_real_content_and_strong_verification():
@@ -464,6 +615,184 @@ def test_validator_still_rejects_standalone_weak_shell_verification(tmp_path):
     )
 
     assert verdict.details["weak_verification_steps"] == [1]
+
+
+def test_validator_stack_conflict_ignores_json_method_substring(tmp_path):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create FastAPI health endpoint",
+            "commands": [
+                "printf 'from fastapi import FastAPI\\napp = FastAPI()\\n' > app.py"
+            ],
+            "verification": "python3 -m py_compile app.py",
+            "rollback": "rm -f app.py",
+            "expected_files": ["app.py"],
+        },
+        {
+            "step_number": 2,
+            "description": "Create TestClient health test",
+            "commands": [
+                'printf \'def test_health():\\n    assert response.json()["status"] == "ok"\\n\' > test_app.py'
+            ],
+            "verification": "python3 -m pytest test_app.py",
+            "rollback": "rm -f test_app.py",
+            "expected_files": ["test_app.py"],
+        },
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Create a minimal FastAPI app with a health endpoint",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert "stack_conflict" not in verdict.details
+    assert (
+        "Plan mixes inconsistent implementation stacks for one task"
+        not in verdict.reasons
+    )
+
+
+def test_validator_stack_conflict_still_detects_real_js_file(tmp_path):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create Python and JavaScript files",
+            "commands": [
+                "printf 'print(\"ok\")\\n' > app.py",
+                "printf 'console.log(\"ok\")\\n' > main.js",
+            ],
+            "verification": "python3 -m py_compile app.py",
+            "rollback": "rm -f app.py main.js",
+            "expected_files": ["app.py", "main.js"],
+        }
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Create a small health endpoint",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.details["stack_conflict"] is True
+    assert (
+        "Plan mixes inconsistent implementation stacks for one task" in verdict.reasons
+    )
+
+
+def test_validator_treats_placeholder_stub_plan_as_repairable(tmp_path):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Build the health service",
+            "commands": [
+                "mkdir -p services",
+                "printf 'class ServiceStatus:\\n    pass\\n' > services/health.py",
+            ],
+            "verification": "python3 -m py_compile services/health.py",
+            "rollback": "rm -f services/health.py",
+            "expected_files": ["services/health.py"],
+        }
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Build a distributed workflow health checker",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.status == "repair_required"
+    assert verdict.repairable is True
+    assert verdict.rejected is False
+    assert verdict.details["placeholder_only_implementation"] is True
+    assert (
+        "Plan appears to generate placeholder or stub implementations"
+        in verdict.reasons
+    )
+
+
+def test_validator_treats_placeholder_stub_plus_oversized_plan_as_repairable(
+    tmp_path,
+):
+    long_body = "x = 1\n" * 220
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Build the health service",
+            "commands": [
+                "mkdir -p services",
+                "printf 'class ServiceStatus:\\n    pass\\n' > services/health.py",
+            ],
+            "verification": "python3 -m py_compile services/health.py",
+            "rollback": "rm -f services/health.py",
+            "expected_files": ["services/health.py"],
+        },
+        {
+            "step_number": 2,
+            "description": "Write a large test module",
+            "commands": [f"printf '{long_body}' > tests/test_health.py"],
+            "verification": "python3 -m py_compile tests/test_health.py",
+            "rollback": "rm -f tests/test_health.py",
+            "expected_files": ["tests/test_health.py"],
+        },
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Build a distributed workflow health checker",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.status == "repair_required"
+    assert verdict.rejected is False
+    assert verdict.details["placeholder_only_implementation"] is True
+    assert "oversized_command_length" in verdict.details["brittle_command_subcodes"]
+    assert (
+        "Plan appears to generate placeholder or stub implementations"
+        in verdict.reasons
+    )
+    assert (
+        "Plan contains brittle heredoc-heavy or malformed commands" in verdict.reasons
+    )
+
+
+def test_validator_does_not_set_placeholder_flag_for_non_stub_plan(tmp_path):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Build the health service",
+            "commands": [
+                "mkdir -p services",
+                "printf 'class ServiceStatus:\\n    status = \"healthy\"\\n' > services/health.py",
+            ],
+            "verification": "python3 -m py_compile services/health.py",
+            "rollback": "rm -f services/health.py",
+            "expected_files": ["services/health.py"],
+        }
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Build a distributed workflow health checker",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert "placeholder_only_implementation" not in verdict.details
+    assert (
+        "Plan appears to generate placeholder or stub implementations"
+        not in verdict.reasons
+    )
 
 
 def test_validator_rejects_non_runnable_pseudo_command_with_code(tmp_path):
@@ -992,9 +1321,10 @@ def test_planning_repair_prompt_bans_external_helpers_and_allows_bounded_heredoc
     assert "Repair the plan, not the task" in prompt
     assert "Preserve valid steps" in prompt
     assert "Use 3 to 4 steps" in prompt
+    assert "no separate mkdir/touch-only scaffold step for normal files" in prompt
     assert "/root/write_file.py" in prompt
     assert "absolute helper scripts" in prompt
-    assert "no `test -f`, `grep -q`, or `echo`" in prompt
+    assert "no `test -f`, `grep -q`, `echo`, or `cd /... &&`" in prompt
     assert "No `\\'` inside single-quoted strings" in prompt
     assert "cat > src/App.jsx <<'EOF'" in prompt
     assert "export default function App() { return <main>Ready</main>; }" in prompt
@@ -1007,6 +1337,20 @@ def test_planning_repair_prompt_bans_external_helpers_and_allows_bounded_heredoc
     assert "Use printf to overwrite only needed JSX body/CSS lines" in prompt
     assert "exactly ONE heredoc across ENTIRE plan, all steps combined" in prompt
     assert "multiple heredoc commands" in prompt
+
+
+def test_planning_repair_prompt_includes_truncated_plan_restart_hint():
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Build a workflow checker",
+        malformed_output='[{"step_number":1,"commands":["printf \\"unterminated',
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+        rejection_reasons=[TRUNCATED_PLAN_REPAIR_REJECTION_REASON],
+    )
+
+    assert "Validation error:" in prompt
+    assert "Output was cut off mid-stream" in prompt
+    assert "Ignore the broken output above" in prompt
+    assert "Produce a complete new JSON array from scratch" in prompt
 
 
 def test_planning_repair_prompt_uses_reduced_context_only():
@@ -3311,10 +3655,60 @@ def test_repair_rejection_reasons_prepend_oversized_command_details():
     assert enriched[1:] == reasons
 
 
-def test_repair_rejection_reasons_unchanged_without_oversized_subcode():
+def test_repair_rejection_reasons_prepend_multiple_heredoc_details():
     reasons = ["Plan contains brittle heredoc-heavy or malformed commands"]
     details = {
         "brittle_command_subcodes": ["multiple_heredoc_across_plan"],
+        "heredoc_command_count": 3,
+    }
+
+    enriched = _build_repair_rejection_reasons(reasons, details)
+
+    assert enriched[0].startswith("multiple_heredoc_across_plan:")
+    assert "3 heredoc blocks found" in enriched[0]
+    assert "max 1 across entire plan" in enriched[0]
+    assert "Replace all but one with printf" in enriched[0]
+    assert enriched[1:] == reasons
+
+
+def test_repair_rejection_reasons_prepend_too_many_lines_step_details():
+    reasons = ["Plan contains brittle heredoc-heavy or malformed commands"]
+    details = {
+        "brittle_command_subcodes": ["too_many_lines"],
+        "brittle_command_step_details": {
+            1: ["too_many_lines"],
+            2: ["oversized_command_length"],
+            "3": ["too_many_lines"],
+        },
+    }
+
+    enriched = _build_repair_rejection_reasons(reasons, details)
+
+    assert enriched[0].startswith("too_many_lines:")
+    assert "step [1, 3]" in enriched[0]
+    assert "commands exceed line limit" in enriched[0]
+    assert "Use printf or split content across steps" in enriched[0]
+    assert enriched[1:] == reasons
+
+
+def test_repair_rejection_reasons_prepend_weak_verification_step_details():
+    reasons = [
+        "Plan uses weak verification for implementation-heavy work (steps: [1, 2])"
+    ]
+    details = {"weak_verification_steps": [2, "1", "bad"]}
+
+    enriched = _build_repair_rejection_reasons(reasons, details)
+
+    assert enriched[0].startswith("weak_verification_steps:")
+    assert "steps [1, 2]" in enriched[0]
+    assert "replace with pytest, python -m, or npm run build" in enriched[0]
+    assert enriched[1:] == reasons
+
+
+def test_repair_rejection_reasons_preserve_base_reasons_without_targeted_subcodes():
+    reasons = ["Plan contains brittle heredoc-heavy or malformed commands"]
+    details = {
+        "brittle_command_subcodes": ["disallowed_heredoc_shape"],
         "brittle_command_step_details": {1: ["disallowed_heredoc_shape"]},
     }
 
@@ -3341,6 +3735,49 @@ def test_repair_prompt_includes_injected_oversized_rejection_line():
     assert "Validation error:" in prompt
     assert "oversized_command_length: steps [2]" in prompt
     assert "step 2: 1684 chars" in prompt
+
+
+def test_repair_prompt_includes_injected_brittle_shape_rejection_lines():
+    reasons = _build_repair_rejection_reasons(
+        ["Plan contains brittle heredoc-heavy or malformed commands"],
+        {
+            "brittle_command_subcodes": [
+                "multiple_heredoc_across_plan",
+                "too_many_lines",
+            ],
+            "heredoc_command_count": 2,
+            "brittle_command_step_details": {1: ["too_many_lines"]},
+        },
+    )
+
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Build a static page",
+        malformed_output='[{"step_number":1,"commands":["cat > index.html <<EOF"]}]',
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+        rejection_reasons=reasons,
+    )
+
+    assert "Validation error:" in prompt
+    assert "multiple_heredoc_across_plan: 2 heredoc blocks found" in prompt
+    assert "too_many_lines: step [1]" in prompt
+
+
+def test_repair_prompt_includes_injected_weak_verification_rejection_line():
+    reasons = _build_repair_rejection_reasons(
+        ["Plan uses weak verification for implementation-heavy work (steps: [1, 2])"],
+        {"weak_verification_steps": [1, 2]},
+    )
+
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Build a FastAPI health endpoint",
+        malformed_output='[{"step_number":1,"verification":null}]',
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+        rejection_reasons=reasons,
+    )
+
+    assert "Validation error:" in prompt
+    assert "weak_verification_steps: steps [1, 2]" in prompt
+    assert "pytest, python -m, or npm run build" in prompt
 
 
 # Phase 6Q: expose brittle-command subcodes in planning events

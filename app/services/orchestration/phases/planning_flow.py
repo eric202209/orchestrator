@@ -51,6 +51,10 @@ from app.services.prompt_templates import OrchestrationStatus, estimate_token_co
 # Circuit breaker: abort planning after this many consecutive validation failures
 # to prevent infinite retry loops that hang the session.
 MAX_PLANNING_RETRIES = 3
+TRUNCATED_PLAN_REPAIR_REJECTION_REASON = (
+    "Output was cut off mid-stream. Ignore the broken output above. "
+    "Produce a complete new JSON array from scratch."
+)
 
 
 def _build_repair_rejection_reasons(
@@ -62,55 +66,103 @@ def _build_repair_rejection_reasons(
     base_reasons = list(reasons or [])
     details = verdict_details or {}
     subcodes = set(details.get("brittle_command_subcodes") or [])
-    if "oversized_command_length" not in subcodes:
-        return base_reasons
+    targeted_reasons: list[str] = []
 
-    raw_steps = details.get("oversized_command_steps") or []
-    step_lengths = details.get("brittle_command_step_command_lengths") or {}
-    step_numbers: list[int] = []
-    for raw_step in raw_steps:
-        try:
-            step_numbers.append(int(raw_step))
-        except (TypeError, ValueError):
-            continue
-    if not step_numbers:
-        for raw_step in step_lengths:
+    def _normalized_step_numbers(raw_steps: Any) -> list[int]:
+        step_numbers: list[int] = []
+        if isinstance(raw_steps, dict):
+            raw_iterable = raw_steps.keys()
+        else:
+            raw_iterable = raw_steps or []
+        for raw_step in raw_iterable:
             try:
                 step_numbers.append(int(raw_step))
             except (TypeError, ValueError):
                 continue
-    step_numbers = sorted(set(step_numbers))
+        return sorted(set(step_numbers))
+
+    step_lengths = details.get("brittle_command_step_command_lengths") or {}
+    raw_steps = details.get("oversized_command_steps") or []
+    step_numbers: list[int] = []
+    if "oversized_command_length" in subcodes:
+        step_numbers = _normalized_step_numbers(raw_steps)
     if not step_numbers:
-        return base_reasons
+        step_numbers = _normalized_step_numbers(step_lengths)
+    if "oversized_command_length" in subcodes and step_numbers:
+        lengths_by_step: list[str] = []
+        for step_number in step_numbers:
+            raw_lengths = step_lengths.get(step_number) or step_lengths.get(
+                str(step_number)
+            )
+            lengths: list[int] = []
+            for raw_length in raw_lengths or []:
+                try:
+                    lengths.append(int(raw_length))
+                except (TypeError, ValueError):
+                    continue
+            if lengths:
+                rendered_lengths = ", ".join(
+                    str(length) for length in sorted(set(lengths))
+                )
+                lengths_by_step.append(f"step {step_number}: {rendered_lengths} chars")
 
-    lengths_by_step: list[str] = []
-    for step_number in step_numbers:
-        raw_lengths = step_lengths.get(step_number) or step_lengths.get(
-            str(step_number)
+        if lengths_by_step:
+            length_clause = "; ".join(lengths_by_step)
+        else:
+            length_clause = (
+                f"steps {step_numbers} exceed {MAX_PLANNING_COMMAND_CHARS} chars"
+            )
+
+        targeted_reasons.append(
+            f"oversized_command_length: steps {step_numbers} have oversized commands "
+            f"({length_clause}; max {MAX_PLANNING_COMMAND_CHARS}). Replace these steps "
+            "with short scaffold or edit commands only."
         )
-        lengths: list[int] = []
-        for raw_length in raw_lengths or []:
-            try:
-                lengths.append(int(raw_length))
-            except (TypeError, ValueError):
-                continue
-        if lengths:
-            rendered_lengths = ", ".join(str(length) for length in sorted(set(lengths)))
-            lengths_by_step.append(f"step {step_number}: {rendered_lengths} chars")
 
-    if lengths_by_step:
-        length_clause = "; ".join(lengths_by_step)
-    else:
-        length_clause = (
-            f"steps {step_numbers} exceed {MAX_PLANNING_COMMAND_CHARS} chars"
+    if "multiple_heredoc_across_plan" in subcodes:
+        try:
+            heredoc_count = int(details.get("heredoc_command_count") or 0)
+        except (TypeError, ValueError):
+            heredoc_count = 0
+        count_clause = (
+            f"{heredoc_count} heredoc blocks found"
+            if heredoc_count
+            else "multiple heredoc blocks found"
+        )
+        targeted_reasons.append(
+            "multiple_heredoc_across_plan: "
+            f"{count_clause}; max 1 across entire plan. "
+            "Replace all but one with printf."
         )
 
-    targeted_reason = (
-        f"oversized_command_length: steps {step_numbers} have oversized commands "
-        f"({length_clause}; max {MAX_PLANNING_COMMAND_CHARS}). Replace these steps "
-        "with short scaffold or edit commands only."
+    if "too_many_lines" in subcodes:
+        step_details = details.get("brittle_command_step_details") or {}
+        too_many_line_steps = [
+            step_number
+            for step_number in _normalized_step_numbers(step_details)
+            if "too_many_lines"
+            in set(
+                step_details.get(step_number)
+                or step_details.get(str(step_number))
+                or []
+            )
+        ]
+        if too_many_line_steps:
+            targeted_reasons.append(
+                f"too_many_lines: step {too_many_line_steps} commands exceed "
+                "line limit. Use printf or split content across steps."
+            )
+
+    weak_verification_steps = _normalized_step_numbers(
+        details.get("weak_verification_steps") or []
     )
-    return [targeted_reason] + base_reasons
+    if weak_verification_steps:
+        targeted_reasons.append(
+            f"weak_verification_steps: steps {weak_verification_steps} use weak "
+            "verification commands; replace with pytest, python -m, or npm run build."
+        )
+
+    return targeted_reasons + base_reasons
 
 
 def _brittle_command_diagnostic_details(
@@ -1019,6 +1071,7 @@ def execute_planning_phase(
                         planning_timeout_seconds=planning_timeout_seconds,
                         malformed_output=output_text,
                         reason="truncated_multistep_plan_detected",
+                        rejection_reasons=[TRUNCATED_PLAN_REPAIR_REJECTION_REASON],
                         prompt_profile=prompt_profile,
                     )
                     retry_state.repair_prompt_used = True
@@ -1065,6 +1118,7 @@ def execute_planning_phase(
                     planning_timeout_seconds=planning_timeout_seconds,
                     malformed_output=output_text,
                     reason="truncated_multistep_plan_after_minimal",
+                    rejection_reasons=[TRUNCATED_PLAN_REPAIR_REJECTION_REASON],
                     prompt_profile=prompt_profile,
                 )
                 retry_state.repair_prompt_used = True

@@ -25,7 +25,9 @@ PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS = 1700
 PLANNING_REPAIR_MAX_VALIDATION_ERROR_CHARS = 500
 REPAIR_PROMPT_MAX_CHARS = 6000
 PLANNING_REPAIR_PROMPT_MAX_CHARS = REPAIR_PROMPT_MAX_CHARS
+MINIMAL_PLANNING_PROMPT_TOKEN_DIAGNOSTIC_THRESHOLD = 6000
 PLANNING_REPAIR_ALLOWED_KNOWLEDGE_TYPES = {"format_guide", "task_example"}
+STRUCTURALLY_EMPTY_FILENAMES = frozenset({"__init__.py", "__init__.pyi", ".gitkeep"})
 PLANNING_REPAIR_STRIP_FIELD_NAMES = {
     "projectContext",
     "nonProjectContext",
@@ -99,6 +101,10 @@ def _render_knowledge_block(knowledge_context: Any) -> str:
 def _render_repair_knowledge_block(knowledge_context: Any) -> str:
     del knowledge_context
     return ""
+
+
+def _estimate_prompt_tokens(prompt: str) -> int:
+    return max(0, (len(prompt or "") + 3) // 4)
 
 
 def _compact_invalid_output_excerpt(malformed_output: str) -> str:
@@ -556,6 +562,17 @@ class PlannerService:
             marker in combined for marker in inspection_markers
         )
 
+    @staticmethod
+    def _step_expected_files_are_structurally_empty(step: Dict[str, Any]) -> bool:
+        file_names = [
+            Path(str(path or "").strip()).name
+            for path in (step.get("expected_files", []) or [])
+            if str(path or "").strip()
+        ]
+        return bool(file_names) and all(
+            name in STRUCTURALLY_EMPTY_FILENAMES for name in file_names
+        )
+
     @classmethod
     def _verification_is_weak(cls, command: Optional[str]) -> bool:
         text = str(command or "").strip().lower()
@@ -609,9 +626,15 @@ class PlannerService:
                     issues["background_process_steps"].append(step_number)
                     break
             if expected_files and PlannerService._step_is_implementation_heavy(step):
-                if commands and all(
-                    PlannerService._command_is_placeholder_only(command)
-                    for command in commands
+                if (
+                    commands
+                    and not PlannerService._step_expected_files_are_structurally_empty(
+                        step
+                    )
+                    and all(
+                        PlannerService._command_is_placeholder_only(command)
+                        for command in commands
+                    )
                 ):
                     issues["placeholder_only_steps"].append(step_number)
                 if PlannerService._verification_is_weak(step.get("verification")):
@@ -969,8 +992,8 @@ Rules:
 6. No background processes, &, nohup, disown, dev servers, or long commands.
 7. No prose, markdown, payloads, logs, session history, or extra JSON keys.
 8. Replace oversized source dumps with short setup/edit commands.
-9. expected_files steps must write or edit real file contents.
-10. Verification must use `node -e`, `npm run build`, or `python -m`; no `test -f`, `grep -q`, or `echo`.
+9. expected_files steps must write real content; no separate mkdir/touch-only scaffold step for normal files.
+10. Verification must use `node -e`, `npm run build`, or `python -m`; no `test -f`, `grep -q`, `echo`, or `cd /... &&`.
 11. No /root/write_file.py, /tmp helpers, absolute helper scripts, or outside files.
 12. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. Use printf to overwrite only needed JSX body/CSS lines.
 13. If scaffold step used `npm create vite@latest`, do not use heredoc; use printf. Last resort: exactly ONE heredoc across ENTIRE plan, all steps combined. Allowed one-file pattern: mkdir -p src && cat > src/App.jsx <<'EOF'
@@ -1017,6 +1040,36 @@ EOF
             if minimal_first
             else "[ORCHESTRATION] Planning output needed a strict JSON retry; starting minimal prompt attempt"
         )
+        minimal_prompt = cls.build_minimal_planning_prompt(
+            task_description,
+            project_dir,
+            prompt_profile=prompt_profile,
+            workflow_profile=workflow_profile,
+            workflow_phases=workflow_phases,
+            workspace_has_existing_files=workspace_has_existing_files,
+        )
+        minimal_prompt_chars = len(minimal_prompt)
+        minimal_prompt_estimated_tokens = _estimate_prompt_tokens(minimal_prompt)
+        ultra_dense_planning_context = (
+            minimal_prompt_estimated_tokens
+            > MINIMAL_PLANNING_PROMPT_TOKEN_DIAGNOSTIC_THRESHOLD
+        )
+        minimal_prompt_diagnostics = {
+            "minimal_prompt_chars": minimal_prompt_chars,
+            "minimal_prompt_estimated_tokens": minimal_prompt_estimated_tokens,
+            "minimal_prompt_token_threshold": (
+                MINIMAL_PLANNING_PROMPT_TOKEN_DIAGNOSTIC_THRESHOLD
+            ),
+            "ultra_dense_planning_context": ultra_dense_planning_context,
+        }
+        logger.warning(
+            "[ORCHESTRATION] Minimal planning prompt size diagnostics "
+            "(chars=%s estimated_tokens=%s threshold=%s ultra_dense=%s)",
+            minimal_prompt_chars,
+            minimal_prompt_estimated_tokens,
+            MINIMAL_PLANNING_PROMPT_TOKEN_DIAGNOSTIC_THRESHOLD,
+            ultra_dense_planning_context,
+        )
         emit_live(
             "WARN",
             f"{retry_message} (timeout: {minimal_timeout}s)",
@@ -1025,8 +1078,20 @@ EOF
                 "retry": "minimal_prompt_first" if minimal_first else "minimal_prompt",
                 "reason": reason[:240],
                 "timeout_seconds": minimal_timeout,
+                **minimal_prompt_diagnostics,
             },
         )
+        if ultra_dense_planning_context:
+            emit_live(
+                "WARN",
+                "[ORCHESTRATION] Minimal planning prompt is still above the diagnostic token threshold",
+                metadata={
+                    "phase": "planning",
+                    "reason": "ultra_dense_planning_context",
+                    "strategy": "minimal_prompt",
+                    **minimal_prompt_diagnostics,
+                },
+            )
         emit_live(
             "INFO",
             (
@@ -1038,21 +1103,20 @@ EOF
                 "attempt": 2,
                 "strategy": "minimal_prompt",
                 "timeout_seconds": minimal_timeout,
+                **minimal_prompt_diagnostics,
             },
         )
         try:
             return asyncio.run(
                 runtime_service.execute_task(
-                    cls.build_minimal_planning_prompt(
-                        task_description,
-                        project_dir,
-                        prompt_profile=prompt_profile,
-                        workflow_profile=workflow_profile,
-                        workflow_phases=workflow_phases,
-                        workspace_has_existing_files=workspace_has_existing_files,
-                    ),
+                    minimal_prompt,
                     timeout_seconds=minimal_timeout,
                     reuse_task_session=False,
+                    diagnostic_label="MINIMAL_PLANNING",
+                    diagnostic_metadata={
+                        "planning_attempt": "minimal",
+                        **minimal_prompt_diagnostics,
+                    },
                 )
             )
         except Exception as exc:

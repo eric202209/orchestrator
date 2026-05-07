@@ -178,6 +178,45 @@ def test_completion_validation_rejects_reported_files_that_never_materialized(tm
     assert verdict.details["reported_changed_files"] == ["README.md"]
 
 
+def test_completion_validation_placeholder_pass_remains_rejected(tmp_path):
+    project_dir = tmp_path / "project"
+    (project_dir / "services").mkdir(parents=True)
+    (project_dir / "services" / "health.py").write_text(
+        "class ServiceStatus:\n    pass\n",
+        encoding="utf-8",
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=[
+            {
+                "step_number": 1,
+                "description": "Create health service",
+                "commands": [
+                    "printf 'class ServiceStatus:\\n    pass\\n' > services/health.py"
+                ],
+                "verification": "python3 -m py_compile services/health.py",
+                "expected_files": ["services/health.py"],
+            }
+        ],
+        task_prompt="Build a distributed workflow health checker.",
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": ["services/health.py"],
+        },
+    )
+
+    assert verdict.status == "rejected"
+    assert verdict.rejected is True
+    assert "placeholder_only_implementation" not in verdict.details
+    assert verdict.details["placeholder_reasons"] == [
+        "health.py still contains `pass` placeholders"
+    ]
+
+
 def test_detect_placeholder_content_flags_broken_python_main_guard(tmp_path):
     entrypoint = tmp_path / "app.py"
     entrypoint.write_text(
