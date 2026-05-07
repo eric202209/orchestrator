@@ -266,7 +266,9 @@ class PromptTemplates:
 
     # ── 1. PLANNING (Concise version) ─────────────────────────────────────────
 
-    TASK_PLANNING = """You are an AI development agent orchestrator. Produce a precise, executable plan — do NOT implement yet.
+    TASK_PLANNING = """Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
+No prose. No markdown fences. No plan.json. No explanation.
+Do not implement anything.
 
 **Task:** {task_description}
 
@@ -304,12 +306,14 @@ class PromptTemplates:
 1. Short targeted runnable shell commands only. `commands` must not be prose or pseudo-commands such as `"write src/foo.js: exports X"`, `"create files"`, `"set up project"`, or `"implement component"`.
 2. Incremental: create dirs first, one file at a time, install deps in a separate step from code changes.
 3. Relative paths everywhere — no `..`, `~`, absolute paths, `cd ... && ...`, nested project folders, or `{project_dir}/` prefixes in `expected_files`.
-4. No background commands (`&`, `nohup`, `disown`). One-shot verification only (no long-running servers).
+4. No background processes, &, nohup, disown, dev servers, or long commands.
 5. Don't assume files exist; inspect before editing. Each command is a standalone shell command (no comma-joining).
 6. If prior artifacts are mentioned in context, extend them instead of recreating parallel implementations.
 7. Avoid heredoc-heavy commands and long generated code inside planning output. Keep each command under 900 characters.
 8. Prefer concise runnable shell or generating a small script/file during execution over embedding full source bodies in plan JSON.
-9. Include exactly one final meaningful verification/build step such as `npm run build`, `pytest`, or a targeted content check.
+9. Include exactly one final meaningful verification/build step such as `npm run build`, `pytest`, or `python -m pytest`.
+10. Verification must use `node -e`, `npm run build`, `python -m`, or a project test command; no `test -f`, `grep -q`, or `echo`.
+11. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. If scaffold is used, do not use heredoc; use printf to overwrite only needed JSX body/CSS lines.
 
 **Execution Profile Rules:**
 {execution_profile_rules}

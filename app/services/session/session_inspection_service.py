@@ -494,7 +494,11 @@ def get_session_divergence_compare_payload(
     current_tags = set(current.get("anomaly_tags", []))
 
     project = db.query(Project).filter(Project.id == session.project_id).first()
-    workspace_path = project.workspace_path if project else None
+    workspace_path = (
+        str(resolve_project_workspace_path(project.workspace_path, project.name, db=db))
+        if project and project.workspace_path
+        else None
+    )
 
     # Write current fingerprint to index so siblings can reference it later.
     if workspace_path:

@@ -578,9 +578,9 @@ class ValidatorService:
         )
         return bool(diagnostics.get("has_brittle_commands"))
 
-    @staticmethod
+    @classmethod
     def _plan_command_budget_diagnostics(
-        extracted_plan: Optional[List[Dict[str, Any]]], output_text: str = ""
+        cls, extracted_plan: Optional[List[Dict[str, Any]]], output_text: str = ""
     ) -> Dict[str, Any]:
         if not extracted_plan:
             return {
@@ -607,16 +607,26 @@ class ValidatorService:
                 raw_command = str(command or "")
                 lowered = raw_command.lower()
                 command_length = len(raw_command)
+                write_heredoc_targets = (
+                    ValidatorService._single_file_write_heredoc_targets(raw_command)
+                )
                 command_total_chars += command_length
                 max_command_length = max(max_command_length, command_length)
                 if ValidatorService._uses_brittle_python_inline_command(raw_command):
                     has_brittle_commands = True
-                if "cat >" in lowered and "<< 'eof'" in lowered:
-                    heredoc_count += 1
-                if "cat >" in lowered and "<< eof" in lowered:
-                    heredoc_count += 1
-                if re.search(r"mkdir\s+-p\s+[^|;&\n]+\s*(?:&&|\|)\s*cat\s+>", lowered):
-                    has_brittle_commands = True
+                heredoc_count += len(write_heredoc_targets)
+                if "<<" in lowered:
+                    if not write_heredoc_targets:
+                        has_brittle_commands = True
+                    if len(write_heredoc_targets) > 1:
+                        has_brittle_commands = True
+                    if ValidatorService._uses_looped_heredoc(raw_command):
+                        has_brittle_commands = True
+                    if any(
+                        ValidatorService._heredoc_target_is_unsafe(target)
+                        for target in write_heredoc_targets
+                    ):
+                        has_brittle_commands = True
                 if raw_command.count("\n") > 25:
                     has_brittle_commands = True
                 if command_length > MAX_PLANNING_COMMAND_CHARS:
@@ -638,7 +648,75 @@ class ValidatorService:
             "command_total_chars": command_total_chars,
             "oversized_command_steps": sorted(set(oversized_command_steps)),
             "has_brittle_commands": has_brittle_commands,
+            "malformed_shell_quoting_steps": cls._plan_malformed_shell_quoting_steps(
+                extracted_plan
+            ),
         }
+
+    @staticmethod
+    def _command_has_malformed_shell_quoting(command: str) -> bool:
+        raw = str(command or "")
+        if "\\'" in raw and re.search(r"\bprintf\s+'", raw):
+            return True
+        try:
+            shlex.split(raw, posix=True)
+        except ValueError:
+            return True
+        return False
+
+    @classmethod
+    def _plan_malformed_shell_quoting_steps(
+        cls, plan: List[Dict[str, Any]]
+    ) -> List[int]:
+        bad_steps: List[int] = []
+        for index, step in enumerate(plan, start=1):
+            step_number = step.get("step_number", index)
+            step_text_parts = [
+                str(step.get("verification") or ""),
+                str(step.get("rollback") or ""),
+            ]
+            step_text_parts.extend(
+                str(command or "") for command in step.get("commands", []) or []
+            )
+            if any(
+                cls._command_has_malformed_shell_quoting(text)
+                for text in step_text_parts
+            ):
+                bad_steps.append(int(step_number))
+        return sorted(set(bad_steps))
+
+    @staticmethod
+    def _single_file_write_heredoc_targets(command: str) -> List[str]:
+        """Return targets for bounded `cat > file <<EOF` write heredocs."""
+
+        target_pattern = re.compile(
+            r"(?:^|[\n;&|]\s*)"
+            r"(?:mkdir\s+-p\s+[^\n;&|]+\s*&&\s*)?"
+            r"cat\s+>\s*(?P<target>'[^']+'|\"[^\"]+\"|[^\s<;&|]+)"
+            r"\s*<<\s*['\"]?[A-Za-z_][A-Za-z0-9_]*['\"]?",
+            re.IGNORECASE,
+        )
+        targets: List[str] = []
+        for match in target_pattern.finditer(str(command or "")):
+            target = match.group("target").strip().strip("'\"")
+            if target:
+                targets.append(target)
+        return targets
+
+    @staticmethod
+    def _uses_looped_heredoc(command: str) -> bool:
+        first_line = str(command or "").split("\n", 1)[0].lower()
+        return bool(re.search(r"\b(for|while)\b.*\bdo\b.*cat\s+>", first_line))
+
+    @staticmethod
+    def _heredoc_target_is_unsafe(target: str) -> bool:
+        path_text = str(target or "").strip()
+        if not path_text:
+            return True
+        candidate = Path(path_text)
+        return (
+            candidate.is_absolute() or "~" in candidate.parts or ".." in candidate.parts
+        )
 
     @staticmethod
     def _uses_brittle_python_inline_command(command: str) -> bool:
@@ -1183,6 +1261,11 @@ class ValidatorService:
             details["oversized_command_steps"] = command_budget[
                 "oversized_command_steps"
             ]
+        malformed_shell_quoting_steps = (
+            command_budget.get("malformed_shell_quoting_steps") or []
+        )
+        if malformed_shell_quoting_steps:
+            details["malformed_shell_quoting_steps"] = malformed_shell_quoting_steps
 
         if len(plan) > MAX_INITIAL_PLAN_STEPS:
             repairable.append(
@@ -1194,6 +1277,11 @@ class ValidatorService:
         if command_budget.get("has_brittle_commands"):
             repairable.append(
                 "Plan contains brittle heredoc-heavy or malformed commands"
+            )
+        if malformed_shell_quoting_steps:
+            repairable.append(
+                "Plan contains malformed shell quoting in runnable commands "
+                f"(steps: {malformed_shell_quoting_steps[:5]})"
             )
 
         if cls._plan_has_invalid_step_sequence(plan):
@@ -1352,6 +1440,8 @@ class ValidatorService:
             semantic_violation_codes.append("missing_verification_command")
         if details.get("weak_verification_steps"):
             semantic_violation_codes.append("weak_verification")
+        if details.get("malformed_shell_quoting_steps"):
+            semantic_violation_codes.append("malformed_shell_quoting")
         if semantic_violation_codes:
             details["semantic_violation_codes"] = semantic_violation_codes
 

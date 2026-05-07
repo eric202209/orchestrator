@@ -155,10 +155,25 @@ def test_initial_planning_prompt_contains_valid_json_contract_example():
         project_dir="/tmp/project",
     )
 
+    assert prompt.startswith(
+        "Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.\n"
+        "No prose. No markdown fences. No plan.json. No explanation."
+    )
     assert "Valid Minimal JSON Example:" in prompt
     assert '"step_number": 1' in prompt
     assert '"description": "Inspect the current workspace"' in prompt
     assert '"commands": ["rg --files . | sort"]' in prompt
+    assert (
+        "No background processes, &, nohup, disown, dev servers, or long commands"
+        in prompt
+    )
+    assert (
+        "Verification must use `node -e`, `npm run build`, `python -m`, or a project test command"
+        in prompt
+    )
+    assert "no `test -f`, `grep -q`, or `echo`" in prompt
+    assert "Prefer scaffold: `npm create vite@latest . -- --template react`" in prompt
+    assert "If scaffold is used, do not use heredoc" in prompt
     assert "exactly these six keys and no extra keys" in prompt
     assert "No markdown. No prose." in prompt
     assert 'Objects like {"steps": [...]} instead of a top-level array' in prompt
@@ -175,6 +190,10 @@ def test_minimal_and_ultra_minimal_planning_prompts_include_contract_example():
     )
 
     for prompt in (minimal, ultra):
+        assert prompt.startswith(
+            "Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.\n"
+            "No prose. No markdown fences. No plan.json. No explanation."
+        )
         assert "Valid minimal JSON example:" in prompt
         assert '"step_number": 1' in prompt
         assert '"commands": ["rg --files . | sort"]' in prompt
@@ -287,6 +306,21 @@ def test_minimal_planning_prompt_requires_real_content_and_strong_verification()
     assert "inspect -> edit -> verify" in prompt
     assert "Do not use heredoc-heavy commands" in prompt
     assert "never emit `python -c` commands" in prompt
+    assert (
+        "Do not put escaped apostrophes like `\\'` inside single-quoted strings"
+        in prompt
+    )
+    assert (
+        "No background processes, &, nohup, disown, dev servers, or long commands"
+        in prompt
+    )
+    assert (
+        "Verification must use `node -e`, `npm run build`, `python -m`, or a project test command"
+        in prompt
+    )
+    assert "no `test -f`, `grep -q`, or `echo`" in prompt
+    assert "Prefer scaffold: `npm create vite@latest . -- --template react`" in prompt
+    assert "If scaffold is used, do not use heredoc" in prompt
     assert (
         "Each step must include exactly these keys and no extra keys: step_number, description, commands, verification, rollback, expected_files"
         in prompt
@@ -525,6 +559,133 @@ def test_validator_rejects_huge_heredoc_command_with_budget_diagnostics(tmp_path
     assert verdict.details["oversized_command_steps"] == [1]
 
 
+def test_validator_routes_printf_apostrophe_shell_quoting_to_repair(tmp_path):
+    command = (
+        "printf 'export default function App() {\\n"
+        "  return <h2>This Week\\'s Featured Games</h2>;\\n"
+        "}\\n' > src/App.jsx"
+    )
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Write React component with malformed shell quoting",
+            "commands": ["mkdir -p src", command],
+            "verification": "node -e \"require('fs').readFileSync('src/App.jsx','utf8')\"",
+            "rollback": "rm -f src/App.jsx",
+            "expected_files": ["src/App.jsx"],
+        },
+        {
+            "step_number": 2,
+            "description": "Run build",
+            "commands": ["npm run build"],
+            "verification": "npm run build",
+            "rollback": None,
+            "expected_files": [],
+        },
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Build a React/Vite landing page",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.repairable is True
+    assert verdict.details["malformed_shell_quoting_steps"] == [1]
+    assert "malformed_shell_quoting" in verdict.details["semantic_violation_codes"]
+
+
+def test_validator_accepts_single_relative_file_write_heredoc(tmp_path):
+    command = (
+        "mkdir -p src && cat > src/App.jsx <<'EOF'\n"
+        "export default function App() { return <main>Board Game Cafe</main>; }\n"
+        "EOF"
+    )
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create the Vite package file",
+            "commands": [
+                'printf \'{"scripts":{"build":"vite --host 0.0.0.0"},"dependencies":{"@vitejs/plugin-react":"latest","vite":"latest","react":"latest","react-dom":"latest"},"devDependencies":{}}\\n\' > package.json'
+            ],
+            "verification": "node -e \"const p=require('./package.json'); if(!p.scripts.build) process.exit(1)\"",
+            "rollback": "rm -f package.json",
+            "expected_files": ["package.json"],
+        },
+        {
+            "step_number": 2,
+            "description": "Write one concise React component",
+            "commands": [command],
+            "verification": "node -e \"const fs=require('fs'); if(!fs.readFileSync('src/App.jsx','utf8').includes('Board Game Cafe')) process.exit(1)\"",
+            "rollback": "rm -f src/App.jsx",
+            "expected_files": ["src/App.jsx"],
+        },
+        {
+            "step_number": 3,
+            "description": "Run build",
+            "commands": ["npm run build"],
+            "verification": "npm run build",
+            "rollback": None,
+            "expected_files": [],
+        },
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Build a React/Vite landing page",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.accepted is True
+    assert verdict.details["heredoc_command_count"] == 1
+    assert verdict.details["max_command_length"] < 900
+
+
+def test_validator_rejects_multi_file_heredoc_command(tmp_path):
+    command = (
+        "cat > src/App.jsx <<'EOF'\n"
+        "export default function App() { return <main>Board Game Cafe</main>; }\n"
+        "EOF\n"
+        "cat > src/App.css <<'EOF'\n"
+        "main { color: #123; }\n"
+        "EOF"
+    )
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Write multiple files in one command",
+            "commands": [command],
+            "verification": "node -e \"console.log('ok')\"",
+            "rollback": "rm -f src/App.jsx src/App.css",
+            "expected_files": ["src/App.jsx", "src/App.css"],
+        },
+        {
+            "step_number": 2,
+            "description": "Run build",
+            "commands": ["npm run build"],
+            "verification": "npm run build",
+            "rollback": None,
+            "expected_files": [],
+        },
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Build a React/Vite landing page",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.repairable is True
+    assert "brittle heredoc-heavy" in " ".join(verdict.reasons)
+    assert verdict.details["heredoc_command_count"] == 2
+
+
 def test_validator_accepts_concise_three_step_react_vite_landing_page_plan(tmp_path):
     plan = [
         {
@@ -717,6 +878,40 @@ def test_planning_repair_prompt_forbids_duplicated_workspace_roots():
     assert "backend/src/backend/src" in prompt
     assert "rooted exactly once" in prompt
     assert "Never use parent-directory traversal like `../backend`" not in prompt
+
+
+def test_planning_repair_prompt_bans_external_helpers_and_allows_bounded_heredoc():
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Build a React/Vite landing page",
+        malformed_output='[{"step_number":2,"commands":["python3 /root/write_file.py src/App.jsx ..."]}]',
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+        rejection_reasons=[
+            "Plan commands reference parent-directory paths outside the task workspace (steps: [2])"
+        ],
+    )
+
+    assert prompt.startswith(
+        "Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.\n"
+        "No prose. No markdown fences. No plan.json. No explanation."
+    )
+    assert "Repair the plan, not the task" in prompt
+    assert "Preserve valid steps" in prompt
+    assert "Use 3 to 4 steps" in prompt
+    assert "/root/write_file.py" in prompt
+    assert "absolute helper scripts" in prompt
+    assert "no `test -f`, `grep -q`, or `echo`" in prompt
+    assert "No `\\'` inside single-quoted strings" in prompt
+    assert "cat > src/App.jsx <<'EOF'" in prompt
+    assert "export default function App() { return <main>Ready</main>; }" in prompt
+    assert "{{ return <main>Ready</main>; }}" not in prompt
+    assert "npm create vite@latest . -- --template react" in prompt
+    assert "it creates src/App.jsx and src/App.css" in prompt
+    assert (
+        "If scaffold step used `npm create vite@latest`, do not use heredoc" in prompt
+    )
+    assert "Use printf to overwrite only needed JSX body/CSS lines" in prompt
+    assert "exactly ONE heredoc across ENTIRE plan, all steps combined" in prompt
+    assert "multiple heredoc commands" in prompt
 
 
 def test_planning_repair_prompt_uses_reduced_context_only():
@@ -2021,6 +2216,142 @@ def test_multi_step_prose_planning_output_uses_fallback_not_execution(
         "non_json_prose",
     }
     assert planning_diagnostics[0]["output_chars"] > 0
+
+
+def test_malformed_shell_quoting_workspace_guard_failure_routes_to_repair(
+    tmp_path, monkeypatch
+):
+    bad_plan = [
+        {
+            "step_number": 1,
+            "description": "Write malformed App component",
+            "commands": [
+                "mkdir -p src",
+                "printf 'export default function App() { return <h2>This Week\\'s Featured Games</h2>; }\\n' > src/App.jsx",
+            ],
+            "verification": "node -e \"require('fs').readFileSync('src/App.jsx','utf8')\"",
+            "rollback": "rm -f src/App.jsx",
+            "expected_files": ["src/App.jsx"],
+        }
+    ]
+    repaired_plan = _valid_three_step_plan()
+    orchestration_state = MagicMock()
+    orchestration_state.project_dir = tmp_path
+    orchestration_state.project_context = ""
+    orchestration_state.plan = []
+    orchestration_state.current_step_index = 0
+    orchestration_state.reasoning_artifact = None
+    orchestration_state.validation_history = []
+    orchestration_state.phase_history = []
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {}
+
+        async def execute_task(self, *args, **kwargs):
+            return {"status": "completed", "output": json.dumps(bad_plan)}
+
+    task = MagicMock()
+    task.title = "Repair malformed shell quoting"
+    task.description = "Repair malformed shell quoting"
+    task.status = None
+    task.steps = None
+    task.current_step = None
+    events = []
+    normalize_calls = {"count": 0}
+    repair_reasons = []
+
+    ctx = OrchestrationRunContext(
+        db=MagicMock(),
+        session=MagicMock(instance_id=None),
+        project=MagicMock(),
+        task=task,
+        session_task_link=MagicMock(),
+        session_id=53,
+        task_id=6,
+        prompt="Build page",
+        timeout_seconds=300,
+        execution_profile="full_lifecycle",
+        validation_profile="standard",
+        runs_in_canonical_baseline=False,
+        orchestration_state=orchestration_state,
+        runtime_service=Runtime(),
+        task_service=MagicMock(),
+        logger=logging.getLogger("test.malformed_shell_quoting_repair"),
+        emit_live=lambda level, message, metadata=None: events.append(
+            (level, message, metadata or {})
+        ),
+        error_handler=MagicMock(),
+    )
+    ctx.error_handler.attempt_json_parsing = lambda output, **kwargs: (
+        True,
+        json.loads(output),
+        "json",
+    )
+
+    _patch_planning_flow_external_writes(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow._build_reasoning_artifact",
+        lambda *args, **kwargs: {
+            "intent": "Repair malformed shell quoting",
+            "workspace_facts": ["workspace exists"],
+            "planned_actions": ["Use repaired JSON"],
+            "verification_plan": ["Validate repaired plan"],
+        },
+    )
+    monkeypatch.setattr(
+        ValidatorService,
+        "validate_reasoning_artifact",
+        classmethod(
+            lambda cls, *args, **kwargs: type(
+                "Verdict",
+                (),
+                {"accepted": True, "status": "accepted", "reasons": []},
+            )()
+        ),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "should_start_with_minimal_prompt",
+        staticmethod(lambda *args, **kwargs: False),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "repair_output",
+        classmethod(
+            lambda cls, *args, **kwargs: repair_reasons.append(kwargs["reason"])
+            or {"output": json.dumps(repaired_plan)}
+        ),
+    )
+
+    def normalize_once_then_pass(*args, **kwargs):
+        normalize_calls["count"] += 1
+        if normalize_calls["count"] == 1:
+            raise RuntimeError(
+                "step 1 command 2 blocked: Command contains malformed shell quoting"
+            )
+        return args[3]
+
+    result = execute_planning_phase(
+        ctx=ctx,
+        workspace_review={"has_existing_files": False},
+        extract_structured_text=extract_structured_text,
+        extract_plan_steps=lambda value: value if isinstance(value, list) else None,
+        looks_like_truncated_multistep_plan=lambda text, plan: False,
+        normalize_plan_with_live_logging=normalize_once_then_pass,
+        workspace_violation_error_cls=RuntimeError,
+    )
+
+    assert result == {"status": "completed"}
+    assert repair_reasons and repair_reasons[0].startswith("malformed_shell_quoting")
+    assert ctx.orchestration_state.plan == repaired_plan
+    diagnostics = [
+        metadata
+        for level, message, metadata in events
+        if message == "[OPENCLAW][PLANNING_DIAGNOSTICS] contract violation detected"
+    ]
+    assert diagnostics
+    assert diagnostics[0]["semantic_violation_codes"] == ["malformed_shell_quoting"]
 
 
 def test_planning_repair_timeout_budget_is_enforced(monkeypatch):

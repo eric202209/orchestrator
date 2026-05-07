@@ -21,7 +21,7 @@ from app.services.workspace.path_display import render_workspace_path_for_prompt
 
 PLANNING_REPAIR_MAX_KNOWLEDGE_ITEMS = 0
 PLANNING_REPAIR_MAX_KNOWLEDGE_ITEM_CHARS = 0
-PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS = 1800
+PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS = 1700
 PLANNING_REPAIR_MAX_VALIDATION_ERROR_CHARS = 500
 REPAIR_PROMPT_MAX_CHARS = 6000
 PLANNING_REPAIR_PROMPT_MAX_CHARS = REPAIR_PROMPT_MAX_CHARS
@@ -672,7 +672,9 @@ class PlannerService:
             workflow_phases=workflow_phases,
             workspace_has_existing_files=workspace_has_existing_files,
         )
-        prompt = f"""Produce a JSON-only execution plan for this software task. Do not implement anything.
+        prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
+No prose. No markdown fences. No plan.json. No explanation.
+Do not implement anything.
 
 Task:
 {concise_task}
@@ -697,17 +699,19 @@ Rules:
 14. Keep each command under 900 characters; planning describes runnable shell actions, not full source files
 15. Prefer concise `printf`, package-manager commands, or generating a small script/file during execution over embedding big file bodies in the plan JSON
 16. Avoid complex nested shell quoting; never emit `python -c` commands with f-strings, JSON strings, semicolons, or mixed quote escaping
+16a. Do not put escaped apostrophes like `\\'` inside single-quoted strings; use double quotes, heredoc, or safer file generation instead
 17. Do not join separate shell commands with commas
-18. Do not use background processes, `&`, `nohup`, `disown`, or long-running dev servers
+18. No background processes, &, nohup, disown, dev servers, or long commands. Do not use background processes.
 19. Commands must be runnable shell, not prose. Do not emit pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
 20. Do not create or cd into a nested project folder; run directly from {display_project_dir}
-21. Include exactly one final meaningful verification/build step such as `npm run build`, `pytest`, or a targeted content check
+21. Include exactly one final meaningful verification/build step such as `npm run build`, `pytest`, or `python -m pytest`
 22. Prefer package-manager/editor-friendly commands and one-file-at-a-time edits
-23. Output JSON array only
+23. Preserve the JSON-only output mode from the first instruction.
 24. If the workspace already has files, start by inspecting or extending them before re-scaffolding
 25. For implementation steps that list expected_files, at least one command must materially write or edit file contents; do not use touch-only or placeholder-only steps
-26. For implementation-heavy steps, verification must prove behavior or content, not only file existence
+26. Verification must use `node -e`, `npm run build`, `python -m`, or a project test command; no `test -f`, `grep -q`, or `echo`. For implementation-heavy steps, verification must prove behavior or content.
 27. Prefer an inspect -> edit -> verify sequence grounded in the current workspace
+28. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. If scaffold is used, do not use heredoc; use printf to overwrite only needed JSX body/CSS lines.
 
 Invalid outputs:
 - Markdown fences around JSON
@@ -738,7 +742,8 @@ Return only a JSON array matching this shape. No markdown. No prose.
             workflow_phases=workflow_phases,
             workspace_has_existing_files=workspace_has_existing_files,
         )
-        prompt = f"""Return JSON array only. No prose.
+        prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
+No prose. No markdown fences. No plan.json. No explanation.
 
 Task:
 {concise_task}
@@ -754,19 +759,21 @@ Requirements:
 4. No long inline source dumps, no heredoc-heavy commands, no absolute paths, no .., no ~
 5. Keep each command under 900 characters and avoid embedding generated source bodies in the JSON
 6. Prefer concise shell commands or creating a small script/file during execution over inline code dumps
+6a. No escaped apostrophes like `\\'` inside single-quoted strings; use double quotes, heredoc, or safer file generation
 7. Each step must contain exactly these keys and no extra keys:
    step_number, description, commands, verification, rollback, expected_files
 8. step_number values must be unique integers and exactly 1, 2, 3... in order
 9. commands must be a JSON array of non-empty strings
 10. verification and rollback must each be one shell string or null
-11. No background processes or long-running servers
+11. No background processes, &, nohup, disown, dev servers, or long commands.
 12. Keep each command short and machine-runnable
 13. If the workspace already has files, inspect or extend them before re-scaffolding
 14. For implementation steps with expected_files, include at least one command that writes real file content, not just mkdir/touch
-15. For implementation-heavy steps, use verification stronger than file-existence checks
+15. Verification must use `node -e`, `npm run build`, `python -m`, or a project test command; no `test -f`, `grep -q`, or `echo`.
 16. Commands must be runnable shell, not pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
 17. Do not create or cd into a nested project folder; run directly from {display_project_dir}
 18. Include exactly one final meaningful verification/build step
+19. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. If scaffold is used, do not use heredoc; use printf to overwrite only needed JSX body/CSS lines.
 
 Invalid outputs:
 - Markdown fences around JSON
@@ -921,28 +928,37 @@ Return only a JSON array matching this shape. No markdown. No prose.
         default_validation_error = (
             "Validation error:\n- malformed or non-runnable planning output\n"
         )
-        prompt = f"""Repair this malformed planning output into valid machine-runnable JSON.
+        prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
+No prose. No markdown fences. No plan.json. No explanation.
+Repair the plan, not the task. Preserve valid steps; replace invalid ones.
 
-Malformed output excerpt:
+Bad:
 {broken_output}
 
 {validation_error or default_validation_error}
 
 Strict output schema:
-Return only a JSON array. Each step object must contain exactly:
+JSON array only. Keys:
 step_number, description, commands, verification, rollback, expected_files.
 
-Repair rules:
-1. Use 3 to 6 sequential steps, numbered 1..N.
-2. commands must be an array of short shell strings.
-3. verification and rollback must each be one shell string or null.
-4. expected_files must be an array of relative paths.
-5. Use relative paths only; no absolute paths, .., ~, or duplicated roots like frontend/src/frontend/src or backend/src/backend/src. Paths must be rooted exactly once from the project workspace.
-6. No background processes, &, nohup, disown, dev servers, or long-running commands.
+Rules:
+1. Use 3 to 4 steps, numbered 1..N.
+2. commands: array of short shell strings.
+3. verification and rollback: one shell string or null.
+4. expected_files: array of relative paths.
+5. Relative paths only; no absolute paths, .., ~, or duplicated roots like frontend/src/frontend/src or backend/src/backend/src. Paths rooted exactly once.
+6. No background processes, &, nohup, disown, dev servers, or long commands.
 7. No prose, markdown, payloads, logs, session history, or extra JSON keys.
-8. Replace oversized inline source dumps with short setup/edit commands.
-9. Implementation steps with expected_files must write or edit real file contents.
-10. Verification must prove behavior or content, not only file existence.
+8. Replace oversized source dumps with short setup/edit commands.
+9. expected_files steps must write or edit real file contents.
+10. Verification must use `node -e`, `npm run build`, or `python -m`; no `test -f`, `grep -q`, or `echo`.
+11. No /root/write_file.py, /tmp helpers, absolute helper scripts, or outside files.
+12. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. Use printf to overwrite only needed JSX body/CSS lines.
+13. If scaffold step used `npm create vite@latest`, do not use heredoc; use printf. Last resort: exactly ONE heredoc across ENTIRE plan, all steps combined. Allowed one-file pattern: mkdir -p src && cat > src/App.jsx <<'EOF'
+export default function App() {{ return <main>Ready</main>; }}
+EOF
+14. No heredocs in loops, multi-file heredocs, or multiple heredoc commands.
+15. No `\\'` inside single-quoted strings; use double quotes or heredoc.
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 

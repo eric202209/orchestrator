@@ -365,6 +365,74 @@ def test_divergence_compare_no_match_when_no_siblings(db_session, monkeypatch):
     assert result["matches"] == []
 
 
+def test_divergence_compare_resolves_relative_project_workspace(
+    db_session, tmp_path, monkeypatch
+):
+    from app.models import Project, Session as SessionModel
+    from app.services.session.session_inspection_service import (
+        get_session_divergence_compare_payload,
+    )
+
+    cwd = tmp_path / "cwd"
+    cwd.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(cwd)
+    workspace_root = tmp_path / "workspace-root"
+    monkeypatch.setattr(
+        "app.services.workspace.project_isolation_service.get_effective_workspace_root",
+        lambda db=None: workspace_root,
+    )
+
+    project = Project(name="Relative Project", workspace_path="relative-project")
+    db_session.add(project)
+    db_session.flush()
+
+    session = SessionModel(
+        name="relative-session", project_id=project.id, status="stopped"
+    )
+    db_session.add(session)
+    db_session.flush()
+    db_session.commit()
+
+    monkeypatch.setattr(
+        "app.services.session.session_inspection_service._build_session_divergence_fingerprint",
+        lambda db, session: {
+            "session_id": session.id,
+            "session_name": session.name,
+            "status": session.status,
+            "created_at": None,
+            "task_count": 0,
+            "event_count": 0,
+            "retry_count": 0,
+            "tool_failure_count": 0,
+            "intent_gap_count": 0,
+            "divergence_count": 0,
+            "divergence_reasons": [],
+            "validation_statuses": [],
+            "min_health_score": None,
+            "anomaly_tags": [],
+        },
+    )
+
+    get_session_divergence_compare_payload(db_session, session.id, limit=5)
+
+    expected = (
+        workspace_root
+        / "relative-project"
+        / ".openclaw"
+        / "fingerprints"
+        / f"session_{session.id}.json"
+    )
+    wrong = (
+        Path.cwd()
+        / "relative-project"
+        / ".openclaw"
+        / "fingerprints"
+        / f"session_{session.id}.json"
+    )
+    assert expected.exists()
+    assert not wrong.exists()
+
+
 def test_divergence_compare_higher_tag_overlap_scores_higher(db_session, monkeypatch):
     from app.models import Project, Session as SessionModel
     from app.services.session.session_inspection_service import (

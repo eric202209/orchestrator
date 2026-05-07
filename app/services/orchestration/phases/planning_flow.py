@@ -222,6 +222,11 @@ def _semantic_codes_for_immediate_repair_issues(
     return codes
 
 
+def _is_repairable_malformed_shell_quoting_violation(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "malformed shell quoting" in message
+
+
 class _PlanningRetryState:
     """Track retry/repair attempts to implement circuit breaking."""
 
@@ -1000,16 +1005,48 @@ def execute_planning_phase(
                 )
 
             sanitized_plan = PlannerService.sanitize_common_plan_issues(extracted_plan)
-            ctx.orchestration_state.plan = normalize_plan_with_live_logging(
-                ctx.db,
-                ctx.session_id,
-                ctx.task_id,
-                sanitized_plan,
-                ctx.orchestration_state.project_dir,
-                ctx.logger,
-                ctx.session_instance_id,
-                "Planning output",
-            )
+            try:
+                ctx.orchestration_state.plan = normalize_plan_with_live_logging(
+                    ctx.db,
+                    ctx.session_id,
+                    ctx.task_id,
+                    sanitized_plan,
+                    ctx.orchestration_state.project_dir,
+                    ctx.logger,
+                    ctx.session_instance_id,
+                    "Planning output",
+                )
+            except workspace_violation_error_cls as exc:
+                if (
+                    _is_repairable_malformed_shell_quoting_violation(exc)
+                    and not retry_state.repair_prompt_used
+                ):
+                    contract_violations = [
+                        "Plan contains malformed shell quoting in runnable commands"
+                    ]
+                    retry_state.last_repair_reason = "malformed_shell_quoting"
+                    _emit_planning_diagnostics_contract_violation(
+                        ctx,
+                        reason="malformed_shell_quoting",
+                        contract_violations=contract_violations,
+                        semantic_violation_codes=["malformed_shell_quoting"],
+                        output_text=output_text,
+                        strategy_info="workspace_guard_malformed_shell_quoting",
+                    )
+                    planning_result = __repair_planning_output(
+                        ctx=ctx,
+                        planning_timeout_seconds=planning_timeout_seconds,
+                        malformed_output=output_text,
+                        reason="malformed_shell_quoting: " + str(exc)[:300],
+                        rejection_reasons=[
+                            "Malformed shell quoting: do not put escaped apostrophes like `\\'` inside single-quoted strings"
+                        ],
+                        prompt_profile=prompt_profile,
+                    )
+                    retry_state.repair_prompt_used = True
+                    retry_state.consecutive_failures += 1
+                    continue
+                raise
             immediate_repair_issues = PlannerService.find_immediate_repair_step_issues(
                 ctx.orchestration_state.plan
             )
