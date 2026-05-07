@@ -15,18 +15,22 @@ from app.services.workspace.project_isolation_service import (
 )
 from app.tasks import worker as worker_module
 from app.tasks.worker import _claim_queued_task_for_worker
+from app.tasks.worker import _find_queued_event_for_dispatch
 from app.tasks.worker import _should_reject_stale_dispatch_claim
 
 
 def test_queue_task_for_session_emits_queued_event_and_keeps_task_pending(
     db_session, monkeypatch, tmp_path
 ):
+    captured_delay_kwargs = {}
+
     class _FakeDelayResult:
         id = "celery-queued-1"
 
     class _FakeWorkerTask:
         @staticmethod
-        def delay(**_kwargs):
+        def delay(**kwargs):
+            captured_delay_kwargs.update(kwargs)
             return _FakeDelayResult()
 
     monkeypatch.setattr(
@@ -85,6 +89,69 @@ def test_queue_task_for_session_emits_queued_event_and_keeps_task_pending(
     events = read_orchestration_events(Path(workspace_root), session.id, task.id)
     assert events[-1]["event_type"] == EventType.TASK_QUEUED
     assert events[-1]["details"]["session_instance_id"] == session.instance_id
+    assert captured_delay_kwargs["queued_event_id"] == events[-1]["event_id"]
+
+
+def test_worker_uses_provided_queued_event_id_for_exact_lookup(tmp_path):
+    project_dir = tmp_path / "dispatch"
+    project_dir.mkdir()
+    from app.services.orchestration.persistence import append_orchestration_event
+
+    old_event = append_orchestration_event(
+        project_dir=project_dir,
+        session_id=43,
+        task_id=7,
+        event_type=EventType.TASK_QUEUED,
+        details={"label": "old"},
+    )
+    fresh_event = append_orchestration_event(
+        project_dir=project_dir,
+        session_id=43,
+        task_id=7,
+        event_type=EventType.TASK_QUEUED,
+        details={"label": "fresh"},
+    )
+
+    found = _find_queued_event_for_dispatch(
+        dispatch_project_dir=project_dir,
+        session_id=43,
+        task_id=7,
+        queued_event_id=fresh_event["event_id"],
+    )
+
+    assert found is not None
+    assert found["event_id"] == fresh_event["event_id"]
+    assert found["event_id"] != old_event["event_id"]
+
+
+def test_worker_falls_back_to_latest_queued_event_without_event_id(tmp_path):
+    project_dir = tmp_path / "dispatch"
+    project_dir.mkdir()
+    from app.services.orchestration.persistence import append_orchestration_event
+
+    append_orchestration_event(
+        project_dir=project_dir,
+        session_id=43,
+        task_id=7,
+        event_type=EventType.TASK_QUEUED,
+        details={"label": "old"},
+    )
+    latest_event = append_orchestration_event(
+        project_dir=project_dir,
+        session_id=43,
+        task_id=7,
+        event_type=EventType.TASK_QUEUED,
+        details={"label": "latest"},
+    )
+
+    found = _find_queued_event_for_dispatch(
+        dispatch_project_dir=project_dir,
+        session_id=43,
+        task_id=7,
+    )
+
+    assert found is not None
+    assert found["event_id"] == latest_event["event_id"]
 
 
 def test_worker_claim_guard_claims_once_and_rejects_duplicate(db_session):
@@ -169,6 +236,36 @@ def test_worker_rejects_stale_dispatch_that_already_progressed(tmp_path):
     )
 
     assert reason == "stale_queue_dispatch_already_progressed"
+
+
+def test_worker_does_not_reject_fresh_specific_queued_event(tmp_path):
+    project_dir = tmp_path / "skillsync"
+    project_dir.mkdir()
+    from app.services.orchestration.persistence import append_orchestration_event
+
+    fresh_event = append_orchestration_event(
+        project_dir=project_dir,
+        session_id=36,
+        task_id=2,
+        event_type=EventType.TASK_QUEUED,
+        details={},
+    )
+    queued_event = _find_queued_event_for_dispatch(
+        dispatch_project_dir=project_dir,
+        session_id=36,
+        task_id=2,
+        queued_event_id=fresh_event["event_id"],
+    )
+
+    reason = _should_reject_stale_dispatch_claim(
+        dispatch_project_dir=project_dir,
+        session_id=36,
+        task_id=2,
+        queued_event=queued_event,
+        queue_latency_seconds=0.1,
+    )
+
+    assert reason is None
 
 
 def test_worker_claim_guard_rejects_stale_session_instance(db_session):

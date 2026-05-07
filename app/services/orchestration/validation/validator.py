@@ -366,6 +366,8 @@ class ValidatorService:
             return True
         meaningful_markers = (
             "pytest",
+            "python3 -m",
+            "python3 ",
             "python -m",
             "node -e",
             "node ",
@@ -382,18 +384,19 @@ class ValidatorService:
         )
         if any(marker in text for marker in meaningful_markers):
             return False
-        weak_markers = (
-            "test -f",
-            "test -d",
-            "test -s",
-            "grep -q",
-            "ls ",
-            "echo ",
-            "cat ",
-            "find ",
-            "wc -l",
+        weak_command_patterns = (
+            r"test\s+-[fds]\b",
+            r"grep\s+-q\b",
+            r"ls\b",
+            r"echo\b",
+            r"cat\b",
+            r"find\b",
+            r"wc\s+-l\b",
         )
-        return any(marker in text for marker in weak_markers)
+        return any(
+            re.search(rf"(?:^|[;&|()\n])\s*{pattern}(?:\s|$)", text)
+            for pattern in weak_command_patterns
+        )
 
     @staticmethod
     def _normalize_failure_signature_parts(reasons: List[str]) -> List[str]:
@@ -590,6 +593,9 @@ class ValidatorService:
                 "command_total_chars": 0,
                 "oversized_command_steps": [],
                 "has_brittle_commands": False,
+                "brittle_command_subcodes": [],
+                "brittle_command_step_details": {},
+                "brittle_command_step_command_lengths": {},
             }
 
         heredoc_count = 0
@@ -597,10 +603,21 @@ class ValidatorService:
         command_total_chars = 0
         oversized_command_steps: List[int] = []
         has_brittle_commands = False
+        plan_subcodes: set = set()
+        step_subcodes: Dict[int, List[str]] = {}
+        step_command_lengths: Dict[int, List[int]] = {}
+
+        def _flag(step_num, code: str) -> None:
+            nonlocal has_brittle_commands
+            has_brittle_commands = True
+            plan_subcodes.add(code)
+            if step_num is not None:
+                step_subcodes.setdefault(int(step_num), []).append(code)
+
         for step in extracted_plan:
             commands = step.get("commands", [])
             if not isinstance(commands, list):
-                has_brittle_commands = True
+                _flag(step.get("step_number"), "non_list_commands")
                 continue
             step_number = step.get("step_number")
             for command in commands:
@@ -613,33 +630,39 @@ class ValidatorService:
                 command_total_chars += command_length
                 max_command_length = max(max_command_length, command_length)
                 if ValidatorService._uses_brittle_python_inline_command(raw_command):
-                    has_brittle_commands = True
+                    _flag(step_number, "brittle_inline_python")
                 heredoc_count += len(write_heredoc_targets)
                 if "<<" in lowered:
                     if not write_heredoc_targets:
-                        has_brittle_commands = True
+                        _flag(step_number, "disallowed_heredoc_shape")
                     if len(write_heredoc_targets) > 1:
-                        has_brittle_commands = True
+                        _flag(step_number, "multiple_heredoc_in_command")
                     if ValidatorService._uses_looped_heredoc(raw_command):
-                        has_brittle_commands = True
+                        _flag(step_number, "looped_heredoc")
                     if any(
                         ValidatorService._heredoc_target_is_unsafe(target)
                         for target in write_heredoc_targets
                     ):
-                        has_brittle_commands = True
+                        _flag(step_number, "unsafe_heredoc_target")
                 if raw_command.count("\n") > 25:
-                    has_brittle_commands = True
+                    _flag(step_number, "too_many_lines")
                 if command_length > MAX_PLANNING_COMMAND_CHARS:
-                    has_brittle_commands = True
+                    _flag(step_number, "oversized_command_length")
                     if step_number is not None:
-                        oversized_command_steps.append(step_number)
+                        normalized_step_number = int(step_number)
+                        oversized_command_steps.append(normalized_step_number)
+                        step_command_lengths.setdefault(
+                            normalized_step_number, []
+                        ).append(command_length)
 
         if heredoc_count >= 2:
             has_brittle_commands = True
+            plan_subcodes.add("multiple_heredoc_across_plan")
 
         lowered_output = (output_text or "").lower()
         if lowered_output.count("cat >") >= 2 and "```json" in lowered_output:
             has_brittle_commands = True
+            plan_subcodes.add("markdown_wrapped_heredoc")
 
         return {
             "step_count": len(extracted_plan),
@@ -648,6 +671,13 @@ class ValidatorService:
             "command_total_chars": command_total_chars,
             "oversized_command_steps": sorted(set(oversized_command_steps)),
             "has_brittle_commands": has_brittle_commands,
+            "brittle_command_subcodes": sorted(plan_subcodes),
+            "brittle_command_step_details": {
+                k: sorted(set(v)) for k, v in step_subcodes.items()
+            },
+            "brittle_command_step_command_lengths": {
+                k: sorted(set(v)) for k, v in step_command_lengths.items()
+            },
             "malformed_shell_quoting_steps": cls._plan_malformed_shell_quoting_steps(
                 extracted_plan
             ),
@@ -1278,6 +1308,19 @@ class ValidatorService:
             repairable.append(
                 "Plan contains brittle heredoc-heavy or malformed commands"
             )
+            brittle_subcodes = command_budget.get("brittle_command_subcodes") or []
+            if brittle_subcodes:
+                details["brittle_command_subcodes"] = brittle_subcodes
+            brittle_step_details = (
+                command_budget.get("brittle_command_step_details") or {}
+            )
+            if brittle_step_details:
+                details["brittle_command_step_details"] = brittle_step_details
+            brittle_step_lengths = (
+                command_budget.get("brittle_command_step_command_lengths") or {}
+            )
+            if brittle_step_lengths:
+                details["brittle_command_step_command_lengths"] = brittle_step_lengths
         if malformed_shell_quoting_steps:
             repairable.append(
                 "Plan contains malformed shell quoting in runnable commands "

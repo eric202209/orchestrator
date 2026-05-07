@@ -199,3 +199,25 @@ PY"""
     normalized = normalize_command(command, project_dir)
 
     assert normalized == command
+
+
+def test_normalize_command_allows_tilde_inside_jsx_content(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir(parents=True)
+
+    command = (
+        "printf 'export default function App() { return <main>Save ~20% tonight</main>; }\\n' "
+        "> src/App.jsx"
+    )
+
+    normalized = normalize_command(command, project_dir)
+
+    assert "Save ~20%" in normalized
+
+
+def test_normalize_command_rejects_home_directory_path_token(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir(parents=True)
+
+    with pytest.raises(TaskWorkspaceViolationError, match="Home-directory paths"):
+        normalize_command("rm -rf ~/.cache/openclaw", project_dir)

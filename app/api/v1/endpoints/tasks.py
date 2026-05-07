@@ -272,6 +272,25 @@ def _queue_task_retry(
     _prepare_task_for_fresh_execution(task, clear_saved_plan=should_clear_saved_plan)
     task_workspace = ensure_task_workspace(db, selected_session, task.id)
 
+    queued_event = append_orchestration_event(
+        project_dir=task_workspace["workspace_path"],
+        session_id=selected_session.id,
+        task_id=task.id,
+        event_type=EventType.TASK_QUEUED,
+        details={
+            "session_instance_id": selected_session.instance_id,
+            "celery_task_id": None,
+            "task_execution_id": task_execution.id,
+            "project_dir": task_workspace["workspace_path"],
+            "backend": get_effective_agent_backend(
+                settings.ORCHESTRATOR_AGENT_BACKEND, db=db
+            ),
+            "model_family": get_effective_agent_model_family(
+                settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=db
+            ),
+        },
+    )
+
     try:
         result = execute_orchestration_task.delay(
             session_id=selected_session.id,
@@ -280,6 +299,7 @@ def _queue_task_retry(
             timeout_seconds=timeout_seconds,
             expected_session_instance_id=selected_session.instance_id,
             task_execution_id=task_execution.id,
+            queued_event_id=(queued_event or {}).get("event_id"),
         )
     except Exception:
         db.rollback()
@@ -325,25 +345,6 @@ def _queue_task_retry(
         )
     )
     db.commit()
-    append_orchestration_event(
-        project_dir=task_workspace["workspace_path"],
-        session_id=selected_session.id,
-        task_id=task.id,
-        event_type=EventType.TASK_QUEUED,
-        details={
-            "session_instance_id": selected_session.instance_id,
-            "celery_task_id": result.id,
-            "task_execution_id": task_execution.id,
-            "project_dir": task_workspace["workspace_path"],
-            "backend": get_effective_agent_backend(
-                settings.ORCHESTRATOR_AGENT_BACKEND, db=db
-            ),
-            "model_family": get_effective_agent_model_family(
-                settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=db
-            ),
-        },
-    )
-
     return {
         "status": "started",
         "task_id": task.id,

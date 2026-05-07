@@ -396,7 +396,7 @@ def queue_task_for_session(
 
     # Write TASK_QUEUED to disk before dispatching so the worker's stale-dispatch
     # check always finds this fresh event instead of a stale one from a prior run.
-    append_orchestration_event(
+    queued_event = append_orchestration_event(
         project_dir=event_project_dir,
         session_id=session.id,
         task_id=task.id,
@@ -417,6 +417,7 @@ def queue_task_for_session(
         timeout_seconds=timeout_seconds,
         expected_session_instance_id=session.instance_id,
         task_execution_id=task_execution.id,
+        queued_event_id=(queued_event or {}).get("event_id"),
     )
 
     db.add(

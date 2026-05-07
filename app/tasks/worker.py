@@ -58,6 +58,7 @@ from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.persistence import (
     append_orchestration_event as _append_orchestration_event,
     find_latest_orchestration_event as _find_latest_orchestration_event,
+    read_orchestration_events as _read_orchestration_events,
     record_live_log as _record_live_log,
     record_validation_verdict as _record_validation_verdict,
     restore_step_result as _restore_step_result,
@@ -265,6 +266,33 @@ def _should_reject_stale_dispatch_claim(
     if latest_post_queue_at is not None and latest_post_queue_at >= queued_at:
         return "stale_queue_dispatch_already_progressed"
     return "stale_queue_dispatch"
+
+
+def _find_queued_event_for_dispatch(
+    *,
+    dispatch_project_dir: Optional[Path],
+    session_id: int,
+    task_id: int,
+    queued_event_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    if not dispatch_project_dir:
+        return None
+    if queued_event_id:
+        for event in _read_orchestration_events(
+            dispatch_project_dir,
+            session_id,
+            task_id,
+            event_type_filter=EventType.TASK_QUEUED,
+        ):
+            if event.get("event_id") == queued_event_id:
+                return event
+        return None
+    return _find_latest_orchestration_event(
+        dispatch_project_dir,
+        session_id,
+        task_id,
+        event_types={EventType.TASK_QUEUED},
+    )
 
 
 def _claim_queued_task_for_worker(
@@ -799,6 +827,7 @@ def execute_orchestration_task(
     resume_checkpoint_name: Optional[str] = None,
     expected_session_instance_id: Optional[str] = None,
     task_execution_id: Optional[int] = None,
+    queued_event_id: Optional[str] = None,
 ):
     """
     Execute an orchestration task with multi-step runtime coordination
@@ -913,11 +942,11 @@ def execute_orchestration_task(
         queued_event = None
         queue_latency_seconds = None
         if dispatch_project_dir:
-            queued_event = _find_latest_orchestration_event(
-                dispatch_project_dir,
-                session_id,
-                task_id,
-                event_types={EventType.TASK_QUEUED},
+            queued_event = _find_queued_event_for_dispatch(
+                dispatch_project_dir=dispatch_project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                queued_event_id=queued_event_id,
             )
             queued_at = _parse_event_timestamp((queued_event or {}).get("timestamp"))
             if queued_at is not None:

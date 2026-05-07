@@ -8,9 +8,12 @@ import pytest
 
 from app.models import TaskStatus
 from app.services.orchestration.phases.planning_flow import (
+    _build_repair_rejection_reasons,
     _compress_project_context_for_planning,
     _emit_planning_diagnostics_contract_violation,
+    _plan_contract_diagnostics,
     _should_repair_truncated_single_step_plan,
+    _terminal_validation_failure_details,
     execute_planning_phase,
 )
 from app.services.orchestration.planning.planner import (
@@ -348,6 +351,44 @@ def test_weak_verification_is_treated_as_blocking_immediate_repair_issue():
     assert issues["weak_verification_steps"] == [1]
 
 
+def test_python3_assertion_import_text_is_not_weak_verification_for_repair_gate():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create project structure and shared models",
+            "commands": [
+                "mkdir -p services",
+                "printf 'class WorkflowRecord: pass\\n' > models.py",
+            ],
+            "verification": (
+                "python3 -c 'from models import WorkflowRecord; "
+                'record = WorkflowRecord(); assert record is not None; print("OK")\''
+            ),
+            "rollback": "rm -f models.py",
+            "expected_files": ["models.py"],
+        },
+        {
+            "step_number": 2,
+            "description": "Implement service handlers",
+            "commands": [
+                "mkdir -p services",
+                "printf 'class ServiceHandler: pass\\n' > services/handlers.py",
+            ],
+            "verification": (
+                "python3 -c 'from services.handlers import ServiceHandler; "
+                "from models import WorkflowRecord; handler = ServiceHandler(); "
+                'record = WorkflowRecord(); assert handler is not None and record is not None; print("OK")\''
+            ),
+            "rollback": "rm -f services/handlers.py",
+            "expected_files": ["services/handlers.py"],
+        },
+    ]
+
+    issues = PlannerService.find_immediate_repair_step_issues(plan)
+
+    assert "weak_verification_steps" not in issues
+
+
 def test_validator_rejects_weak_verification_for_implementation_plan(tmp_path):
     verdict = ValidatorService.validate_plan(
         [
@@ -369,6 +410,60 @@ def test_validator_rejects_weak_verification_for_implementation_plan(tmp_path):
     assert verdict.repairable is True
     assert "weak_verification_steps" in verdict.details
     assert "weak_verification" in verdict.details["semantic_violation_codes"]
+
+
+def test_validator_accepts_python3_assertion_import_text_as_strong_verification(
+    tmp_path,
+):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Build the model implementation",
+            "commands": ["printf 'class WorkflowRecord: pass\\n' > models.py"],
+            "verification": (
+                "python3 -c 'from models import WorkflowRecord; "
+                'record = WorkflowRecord(); assert record is not None; print("OK")\''
+            ),
+            "rollback": "rm -f models.py",
+            "expected_files": ["models.py"],
+        }
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Build a workflow model",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert "weak_verification_steps" not in verdict.details
+    assert "weak_verification" not in verdict.details.get(
+        "semantic_violation_codes", []
+    )
+
+
+def test_validator_still_rejects_standalone_weak_shell_verification(tmp_path):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Build the model implementation",
+            "commands": ["printf 'class WorkflowRecord: pass\\n' > models.py"],
+            "verification": "ls models.py",
+            "rollback": "rm -f models.py",
+            "expected_files": ["models.py"],
+        }
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Build a workflow model",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.details["weak_verification_steps"] == [1]
 
 
 def test_validator_rejects_non_runnable_pseudo_command_with_code(tmp_path):
@@ -1282,9 +1377,11 @@ def test_planning_repair_timeout_emits_runtime_diagnostics(monkeypatch):
 
 def test_planning_repair_no_output_timeout_classification():
     events = []
+    attempts = {"count": 0}
 
     class Runtime:
         async def invoke_prompt(self, prompt, **kwargs):
+            attempts["count"] += 1
             exc = RuntimeError("OpenClaw prompt produced no output before 30s")
             exc.runtime_diagnostics = {
                 "no_output_timeout": True,
@@ -1316,7 +1413,16 @@ def test_planning_repair_no_output_timeout_classification():
         )
 
     assert "no output" in str(exc_info.value).lower()
+    assert attempts["count"] == 2
     assert exc_info.value.runtime_diagnostics["return_code"] == -9
+    retry_events = [
+        metadata
+        for level, message, metadata in events
+        if level == "WARN"
+        and metadata.get("reason") == "planning_repair_no_output_retry"
+    ]
+    assert retry_events
+    assert retry_events[0]["next_repair_attempt"] == 2
     no_output_events = [
         metadata
         for level, message, metadata in events
@@ -1330,12 +1436,87 @@ def test_planning_repair_no_output_timeout_classification():
     assert no_output_events
     metadata = no_output_events[0]
     assert metadata["reason"] == "planning_repair_no_output_timeout"
+    assert metadata["repair_attempts"] == 2
     assert metadata["first_output_delay"] is None
     assert metadata["stdout_chars"] == 0
     assert metadata["stderr_chars"] == 0
     assert metadata["return_code"] == -9
     assert metadata["cancelled"] is True
     assert metadata["timeout_boundary"] == "repair_no_output"
+
+
+def test_planning_repair_no_output_retry_can_succeed():
+    attempts = {"count": 0}
+
+    class Runtime:
+        async def invoke_prompt(self, prompt, **kwargs):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                exc = RuntimeError("OpenClaw prompt produced no output before 30s")
+                exc.runtime_diagnostics = {
+                    "no_output_timeout": True,
+                    "timeout_boundary": "repair_no_output",
+                    "stdout_chars": 0,
+                    "stderr_chars": 0,
+                }
+                raise exc
+            return {"output": '[{"step_number":1}]'}
+
+    result = PlannerService.repair_output(
+        runtime_service=Runtime(),
+        task_description="Build a page",
+        malformed_output='{"steps":"bad"}',
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+        timeout_seconds=300,
+        logger=logging.getLogger("test.planning_repair_no_output_retry_success"),
+        emit_live=lambda *args, **kwargs: None,
+        reason="json_parse_failed",
+        rejection_reasons=["commands must be an array"],
+        knowledge_context=None,
+        session_id=1,
+        task_id=2,
+    )
+
+    assert attempts["count"] == 2
+    assert result == {"output": '[{"step_number":1}]'}
+
+
+def test_planning_repair_returned_prose_fails_without_no_output_retry():
+    events = []
+    attempts = {"count": 0}
+
+    class Runtime:
+        async def invoke_prompt(self, prompt, **kwargs):
+            attempts["count"] += 1
+            return {"output": "I repaired the plan. Here are the steps..."}
+
+    with pytest.raises(PlanningRepairNoOutputTimeout) as exc_info:
+        PlannerService.repair_output(
+            runtime_service=Runtime(),
+            task_description="Build a page",
+            malformed_output='{"steps":"bad"}',
+            project_dir=__import__("pathlib").Path("/tmp/project"),
+            timeout_seconds=300,
+            logger=logging.getLogger("test.planning_repair_returned_prose"),
+            emit_live=lambda level, message, metadata=None: events.append(
+                (level, message, metadata or {})
+            ),
+            reason="json_parse_failed",
+            rejection_reasons=["commands must be an array"],
+            knowledge_context=None,
+            session_id=1,
+            task_id=2,
+        )
+
+    assert attempts["count"] == 1
+    assert exc_info.value.runtime_diagnostics["repair_returned_prose"] is True
+    prose_events = [
+        metadata
+        for _, _, metadata in events
+        if metadata.get("reason") == "repair_returned_prose"
+    ]
+    assert prose_events
+    assert prose_events[0]["repair_attempts"] == 1
 
 
 def test_planning_repair_no_output_skips_parser_validation_metadata():
@@ -2961,3 +3142,316 @@ def test_minimal_prompt_retry_uses_fresh_session_instead_of_task_session():
     )
 
     assert captured["reuse_task_session"] is False
+
+
+# Phase 6O: post-repair brittle command subcodes
+
+
+def test_validator_brittle_subcodes_oversized_printf_command(tmp_path):
+    # Mirrors Board Game Cafe TaskExecution 37: step 2 command 1684 chars,
+    # step 3 command 1668 chars — both above MAX_PLANNING_COMMAND_CHARS (900).
+    long_body = "A" * 1200
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Scaffold project",
+            "commands": ["npm create vite@latest . -- --template react", "npm install"],
+            "verification": "node -e \"require('fs').existsSync('src/App.jsx')\"",
+            "rollback": None,
+            "expected_files": ["src/App.jsx"],
+        },
+        {
+            "step_number": 2,
+            "description": "Write App component",
+            "commands": [f"printf '{long_body}' > src/App.jsx"],
+            "verification": "npm run build",
+            "rollback": "rm -f src/App.jsx",
+            "expected_files": ["src/App.jsx"],
+        },
+        {
+            "step_number": 3,
+            "description": "Write CSS",
+            "commands": [f"printf '{long_body}' > src/App.css"],
+            "verification": "npm run build",
+            "rollback": None,
+            "expected_files": ["src/App.css"],
+        },
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Build a Board Game Cafe landing page",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.repairable is True
+    assert "brittle heredoc-heavy" in " ".join(verdict.reasons)
+    assert "oversized_command_length" in verdict.details["brittle_command_subcodes"]
+    assert 2 in verdict.details["brittle_command_step_details"]
+    assert 3 in verdict.details["brittle_command_step_details"]
+    assert (
+        "oversized_command_length" in verdict.details["brittle_command_step_details"][2]
+    )
+    assert (
+        "oversized_command_length" in verdict.details["brittle_command_step_details"][3]
+    )
+    assert verdict.details["brittle_command_step_command_lengths"][2]
+    assert verdict.details["brittle_command_step_command_lengths"][3]
+
+
+def test_validator_brittle_subcodes_too_many_lines(tmp_path):
+    long_command = "echo start\n" + "\n".join(f"echo {i}" for i in range(30))
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Run many echo lines",
+            "commands": [long_command],
+            "verification": "echo ok",
+            "rollback": None,
+            "expected_files": [],
+        }
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Do something",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.repairable is True
+    assert "too_many_lines" in verdict.details["brittle_command_subcodes"]
+    assert 1 in verdict.details["brittle_command_step_details"]
+    assert "too_many_lines" in verdict.details["brittle_command_step_details"][1]
+
+
+def test_validator_brittle_subcodes_multiple_heredoc_across_plan(tmp_path):
+    heredoc1 = "mkdir -p src && cat > src/App.jsx <<'EOF'\nexport default function App() {}\nEOF"
+    heredoc2 = "cat > src/App.css <<'EOF'\nbody { margin: 0; }\nEOF"
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Write component",
+            "commands": [heredoc1],
+            "verification": "echo ok",
+            "rollback": None,
+            "expected_files": ["src/App.jsx"],
+        },
+        {
+            "step_number": 2,
+            "description": "Write CSS",
+            "commands": [heredoc2],
+            "verification": "echo ok",
+            "rollback": None,
+            "expected_files": ["src/App.css"],
+        },
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Build a landing page",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.repairable is True
+    assert "multiple_heredoc_across_plan" in verdict.details["brittle_command_subcodes"]
+
+
+def test_validator_brittle_aggregate_reason_preserved_alongside_subcodes(tmp_path):
+    long_body = "B" * 1000
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Write oversized file",
+            "commands": [f"printf '{long_body}' > out.txt"],
+            "verification": "echo ok",
+            "rollback": None,
+            "expected_files": ["out.txt"],
+        }
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Do something",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.repairable is True
+    reasons_text = " ".join(verdict.reasons)
+    assert "Plan contains brittle heredoc-heavy or malformed commands" in reasons_text
+    assert "brittle_command_subcodes" in verdict.details
+    assert verdict.details["brittle_command_subcodes"]
+
+
+# Phase 6P: pass oversized command details into repair
+
+
+def test_repair_rejection_reasons_prepend_oversized_command_details():
+    reasons = ["Plan contains brittle heredoc-heavy or malformed commands"]
+    details = {
+        "brittle_command_subcodes": ["oversized_command_length"],
+        "oversized_command_steps": [2, 3],
+        "brittle_command_step_command_lengths": {2: [1684], 3: [1668]},
+    }
+
+    enriched = _build_repair_rejection_reasons(reasons, details)
+
+    assert enriched[0].startswith("oversized_command_length:")
+    assert "steps [2, 3]" in enriched[0]
+    assert "step 2: 1684 chars" in enriched[0]
+    assert "step 3: 1668 chars" in enriched[0]
+    assert "max 900" in enriched[0]
+    assert enriched[1:] == reasons
+
+
+def test_repair_rejection_reasons_unchanged_without_oversized_subcode():
+    reasons = ["Plan contains brittle heredoc-heavy or malformed commands"]
+    details = {
+        "brittle_command_subcodes": ["multiple_heredoc_across_plan"],
+        "brittle_command_step_details": {1: ["disallowed_heredoc_shape"]},
+    }
+
+    assert _build_repair_rejection_reasons(reasons, details) == reasons
+
+
+def test_repair_prompt_includes_injected_oversized_rejection_line():
+    reasons = _build_repair_rejection_reasons(
+        ["Plan contains brittle heredoc-heavy or malformed commands"],
+        {
+            "brittle_command_subcodes": ["oversized_command_length"],
+            "oversized_command_steps": [2],
+            "brittle_command_step_command_lengths": {2: [1684]},
+        },
+    )
+
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Build a landing page",
+        malformed_output='[{"step_number":2,"commands":["printf ..."]}]',
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+        rejection_reasons=reasons,
+    )
+
+    assert "Validation error:" in prompt
+    assert "oversized_command_length: steps [2]" in prompt
+    assert "step 2: 1684 chars" in prompt
+
+
+# Phase 6Q: expose brittle-command subcodes in planning events
+
+
+def test_plan_contract_diagnostics_include_brittle_subcodes_when_present():
+    diagnostics = _plan_contract_diagnostics(
+        {
+            "step_count": 3,
+            "max_command_length": 1203,
+            "heredoc_command_count": 0,
+            "command_total_chars": 2445,
+            "brittle_command_subcodes": ["oversized_command_length"],
+            "brittle_command_step_details": {2: ["oversized_command_length"]},
+        }
+    )
+
+    assert diagnostics["step_count"] == 3
+    assert diagnostics["max_command_length"] == 1203
+    assert diagnostics["brittle_command_subcodes"] == ["oversized_command_length"]
+    assert diagnostics["brittle_command_step_details"] == {
+        2: ["oversized_command_length"]
+    }
+
+
+def test_plan_contract_diagnostics_omit_brittle_keys_when_absent():
+    diagnostics = _plan_contract_diagnostics(
+        {
+            "step_count": 3,
+            "max_command_length": 1203,
+            "heredoc_command_count": 0,
+            "command_total_chars": 2445,
+        }
+    )
+
+    assert "brittle_command_subcodes" not in diagnostics
+    assert "brittle_command_step_details" not in diagnostics
+
+
+def test_planning_contract_violation_event_includes_brittle_subcodes():
+    events = []
+    ctx = MagicMock(
+        session_id=55,
+        task_id=10,
+        task_execution_id=38,
+        emit_live=lambda level, message, metadata=None: events.append(
+            (level, message, metadata or {})
+        ),
+    )
+
+    _emit_planning_diagnostics_contract_violation(
+        ctx,
+        reason="plan_validation_failed",
+        contract_violations=[
+            "Plan contains brittle heredoc-heavy or malformed commands"
+        ],
+        contract_diagnostics={
+            "step_count": 3,
+            "max_command_length": 1203,
+            "heredoc_command_count": 0,
+            "command_total_chars": 2445,
+            "brittle_command_subcodes": ["oversized_command_length"],
+            "brittle_command_step_details": {2: ["oversized_command_length"]},
+        },
+        output_text='[{"step_number":2}]',
+        strategy_info="plan_validation_failed",
+    )
+
+    metadata = events[0][2]
+    assert metadata["brittle_command_subcodes"] == ["oversized_command_length"]
+    assert metadata["brittle_command_step_details"] == {2: ["oversized_command_length"]}
+
+
+def test_terminal_validation_failure_details_include_brittle_subcodes_when_present():
+    verdict = type(
+        "Verdict",
+        (),
+        {
+            "reasons": ["Plan contains brittle heredoc-heavy or malformed commands"],
+            "details": {
+                "brittle_command_subcodes": ["oversized_command_length"],
+                "brittle_command_step_details": {2: ["oversized_command_length"]},
+            },
+        },
+    )()
+
+    details = _terminal_validation_failure_details(verdict)
+
+    assert details["reason"] == "planning_validation_failed_after_repair"
+    assert details["validation_reasons"] == [
+        "Plan contains brittle heredoc-heavy or malformed commands"
+    ]
+    assert details["brittle_command_subcodes"] == ["oversized_command_length"]
+    assert details["brittle_command_step_details"] == {2: ["oversized_command_length"]}
+
+
+def test_terminal_validation_failure_details_omit_brittle_keys_when_absent():
+    verdict = type(
+        "Verdict",
+        (),
+        {
+            "reasons": ["Plan contains brittle heredoc-heavy or malformed commands"],
+            "details": {},
+        },
+    )()
+
+    details = _terminal_validation_failure_details(verdict)
+
+    assert details == {
+        "reason": "planning_validation_failed_after_repair",
+        "validation_reasons": [
+            "Plan contains brittle heredoc-heavy or malformed commands"
+        ],
+    }

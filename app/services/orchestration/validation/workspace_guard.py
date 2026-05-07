@@ -67,7 +67,7 @@ def normalize_path_reference(path_text: str, project_dir: Path) -> str:
     raw = (path_text or "").strip().strip("\"'")
     if not raw:
         raise TaskWorkspaceViolationError("Empty path reference is not allowed")
-    if "~" in raw:
+    if raw.startswith("~"):
         raise TaskWorkspaceViolationError(
             f"Home-directory path is not allowed in task workspace: {raw}"
         )
@@ -160,6 +160,19 @@ def _looks_like_path_traversal_token(token: str) -> bool:
     return bool(re.fullmatch(r"\.\.(?:/[A-Za-z0-9._@:+-]+)+/?", stripped))
 
 
+def _looks_like_home_path_token(token: str) -> bool:
+    """Return True for shell-token home paths without flagging source text."""
+
+    stripped = (token or "").strip().strip("\"'")
+    if not stripped:
+        return False
+    if any(char.isspace() for char in stripped):
+        return False
+    if any(char in stripped for char in "(){};,`<>"):
+        return False
+    return stripped == "~" or bool(re.fullmatch(r"~[A-Za-z0-9_-]*/.+", stripped))
+
+
 def _repair_workspace_relative_cd_target(path_text: str, project_dir: Path) -> str:
     """Rewrite mistaken `../name` cd targets back into the current workspace.
 
@@ -192,7 +205,7 @@ def _normalize_cd_target_for_cwd(
     raw = (path_text or "").strip().strip("\"'")
     if not raw:
         raise TaskWorkspaceViolationError("Empty cd target is not allowed")
-    if "~" in raw:
+    if raw.startswith("~"):
         raise TaskWorkspaceViolationError(
             f"Home-directory path is not allowed in task workspace: {raw}"
         )
@@ -285,13 +298,6 @@ def normalize_command(command: str, project_dir: Path) -> str:
     if looks_like_plain_english_instruction(normalized):
         return normalized
 
-    traversal_check_target = strip_heredoc_bodies(normalized)
-
-    if "~" in traversal_check_target:
-        raise TaskWorkspaceViolationError(
-            f"Home-directory paths are not allowed: {normalized}"
-        )
-
     current = _rewrite_safe_cd_chain(normalized, project_dir)
     cd_pattern = re.compile(r"^\s*cd\s+([^;&|]+?)\s*&&\s*(.+)$")
     while True:
@@ -330,6 +336,10 @@ def normalize_command(command: str, project_dir: Path) -> str:
             raise TaskWorkspaceViolationError(
                 f"Parent-directory traversal is not allowed: {normalized}"
             )
+        if _looks_like_home_path_token(token):
+            raise TaskWorkspaceViolationError(
+                f"Home-directory paths are not allowed: {normalized}"
+            )
 
         if not token.startswith("/"):
             continue
@@ -354,8 +364,9 @@ def normalize_command(command: str, project_dir: Path) -> str:
         raise TaskWorkspaceViolationError(
             f"Command contains malformed shell quoting after normalization: {current}"
         ) from exc
-    if "~" in current_traversal_target or any(
-        _looks_like_path_traversal_token(token) for token in current_tokens
+    if any(
+        _looks_like_path_traversal_token(token) or _looks_like_home_path_token(token)
+        for token in current_tokens
     ):
         raise TaskWorkspaceViolationError(
             f"Command still contains unsafe path traversal: {current}"

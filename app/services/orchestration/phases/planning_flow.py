@@ -42,12 +42,117 @@ from app.services.orchestration.types import ReasoningArtifact
 from app.services.orchestration.validation.parsing import (
     extract_plan_steps_from_summary_text,
 )
-from app.services.orchestration.validation.validator import ValidatorService
+from app.services.orchestration.validation.validator import (
+    MAX_PLANNING_COMMAND_CHARS,
+    ValidatorService,
+)
 from app.services.prompt_templates import OrchestrationStatus, estimate_token_count
 
 # Circuit breaker: abort planning after this many consecutive validation failures
 # to prevent infinite retry loops that hang the session.
 MAX_PLANNING_RETRIES = 3
+
+
+def _build_repair_rejection_reasons(
+    reasons: list[str],
+    verdict_details: Dict[str, Any] | None,
+) -> list[str]:
+    """Add precise validator diagnostics to repair without changing verdicts."""
+
+    base_reasons = list(reasons or [])
+    details = verdict_details or {}
+    subcodes = set(details.get("brittle_command_subcodes") or [])
+    if "oversized_command_length" not in subcodes:
+        return base_reasons
+
+    raw_steps = details.get("oversized_command_steps") or []
+    step_lengths = details.get("brittle_command_step_command_lengths") or {}
+    step_numbers: list[int] = []
+    for raw_step in raw_steps:
+        try:
+            step_numbers.append(int(raw_step))
+        except (TypeError, ValueError):
+            continue
+    if not step_numbers:
+        for raw_step in step_lengths:
+            try:
+                step_numbers.append(int(raw_step))
+            except (TypeError, ValueError):
+                continue
+    step_numbers = sorted(set(step_numbers))
+    if not step_numbers:
+        return base_reasons
+
+    lengths_by_step: list[str] = []
+    for step_number in step_numbers:
+        raw_lengths = step_lengths.get(step_number) or step_lengths.get(
+            str(step_number)
+        )
+        lengths: list[int] = []
+        for raw_length in raw_lengths or []:
+            try:
+                lengths.append(int(raw_length))
+            except (TypeError, ValueError):
+                continue
+        if lengths:
+            rendered_lengths = ", ".join(str(length) for length in sorted(set(lengths)))
+            lengths_by_step.append(f"step {step_number}: {rendered_lengths} chars")
+
+    if lengths_by_step:
+        length_clause = "; ".join(lengths_by_step)
+    else:
+        length_clause = (
+            f"steps {step_numbers} exceed {MAX_PLANNING_COMMAND_CHARS} chars"
+        )
+
+    targeted_reason = (
+        f"oversized_command_length: steps {step_numbers} have oversized commands "
+        f"({length_clause}; max {MAX_PLANNING_COMMAND_CHARS}). Replace these steps "
+        "with short scaffold or edit commands only."
+    )
+    return [targeted_reason] + base_reasons
+
+
+def _brittle_command_diagnostic_details(
+    verdict_details: Dict[str, Any] | None,
+) -> dict[str, Any]:
+    details = verdict_details or {}
+    diagnostics: dict[str, Any] = {}
+    subcodes = details.get("brittle_command_subcodes") or []
+    if not subcodes:
+        return diagnostics
+
+    diagnostics["brittle_command_subcodes"] = list(subcodes)
+    step_details = details.get("brittle_command_step_details") or {}
+    if step_details:
+        diagnostics["brittle_command_step_details"] = dict(step_details)
+    return diagnostics
+
+
+def _plan_contract_diagnostics(
+    verdict_details: Dict[str, Any] | None,
+) -> dict[str, Any]:
+    details = verdict_details or {}
+    diagnostics = {
+        key: details.get(key)
+        for key in (
+            "step_count",
+            "max_command_length",
+            "heredoc_command_count",
+            "command_total_chars",
+        )
+    }
+    diagnostics.update(_brittle_command_diagnostic_details(details))
+    return diagnostics
+
+
+def _terminal_validation_failure_details(plan_verdict: Any) -> dict[str, Any]:
+    details = {
+        "reason": "planning_validation_failed_after_repair",
+        "validation_reasons": list(plan_verdict.reasons or [])[:5],
+    }
+    details.update(_brittle_command_diagnostic_details(plan_verdict.details))
+    return details
 
 
 def _compress_project_context_for_planning(
@@ -180,28 +285,30 @@ def _emit_planning_diagnostics_contract_violation(
     violation_type = _normalize_contract_violation_type(
         contract_violations, reason or "planning_contract_violation"
     )
+    metadata = {
+        "session_id": ctx.session_id,
+        "task_id": ctx.task_id,
+        "task_execution_id": ctx.task_execution_id,
+        "contract_violation_type": violation_type,
+        "reason": reason,
+        "strategy_info": strategy_info,
+        "output_chars": len(output_text or ""),
+        "truncated_output_detected": (
+            "truncated" in str(output_text or "").lower()
+            or "truncated_multistep_plan" in str(reason or "")
+        ),
+        "contract_violations": list(contract_violations or [])[:8],
+        "semantic_violation_codes": list(semantic_violation_codes or [])[:8],
+        "step_count": diagnostics.get("step_count"),
+        "max_command_length": diagnostics.get("max_command_length"),
+        "heredoc_command_count": diagnostics.get("heredoc_command_count"),
+        "command_total_chars": diagnostics.get("command_total_chars"),
+    }
+    metadata.update(_brittle_command_diagnostic_details(diagnostics))
     ctx.emit_live(
         "WARN",
         "[OPENCLAW][PLANNING_DIAGNOSTICS] contract violation detected",
-        metadata={
-            "session_id": ctx.session_id,
-            "task_id": ctx.task_id,
-            "task_execution_id": ctx.task_execution_id,
-            "contract_violation_type": violation_type,
-            "reason": reason,
-            "strategy_info": strategy_info,
-            "output_chars": len(output_text or ""),
-            "truncated_output_detected": (
-                "truncated" in str(output_text or "").lower()
-                or "truncated_multistep_plan" in str(reason or "")
-            ),
-            "contract_violations": list(contract_violations or [])[:8],
-            "semantic_violation_codes": list(semantic_violation_codes or [])[:8],
-            "step_count": diagnostics.get("step_count"),
-            "max_command_length": diagnostics.get("max_command_length"),
-            "heredoc_command_count": diagnostics.get("heredoc_command_count"),
-            "command_total_chars": diagnostics.get("command_total_chars"),
-        },
+        metadata=metadata,
     )
 
 
@@ -1223,15 +1330,7 @@ def execute_planning_phase(
                 )
 
             if not plan_verdict.accepted and not retry_state.repair_prompt_used:
-                contract_diagnostics = {
-                    key: (plan_verdict.details or {}).get(key)
-                    for key in (
-                        "step_count",
-                        "max_command_length",
-                        "heredoc_command_count",
-                        "command_total_chars",
-                    )
-                }
+                contract_diagnostics = _plan_contract_diagnostics(plan_verdict.details)
                 semantic_violation_codes = list(
                     (plan_verdict.details or {}).get("semantic_violation_codes") or []
                 )
@@ -1264,7 +1363,10 @@ def execute_planning_phase(
                     malformed_output=output_text,
                     reason="plan_validation_failed: "
                     + "; ".join(plan_verdict.reasons[:3]),
-                    rejection_reasons=plan_verdict.reasons,
+                    rejection_reasons=_build_repair_rejection_reasons(
+                        plan_verdict.reasons,
+                        plan_verdict.details,
+                    ),
                     prompt_profile=prompt_profile,
                     knowledge_context=(
                         validation_knowledge_ctx
@@ -1298,10 +1400,7 @@ def execute_planning_phase(
                     level="ERROR",
                     phase="planning",
                     message="[ORCHESTRATION] Plan validation failed after repair",
-                    details={
-                        "reason": "planning_validation_failed_after_repair",
-                        "validation_reasons": plan_verdict.reasons[:5],
-                    },
+                    details=_terminal_validation_failure_details(plan_verdict),
                 )
                 failure_reason = "Plan validation failed after repair: " + "; ".join(
                     plan_verdict.reasons[:4]

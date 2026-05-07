@@ -196,6 +196,8 @@ class PlannerService:
 
     _STRONG_VERIFICATION_MARKERS = (
         "pytest",
+        "python3 -m",
+        "python3 ",
         "python -m",
         "python ",
         "uv run",
@@ -561,7 +563,24 @@ class PlannerService:
             return True
         if any(marker in text for marker in cls._STRONG_VERIFICATION_MARKERS):
             return False
-        return any(marker in text for marker in cls._WEAK_VERIFICATION_MARKERS)
+        return cls._contains_weak_verification_command(text)
+
+    @classmethod
+    def _contains_weak_verification_command(cls, text: str) -> bool:
+        del cls
+        weak_command_patterns = (
+            r"test\s+-[fds]\b",
+            r"grep\s+-q\b",
+            r"ls\b",
+            r"echo\b",
+            r"cat\b",
+            r"find\b",
+            r"wc\s+-l\b",
+        )
+        return any(
+            re.search(rf"(?:^|[;&|()\n])\s*{pattern}(?:\s|$)", text)
+            for pattern in weak_command_patterns
+        )
 
     @staticmethod
     def find_immediate_repair_step_issues(
@@ -1105,6 +1124,8 @@ EOF
         knowledge_context: Any = None,
         session_id: Optional[int] = None,
         task_id: Optional[int] = None,
+        _no_output_retry_used: bool = False,
+        _repair_attempt_number: int = 1,
     ) -> Dict[str, Any]:
         repair_build_started_at = time.monotonic()
         logger.warning(
@@ -1136,7 +1157,7 @@ EOF
             "[ORCHESTRATION] session_id=%s task_id=%s repair_prompt_chars=%s "
             "malformed_output_chars=%s validation_error_chars=%s knowledge_context_chars=%s "
             "includes_project_context=false includes_non_project_context=false "
-            "repair_reason=%s repair_prompt_build_seconds=%.3f repair_attempts=1",
+            "repair_reason=%s repair_prompt_build_seconds=%.3f repair_attempts=%s",
             session_id,
             task_id,
             len(repair_prompt),
@@ -1145,6 +1166,7 @@ EOF
             knowledge_context_chars,
             reason[:120],
             repair_prompt_build_seconds,
+            _repair_attempt_number,
         )
         if len(repair_prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS:
             budget_error = cls._build_repair_prompt_budget_error(
@@ -1192,7 +1214,7 @@ EOF
                 "repair_prompt_chars": len(repair_prompt),
                 "malformed_output_chars": compact_malformed_output_chars,
                 "repair_prompt_build_seconds": round(repair_prompt_build_seconds, 3),
-                "repair_attempts": 1,
+                "repair_attempts": _repair_attempt_number,
             },
         )
         emit_live(
@@ -1209,7 +1231,7 @@ EOF
                 "repair_prompt_chars": len(repair_prompt),
                 "malformed_output_chars": compact_malformed_output_chars,
                 "repair_prompt_build_seconds": round(repair_prompt_build_seconds, 3),
-                "repair_attempts": 1,
+                "repair_attempts": _repair_attempt_number,
             },
         )
         repair_started_at = time.monotonic()
@@ -1232,6 +1254,46 @@ EOF
             repair_output_token_estimate = max(0, (repair_output_chars + 3) // 4)
             repair_truncated = "...<truncated" in repair_output_text.lower()
             parser_validation_seconds = time.monotonic() - parser_started_at
+            if not repair_output_text.lstrip().startswith("["):
+                diagnostics = {
+                    "repair_returned_prose": True,
+                    "timeout_boundary": "repair_returned_prose",
+                    "stdout_chars": repair_output_chars,
+                    "stderr_chars": len(str(result.get("stderr") or "")),
+                    "first_output_after_seconds": None,
+                    "cancelled": False,
+                }
+                logger.warning(
+                    "[ORCHESTRATION] Planning repair returned prose instead of JSON "
+                    "(session_id=%s task_id=%s output_chars=%s repair_attempts=%s)",
+                    session_id,
+                    task_id,
+                    repair_output_chars,
+                    _repair_attempt_number,
+                )
+                emit_live(
+                    "ERROR",
+                    "[ORCHESTRATION] Repair returned prose instead of a JSON array; stopping repair.",
+                    metadata={
+                        "phase": "planning",
+                        "reason": "repair_returned_prose",
+                        "timeout_seconds": repair_timeout,
+                        "duration_seconds": round(repair_duration_seconds, 3),
+                        "repair_prompt_build_seconds": round(
+                            repair_prompt_build_seconds, 3
+                        ),
+                        "repair_prompt_chars": len(repair_prompt),
+                        "malformed_output_chars": compact_malformed_output_chars,
+                        "repair_reason": reason[:240],
+                        "repair_attempts": _repair_attempt_number,
+                        "repair_output_chars": repair_output_chars,
+                        "parser_validation_seconds": None,
+                    },
+                )
+                raise PlanningRepairNoOutputTimeout(
+                    "Planning repair returned prose instead of JSON array",
+                    diagnostics,
+                )
             if repair_duration_seconds > repair_timeout:
                 raise TimeoutError(
                     f"Planning repair timed out after {repair_timeout:g}s "
@@ -1273,15 +1335,64 @@ EOF
                     "repair_output_chars": repair_output_chars,
                     "repair_output_token_estimate": repair_output_token_estimate,
                     "repair_output_truncated": repair_truncated,
-                    "repair_attempts": 1,
+                    "repair_attempts": _repair_attempt_number,
                 },
             )
             return result
+        except PlanningRepairNoOutputTimeout:
+            raise
         except Exception as exc:
             repair_duration_seconds = time.monotonic() - repair_started_at
             openclaw_request_seconds = time.monotonic() - invoke_started_at
             if cls._is_no_output_repair_timeout(exc):
                 diagnostics = cls._get_runtime_diagnostics(exc)
+                if not _no_output_retry_used:
+                    logger.warning(
+                        "[ORCHESTRATION] Planning repair produced no output before %.2fs; "
+                        "retrying repair once "
+                        "(repair_prompt_chars=%s malformed_output_chars=%s reason=%s)",
+                        repair_duration_seconds,
+                        len(repair_prompt),
+                        compact_malformed_output_chars,
+                        reason[:120],
+                    )
+                    emit_live(
+                        "WARN",
+                        "[ORCHESTRATION] Planning repair produced no output; retrying once.",
+                        metadata={
+                            "phase": "planning",
+                            "reason": "planning_repair_no_output_retry",
+                            "timeout_seconds": PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS,
+                            "duration_seconds": round(repair_duration_seconds, 3),
+                            "repair_prompt_chars": len(repair_prompt),
+                            "malformed_output_chars": compact_malformed_output_chars,
+                            "repair_reason": reason[:240],
+                            "repair_attempts": _repair_attempt_number,
+                            "next_repair_attempt": _repair_attempt_number + 1,
+                            "timeout_boundary": diagnostics.get("timeout_boundary")
+                            or "repair_no_output",
+                        },
+                    )
+                    return cls.repair_output(
+                        runtime_service=runtime_service,
+                        task_description=task_description,
+                        malformed_output=malformed_output,
+                        project_dir=project_dir,
+                        timeout_seconds=timeout_seconds,
+                        logger=logger,
+                        emit_live=emit_live,
+                        reason=reason,
+                        rejection_reasons=rejection_reasons,
+                        prompt_profile=prompt_profile,
+                        workflow_profile=workflow_profile,
+                        workflow_phases=workflow_phases,
+                        workspace_has_existing_files=workspace_has_existing_files,
+                        knowledge_context=knowledge_context,
+                        session_id=session_id,
+                        task_id=task_id,
+                        _no_output_retry_used=True,
+                        _repair_attempt_number=_repair_attempt_number + 1,
+                    )
                 timeout_exc = PlanningRepairNoOutputTimeout(
                     (
                         "Planning repair produced no output before "
@@ -1292,10 +1403,11 @@ EOF
                 )
                 logger.warning(
                     "[ORCHESTRATION] Planning repair produced no output before %.2fs; "
-                    "stopping instead of retrying repair "
+                    "stopping after one retry "
                     "(first_output_after=%s stdout_chars=%s stderr_chars=%s "
                     "return_code=%s cancelled=%s timeout_boundary=%s "
-                    "repair_prompt_chars=%s malformed_output_chars=%s reason=%s)",
+                    "repair_prompt_chars=%s malformed_output_chars=%s reason=%s "
+                    "repair_attempts=%s)",
                     repair_duration_seconds,
                     diagnostics.get("first_output_after_seconds"),
                     diagnostics.get("stdout_chars", 0),
@@ -1306,6 +1418,7 @@ EOF
                     len(repair_prompt),
                     compact_malformed_output_chars,
                     reason[:120],
+                    _repair_attempt_number,
                 )
                 emit_live(
                     "ERROR",
@@ -1325,7 +1438,7 @@ EOF
                         "repair_prompt_chars": len(repair_prompt),
                         "malformed_output_chars": compact_malformed_output_chars,
                         "repair_reason": reason[:240],
-                        "repair_attempts": 1,
+                        "repair_attempts": _repair_attempt_number,
                         "first_output_delay": diagnostics.get(
                             "first_output_after_seconds"
                         ),
@@ -1373,7 +1486,7 @@ EOF
                         "repair_prompt_chars": len(repair_prompt),
                         "malformed_output_chars": compact_malformed_output_chars,
                         "repair_reason": reason[:240],
-                        "repair_attempts": 1,
+                        "repair_attempts": _repair_attempt_number,
                         "timeout_boundary": "planner_wait_for",
                     },
                 )
