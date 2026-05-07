@@ -37,7 +37,10 @@ from app.services.orchestration.policy import (
     STRICT_JSON_RETRY_TIMEOUT_SECONDS,
     ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS,
 )
-from app.services.agents.openclaw_service import OpenClawSessionService
+from app.services.agents.openclaw_service import (
+    OpenClawSessionError,
+    OpenClawSessionService,
+)
 from app.tasks.worker import execute_orchestration_task
 
 
@@ -1304,7 +1307,7 @@ def test_planning_repair_prompt_forbids_duplicated_workspace_roots():
     assert "Never use parent-directory traversal like `../backend`" not in prompt
 
 
-def test_planning_repair_prompt_bans_external_helpers_and_allows_bounded_heredoc():
+def test_planning_repair_prompt_bans_external_helpers_and_heredoc():
     prompt = PlannerService.build_planning_repair_prompt(
         "Build a React/Vite landing page",
         malformed_output='[{"step_number":2,"commands":["python3 /root/write_file.py src/App.jsx ..."]}]',
@@ -1326,16 +1329,18 @@ def test_planning_repair_prompt_bans_external_helpers_and_allows_bounded_heredoc
     assert "absolute helper scripts" in prompt
     assert "no `test -f`, `grep -q`, `echo`, or `cd /... &&`" in prompt
     assert "No `\\'` inside single-quoted strings" in prompt
-    assert "cat > src/App.jsx <<'EOF'" in prompt
-    assert "export default function App() { return <main>Ready</main>; }" in prompt
     assert "{{ return <main>Ready</main>; }}" not in prompt
     assert "npm create vite@latest . -- --template react" in prompt
     assert "it creates src/App.jsx and src/App.css" in prompt
-    assert (
-        "If scaffold step used `npm create vite@latest`, do not use heredoc" in prompt
-    )
+    assert "Never use heredoc" in prompt
+    assert "<<'EOF'" in prompt
+    assert "<<'PY'" in prompt
+    assert "<<'HEREDOC'" in prompt
     assert "Use printf to overwrite only needed JSX body/CSS lines" in prompt
-    assert "exactly ONE heredoc across ENTIRE plan, all steps combined" in prompt
+    assert "Always use printf for all file writes" in prompt
+    assert "exactly ONE heredoc across ENTIRE plan, all steps combined" not in prompt
+    assert "use double quotes instead" in prompt
+    assert "use double quotes or heredoc" not in prompt
     assert "multiple heredoc commands" in prompt
 
 
@@ -1997,6 +2002,21 @@ def _openclaw_parse_service():
 
     service._log_entry = log_entry
     return service
+
+
+@pytest.mark.asyncio
+async def test_openclaw_refuses_task_run_without_resolved_workspace_cwd():
+    service = _openclaw_parse_service()
+    service.task_model = object()
+    service.session_model = None
+
+    with pytest.raises(OpenClawSessionError, match="resolved project workspace cwd"):
+        await service._run_cli_prompt_with_diagnostics(
+            ["openclaw"],
+            timeout_seconds=1,
+            cwd=None,
+            prompt="[]",
+        )
 
 
 def test_openclaw_parse_uses_stdout_only_model_output():

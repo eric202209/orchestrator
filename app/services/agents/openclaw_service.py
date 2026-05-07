@@ -475,6 +475,13 @@ class OpenClawSessionService:
         isolate_workspace_context: bool = False,
         no_output_timeout_seconds: Optional[int] = None,
     ) -> tuple[subprocess.CompletedProcess[str], Dict[str, Any]]:
+        if cwd is None and (
+            self.task_model is not None or self.session_model is not None
+        ):
+            raise OpenClawSessionError(
+                "Refusing to run OpenClaw without a resolved project workspace cwd"
+            )
+
         started_at = time.monotonic()
         first_output_at: Optional[float] = None
         last_output_at: Optional[float] = None

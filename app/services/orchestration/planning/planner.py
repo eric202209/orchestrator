@@ -996,11 +996,9 @@ Rules:
 10. Verification must use `node -e`, `npm run build`, or `python -m`; no `test -f`, `grep -q`, `echo`, or `cd /... &&`.
 11. No /root/write_file.py, /tmp helpers, absolute helper scripts, or outside files.
 12. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. Use printf to overwrite only needed JSX body/CSS lines.
-13. If scaffold step used `npm create vite@latest`, do not use heredoc; use printf. Last resort: exactly ONE heredoc across ENTIRE plan, all steps combined. Allowed one-file pattern: mkdir -p src && cat > src/App.jsx <<'EOF'
-export default function App() {{ return <main>Ready</main>; }}
-EOF
+13. Never use heredoc (`<<'EOF'`, `<<'PY'`, `<<'HEREDOC'`, etc.). Always use printf for all file writes.
 14. No heredocs in loops, multi-file heredocs, or multiple heredoc commands.
-15. No `\\'` inside single-quoted strings; use double quotes or heredoc.
+15. No `\\'` inside single-quoted strings; use double quotes instead.
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 
