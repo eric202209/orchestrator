@@ -58,6 +58,20 @@ TRUNCATED_PLAN_REPAIR_REJECTION_REASON = (
 )
 
 
+def _normalized_step_numbers(raw_steps: Any) -> list[int]:
+    step_numbers: list[int] = []
+    if isinstance(raw_steps, dict):
+        raw_iterable = raw_steps.keys()
+    else:
+        raw_iterable = raw_steps or []
+    for raw_step in raw_iterable:
+        try:
+            step_numbers.append(int(raw_step))
+        except (TypeError, ValueError):
+            continue
+    return sorted(set(step_numbers))
+
+
 def _build_repair_rejection_reasons(
     reasons: list[str],
     verdict_details: Dict[str, Any] | None,
@@ -68,19 +82,6 @@ def _build_repair_rejection_reasons(
     details = verdict_details or {}
     subcodes = set(details.get("brittle_command_subcodes") or [])
     targeted_reasons: list[str] = []
-
-    def _normalized_step_numbers(raw_steps: Any) -> list[int]:
-        step_numbers: list[int] = []
-        if isinstance(raw_steps, dict):
-            raw_iterable = raw_steps.keys()
-        else:
-            raw_iterable = raw_steps or []
-        for raw_step in raw_iterable:
-            try:
-                step_numbers.append(int(raw_step))
-            except (TypeError, ValueError):
-                continue
-        return sorted(set(step_numbers))
 
     step_lengths = details.get("brittle_command_step_command_lengths") or {}
     raw_steps = details.get("oversized_command_steps") or []
@@ -163,6 +164,17 @@ def _build_repair_rejection_reasons(
             "verification commands; replace with pytest, python -m, or npm run build."
         )
 
+    missing_verification_steps = _normalized_step_numbers(
+        details.get("missing_verification_steps") or []
+    )
+    if missing_verification_steps:
+        targeted_reasons.append(
+            "missing_verification_steps: steps "
+            f"{missing_verification_steps} are missing verification commands; "
+            "add pytest, python -m, npm run build, or an equivalent project test "
+            "command that proves behavior for each implementation-heavy step."
+        )
+
     return targeted_reasons + base_reasons
 
 
@@ -206,6 +218,43 @@ def _terminal_validation_failure_details(plan_verdict: Any) -> dict[str, Any]:
     }
     details.update(_brittle_command_diagnostic_details(plan_verdict.details))
     return details
+
+
+def _post_repair_missing_verification_steps(plan_verdict: Any) -> list[int]:
+    details = getattr(plan_verdict, "details", None) or {}
+    missing_steps = _normalized_step_numbers(
+        details.get("missing_verification_steps") or []
+    )
+    if not missing_steps:
+        return []
+
+    semantic_codes = set(details.get("semantic_violation_codes") or [])
+    if semantic_codes and semantic_codes != {"missing_verification_command"}:
+        return []
+
+    blocking_detail_keys = (
+        "weak_verification_steps",
+        "brittle_command_subcodes",
+        "placeholder_only_implementation",
+        "non_runnable_steps",
+        "background_process_steps",
+        "nested_workspace_steps",
+        "nested_project_root_steps",
+        "malformed_shell_quoting_steps",
+        "workflow_phase_violations",
+        "stack_conflict",
+    )
+    if any(details.get(key) for key in blocking_detail_keys):
+        return []
+
+    reasons = [
+        str(reason or "").lower()
+        for reason in getattr(plan_verdict, "reasons", []) or []
+    ]
+    if reasons and any("missing verification" not in reason for reason in reasons):
+        return []
+
+    return missing_steps
 
 
 def _compress_project_context_for_planning(
@@ -395,6 +444,7 @@ class _PlanningRetryState:
         self.minimal_prompt_used = False
         self.repair_prompt_used = False
         self.post_repair_blocking_second_repair_used = False
+        self.post_repair_validation_second_repair_used = False
         self.last_repair_reason = ""
 
     @property
@@ -1532,6 +1582,74 @@ def execute_planning_phase(
                 continue
 
             if not plan_verdict.accepted:
+                missing_verification_steps = _post_repair_missing_verification_steps(
+                    plan_verdict
+                )
+                if (
+                    missing_verification_steps
+                    and retry_state.repair_prompt_used
+                    and not retry_state.post_repair_validation_second_repair_used
+                ):
+                    issue_fragments = [
+                        (
+                            "missing_verification_steps: steps "
+                            f"{missing_verification_steps[:5]} are still missing "
+                            "verification after repair; add pytest, python -m, "
+                            "npm run build, or an equivalent project test command "
+                            "that proves behavior for each implementation-heavy step"
+                        )
+                    ]
+                    contract_diagnostics = _plan_contract_diagnostics(
+                        plan_verdict.details
+                    )
+                    _emit_planning_diagnostics_contract_violation(
+                        ctx,
+                        reason="post_repair_missing_verification_second_pass",
+                        contract_violations=plan_verdict.reasons,
+                        semantic_violation_codes=["missing_verification_command"],
+                        contract_diagnostics=contract_diagnostics,
+                        output_text=output_text,
+                        strategy_info="post_repair_missing_verification_second_pass",
+                    )
+                    emit_phase_event(
+                        ctx.orchestration_state,
+                        ctx.emit_live,
+                        level="WARN",
+                        phase="planning",
+                        message=(
+                            "[ORCHESTRATION] Planning repair still missed "
+                            "verification; starting one targeted second repair pass"
+                        ),
+                        details={
+                            "reason": "post_repair_missing_verification_second_pass",
+                            "missing_verification_steps": missing_verification_steps[
+                                :5
+                            ],
+                            "validation_reasons": list(plan_verdict.reasons or [])[:5],
+                            "repair_attempts": retry_state.consecutive_failures + 1,
+                        },
+                    )
+                    ctx.logger.warning(
+                        "[ORCHESTRATION] Planning repair still missed verification "
+                        "in steps %s; starting one targeted second repair pass",
+                        missing_verification_steps[:5],
+                    )
+                    retry_state.last_repair_reason = (
+                        "post_repair_missing_verification_second_pass"
+                    )
+                    planning_result = __repair_planning_output(
+                        ctx=ctx,
+                        planning_timeout_seconds=planning_timeout_seconds,
+                        malformed_output=output_text,
+                        reason="post_repair_missing_verification_steps: "
+                        + "; ".join(issue_fragments),
+                        rejection_reasons=issue_fragments,
+                        prompt_profile=prompt_profile,
+                    )
+                    retry_state.post_repair_validation_second_repair_used = True
+                    retry_state.consecutive_failures += 1
+                    continue
+
                 # Repair already attempted and validation still fails — abort
                 # instead of looping through more repair calls (prevents the
                 # plan→error→repair→retry chain from burning minutes of budget).

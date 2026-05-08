@@ -2551,6 +2551,11 @@ def test_planning_uses_workspace_plan_json_before_strict_retry(tmp_path, monkeyp
     )
     monkeypatch.setattr(
         PlannerService,
+        "find_immediate_repair_step_issues",
+        staticmethod(lambda *args, **kwargs: {}),
+    )
+    monkeypatch.setattr(
+        PlannerService,
         "retry_with_minimal_prompt",
         classmethod(
             lambda cls, *args, **kwargs: (_ for _ in ()).throw(
@@ -2669,6 +2674,11 @@ def test_planning_extracts_valid_json_from_recovered_stderr_without_repair(
         PlannerService,
         "should_start_with_minimal_prompt",
         staticmethod(lambda *args, **kwargs: False),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "find_immediate_repair_step_issues",
+        staticmethod(lambda *args, **kwargs: {}),
     )
     monkeypatch.setattr(
         PlannerService,
@@ -3358,7 +3368,6 @@ def test_post_repair_weak_verification_gets_one_targeted_second_repair(
         "should_start_with_minimal_prompt",
         staticmethod(lambda *args, **kwargs: False),
     )
-
     repair_calls = []
 
     def repair_output(cls, *args, **kwargs):
@@ -3601,6 +3610,311 @@ def test_post_repair_background_process_gets_one_targeted_second_repair(
     assert "steps [1]" in repair_calls[1]["rejection_reasons"][0]
     assert "bounded foreground commands" in repair_calls[1]["rejection_reasons"][0]
     assert ctx.orchestration_state.plan == second_repair_plan
+
+
+def test_post_repair_missing_verification_gets_one_targeted_second_repair(
+    tmp_path, monkeypatch
+):
+    initial_plan = [
+        {
+            "step_number": 1,
+            "description": "Create CSV reporter",
+            "commands": ["printf 'def build_report(rows): return []\\n' > reporter.py"],
+            "verification": None,
+            "rollback": "rm -f reporter.py",
+            "expected_files": ["reporter.py"],
+        }
+    ]
+    first_repair_plan = [
+        {
+            "step_number": 1,
+            "description": "Create CSV reporter",
+            "commands": ["printf 'def build_report(rows): return []\\n' > reporter.py"],
+            "verification": None,
+            "rollback": "rm -f reporter.py",
+            "expected_files": ["reporter.py"],
+        }
+    ]
+    second_repair_plan = [
+        {
+            "step_number": 1,
+            "description": "Create CSV reporter",
+            "commands": ["printf 'def build_report(rows): return []\\n' > reporter.py"],
+            "verification": "python -m pytest test_reporter.py -q",
+            "rollback": "rm -f reporter.py",
+            "expected_files": ["reporter.py"],
+        }
+    ]
+
+    orchestration_state = MagicMock()
+    orchestration_state.project_dir = tmp_path
+    orchestration_state.project_context = ""
+    orchestration_state.plan = []
+    orchestration_state.current_step_index = 0
+    orchestration_state.reasoning_artifact = None
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {}
+
+        async def execute_task(self, *args, **kwargs):
+            return {"status": "completed", "output": json.dumps(initial_plan)}
+
+    task = MagicMock()
+    task.title = "Repair missing verification"
+    task.description = "Repair missing verification"
+    session = MagicMock()
+    session.status = "running"
+    session.is_active = True
+    session_task_link = MagicMock()
+
+    ctx = OrchestrationRunContext(
+        db=MagicMock(),
+        session=session,
+        project=MagicMock(),
+        task=task,
+        session_task_link=session_task_link,
+        session_id=67,
+        task_id=17,
+        prompt="Repair missing verification",
+        timeout_seconds=300,
+        execution_profile="full_lifecycle",
+        validation_profile="standard",
+        runs_in_canonical_baseline=False,
+        orchestration_state=orchestration_state,
+        runtime_service=Runtime(),
+        task_service=MagicMock(),
+        logger=logging.getLogger("test.post_repair_missing_verification_second_pass"),
+        emit_live=lambda *args, **kwargs: None,
+        error_handler=MagicMock(),
+    )
+    ctx.error_handler.attempt_json_parsing = lambda output, **kwargs: (
+        True,
+        json.loads(output),
+        "json",
+    )
+
+    _patch_planning_flow_external_writes(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow._build_reasoning_artifact",
+        lambda *args, **kwargs: {
+            "intent": "Create CSV reporter",
+            "workspace_facts": [],
+            "planned_actions": [],
+            "verification_plan": ["Run pytest"],
+        },
+    )
+    monkeypatch.setattr(
+        ValidatorService,
+        "validate_reasoning_artifact",
+        staticmethod(
+            lambda *args, **kwargs: type(
+                "Verdict",
+                (),
+                {"accepted": True, "status": "accepted", "reasons": []},
+            )()
+        ),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "should_start_with_minimal_prompt",
+        staticmethod(lambda *args, **kwargs: False),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "find_immediate_repair_step_issues",
+        staticmethod(lambda *args, **kwargs: {}),
+    )
+
+    repair_calls = []
+
+    def repair_output(cls, *args, **kwargs):
+        repair_calls.append(kwargs)
+        if len(repair_calls) == 1:
+            return {"output": json.dumps(first_repair_plan)}
+        return {"output": json.dumps(second_repair_plan)}
+
+    validate_calls = []
+
+    def validate_plan(*args, **kwargs):
+        validate_calls.append(args)
+        if len(validate_calls) < 3:
+            return type(
+                "Verdict",
+                (),
+                {
+                    "accepted": False,
+                    "warning": False,
+                    "status": "rejected",
+                    "reasons": [
+                        "Plan is missing verification commands for implementation-heavy work (steps: [1])"
+                    ],
+                    "details": {
+                        "missing_verification_steps": [1],
+                        "semantic_violation_codes": ["missing_verification_command"],
+                    },
+                    "verdict": {"status": "rejected"},
+                },
+            )()
+        return type(
+            "Verdict",
+            (),
+            {
+                "accepted": True,
+                "warning": False,
+                "status": "accepted",
+                "reasons": [],
+                "details": {},
+                "verdict": {"status": "accepted"},
+            },
+        )()
+
+    monkeypatch.setattr(PlannerService, "repair_output", classmethod(repair_output))
+    monkeypatch.setattr(ValidatorService, "validate_plan", staticmethod(validate_plan))
+
+    result = execute_planning_phase(
+        ctx=ctx,
+        workspace_review={"has_existing_files": False},
+        extract_structured_text=extract_structured_text,
+        extract_plan_steps=lambda value: value if isinstance(value, list) else None,
+        looks_like_truncated_multistep_plan=lambda text, plan: False,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: args[3],
+        workspace_violation_error_cls=RuntimeError,
+    )
+
+    assert result == {"status": "completed"}
+    assert len(repair_calls) == 2
+    assert repair_calls[1]["reason"].startswith(
+        "post_repair_missing_verification_steps"
+    )
+    assert "steps [1]" in repair_calls[1]["rejection_reasons"][0]
+    assert "implementation-heavy step" in repair_calls[1]["rejection_reasons"][0]
+    assert ctx.orchestration_state.plan == second_repair_plan
+
+
+def test_post_repair_missing_verification_second_repair_is_capped(
+    tmp_path, monkeypatch
+):
+    missing_plan = [
+        {
+            "step_number": 1,
+            "description": "Create CSV reporter",
+            "commands": ["printf 'def build_report(rows): return []\\n' > reporter.py"],
+            "verification": None,
+            "rollback": "rm -f reporter.py",
+            "expected_files": ["reporter.py"],
+        }
+    ]
+
+    orchestration_state = MagicMock()
+    orchestration_state.project_dir = tmp_path
+    orchestration_state.project_context = ""
+    orchestration_state.plan = []
+    orchestration_state.current_step_index = 0
+    orchestration_state.reasoning_artifact = None
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {}
+
+        async def execute_task(self, *args, **kwargs):
+            return {"status": "completed", "output": json.dumps(missing_plan)}
+
+    task = MagicMock()
+    task.title = "Repair missing verification cap"
+    task.description = "Repair missing verification cap"
+    session = MagicMock()
+    session.status = "running"
+    session.is_active = True
+    session_task_link = MagicMock()
+
+    ctx = OrchestrationRunContext(
+        db=MagicMock(),
+        session=session,
+        project=MagicMock(),
+        task=task,
+        session_task_link=session_task_link,
+        session_id=68,
+        task_id=17,
+        prompt="Repair missing verification cap",
+        timeout_seconds=300,
+        execution_profile="full_lifecycle",
+        validation_profile="standard",
+        runs_in_canonical_baseline=False,
+        orchestration_state=orchestration_state,
+        runtime_service=Runtime(),
+        task_service=MagicMock(),
+        logger=logging.getLogger("test.post_repair_missing_verification_cap"),
+        emit_live=lambda *args, **kwargs: None,
+        error_handler=MagicMock(),
+    )
+    ctx.error_handler.attempt_json_parsing = lambda output, **kwargs: (
+        True,
+        json.loads(output),
+        "json",
+    )
+
+    _patch_planning_flow_external_writes(monkeypatch)
+    monkeypatch.setattr(
+        PlannerService,
+        "should_start_with_minimal_prompt",
+        staticmethod(lambda *args, **kwargs: False),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "find_immediate_repair_step_issues",
+        staticmethod(lambda *args, **kwargs: {}),
+    )
+
+    repair_calls = []
+
+    def repair_output(cls, *args, **kwargs):
+        repair_calls.append(kwargs)
+        return {"output": json.dumps(missing_plan)}
+
+    def rejected_missing_verification(*args, **kwargs):
+        return type(
+            "Verdict",
+            (),
+            {
+                "accepted": False,
+                "warning": False,
+                "status": "rejected",
+                "reasons": [
+                    "Plan is missing verification commands for implementation-heavy work (steps: [1])"
+                ],
+                "details": {
+                    "missing_verification_steps": [1],
+                    "semantic_violation_codes": ["missing_verification_command"],
+                },
+                "verdict": {"status": "rejected"},
+            },
+        )()
+
+    monkeypatch.setattr(PlannerService, "repair_output", classmethod(repair_output))
+    monkeypatch.setattr(
+        ValidatorService, "validate_plan", staticmethod(rejected_missing_verification)
+    )
+
+    result = execute_planning_phase(
+        ctx=ctx,
+        workspace_review={"has_existing_files": False},
+        extract_structured_text=extract_structured_text,
+        extract_plan_steps=lambda value: value if isinstance(value, list) else None,
+        looks_like_truncated_multistep_plan=lambda text, plan: False,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: args[3],
+        workspace_violation_error_cls=RuntimeError,
+    )
+
+    assert len(repair_calls) == 2
+    assert result == {
+        "status": "failed",
+        "reason": "planning_validation_failed_after_repair",
+    }
+    assert task.status == TaskStatus.FAILED
+    assert session_task_link.status == TaskStatus.FAILED
+    assert session.status == "paused"
+    assert session.is_active is False
 
 
 def test_minimal_first_timeout_is_finalized_without_outer_retry(tmp_path, monkeypatch):
@@ -4213,6 +4527,20 @@ def test_repair_rejection_reasons_prepend_weak_verification_step_details():
     assert enriched[0].startswith("weak_verification_steps:")
     assert "steps [1, 2]" in enriched[0]
     assert "replace with pytest, python -m, or npm run build" in enriched[0]
+    assert enriched[1:] == reasons
+
+
+def test_repair_rejection_reasons_prepend_missing_verification_step_details():
+    reasons = [
+        "Plan is missing verification commands for implementation-heavy work (steps: [1])"
+    ]
+    details = {"missing_verification_steps": ["1", "bad"]}
+
+    enriched = _build_repair_rejection_reasons(reasons, details)
+
+    assert enriched[0].startswith("missing_verification_steps:")
+    assert "steps [1]" in enriched[0]
+    assert "add pytest, python -m, npm run build" in enriched[0]
     assert enriched[1:] == reasons
 
 
