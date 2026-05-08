@@ -175,6 +175,7 @@ class PlanningSessionCreateRequest(BaseModel):
     project_id: int
     prompt: str = Field(min_length=3)
     source_brain: str = "local"
+    skip_clarification: bool = False
 
 
 class PlanningSessionRespondRequest(BaseModel):

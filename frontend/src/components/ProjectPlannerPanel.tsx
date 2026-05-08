@@ -33,6 +33,8 @@ interface ProjectPlannerPanelProps {
   onTasksCommitted: (tasks: Task[]) => void
 }
 
+type PlannerWorkflowMode = 'interactive' | 'markdown' | 'recovery'
+
 const defaultPrompt =
   'Design a safe, execution-ready implementation plan for this project enhancement.'
 
@@ -68,6 +70,143 @@ const getStatusClass = (status: string) => {
 const findArtifact = (artifacts: PlanningArtifact[], type: string) =>
   artifacts.find((artifact) => artifact.artifact_type === type)
 
+const stripMarkdownDisplay = (value?: string | null) => {
+  if (!value) return ''
+  return value
+    .split('\n')
+    .map((line) =>
+      line
+        .replace(/^#{1,6}\s+/, '')
+        .replace(/^[-*]\s+\[[ x]\]\s+/i, '')
+        .replace(/^[-*]\s+/, '')
+        .replace(/\*\*(.*?)\*\*/g, '$1')
+        .replace(/`([^`]+)`/g, '$1')
+        .trim()
+    )
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+const displayPlanningTitle = (title?: string | null, fallback = 'Planning session') => {
+  const cleaned = stripMarkdownDisplay(title)
+  if (!cleaned) return fallback
+  return cleaned.length > 96 ? `${cleaned.slice(0, 93)}...` : cleaned
+}
+
+const isUncommittedCompletedSession = (
+  session: Pick<PlanningSessionSummary, 'status' | 'committed_at'> & {
+    committed_task_ids?: number[]
+  }
+) =>
+  session.status === 'completed' &&
+  !session.committed_at &&
+  (!session.committed_task_ids || session.committed_task_ids.length === 0)
+
+const canDeletePlanningSession = (
+  session: Pick<PlanningSessionSummary, 'status' | 'committed_at'> & {
+    committed_task_ids?: number[]
+  }
+) => ['failed', 'cancelled'].includes(session.status) || isUncommittedCompletedSession(session)
+
+const getPlanningStatusLabel = (
+  session: Pick<PlanningSessionSummary, 'status' | 'committed_at'> & {
+    committed_task_ids?: number[]
+  }
+) => {
+  if (isUncommittedCompletedSession(session)) return 'ready for review'
+  if (session.status === 'completed' && (session.committed_at || session.committed_task_ids?.length)) {
+    return 'committed'
+  }
+  return session.status.replace(/_/g, ' ')
+}
+
+const renderMarkdownText = (value: string) => {
+  const lines = value.split('\n')
+  const nodes: React.ReactNode[] = []
+  let listItems: string[] = []
+  let codeLines: string[] = []
+  let inCodeBlock = false
+
+  const flushList = () => {
+    if (listItems.length === 0) return
+    const items = listItems
+    listItems = []
+    nodes.push(
+      <ul key={`list-${nodes.length}`} className="list-disc space-y-1 pl-5 text-sm text-slate-300">
+        {items.map((item, index) => (
+          <li key={`${item}-${index}`}>{item}</li>
+        ))}
+      </ul>
+    )
+  }
+
+  const flushCode = () => {
+    if (codeLines.length === 0) return
+    const content = codeLines.join('\n')
+    codeLines = []
+    nodes.push(
+      <pre key={`code-${nodes.length}`} className="overflow-x-auto rounded-lg bg-slate-950/80 p-3 text-xs text-slate-300">
+        {content}
+      </pre>
+    )
+  }
+
+  lines.forEach((line) => {
+    const trimmed = line.trim()
+    if (trimmed.startsWith('```')) {
+      if (inCodeBlock) {
+        inCodeBlock = false
+        flushCode()
+      } else {
+        flushList()
+        inCodeBlock = true
+      }
+      return
+    }
+
+    if (inCodeBlock) {
+      codeLines.push(line)
+      return
+    }
+
+    if (!trimmed) {
+      flushList()
+      return
+    }
+
+    const heading = trimmed.match(/^(#{1,6})\s+(.+)$/)
+    if (heading) {
+      flushList()
+      nodes.push(
+        <p key={`heading-${nodes.length}`} className="text-sm font-semibold text-slate-100">
+          {heading[2]}
+        </p>
+      )
+      return
+    }
+
+    const listItem = trimmed.match(/^[-*]\s+(?:\[[ x]\]\s+)?(.+)$/i)
+    if (listItem) {
+      listItems.push(listItem[1])
+      return
+    }
+
+    flushList()
+    nodes.push(
+      <p key={`p-${nodes.length}`} className="text-sm leading-relaxed text-slate-300">
+        {trimmed}
+      </p>
+    )
+  })
+
+  flushList()
+  flushCode()
+
+  return nodes
+}
+
 export function ProjectPlannerPanel({
   project,
   onTasksCommitted,
@@ -100,6 +239,7 @@ export function ProjectPlannerPanel({
   const [manualSaving, setManualSaving] = useState(false)
   const [manualCommitting, setManualCommitting] = useState(false)
   const [deletingPlanId, setDeletingPlanId] = useState<number | null>(null)
+  const [plannerMode, setPlannerMode] = useState<PlannerWorkflowMode>('interactive')
 
   const loadSessions = useCallback(async () => {
     try {
@@ -157,6 +297,7 @@ export function ProjectPlannerPanel({
     setManualMarkdown('')
     setManualDraftTasks([])
     setManualRequirement(project.description || defaultPrompt)
+    setPlannerMode('interactive')
     void loadSessions()
     void loadPlans()
   }, [loadPlans, loadSessions, project.description, project.id])
@@ -215,6 +356,7 @@ export function ProjectPlannerPanel({
         project_id: project.id,
         prompt: newPrompt.trim(),
         source_brain: sourceBrain,
+        skip_clarification: true,
       })
       setActiveSessionId(response.data.id)
       setActiveSession(response.data)
@@ -275,6 +417,60 @@ export function ProjectPlannerPanel({
       console.error('Failed to cancel planning session:', error)
       alert('Failed to cancel the planning session.')
     }
+  }
+
+  const handleDeletePlanningSession = async (session: PlanningSessionSummary) => {
+    if (!canDeletePlanningSession(session)) {
+      return
+    }
+    const action = isUncommittedCompletedSession(session)
+      ? 'Discard generated plan'
+      : 'Delete planning session'
+    const confirmed = window.confirm(`${action} "${displayPlanningTitle(session.title)}"?`)
+    if (!confirmed) {
+      return
+    }
+
+    try {
+      await planningAPI.delete(session.id)
+      if (activeSessionId === session.id) {
+        setActiveSessionId(null)
+        setActiveSession(null)
+      }
+      await loadSessions()
+    } catch (error) {
+      console.error('Failed to delete planning session:', error)
+      alert('Failed to delete the planning session.')
+    }
+  }
+
+  const handleUseConversationInLegacyPlanner = () => {
+    if (!activeSession) {
+      return
+    }
+
+    const transcript = activeSession.messages
+      .map((message) => `${message.role.toUpperCase()}: ${stripMarkdownDisplay(message.content)}`)
+      .join('\n\n')
+
+    setManualRequirement(
+      [
+        `Project: ${project.name}`,
+        `Planning session: ${displayPlanningTitle(activeSession.title)}`,
+        `Status: ${activeSession.status}`,
+        '',
+        'Original prompt:',
+        stripMarkdownDisplay(activeSession.prompt),
+        '',
+        'Conversation so far:',
+        transcript || 'No conversation messages recorded.',
+        '',
+        'Create a small, execution-ready task list from the useful decisions above.',
+      ].join('\n')
+    )
+    setManualMarkdown('')
+    setManualDraftTasks([])
+    setPlannerMode('markdown')
   }
 
   const handleReparseSessionMarkdown = async () => {
@@ -469,6 +665,27 @@ export function ProjectPlannerPanel({
     return findArtifact(activeSession?.artifacts || [], selectedArtifact)?.content || ''
   }, [activeSession?.artifacts, plannerMarkdownDraft, selectedArtifact])
 
+  const activeDisplayTitle = displayPlanningTitle(activeSession?.title)
+  const activeDisplayPrompt = stripMarkdownDisplay(activeSession?.prompt)
+  const recoverySessions = useMemo(
+    () =>
+      sessions.filter(
+        (session) =>
+          session.prompt.includes('## Failure Context') ||
+          session.prompt.includes('## Operator Guidance')
+      ),
+    [sessions]
+  )
+  const interactiveSessions = useMemo(
+    () =>
+      sessions.filter(
+        (session) => !recoverySessions.some((recovery) => recovery.id === session.id)
+      ),
+    [recoverySessions, sessions]
+  )
+  const visiblePlanningSessions =
+    plannerMode === 'recovery' ? recoverySessions : interactiveSessions
+
   const pendingQuestion = useMemo(
     () =>
       activeSession?.messages
@@ -536,12 +753,49 @@ export function ProjectPlannerPanel({
 
   return (
     <div className="space-y-6">
+      <div className="border-b border-slate-700">
+        <nav className="flex gap-0">
+          {[
+            { key: 'interactive', label: 'Interactive' },
+            { key: 'markdown', label: 'Markdown' },
+            { key: 'recovery', label: 'Replan Recovery' },
+          ].map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => {
+                const nextMode = tab.key as PlannerWorkflowMode
+                const nextSessions =
+                  nextMode === 'recovery' ? recoverySessions : interactiveSessions
+                setPlannerMode(nextMode)
+                if (nextMode !== 'markdown') {
+                  setActiveSessionId((current) =>
+                    current && nextSessions.some((session) => session.id === current)
+                      ? current
+                      : nextSessions[0]?.id ?? null
+                  )
+                }
+              }}
+              className={`border-b-2 -mb-px px-4 py-2 text-sm font-medium transition-colors ${
+                plannerMode === tab.key
+                  ? 'border-sky-500 text-white'
+                  : 'border-transparent text-slate-500 hover:text-slate-300'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </nav>
+      </div>
+
+      {(plannerMode === 'interactive' || plannerMode === 'recovery') && (
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
         <Card className="rounded-2xl border-slate-700/50 bg-slate-900/80 p-5">
           <div className="mb-5 pb-4 border-b border-slate-700/50 flex items-center gap-2 text-sm font-semibold text-amber-300">
             <Lightbulb className="h-4 w-4" />
-            Interactive Planning
+            {plannerMode === 'recovery' ? 'Replan Recovery' : 'Interactive Planning'}
           </div>
+          {plannerMode === 'interactive' ? (
           <div className="space-y-4">
             <div>
               <label className="mb-2 block text-xs font-semibold uppercase tracking-wider text-slate-400">
@@ -586,28 +840,33 @@ export function ProjectPlannerPanel({
               className="w-full"
             >
               <Play className="mr-2 h-4 w-4" />
-              {startingSession ? 'Starting...' : 'Start Planning Session'}
+              {startingSession ? 'Generating...' : 'Generate Task Plan'}
             </Button>
           </div>
+          ) : (
+            <div className="rounded-xl border border-slate-700/60 bg-slate-900/40 p-4 text-sm text-slate-300">
+              Continue Project Architect conversations started from failed sessions. When the plan is agreed, review the task preview and commit it to the project, or move the conversation into Markdown mode.
+            </div>
+          )}
 
           <div className="mt-8 pt-6 border-t border-slate-700/50">
             <div className="mb-3 flex items-center justify-between">
-              <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">Planning Sessions</div>
-              <div className="text-xs text-slate-500">{sessions.length}</div>
+              <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                {plannerMode === 'recovery' ? 'Recovery Sessions' : 'Planning Sessions'}
+              </div>
+              <div className="text-xs text-slate-500">{visiblePlanningSessions.length}</div>
             </div>
             {loadingSessions ? (
               <div className="text-sm text-slate-500">Loading sessions...</div>
-            ) : sessions.length === 0 ? (
+            ) : visiblePlanningSessions.length === 0 ? (
               <div className="rounded-xl border border-dashed border-slate-700/60 bg-slate-900/30 px-4 py-8 text-sm text-slate-500">
-                No planning sessions yet.
+                {plannerMode === 'recovery' ? 'No replan recovery sessions yet.' : 'No planning sessions yet.'}
               </div>
             ) : (
               <div className="space-y-3">
-                {sessions.map((session) => (
-                  <button
+                {visiblePlanningSessions.map((session) => (
+                  <div
                     key={session.id}
-                    type="button"
-                    onClick={() => setActiveSessionId(session.id)}
                     className={`w-full rounded-xl border p-4 text-left transition-colors ${
                       activeSessionId === session.id
                         ? 'border-primary-500/70 bg-primary-500/10'
@@ -615,10 +874,17 @@ export function ProjectPlannerPanel({
                     }`}
                   >
                     <div className="flex items-start justify-between gap-3">
+                      <button
+                        type="button"
+                        onClick={() => setActiveSessionId(session.id)}
+                        className="min-w-0 flex-1 text-left"
+                      >
                       <div className="min-w-0">
-                        <div className="truncate text-sm font-medium text-white">{session.title}</div>
+                        <div className="truncate text-sm font-medium text-white">
+                          {displayPlanningTitle(session.title)}
+                        </div>
                         <div className="mt-1 line-clamp-2 text-xs text-slate-400">
-                          {session.prompt}
+                          {stripMarkdownDisplay(session.prompt)}
                         </div>
                         <div className="mt-2 text-xs text-slate-500">
                           Updated{' '}
@@ -627,15 +893,30 @@ export function ProjectPlannerPanel({
                           })}
                         </div>
                       </div>
+                      </button>
                       <div
                         className={`rounded-full border px-2 py-1 text-[11px] ${getStatusClass(
                           session.status
                         )}`}
                       >
-                        {session.status.replace(/_/g, ' ')}
+                        {getPlanningStatusLabel(session)}
                       </div>
+                      {canDeletePlanningSession(session) && (
+                        <button
+                          type="button"
+                          onClick={() => void handleDeletePlanningSession(session)}
+                          className="rounded-md p-1 text-slate-500 transition-colors hover:bg-red-950/40 hover:text-red-300"
+                          title={
+                            isUncommittedCompletedSession(session)
+                              ? 'Discard generated plan'
+                              : 'Delete planning session'
+                          }
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      )}
                     </div>
-                  </button>
+                  </div>
                 ))}
               </div>
             )}
@@ -646,7 +927,9 @@ export function ProjectPlannerPanel({
           <Card className="rounded-2xl border-slate-700/50 bg-slate-800/40 p-6">
             {!activeSession ? (
               <div className="rounded-xl border border-dashed border-slate-700/60 bg-slate-900/30 px-6 py-16 text-center text-sm text-slate-500">
-                Select a planning session or start a new one to begin the interactive flow.
+                {plannerMode === 'recovery'
+                  ? 'Select a replan recovery session from the sidebar.'
+                  : 'Select a planning session or start a new one to begin the interactive flow.'}
               </div>
             ) : (
               <div className="space-y-5">
@@ -656,8 +939,12 @@ export function ProjectPlannerPanel({
                       <Sparkles className="h-4 w-4" />
                       Session-first planning
                     </div>
-                    <h2 className="text-2xl font-semibold text-white">{activeSession.title}</h2>
-                    <p className="mt-2 max-w-3xl text-sm text-slate-400 leading-relaxed">{activeSession.prompt}</p>
+                    <h2 className="text-2xl font-semibold text-white">{activeDisplayTitle}</h2>
+                    {activeDisplayPrompt && (
+                      <p className="mt-2 max-w-3xl text-sm text-slate-400 leading-relaxed">
+                        {activeDisplayPrompt}
+                      </p>
+                    )}
                   </div>
                   <div className="flex items-center gap-2">
                     <div
@@ -665,7 +952,7 @@ export function ProjectPlannerPanel({
                         activeSession.status
                       )}`}
                     >
-                      {activeSession.status.replace(/_/g, ' ')}
+                      {getPlanningStatusLabel(activeSession)}
                     </div>
                     {['active', 'waiting_for_input'].includes(activeSession.status) && (
                       <Button
@@ -674,6 +961,15 @@ export function ProjectPlannerPanel({
                         onClick={() => handleCancelSession(activeSession.id)}
                       >
                         Cancel
+                      </Button>
+                    )}
+                    {isUncommittedCompletedSession(activeSession) && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void handleDeletePlanningSession(activeSession)}
+                      >
+                        Discard
                       </Button>
                     )}
                   </div>
@@ -704,7 +1000,7 @@ export function ProjectPlannerPanel({
                               )}
                               {message.role}
                             </div>
-                            <div className="whitespace-pre-wrap text-sm leading-relaxed">{message.content}</div>
+                            <div className="space-y-2">{renderMarkdownText(message.content)}</div>
                           </div>
                         ))}
                       </div>
@@ -735,7 +1031,7 @@ export function ProjectPlannerPanel({
 
                     {activeSession.status === 'active' && (
                       <div className="rounded-xl border border-sky-500/30 bg-sky-500/10 p-4 text-sm text-sky-100">
-                        The planner is still running in the background. This view refreshes automatically while it decides whether to ask one more question or generate final artifacts.
+                        The planner is generating markdown and task preview directly from your prompt.
                       </div>
                     )}
 
@@ -744,7 +1040,13 @@ export function ProjectPlannerPanel({
                         {activeSession.last_error && (
                           <div className="text-sm text-red-100">{activeSession.last_error}</div>
                         )}
-                        <div className="flex justify-end">
+                        <div className="flex flex-wrap justify-end gap-2">
+                          <Button
+                            variant="outline"
+                            onClick={handleUseConversationInLegacyPlanner}
+                          >
+                            Use in Legacy Planner
+                          </Button>
                           <Button
                             onClick={handleRetrySession}
                             disabled={retryingSession}
@@ -755,57 +1057,68 @@ export function ProjectPlannerPanel({
                         </div>
                       </div>
                     )}
+
+                    {activeSession.status === 'cancelled' && (
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/60 p-4">
+                        <div className="text-sm text-slate-300">
+                          This planning conversation was cancelled. You can start a fresh session from the sidebar or reuse the conversation as source material for the legacy markdown planner.
+                        </div>
+                        <div className="mt-3 flex justify-end">
+                          <Button
+                            variant="outline"
+                            onClick={handleUseConversationInLegacyPlanner}
+                          >
+                            Use in Legacy Planner
+                          </Button>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   <div className="space-y-4">
+                    {activeSession.artifacts.length > 0 && (
                     <div className="rounded-xl border border-slate-700/60 bg-slate-900/40 p-4">
                       <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-white">
                         <FileText className="h-4 w-4 text-sky-400" />
                         Planning Artifacts
                       </div>
-                      {activeSession.artifacts.length === 0 ? (
-                        <div className="text-sm text-slate-500">
-                          Artifacts will appear here once the planning session completes.
+                      <div className="mb-3 flex flex-wrap gap-2">
+                        {activeSession.artifacts.map((artifact) => (
+                          <button
+                            key={artifact.id}
+                            type="button"
+                            onClick={() => setSelectedArtifact(artifact.artifact_type)}
+                            className={`rounded-lg border px-3 py-1.5 text-xs transition-colors ${
+                              selectedArtifact === artifact.artifact_type
+                                ? 'border-primary-500 bg-primary-500/10 text-white'
+                                : 'border-slate-700 bg-slate-800 text-slate-300'
+                            }`}
+                          >
+                            {artifactLabels[artifact.artifact_type] || artifact.filename}
+                          </button>
+                        ))}
+                      </div>
+                      <TextArea
+                        value={selectedArtifactContent}
+                        onChange={(event) => {
+                          if (selectedArtifact === 'planner_markdown') {
+                            setPlannerMarkdownDraft(event.target.value)
+                          }
+                        }}
+                        readOnly={selectedArtifact !== 'planner_markdown'}
+                        className="min-h-[280px] font-mono text-sm leading-relaxed px-4 py-3"
+                      />
+                      {selectedArtifact === 'planner_markdown' && (
+                        <div className="mt-3 flex justify-end">
+                          <Button variant="outline" onClick={handleReparseSessionMarkdown}>
+                            Parse Markdown Preview
+                          </Button>
                         </div>
-                      ) : (
-                        <>
-                          <div className="mb-3 flex flex-wrap gap-2">
-                            {activeSession.artifacts.map((artifact) => (
-                              <button
-                                key={artifact.id}
-                                type="button"
-                                onClick={() => setSelectedArtifact(artifact.artifact_type)}
-                                className={`rounded-lg border px-3 py-1.5 text-xs transition-colors ${
-                                  selectedArtifact === artifact.artifact_type
-                                    ? 'border-primary-500 bg-primary-500/10 text-white'
-                                    : 'border-slate-700 bg-slate-800 text-slate-300'
-                                }`}
-                              >
-                                {artifactLabels[artifact.artifact_type] || artifact.filename}
-                              </button>
-                            ))}
-                          </div>
-                          <TextArea
-                            value={selectedArtifactContent}
-                            onChange={(event) => {
-                              if (selectedArtifact === 'planner_markdown') {
-                                setPlannerMarkdownDraft(event.target.value)
-                              }
-                            }}
-                            readOnly={selectedArtifact !== 'planner_markdown'}
-                            className="min-h-[280px] font-mono text-sm leading-relaxed px-4 py-3"
-                          />
-                          {selectedArtifact === 'planner_markdown' && (
-                            <div className="mt-3 flex justify-end">
-                              <Button variant="outline" onClick={handleReparseSessionMarkdown}>
-                                Parse Markdown Preview
-                              </Button>
-                            </div>
-                          )}
-                        </>
                       )}
                     </div>
+                    )}
 
+                    {sessionDraftTasks.length > 0 && (
                     <div className="rounded-xl border border-slate-700/60 bg-slate-900/40 p-4">
                       <div className="mb-4 flex items-center justify-between">
                         <div className="flex items-center gap-2 text-sm font-semibold text-white">
@@ -834,21 +1147,27 @@ export function ProjectPlannerPanel({
                         </Button>
                       </div>
                     </div>
+                    )}
                   </div>
                 </div>
               </div>
             )}
           </Card>
 
+        </div>
+      </div>
+      )}
+
+      {plannerMode === 'markdown' && (
           <Card className="rounded-2xl border-slate-700/50 bg-slate-800/40 p-6">
             <div className="mb-6 pb-4 border-b border-slate-700/50 flex items-center justify-between gap-4">
               <div>
                 <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-200">
                   <PencilLine className="h-4 w-4 text-slate-400" />
-                  Legacy Markdown Planner
+                  Markdown Planner
                 </div>
                 <p className="text-sm text-slate-400 leading-relaxed">
-                  Keep using the old markdown-driven planner when you want direct editing without the interactive Q&A flow.
+                  Paste or generate planner markdown, parse it into small tasks, then commit selected tasks into the project.
                 </p>
               </div>
               <div className="text-xs text-slate-500">
@@ -882,12 +1201,17 @@ export function ProjectPlannerPanel({
                     {manualCommitting ? 'Committing...' : 'Commit Manual Tasks'}
                   </Button>
                 </div>
-                <TextArea
+                <div className="rounded-xl border border-slate-700/60 bg-slate-950/50 p-3">
+                  <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
+                    Raw markdown output
+                  </div>
+                  <TextArea
                   value={manualMarkdown}
                   onChange={(event) => setManualMarkdown(event.target.value)}
                   className="min-h-[280px] font-mono text-sm leading-relaxed px-4 py-3"
                   placeholder="# Project: ...\n\n## Task List\n- [ ] TASK_START: ..."
-                />
+                  />
+                </div>
                 {renderTaskPreview(manualDraftTasks, setManualDraftTasks)}
               </div>
 
@@ -936,8 +1260,7 @@ export function ProjectPlannerPanel({
               </div>
             </div>
           </Card>
-        </div>
-      </div>
+      )}
     </div>
   )
 }

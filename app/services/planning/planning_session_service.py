@@ -169,6 +169,28 @@ class PlanningSessionService:
             self.db.refresh(session)
         return session
 
+    def delete_terminal_session(self, session_id: int) -> None:
+        session = self.get_session(session_id)
+        committed_task_ids = self._load_committed_task_ids(session)
+        can_delete_uncommitted_plan = (
+            session.status == "completed"
+            and not committed_task_ids
+            and session.committed_at is None
+        )
+        if (
+            session.status not in {"failed", "cancelled"}
+            and not can_delete_uncommitted_plan
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Only failed, cancelled, or uncommitted completed planning "
+                    "sessions can be deleted"
+                ),
+            )
+        self.db.delete(session)
+        self.db.commit()
+
     def schedule_processing(self, session_id: int) -> None:
         if self._should_process_inline():
             self.process_session(session_id)

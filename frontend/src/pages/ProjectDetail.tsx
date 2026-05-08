@@ -14,7 +14,8 @@ import {
   Terminal,
   Activity,
   Clock,
-  Plus
+  Plus,
+  MoreHorizontal
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { StatusBadge, EmptyState } from '../components/ui';
@@ -150,6 +151,15 @@ function ProjectDetail() {
 
   const formatWorkspaceStatus = (status?: string | null) =>
     (status || 'not_created').replace(/_/g, ' ');
+
+  const workspaceCountItems = workspaceOverview
+    ? [
+        { key: 'ready', label: 'Ready', value: workspaceOverview.counts.ready || 0, className: 'text-sky-300' },
+        { key: 'promoted', label: 'Promoted', value: workspaceOverview.counts.promoted || 0, className: 'text-emerald-300' },
+        { key: 'changes_requested', label: 'Changes Requested', value: workspaceOverview.counts.changes_requested || 0, className: 'text-amber-300' },
+        { key: 'blocked', label: 'Blocked', value: workspaceOverview.counts.blocked || 0, className: 'text-red-300' },
+      ].filter((item) => item.value > 0)
+    : [];
 
   const handlePromoteTask = async (task: Task) => {
     const note = window.prompt('Optional promotion note for this task workspace:', task.promotion_note || '');
@@ -500,23 +510,30 @@ function ProjectDetail() {
             {editingProjectMeta ? 'Close Brief' : 'Edit Brief'}
           </button>
           {tasks.length > 0 && (
-            <button
-              onClick={async () => {
-                if (!confirm('Delete all tasks in this project? This cannot be undone.')) return;
-                try {
-                  await Promise.all(tasks.map(task => tasksAPI.delete(task.id)));
-                  alert('All tasks deleted');
-                  fetchTasks();
-                } catch (error) {
-                  console.error('Failed to delete all tasks:', error);
-                  alert('Failed to delete all tasks. Please try again.');
-                }
-              }}
-              className="flex items-center gap-1 text-xs text-red-400 hover:text-red-300 transition-colors"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-              Delete All
-            </button>
+            <details className="relative">
+              <summary className="flex cursor-pointer list-none items-center rounded-md p-1 text-slate-500 transition-colors hover:bg-slate-800 hover:text-slate-300">
+                <MoreHorizontal className="h-4 w-4" />
+              </summary>
+              <div className="absolute right-0 z-20 mt-2 w-44 rounded-lg border border-slate-700 bg-slate-900 p-1 shadow-xl">
+                <button
+                  onClick={async () => {
+                    if (!confirm('Delete all tasks in this project? This cannot be undone.')) return;
+                    try {
+                      await Promise.all(tasks.map(task => tasksAPI.delete(task.id)));
+                      alert('All tasks deleted');
+                      fetchTasks();
+                    } catch (error) {
+                      console.error('Failed to delete all tasks:', error);
+                      alert('Failed to delete all tasks. Please try again.');
+                    }
+                  }}
+                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs text-red-300 transition-colors hover:bg-red-950/40"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Delete all tasks
+                </button>
+              </div>
+            </details>
           )}
         </div>
       </div>
@@ -670,7 +687,19 @@ function ProjectDetail() {
                   tasks.map((task) => task.title)
                 );
                 return (
-                <div key={session.id} className="flex items-center gap-4 px-4 py-3 hover:bg-slate-700/40 transition-colors">
+                <div
+                  key={session.id}
+                  onClick={() => navigate(`/sessions/${session.id}`)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      navigate(`/sessions/${session.id}`);
+                    }
+                  }}
+                  role="button"
+                  tabIndex={0}
+                  className="flex cursor-pointer items-center gap-4 px-4 py-3 transition-colors hover:bg-slate-700/40 focus:outline-none focus:ring-1 focus:ring-sky-500/70"
+                >
                   <div className="flex-1 min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <p className="text-sm font-medium text-slate-200">{session.name}</p>
@@ -694,7 +723,10 @@ function ProjectDetail() {
                   <div className="flex items-center gap-2">
                     <StatusBadge status={session.status} size="sm" />
                     <button
-                      onClick={() => handleDeleteSession(session.id)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleDeleteSession(session.id);
+                      }}
                       className="text-slate-500 hover:text-red-400 transition-colors"
                       title="Delete session"
                     >
@@ -757,24 +789,16 @@ function ProjectDetail() {
                       {rebuildingBaseline ? 'Rebuilding...' : 'Rebuild Baseline'}
                     </button>
                   </div>
-                  <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-                    <div>
-                      <p className="text-xs uppercase tracking-wide text-slate-500">Ready</p>
-                      <p className="mt-1 text-lg font-semibold text-sky-300">{workspaceOverview.counts.ready || 0}</p>
+                  {workspaceCountItems.length > 0 && (
+                    <div className="flex flex-wrap gap-3">
+                      {workspaceCountItems.map((item) => (
+                        <div key={item.key} className="rounded-md border border-slate-700 bg-slate-900/50 px-3 py-2">
+                          <p className="text-xs uppercase tracking-wide text-slate-500">{item.label}</p>
+                          <p className={`mt-1 text-lg font-semibold ${item.className}`}>{item.value}</p>
+                        </div>
+                      ))}
                     </div>
-                    <div>
-                      <p className="text-xs uppercase tracking-wide text-slate-500">Promoted</p>
-                      <p className="mt-1 text-lg font-semibold text-emerald-300">{workspaceOverview.counts.promoted || 0}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs uppercase tracking-wide text-slate-500">Changes Requested</p>
-                      <p className="mt-1 text-lg font-semibold text-amber-300">{workspaceOverview.counts.changes_requested || 0}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs uppercase tracking-wide text-slate-500">Blocked</p>
-                      <p className="mt-1 text-lg font-semibold text-red-300">{workspaceOverview.counts.blocked || 0}</p>
-                    </div>
-                  </div>
+                  )}
                 </div>
               )}
 
@@ -816,57 +840,58 @@ function ProjectDetail() {
                         </div>
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
-                        {task.status !== 'running' && (
-                          <>
-                            <button
-                              onClick={() => handleRerunTask(task)}
-                              className="rounded-md bg-blue-600/80 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-500"
-                            >
-                              {task.status === 'done'
-                                ? 'Run again in workflow session'
-                                : 'Run in workflow session'}
-                            </button>
-                            <button
-                              onClick={() => handleRerunTask(task, true)}
-                              className="rounded-md border border-slate-600 px-2.5 py-1 text-xs font-medium text-slate-300 transition-colors hover:border-slate-500 hover:text-white"
-                            >
-                              Run in new isolated session
-                            </button>
-                          </>
-                        )}
-                        {task.status === 'done' && task.task_subfolder && task.workspace_status !== 'promoted' && (
-                          <button
-                            onClick={() => handlePromoteTask(task)}
-                            className="rounded-md bg-emerald-600/80 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-emerald-500"
-                          >
-                            Promote
-                          </button>
-                        )}
-                        {task.task_subfolder && task.workspace_status !== 'promoted' && (
-                          <button
-                            onClick={() => handleRequestChanges(task)}
-                            className="rounded-md bg-amber-600/80 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-amber-500"
-                          >
-                            Changes
-                          </button>
-                        )}
-                        <button
-                          onClick={() => startEditTask(task)}
-                          className="text-slate-400 hover:text-slate-200 transition-colors"
-                          title="Edit task"
-                        >
-                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                          </svg>
-                        </button>
                         <StatusBadge status={task.status} size="sm" />
-                        <button
-                          onClick={() => handleDeleteTask(task.id)}
-                          className="text-slate-500 hover:text-red-400 transition-colors"
-                          title="Delete task"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
+                        {task.status !== 'running' && (
+                          <button
+                            onClick={() => handleRerunTask(task)}
+                            className="rounded-md bg-blue-600/80 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-500"
+                          >
+                            {task.status === 'done' ? 'Run again' : 'Run'}
+                          </button>
+                        )}
+                        <details className="relative">
+                          <summary className="flex cursor-pointer list-none items-center rounded-md p-1.5 text-slate-500 transition-colors hover:bg-slate-700 hover:text-slate-300">
+                            <MoreHorizontal className="h-4 w-4" />
+                          </summary>
+                          <div className="absolute right-0 z-20 mt-2 w-56 rounded-lg border border-slate-700 bg-slate-900 p-1 shadow-xl">
+                            {task.status !== 'running' && (
+                              <button
+                                onClick={() => handleRerunTask(task, true)}
+                                className="w-full rounded-md px-2.5 py-2 text-left text-xs text-slate-300 transition-colors hover:bg-slate-800 hover:text-white"
+                              >
+                                Run in new isolated session
+                              </button>
+                            )}
+                            {task.status === 'done' && task.task_subfolder && task.workspace_status !== 'promoted' && (
+                              <button
+                                onClick={() => handlePromoteTask(task)}
+                                className="w-full rounded-md px-2.5 py-2 text-left text-xs text-emerald-300 transition-colors hover:bg-emerald-950/40"
+                              >
+                                Promote workspace
+                              </button>
+                            )}
+                            {task.task_subfolder && task.workspace_status !== 'promoted' && (
+                              <button
+                                onClick={() => handleRequestChanges(task)}
+                                className="w-full rounded-md px-2.5 py-2 text-left text-xs text-amber-300 transition-colors hover:bg-amber-950/40"
+                              >
+                                Request changes
+                              </button>
+                            )}
+                            <button
+                              onClick={() => startEditTask(task)}
+                              className="w-full rounded-md px-2.5 py-2 text-left text-xs text-slate-300 transition-colors hover:bg-slate-800 hover:text-white"
+                            >
+                              Edit task
+                            </button>
+                            <button
+                              onClick={() => handleDeleteTask(task.id)}
+                              className="w-full rounded-md px-2.5 py-2 text-left text-xs text-red-300 transition-colors hover:bg-red-950/40"
+                            >
+                              Delete task
+                            </button>
+                          </div>
+                        </details>
                       </div>
                     </div>
                   </div>

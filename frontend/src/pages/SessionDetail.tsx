@@ -24,12 +24,15 @@ import {
   HumanInterventionPanel,
   KnowledgeUsagePanel,
   SessionConnectionNotice,
+  SessionDiagnosticsPanel,
   SessionHeader,
   SessionLogsPanel,
   SessionSettingsPanel,
   SessionStats,
   SessionTabs,
   SessionTasksPanel,
+  SessionTimelinePanel,
+  type SessionDetailTab,
   type TimelineSpan,
 } from '@/components/SessionDetailSections';
 import { MessageCircle, Pause, Play, Square, XCircle } from 'lucide-react';
@@ -82,6 +85,43 @@ interface InterventionToastState {
 type CheckpointActionIntent = 'start' | 'resume';
 
 const MAX_TIMELINE_EVENTS = 150;
+const TERMINAL_SESSION_STATUSES = new Set(['stopped', 'failed', 'cancelled', 'canceled']);
+
+const cleanJsonLogMessage = (message: string): string => {
+  const trimmed = message.trim();
+  if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) {
+    return message;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return message;
+    }
+
+    const record = parsed as Record<string, unknown>;
+    const primary =
+      record.message ||
+      record.summary ||
+      record.event ||
+      record.event_type ||
+      record.type ||
+      record.status ||
+      'Log event';
+    const details = [
+      record.phase ? `phase=${String(record.phase)}` : null,
+      record.reason ? `reason=${String(record.reason)}` : null,
+      record.task_execution_id ? `TE=${String(record.task_execution_id)}` : null,
+      record.task_id ? `task=${String(record.task_id)}` : null,
+    ].filter(Boolean);
+
+    return details.length > 0
+      ? `${String(primary)} (${details.join(', ')})`
+      : String(primary);
+  } catch {
+    return message;
+  }
+};
 
 export default function SessionDetail() {
   const { sessionId } = useParams<{ sessionId: string }>();
@@ -90,7 +130,7 @@ export default function SessionDetail() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [project, setProject] = useState<Project | null>(null);
   const [displayLogs, setDisplayLogs] = useState<TerminalLogEntry[]>([]);
-  const [activeTab, setActiveTab] = useState<'logs' | 'tasks' | 'settings'>('logs');
+  const [activeTab, setActiveTab] = useState<SessionDetailTab>('logs');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
@@ -128,6 +168,7 @@ export default function SessionDetail() {
   const seenOrchestrationTimelineKeysRef = useRef<Set<string>>(new Set());
   const lastAutoOpenedAgentInterventionRef = useRef<number | null>(null);
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const defaultTabSessionRef = useRef<number | null>(null);
 
   const pendingInterventions = interventions.filter((i) => i.status === 'pending');
   const pendingAgentInterventions = pendingInterventions.filter((i) => i.initiated_by !== 'human');
@@ -140,6 +181,12 @@ export default function SessionDetail() {
       return left - right;
     })
     .slice(0, 5);
+
+  useEffect(() => {
+    if (!session || defaultTabSessionRef.current === session.id) return;
+    defaultTabSessionRef.current = session.id;
+    setActiveTab(TERMINAL_SESSION_STATUSES.has(session.status) ? 'timeline' : 'logs');
+  }, [session]);
 
   const dismissInterventionToast = useCallback(() => {
     if (toastTimeoutRef.current) {
@@ -222,9 +269,9 @@ export default function SessionDetail() {
   }, [parseApiDate]);
 
   const toTerminalLogEntry = useCallback((log: SessionLogItem): TerminalLogEntry => ({
-    message: log.message,
+    message: logVerbosity === 'clean' ? cleanJsonLogMessage(log.message) : log.message,
     timestamp: formatLogTimestamp(log.timestamp || log.created_at),
-  }), [formatLogTimestamp]);
+  }), [formatLogTimestamp, logVerbosity]);
 
   const shouldDisplayLog = useCallback(
     (log: SessionLogItem) => logVerbosity === 'verbose' || !isNoisySessionLogMessage(log.message),
@@ -1106,7 +1153,7 @@ export default function SessionDetail() {
               const next = [
                 ...prev.slice(-499),
                 {
-                  message: data.message,
+                  message: logVerbosity === 'clean' ? cleanJsonLogMessage(data.message) : data.message,
                   timestamp: formatLogTimestamp(data.timestamp),
                 },
               ];
@@ -2135,7 +2182,7 @@ export default function SessionDetail() {
         />
       )}
 
-      {session.status === 'stopped' && (
+      {TERMINAL_SESSION_STATUSES.has(session.status) && (
         <FailureSummaryPanel
           summary={failureSummary}
           loading={failureSummaryLoading}
@@ -2159,12 +2206,7 @@ export default function SessionDetail() {
       <div className="min-h-[400px]">
         {activeTab === 'logs' && (
           <SessionLogsPanel
-            anomalyEvents={anomalyEvents}
-            compareMatches={compareMatches}
             displayLogs={displayLogs}
-            dispatchWatchdog={dispatchWatchdog}
-            formatDateTime={formatDateTime}
-            healthEvents={healthEvents}
             handleRefreshLogs={handleRefreshLogs}
             logVerbosity={logVerbosity}
             logViewMode={logViewMode}
@@ -2173,13 +2215,29 @@ export default function SessionDetail() {
               setLogViewMode(mode);
               applyLogView(allLogs, mode);
             }}
-            decisionEvents={decisionEvents}
-            replayInvestigation={replayInvestigation}
-            stateDiff={stateDiff}
-            timelineEvents={timelineEvents}
-            timelineSpans={timelineSpans}
             wsConnected={wsConnected}
           />
+        )}
+
+        {activeTab === 'timeline' && (
+          <div className="space-y-4">
+            <SessionTimelinePanel
+              decisionEvents={decisionEvents}
+              formatDateTime={formatDateTime}
+              timelineEvents={timelineEvents}
+              timelineSpans={timelineSpans}
+            />
+            <SessionDiagnosticsPanel
+              anomalyEvents={anomalyEvents}
+              compareMatches={compareMatches}
+              dispatchWatchdog={dispatchWatchdog}
+              formatDateTime={formatDateTime}
+              healthEvents={healthEvents}
+              replayInvestigation={replayInvestigation}
+              stateDiff={stateDiff}
+            />
+            <KnowledgeUsagePanel phases={knowledgeUsage} />
+          </div>
         )}
 
         {activeTab === 'tasks' && (
@@ -2207,7 +2265,6 @@ export default function SessionDetail() {
         )}
       </div>
 
-      <KnowledgeUsagePanel phases={knowledgeUsage} />
     </div>
   );
 }

@@ -168,6 +168,8 @@ export interface ExecutionFailureSummary {
   generated_at: string | null;
   feedback_at: string | null;
   replan_planning_session_id: number | null;
+  replan_planning_session_status?: string | null;
+  replan_planning_session_title?: string | null;
   diagnostics?: FailureDiagnostics | null;
   message?: string;
 }

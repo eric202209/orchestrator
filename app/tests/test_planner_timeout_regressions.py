@@ -1324,6 +1324,8 @@ def test_planning_repair_prompt_bans_external_helpers_and_heredoc():
         "Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.\n"
         "No prose. No markdown fences. No plan.json. No explanation."
     )
+    assert "Do not create, edit, read, or write files during planning repair" in prompt
+    assert "return the JSON array as message text only" in prompt
     assert "Repair the plan, not the task" in prompt
     assert "Preserve valid steps" in prompt
     assert "Use 3 to 4 steps" in prompt
@@ -3218,6 +3220,32 @@ def test_targeted_second_repair_reason_centralizes_blocking_eligibility():
     assert reason.cap_used is False
     assert reason.cap_attribute == "post_repair_blocking_second_repair_used"
     assert "steps [3, 2]" in reason.rejection_text
+
+
+def test_targeted_second_repair_reason_requires_prior_repair():
+    retry_state = _PlanningRetryState()
+
+    reason = _get_targeted_second_repair_reason(
+        retry_state=retry_state,
+        blocking_repair_issues={"weak_verification_steps": [1]},
+    )
+
+    assert reason is None
+
+
+def test_targeted_second_repair_reason_rejects_mixed_blocking_classes():
+    retry_state = _PlanningRetryState()
+    retry_state.repair_prompt_used = True
+
+    reason = _get_targeted_second_repair_reason(
+        retry_state=retry_state,
+        blocking_repair_issues={
+            "weak_verification_steps": [1],
+            "background_process_steps": [2],
+        },
+    )
+
+    assert reason is None
 
 
 def test_targeted_second_repair_reason_respects_blocking_cap():

@@ -59,7 +59,10 @@ def start_planning_session(
 
     service = PlanningSessionService(db)
     session = service.start_session(
-        project, payload.prompt, source_brain=payload.source_brain
+        project,
+        payload.prompt,
+        source_brain=payload.source_brain,
+        skip_clarification=payload.skip_clarification,
     )
     return service.build_session_payload(session)
 
@@ -107,6 +110,17 @@ def cancel_planning_session(
     service = PlanningSessionService(db)
     session = service.cancel(session_id)
     return service.build_session_payload(session)
+
+
+@router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_planning_session(
+    session_id: int,
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_active_user),
+):
+    service = PlanningSessionService(db)
+    service.delete_terminal_session(session_id)
+    return None
 
 
 @router.post("/sessions/{session_id}/commit", response_model=PlanningCommitResponse)

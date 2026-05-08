@@ -22,6 +22,7 @@ vi.mock('@/api/client', () => ({
     get: vi.fn(),
     respond: vi.fn(),
     cancel: vi.fn(),
+    delete: vi.fn(),
     commit: vi.fn(),
   },
   plannerAPI: {
@@ -167,6 +168,7 @@ const mockProjectsGetPlans = projectsAPI.getPlans as Mock
 const mockPlanningList = planningAPI.list as Mock
 const mockPlanningGet = planningAPI.get as Mock
 const mockPlanningCommit = planningAPI.commit as Mock
+const mockPlanningDelete = planningAPI.delete as Mock
 
 async function flush(): Promise<void> {
   await act(async () => {
@@ -222,7 +224,7 @@ describe('ProjectPlannerPanel', () => {
     await flush()
 
     expect(container.textContent).toContain(
-      'The planner is still running in the background.'
+      'The planner is generating markdown and task preview directly from your prompt.'
     )
   })
 
@@ -296,5 +298,31 @@ describe('ProjectPlannerPanel', () => {
       })
     )
     expect(onTasksCommitted).toHaveBeenCalledWith(committedTasks)
+  })
+
+  it('allows discarding a completed uncommitted planning session', async () => {
+    const completedSession = createCompletedSession()
+    mockPlanningList.mockResolvedValue({
+      data: [{ ...summary, status: 'completed', current_prompt_id: null }],
+    })
+    mockPlanningGet.mockResolvedValue({ data: completedSession })
+    mockPlanningDelete.mockResolvedValue({ data: null })
+
+    await act(async () => {
+      root.render(<ProjectPlannerPanel project={project} onTasksCommitted={vi.fn()} />)
+    })
+    await flush()
+
+    expect(container.textContent).toContain('ready for review')
+    const buttons = Array.from(container.querySelectorAll('button'))
+    const discardButton = buttons.find((button) => button.textContent?.includes('Discard'))
+    expect(discardButton).toBeTruthy()
+
+    await act(async () => {
+      discardButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
+
+    expect(planningAPI.delete).toHaveBeenCalledWith(42)
   })
 })

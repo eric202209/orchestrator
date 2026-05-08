@@ -3,22 +3,29 @@ import { Link } from 'react-router-dom';
 import { tasksAPI, projectsAPI } from '@/api/client';
 import type { Task, Project } from '@/types/api';
 import { 
-  XCircle,
   Search,
-  Filter,
   ListTodo,
   GitBranch
 } from 'lucide-react';
 import { StatusBadge, LoadingSpinner, EmptyState } from '@/components/ui';
 
-type TaskStatus = 'pending' | 'running' | 'done' | 'failed';
+type TaskStatusFilter = 'all' | 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
+
+const statusFilters: Array<{ key: TaskStatusFilter; label: string }> = [
+  { key: 'all', label: 'All' },
+  { key: 'failed', label: 'Failed' },
+  { key: 'pending', label: 'Pending' },
+  { key: 'running', label: 'Running' },
+  { key: 'done', label: 'Done' },
+  { key: 'cancelled', label: 'Cancelled' },
+];
 
 function TasksList() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [projects, setProjects] = useState<Record<number, Project>>({});
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<TaskStatus | 'all'>('all');
+  const [statusFilter, setStatusFilter] = useState<TaskStatusFilter>('all');
 
   useEffect(() => {
     fetchTasks();
@@ -80,21 +87,6 @@ function TasksList() {
 
         <div className="flex items-center gap-2">
           <div className="relative">
-            <Filter className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-500" />
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value as TaskStatus | 'all')}
-              className="pl-8 pr-3 py-1.5 bg-slate-800 border border-slate-700 rounded-md text-xs text-slate-300 focus:outline-none focus:border-slate-600 hover:border-slate-600"
-            >
-              <option value="all">All</option>
-              <option value="pending">Pending</option>
-              <option value="running">Running</option>
-              <option value="done">Done</option>
-              <option value="failed">Failed</option>
-            </select>
-          </div>
-
-          <div className="relative">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-500" />
             <input
               type="text"
@@ -105,6 +97,30 @@ function TasksList() {
             />
           </div>
         </div>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        {statusFilters.map((filter) => {
+          const count =
+            filter.key === 'all'
+              ? tasks.length
+              : tasks.filter((task) => task.status === filter.key).length;
+          return (
+            <button
+              key={filter.key}
+              type="button"
+              onClick={() => setStatusFilter(filter.key)}
+              className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                statusFilter === filter.key
+                  ? 'border-sky-500 bg-sky-500/10 text-white'
+                  : 'border-slate-700 bg-slate-800 text-slate-400 hover:border-slate-600 hover:text-slate-200'
+              }`}
+            >
+              {filter.label}
+              <span className="ml-1 text-slate-500">{count}</span>
+            </button>
+          );
+        })}
       </div>
 
       {/* Tasks Grid */}
@@ -146,12 +162,6 @@ function TasksList() {
                     )}
                     {task.created_at && (
                       <span>{new Date(task.created_at).toLocaleDateString()}</span>
-                    )}
-                    {task.error_message && (
-                      <span className="text-red-500 flex items-center gap-1">
-                        <XCircle className="h-3 w-3" />
-                        Error
-                      </span>
                     )}
                   </div>
                 </div>
