@@ -30,6 +30,7 @@ from app.services.orchestration.planning.planner import (
     PlannerService,
     PlanningRepairBudgetExceeded,
     PlanningRepairNoOutputTimeout,
+    PlanningRepairOutputContractViolation,
 )
 from app.services.orchestration.policy import (
     PLANNING_REPAIR_TIMEOUT_SECONDS,
@@ -393,6 +394,7 @@ class _PlanningRetryState:
         self.consecutive_failures = 0
         self.minimal_prompt_used = False
         self.repair_prompt_used = False
+        self.post_repair_blocking_second_repair_used = False
         self.last_repair_reason = ""
 
     @property
@@ -1295,6 +1297,100 @@ def execute_planning_phase(
                 retry_state.consecutive_failures += 1
                 continue
             if blocking_repair_issues:
+                only_weak_verification = set(blocking_repair_issues.keys()) == {
+                    "weak_verification_steps"
+                }
+                only_background_process = set(blocking_repair_issues.keys()) == {
+                    "background_process_steps"
+                }
+                if (
+                    (only_weak_verification or only_background_process)
+                    and retry_state.repair_prompt_used
+                    and not retry_state.post_repair_blocking_second_repair_used
+                ):
+                    if only_weak_verification:
+                        issue_key = "weak_verification_steps"
+                        issue_label = "weak verification"
+                        semantic_violation_code = "weak_verification"
+                        retry_reason = "post_repair_weak_verification_steps"
+                        event_reason = "post_repair_weak_verification_second_pass"
+                        issue_steps = blocking_repair_issues[issue_key][:5]
+                        issue_fragments = [
+                            (
+                                "weak_verification_steps: steps "
+                                f"{issue_steps} still use weak verification after repair; "
+                                "replace each with pytest, python -m, or npm run build "
+                                "that proves behavior for the files changed in that step"
+                            )
+                        ]
+                    else:
+                        issue_key = "background_process_steps"
+                        issue_label = "background process commands"
+                        semantic_violation_code = "background_process_command"
+                        retry_reason = "post_repair_background_process_steps"
+                        event_reason = "post_repair_background_process_second_pass"
+                        issue_steps = blocking_repair_issues[issue_key][:5]
+                        issue_fragments = [
+                            (
+                                "background_process_steps: steps "
+                                f"{issue_steps} still start background or long-running "
+                                "processes after repair; replace each with bounded "
+                                "foreground commands that terminate"
+                            )
+                        ]
+                    contract_violations = (
+                        PlannerService.describe_planning_contract_violations(
+                            output_text=output_text,
+                            parse_success=True,
+                            strategy_info=retry_reason,
+                            plan_data=plan_data,
+                            extracted_plan=ctx.orchestration_state.plan,
+                            immediate_repair_issues=blocking_repair_issues,
+                        )
+                    )
+                    emit_phase_event(
+                        ctx.orchestration_state,
+                        ctx.emit_live,
+                        level="WARN",
+                        phase="planning",
+                        message=(
+                            "[ORCHESTRATION] Planning repair still had a targeted "
+                            "blocking issue; starting one targeted second repair pass"
+                        ),
+                        details={
+                            "reason": event_reason,
+                            issue_key: issue_steps,
+                            "contract_violations": contract_violations[:8],
+                            "repair_attempts": retry_state.consecutive_failures + 1,
+                        },
+                    )
+                    ctx.logger.warning(
+                        "[ORCHESTRATION] Planning repair still had %s in steps %s; "
+                        "starting one targeted second repair pass",
+                        issue_label,
+                        issue_steps,
+                    )
+                    _emit_planning_diagnostics_contract_violation(
+                        ctx,
+                        reason=event_reason,
+                        contract_violations=contract_violations,
+                        semantic_violation_codes=[semantic_violation_code],
+                        output_text=output_text,
+                        strategy_info=event_reason,
+                    )
+                    retry_state.last_repair_reason = event_reason
+                    planning_result = __repair_planning_output(
+                        ctx=ctx,
+                        planning_timeout_seconds=planning_timeout_seconds,
+                        malformed_output=output_text,
+                        reason=f"{retry_reason}: " + "; ".join(issue_fragments),
+                        rejection_reasons=issue_fragments,
+                        prompt_profile=prompt_profile,
+                    )
+                    retry_state.post_repair_blocking_second_repair_used = True
+                    retry_state.consecutive_failures += 1
+                    continue
+
                 ctx.orchestration_state.status = OrchestrationStatus.ABORTED
                 ctx.orchestration_state.abort_reason = "Planning repair still produced non-runnable or long-running commands"
                 failure_reason = (
@@ -1620,6 +1716,55 @@ def execute_planning_phase(
         if ctx.restore_workspace_snapshot_if_needed:
             ctx.restore_workspace_snapshot_if_needed("workspace isolation violation")
         return {"status": "failed", "reason": "workspace_isolation_violation"}
+    except PlanningRepairOutputContractViolation as exc:
+        failure_type = "repair_output_contract_violation"
+        ctx.logger.error(
+            "[ORCHESTRATION] Planning repair output contract violation: %s",
+            exc,
+        )
+        ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+        ctx.orchestration_state.abort_reason = str(exc)
+        emit_phase_event(
+            ctx.orchestration_state,
+            ctx.emit_live,
+            level="ERROR",
+            phase="planning",
+            message=f"[ORCHESTRATION] Planning repair output contract violation: {exc}",
+            details={"reason": failure_type},
+        )
+        try:
+            phase_finished_event = append_orchestration_event(
+                project_dir=ctx.orchestration_state.project_dir,
+                session_id=ctx.session_id,
+                task_id=ctx.task_id,
+                event_type=EventType.PHASE_FINISHED,
+                parent_event_id=(planning_phase_event or {}).get("event_id"),
+                details={
+                    "phase": "planning",
+                    "status": "repair_output_contract_violation",
+                },
+            )
+            write_orchestration_state_snapshot(
+                project_dir=ctx.orchestration_state.project_dir,
+                session_id=ctx.session_id,
+                task_id=ctx.task_id,
+                orchestration_state=ctx.orchestration_state,
+                trigger="phase_finished",
+                related_event_id=phase_finished_event.get("event_id"),
+            )
+        except Exception as snap_exc:
+            ctx.logger.debug(
+                "[ORCHESTRATION] Failed to persist repair output contract violation phase-finish snapshot: %s",
+                snap_exc,
+            )
+        _finalize_planning_terminal_failure(
+            ctx=ctx,
+            failure_type=failure_type,
+            failure_reason=str(exc),
+        )
+        if ctx.restore_workspace_snapshot_if_needed:
+            ctx.restore_workspace_snapshot_if_needed("repair output contract violation")
+        return {"status": "failed", "reason": failure_type}
     except TimeoutError as exc:
         timeout_exc = exc
         failure_type = _classify_planning_timeout_failure(exc, retry_state)

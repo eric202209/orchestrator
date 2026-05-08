@@ -169,6 +169,14 @@ class PlanningRepairNoOutputTimeout(TimeoutError):
         self.runtime_diagnostics = diagnostics or {}
 
 
+class PlanningRepairOutputContractViolation(RuntimeError):
+    """Raised when repair returns prose or markdown-fenced JSON instead of a bare JSON array."""
+
+    def __init__(self, message: str, diagnostics: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.runtime_diagnostics = diagnostics or {}
+
+
 class PlannerService:
     """Planning-stage fallback and repair helpers."""
 
@@ -1317,17 +1325,23 @@ Rules:
             repair_truncated = "...<truncated" in repair_output_text.lower()
             parser_validation_seconds = time.monotonic() - parser_started_at
             if not repair_output_text.lstrip().startswith("["):
+                is_fenced = repair_output_text.lstrip().startswith("```")
+                contract_reason = (
+                    "repair returned markdown-fenced JSON; expected bare JSON array"
+                    if is_fenced
+                    else "repair returned prose; expected bare JSON array"
+                )
                 diagnostics = {
-                    "repair_returned_prose": True,
-                    "timeout_boundary": "repair_returned_prose",
+                    "output_contract_violated": True,
+                    "repair_output_fenced": is_fenced,
                     "stdout_chars": repair_output_chars,
                     "stderr_chars": len(str(result.get("stderr") or "")),
-                    "first_output_after_seconds": None,
-                    "cancelled": False,
+                    "repair_attempts": _repair_attempt_number,
                 }
                 logger.warning(
-                    "[ORCHESTRATION] Planning repair returned prose instead of JSON "
+                    "[ORCHESTRATION] Planning repair output contract violation: %s "
                     "(session_id=%s task_id=%s output_chars=%s repair_attempts=%s)",
+                    contract_reason,
                     session_id,
                     task_id,
                     repair_output_chars,
@@ -1335,25 +1349,22 @@ Rules:
                 )
                 emit_live(
                     "ERROR",
-                    "[ORCHESTRATION] Repair returned prose instead of a JSON array; stopping repair.",
+                    f"[ORCHESTRATION] Repair output contract violation: {contract_reason}; stopping repair.",
                     metadata={
                         "phase": "planning",
-                        "reason": "repair_returned_prose",
-                        "timeout_seconds": repair_timeout,
+                        "reason": "repair_output_contract_violation",
+                        "contract_reason": contract_reason,
+                        "repair_output_fenced": is_fenced,
                         "duration_seconds": round(repair_duration_seconds, 3),
-                        "repair_prompt_build_seconds": round(
-                            repair_prompt_build_seconds, 3
-                        ),
                         "repair_prompt_chars": len(repair_prompt),
                         "malformed_output_chars": compact_malformed_output_chars,
                         "repair_reason": reason[:240],
                         "repair_attempts": _repair_attempt_number,
                         "repair_output_chars": repair_output_chars,
-                        "parser_validation_seconds": None,
                     },
                 )
-                raise PlanningRepairNoOutputTimeout(
-                    "Planning repair returned prose instead of JSON array",
+                raise PlanningRepairOutputContractViolation(
+                    contract_reason,
                     diagnostics,
                 )
             if repair_duration_seconds > repair_timeout:
@@ -1401,6 +1412,8 @@ Rules:
                 },
             )
             return result
+        except PlanningRepairOutputContractViolation:
+            raise
         except PlanningRepairNoOutputTimeout:
             raise
         except Exception as exc:
