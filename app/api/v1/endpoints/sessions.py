@@ -20,6 +20,7 @@ from app.models import (
     Session as SessionModel,
     SessionTask,
     Task,
+    TaskExecution,
     TaskStatus,
 )
 from app.schemas import (
@@ -838,6 +839,83 @@ def _serialize_failure_summary(record) -> Dict[str, Any]:
     }
 
 
+_FAILURE_DIAGNOSTIC_KEYS = (
+    "reason",
+    "contract_violation_type",
+    "validation_reasons",
+    "contract_violations",
+    "semantic_violation_codes",
+    "brittle_command_subcodes",
+    "brittle_command_step_details",
+    "brittle_command_step_command_lengths",
+    "max_command_length",
+    "command_total_chars",
+    "heredoc_command_count",
+    "weak_verification_steps",
+    "missing_verification_steps",
+)
+
+
+def _latest_failure_diagnostics(db: Session, session_id: int) -> Dict[str, Any] | None:
+    latest_execution = (
+        db.query(TaskExecution)
+        .filter(
+            TaskExecution.session_id == session_id,
+            TaskExecution.status == TaskStatus.FAILED,
+        )
+        .order_by(
+            TaskExecution.completed_at.desc().nullslast(),
+            TaskExecution.id.desc(),
+        )
+        .first()
+    )
+    query = db.query(LogEntry).filter(
+        LogEntry.session_id == session_id,
+        LogEntry.log_metadata.isnot(None),
+    )
+    if latest_execution:
+        query = query.filter(LogEntry.task_execution_id == latest_execution.id)
+
+    candidates: list[Dict[str, Any]] = []
+    for entry in query.order_by(LogEntry.created_at.desc(), LogEntry.id.desc()).limit(
+        80
+    ):
+        try:
+            metadata = json.loads(entry.log_metadata or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        diagnostic = {
+            key: metadata[key]
+            for key in _FAILURE_DIAGNOSTIC_KEYS
+            if key in metadata and metadata[key] not in (None, [], {})
+        }
+        if not diagnostic:
+            continue
+        diagnostic["log_id"] = entry.id
+        diagnostic["level"] = entry.level
+        diagnostic["message"] = entry.message
+        diagnostic["created_at"] = (
+            entry.created_at.isoformat() if entry.created_at else None
+        )
+        diagnostic["task_id"] = entry.task_id
+        diagnostic["task_execution_id"] = entry.task_execution_id
+        candidates.append(diagnostic)
+
+    if not candidates:
+        return None
+
+    terminal_reasons = {
+        "planning_validation_failed_after_repair",
+        "planning_invalid_commands_after_repair",
+    }
+    for candidate in candidates:
+        if candidate.get("reason") in terminal_reasons:
+            return candidate
+    return candidates[0]
+
+
 @router.get("/sessions/{session_id}/failure-summary")
 def get_failure_summary(
     session_id: int,
@@ -851,7 +929,9 @@ def get_failure_summary(
     the cached record.
     """
     record = _get_or_generate_failure_summary(db, session_id)
-    return _serialize_failure_summary(record)
+    payload = _serialize_failure_summary(record)
+    payload["diagnostics"] = _latest_failure_diagnostics(db, session_id)
+    return payload
 
 
 class OperatorFeedbackBody(BaseModel):

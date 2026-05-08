@@ -4,6 +4,7 @@ import type {
   Checkpoint,
   CheckpointInspection,
   ExecutionFailureSummary,
+  FailureDiagnostics,
   InterventionRequest,
   KnowledgeUsageEntry,
   Project,
@@ -61,6 +62,77 @@ export interface TimelineSpan {
   event_count: number;
   summary: string;
 }
+
+const getStringList = (value: unknown): string[] =>
+  Array.isArray(value)
+    ? value
+        .map((item) => String(item || '').trim())
+        .filter((item) => item.length > 0)
+    : [];
+
+const getNumberList = (value: unknown): number[] =>
+  Array.isArray(value)
+    ? value
+        .map((item) => Number(item))
+        .filter((item) => Number.isFinite(item))
+    : [];
+
+const getStepDetailEntries = (
+  value: unknown
+): Array<{ step: string; codes: string[] }> => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return [];
+  }
+  return Object.entries(value as Record<string, unknown>)
+    .map(([step, codes]) => ({ step, codes: getStringList(codes) }))
+    .filter((entry) => entry.codes.length > 0);
+};
+
+const getDiagnosticBadges = (
+  diagnostics?: FailureDiagnostics | Record<string, unknown> | null
+): string[] => {
+  if (!diagnostics) return [];
+  const badges: string[] = [];
+  const subcodes = getStringList(diagnostics.brittle_command_subcodes);
+  if (subcodes.length > 0) {
+    badges.push(...subcodes.slice(0, 3));
+  }
+  const stepDetails = getStepDetailEntries(diagnostics.brittle_command_step_details);
+  if (stepDetails.length > 0) {
+    badges.push(
+      ...stepDetails.slice(0, 3).map((entry) => `step ${entry.step}: ${entry.codes.join(', ')}`)
+    );
+  }
+  const weakSteps = getNumberList(diagnostics.weak_verification_steps);
+  if (weakSteps.length > 0) {
+    badges.push(`weak verification steps ${weakSteps.join(', ')}`);
+  }
+  const missingSteps = getNumberList(diagnostics.missing_verification_steps);
+  if (missingSteps.length > 0) {
+    badges.push(`missing verification steps ${missingSteps.join(', ')}`);
+  }
+  if (typeof diagnostics.max_command_length === 'number') {
+    badges.push(`max command ${diagnostics.max_command_length} chars`);
+  }
+  if (typeof diagnostics.command_total_chars === 'number') {
+    badges.push(`total commands ${diagnostics.command_total_chars} chars`);
+  }
+  if (typeof diagnostics.heredoc_command_count === 'number') {
+    badges.push(`${diagnostics.heredoc_command_count} heredocs`);
+  }
+  return Array.from(new Set(badges)).slice(0, 8);
+};
+
+const getDiagnosticReasons = (
+  diagnostics?: FailureDiagnostics | Record<string, unknown> | null
+): string[] => {
+  if (!diagnostics) return [];
+  const reasons = [
+    ...getStringList(diagnostics.validation_reasons),
+    ...getStringList(diagnostics.contract_violations),
+  ];
+  return Array.from(new Set(reasons)).slice(0, 5);
+};
 
 interface SessionHeaderProps {
   project: Project | null;
@@ -657,52 +729,78 @@ export function SessionLogsPanel({
             decisionEvents
               .slice()
               .reverse()
-              .map((event) => (
-                <div key={event.id} className="rounded-md border border-slate-700 p-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span
-                        className={cn(
-                          'text-xs font-medium uppercase',
-                          event.severity === 'error' && 'text-red-400',
-                          event.severity === 'warning' && 'text-amber-400',
-                          event.severity !== 'error' &&
-                            event.severity !== 'warning' &&
-                            'text-sky-400'
+              .map((event) => {
+                const diagnosticBadges = getDiagnosticBadges(event.details);
+                const diagnosticReasons = getDiagnosticReasons(event.details);
+
+                return (
+                  <div key={event.id} className="rounded-md border border-slate-700 p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span
+                          className={cn(
+                            'text-xs font-medium uppercase',
+                            event.severity === 'error' && 'text-red-400',
+                            event.severity === 'warning' && 'text-amber-400',
+                            event.severity !== 'error' &&
+                              event.severity !== 'warning' &&
+                              'text-sky-400'
+                          )}
+                        >
+                          {event.title}
+                        </span>
+                        <span className="rounded-sm border border-slate-700 px-1.5 py-0.5 text-xs uppercase text-slate-400">
+                          {event.phase}
+                        </span>
+                        {event.task_id !== null && event.task_id !== undefined && (
+                          <span className="text-xs text-slate-500">
+                            Task {event.task_id}
+                          </span>
                         )}
-                      >
-                        {event.title}
+                      </div>
+                      <span className="text-xs text-slate-400">
+                        {formatDateTime(event.timestamp)}
                       </span>
-                      <span className="rounded-sm border border-slate-700 px-1.5 py-0.5 text-xs uppercase text-slate-400">
-                        {event.phase}
-                      </span>
-                      {event.task_id !== null && event.task_id !== undefined && (
-                        <span className="text-xs text-slate-500">
-                          Task {event.task_id}
-                        </span>
-                      )}
                     </div>
-                    <span className="text-xs text-slate-400">
-                      {formatDateTime(event.timestamp)}
-                    </span>
+                    <p className="mt-1 break-words text-slate-300">{event.summary}</p>
+                    {diagnosticBadges.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {diagnosticBadges.map((badge) => (
+                          <span
+                            key={badge}
+                            className="rounded-sm border border-red-900/70 bg-red-950/30 px-1.5 py-0.5 text-xs text-red-200"
+                          >
+                            {badge}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {diagnosticReasons.length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        {diagnosticReasons.map((reason) => (
+                          <p key={reason} className="break-words text-xs text-slate-400">
+                            {reason}
+                          </p>
+                        ))}
+                      </div>
+                    )}
+                    {(event.knowledge_usage_ids.length > 0 || event.intervention_id) && (
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {event.knowledge_usage_ids.length > 0 && (
+                          <span className="rounded-sm border border-violet-900/70 bg-violet-950/30 px-1.5 py-0.5 text-xs text-violet-300">
+                            Knowledge phase context
+                          </span>
+                        )}
+                        {event.intervention_id && (
+                          <span className="rounded-sm border border-amber-900/70 bg-amber-950/30 px-1.5 py-0.5 text-xs text-amber-300">
+                            Intervention #{event.intervention_id}
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
-                  <p className="mt-1 break-words text-slate-300">{event.summary}</p>
-                  {(event.knowledge_usage_ids.length > 0 || event.intervention_id) && (
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {event.knowledge_usage_ids.length > 0 && (
-                        <span className="rounded-sm border border-violet-900/70 bg-violet-950/30 px-1.5 py-0.5 text-xs text-violet-300">
-                          Knowledge phase context
-                        </span>
-                      )}
-                      {event.intervention_id && (
-                        <span className="rounded-sm border border-amber-900/70 bg-amber-950/30 px-1.5 py-0.5 text-xs text-amber-300">
-                          Intervention #{event.intervention_id}
-                        </span>
-                      )}
-                    </div>
-                  )}
-                </div>
-              ))
+                );
+              })
           )}
         </div>
       </div>
@@ -1490,6 +1588,8 @@ export function FailureSummaryPanel({
   if (!summary) return null;
 
   const alreadyReplanned = summary.replan_planning_session_id !== null;
+  const diagnosticBadges = getDiagnosticBadges(summary.diagnostics);
+  const diagnosticReasons = getDiagnosticReasons(summary.diagnostics);
 
   return (
     <div className="space-y-4">
@@ -1506,6 +1606,51 @@ export function FailureSummaryPanel({
         <pre className="whitespace-pre-wrap rounded bg-slate-950/60 p-3 text-sm leading-6 text-slate-200">
           {summary.summary}
         </pre>
+        {summary.diagnostics && (
+          <div className="mt-3 rounded-md border border-red-900/60 bg-slate-950/40 p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-medium uppercase text-red-300">
+                Failure diagnostics
+              </span>
+              {summary.diagnostics.task_execution_id && (
+                <span className="text-xs text-slate-400">
+                  TE {summary.diagnostics.task_execution_id}
+                </span>
+              )}
+              {summary.diagnostics.reason && (
+                <span className="text-xs text-slate-400">
+                  {summary.diagnostics.reason}
+                </span>
+              )}
+            </div>
+            {diagnosticBadges.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {diagnosticBadges.map((badge) => (
+                  <span
+                    key={badge}
+                    className="rounded-sm border border-red-900/70 bg-red-950/30 px-1.5 py-0.5 text-xs text-red-200"
+                  >
+                    {badge}
+                  </span>
+                ))}
+              </div>
+            )}
+            {diagnosticReasons.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {diagnosticReasons.map((reason) => (
+                  <p key={reason} className="break-words text-xs text-slate-300">
+                    {reason}
+                  </p>
+                ))}
+              </div>
+            )}
+            {summary.diagnostics.message && (
+              <p className="mt-2 break-words text-xs text-slate-400">
+                {summary.diagnostics.message}
+              </p>
+            )}
+          </div>
+        )}
       </div>
 
       {summary.operator_feedback && (

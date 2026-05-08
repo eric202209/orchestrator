@@ -610,6 +610,19 @@ def _bounded_details(details: Dict[str, Any]) -> Dict[str, Any]:
         "failure_envelope",
         "queue_latency_seconds",
         "queue_age_seconds",
+        "task_execution_id",
+        "validation_reasons",
+        "contract_violations",
+        "contract_violation_type",
+        "semantic_violation_codes",
+        "brittle_command_subcodes",
+        "brittle_command_step_details",
+        "brittle_command_step_command_lengths",
+        "max_command_length",
+        "command_total_chars",
+        "heredoc_command_count",
+        "weak_verification_steps",
+        "missing_verification_steps",
     }
     bounded: Dict[str, Any] = {}
     for key in allowed:

@@ -315,6 +315,57 @@ def test_decision_timeline_ignores_malformed_jsonl(authenticated_client, db_sess
         assert events[0]["id"] == "valid"
 
 
+def test_decision_timeline_preserves_validation_diagnostics(
+    authenticated_client, db_session
+):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        project = _make_project(db_session, workspace_path=tmpdir)
+        session = _make_session(db_session, project)
+        task = _make_task(db_session, project, session)
+
+        _write_events(
+            tmpdir,
+            session.id,
+            task.id,
+            [
+                _event(
+                    event_id="diagnostic-validation",
+                    session_id=session.id,
+                    task_id=task.id,
+                    event_type="validation_result",
+                    timestamp=datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
+                    details={
+                        "stage": "plan",
+                        "status": "repair_required",
+                        "validation_reasons": [
+                            "Plan contains brittle heredoc-heavy or malformed commands"
+                        ],
+                        "brittle_command_subcodes": ["oversized_command_length"],
+                        "brittle_command_step_details": {
+                            "2": ["oversized_command_length"]
+                        },
+                        "max_command_length": 1456,
+                    },
+                )
+            ],
+        )
+
+        resp = authenticated_client.get(
+            f"/api/v1/sessions/{session.id}/decision-timeline"
+        )
+
+        assert resp.status_code == 200
+        details = resp.json()["events"][0]["details"]
+        assert details["validation_reasons"] == [
+            "Plan contains brittle heredoc-heavy or malformed commands"
+        ]
+        assert details["brittle_command_subcodes"] == ["oversized_command_length"]
+        assert details["brittle_command_step_details"] == {
+            "2": ["oversized_command_length"]
+        }
+        assert details["max_command_length"] == 1456
+
+
 def test_decision_timeline_phase_filter(authenticated_client, db_session):
     with tempfile.TemporaryDirectory() as tmpdir:
         project = _make_project(db_session, workspace_path=tmpdir)

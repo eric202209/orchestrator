@@ -10,6 +10,7 @@ Covers:
 from __future__ import annotations
 
 from unittest.mock import patch
+import json
 
 import pytest
 from fastapi.testclient import TestClient
@@ -21,6 +22,7 @@ from app.models import (
     Project,
     Session as SessionModel,
     Task,
+    TaskExecution,
     TaskStatus,
     SessionTask,
 )
@@ -231,6 +233,73 @@ class TestFailureSummaryEndpoints:
         data = resp.json()
         assert data["session_id"] == session.id
         assert data["summary"] == "API test summary."
+
+    def test_get_failure_summary_includes_latest_failure_diagnostics(
+        self, authenticated_client: TestClient, db_session: Session
+    ):
+        project = Project(name="diagnostic-project", workspace_path=None)
+        db_session.add(project)
+        db_session.commit()
+
+        session = SessionModel(
+            project_id=project.id,
+            name="diagnostic-session",
+            status="stopped",
+            is_active=False,
+            instance_id="diagnostic-uuid",
+        )
+        task = Task(
+            project_id=project.id,
+            title="Build utility",
+            status=TaskStatus.FAILED,
+            error_message="Plan validation failed after repair",
+        )
+        db_session.add_all([session, task])
+        db_session.commit()
+
+        execution = TaskExecution(
+            session_id=session.id,
+            task_id=task.id,
+            attempt_number=1,
+            status=TaskStatus.FAILED,
+        )
+        db_session.add(execution)
+        db_session.commit()
+
+        db_session.add(
+            LogEntry(
+                session_id=session.id,
+                task_id=task.id,
+                task_execution_id=execution.id,
+                level="ERROR",
+                message="[ORCHESTRATION] Plan validation failed after repair",
+                log_metadata=json.dumps(
+                    {
+                        "reason": "planning_validation_failed_after_repair",
+                        "brittle_command_subcodes": ["oversized_command_length"],
+                        "brittle_command_step_details": {
+                            "2": ["oversized_command_length"]
+                        },
+                        "max_command_length": 1456,
+                    }
+                ),
+            )
+        )
+        db_session.commit()
+
+        with patch(_LLM_PATH, return_value="API test summary."):
+            resp = authenticated_client.get(
+                f"/api/v1/sessions/{session.id}/failure-summary"
+            )
+
+        assert resp.status_code == 200
+        diagnostics = resp.json()["diagnostics"]
+        assert diagnostics["task_execution_id"] == execution.id
+        assert diagnostics["reason"] == "planning_validation_failed_after_repair"
+        assert diagnostics["brittle_command_subcodes"] == ["oversized_command_length"]
+        assert diagnostics["brittle_command_step_details"] == {
+            "2": ["oversized_command_length"]
+        }
 
     def test_operator_feedback_saved(
         self, authenticated_client: TestClient, db_session: Session

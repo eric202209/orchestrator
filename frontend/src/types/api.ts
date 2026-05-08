@@ -168,7 +168,30 @@ export interface ExecutionFailureSummary {
   generated_at: string | null;
   feedback_at: string | null;
   replan_planning_session_id: number | null;
+  diagnostics?: FailureDiagnostics | null;
   message?: string;
+}
+
+export interface FailureDiagnostics {
+  reason?: string;
+  contract_violation_type?: string;
+  validation_reasons?: string[];
+  contract_violations?: string[];
+  semantic_violation_codes?: string[];
+  brittle_command_subcodes?: string[];
+  brittle_command_step_details?: Record<string, string[]>;
+  brittle_command_step_command_lengths?: Record<string, number[]>;
+  max_command_length?: number;
+  command_total_chars?: number;
+  heredoc_command_count?: number;
+  weak_verification_steps?: number[];
+  missing_verification_steps?: number[];
+  log_id?: number;
+  level?: string;
+  message?: string;
+  created_at?: string | null;
+  task_id?: number | null;
+  task_execution_id?: number | null;
 }
 
 export interface LogEntry {
