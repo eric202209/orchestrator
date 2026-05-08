@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+import fcntl
 import json
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -28,6 +31,16 @@ PLANNING_REPAIR_PROMPT_MAX_CHARS = REPAIR_PROMPT_MAX_CHARS
 MINIMAL_PLANNING_PROMPT_TOKEN_DIAGNOSTIC_THRESHOLD = 6000
 PLANNING_REPAIR_ALLOWED_KNOWLEDGE_TYPES = {"format_guide", "task_example"}
 STRUCTURALLY_EMPTY_FILENAMES = frozenset({"__init__.py", "__init__.pyi", ".gitkeep"})
+OPENCLAW_SESSION_LOCK_MARKERS = (
+    "session file locked",
+    "sessions.json.lock",
+)
+OPENCLAW_PLANNING_LOCK_PATH = Path(
+    os.environ.get(
+        "ORCHESTRATOR_OPENCLAW_PLANNING_LOCK",
+        "/tmp/orchestrator-openclaw-planning.lock",
+    )
+)
 PLANNING_REPAIR_STRIP_FIELD_NAMES = {
     "projectContext",
     "nonProjectContext",
@@ -195,6 +208,54 @@ class PlannerService:
         "ensure ",
         "confirm ",
     )
+
+    @staticmethod
+    def is_openclaw_lock_contention(value: Any) -> bool:
+        if isinstance(value, dict):
+            candidates = [
+                value.get("error"),
+                value.get("output"),
+                value.get("stderr"),
+                value.get("message"),
+            ]
+            diagnostics = value.get("diagnostics")
+            if isinstance(diagnostics, dict):
+                candidates.extend(
+                    [
+                        diagnostics.get("error"),
+                        diagnostics.get("stderr"),
+                        diagnostics.get("message"),
+                    ]
+                )
+            return any(
+                PlannerService.is_openclaw_lock_contention(candidate)
+                for candidate in candidates
+                if candidate is not None
+            )
+
+        text = str(value or "").lower()
+        return any(marker in text for marker in OPENCLAW_SESSION_LOCK_MARKERS)
+
+    @staticmethod
+    @contextmanager
+    def _openclaw_planning_lock():
+        OPENCLAW_PLANNING_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with OPENCLAW_PLANNING_LOCK_PATH.open("a", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    @classmethod
+    async def _execute_task_with_planning_lock(
+        cls,
+        runtime_service: Any,
+        prompt: str,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        with cls._openclaw_planning_lock():
+            return await runtime_service.execute_task(prompt, **kwargs)
 
     _WEAK_VERIFICATION_MARKERS = (
         "test -f",
@@ -919,16 +980,18 @@ Return only a JSON array matching this shape. No markdown. No prose.
     ) -> Dict[str, Any]:
         invoke_prompt = getattr(runtime_service, "invoke_prompt", None)
         if callable(invoke_prompt):
-            return await invoke_prompt(
-                repair_prompt,
-                timeout_seconds=repair_timeout,
-                source_brain="local",
-                session_prefix="planning-repair",
-                isolate_workspace_context=False,
-                no_output_timeout_seconds=PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS,
-            )
+            with PlannerService._openclaw_planning_lock():
+                return await invoke_prompt(
+                    repair_prompt,
+                    timeout_seconds=repair_timeout,
+                    source_brain="local",
+                    session_prefix="planning-repair",
+                    isolate_workspace_context=False,
+                    no_output_timeout_seconds=PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS,
+                )
 
-        return await runtime_service.execute_task(
+        return await PlannerService._execute_task_with_planning_lock(
+            runtime_service,
             repair_prompt,
             timeout_seconds=repair_timeout,
             reuse_task_session=False,
@@ -1115,7 +1178,8 @@ Rules:
         )
         try:
             return asyncio.run(
-                runtime_service.execute_task(
+                cls._execute_task_with_planning_lock(
+                    runtime_service,
                     minimal_prompt,
                     timeout_seconds=minimal_timeout,
                     reuse_task_session=False,
@@ -1162,7 +1226,8 @@ Rules:
                 },
             )
             return asyncio.run(
-                runtime_service.execute_task(
+                cls._execute_task_with_planning_lock(
+                    runtime_service,
                     cls.build_ultra_minimal_planning_prompt(
                         task_description,
                         project_dir,

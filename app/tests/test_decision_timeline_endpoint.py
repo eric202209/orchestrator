@@ -917,6 +917,12 @@ def test_decision_timeline_surfaces_timeout_and_repair_contract_terminals(
             "title": "Repair Output Contract Violation",
             "repair_attempted": True,
         },
+        {
+            "reason": "planning_openclaw_lock_contention",
+            "message": "[ORCHESTRATION] OpenClaw session lock contention",
+            "title": "OpenClaw Session Lock Contention",
+            "repair_attempted": False,
+        },
     ]
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -977,6 +983,75 @@ def test_decision_timeline_surfaces_timeout_and_repair_contract_terminals(
             assert failure["details"]["targeted_second_repair_attempted"] is False
             assert "operator_next_action" in failure["details"]
             assert payload["counts"]["failure"] == 1
+
+
+def test_decision_timeline_surfaces_workspace_isolation_terminal(
+    authenticated_client, db_session
+):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        project = _make_project(db_session, workspace_path=tmpdir)
+        session = _make_session(db_session, project)
+        task = _make_task(db_session, project, session)
+        completed_at = datetime(2026, 5, 8, 20, 46, tzinfo=UTC)
+        execution = TaskExecution(
+            session_id=session.id,
+            task_id=task.id,
+            attempt_number=1,
+            status=TaskStatus.FAILED,
+            completed_at=completed_at,
+        )
+        db_session.add(execution)
+        db_session.commit()
+        db_session.refresh(execution)
+
+        db_session.add(
+            LogEntry(
+                session_id=session.id,
+                task_id=task.id,
+                task_execution_id=execution.id,
+                level="WARN",
+                message=(
+                    "[ORCHESTRATION] Restored workspace to the pre-run snapshot "
+                    "after workspace isolation violation"
+                ),
+                created_at=completed_at,
+                log_metadata=json.dumps(
+                    {
+                        "phase": "workspace_restore",
+                        "reason": "workspace isolation violation",
+                        "snapshot_path": f"{tmpdir}/.openclaw/auto-snapshots/task",
+                        "target_path": tmpdir,
+                        "task_execution_id": execution.id,
+                    }
+                ),
+            )
+        )
+        db_session.commit()
+
+        resp = authenticated_client.get(
+            f"/api/v1/sessions/{session.id}/decision-timeline"
+        )
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        failure = [
+            event
+            for event in payload["events"]
+            if event["source"] == "terminal_log_metadata"
+        ][0]
+        assert failure["title"] == "Workspace Isolation Violation"
+        assert failure["status"] == "failed"
+        assert failure["details"]["reason"] == "workspace isolation violation"
+        assert failure["details"]["task_execution_id"] == execution.id
+        assert failure["details"]["snapshot_path"].endswith(
+            ".openclaw/auto-snapshots/task"
+        )
+        assert failure["details"]["target_path"] == tmpdir
+        assert failure["details"]["repair_attempted"] is False
+        assert failure["details"]["targeted_second_repair_attempted"] is False
+        assert "project boundary" in failure["details"]["no_further_repair_reason"]
+        assert "operator_next_action" in failure["details"]
+        assert payload["counts"]["failure"] == 1
 
 
 def test_decision_timeline_surfaces_cancelled_execution_without_terminal_log(

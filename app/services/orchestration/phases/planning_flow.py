@@ -582,6 +582,8 @@ def _classify_planning_timeout_failure(
     retry_state: _PlanningRetryState | None,
 ) -> str:
     message = str(exc).lower()
+    if PlannerService.is_openclaw_lock_contention(message):
+        return "planning_openclaw_lock_contention"
     if "context" in message or "context overflow" in message:
         return "planning_context_overflow"
     if (
@@ -851,7 +853,8 @@ def execute_planning_phase(
         )
     else:
         planning_result = asyncio.run(
-            ctx.runtime_service.execute_task(
+            PlannerService._execute_task_with_planning_lock(
+                ctx.runtime_service,
                 planning_prompt,
                 timeout_seconds=planning_timeout_seconds,
                 reuse_task_session=False,
@@ -887,7 +890,19 @@ def execute_planning_phase(
         planning_result, initial_output_text
     ) and not PlannerService.looks_salvageable_planning_output(initial_output_text):
         if used_minimal_planning_prompt:
-            failure_reason = f"Planning timed out or exceeded context after {planning_timeout_seconds}s"
+            if PlannerService.is_openclaw_lock_contention(planning_result):
+                failure_type = "planning_openclaw_lock_contention"
+                failure_reason = (
+                    "OpenClaw planning failed because the local session file was locked"
+                )
+                restore_reason = "planning OpenClaw lock contention"
+            else:
+                failure_type = "planning_timeout"
+                failure_reason = (
+                    "Planning timed out or exceeded context after "
+                    f"{planning_timeout_seconds}s"
+                )
+                restore_reason = "planning timeout or context overflow"
             ctx.logger.error(
                 "[ORCHESTRATION] Planning timed out before a salvageable response was produced: %s",
                 failure_reason,
@@ -899,19 +914,20 @@ def execute_planning_phase(
                 ctx.emit_live,
                 level="ERROR",
                 phase="planning",
-                message=f"[ORCHESTRATION] Planning timed out or exceeded context: {failure_reason}",
-                details={"reason": "planning_timeout"},
+                message=(
+                    "[ORCHESTRATION] Planning terminalized before a valid plan "
+                    f"was produced: {failure_reason}"
+                ),
+                details={"reason": failure_type},
             )
             _finalize_planning_timeout_failure(
                 ctx=ctx,
-                failure_type="planning_timeout",
+                failure_type=failure_type,
                 failure_reason=failure_reason,
             )
             if ctx.restore_workspace_snapshot_if_needed:
-                ctx.restore_workspace_snapshot_if_needed(
-                    "planning timeout or context overflow"
-                )
-            return {"status": "failed", "reason": "planning_timeout"}
+                ctx.restore_workspace_snapshot_if_needed(restore_reason)
+            return {"status": "failed", "reason": failure_type}
         ctx.logger.warning(
             "[ORCHESTRATION] Planning failed on the first pass; retrying with minimal prompt"
         )
@@ -1027,6 +1043,11 @@ def execute_planning_phase(
                 and not success
                 and not PlannerService.looks_salvageable_planning_output(output_text)
             ):
+                if PlannerService.is_openclaw_lock_contention(planning_result):
+                    raise TimeoutError(
+                        "OpenClaw planning failed because the local session file "
+                        "was locked"
+                    )
                 raise TimeoutError(
                     f"Planning timed out or exceeded context after {planning_timeout_seconds}s"
                 )

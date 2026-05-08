@@ -10,6 +10,7 @@ from app.models import TaskStatus
 from app.services.orchestration.phases.planning_flow import (
     _PlanningRetryState,
     _build_repair_rejection_reasons,
+    _classify_planning_timeout_failure,
     _compress_project_context_for_planning,
     _emit_planning_diagnostics_contract_violation,
     _get_targeted_second_repair_reason,
@@ -265,6 +266,62 @@ def test_minimal_prompt_retry_emits_prompt_size_diagnostics(tmp_path):
         captured["kwargs"]["diagnostic_metadata"]["minimal_prompt_estimated_tokens"]
         == retry_metadata["minimal_prompt_estimated_tokens"]
     )
+
+
+def test_openclaw_session_lock_is_classified_distinctly():
+    exc = TimeoutError(
+        "OpenClaw planning failed: session file locked (timeout 10000ms): "
+        "pid=123 /root/.openclaw/agents/main/sessions/sessions.json.lock"
+    )
+
+    assert (
+        _classify_planning_timeout_failure(exc, _PlanningRetryState())
+        == "planning_openclaw_lock_contention"
+    )
+    assert PlannerService.is_openclaw_lock_contention(
+        {
+            "error": (
+                "Error: session file locked (timeout 10000ms): "
+                "pid=123 /root/.openclaw/agents/main/sessions/sessions.json.lock"
+            )
+        }
+    )
+
+
+def test_planning_model_calls_use_interprocess_lock(tmp_path, monkeypatch):
+    from app.services.orchestration.planning import planner as planner_module
+
+    captured = {}
+    lock_path = tmp_path / "planning.lock"
+    monkeypatch.setattr(
+        planner_module,
+        "OPENCLAW_PLANNING_LOCK_PATH",
+        lock_path,
+    )
+
+    class Runtime:
+        async def execute_task(self, prompt, **kwargs):
+            captured["lock_exists_during_call"] = (
+                planner_module.OPENCLAW_PLANNING_LOCK_PATH.exists()
+            )
+            captured["prompt"] = prompt
+            captured["kwargs"] = kwargs
+            return {"status": "completed", "output": "[]"}
+
+    result = asyncio.run(
+        PlannerService._execute_task_with_planning_lock(
+            Runtime(),
+            "[]",
+            timeout_seconds=120,
+            reuse_task_session=False,
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert captured["prompt"] == "[]"
+    assert captured["kwargs"]["timeout_seconds"] == 120
+    assert captured["lock_exists_during_call"] is True
+    assert lock_path.exists()
 
 
 def test_minimal_prompt_retry_flags_ultra_dense_prompt_without_changing_retry(

@@ -340,6 +340,18 @@ _TERMINAL_REASON_POLICIES: Dict[str, Dict[str, str]] = {
             "model/runtime availability if this repeats across simple workloads."
         ),
     },
+    "planning_openclaw_lock_contention": {
+        "title": "OpenClaw Session Lock Contention",
+        "summary_prefix": "Planning terminalized because OpenClaw session storage was locked",
+        "no_further_repair_reason": (
+            "No repair pass is available because OpenClaw could not acquire its "
+            "local session lock before producing a usable plan."
+        ),
+        "operator_next_action": (
+            "Retry after concurrent OpenClaw work drains, or reduce local planning "
+            "concurrency if this repeats."
+        ),
+    },
     "repair_output_contract_violation": {
         "title": "Repair Output Contract Violation",
         "summary_prefix": "Planning repair terminalized",
@@ -364,6 +376,30 @@ _TERMINAL_REASON_POLICIES: Dict[str, Dict[str, str]] = {
             "contract strict and inspect the repair output format."
         ),
     },
+    "workspace isolation violation": {
+        "title": "Workspace Isolation Violation",
+        "summary_prefix": "Execution terminalized after a workspace isolation violation",
+        "no_further_repair_reason": (
+            "Workspace isolation violations are terminal because the attempted "
+            "operation crossed the project boundary."
+        ),
+        "operator_next_action": (
+            "Inspect the blocked path or command, keep execution inside the "
+            "project workspace, then rerun only after the task instructions are clear."
+        ),
+    },
+    "workspace_isolation_violation": {
+        "title": "Workspace Isolation Violation",
+        "summary_prefix": "Execution terminalized after a workspace isolation violation",
+        "no_further_repair_reason": (
+            "Workspace isolation violations are terminal because the attempted "
+            "operation crossed the project boundary."
+        ),
+        "operator_next_action": (
+            "Inspect the blocked path or command, keep execution inside the "
+            "project workspace, then rerun only after the task instructions are clear."
+        ),
+    },
 }
 
 _TERMINAL_FAILURE_DIAGNOSTIC_KEYS = (
@@ -380,6 +416,8 @@ _TERMINAL_FAILURE_DIAGNOSTIC_KEYS = (
     "heredoc_command_count",
     "weak_verification_steps",
     "missing_verification_steps",
+    "snapshot_path",
+    "target_path",
 )
 
 
@@ -913,6 +951,8 @@ def _bounded_details(details: Dict[str, Any]) -> Dict[str, Any]:
         "heredoc_command_count",
         "weak_verification_steps",
         "missing_verification_steps",
+        "snapshot_path",
+        "target_path",
     }
     bounded: Dict[str, Any] = {}
     for key in allowed:
