@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 from app.models import (
     InterventionRequest,
     LogEntry,
+    PlanningSession,
     Project,
     Session as SessionModel,
     SessionTask,
@@ -824,8 +825,14 @@ def deny_session_intervention(
 # ── Replan flow endpoints ─────────────────────────────────────────────────────
 
 
-def _serialize_failure_summary(record) -> Dict[str, Any]:
-    from app.models import ExecutionFailureSummary as _EFS
+def _serialize_failure_summary(db: Session, record) -> Dict[str, Any]:
+    replan_session = None
+    if record.replan_planning_session_id:
+        replan_session = (
+            db.query(PlanningSession)
+            .filter(PlanningSession.id == record.replan_planning_session_id)
+            .first()
+        )
 
     return {
         "session_id": record.session_id,
@@ -836,6 +843,12 @@ def _serialize_failure_summary(record) -> Dict[str, Any]:
         ),
         "feedback_at": record.feedback_at.isoformat() if record.feedback_at else None,
         "replan_planning_session_id": record.replan_planning_session_id,
+        "replan_planning_session_status": (
+            replan_session.status if replan_session else None
+        ),
+        "replan_planning_session_title": (
+            replan_session.title if replan_session else None
+        ),
     }
 
 
@@ -929,7 +942,7 @@ def get_failure_summary(
     the cached record.
     """
     record = _get_or_generate_failure_summary(db, session_id)
-    payload = _serialize_failure_summary(record)
+    payload = _serialize_failure_summary(db, record)
     payload["diagnostics"] = _latest_failure_diagnostics(db, session_id)
     return payload
 
@@ -953,7 +966,7 @@ def submit_operator_feedback(
     if not body.feedback.strip():
         raise HTTPException(status_code=400, detail="feedback must not be empty")
     record = _store_operator_feedback(db, session_id, body.feedback)
-    payload = _serialize_failure_summary(record)
+    payload = _serialize_failure_summary(db, record)
     payload["message"] = "Operator feedback saved."
     return payload
 

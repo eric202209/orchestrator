@@ -22,6 +22,7 @@ import { StatusBadge } from '@/components/ui';
 import {
   Activity,
   AlertTriangle,
+  Clock,
   ExternalLink,
   MessageCircle,
   RefreshCw,
@@ -134,6 +135,116 @@ const getDiagnosticReasons = (
   return Array.from(new Set(reasons)).slice(0, 5);
 };
 
+const formatRunDuration = (session: Session): string => {
+  if (!session.started_at) return 'Not started';
+  const startedAt = new Date(session.started_at);
+  const endedAt = session.stopped_at ? new Date(session.stopped_at) : new Date();
+
+  if (Number.isNaN(startedAt.getTime()) || Number.isNaN(endedAt.getTime())) {
+    return 'Unknown';
+  }
+
+  const totalSeconds = Math.max(0, Math.round((endedAt.getTime() - startedAt.getTime()) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+};
+
+const renderMarkdownSummary = (markdown: string) => {
+  const lines = markdown.split('\n');
+  const blocks: ReactNode[] = [];
+  let listItems: string[] = [];
+  let codeLines: string[] = [];
+  let inCodeBlock = false;
+
+  const flushList = () => {
+    if (listItems.length === 0) return;
+    const items = listItems;
+    listItems = [];
+    blocks.push(
+      <ul key={`list-${blocks.length}`} className="list-disc space-y-1 pl-5 text-sm text-slate-200">
+        {items.map((item, index) => (
+          <li key={`${item}-${index}`}>{item}</li>
+        ))}
+      </ul>
+    );
+  };
+
+  const flushCode = () => {
+    if (codeLines.length === 0) return;
+    const content = codeLines.join('\n');
+    codeLines = [];
+    blocks.push(
+      <pre key={`code-${blocks.length}`} className="overflow-x-auto rounded-md bg-slate-950/70 p-3 text-xs text-slate-300">
+        {content}
+      </pre>
+    );
+  };
+
+  lines.forEach((line) => {
+    const trimmed = line.trim();
+
+    if (trimmed.startsWith('```')) {
+      if (inCodeBlock) {
+        inCodeBlock = false;
+        flushCode();
+      } else {
+        flushList();
+        inCodeBlock = true;
+      }
+      return;
+    }
+
+    if (inCodeBlock) {
+      codeLines.push(line);
+      return;
+    }
+
+    if (!trimmed) {
+      flushList();
+      return;
+    }
+
+    const heading = trimmed.match(/^(#{1,4})\s+(.+)$/);
+    if (heading) {
+      flushList();
+      const [, level, text] = heading;
+      const className =
+        level.length <= 2
+          ? 'text-sm font-semibold text-red-100'
+          : 'text-xs font-semibold uppercase text-red-200/80';
+      blocks.push(
+        <p key={`heading-${blocks.length}`} className={className}>
+          {text}
+        </p>
+      );
+      return;
+    }
+
+    const listItem = trimmed.match(/^[-*]\s+(.+)$/);
+    if (listItem) {
+      listItems.push(listItem[1]);
+      return;
+    }
+
+    flushList();
+    blocks.push(
+      <p key={`p-${blocks.length}`} className="text-sm leading-6 text-slate-200">
+        {trimmed}
+      </p>
+    );
+  });
+
+  flushList();
+  flushCode();
+
+  return blocks;
+};
+
 interface SessionHeaderProps {
   project: Project | null;
   session: Session;
@@ -236,37 +347,31 @@ export function SessionStats({
   tasksCount,
 }: SessionStatsProps) {
   return (
-    <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-      <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
-        <p className="mb-1.5 text-xs text-slate-400">Status</p>
-        <p className="text-sm font-medium capitalize text-white">{session.status}</p>
-        <p className="mt-0.5 text-xs text-slate-400">
-          {session.execution_mode} mode
-        </p>
-      </div>
+    <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
       <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
         <p className="mb-1.5 text-xs text-slate-400">Tasks</p>
         <p className="text-sm font-medium text-white">{tasksCount}</p>
       </div>
       <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
-        <p className="mb-1.5 text-xs text-slate-400">Created</p>
-        <p className="text-sm font-medium text-white font-mono">{formatDateTime(session.created_at)}</p>
+        <p className="mb-1.5 text-xs text-slate-400">Duration</p>
+        <p className="text-sm font-medium text-white">{formatRunDuration(session)}</p>
+        <p className="mt-0.5 text-xs capitalize text-slate-400">{session.execution_mode} mode</p>
       </div>
-      {session.started_at && (
-        <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
-          <p className="mb-1.5 text-xs text-slate-400">Started</p>
-          <p className="text-sm font-medium text-white font-mono">
-            {formatDateTime(session.started_at)}
-          </p>
-        </div>
-      )}
+      <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
+        <p className="mb-1.5 text-xs text-slate-400">Started</p>
+        <p className="text-sm font-medium text-white font-mono">
+          {session.started_at ? formatDateTime(session.started_at) : 'N/A'}
+        </p>
+      </div>
     </div>
   );
 }
 
+export type SessionDetailTab = 'timeline' | 'tasks' | 'logs' | 'settings';
+
 interface SessionTabsProps {
-  activeTab: 'logs' | 'tasks' | 'settings';
-  onChange: (tab: 'logs' | 'tasks' | 'settings') => void;
+  activeTab: SessionDetailTab;
+  onChange: (tab: SessionDetailTab) => void;
   tasksCount: number;
 }
 
@@ -279,16 +384,16 @@ export function SessionTabs({
     <div className="border-b border-slate-700">
       <nav className="flex gap-0">
         <button
-          onClick={() => onChange('logs')}
+          onClick={() => onChange('timeline')}
           className={cn(
             'flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors',
-            activeTab === 'logs'
+            activeTab === 'timeline'
               ? 'border-sky-500 text-white'
               : 'border-transparent text-slate-500 hover:text-slate-300'
           )}
         >
-          <TerminalIcon className="h-3.5 w-3.5" />
-          Logs
+          <Clock className="h-3.5 w-3.5" />
+          Timeline
         </button>
         <button
           onClick={() => onChange('tasks')}
@@ -300,6 +405,18 @@ export function SessionTabs({
           )}
         >
           Tasks {tasksCount > 0 && <span className="ml-1 text-xs text-slate-600">({tasksCount})</span>}
+        </button>
+        <button
+          onClick={() => onChange('logs')}
+          className={cn(
+            'flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors',
+            activeTab === 'logs'
+              ? 'border-sky-500 text-white'
+              : 'border-transparent text-slate-500 hover:text-slate-300'
+          )}
+        >
+          <TerminalIcon className="h-3.5 w-3.5" />
+          Logs
         </button>
         <button
           onClick={() => onChange('settings')}
@@ -319,49 +436,42 @@ export function SessionTabs({
 }
 
 interface SessionLogsPanelProps {
-  anomalyEvents?: Array<{ title: string; detail: string; at: string }>;
-  compareMatches?: SessionDivergenceCompareResponse | null;
   displayLogs: TerminalLogEntry[];
-  dispatchWatchdog?: SessionDispatchWatchdogResponse | null;
-  formatDateTime: (value?: string | null) => string;
   handleRefreshLogs: () => Promise<void>;
-  healthEvents?: Array<{ timestamp: string; score: number; slope?: number | null }>;
   logVerbosity: 'clean' | 'verbose';
   logViewMode: 'newest' | 'oldest' | 'success' | 'errors' | 'all';
   onLogVerbosityChange: (mode: 'clean' | 'verbose') => void;
   onLogViewModeChange: (mode: 'newest' | 'oldest' | 'success' | 'errors' | 'all') => void;
-  timelineSpans?: TimelineSpan[];
-  decisionEvents?: SessionDecisionEvent[];
-  replayInvestigation?: SessionReplayResponse | null;
-  stateDiff?: SessionStateDiffResponse | null;
-  timelineEvents: TimelineEvent[];
   wsConnected: boolean;
 }
 
+interface SessionTimelinePanelProps {
+  decisionEvents?: SessionDecisionEvent[];
+  formatDateTime: (value?: string | null) => string;
+  timelineSpans?: TimelineSpan[];
+  timelineEvents: TimelineEvent[];
+}
+
+interface SessionDiagnosticsPanelProps {
+  anomalyEvents?: Array<{ title: string; detail: string; at: string }>;
+  compareMatches?: SessionDivergenceCompareResponse | null;
+  dispatchWatchdog?: SessionDispatchWatchdogResponse | null;
+  formatDateTime: (value?: string | null) => string;
+  healthEvents?: Array<{ timestamp: string; score: number; slope?: number | null }>;
+  decisionEvents?: SessionDecisionEvent[];
+  replayInvestigation?: SessionReplayResponse | null;
+  stateDiff?: SessionStateDiffResponse | null;
+}
+
 export function SessionLogsPanel({
-  anomalyEvents = [],
-  compareMatches,
   displayLogs,
-  dispatchWatchdog,
-  formatDateTime,
   handleRefreshLogs,
-  healthEvents = [],
   logVerbosity,
   logViewMode,
   onLogVerbosityChange,
   onLogViewModeChange,
-  timelineSpans = [],
-  decisionEvents = [],
-  replayInvestigation,
-  stateDiff,
-  timelineEvents,
   wsConnected,
 }: SessionLogsPanelProps) {
-  const latestHealth = healthEvents[healthEvents.length - 1] || null;
-  const staleDispatch = dispatchWatchdog?.stale_tasks?.[0] || null;
-  const queuedDispatches =
-    dispatchWatchdog?.tasks?.filter((task) => task.dispatch_state === 'queued') || [];
-
   return (
     <div className="space-y-4">
       <TerminalViewer
@@ -414,16 +524,42 @@ export function SessionLogsPanel({
           </select>
         </div>
       </div>
+    </div>
+  );
+}
 
-      <div className="grid gap-3 lg:grid-cols-2">
-        <div
+export function SessionDiagnosticsPanel({
+  anomalyEvents = [],
+  compareMatches,
+  dispatchWatchdog,
+  formatDateTime,
+  healthEvents = [],
+  replayInvestigation,
+  stateDiff,
+}: SessionDiagnosticsPanelProps) {
+  const latestHealth = healthEvents[healthEvents.length - 1] || null;
+  const staleDispatch = dispatchWatchdog?.stale_tasks?.[0] || null;
+  const queuedDispatches =
+    dispatchWatchdog?.tasks?.filter((task) => task.dispatch_state === 'queued') || [];
+  const visibleMatches = (compareMatches?.matches || []).filter(
+    (match) => match.similarity_score > 0
+  );
+
+  return (
+    <details className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
+      <summary className="cursor-pointer text-sm font-medium text-slate-300 hover:text-white">
+        Diagnostics
+      </summary>
+      <div className="mt-4 space-y-4">
+        <div className="grid gap-3 lg:grid-cols-2">
+          <div
           className={cn(
             'rounded-lg border p-4',
             staleDispatch
               ? 'border-amber-800/60 bg-amber-950/20'
               : 'border-slate-700 bg-slate-800'
           )}
-        >
+          >
           <div className="mb-3 flex items-center justify-between">
             <h3 className="text-sm font-medium text-slate-300">Dispatch Watchdog</h3>
             <span
@@ -478,9 +614,9 @@ export function SessionLogsPanel({
               )}
             </div>
           )}
-        </div>
+          </div>
 
-        <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
+          <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
           <div className="mb-3 flex items-center justify-between">
             <h3 className="text-sm font-medium text-slate-300">Health Score</h3>
             {latestHealth ? (
@@ -533,9 +669,9 @@ export function SessionLogsPanel({
               ))}
             </div>
           )}
-        </div>
+          </div>
 
-        <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
+          <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
           <div className="mb-3 flex items-center justify-between">
             <h3 className="text-sm font-medium text-slate-300">Latest State Diff</h3>
             <span className="text-xs text-slate-400">
@@ -574,7 +710,7 @@ export function SessionLogsPanel({
               </p>
             </div>
           )}
-        </div>
+          </div>
       </div>
 
       {anomalyEvents.length > 0 && (
@@ -684,14 +820,14 @@ export function SessionLogsPanel({
         )}
       </div>
 
-      {compareMatches && compareMatches.matches.length > 0 && (
+      {visibleMatches.length > 0 && (
         <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
           <div className="mb-3 flex items-center justify-between">
             <h3 className="text-sm font-medium text-slate-300">Similar Failed Sessions</h3>
-            <span className="text-xs text-slate-400">{compareMatches.matches.length} matches</span>
+            <span className="text-xs text-slate-400">{visibleMatches.length} matches</span>
           </div>
           <div className="space-y-2">
-            {compareMatches.matches.slice(0, 3).map((match) => (
+            {visibleMatches.slice(0, 3).map((match) => (
               <div key={match.session_id} className="rounded-md border border-slate-700 p-3">
                 <div className="flex items-center justify-between gap-3">
                   <p className="text-sm font-medium text-slate-200">
@@ -714,7 +850,19 @@ export function SessionLogsPanel({
           </div>
         </div>
       )}
+      </div>
+    </details>
+  );
+}
 
+export function SessionTimelinePanel({
+  decisionEvents = [],
+  formatDateTime,
+  timelineSpans = [],
+  timelineEvents,
+}: SessionTimelinePanelProps) {
+  return (
+    <div className="space-y-4">
       <div className="rounded-lg border border-slate-600 bg-slate-800 p-4">
         <div className="mb-3 flex items-center justify-between">
           <h3 className="text-sm font-semibold text-slate-200">Decision Timeline</h3>
@@ -1081,29 +1229,30 @@ export function SessionSettingsPanel({
         </div>
       </div>
       <div className="rounded-xl border border-slate-600 bg-slate-800 p-4">
-        <p className="mb-1 text-sm text-slate-400">Session ID</p>
-        <p className="font-mono text-sm text-white">{session.id}</p>
-      </div>
-      <div className="rounded-xl border border-slate-600 bg-slate-800 p-4">
-        <p className="mb-1 text-sm text-slate-400">Project ID</p>
-        <p className="font-mono text-sm text-white">{session.project_id}</p>
-      </div>
-      <div className="rounded-xl border border-slate-600 bg-slate-800 p-4">
-        <p className="mb-1 text-sm text-slate-400">Created At</p>
-        <p className="text-white">{formatDateTime(session.created_at)}</p>
-      </div>
-      {session.started_at && (
-        <div className="rounded-xl border border-slate-600 bg-slate-800 p-4">
-          <p className="mb-1 text-sm text-slate-400">Started At</p>
-          <p className="text-white">{formatDateTime(session.started_at)}</p>
+        <p className="mb-3 text-sm text-slate-400">Session Metadata</p>
+        <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-5">
+          <div>
+            <p className="text-xs text-slate-500">Session ID</p>
+            <p className="font-mono text-white">{session.id}</p>
+          </div>
+          <div>
+            <p className="text-xs text-slate-500">Project ID</p>
+            <p className="font-mono text-white">{session.project_id}</p>
+          </div>
+          <div>
+            <p className="text-xs text-slate-500">Created</p>
+            <p className="text-white">{formatDateTime(session.created_at)}</p>
+          </div>
+          <div>
+            <p className="text-xs text-slate-500">Started</p>
+            <p className="text-white">{session.started_at ? formatDateTime(session.started_at) : 'N/A'}</p>
+          </div>
+          <div>
+            <p className="text-xs text-slate-500">Stopped</p>
+            <p className="text-white">{session.stopped_at ? formatDateTime(session.stopped_at) : 'N/A'}</p>
+          </div>
         </div>
-      )}
-      {session.stopped_at && (
-        <div className="rounded-xl border border-slate-600 bg-slate-800 p-4">
-          <p className="mb-1 text-sm text-slate-400">Stopped At</p>
-          <p className="text-white">{formatDateTime(session.stopped_at)}</p>
-        </div>
-      )}
+      </div>
       <div className="rounded-xl border border-slate-600 bg-slate-800 p-4">
         <div className="mb-3 flex items-center justify-between">
           <p className="text-sm text-slate-400">Checkpoint Inspector</p>
@@ -1587,7 +1736,13 @@ export function FailureSummaryPanel({
 
   if (!summary) return null;
 
-  const alreadyReplanned = summary.replan_planning_session_id !== null;
+  const replanStatus = summary.replan_planning_session_status || null;
+  const hasPriorReplan = summary.replan_planning_session_id !== null;
+  const replanStillOwnsFlow =
+    hasPriorReplan &&
+    (!replanStatus || ['active', 'waiting_for_input', 'completed'].includes(replanStatus));
+  const canStartReplan =
+    !hasPriorReplan || ['failed', 'cancelled', 'canceled'].includes(replanStatus || '');
   const diagnosticBadges = getDiagnosticBadges(summary.diagnostics);
   const diagnosticReasons = getDiagnosticReasons(summary.diagnostics);
 
@@ -1597,15 +1752,15 @@ export function FailureSummaryPanel({
         <div className="mb-3 flex items-center gap-2">
           <AlertTriangle className="h-5 w-5 text-red-400" />
           <span className="font-semibold text-red-200">Execution Failure Summary</span>
-          {alreadyReplanned && (
-            <span className="rounded bg-emerald-800/50 px-2 py-0.5 text-xs text-emerald-300">
-              Replanned
+          {hasPriorReplan && (
+            <span className="rounded bg-sky-800/50 px-2 py-0.5 text-xs text-sky-300">
+              Replan {replanStatus ? replanStatus.replace(/_/g, ' ') : 'started'}
             </span>
           )}
         </div>
-        <pre className="whitespace-pre-wrap rounded bg-slate-950/60 p-3 text-sm leading-6 text-slate-200">
-          {summary.summary}
-        </pre>
+        <div className="space-y-3 rounded bg-slate-950/60 p-3">
+          {renderMarkdownSummary(summary.summary)}
+        </div>
         {summary.diagnostics && (
           <div className="mt-3 rounded-md border border-red-900/60 bg-slate-950/40 p-3">
             <div className="flex flex-wrap items-center gap-2">
@@ -1660,19 +1815,22 @@ export function FailureSummaryPanel({
         </div>
       )}
 
-      {!alreadyReplanned && (
+      {canStartReplan && (
         <div className="rounded-lg border border-slate-700 bg-slate-800/30 p-4 space-y-3">
           <p className="text-sm font-medium text-slate-300">Operator Feedback (optional)</p>
           <p className="text-xs text-slate-400">
             Add high-level direction before replanning. The agent receives both the failure
             summary and your guidance when creating the revised plan.
+            {hasPriorReplan && replanStatus
+              ? ` Previous Project Architect run is ${replanStatus.replace(/_/g, ' ')}, so you can start another.`
+              : ''}
           </p>
           <textarea
             rows={3}
             value={feedback}
             onChange={(e) => setFeedback(e.target.value)}
             placeholder="e.g. Focus on fixing the database migration — the schema change was wrong."
-            className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-red-500 focus:outline-none resize-none"
+            className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none resize-none"
           />
           <div className="flex items-center gap-3">
             {feedback.trim() && (
@@ -1702,15 +1860,19 @@ export function FailureSummaryPanel({
                   setReplanning(false);
                 }
               }}
-              className="flex items-center gap-1.5 rounded-lg bg-red-700 px-4 py-2 text-sm text-white transition-colors hover:bg-red-600 disabled:opacity-50"
+              className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-4 py-2 text-sm text-white transition-colors hover:bg-sky-500 disabled:opacity-50"
             >
-              {replanning ? 'Starting replan…' : 'Send to Project Architect'}
+              {replanning
+                ? 'Starting replan…'
+                : hasPriorReplan
+                  ? 'Send to Project Architect Again'
+                  : 'Send to Project Architect'}
             </button>
           </div>
         </div>
       )}
 
-      {alreadyReplanned && (
+      {replanStillOwnsFlow && (
         <p className="text-xs text-slate-400">
           Replan started as planning session #{summary.replan_planning_session_id}. Open Project
           Architect to review and commit the revised plan.

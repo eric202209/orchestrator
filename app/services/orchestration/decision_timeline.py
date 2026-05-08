@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
+import json
 from typing import Any, Dict, Iterable, List, Optional
 
 from fastapi import HTTPException
@@ -22,6 +23,8 @@ from app.models import (
     Project,
     Session as SessionModel,
     SessionTask,
+    TaskExecution,
+    TaskStatus,
 )
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
@@ -93,6 +96,13 @@ def get_session_decision_timeline_payload(
             db,
             session_id=session_id,
             knowledge_by_task_phase=knowledge_by_task_phase,
+        )
+    )
+    events.extend(
+        _build_terminal_failure_events(
+            db,
+            session_id=session_id,
+            existing_events=events,
         )
     )
     events.sort(key=_timeline_sort_key)
@@ -279,6 +289,279 @@ def _build_intervention_events(
             }
         )
     return events
+
+
+_TERMINAL_REASON_POLICIES: Dict[str, Dict[str, str]] = {
+    "planning_validation_failed_after_repair": {
+        "title": "Planning Failed After Repair",
+        "summary_prefix": "Planning terminalized after repair",
+        "no_further_repair_reason": (
+            "Brittle-command planning failures remain terminal after the bounded "
+            "repair pass unless future evidence proves an orchestration semantic gap."
+        ),
+        "operator_next_action": (
+            "Revise the task or model prompt to avoid oversized, heredoc-heavy, "
+            "or malformed commands; do not loosen the validator for this failure class."
+        ),
+    },
+    "planning_invalid_commands_after_repair": {
+        "title": "Planning Failed After Repair",
+        "summary_prefix": "Planning terminalized after repair",
+        "no_further_repair_reason": (
+            "Invalid-command planning failures remain terminal after the bounded "
+            "repair pass unless future evidence proves an orchestration semantic gap."
+        ),
+        "operator_next_action": (
+            "Revise the task or model prompt to produce short runnable shell "
+            "commands; do not loosen the validator for this failure class."
+        ),
+    },
+    "planning_context_overflow": {
+        "title": "Planning Timed Out Or Exceeded Context",
+        "summary_prefix": "Planning terminalized before execution",
+        "no_further_repair_reason": (
+            "No repair pass is available because planning did not produce a "
+            "validated plan to repair."
+        ),
+        "operator_next_action": (
+            "Retry with a smaller task or reduced project context, or investigate "
+            "model/runtime availability if this repeats across simple workloads."
+        ),
+    },
+    "planning timeout or context overflow": {
+        "title": "Planning Timed Out Or Exceeded Context",
+        "summary_prefix": "Planning terminalized before execution",
+        "no_further_repair_reason": (
+            "No repair pass is available because planning did not produce a "
+            "validated plan to repair."
+        ),
+        "operator_next_action": (
+            "Retry with a smaller task or reduced project context, or investigate "
+            "model/runtime availability if this repeats across simple workloads."
+        ),
+    },
+    "repair_output_contract_violation": {
+        "title": "Repair Output Contract Violation",
+        "summary_prefix": "Planning repair terminalized",
+        "no_further_repair_reason": (
+            "Repair output contract violations terminalize to preserve the "
+            "strict JSON-only planner boundary."
+        ),
+        "operator_next_action": (
+            "Retry only if model output reliability has improved; keep the repair "
+            "contract strict and inspect the repair output format."
+        ),
+    },
+    "repair output contract violation": {
+        "title": "Repair Output Contract Violation",
+        "summary_prefix": "Planning repair terminalized",
+        "no_further_repair_reason": (
+            "Repair output contract violations terminalize to preserve the "
+            "strict JSON-only planner boundary."
+        ),
+        "operator_next_action": (
+            "Retry only if model output reliability has improved; keep the repair "
+            "contract strict and inspect the repair output format."
+        ),
+    },
+}
+
+_TERMINAL_FAILURE_DIAGNOSTIC_KEYS = (
+    "reason",
+    "contract_violation_type",
+    "validation_reasons",
+    "contract_violations",
+    "semantic_violation_codes",
+    "brittle_command_subcodes",
+    "brittle_command_step_details",
+    "brittle_command_step_command_lengths",
+    "max_command_length",
+    "command_total_chars",
+    "heredoc_command_count",
+    "weak_verification_steps",
+    "missing_verification_steps",
+)
+
+
+def _build_terminal_failure_events(
+    db: Session,
+    *,
+    session_id: int,
+    existing_events: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    latest_execution = (
+        db.query(TaskExecution)
+        .filter(
+            TaskExecution.session_id == session_id,
+            TaskExecution.status.in_([TaskStatus.FAILED, TaskStatus.CANCELLED]),
+        )
+        .order_by(
+            TaskExecution.completed_at.desc().nullslast(),
+            TaskExecution.id.desc(),
+        )
+        .first()
+    )
+    if not latest_execution:
+        return []
+    if _has_journal_terminal_event(existing_events, latest_execution):
+        return []
+
+    rows = (
+        db.query(LogEntry)
+        .filter(
+            LogEntry.session_id == session_id,
+            LogEntry.task_execution_id == latest_execution.id,
+            LogEntry.log_metadata.isnot(None),
+        )
+        .order_by(LogEntry.created_at.desc(), LogEntry.id.desc())
+        .limit(120)
+        .all()
+    )
+
+    for entry in rows:
+        try:
+            metadata = json.loads(entry.log_metadata or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        reason = str(metadata.get("reason") or "").strip()
+        policy = _terminal_reason_policy(reason)
+        if not policy:
+            continue
+
+        details = {
+            key: metadata[key]
+            for key in _TERMINAL_FAILURE_DIAGNOSTIC_KEYS
+            if key in metadata and metadata[key] not in (None, [], {})
+        }
+        details.update(
+            {
+                "task_execution_id": latest_execution.id,
+                "task_id": latest_execution.task_id,
+                "log_id": entry.id,
+                "terminal": True,
+                "repair_attempted": _terminal_reason_implies_repair_attempted(reason),
+                "targeted_second_repair_attempted": False,
+                "no_further_repair_reason": policy["no_further_repair_reason"],
+                "operator_next_action": policy["operator_next_action"],
+            }
+        )
+
+        return [
+            {
+                "id": f"terminal-failure-log-{entry.id}",
+                "session_id": session_id,
+                "task_id": latest_execution.task_id,
+                "timestamp": _serialize_dt(entry.created_at),
+                "phase": "failure",
+                "event_type": EventType.TASK_FAILED,
+                "decision_type": "failure",
+                "title": policy["title"],
+                "summary": _terminal_failure_summary(details, policy=policy),
+                "status": _terminal_status(latest_execution),
+                "severity": "error",
+                "source": "terminal_log_metadata",
+                "parent_event_id": None,
+                "related_event_ids": [],
+                "knowledge_usage_ids": [],
+                "intervention_id": None,
+                "details": _bounded_details(details),
+            }
+        ]
+
+    if latest_execution.status == TaskStatus.CANCELLED:
+        details = {
+            "reason": "forced-stop or cancellation",
+            "task_execution_id": latest_execution.id,
+            "task_id": latest_execution.task_id,
+            "terminal": True,
+            "repair_attempted": False,
+            "targeted_second_repair_attempted": False,
+            "no_further_repair_reason": (
+                "Execution was cancelled or force-stopped, so no further repair "
+                "was attempted."
+            ),
+            "operator_next_action": (
+                "Inspect the last execution step, then rerun when the runtime is "
+                "healthy or split the work if it repeatedly stalls."
+            ),
+        }
+        return [
+            {
+                "id": f"terminal-cancelled-execution-{latest_execution.id}",
+                "session_id": session_id,
+                "task_id": latest_execution.task_id,
+                "timestamp": _serialize_dt(latest_execution.completed_at),
+                "phase": "failure",
+                "event_type": EventType.TASK_FAILED,
+                "decision_type": "failure",
+                "title": "Execution Cancelled",
+                "summary": "Execution terminalized after cancellation or forced stop.",
+                "status": "cancelled",
+                "severity": "warning",
+                "source": "terminal_log_metadata",
+                "parent_event_id": None,
+                "related_event_ids": [],
+                "knowledge_usage_ids": [],
+                "intervention_id": None,
+                "details": _bounded_details(details),
+            }
+        ]
+
+    return []
+
+
+def _terminal_reason_policy(reason: str) -> Optional[Dict[str, str]]:
+    return _TERMINAL_REASON_POLICIES.get(reason)
+
+
+def _terminal_reason_implies_repair_attempted(reason: str) -> bool:
+    return reason in {
+        "planning_validation_failed_after_repair",
+        "planning_invalid_commands_after_repair",
+        "repair_output_contract_violation",
+        "repair output contract violation",
+    }
+
+
+def _terminal_status(execution: TaskExecution) -> str:
+    if execution.status == TaskStatus.CANCELLED:
+        return "cancelled"
+    return "failed"
+
+
+def _has_journal_terminal_event(
+    existing_events: List[Dict[str, Any]],
+    execution: TaskExecution,
+) -> bool:
+    for event in existing_events:
+        if event.get("event_type") != EventType.TASK_FAILED:
+            continue
+        details = event.get("details") if isinstance(event.get("details"), dict) else {}
+        event_execution_id = _coerce_optional_int(details.get("task_execution_id"))
+        if event_execution_id is not None:
+            if event_execution_id == execution.id:
+                return True
+            continue
+        if _coerce_optional_int(event.get("task_id")) == execution.task_id:
+            return True
+    return False
+
+
+def _terminal_failure_summary(
+    details: Dict[str, Any],
+    *,
+    policy: Dict[str, str],
+) -> str:
+    reason = str(details.get("reason") or "planning failure")
+    subcodes = details.get("brittle_command_subcodes")
+    if isinstance(subcodes, list) and subcodes:
+        return (
+            f"{policy['summary_prefix']}: {reason} "
+            f"({', '.join(map(str, subcodes[:3]))})."
+        )
+    return f"{policy['summary_prefix']}: {reason}."
 
 
 def _knowledge_for_event(
@@ -611,6 +894,13 @@ def _bounded_details(details: Dict[str, Any]) -> Dict[str, Any]:
         "queue_latency_seconds",
         "queue_age_seconds",
         "task_execution_id",
+        "task_id",
+        "log_id",
+        "terminal",
+        "repair_attempted",
+        "targeted_second_repair_attempted",
+        "no_further_repair_reason",
+        "operator_next_action",
         "validation_reasons",
         "contract_violations",
         "contract_violation_type",

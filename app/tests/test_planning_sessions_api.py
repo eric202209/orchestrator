@@ -66,6 +66,132 @@ def test_start_planning_session_requires_unique_active_session(authenticated_cli
     assert duplicate.status_code == 409
 
 
+def test_start_planning_session_can_skip_clarification(
+    authenticated_client, monkeypatch
+):
+    project = _create_project(authenticated_client)
+
+    def fake_run_openclaw(self, prompt: str, source_brain: str = "local"):
+        payload = _completed_payload(project["name"])
+        return {"status": "completed", "output": json.dumps(payload)}
+
+    monkeypatch.setattr(PlanningSessionService, "_run_openclaw", fake_run_openclaw)
+
+    response = authenticated_client.post(
+        "/api/v1/planning/sessions",
+        json={
+            "project_id": project["id"],
+            "prompt": "Improve planner directly",
+            "skip_clarification": True,
+        },
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["status"] == "completed"
+    assert payload["current_prompt_id"] is None
+    assert len(payload["tasks_preview"]) == 3
+
+
+def test_delete_failed_or_cancelled_planning_session(authenticated_client):
+    project = _create_project(authenticated_client)
+    response = authenticated_client.post(
+        "/api/v1/planning/sessions",
+        json={"project_id": project["id"], "prompt": "Temporary plan"},
+    )
+    assert response.status_code == 201
+    session_id = response.json()["id"]
+
+    cancel = authenticated_client.post(f"/api/v1/planning/sessions/{session_id}/cancel")
+    assert cancel.status_code == 200
+
+    delete = authenticated_client.delete(f"/api/v1/planning/sessions/{session_id}")
+    assert delete.status_code == 204
+
+    loaded = authenticated_client.get(f"/api/v1/planning/sessions/{session_id}")
+    assert loaded.status_code == 404
+
+
+def test_delete_active_planning_session_rejected(authenticated_client):
+    project = _create_project(authenticated_client)
+    response = authenticated_client.post(
+        "/api/v1/planning/sessions",
+        json={"project_id": project["id"], "prompt": "Do not delete active"},
+    )
+    assert response.status_code == 201
+    session_id = response.json()["id"]
+
+    delete = authenticated_client.delete(f"/api/v1/planning/sessions/{session_id}")
+    assert delete.status_code == 409
+
+
+def test_delete_completed_uncommitted_planning_session(
+    authenticated_client, monkeypatch
+):
+    project = _create_project(authenticated_client)
+
+    def fake_run_openclaw(self, prompt: str, source_brain: str = "local"):
+        return {
+            "status": "completed",
+            "output": json.dumps(_completed_payload(project["name"])),
+        }
+
+    monkeypatch.setattr(PlanningSessionService, "_run_openclaw", fake_run_openclaw)
+
+    response = authenticated_client.post(
+        "/api/v1/planning/sessions",
+        json={
+            "project_id": project["id"],
+            "prompt": "Generate a plan I might discard",
+            "skip_clarification": True,
+        },
+    )
+    assert response.status_code == 201
+    session_id = response.json()["id"]
+    assert response.json()["status"] == "completed"
+    assert response.json()["committed_task_ids"] == []
+
+    delete = authenticated_client.delete(f"/api/v1/planning/sessions/{session_id}")
+    assert delete.status_code == 204
+
+    loaded = authenticated_client.get(f"/api/v1/planning/sessions/{session_id}")
+    assert loaded.status_code == 404
+
+
+def test_delete_completed_committed_planning_session_rejected(
+    authenticated_client, monkeypatch
+):
+    project = _create_project(authenticated_client)
+
+    def fake_run_openclaw(self, prompt: str, source_brain: str = "local"):
+        return {
+            "status": "completed",
+            "output": json.dumps(_completed_payload(project["name"])),
+        }
+
+    monkeypatch.setattr(PlanningSessionService, "_run_openclaw", fake_run_openclaw)
+
+    response = authenticated_client.post(
+        "/api/v1/planning/sessions",
+        json={
+            "project_id": project["id"],
+            "prompt": "Generate a plan I will commit",
+            "skip_clarification": True,
+        },
+    )
+    assert response.status_code == 201
+    session_id = response.json()["id"]
+
+    commit = authenticated_client.post(
+        f"/api/v1/planning/sessions/{session_id}/commit", json={}
+    )
+    assert commit.status_code == 200
+    assert len(commit.json()["committed_task_ids"]) == 3
+
+    delete = authenticated_client.delete(f"/api/v1/planning/sessions/{session_id}")
+    assert delete.status_code == 409
+
+
 def test_planning_session_can_respond_finalize_and_commit_idempotently(
     authenticated_client, monkeypatch
 ):

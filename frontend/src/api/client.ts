@@ -267,7 +267,7 @@ export const planningAPI = {
       params: projectId ? { project_id: projectId } : undefined,
     }),
 
-  start: (data: { project_id: number; prompt: string; source_brain?: string }) =>
+  start: (data: { project_id: number; prompt: string; source_brain?: string; skip_clarification?: boolean }) =>
     apiClient.post<PlanningSession>('/planning/sessions', data),
 
   get: (sessionId: number) =>
@@ -278,6 +278,9 @@ export const planningAPI = {
 
   cancel: (sessionId: number) =>
     apiClient.post<PlanningSession>(`/planning/sessions/${sessionId}/cancel`),
+
+  delete: (sessionId: number) =>
+    apiClient.delete(`/planning/sessions/${sessionId}`),
 
   retry: (sessionId: number) =>
     apiClient.post<PlanningSession>(`/planning/sessions/${sessionId}/retry`),

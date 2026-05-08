@@ -11,6 +11,22 @@ import {
 import { formatDistanceToNow } from 'date-fns';
 import { EmptyState, StatusBadge, Skeleton } from '../components/ui';
 
+const sessionAccentClasses: Record<string, string> = {
+  done: 'border-l-emerald-500/80',
+  completed: 'border-l-emerald-500/80',
+  failed: 'border-l-red-500/80',
+  error: 'border-l-red-500/80',
+  paused: 'border-l-amber-500/80',
+  awaiting_input: 'border-l-amber-500/80',
+  stopped: 'border-l-slate-600',
+  cancelled: 'border-l-slate-600',
+  canceled: 'border-l-slate-600',
+  running: 'border-l-sky-500/80',
+  pending: 'border-l-slate-500',
+};
+
+const mutedSessionStatuses = new Set(['stopped', 'cancelled', 'canceled']);
+
 function SessionsList() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [projects, setProjects] = useState<Record<number, Project>>({});
@@ -108,11 +124,18 @@ function SessionsList() {
               session,
               (tasksByProject[session.project_id] || []).map((task) => task.title)
             );
+            const statusKey = session.status?.toLowerCase() || '';
+            const accentClass = sessionAccentClasses[statusKey] || 'border-l-slate-600';
+            const isMuted = mutedSessionStatuses.has(statusKey);
             return (
               <Link
                 key={session.id}
                 to={`/sessions/${session.id}`}
-                className="bg-slate-800 rounded-lg border border-slate-700 p-4 hover:border-slate-600 transition-colors group"
+                className={`bg-slate-800 rounded-lg border border-l-[3px] ${accentClass} p-4 transition-colors group ${
+                  isMuted
+                    ? 'border-slate-800 opacity-70 hover:opacity-90 hover:border-slate-700'
+                    : 'border-slate-700 hover:border-slate-600'
+                }`}
               >
                 <div className="flex items-start justify-between mb-3">
                   <StatusBadge status={session.status} size="sm" />

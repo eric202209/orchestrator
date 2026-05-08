@@ -8,8 +8,10 @@ import {
   Activity, 
   CheckCircle2,
   FileText,
+  Search,
   Terminal,
-  Trash2
+  Trash2,
+  ExternalLink
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { StatusBadge, EmptyState, Skeleton } from '../components/ui';
@@ -25,6 +27,7 @@ function Dashboard() {
   const [newProjectName, setNewProjectName] = useState('');
   const [creatingProject, setCreatingProject] = useState(false);
   const [isAuthChecked, setIsAuthChecked] = useState(false);
+  const [projectSearchQuery, setProjectSearchQuery] = useState('');
 
   const checkAuth = useCallback(async () => {
     try {
@@ -177,6 +180,17 @@ function Dashboard() {
     completedTasks: tasks.filter(t => t.status === 'done').length,
   };
   const accountLabel = user?.name?.trim() || user?.email || '';
+  const filteredProjects = projects.filter((project) => {
+    const query = projectSearchQuery.trim().toLowerCase();
+    if (!query) return true;
+
+    return (
+      project.name.toLowerCase().includes(query) ||
+      project.description?.toLowerCase().includes(query) ||
+      project.branch?.toLowerCase().includes(query) ||
+      project.github_url?.toLowerCase().includes(query)
+    );
+  });
 
   return (
     <div>
@@ -302,15 +316,35 @@ function Dashboard() {
 
         {activeTab === 'projects' && (
           <div className="space-y-4">
+            {projects.length > 0 && (
+              <div className="flex justify-end">
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-500" />
+                  <input
+                    type="text"
+                    placeholder="Search..."
+                    value={projectSearchQuery}
+                    onChange={(e) => setProjectSearchQuery(e.target.value)}
+                    className="w-44 bg-slate-800 border border-slate-700 rounded-md py-1.5 pl-8 pr-3 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-slate-600 hover:border-slate-600"
+                  />
+                </div>
+              </div>
+            )}
             {projects.length === 0 ? (
               <EmptyState
                 icon={GitBranch}
                 title="No projects yet"
                 description="Create your first project to start orchestrating AI development tasks"
               />
+            ) : filteredProjects.length === 0 ? (
+              <EmptyState
+                icon={GitBranch}
+                title="No matching projects"
+                description="Try adjusting your search query"
+              />
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                {projects.map((project) => (
+                {filteredProjects.map((project) => (
                   <div key={project.id} className="bg-slate-800 rounded-lg border border-slate-700 p-4 hover:border-slate-600 transition-colors">
                     <div className="flex items-start justify-between mb-3">
                       <GitBranch className="h-4 w-4 text-slate-500 mt-0.5" />
@@ -336,9 +370,6 @@ function Dashboard() {
                       </div>
                     </div>
                     <h3 className="text-sm font-semibold text-white mb-1">{project.name}</h3>
-                    {project.description && (
-                      <p className="text-xs text-slate-400 mb-3 line-clamp-2">{project.description}</p>
-                    )}
                     <div className="flex items-center justify-between text-xs text-slate-500">
                       <span>{project.branch}</span>
                       <span>{formatDistanceToNow(new Date(project.created_at), { addSuffix: true })}</span>
@@ -429,14 +460,6 @@ function Dashboard() {
         </div>
       )}
     </div>
-  );
-}
-
-function ExternalLink({ className }: { className?: string }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-    </svg>
   );
 }
 

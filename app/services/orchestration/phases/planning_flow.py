@@ -466,6 +466,83 @@ class _SecondRepairReason:
     cap_attribute: str
 
 
+@dataclass(frozen=True)
+class _SecondRepairPolicy:
+    issue_key: str
+    issue_label: str
+    retry_reason: str
+    event_reason: str
+    semantic_violation_code: str
+    cap_attribute: str
+    rejection_template: str
+
+
+_SECOND_REPAIR_BLOCKING_POLICIES: dict[str, _SecondRepairPolicy] = {
+    "weak_verification_steps": _SecondRepairPolicy(
+        issue_key="weak_verification_steps",
+        issue_label="weak verification",
+        retry_reason="post_repair_weak_verification_steps",
+        event_reason="post_repair_weak_verification_second_pass",
+        semantic_violation_code="weak_verification",
+        cap_attribute="post_repair_blocking_second_repair_used",
+        rejection_template=(
+            "weak_verification_steps: steps {steps} still use weak verification "
+            "after repair; replace each with pytest, python -m, or npm run build "
+            "that proves behavior for the files changed in that step"
+        ),
+    ),
+    "background_process_steps": _SecondRepairPolicy(
+        issue_key="background_process_steps",
+        issue_label="background process commands",
+        retry_reason="post_repair_background_process_steps",
+        event_reason="post_repair_background_process_second_pass",
+        semantic_violation_code="background_process_command",
+        cap_attribute="post_repair_blocking_second_repair_used",
+        rejection_template=(
+            "background_process_steps: steps {steps} still start background or "
+            "long-running processes after repair; replace each with bounded "
+            "foreground commands that terminate"
+        ),
+    ),
+}
+
+_SECOND_REPAIR_VALIDATOR_POLICIES: dict[str, _SecondRepairPolicy] = {
+    "missing_verification_steps": _SecondRepairPolicy(
+        issue_key="missing_verification_steps",
+        issue_label="missing verification",
+        retry_reason="post_repair_missing_verification_steps",
+        event_reason="post_repair_missing_verification_second_pass",
+        semantic_violation_code="missing_verification_command",
+        cap_attribute="post_repair_validation_second_repair_used",
+        rejection_template=(
+            "missing_verification_steps: steps {steps} are still missing "
+            "verification after repair; add pytest, python -m, npm run build, "
+            "or an equivalent project test command that proves behavior for "
+            "each implementation-heavy step"
+        ),
+    ),
+}
+
+
+def _second_repair_reason_from_policy(
+    retry_state: _PlanningRetryState,
+    policy: _SecondRepairPolicy,
+    step_numbers: list[int],
+) -> _SecondRepairReason:
+    issue_steps = step_numbers[:5]
+    return _SecondRepairReason(
+        issue_key=policy.issue_key,
+        issue_label=policy.issue_label,
+        retry_reason=policy.retry_reason,
+        event_reason=policy.event_reason,
+        semantic_violation_code=policy.semantic_violation_code,
+        step_numbers=issue_steps,
+        rejection_text=policy.rejection_template.format(steps=issue_steps),
+        cap_used=bool(getattr(retry_state, policy.cap_attribute)),
+        cap_attribute=policy.cap_attribute,
+    )
+
+
 def _get_targeted_second_repair_reason(
     *,
     retry_state: _PlanningRetryState,
@@ -476,62 +553,25 @@ def _get_targeted_second_repair_reason(
         return None
 
     issue_keys = set((blocking_repair_issues or {}).keys())
-    if issue_keys == {"weak_verification_steps"}:
-        issue_steps = (blocking_repair_issues or {})["weak_verification_steps"][:5]
-        return _SecondRepairReason(
-            issue_key="weak_verification_steps",
-            issue_label="weak verification",
-            retry_reason="post_repair_weak_verification_steps",
-            event_reason="post_repair_weak_verification_second_pass",
-            semantic_violation_code="weak_verification",
-            step_numbers=issue_steps,
-            rejection_text=(
-                f"weak_verification_steps: steps {issue_steps} still use weak "
-                "verification after repair; replace each with pytest, python -m, "
-                "or npm run build that proves behavior for the files changed in "
-                "that step"
-            ),
-            cap_used=retry_state.post_repair_blocking_second_repair_used,
-            cap_attribute="post_repair_blocking_second_repair_used",
-        )
-    if issue_keys == {"background_process_steps"}:
-        issue_steps = (blocking_repair_issues or {})["background_process_steps"][:5]
-        return _SecondRepairReason(
-            issue_key="background_process_steps",
-            issue_label="background process commands",
-            retry_reason="post_repair_background_process_steps",
-            event_reason="post_repair_background_process_second_pass",
-            semantic_violation_code="background_process_command",
-            step_numbers=issue_steps,
-            rejection_text=(
-                f"background_process_steps: steps {issue_steps} still start "
-                "background or long-running processes after repair; replace each "
-                "with bounded foreground commands that terminate"
-            ),
-            cap_used=retry_state.post_repair_blocking_second_repair_used,
-            cap_attribute="post_repair_blocking_second_repair_used",
-        )
+    if len(issue_keys) == 1:
+        issue_key = next(iter(issue_keys))
+        policy = _SECOND_REPAIR_BLOCKING_POLICIES.get(issue_key)
+        if policy:
+            return _second_repair_reason_from_policy(
+                retry_state,
+                policy,
+                (blocking_repair_issues or {}).get(issue_key) or [],
+            )
 
     missing_verification_steps = (
         _post_repair_missing_verification_steps(plan_verdict) if plan_verdict else []
     )
     if missing_verification_steps:
-        issue_steps = missing_verification_steps[:5]
-        return _SecondRepairReason(
-            issue_key="missing_verification_steps",
-            issue_label="missing verification",
-            retry_reason="post_repair_missing_verification_steps",
-            event_reason="post_repair_missing_verification_second_pass",
-            semantic_violation_code="missing_verification_command",
-            step_numbers=issue_steps,
-            rejection_text=(
-                f"missing_verification_steps: steps {issue_steps} are still "
-                "missing verification after repair; add pytest, python -m, npm "
-                "run build, or an equivalent project test command that proves "
-                "behavior for each implementation-heavy step"
-            ),
-            cap_used=retry_state.post_repair_validation_second_repair_used,
-            cap_attribute="post_repair_validation_second_repair_used",
+        policy = _SECOND_REPAIR_VALIDATOR_POLICIES["missing_verification_steps"]
+        return _second_repair_reason_from_policy(
+            retry_state,
+            policy,
+            missing_verification_steps,
         )
 
     return None

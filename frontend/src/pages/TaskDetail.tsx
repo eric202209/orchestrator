@@ -1,30 +1,29 @@
-import { useCallback, useEffect, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import { tasksAPI } from '@/api/client';
-import type { Task } from '@/types/api';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Link, useParams, useNavigate } from 'react-router-dom';
+import { projectsAPI, tasksAPI } from '@/api/client';
+import type { Project, Task } from '@/types/api';
 import { 
   ArrowLeft, 
+  ChevronDown,
   Edit3, 
   Save, 
   X, 
-  Clock, 
-  CheckCircle2, 
-  PlayCircle, 
-  XCircle as XCircleIcon,
   Calendar,
   AlertCircle,
   FileJson
 } from 'lucide-react';
 import { StatusBadge, LoadingSpinner, Button, TextArea, Alert } from '@/components/ui';
-import { cn } from '@/lib/utils';
 
 function TaskDetail() {
-  const { taskId } = useParams<{ projectId: string; taskId: string }>();
+  const { projectId, taskId } = useParams<{ projectId: string; taskId: string }>();
   const navigate = useNavigate();
   const [task, setTask] = useState<Task | null>(null);
+  const [project, setProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [allowCurrentStepEdit, setAllowCurrentStepEdit] = useState(false);
+  const [runInNewSession, setRunInNewSession] = useState(false);
   const [editForm, setEditForm] = useState({
     title: '',
     description: '',
@@ -36,6 +35,15 @@ function TaskDetail() {
     try {
       const response = await tasksAPI.getById(Number(taskId));
       setTask(response.data);
+      if (response.data?.project_id) {
+        try {
+          const projectResponse = await projectsAPI.getById(response.data.project_id);
+          setProject(projectResponse.data);
+        } catch (error) {
+          console.error('Failed to fetch task project:', error);
+          setProject(null);
+        }
+      }
       const steps = response.data?.steps ? JSON.stringify(JSON.parse(response.data.steps), null, 2) : '';
       setEditForm({
         title: response.data?.title || '',
@@ -43,6 +51,7 @@ function TaskDetail() {
         steps: steps,
         current_step: response.data?.current_step || 0
       });
+      setAllowCurrentStepEdit(false);
     } catch (error) {
       console.error('Failed to fetch task:', error);
       setSaveError('Failed to load task details');
@@ -86,6 +95,7 @@ function TaskDetail() {
 
   const handleCancel = () => {
     setEditing(false);
+    setAllowCurrentStepEdit(false);
     fetchTask();
   };
 
@@ -130,31 +140,23 @@ function TaskDetail() {
     }
   };
 
-  const getStatusIcon = (status: string) => {
-    switch (status) {
-      case 'done':
-        return <CheckCircle2 className="h-5 w-5 text-emerald-400" />;
-      case 'running':
-        return <PlayCircle className="h-5 w-5 text-blue-400 animate-pulse" />;
-      case 'failed':
-        return <XCircleIcon className="h-5 w-5 text-red-400" />;
-      default:
-        return <Clock className="h-5 w-5 text-slate-400" />;
+  const stepsJsonState = useMemo(() => {
+    if (!editForm.steps.trim()) {
+      return { valid: true, message: 'No step plan' };
     }
-  };
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'done':
-        return 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20';
-      case 'running':
-        return 'bg-blue-500/10 text-blue-400 border-blue-500/20';
-      case 'failed':
-        return 'bg-red-500/10 text-red-400 border-red-500/20';
-      default:
-        return 'bg-slate-500/10 text-slate-400 border-slate-500/20';
+    try {
+      const parsed = JSON.parse(editForm.steps);
+      return {
+        valid: true,
+        message: Array.isArray(parsed) ? `${parsed.length} JSON step${parsed.length === 1 ? '' : 's'}` : 'Valid JSON',
+      };
+    } catch (error) {
+      return {
+        valid: false,
+        message: error instanceof Error ? error.message : 'Invalid JSON',
+      };
     }
-  };
+  }, [editForm.steps]);
 
   if (loading) {
     return (
@@ -247,14 +249,11 @@ function TaskDetail() {
       {/* Task Content */}
       <div className="bg-slate-800 rounded-lg border border-slate-700 p-6">
         <div className="flex items-start justify-between mb-6">
-          <div className="flex items-center gap-3">
-            <div className={cn('p-3 rounded-lg', getStatusColor(task.status))}>
-              {getStatusIcon(task.status)}
-            </div>
-            <div>
-              <h2 className="text-xl font-bold text-white">
-                {task.title}
-              </h2>
+          <div>
+            <h2 className="text-xl font-bold text-white">
+              {task.title}
+            </h2>
+            <div className="mt-2">
               <StatusBadge status={task.status} />
             </div>
           </div>
@@ -315,24 +314,54 @@ function TaskDetail() {
                 value={editForm.steps}
                 onChange={(e) => setEditForm({ ...editForm, steps: e.target.value })}
                 placeholder='[{"action": "setup", "description": "Initialize project"}, {"action": "code", "description": "Write main code"}]'
-                className="bg-slate-900 border-slate-700 min-h-[300px] font-mono text-sm"
+                className={`bg-slate-900 min-h-[300px] font-mono text-sm ${
+                  stepsJsonState.valid
+                    ? 'border-emerald-700/70 focus:ring-emerald-500'
+                    : 'border-red-700/80 focus:ring-red-500'
+                }`}
               />
+              <p
+                className={`mt-2 text-xs ${
+                  stepsJsonState.valid ? 'text-emerald-300' : 'text-red-300'
+                }`}
+              >
+                {stepsJsonState.valid ? 'Valid JSON' : 'Invalid JSON'} · {stepsJsonState.message}
+              </p>
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-slate-300 mb-2">
-                Current Step
-              </label>
-              <p className="text-xs text-amber-300 mb-2">
-                Lowering this value can re-run earlier steps. Only change it if you intentionally want to take that risk.
-              </p>
-              <input
-                type="number"
-                value={editForm.current_step}
-                onChange={(e) => setEditForm({ ...editForm, current_step: parseInt(e.target.value) || 0 })}
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
-              />
-            </div>
+            <details className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
+              <summary className="cursor-pointer text-sm font-medium text-slate-300">
+                Advanced / Dangerous
+              </summary>
+              <div className="mt-4 space-y-3">
+                <label className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-100">
+                  <input
+                    type="checkbox"
+                    checked={allowCurrentStepEdit}
+                    onChange={(event) => setAllowCurrentStepEdit(event.target.checked)}
+                    className="mt-0.5 h-4 w-4 rounded border-amber-500 bg-slate-950"
+                  />
+                  <span>
+                    I understand lowering this step may re-run earlier work and can overwrite or duplicate project files.
+                  </span>
+                </label>
+                <div>
+                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                    Current Step
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    disabled={!allowCurrentStepEdit}
+                    value={editForm.current_step}
+                    onChange={(e) =>
+                      setEditForm({ ...editForm, current_step: parseInt(e.target.value) || 0 })
+                    }
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                  />
+                </div>
+              </div>
+            </details>
           </div>
         ) : (
           /* View Mode */
@@ -355,10 +384,9 @@ function TaskDetail() {
             )}
 
             <div className="rounded-lg border border-slate-600 bg-slate-700/40 p-4">
-              <h3 className="mb-2 text-sm font-medium text-slate-300">Workspace Review</h3>
               <div className="flex flex-wrap items-center gap-2">
                 <span className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1 text-xs capitalize text-slate-200">
-                  {String(task.workspace_status || 'not_created').replace(/_/g, ' ')}
+                  Workspace: {String(task.workspace_status || 'not_created').replace(/_/g, ' ')}
                 </span>
                 {task.task_subfolder && (
                   <span className="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-400">
@@ -376,16 +404,27 @@ function TaskDetail() {
               )}
               <div className="mt-4 flex flex-wrap gap-2">
                 {task.status !== 'running' && (
-                  <>
-                    <Button size="sm" variant="outline" onClick={() => handleRerun()}>
-                      {task.status === 'done'
-                        ? 'Run again in workflow session'
-                        : 'Run in workflow session'}
+                  <div className="flex items-center overflow-hidden rounded-md border border-sky-500/40">
+                    <Button
+                      size="sm"
+                      onClick={() => handleRerun(runInNewSession)}
+                      className="rounded-none border-0"
+                    >
+                      {task.status === 'done' ? 'Run Again' : 'Run'}
                     </Button>
-                    <Button size="sm" variant="outline" onClick={() => handleRerun(true)}>
-                      Run in new isolated session
-                    </Button>
-                  </>
+                    <label className="flex items-center gap-1 border-l border-sky-500/30 bg-slate-900 px-2 text-xs text-slate-300">
+                      <ChevronDown className="h-3.5 w-3.5 text-slate-500" />
+                      <select
+                        value={runInNewSession ? 'new_session' : 'workflow'}
+                        onChange={(event) => setRunInNewSession(event.target.value === 'new_session')}
+                        className="bg-transparent py-1.5 text-xs text-slate-300 focus:outline-none"
+                        aria-label="Run mode"
+                      >
+                        <option value="workflow">Workflow session</option>
+                        <option value="new_session">New isolated session</option>
+                      </select>
+                    </label>
+                  </div>
                 )}
                 {task.status === 'done' && task.task_subfolder && task.workspace_status !== 'promoted' && (
                   <Button size="sm" onClick={handlePromote}>
@@ -414,12 +453,30 @@ function TaskDetail() {
 
             <div className="grid grid-cols-2 gap-4 pt-4 border-t border-slate-600">
               <div>
-                <h3 className="text-sm font-medium text-slate-300 mb-1">Project ID</h3>
-                <p className="text-slate-400 text-sm">{task.project_id || 'N/A'}</p>
+                <h3 className="text-sm font-medium text-slate-300 mb-1">Project</h3>
+                {task.project_id ? (
+                  <Link
+                    to={`/projects/${task.project_id || projectId}`}
+                    className="text-sm text-sky-300 hover:text-sky-200"
+                  >
+                    {project?.name || `Project ${task.project_id}`}
+                  </Link>
+                ) : (
+                  <p className="text-slate-400 text-sm">N/A</p>
+                )}
               </div>
               <div>
                 <h3 className="text-sm font-medium text-slate-300 mb-1">Latest execution session</h3>
-                <p className="text-slate-400 text-sm">{task.session_id || 'N/A'}</p>
+                {task.session_id ? (
+                  <Link
+                    to={`/sessions/${task.session_id}`}
+                    className="text-sm text-sky-300 hover:text-sky-200"
+                  >
+                    Session {task.session_id}
+                  </Link>
+                ) : (
+                  <p className="text-slate-400 text-sm">N/A</p>
+                )}
               </div>
               <div>
                 <h3 className="text-sm font-medium text-slate-300 mb-1">Current Step</h3>

@@ -19,6 +19,7 @@ from app.models import (
     SessionTask,
     Task,
     TaskCheckpoint,
+    TaskExecution,
     TaskStatus,
 )
 
@@ -824,6 +825,258 @@ def test_decision_timeline_links_task_failure_to_latest_cause(
                 "confidence": "medium",
             }
         ]
+
+
+def test_decision_timeline_surfaces_terminal_planning_failure_metadata(
+    authenticated_client, db_session
+):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        project = _make_project(db_session, workspace_path=tmpdir)
+        session = _make_session(db_session, project)
+        task = _make_task(db_session, project, session)
+        completed_at = datetime(2026, 5, 8, 3, 47, tzinfo=UTC)
+        execution = TaskExecution(
+            session_id=session.id,
+            task_id=task.id,
+            attempt_number=1,
+            status=TaskStatus.FAILED,
+            completed_at=completed_at,
+        )
+        db_session.add(execution)
+        db_session.commit()
+        db_session.refresh(execution)
+
+        db_session.add(
+            LogEntry(
+                session_id=session.id,
+                task_id=task.id,
+                task_execution_id=execution.id,
+                level="ERROR",
+                message="[ORCHESTRATION] Plan validation failed after repair",
+                created_at=completed_at,
+                log_metadata=json.dumps(
+                    {
+                        "reason": "planning_validation_failed_after_repair",
+                        "validation_reasons": [
+                            "Plan contains brittle heredoc-heavy or malformed commands"
+                        ],
+                        "brittle_command_subcodes": ["oversized_command_length"],
+                        "brittle_command_step_details": {
+                            "2": ["oversized_command_length"]
+                        },
+                        "brittle_command_step_command_lengths": {"2": [1684]},
+                    }
+                ),
+            )
+        )
+        db_session.commit()
+
+        resp = authenticated_client.get(
+            f"/api/v1/sessions/{session.id}/decision-timeline"
+        )
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        failure_events = [
+            event
+            for event in payload["events"]
+            if event["source"] == "terminal_log_metadata"
+        ]
+        assert len(failure_events) == 1
+        failure = failure_events[0]
+        assert failure["phase"] == "failure"
+        assert failure["status"] == "failed"
+        assert failure["details"]["task_execution_id"] == execution.id
+        assert failure["details"]["reason"] == "planning_validation_failed_after_repair"
+        assert failure["details"]["brittle_command_subcodes"] == [
+            "oversized_command_length"
+        ]
+        assert failure["details"]["brittle_command_step_details"] == {
+            "2": ["oversized_command_length"]
+        }
+        assert failure["details"]["repair_attempted"] is True
+        assert failure["details"]["targeted_second_repair_attempted"] is False
+        assert "Brittle-command" in failure["details"]["no_further_repair_reason"]
+        assert "operator_next_action" in failure["details"]
+        assert payload["counts"]["failure"] == 1
+
+
+def test_decision_timeline_surfaces_timeout_and_repair_contract_terminals(
+    authenticated_client, db_session
+):
+    cases = [
+        {
+            "reason": "planning_context_overflow",
+            "message": "[ORCHESTRATION] Planning timed out or exceeded context",
+            "title": "Planning Timed Out Or Exceeded Context",
+            "repair_attempted": False,
+        },
+        {
+            "reason": "repair_output_contract_violation",
+            "message": "[ORCHESTRATION] Repair output contract violation",
+            "title": "Repair Output Contract Violation",
+            "repair_attempted": True,
+        },
+    ]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        project = _make_project(db_session, workspace_path=tmpdir)
+        base = datetime(2026, 5, 8, 4, 0, tzinfo=UTC)
+        session_ids = []
+
+        for index, case in enumerate(cases):
+            session = _make_session(db_session, project)
+            task = _make_task(db_session, project, session)
+            execution = TaskExecution(
+                session_id=session.id,
+                task_id=task.id,
+                attempt_number=1,
+                status=TaskStatus.FAILED,
+                completed_at=base + timedelta(minutes=index),
+            )
+            db_session.add(execution)
+            db_session.commit()
+            db_session.refresh(execution)
+            db_session.add(
+                LogEntry(
+                    session_id=session.id,
+                    task_id=task.id,
+                    task_execution_id=execution.id,
+                    level="ERROR",
+                    message=case["message"],
+                    created_at=execution.completed_at,
+                    log_metadata=json.dumps(
+                        {
+                            "phase": "planning",
+                            "reason": case["reason"],
+                            "task_execution_id": execution.id,
+                        }
+                    ),
+                )
+            )
+            db_session.commit()
+            session_ids.append((session.id, execution.id, case))
+
+        for session_id, execution_id, case in session_ids:
+            resp = authenticated_client.get(
+                f"/api/v1/sessions/{session_id}/decision-timeline"
+            )
+
+            assert resp.status_code == 200
+            payload = resp.json()
+            failure = [
+                event
+                for event in payload["events"]
+                if event["source"] == "terminal_log_metadata"
+            ][0]
+            assert failure["title"] == case["title"]
+            assert failure["status"] == "failed"
+            assert failure["details"]["task_execution_id"] == execution_id
+            assert failure["details"]["reason"] == case["reason"]
+            assert failure["details"]["repair_attempted"] is case["repair_attempted"]
+            assert failure["details"]["targeted_second_repair_attempted"] is False
+            assert "operator_next_action" in failure["details"]
+            assert payload["counts"]["failure"] == 1
+
+
+def test_decision_timeline_surfaces_cancelled_execution_without_terminal_log(
+    authenticated_client, db_session
+):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        project = _make_project(db_session, workspace_path=tmpdir)
+        session = _make_session(db_session, project)
+        task = _make_task(db_session, project, session)
+        execution = TaskExecution(
+            session_id=session.id,
+            task_id=task.id,
+            attempt_number=1,
+            status=TaskStatus.CANCELLED,
+            completed_at=datetime(2026, 5, 8, 5, 0, tzinfo=UTC),
+        )
+        db_session.add(execution)
+        db_session.commit()
+        db_session.refresh(execution)
+
+        resp = authenticated_client.get(
+            f"/api/v1/sessions/{session.id}/decision-timeline"
+        )
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        failure = [
+            event
+            for event in payload["events"]
+            if event["source"] == "terminal_log_metadata"
+        ][0]
+        assert failure["title"] == "Execution Cancelled"
+        assert failure["status"] == "cancelled"
+        assert failure["severity"] == "warning"
+        assert failure["details"]["task_execution_id"] == execution.id
+        assert failure["details"]["reason"] == "forced-stop or cancellation"
+        assert failure["details"]["repair_attempted"] is False
+        assert failure["details"]["targeted_second_repair_attempted"] is False
+        assert "operator_next_action" in failure["details"]
+        assert payload["counts"]["failure"] == 1
+
+
+def test_decision_timeline_does_not_duplicate_existing_task_failed_event(
+    authenticated_client, db_session
+):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        project = _make_project(db_session, workspace_path=tmpdir)
+        session = _make_session(db_session, project)
+        task = _make_task(db_session, project, session)
+        completed_at = datetime(2026, 5, 8, 6, 0, tzinfo=UTC)
+        execution = TaskExecution(
+            session_id=session.id,
+            task_id=task.id,
+            attempt_number=1,
+            status=TaskStatus.FAILED,
+            completed_at=completed_at,
+        )
+        db_session.add(execution)
+        db_session.commit()
+        db_session.refresh(execution)
+        _write_events(
+            tmpdir,
+            session.id,
+            task.id,
+            [
+                _event(
+                    event_id="task-failed-existing",
+                    session_id=session.id,
+                    task_id=task.id,
+                    event_type="task_failed",
+                    timestamp=completed_at,
+                    details={"task_execution_id": execution.id},
+                )
+            ],
+        )
+        db_session.add(
+            LogEntry(
+                session_id=session.id,
+                task_id=task.id,
+                task_execution_id=execution.id,
+                level="ERROR",
+                message="[ORCHESTRATION] Planning timed out or exceeded context",
+                created_at=completed_at,
+                log_metadata=json.dumps({"reason": "planning_context_overflow"}),
+            )
+        )
+        db_session.commit()
+
+        resp = authenticated_client.get(
+            f"/api/v1/sessions/{session.id}/decision-timeline"
+        )
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert [
+            event
+            for event in payload["events"]
+            if event["source"] == "terminal_log_metadata"
+        ] == []
+        assert [event["id"] for event in payload["events"]] == ["task-failed-existing"]
 
 
 def test_decision_timeline_links_intervention_to_latest_failure(

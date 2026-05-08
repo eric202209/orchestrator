@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from app.models import (
     ExecutionFailureSummary,
     LogEntry,
+    PlanningSession,
     Project,
     Session as SessionModel,
     Task,
@@ -300,6 +301,48 @@ class TestFailureSummaryEndpoints:
         assert diagnostics["brittle_command_step_details"] == {
             "2": ["oversized_command_length"]
         }
+
+    def test_get_failure_summary_includes_replan_planning_status(
+        self, authenticated_client: TestClient, db_session: Session
+    ):
+        project = Project(name="replan-status-project", workspace_path=None)
+        db_session.add(project)
+        db_session.commit()
+
+        session = SessionModel(
+            project_id=project.id,
+            name="replan-status-session",
+            status="stopped",
+            is_active=False,
+            instance_id="replan-status-uuid",
+        )
+        planning_session = PlanningSession(
+            project_id=project.id,
+            title="Retry auth plan",
+            prompt="Plan auth fix",
+            status="cancelled",
+            source_brain="local",
+        )
+        db_session.add_all([session, planning_session])
+        db_session.commit()
+
+        summary = ExecutionFailureSummary(
+            session_id=session.id,
+            summary="Auth failed.",
+            replan_planning_session_id=planning_session.id,
+        )
+        db_session.add(summary)
+        db_session.commit()
+
+        resp = authenticated_client.get(
+            f"/api/v1/sessions/{session.id}/failure-summary"
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["replan_planning_session_id"] == planning_session.id
+        assert data["replan_planning_session_status"] == "cancelled"
+        assert data["replan_planning_session_title"] == "Retry auth plan"
 
     def test_operator_feedback_saved(
         self, authenticated_client: TestClient, db_session: Session

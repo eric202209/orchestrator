@@ -8,6 +8,7 @@ import {
   FileText,
   XCircle,
   ExternalLink,
+  Search,
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { EmptyState, Skeleton } from '../components/ui';
@@ -24,6 +25,7 @@ function ProjectsList() {
   const [newProjectRules, setNewProjectRules] = useState('');
   const [creatingProject, setCreatingProject] = useState(false);
   const [updatingProject, setUpdatingProject] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
     fetchProjects();
@@ -152,6 +154,18 @@ function ProjectsList() {
     }
   };
 
+  const filteredProjects = projects.filter((project) => {
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return true;
+
+    return (
+      project.name.toLowerCase().includes(query) ||
+      project.description?.toLowerCase().includes(query) ||
+      project.branch?.toLowerCase().includes(query) ||
+      project.github_url?.toLowerCase().includes(query)
+    );
+  });
+
   if (loading) {
     return (
       <div className="space-y-5">
@@ -171,15 +185,32 @@ function ProjectsList() {
   return (
     <div>
       {/* Header */}
-      <div className="flex items-center justify-between mb-5">
-        <h1 className="text-lg font-semibold text-white">Projects</h1>
-        <button
-          onClick={() => setShowCreateProject(true)}
-          className="flex items-center gap-1.5 bg-sky-600 hover:bg-sky-500 text-white text-sm px-3 py-1.5 rounded-md transition-colors"
-        >
-          <Plus className="h-4 w-4" />
-          New Project
-        </button>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-5">
+        <div>
+          <h1 className="text-lg font-semibold text-white">Projects</h1>
+          <p className="text-xs text-slate-500 mt-0.5">
+            {projects.length} project{projects.length !== 1 ? 's' : ''}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-500" />
+            <input
+              type="text"
+              placeholder="Search..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-44 bg-slate-800 border border-slate-700 rounded-md py-1.5 pl-8 pr-3 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-slate-600 hover:border-slate-600"
+            />
+          </div>
+          <button
+            onClick={() => setShowCreateProject(true)}
+            className="flex items-center gap-1.5 bg-sky-600 hover:bg-sky-500 text-white text-sm px-3 py-1.5 rounded-md transition-colors"
+          >
+            <Plus className="h-4 w-4" />
+            New Project
+          </button>
+        </div>
       </div>
 
         {/* Projects Grid */}
@@ -193,9 +224,15 @@ function ProjectsList() {
               onClick: () => setShowCreateProject(true)
             }}
           />
+        ) : filteredProjects.length === 0 ? (
+          <EmptyState
+            icon={GitBranch}
+            title="No matching projects"
+            description="Try adjusting your search query"
+          />
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-            {projects.map((project) => (
+            {filteredProjects.map((project) => (
               <div
                 key={project.id}
                 onClick={() => navigate(`/projects/${project.id}`)}
@@ -285,9 +322,6 @@ function ProjectsList() {
                   <h3 className="text-sm font-semibold text-white mb-1 group-hover:text-slate-200 transition-colors">
                     {project.name}
                   </h3>
-                )}
-                {project.description && (
-                  <p className="text-xs text-slate-400 mb-3 line-clamp-2">{project.description}</p>
                 )}
                 <div className="flex items-center justify-between text-xs text-slate-500">
                   <span className="flex items-center gap-1">

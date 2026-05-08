@@ -980,6 +980,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
         )
         prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
+Do not create, edit, read, or write files during planning repair; return the JSON array as message text only.
 Repair the plan, not the task. Preserve valid steps; replace invalid ones.
 
 Bad:
