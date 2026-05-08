@@ -22,6 +22,7 @@ from app.services.orchestration.planning.planner import (
     MINIMAL_PLANNING_PROMPT_TOKEN_DIAGNOSTIC_THRESHOLD,
     PlanningRepairBudgetExceeded,
     PlanningRepairNoOutputTimeout,
+    PlanningRepairOutputContractViolation,
     PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS,
     PLANNING_REPAIR_PROMPT_MAX_CHARS,
 )
@@ -1830,7 +1831,7 @@ def test_planning_repair_no_output_retry_can_succeed():
     assert result == {"output": '[{"step_number":1}]'}
 
 
-def test_planning_repair_returned_prose_fails_without_no_output_retry():
+def test_planning_repair_returned_prose_raises_output_contract_violation():
     events = []
     attempts = {"count": 0}
 
@@ -1839,7 +1840,7 @@ def test_planning_repair_returned_prose_fails_without_no_output_retry():
             attempts["count"] += 1
             return {"output": "I repaired the plan. Here are the steps..."}
 
-    with pytest.raises(PlanningRepairNoOutputTimeout) as exc_info:
+    with pytest.raises(PlanningRepairOutputContractViolation) as exc_info:
         PlannerService.repair_output(
             runtime_service=Runtime(),
             task_description="Build a page",
@@ -1858,14 +1859,90 @@ def test_planning_repair_returned_prose_fails_without_no_output_retry():
         )
 
     assert attempts["count"] == 1
-    assert exc_info.value.runtime_diagnostics["repair_returned_prose"] is True
-    prose_events = [
+    assert exc_info.value.runtime_diagnostics["output_contract_violated"] is True
+    assert exc_info.value.runtime_diagnostics["repair_output_fenced"] is False
+    assert "prose" in str(exc_info.value)
+    contract_events = [
         metadata
         for _, _, metadata in events
-        if metadata.get("reason") == "repair_returned_prose"
+        if metadata.get("reason") == "repair_output_contract_violation"
     ]
-    assert prose_events
-    assert prose_events[0]["repair_attempts"] == 1
+    assert contract_events
+    assert contract_events[0]["repair_attempts"] == 1
+
+
+def test_planning_repair_returned_fenced_json_raises_output_contract_violation():
+    events = []
+
+    class Runtime:
+        async def invoke_prompt(self, prompt, **kwargs):
+            return {
+                "output": '```json\n[{"step": 1, "commands": ["echo hi"], "verification": "echo hi"}]\n```'
+            }
+
+    with pytest.raises(PlanningRepairOutputContractViolation) as exc_info:
+        PlannerService.repair_output(
+            runtime_service=Runtime(),
+            task_description="Build a page",
+            malformed_output='{"steps":"bad"}',
+            project_dir=__import__("pathlib").Path("/tmp/project"),
+            timeout_seconds=300,
+            logger=logging.getLogger("test.planning_repair_fenced_json"),
+            emit_live=lambda level, message, metadata=None: events.append(
+                (level, message, metadata or {})
+            ),
+            reason="json_parse_failed",
+            rejection_reasons=["commands must be an array"],
+            knowledge_context=None,
+            session_id=1,
+            task_id=2,
+        )
+
+    assert exc_info.value.runtime_diagnostics["output_contract_violated"] is True
+    assert exc_info.value.runtime_diagnostics["repair_output_fenced"] is True
+    assert "markdown-fenced" in str(exc_info.value)
+    contract_events = [
+        metadata
+        for _, _, metadata in events
+        if metadata.get("reason") == "repair_output_contract_violation"
+    ]
+    assert contract_events
+    assert contract_events[0]["repair_output_fenced"] is True
+
+
+def test_planning_repair_bare_json_array_does_not_raise_output_contract_violation():
+    events = []
+
+    class Runtime:
+        async def invoke_prompt(self, prompt, **kwargs):
+            return {
+                "output": '[{"step": 1, "commands": ["echo hi"], "verification": "echo hi"}]'
+            }
+
+    result = PlannerService.repair_output(
+        runtime_service=Runtime(),
+        task_description="Build a page",
+        malformed_output='{"steps":"bad"}',
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+        timeout_seconds=300,
+        logger=logging.getLogger("test.planning_repair_bare_json"),
+        emit_live=lambda level, message, metadata=None: events.append(
+            (level, message, metadata or {})
+        ),
+        reason="json_parse_failed",
+        rejection_reasons=["commands must be an array"],
+        knowledge_context=None,
+        session_id=1,
+        task_id=2,
+    )
+
+    assert result is not None
+    contract_events = [
+        metadata
+        for _, _, metadata in events
+        if metadata.get("reason") == "repair_output_contract_violation"
+    ]
+    assert not contract_events
 
 
 def test_planning_repair_no_output_skips_parser_validation_metadata():
@@ -2220,7 +2297,7 @@ def test_planning_repair_budget_fails_fast_without_retry():
                 logger=__import__("logging").getLogger("test"),
                 emit_live=lambda *a, **kw: None,
                 reason="json_parse_failed",
-                rejection_reasons=[("commands must be array " + ("z" * 400))] * 4,
+                rejection_reasons=["commands must be array " + ("z" * 400)] * 4,
                 knowledge_context=type(
                     "KnowledgeCtx",
                     (),
@@ -3110,6 +3187,420 @@ def test_planning_validation_failure_after_repair_marks_session_not_running(
     assert session.status == "paused"
     assert session.is_active is False
     assert session.paused_at is not None
+
+
+def test_post_repair_weak_verification_gets_one_targeted_second_repair(
+    tmp_path, monkeypatch
+):
+    initial_plan = [
+        {
+            "step_number": 1,
+            "description": "Create text stats implementation",
+            "commands": [
+                "printf 'def analyze_text(text): return {}\\n' > text_stats.py"
+            ],
+            "verification": "echo ok",
+            "rollback": "rm -f text_stats.py",
+            "expected_files": ["text_stats.py"],
+        }
+    ]
+    first_repair_plan = [
+        {
+            "step_number": 1,
+            "description": "Inspect files",
+            "commands": ["ls"],
+            "verification": "python -m pytest --version",
+            "rollback": None,
+            "expected_files": [],
+        },
+        {
+            "step_number": 2,
+            "description": "Create text stats implementation",
+            "commands": [
+                "printf 'def analyze_text(text): return {}\\n' > text_stats.py"
+            ],
+            "verification": "echo ok",
+            "rollback": "rm -f text_stats.py",
+            "expected_files": ["text_stats.py"],
+        },
+        {
+            "step_number": 3,
+            "description": "Create text stats tests",
+            "commands": [
+                "printf 'from text_stats import analyze_text\\n' > test_text_stats.py"
+            ],
+            "verification": "test -f test_text_stats.py",
+            "rollback": "rm -f test_text_stats.py",
+            "expected_files": ["test_text_stats.py"],
+        },
+    ]
+    second_repair_plan = [
+        {
+            "step_number": 1,
+            "description": "Inspect files",
+            "commands": ["ls"],
+            "verification": "python -m pytest --version",
+            "rollback": None,
+            "expected_files": [],
+        },
+        {
+            "step_number": 2,
+            "description": "Create text stats implementation",
+            "commands": [
+                "printf 'def analyze_text(text): return {}\\n' > text_stats.py"
+            ],
+            "verification": "python -m pytest test_text_stats.py -q",
+            "rollback": "rm -f text_stats.py",
+            "expected_files": ["text_stats.py"],
+        },
+        {
+            "step_number": 3,
+            "description": "Create text stats tests",
+            "commands": [
+                "printf 'from text_stats import analyze_text\\n' > test_text_stats.py"
+            ],
+            "verification": "python -m pytest test_text_stats.py -q",
+            "rollback": "rm -f test_text_stats.py",
+            "expected_files": ["test_text_stats.py"],
+        },
+    ]
+
+    orchestration_state = MagicMock()
+    orchestration_state.project_dir = tmp_path
+    orchestration_state.project_context = ""
+    orchestration_state.plan = []
+    orchestration_state.current_step_index = 0
+    orchestration_state.reasoning_artifact = None
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {}
+
+        async def execute_task(self, *args, **kwargs):
+            return {"status": "completed", "output": json.dumps(initial_plan)}
+
+    task = MagicMock()
+    task.title = "Repair weak verification"
+    task.description = "Repair weak verification"
+    session = MagicMock()
+    session.status = "running"
+    session.is_active = True
+    session_task_link = MagicMock()
+    events = []
+
+    ctx = OrchestrationRunContext(
+        db=MagicMock(),
+        session=session,
+        project=MagicMock(),
+        task=task,
+        session_task_link=session_task_link,
+        session_id=64,
+        task_id=15,
+        prompt="Repair weak verification",
+        timeout_seconds=300,
+        execution_profile="full_lifecycle",
+        validation_profile="standard",
+        runs_in_canonical_baseline=False,
+        orchestration_state=orchestration_state,
+        runtime_service=Runtime(),
+        task_service=MagicMock(),
+        logger=logging.getLogger("test.post_repair_weak_verification_second_pass"),
+        emit_live=lambda *args, **kwargs: events.append((args, kwargs)),
+        error_handler=MagicMock(),
+    )
+    ctx.error_handler.attempt_json_parsing = lambda output, **kwargs: (
+        True,
+        json.loads(output),
+        "json",
+    )
+
+    _patch_planning_flow_external_writes(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow._build_reasoning_artifact",
+        lambda *args, **kwargs: {
+            "intent": "Create text utility",
+            "workspace_facts": [],
+            "planned_actions": [],
+            "verification_plan": ["Run pytest"],
+        },
+    )
+    monkeypatch.setattr(
+        ValidatorService,
+        "validate_reasoning_artifact",
+        staticmethod(
+            lambda *args, **kwargs: type(
+                "Verdict",
+                (),
+                {"accepted": True, "status": "accepted", "reasons": []},
+            )()
+        ),
+    )
+    monkeypatch.setattr(
+        ValidatorService,
+        "validate_plan",
+        staticmethod(
+            lambda *args, **kwargs: type(
+                "Verdict",
+                (),
+                {
+                    "accepted": True,
+                    "warning": False,
+                    "status": "accepted",
+                    "reasons": [],
+                    "details": {},
+                    "verdict": {"status": "accepted"},
+                },
+            )()
+        ),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "should_start_with_minimal_prompt",
+        staticmethod(lambda *args, **kwargs: False),
+    )
+
+    repair_calls = []
+
+    def repair_output(cls, *args, **kwargs):
+        repair_calls.append(kwargs)
+        if len(repair_calls) == 1:
+            return {"output": json.dumps(first_repair_plan)}
+        return {"output": json.dumps(second_repair_plan)}
+
+    monkeypatch.setattr(PlannerService, "repair_output", classmethod(repair_output))
+
+    result = execute_planning_phase(
+        ctx=ctx,
+        workspace_review={"has_existing_files": False},
+        extract_structured_text=extract_structured_text,
+        extract_plan_steps=lambda value: value if isinstance(value, list) else None,
+        looks_like_truncated_multistep_plan=lambda text, plan: False,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: args[3],
+        workspace_violation_error_cls=RuntimeError,
+    )
+
+    assert result == {"status": "completed"}
+    assert len(repair_calls) == 2
+    assert repair_calls[1]["reason"].startswith("post_repair_weak_verification_steps")
+    assert "steps [2, 3]" in repair_calls[1]["rejection_reasons"][0]
+    assert ctx.orchestration_state.plan == second_repair_plan
+
+
+def test_post_repair_weak_verification_second_repair_is_capped(tmp_path, monkeypatch):
+    weak_plan = [
+        {
+            "step_number": 1,
+            "description": "Create text stats implementation",
+            "commands": [
+                "printf 'def analyze_text(text): return {}\\n' > text_stats.py"
+            ],
+            "verification": "echo ok",
+            "rollback": "rm -f text_stats.py",
+            "expected_files": ["text_stats.py"],
+        }
+    ]
+
+    orchestration_state = MagicMock()
+    orchestration_state.project_dir = tmp_path
+    orchestration_state.project_context = ""
+    orchestration_state.plan = []
+    orchestration_state.current_step_index = 0
+    orchestration_state.reasoning_artifact = None
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {}
+
+        async def execute_task(self, *args, **kwargs):
+            return {"status": "completed", "output": json.dumps(weak_plan)}
+
+    task = MagicMock()
+    task.title = "Repair weak verification cap"
+    task.description = "Repair weak verification cap"
+    session = MagicMock()
+    session.status = "running"
+    session.is_active = True
+    session_task_link = MagicMock()
+
+    ctx = OrchestrationRunContext(
+        db=MagicMock(),
+        session=session,
+        project=MagicMock(),
+        task=task,
+        session_task_link=session_task_link,
+        session_id=65,
+        task_id=16,
+        prompt="Repair weak verification cap",
+        timeout_seconds=300,
+        execution_profile="full_lifecycle",
+        validation_profile="standard",
+        runs_in_canonical_baseline=False,
+        orchestration_state=orchestration_state,
+        runtime_service=Runtime(),
+        task_service=MagicMock(),
+        logger=logging.getLogger("test.post_repair_weak_verification_cap"),
+        emit_live=lambda *args, **kwargs: None,
+        error_handler=MagicMock(),
+    )
+    ctx.error_handler.attempt_json_parsing = lambda output, **kwargs: (
+        True,
+        json.loads(output),
+        "json",
+    )
+
+    _patch_planning_flow_external_writes(monkeypatch)
+    monkeypatch.setattr(
+        PlannerService,
+        "should_start_with_minimal_prompt",
+        staticmethod(lambda *args, **kwargs: False),
+    )
+
+    repair_calls = []
+
+    def repair_output(cls, *args, **kwargs):
+        repair_calls.append(kwargs)
+        return {"output": json.dumps(weak_plan)}
+
+    monkeypatch.setattr(PlannerService, "repair_output", classmethod(repair_output))
+
+    result = execute_planning_phase(
+        ctx=ctx,
+        workspace_review={"has_existing_files": False},
+        extract_structured_text=extract_structured_text,
+        extract_plan_steps=lambda value: value if isinstance(value, list) else None,
+        looks_like_truncated_multistep_plan=lambda text, plan: False,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: args[3],
+        workspace_violation_error_cls=RuntimeError,
+    )
+
+    assert len(repair_calls) == 2
+    assert result == {
+        "status": "failed",
+        "reason": "planning_invalid_commands_after_repair",
+    }
+    assert task.status == TaskStatus.FAILED
+    assert session_task_link.status == TaskStatus.FAILED
+    assert session.status == "paused"
+    assert session.is_active is False
+
+
+def test_post_repair_background_process_gets_one_targeted_second_repair(
+    tmp_path, monkeypatch
+):
+    initial_plan = [
+        {
+            "step_number": 1,
+            "description": "Create text stats implementation",
+            "commands": [
+                "printf 'def analyze_text(text): return {}\\n' > text_stats.py"
+            ],
+            "verification": "echo ok",
+            "rollback": "rm -f text_stats.py",
+            "expected_files": ["text_stats.py"],
+        }
+    ]
+    first_repair_plan = [
+        {
+            "step_number": 1,
+            "description": "Start a background server",
+            "commands": ["python -m http.server 8000 &"],
+            "verification": "python -m pytest --version",
+            "rollback": None,
+            "expected_files": [],
+        }
+    ]
+    second_repair_plan = [
+        {
+            "step_number": 1,
+            "description": "Run a bounded foreground check",
+            "commands": ["python -m pytest --version"],
+            "verification": "python -m pytest --version",
+            "rollback": None,
+            "expected_files": [],
+        }
+    ]
+
+    orchestration_state = MagicMock()
+    orchestration_state.project_dir = tmp_path
+    orchestration_state.project_context = ""
+    orchestration_state.plan = []
+    orchestration_state.current_step_index = 0
+    orchestration_state.reasoning_artifact = None
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {}
+
+        async def execute_task(self, *args, **kwargs):
+            return {"status": "completed", "output": json.dumps(initial_plan)}
+
+    task = MagicMock()
+    task.title = "Repair background process"
+    task.description = "Repair background process"
+    session = MagicMock()
+    session.status = "running"
+    session.is_active = True
+    session_task_link = MagicMock()
+
+    ctx = OrchestrationRunContext(
+        db=MagicMock(),
+        session=session,
+        project=MagicMock(),
+        task=task,
+        session_task_link=session_task_link,
+        session_id=66,
+        task_id=15,
+        prompt="Repair background process",
+        timeout_seconds=300,
+        execution_profile="full_lifecycle",
+        validation_profile="standard",
+        runs_in_canonical_baseline=False,
+        orchestration_state=orchestration_state,
+        runtime_service=Runtime(),
+        task_service=MagicMock(),
+        logger=logging.getLogger("test.post_repair_background_process_second_pass"),
+        emit_live=lambda *args, **kwargs: None,
+        error_handler=MagicMock(),
+    )
+    ctx.error_handler.attempt_json_parsing = lambda output, **kwargs: (
+        True,
+        json.loads(output),
+        "json",
+    )
+
+    _patch_planning_flow_external_writes(monkeypatch)
+    monkeypatch.setattr(
+        PlannerService,
+        "should_start_with_minimal_prompt",
+        staticmethod(lambda *args, **kwargs: False),
+    )
+
+    repair_calls = []
+
+    def repair_output(cls, *args, **kwargs):
+        repair_calls.append(kwargs)
+        if len(repair_calls) == 1:
+            return {"output": json.dumps(first_repair_plan)}
+        return {"output": json.dumps(second_repair_plan)}
+
+    monkeypatch.setattr(PlannerService, "repair_output", classmethod(repair_output))
+
+    result = execute_planning_phase(
+        ctx=ctx,
+        workspace_review={"has_existing_files": False},
+        extract_structured_text=extract_structured_text,
+        extract_plan_steps=lambda value: value if isinstance(value, list) else None,
+        looks_like_truncated_multistep_plan=lambda text, plan: False,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: args[3],
+        workspace_violation_error_cls=RuntimeError,
+    )
+
+    assert result == {"status": "completed"}
+    assert len(repair_calls) == 2
+    assert repair_calls[1]["reason"].startswith("post_repair_background_process_steps")
+    assert "steps [1]" in repair_calls[1]["rejection_reasons"][0]
+    assert "bounded foreground commands" in repair_calls[1]["rejection_reasons"][0]
+    assert ctx.orchestration_state.plan == second_repair_plan
 
 
 def test_minimal_first_timeout_is_finalized_without_outer_retry(tmp_path, monkeypatch):
