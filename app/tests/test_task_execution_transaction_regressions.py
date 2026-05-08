@@ -38,10 +38,10 @@ def _stub_retry_dispatch(monkeypatch, captured_kwargs: dict | None = None):
     monkeypatch.setattr(worker_module.execute_orchestration_task, "delay", _fake_delay)
 
 
-def test_task_retry_rolls_back_session_creation_when_queueing_fails(
+def test_task_retry_marks_attempt_failed_when_post_commit_dispatch_fails(
     authenticated_client, db_session, monkeypatch
 ):
-    project = Project(name="Rollback Project")
+    project = Project(name="Dispatch Failure Project")
     db_session.add(project)
     db_session.commit()
     db_session.refresh(project)
@@ -76,11 +76,84 @@ def test_task_retry_rolls_back_session_creation_when_queueing_fails(
     with pytest.raises(RuntimeError, match="broker down"):
         authenticated_client.post(f"/api/v1/tasks/{task.id}/retry")
 
-    assert db_session.query(SessionModel).count() == 0
-    assert db_session.query(SessionTask).count() == 0
-    assert db_session.query(TaskExecution).count() == 0
+    session = db_session.query(SessionModel).one()
+    assert session.status == "stopped"
+    assert session.is_active is False
+    assert session.stopped_at is not None
+    assert db_session.query(SessionTask).count() == 1
+    task_execution = db_session.query(TaskExecution).one()
+    assert task_execution.status == TaskStatus.FAILED
+    assert task_execution.completed_at is not None
     db_session.refresh(task)
     assert task.status == TaskStatus.FAILED
+    assert task.error_message == "Failed to dispatch task to worker"
+
+
+def test_task_retry_commits_records_before_worker_dispatch(
+    authenticated_client, db_session, db_session_factory, monkeypatch
+):
+    project = Project(name="Dispatch Visibility Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task = Task(
+        project_id=project.id,
+        title="Retry after commit",
+        description="retry prompt",
+        status=TaskStatus.FAILED,
+    )
+    db_session.add(task)
+    db_session.commit()
+    db_session.refresh(task)
+
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.tasks.ensure_task_workspace",
+        lambda *a, **kw: {
+            "workspace_path": "/tmp/dispatch-visibility-project",
+            "task_subfolder": None,
+            "stored_task_subfolder": "retry-after-commit",
+            "workspace_scope": "isolated_task_workspace",
+        },
+    )
+
+    seen: dict[str, bool] = {}
+
+    def _fake_delay(**kwargs):
+        with db_session_factory() as fresh_db:
+            seen["session_visible"] = (
+                fresh_db.query(SessionModel)
+                .filter(SessionModel.id == kwargs["session_id"])
+                .first()
+                is not None
+            )
+            seen["task_visible"] = (
+                fresh_db.query(Task).filter(Task.id == kwargs["task_id"]).first()
+                is not None
+            )
+            seen["task_execution_visible"] = (
+                fresh_db.query(TaskExecution)
+                .filter(TaskExecution.id == kwargs["task_execution_id"])
+                .first()
+                is not None
+            )
+        return _FakeAsyncResult()
+
+    from app.tasks import worker as worker_module
+
+    monkeypatch.setattr(worker_module.execute_orchestration_task, "delay", _fake_delay)
+
+    response = authenticated_client.post(
+        f"/api/v1/tasks/{task.id}/retry",
+        json={"execution_scope": "new_session"},
+    )
+
+    assert response.status_code == 200
+    assert seen == {
+        "session_visible": True,
+        "task_visible": True,
+        "task_execution_visible": True,
+    }
 
 
 def test_task_retry_dual_writes_pending_task_execution(

@@ -291,20 +291,6 @@ def _queue_task_retry(
         },
     )
 
-    try:
-        result = execute_orchestration_task.delay(
-            session_id=selected_session.id,
-            task_id=task.id,
-            prompt=prompt,
-            timeout_seconds=timeout_seconds,
-            expected_session_instance_id=selected_session.instance_id,
-            task_execution_id=task_execution.id,
-            queued_event_id=(queued_event or {}).get("event_id"),
-        )
-    except Exception:
-        db.rollback()
-        raise
-
     selected_session.status = "running"
     selected_session.is_active = True
     selected_session.started_at = selected_session.started_at or datetime.now(UTC)
@@ -319,7 +305,7 @@ def _queue_task_retry(
             message=f"Task queued: {task.title}",
             log_metadata=json.dumps(
                 {
-                    "celery_task_id": result.id,
+                    "celery_task_id": None,
                     "task_execution_id": task_execution.id,
                     "retry": True,
                     "execution_scope": (
@@ -342,6 +328,62 @@ def _queue_task_retry(
             task_execution_id=task_execution.id,
             level="INFO",
             message=f"Session started: {selected_session.name}",
+        )
+    )
+    db.commit()
+
+    try:
+        result = execute_orchestration_task.delay(
+            session_id=selected_session.id,
+            task_id=task.id,
+            prompt=prompt,
+            timeout_seconds=timeout_seconds,
+            expected_session_instance_id=selected_session.instance_id,
+            task_execution_id=task_execution.id,
+            queued_event_id=(queued_event or {}).get("event_id"),
+        )
+    except Exception:
+        selected_session.status = "stopped"
+        selected_session.is_active = False
+        selected_session.stopped_at = datetime.now(UTC)
+        task.status = TaskStatus.FAILED
+        task.error_message = "Failed to dispatch task to worker"
+        task_execution.status = TaskStatus.FAILED
+        task_execution.completed_at = datetime.now(UTC)
+        db.add(
+            LogEntry(
+                session_id=selected_session.id,
+                session_instance_id=selected_session.instance_id,
+                task_id=task.id,
+                task_execution_id=task_execution.id,
+                level="ERROR",
+                message=f"Failed to dispatch task to worker: {task.title}",
+                log_metadata=json.dumps(
+                    {
+                        "task_execution_id": task_execution.id,
+                        "dispatch_failed": True,
+                    }
+                ),
+            )
+        )
+        db.commit()
+        raise
+
+    db.add(
+        LogEntry(
+            session_id=selected_session.id,
+            session_instance_id=selected_session.instance_id,
+            task_id=task.id,
+            task_execution_id=task_execution.id,
+            level="INFO",
+            message=f"Celery task dispatched: {task.title}",
+            log_metadata=json.dumps(
+                {
+                    "celery_task_id": result.id,
+                    "task_execution_id": task_execution.id,
+                    "dispatch_after_commit": True,
+                }
+            ),
         )
     )
     db.commit()
