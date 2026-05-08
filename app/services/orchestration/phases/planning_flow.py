@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Callable, Dict
 
@@ -450,6 +451,90 @@ class _PlanningRetryState:
     @property
     def circuit_open(self) -> bool:
         return self.consecutive_failures >= MAX_PLANNING_RETRIES
+
+
+@dataclass(frozen=True)
+class _SecondRepairReason:
+    issue_key: str
+    issue_label: str
+    retry_reason: str
+    event_reason: str
+    semantic_violation_code: str
+    step_numbers: list[int]
+    rejection_text: str
+    cap_used: bool
+    cap_attribute: str
+
+
+def _get_targeted_second_repair_reason(
+    *,
+    retry_state: _PlanningRetryState,
+    blocking_repair_issues: dict[str, list[int]] | None = None,
+    plan_verdict: Any | None = None,
+) -> _SecondRepairReason | None:
+    if not retry_state.repair_prompt_used:
+        return None
+
+    issue_keys = set((blocking_repair_issues or {}).keys())
+    if issue_keys == {"weak_verification_steps"}:
+        issue_steps = (blocking_repair_issues or {})["weak_verification_steps"][:5]
+        return _SecondRepairReason(
+            issue_key="weak_verification_steps",
+            issue_label="weak verification",
+            retry_reason="post_repair_weak_verification_steps",
+            event_reason="post_repair_weak_verification_second_pass",
+            semantic_violation_code="weak_verification",
+            step_numbers=issue_steps,
+            rejection_text=(
+                f"weak_verification_steps: steps {issue_steps} still use weak "
+                "verification after repair; replace each with pytest, python -m, "
+                "or npm run build that proves behavior for the files changed in "
+                "that step"
+            ),
+            cap_used=retry_state.post_repair_blocking_second_repair_used,
+            cap_attribute="post_repair_blocking_second_repair_used",
+        )
+    if issue_keys == {"background_process_steps"}:
+        issue_steps = (blocking_repair_issues or {})["background_process_steps"][:5]
+        return _SecondRepairReason(
+            issue_key="background_process_steps",
+            issue_label="background process commands",
+            retry_reason="post_repair_background_process_steps",
+            event_reason="post_repair_background_process_second_pass",
+            semantic_violation_code="background_process_command",
+            step_numbers=issue_steps,
+            rejection_text=(
+                f"background_process_steps: steps {issue_steps} still start "
+                "background or long-running processes after repair; replace each "
+                "with bounded foreground commands that terminate"
+            ),
+            cap_used=retry_state.post_repair_blocking_second_repair_used,
+            cap_attribute="post_repair_blocking_second_repair_used",
+        )
+
+    missing_verification_steps = (
+        _post_repair_missing_verification_steps(plan_verdict) if plan_verdict else []
+    )
+    if missing_verification_steps:
+        issue_steps = missing_verification_steps[:5]
+        return _SecondRepairReason(
+            issue_key="missing_verification_steps",
+            issue_label="missing verification",
+            retry_reason="post_repair_missing_verification_steps",
+            event_reason="post_repair_missing_verification_second_pass",
+            semantic_violation_code="missing_verification_command",
+            step_numbers=issue_steps,
+            rejection_text=(
+                f"missing_verification_steps: steps {issue_steps} are still "
+                "missing verification after repair; add pytest, python -m, npm "
+                "run build, or an equivalent project test command that proves "
+                "behavior for each implementation-heavy step"
+            ),
+            cap_used=retry_state.post_repair_validation_second_repair_used,
+            cap_attribute="post_repair_validation_second_repair_used",
+        )
+
+    return None
 
 
 def _classify_planning_timeout_failure(
@@ -1347,52 +1432,17 @@ def execute_planning_phase(
                 retry_state.consecutive_failures += 1
                 continue
             if blocking_repair_issues:
-                only_weak_verification = set(blocking_repair_issues.keys()) == {
-                    "weak_verification_steps"
-                }
-                only_background_process = set(blocking_repair_issues.keys()) == {
-                    "background_process_steps"
-                }
-                if (
-                    (only_weak_verification or only_background_process)
-                    and retry_state.repair_prompt_used
-                    and not retry_state.post_repair_blocking_second_repair_used
-                ):
-                    if only_weak_verification:
-                        issue_key = "weak_verification_steps"
-                        issue_label = "weak verification"
-                        semantic_violation_code = "weak_verification"
-                        retry_reason = "post_repair_weak_verification_steps"
-                        event_reason = "post_repair_weak_verification_second_pass"
-                        issue_steps = blocking_repair_issues[issue_key][:5]
-                        issue_fragments = [
-                            (
-                                "weak_verification_steps: steps "
-                                f"{issue_steps} still use weak verification after repair; "
-                                "replace each with pytest, python -m, or npm run build "
-                                "that proves behavior for the files changed in that step"
-                            )
-                        ]
-                    else:
-                        issue_key = "background_process_steps"
-                        issue_label = "background process commands"
-                        semantic_violation_code = "background_process_command"
-                        retry_reason = "post_repair_background_process_steps"
-                        event_reason = "post_repair_background_process_second_pass"
-                        issue_steps = blocking_repair_issues[issue_key][:5]
-                        issue_fragments = [
-                            (
-                                "background_process_steps: steps "
-                                f"{issue_steps} still start background or long-running "
-                                "processes after repair; replace each with bounded "
-                                "foreground commands that terminate"
-                            )
-                        ]
+                second_repair_reason = _get_targeted_second_repair_reason(
+                    retry_state=retry_state,
+                    blocking_repair_issues=blocking_repair_issues,
+                )
+                if second_repair_reason and not second_repair_reason.cap_used:
+                    issue_fragments = [second_repair_reason.rejection_text]
                     contract_violations = (
                         PlannerService.describe_planning_contract_violations(
                             output_text=output_text,
                             parse_success=True,
-                            strategy_info=retry_reason,
+                            strategy_info=second_repair_reason.retry_reason,
                             plan_data=plan_data,
                             extracted_plan=ctx.orchestration_state.plan,
                             immediate_repair_issues=blocking_repair_issues,
@@ -1408,8 +1458,10 @@ def execute_planning_phase(
                             "blocking issue; starting one targeted second repair pass"
                         ),
                         details={
-                            "reason": event_reason,
-                            issue_key: issue_steps,
+                            "reason": second_repair_reason.event_reason,
+                            second_repair_reason.issue_key: (
+                                second_repair_reason.step_numbers
+                            ),
                             "contract_violations": contract_violations[:8],
                             "repair_attempts": retry_state.consecutive_failures + 1,
                         },
@@ -1417,27 +1469,34 @@ def execute_planning_phase(
                     ctx.logger.warning(
                         "[ORCHESTRATION] Planning repair still had %s in steps %s; "
                         "starting one targeted second repair pass",
-                        issue_label,
-                        issue_steps,
+                        second_repair_reason.issue_label,
+                        second_repair_reason.step_numbers,
                     )
                     _emit_planning_diagnostics_contract_violation(
                         ctx,
-                        reason=event_reason,
+                        reason=second_repair_reason.event_reason,
                         contract_violations=contract_violations,
-                        semantic_violation_codes=[semantic_violation_code],
+                        semantic_violation_codes=[
+                            second_repair_reason.semantic_violation_code
+                        ],
                         output_text=output_text,
-                        strategy_info=event_reason,
+                        strategy_info=second_repair_reason.event_reason,
                     )
-                    retry_state.last_repair_reason = event_reason
+                    retry_state.last_repair_reason = second_repair_reason.event_reason
                     planning_result = __repair_planning_output(
                         ctx=ctx,
                         planning_timeout_seconds=planning_timeout_seconds,
                         malformed_output=output_text,
-                        reason=f"{retry_reason}: " + "; ".join(issue_fragments),
+                        reason=f"{second_repair_reason.retry_reason}: "
+                        + "; ".join(issue_fragments),
                         rejection_reasons=issue_fragments,
                         prompt_profile=prompt_profile,
                     )
-                    retry_state.post_repair_blocking_second_repair_used = True
+                    setattr(
+                        retry_state,
+                        second_repair_reason.cap_attribute,
+                        True,
+                    )
                     retry_state.consecutive_failures += 1
                     continue
 
@@ -1582,34 +1641,25 @@ def execute_planning_phase(
                 continue
 
             if not plan_verdict.accepted:
-                missing_verification_steps = _post_repair_missing_verification_steps(
-                    plan_verdict
+                second_repair_reason = _get_targeted_second_repair_reason(
+                    retry_state=retry_state,
+                    plan_verdict=plan_verdict,
                 )
-                if (
-                    missing_verification_steps
-                    and retry_state.repair_prompt_used
-                    and not retry_state.post_repair_validation_second_repair_used
-                ):
-                    issue_fragments = [
-                        (
-                            "missing_verification_steps: steps "
-                            f"{missing_verification_steps[:5]} are still missing "
-                            "verification after repair; add pytest, python -m, "
-                            "npm run build, or an equivalent project test command "
-                            "that proves behavior for each implementation-heavy step"
-                        )
-                    ]
+                if second_repair_reason and not second_repair_reason.cap_used:
+                    issue_fragments = [second_repair_reason.rejection_text]
                     contract_diagnostics = _plan_contract_diagnostics(
                         plan_verdict.details
                     )
                     _emit_planning_diagnostics_contract_violation(
                         ctx,
-                        reason="post_repair_missing_verification_second_pass",
+                        reason=second_repair_reason.event_reason,
                         contract_violations=plan_verdict.reasons,
-                        semantic_violation_codes=["missing_verification_command"],
+                        semantic_violation_codes=[
+                            second_repair_reason.semantic_violation_code
+                        ],
                         contract_diagnostics=contract_diagnostics,
                         output_text=output_text,
-                        strategy_info="post_repair_missing_verification_second_pass",
+                        strategy_info=second_repair_reason.event_reason,
                     )
                     emit_phase_event(
                         ctx.orchestration_state,
@@ -1621,10 +1671,10 @@ def execute_planning_phase(
                             "verification; starting one targeted second repair pass"
                         ),
                         details={
-                            "reason": "post_repair_missing_verification_second_pass",
-                            "missing_verification_steps": missing_verification_steps[
-                                :5
-                            ],
+                            "reason": second_repair_reason.event_reason,
+                            second_repair_reason.issue_key: (
+                                second_repair_reason.step_numbers
+                            ),
                             "validation_reasons": list(plan_verdict.reasons or [])[:5],
                             "repair_attempts": retry_state.consecutive_failures + 1,
                         },
@@ -1632,21 +1682,23 @@ def execute_planning_phase(
                     ctx.logger.warning(
                         "[ORCHESTRATION] Planning repair still missed verification "
                         "in steps %s; starting one targeted second repair pass",
-                        missing_verification_steps[:5],
+                        second_repair_reason.step_numbers,
                     )
-                    retry_state.last_repair_reason = (
-                        "post_repair_missing_verification_second_pass"
-                    )
+                    retry_state.last_repair_reason = second_repair_reason.event_reason
                     planning_result = __repair_planning_output(
                         ctx=ctx,
                         planning_timeout_seconds=planning_timeout_seconds,
                         malformed_output=output_text,
-                        reason="post_repair_missing_verification_steps: "
+                        reason=f"{second_repair_reason.retry_reason}: "
                         + "; ".join(issue_fragments),
                         rejection_reasons=issue_fragments,
                         prompt_profile=prompt_profile,
                     )
-                    retry_state.post_repair_validation_second_repair_used = True
+                    setattr(
+                        retry_state,
+                        second_repair_reason.cap_attribute,
+                        True,
+                    )
                     retry_state.consecutive_failures += 1
                     continue
 

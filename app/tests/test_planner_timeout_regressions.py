@@ -8,9 +8,11 @@ import pytest
 
 from app.models import TaskStatus
 from app.services.orchestration.phases.planning_flow import (
+    _PlanningRetryState,
     _build_repair_rejection_reasons,
     _compress_project_context_for_planning,
     _emit_planning_diagnostics_contract_violation,
+    _get_targeted_second_repair_reason,
     _plan_contract_diagnostics,
     _should_repair_truncated_single_step_plan,
     _terminal_validation_failure_details,
@@ -3197,6 +3199,94 @@ def test_planning_validation_failure_after_repair_marks_session_not_running(
     assert session.status == "paused"
     assert session.is_active is False
     assert session.paused_at is not None
+
+
+def test_targeted_second_repair_reason_centralizes_blocking_eligibility():
+    retry_state = _PlanningRetryState()
+    retry_state.repair_prompt_used = True
+
+    reason = _get_targeted_second_repair_reason(
+        retry_state=retry_state,
+        blocking_repair_issues={"weak_verification_steps": [3, 2]},
+    )
+
+    assert reason is not None
+    assert reason.issue_key == "weak_verification_steps"
+    assert reason.event_reason == "post_repair_weak_verification_second_pass"
+    assert reason.semantic_violation_code == "weak_verification"
+    assert reason.step_numbers == [3, 2]
+    assert reason.cap_used is False
+    assert reason.cap_attribute == "post_repair_blocking_second_repair_used"
+    assert "steps [3, 2]" in reason.rejection_text
+
+
+def test_targeted_second_repair_reason_respects_blocking_cap():
+    retry_state = _PlanningRetryState()
+    retry_state.repair_prompt_used = True
+    retry_state.post_repair_blocking_second_repair_used = True
+
+    reason = _get_targeted_second_repair_reason(
+        retry_state=retry_state,
+        blocking_repair_issues={"background_process_steps": [1]},
+    )
+
+    assert reason is not None
+    assert reason.issue_key == "background_process_steps"
+    assert reason.cap_used is True
+
+
+def test_targeted_second_repair_reason_centralizes_validator_eligibility():
+    retry_state = _PlanningRetryState()
+    retry_state.repair_prompt_used = True
+    verdict = type(
+        "Verdict",
+        (),
+        {
+            "reasons": [
+                "Plan is missing verification commands for implementation-heavy work (steps: [1])"
+            ],
+            "details": {
+                "missing_verification_steps": [1],
+                "semantic_violation_codes": ["missing_verification_command"],
+            },
+        },
+    )()
+
+    reason = _get_targeted_second_repair_reason(
+        retry_state=retry_state,
+        plan_verdict=verdict,
+    )
+
+    assert reason is not None
+    assert reason.issue_key == "missing_verification_steps"
+    assert reason.event_reason == "post_repair_missing_verification_second_pass"
+    assert reason.semantic_violation_code == "missing_verification_command"
+    assert reason.cap_attribute == "post_repair_validation_second_repair_used"
+    assert "implementation-heavy step" in reason.rejection_text
+
+
+def test_targeted_second_repair_reason_does_not_add_brittle_eligibility():
+    retry_state = _PlanningRetryState()
+    retry_state.repair_prompt_used = True
+    verdict = type(
+        "Verdict",
+        (),
+        {
+            "reasons": ["Plan contains brittle heredoc-heavy or malformed commands"],
+            "details": {
+                "brittle_command_subcodes": ["oversized_command_length"],
+                "semantic_violation_codes": ["brittle_command"],
+            },
+        },
+    )()
+
+    assert (
+        _get_targeted_second_repair_reason(
+            retry_state=retry_state,
+            plan_verdict=verdict,
+        )
+        is None
+    )
 
 
 def test_post_repair_weak_verification_gets_one_targeted_second_repair(
