@@ -1127,7 +1127,12 @@ Rules:
 - commands must be short shell strings.
 - verification must be one real command using `python -m`, `node -e`, or `npm run build`.
 - expected_files must be relative paths only.
+- expected_files steps must write real content; no touch-only, TODO, pass, stub, or placeholder-only implementation.
+- no nested project folder; run directly in the task workspace and do not `cd` into a new app/backend/frontend root.
+- no duplicated path roots like frontend/src/frontend/src or backend/src/backend/src.
 - no background processes, dev servers, absolute paths, heredocs, prose, markdown, or extra keys.
+- never use heredoc syntax (`<<EOF`, `<<'PY'`, `cat > file <<`, looped heredocs); use short printf or existing project commands.
+- avoid brittle `python -c` with f-strings, JSON strings, semicolon-heavy code, or mixed quote escaping.
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 

@@ -37,3 +37,25 @@ def test_fullstack_scaffold_task_resolves_workflow_profile():
         )
         == "fullstack_scaffold"
     )
+
+
+def test_backend_api_task_with_negated_frontend_resolves_backend_only():
+    assert (
+        get_workflow_profile(
+            "full_lifecycle",
+            "Tiny FastAPI notes API",
+            "Build a FastAPI notes API. Do not create a frontend or package manager setup.",
+        )
+        == "backend_only"
+    )
+
+
+def test_static_frontend_task_with_negated_backend_resolves_frontend_only():
+    assert (
+        get_workflow_profile(
+            "full_lifecycle",
+            "Static productivity timer landing page",
+            "Build a static frontend landing page. Do not create a backend.",
+        )
+        == "frontend_only"
+    )

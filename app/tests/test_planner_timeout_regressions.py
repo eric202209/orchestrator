@@ -1452,6 +1452,47 @@ def test_planning_repair_prompt_bans_external_helpers_and_heredoc():
     assert "multiple heredoc commands" in prompt
 
 
+def test_planning_repair_reasons_include_heredoc_and_inline_python_subcodes():
+    reasons = _build_repair_rejection_reasons(
+        ["Plan contains brittle heredoc-heavy or malformed commands"],
+        {
+            "brittle_command_subcodes": [
+                "brittle_inline_python",
+                "disallowed_heredoc_shape",
+            ],
+            "brittle_command_step_details": {
+                1: ["disallowed_heredoc_shape"],
+                2: ["brittle_inline_python"],
+            },
+            "placeholder_only_implementation": True,
+        },
+    )
+
+    rendered = "\n".join(reasons)
+    assert "heredoc_command_shape:" in rendered
+    assert "steps [1]" in rendered
+    assert "brittle_inline_python:" in rendered
+    assert "steps [2]" in rendered
+    assert "placeholder_only_implementation:" in rendered
+    assert reasons[-1] == "Plan contains brittle heredoc-heavy or malformed commands"
+
+
+def test_compact_planning_repair_prompt_preserves_phase7k_contract_rules():
+    prompt = PlannerService.build_compact_planning_repair_prompt(
+        malformed_output='[{"step_number":1,"commands":["cat > app.py <<EOF"]}]',
+        rejection_reasons=[
+            "heredoc_command_shape: disallowed_heredoc_shape in steps [1]",
+            "placeholder_only_implementation: implementation steps look like stubs",
+        ],
+    )
+
+    assert "no nested project folder" in prompt
+    assert "no duplicated path roots" in prompt
+    assert "never use heredoc syntax" in prompt
+    assert "placeholder-only implementation" in prompt
+    assert "avoid brittle `python -c`" in prompt
+
+
 def test_planning_repair_prompt_includes_truncated_plan_restart_hint():
     prompt = PlannerService.build_planning_repair_prompt(
         "Build a workflow checker",
@@ -1600,15 +1641,16 @@ def test_validator_rejects_brittle_python_c_with_nested_quotes(tmp_path):
     assert "brittle" in " ".join(verdict.reasons).lower()
 
 
-def test_shell_safe_command_guide_recommends_python_heredoc():
+def test_shell_safe_command_guide_rejects_python_heredoc():
     guide = (
         __import__("pathlib")
         .Path("knowledge/seed/format_guides/shell-safe-command.md")
         .read_text()
     )
 
-    assert "prefer heredoc syntax for inline python" in guide.lower()
-    assert "python3 - <<'PY'" in guide
+    assert "do not use heredoc syntax" in guide.lower()
+    assert "cat > file <<EOF" in guide
+    assert "python3 - <<'PY'" not in guide
 
 
 def test_planning_repair_still_succeeds_for_small_malformed_output():
@@ -4710,8 +4752,7 @@ def test_repair_rejection_reasons_prepend_multiple_heredoc_details():
 
     assert enriched[0].startswith("multiple_heredoc_across_plan:")
     assert "3 heredoc blocks found" in enriched[0]
-    assert "max 1 across entire plan" in enriched[0]
-    assert "Replace all but one with printf" in enriched[0]
+    assert "Replace every heredoc" in enriched[0]
     assert enriched[1:] == reasons
 
 
@@ -4763,14 +4804,19 @@ def test_repair_rejection_reasons_prepend_missing_verification_step_details():
     assert enriched[1:] == reasons
 
 
-def test_repair_rejection_reasons_preserve_base_reasons_without_targeted_subcodes():
+def test_repair_rejection_reasons_prepend_heredoc_shape_subcodes():
     reasons = ["Plan contains brittle heredoc-heavy or malformed commands"]
     details = {
         "brittle_command_subcodes": ["disallowed_heredoc_shape"],
         "brittle_command_step_details": {1: ["disallowed_heredoc_shape"]},
     }
 
-    assert _build_repair_rejection_reasons(reasons, details) == reasons
+    enriched = _build_repair_rejection_reasons(reasons, details)
+
+    assert enriched[0].startswith("heredoc_command_shape:")
+    assert "disallowed_heredoc_shape" in enriched[0]
+    assert "steps [1]" in enriched[0]
+    assert enriched[1:] == reasons
 
 
 def test_repair_prompt_includes_injected_oversized_rejection_line():

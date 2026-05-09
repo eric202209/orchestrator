@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -103,6 +104,8 @@ def get_workflow_profile(
     has_frontend = any(
         marker in combined
         for marker in ("frontend", "react", "vite", "next.js", "nextjs")
+    ) and not _contains_negated_stack_marker(
+        combined, ("frontend", "front end", "react", "vite", "next.js", "nextjs")
     )
     has_backend = any(
         marker in combined
@@ -115,6 +118,9 @@ def get_workflow_profile(
             "node.js",
             "api",
         )
+    ) and not _contains_negated_stack_marker(
+        combined,
+        ("backend", "fastapi", "django", "flask", "express", "node.js", "api"),
     )
     scaffold_markers = (
         "set up",
@@ -134,6 +140,22 @@ def get_workflow_profile(
             return "backend_only"
 
     return "default" if "default" in WORKFLOW_PROFILES else execution_profile
+
+
+def _contains_negated_stack_marker(text: str, markers: tuple[str, ...]) -> bool:
+    """Return True when a stack term is only mentioned as an exclusion."""
+
+    for marker in markers:
+        escaped = re.escape(marker)
+        patterns = (
+            rf"\bdo\s+not\s+(?:create|build|add|include|use|make|set\s+up|setup)\s+(?:a\s+|an\s+)?{escaped}\b",
+            rf"\bdon't\s+(?:create|build|add|include|use|make|set\s+up|setup)\s+(?:a\s+|an\s+)?{escaped}\b",
+            rf"\bwithout\s+(?:a\s+|an\s+)?{escaped}\b",
+            rf"\bno\s+(?:new\s+)?{escaped}\b",
+        )
+        if any(re.search(pattern, text) for pattern in patterns):
+            return True
+    return False
 
 
 def get_task_report_path(project_root: Path, task: Task) -> Optional[Path]:

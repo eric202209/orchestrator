@@ -96,12 +96,72 @@ def _build_repair_rejection_reasons(
         )
         targeted_reasons.append(
             "multiple_heredoc_across_plan: "
-            f"{count_clause}; max 1 across entire plan. "
-            "Replace all but one with printf."
+            f"{count_clause}. Replace every heredoc with short printf or "
+            "package-manager/editor-friendly commands."
+        )
+
+    step_details = details.get("brittle_command_step_details") or {}
+    heredoc_subcodes = subcodes.intersection(
+        {
+            "disallowed_heredoc_shape",
+            "multiple_heredoc_in_command",
+            "looped_heredoc",
+            "unsafe_heredoc_target",
+            "markdown_wrapped_heredoc",
+        }
+    )
+    if heredoc_subcodes:
+        heredoc_steps = sorted(
+            {
+                step_number
+                for step_number in _normalized_step_numbers(step_details)
+                if heredoc_subcodes.intersection(
+                    set(
+                        step_details.get(step_number)
+                        or step_details.get(str(step_number))
+                        or []
+                    )
+                )
+            }
+        )
+        step_clause = f" in steps {heredoc_steps}" if heredoc_steps else ""
+        targeted_reasons.append(
+            "heredoc_command_shape: "
+            f"{', '.join(sorted(heredoc_subcodes))}{step_clause}. "
+            "Remove all heredoc syntax (`<<EOF`, `<<'PY'`, cat heredocs, and looped "
+            "heredocs); use short printf or existing project commands instead."
+        )
+
+    if "brittle_inline_python" in subcodes:
+        inline_python_steps = sorted(
+            {
+                step_number
+                for step_number in _normalized_step_numbers(step_details)
+                if "brittle_inline_python"
+                in set(
+                    step_details.get(step_number)
+                    or step_details.get(str(step_number))
+                    or []
+                )
+            }
+        )
+        step_clause = f" in steps {inline_python_steps}" if inline_python_steps else ""
+        targeted_reasons.append(
+            "brittle_inline_python: "
+            f"nested `python -c` command shape{step_clause}. Replace with "
+            "short package-manager/editor-friendly commands or simple printf writes; "
+            "do not embed f-strings, JSON strings, semicolon-heavy code, or mixed "
+            "shell quoting in one command."
+        )
+
+    if details.get("placeholder_only_implementation"):
+        targeted_reasons.append(
+            "placeholder_only_implementation: implementation steps look like stubs "
+            "or placeholders. Replace TODO/pass/stub/touch-only content with real "
+            "minimal behavior and verify it."
         )
 
     if "too_many_lines" in subcodes:
-        step_details = details.get("brittle_command_step_details") or {}
         too_many_line_steps = [
             step_number
             for step_number in _normalized_step_numbers(step_details)
