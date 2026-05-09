@@ -9,8 +9,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${SCRIPT_DIR}"
 FRONTEND_DIR="${PROJECT_ROOT}/frontend"
 VENV_DIR="${PROJECT_ROOT}/venv"
-LOG_DIR="${PROJECT_ROOT}/logs"
-PID_DIR="${PROJECT_ROOT}/run"
+VAR_DIR="${PROJECT_ROOT}/var"
+LOG_DIR="${VAR_DIR}/logs"
+PID_DIR="${VAR_DIR}/run"
+DATA_DIR="${VAR_DIR}/data"
 
 echo "🚀 Starting Orchestrator Network..."
 echo ""
@@ -50,6 +52,7 @@ load_env() {
 prepare_logs() {
     mkdir -p "${LOG_DIR}"
     mkdir -p "${PID_DIR}"
+    mkdir -p "${DATA_DIR}"
     : > "${LOG_DIR}/backend.log"
     : > "${LOG_DIR}/worker.log"
     : > "${LOG_DIR}/frontend.log"
@@ -97,11 +100,7 @@ ensure_frontend_deps() {
 ensure_database() {
     echo -e "${BLUE}🗄️  Checking database...${NC}"
     cd "${PROJECT_ROOT}"
-    if [ ! -f "${PROJECT_ROOT}/orchestrator.db" ]; then
-        "${VENV_DIR}/bin/python" -c "from app.database import init_db; init_db(); print('✅ Database initialized')"
-    else
-        echo -e "${GREEN}✅ Database exists${NC}"
-    fi
+    "${VENV_DIR}/bin/python" -c "from app.database import init_db; init_db(); print('✅ Database ready')"
     echo ""
 }
 
@@ -231,7 +230,7 @@ start_qdrant() {
     fi
 
     local QDRANT_BIN="${PROJECT_ROOT}/bin/qdrant"
-    local QDRANT_STORAGE="${PROJECT_ROOT}/data/qdrant"
+    local QDRANT_STORAGE="${DATA_DIR}/qdrant"
     mkdir -p "${QDRANT_STORAGE}"
 
     if [ ! -x "${QDRANT_BIN}" ]; then
@@ -256,10 +255,10 @@ start_qdrant() {
 
     if [ "${qdrant_ok}" = true ]; then
         echo -e "${GREEN}✅ Qdrant started on port 6333${NC}"
-        echo -e "${GREEN}📝 Qdrant logs: tail -f logs/qdrant.log${NC}"
+        echo -e "${GREEN}📝 Qdrant logs: tail -f var/logs/qdrant.log${NC}"
     else
         echo -e "${RED}❌ Qdrant failed to start — knowledge layer unavailable${NC}"
-        echo -e "${YELLOW}Check logs: cat logs/qdrant.log${NC}"
+        echo -e "${YELLOW}Check logs: cat var/logs/qdrant.log${NC}"
     fi
     echo ""
 }
@@ -284,7 +283,7 @@ start_backend() {
     fi
     
     # Start backend in background with comprehensive timeout configuration
-    # LOGS DIRECTIVE: Write directly to logs/ directory (not /tmp/) for history preservation
+    # LOGS DIRECTIVE: Write directly to var/logs/ for history preservation.
     cleanup_pid_file "${PID_DIR}/backend.pid"
     nohup "${VENV_DIR}/bin/uvicorn" app.main:app \
         --host "${BACKEND_HOST}" \
@@ -312,11 +311,11 @@ start_backend() {
     if [ "${backend_ok}" = true ]; then
         echo -e "${GREEN}✅ Backend started on ${BACKEND_HOST}:${BACKEND_PORT}${NC}"
         echo -e "${GREEN}🆔 Backend PID: ${backend_pid}${NC}"
-        echo -e "${GREEN}📝 Backend logs: tail -f logs/backend.log${NC}"
+        echo -e "${GREEN}📝 Backend logs: tail -f var/logs/backend.log${NC}"
     else
         rm -f "${PID_DIR}/backend.pid"
         echo -e "${RED}❌ Backend failed to start!${NC}"
-        echo -e "${YELLOW}Check logs: cat logs/backend.log${NC}"
+        echo -e "${YELLOW}Check logs: cat var/logs/backend.log${NC}"
         return 1
     fi
     echo ""
@@ -339,7 +338,7 @@ start_workers() {
     fi
     
     # Start worker in background
-    # LOGS DIRECTIVE: Write directly to logs/ directory (not /tmp/) for history preservation
+    # LOGS DIRECTIVE: Write directly to var/logs/ for history preservation.
     cleanup_pid_file "${PID_DIR}/worker.pid"
     nohup "${VENV_DIR}/bin/celery" \
         -A app.celery_app worker \
@@ -363,11 +362,11 @@ start_workers() {
     if [ "${worker_ok}" = true ] || check_process "celery -A app.celery_app worker"; then
         echo -e "${GREEN}✅ Celery worker started${NC}"
         echo -e "${GREEN}🆔 Worker PID: ${worker_pid}${NC}"
-        echo -e "${GREEN}📝 Worker logs: tail -f logs/worker.log${NC}"
+        echo -e "${GREEN}📝 Worker logs: tail -f var/logs/worker.log${NC}"
     else
         rm -f "${PID_DIR}/worker.pid"
         echo -e "${RED}❌ Worker failed to start!${NC}"
-        echo -e "${YELLOW}Check logs: cat logs/worker.log${NC}"
+        echo -e "${YELLOW}Check logs: cat var/logs/worker.log${NC}"
         return 1
     fi
     echo ""
@@ -394,7 +393,7 @@ start_frontend() {
     fi
     
     # Start frontend in background
-    # LOGS DIRECTIVE: Write directly to logs/ directory (not /tmp/) for history preservation
+    # LOGS DIRECTIVE: Write directly to var/logs/ for history preservation.
     cleanup_pid_file "${PID_DIR}/frontend.pid"
     nohup pnpm dev >> "${LOG_DIR}/frontend.log" 2>&1 &
     local frontend_pid=$!
@@ -415,11 +414,11 @@ start_frontend() {
     if [ "${frontend_ok}" = true ]; then
         echo -e "${GREEN}✅ Frontend started on port 3000${NC}"
         echo -e "${GREEN}🆔 Frontend PID: ${frontend_pid}${NC}"
-        echo -e "${GREEN}📝 Frontend logs: tail -f logs/frontend.log${NC}"
+        echo -e "${GREEN}📝 Frontend logs: tail -f var/logs/frontend.log${NC}"
     else
         rm -f "${PID_DIR}/frontend.pid"
         echo -e "${RED}❌ Frontend failed to start!${NC}"
-        echo -e "${YELLOW}Check logs: cat logs/frontend.log${NC}${NC}"
+        echo -e "${YELLOW}Check logs: cat var/logs/frontend.log${NC}${NC}"
         return 1
     fi
     echo ""
@@ -470,7 +469,7 @@ check_health() {
         echo -e "${GREEN}🎉 All services operational!${NC}"
     else
         echo -e "${RED}⚠️  Some services failed health checks${NC}"
-        echo "Check logs: tail -20 logs/backend.log logs/frontend.log logs/worker.log"
+        echo "Check logs: tail -20 var/logs/backend.log var/logs/frontend.log var/logs/worker.log"
     fi
 }
 
@@ -519,9 +518,9 @@ main() {
     echo "🐘 Redis: localhost:6379"
     echo ""
     echo "📝 View logs (permanent storage):"
-    echo "  Backend:    tail -f logs/backend.log"
-    echo "  Worker:     tail -f logs/worker.log"
-    echo "  Frontend:   tail -f logs/frontend.log"
+    echo "  Backend:    tail -f var/logs/backend.log"
+    echo "  Worker:     tail -f var/logs/worker.log"
+    echo "  Frontend:   tail -f var/logs/frontend.log"
     echo ""
     echo "🛑 To stop all services:"
     echo "  pkill -f 'uvicorn app.main:app'"
@@ -533,4 +532,3 @@ main() {
 
 # Run main function
 main
-

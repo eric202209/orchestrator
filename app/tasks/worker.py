@@ -11,17 +11,14 @@ import json
 import asyncio
 import time
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 from datetime import datetime, timezone
-from sqlalchemy.orm import Session
 from app.celery_app import celery_app
 from app.models import (
     Session as SessionModel,
     SessionTask,
     Task,
-    TaskExecution,
     TaskStatus,
-    LogEntry,
     Project,
 )
 from app.database import get_db_session
@@ -48,27 +45,18 @@ from app.services.orchestration import (
     render_task_report as _render_task_report,
     run_virtual_merge_gate as _run_virtual_merge_gate,
     should_execute_in_canonical_project_root as _should_execute_in_canonical_project_root,
-    should_restore_workspace_on_failure,
     should_force_review_execution_profile as _should_force_review_execution_profile,
-)
-from app.services.orchestration.context_assembly import (
-    collect_workspace_inventory_paths,
-    sanitize_progress_notes_for_workspace,
 )
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.persistence import (
     append_orchestration_event as _append_orchestration_event,
-    find_latest_orchestration_event as _find_latest_orchestration_event,
-    read_orchestration_events as _read_orchestration_events,
     record_live_log as _record_live_log,
     record_validation_verdict as _record_validation_verdict,
-    restore_step_result as _restore_step_result,
     save_orchestration_checkpoint as _save_orchestration_checkpoint,
     set_session_alert as _set_session_alert,
 )
 from app.services.orchestration.execution.runtime import (
     get_state_manager_path as _get_state_manager_path,
-    restore_workspace_after_abort as _restore_workspace_after_abort,
     snapshot_workspace_before_run as _snapshot_workspace_before_run,
     write_project_state_snapshot as _write_project_state_snapshot,
 )
@@ -87,7 +75,6 @@ from app.services.session.session_runtime_service import (
 )
 from app.services.task_execution_service import (
     create_task_execution,
-    get_task_execution,
 )
 from app.services.orchestration.policy import get_policy_profile
 from app.services.orchestration.policy import (
@@ -95,11 +82,6 @@ from app.services.orchestration.policy import (
     ORCHESTRATION_TASK_TIME_LIMIT_SECONDS,
 )
 from app.services.workspace.system_settings import get_effective_policy_profile
-from app.services.workspace.system_settings import (
-    get_effective_agent_backend,
-    get_effective_agent_model_family,
-)
-from app.config import settings
 from app.services.orchestration.validation.workspace_guard import (
     verify_workspace_contract,
 )
@@ -115,718 +97,24 @@ logger = logging.getLogger(__name__)
 
 MAX_SUBFOLDER_COLLISION_ATTEMPTS = 999
 
-_PROGRESS_NOTES_MAX_BYTES = 8000
-_STALE_QUEUE_CLAIM_SLA_SECONDS = 900
-
-
-def _decode_context_snapshot_object(raw_snapshot: Any) -> Dict[str, Any]:
-    if not raw_snapshot:
-        return {}
-    try:
-        decoded = json.loads(raw_snapshot)
-    except (TypeError, ValueError):
-        return {}
-    if isinstance(decoded, dict):
-        return decoded
-    return {"previous_context_snapshot": decoded}
-
-
-def _parse_event_timestamp(raw_timestamp: Optional[str]) -> Optional[datetime]:
-    text = str(raw_timestamp or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
-
-def _coerce_utc_datetime(value: Optional[datetime]) -> Optional[datetime]:
-    if value is None:
-        return None
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
-
-
-def _inject_progress_notes_into_context(
-    *,
-    orchestration_state: Any,
-    logger: Any,
-) -> None:
-    """Read .openclaw/progress_notes.md and prepend it to project_context.
-
-    This is the orient phase from best-practices: give the planner full history
-    of what previous task runs already accomplished so it does not repeat work
-    or contradict earlier decisions.
-    """
-    from pathlib import Path
-
-    project_dir = getattr(orchestration_state, "project_dir", None)
-    if not project_dir:
-        return
-    notes_path = Path(project_dir) / ".openclaw" / "progress_notes.md"
-    if not notes_path.exists():
-        return
-    try:
-        notes_text = notes_path.read_text(encoding="utf-8", errors="replace")
-        sanitized_notes = sanitize_progress_notes_for_workspace(
-            notes_text,
-            Path(project_dir),
-        )
-        workspace_inventory = collect_workspace_inventory_paths(
-            Path(project_dir),
-            max_files=40,
-        )
-        # Keep only the tail so large histories don't flood the context window.
-        if len(sanitized_notes) > _PROGRESS_NOTES_MAX_BYTES:
-            sanitized_notes = (
-                "...(truncated)\n" + sanitized_notes[-_PROGRESS_NOTES_MAX_BYTES:]
-            )
-        workspace_truth = ["=== CURRENT WORKSPACE TRUTH ==="]
-        if workspace_inventory:
-            workspace_truth.extend(f"- {path}" for path in workspace_inventory[:40])
-        else:
-            workspace_truth.append("- No tracked files detected yet.")
-        prefix = (
-            "=== PRIOR SESSION PROGRESS NOTES ===\n"
-            + sanitized_notes.strip()
-            + "\n=== END PRIOR SESSION PROGRESS NOTES ===\n\n"
-            + "\n".join(workspace_truth)
-            + "\n=== END CURRENT WORKSPACE TRUTH ===\n\n"
-        )
-        current = orchestration_state.project_context or ""
-        orchestration_state.project_context = (prefix + current)[:8000]
-        logger.info("[ORIENT] Injected progress notes from %s", notes_path)
-    except Exception as e:
-        logger.warning("[ORIENT] Failed to read progress notes: %s", e)
-
-
-def _get_next_pending_project_task(
-    db: Session, project_id: Optional[int]
-) -> Optional[Task]:
-    if not project_id:
-        return None
-    return TaskService(db).get_next_pending_task(project_id)
-
-
-def _get_latest_session_task_link(
-    db: Session, session_id: int, task_id: int
-) -> Optional[SessionTask]:
-    return (
-        db.query(SessionTask)
-        .filter(
-            SessionTask.session_id == session_id,
-            SessionTask.task_id == task_id,
-        )
-        .order_by(SessionTask.id.desc())
-        .first()
-    )
-
-
-def _runtime_selection_details(db: Session) -> Dict[str, Optional[str]]:
-    return {
-        "backend": get_effective_agent_backend(
-            settings.ORCHESTRATOR_AGENT_BACKEND, db=db
-        ),
-        "model_family": get_effective_agent_model_family(
-            settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=db
-        ),
-    }
-
-
-def _should_reject_stale_dispatch_claim(
-    *,
-    dispatch_project_dir: Optional[Path],
-    session_id: int,
-    task_id: int,
-    queued_event: Optional[Dict[str, Any]],
-    queue_latency_seconds: Optional[float],
-    resume_checkpoint_name: Optional[str] = None,
-) -> Optional[str]:
-    # Resume dispatches are always intentional — the user explicitly triggered
-    # them.  The TASK_QUEUED event they inherit belongs to the original run, so
-    # latency-based stale detection produces false positives here.
-    if resume_checkpoint_name:
-        return None
-    if not dispatch_project_dir or not queued_event:
-        return None
-    if (
-        queue_latency_seconds is None
-        or queue_latency_seconds <= _STALE_QUEUE_CLAIM_SLA_SECONDS
-    ):
-        return None
-
-    queued_at = _parse_event_timestamp((queued_event or {}).get("timestamp"))
-    if queued_at is None:
-        return "stale_queue_dispatch"
-
-    latest_post_queue_event = _find_latest_orchestration_event(
-        dispatch_project_dir,
-        session_id,
-        task_id,
-        event_types={
-            EventType.TASK_CLAIMED,
-            EventType.TASK_STARTED,
-            EventType.PHASE_STARTED,
-            EventType.PHASE_FINISHED,
-        },
-    )
-    latest_post_queue_at = _parse_event_timestamp(
-        (latest_post_queue_event or {}).get("timestamp")
-    )
-    if latest_post_queue_at is not None and latest_post_queue_at >= queued_at:
-        return "stale_queue_dispatch_already_progressed"
-    return "stale_queue_dispatch"
-
-
-def _find_queued_event_for_dispatch(
-    *,
-    dispatch_project_dir: Optional[Path],
-    session_id: int,
-    task_id: int,
-    queued_event_id: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
-    if not dispatch_project_dir:
-        return None
-    if queued_event_id:
-        for event in _read_orchestration_events(
-            dispatch_project_dir,
-            session_id,
-            task_id,
-            event_type_filter=EventType.TASK_QUEUED,
-        ):
-            if event.get("event_id") == queued_event_id:
-                return event
-        return None
-    return _find_latest_orchestration_event(
-        dispatch_project_dir,
-        session_id,
-        task_id,
-        event_types={EventType.TASK_QUEUED},
-    )
-
-
-def _claim_queued_task_for_worker(
-    *,
-    db: Session,
-    session: SessionModel,
-    task: Task,
-    session_task_link: Optional[SessionTask],
-    expected_session_instance_id: Optional[str],
-) -> tuple[bool, str, Optional[datetime], Optional[SessionTask]]:
-    """Claim a queued task exactly once for the current worker dispatch."""
-
-    if (
-        expected_session_instance_id
-        and session.instance_id != expected_session_instance_id
-    ):
-        db.rollback()
-        return False, "session_instance_changed", None, session_task_link
-
-    if session.status not in {"pending", "running", "paused", "awaiting_input"}:
-        db.rollback()
-        return False, f"session_not_runnable:{session.status}", None, session_task_link
-
-    claim_started_at = datetime.now(timezone.utc)
-    updated_task_rows = (
-        db.query(Task)
-        .filter(Task.id == task.id, Task.status == TaskStatus.PENDING)
-        .update(
-            {
-                Task.status: TaskStatus.RUNNING,
-                Task.started_at: claim_started_at,
-                Task.completed_at: None,
-                Task.error_message: None,
-            },
-            synchronize_session=False,
-        )
-    )
-    if updated_task_rows != 1:
-        db.rollback()
-        return False, f"task_not_claimable:{task.status.value}", None, session_task_link
-
-    latest_link = session_task_link or _get_latest_session_task_link(
-        db, session.id, task.id
-    )
-    if latest_link is None:
-        db.rollback()
-        return False, "missing_session_task_link", None, None
-
-    updated_link_rows = (
-        db.query(SessionTask)
-        .filter(
-            SessionTask.id == latest_link.id, SessionTask.status == TaskStatus.PENDING
-        )
-        .update(
-            {
-                SessionTask.status: TaskStatus.RUNNING,
-                SessionTask.started_at: claim_started_at,
-                SessionTask.completed_at: None,
-            },
-            synchronize_session=False,
-        )
-    )
-    if updated_link_rows != 1:
-        db.rollback()
-        return (
-            False,
-            f"session_task_not_claimable:{latest_link.status.value}",
-            None,
-            latest_link,
-        )
-
-    db.commit()
-    db.refresh(session)
-    db.refresh(task)
-    latest_link = _get_latest_session_task_link(db, session.id, task.id)
-    return True, "claimed", claim_started_at, latest_link
-
-
-def _sync_task_execution_state(
-    db: Session,
-    task_execution_id: Optional[int],
-    *,
-    status: TaskStatus,
-    started_at: Optional[datetime] = None,
-    completed_at: Optional[datetime] = None,
-) -> None:
-    task_execution = get_task_execution(db, task_execution_id)
-    if not task_execution:
-        return
-    task_execution.status = status
-    if started_at is not None:
-        task_execution.started_at = started_at
-    if completed_at is not None:
-        task_execution.completed_at = completed_at
-    db.commit()
-
-
-def _clear_orphaned_running_state_without_active_execution(
-    db: Session,
-    *,
-    session_id: int,
-    task_id: int,
-) -> None:
-    """A task/link cannot remain RUNNING after its only active execution is terminal."""
-
-    active_execution = (
-        db.query(TaskExecution)
-        .filter(
-            TaskExecution.session_id == session_id,
-            TaskExecution.task_id == task_id,
-            TaskExecution.status == TaskStatus.RUNNING,
-        )
-        .first()
-    )
-    if active_execution:
-        return
-
-    task = db.query(Task).filter(Task.id == task_id).first()
-    if task and task.status == TaskStatus.RUNNING:
-        task.status = TaskStatus.PENDING
-        task.started_at = None
-        task.completed_at = None
-
-    running_links = (
-        db.query(SessionTask)
-        .filter(
-            SessionTask.session_id == session_id,
-            SessionTask.task_id == task_id,
-            SessionTask.status == TaskStatus.RUNNING,
-        )
-        .all()
-    )
-    for link in running_links:
-        link.status = TaskStatus.PENDING
-        link.started_at = None
-        link.completed_at = None
-
-    db.commit()
-
-
-def _sync_task_execution_from_task_state(
-    db: Session,
-    task_execution_id: Optional[int],
-    *,
-    task: Optional[Task],
-    session_task_link: Optional[SessionTask],
-) -> None:
-    task_execution = get_task_execution(db, task_execution_id)
-    if not task_execution:
-        return
-
-    current_status = (
-        getattr(session_task_link, "status", None)
-        or getattr(task, "status", None)
-        or task_execution.status
-    )
-    if task_execution.status in {
-        TaskStatus.DONE,
-        TaskStatus.FAILED,
-        TaskStatus.CANCELLED,
-    } and current_status not in {
-        TaskStatus.DONE,
-        TaskStatus.FAILED,
-        TaskStatus.CANCELLED,
-    }:
-        return
-    task_execution.status = current_status
-    if getattr(session_task_link, "started_at", None) or getattr(
-        task, "started_at", None
-    ):
-        task_execution.started_at = getattr(
-            session_task_link, "started_at", None
-        ) or getattr(task, "started_at", None)
-    if current_status in {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED}:
-        task_execution.completed_at = (
-            getattr(session_task_link, "completed_at", None)
-            or getattr(task, "completed_at", None)
-            or datetime.now(timezone.utc)
-        )
-    db.commit()
-
-
-def _build_base_project_context(
-    task_service: Any,
-    project: Any,
-    task: Any,
-    hydration_result: Dict[str, Any],
-    max_chars: int = 5000,
-) -> str:
-    context = task_service.build_project_execution_context(
-        project=project,
-        current_task=task,
-    )
-    if hydration_result.get("hydrated"):
-        hydrated_sources = ", ".join(
-            f"#{item.get('task_id')} {item.get('title')}"
-            for item in hydration_result.get("source_tasks", [])[:6]
-        )
-        context = (
-            f"{context}\n"
-            f"Hydrated baseline sources available directly in this workspace: {hydrated_sources}"
-        )[:max_chars]
-    return context
-
-
-def _restore_workspace_snapshot_if_needed(
-    reason: str,
-    *,
-    project: Any,
-    session_id: int,
-    task_id: int,
-    orchestration_state: Any,
-    policy_profile_name: str,
-    runs_in_canonical_baseline: bool,
-    task_service: Any,
-    emit_live: Any,
-) -> Optional[Dict[str, Any]]:
-    if not project:
-        return None
-    should_restore = should_restore_workspace_on_failure(
-        reason, policy_profile=policy_profile_name
-    )
-    if not should_restore:
-        logger.warning(
-            "[ORCHESTRATION] Preserved workspace for task %s after %s; automatic restore is limited to isolation-violation failures",
-            task_id,
-            reason,
-        )
-        emit_live(
-            "WARN",
-            (
-                "[ORCHESTRATION] Preserved the current workspace after "
-                f"{reason}; automatic restore is only applied for "
-                "workspace-isolation violations"
-            ),
-            metadata={
-                "phase": "workspace_restore",
-                "reason": reason,
-                "restore_skipped": True,
-                "policy": policy_profile_name,
-            },
-        )
-        _append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
-            session_id=session_id,
-            task_id=task_id,
-            event_type=EventType.WORKSPACE_RESTORE_SKIPPED,
-            details={
-                "reason": reason,
-                "policy": "preserve_on_non_isolation_failures",
-            },
-        )
-        return {
-            "restored": False,
-            "reason": "preserved_non_isolation_failure",
-            "target_path": str(orchestration_state.project_dir),
-        }
-    restore_result = _restore_workspace_after_abort(
-        task_service,
-        project,
-        task_id,
-        orchestration_state.project_dir,
-        preserve_project_root_rules=runs_in_canonical_baseline,
-    )
-    if restore_result and restore_result.get("restored"):
-        logger.warning(
-            "[ORCHESTRATION] Restored workspace snapshot for task %s after %s (%s files)",
-            task_id,
-            reason,
-            restore_result.get("files_restored", 0),
-        )
-        emit_live(
-            "WARN",
-            (
-                "[ORCHESTRATION] Restored workspace to the pre-run snapshot "
-                f"after {reason} ({restore_result.get('files_restored', 0)} files)"
-            ),
-            metadata={
-                "phase": "workspace_restore",
-                "reason": reason,
-                "snapshot_path": restore_result.get("snapshot_path"),
-                "target_path": restore_result.get("target_path"),
-            },
-        )
-    elif (
-        restore_result
-        and restore_result.get("reason")
-        == "empty_snapshot_preserved_existing_workspace"
-    ):
-        logger.warning(
-            "[ORCHESTRATION] Skipped destructive restore for task %s after %s because snapshot was empty and workspace already had files",
-            task_id,
-            reason,
-        )
-        emit_live(
-            "WARN",
-            (
-                "[ORCHESTRATION] Skipped restoring an empty pre-run snapshot "
-                f"after {reason} to preserve the current workspace "
-                f"({restore_result.get('current_workspace_files', 0)} files)"
-            ),
-            metadata={
-                "phase": "workspace_restore",
-                "reason": reason,
-                "snapshot_path": restore_result.get("snapshot_path"),
-                "target_path": restore_result.get("target_path"),
-                "current_workspace_files": restore_result.get(
-                    "current_workspace_files", 0
-                ),
-                "restore_skipped": True,
-            },
-        )
-        _append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
-            session_id=session_id,
-            task_id=task_id,
-            event_type=EventType.WORKSPACE_RESTORE_SKIPPED,
-            details={
-                "reason": reason,
-                "policy": "empty_snapshot_preserved_existing_workspace",
-            },
-        )
-    elif restore_result and restore_result.get("restored"):
-        _append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
-            session_id=session_id,
-            task_id=task_id,
-            event_type=EventType.WORKSPACE_PRESERVED,
-            details={
-                "reason": reason,
-                "restored_files": restore_result.get("files_restored", 0),
-            },
-        )
-    return restore_result
-
-
-def _apply_checkpoint_payload(
-    checkpoint_payload: Dict[str, Any],
-    *,
-    orchestration_state: Any,
-    task: Any,
-    session_id: int,
-    task_id: int,
-    prompt: str,
-    emit_live: Any,
-) -> tuple:
-    """Apply checkpoint data to orchestration_state. Returns (updated_prompt, compatibility)."""
-    checkpoint_context = checkpoint_payload.get("context", {}) or {}
-    checkpoint_state = checkpoint_payload.get("orchestration_state", {}) or {}
-
-    prompt = checkpoint_context.get("task_description", prompt) or prompt
-    orchestration_state.project_name = checkpoint_context.get(
-        "project_name", orchestration_state.project_name
-    )
-    orchestration_state.project_context = checkpoint_context.get(
-        "project_context", orchestration_state.project_context
-    )
-    if checkpoint_context.get("task_subfolder"):
-        orchestration_state._task_subfolder_override = checkpoint_context.get(
-            "task_subfolder"
-        )
-    # Do NOT restore _project_dir_override from checkpoint — it is always
-    # recomputed from current project settings (canonical baseline logic
-    # runs after checkpoint load). Restoring a stale saved path causes
-    # the wrong workspace (old host path, or path with task subfolder) to
-    # be used in prompts and tool calls.
-
-    orchestration_state.plan = checkpoint_state.get("plan", []) or []
-    orchestration_state.reasoning_artifact = checkpoint_state.get("reasoning_artifact")
-    orchestration_state.current_step_index = (
-        checkpoint_state.get(
-            "current_step_index",
-            checkpoint_payload.get("current_step_index", 0) or 0,
-        )
-        or 0
-    )
-    orchestration_state.debug_attempts = (
-        checkpoint_state.get("debug_attempts", []) or []
-    )
-    orchestration_state.changed_files = checkpoint_state.get("changed_files", []) or []
-    orchestration_state.validation_history = (
-        checkpoint_state.get("validation_history", []) or []
-    )
-    orchestration_state.phase_history = checkpoint_state.get("phase_history", []) or []
-    orchestration_state.last_plan_validation = checkpoint_state.get(
-        "last_plan_validation"
-    )
-    orchestration_state.last_completion_validation = checkpoint_state.get(
-        "last_completion_validation"
-    )
-    orchestration_state.relaxed_mode = bool(checkpoint_state.get("relaxed_mode", False))
-    orchestration_state.completion_repair_attempts = int(
-        checkpoint_state.get("completion_repair_attempts", 0) or 0
-    )
-    orchestration_state.debug_repair_task_execution_ids = [
-        int(item)
-        for item in checkpoint_state.get("debug_repair_task_execution_ids", []) or []
-        if str(item).isdigit()
-    ]
-    orchestration_state.execution_results = [
-        _restore_step_result(item)
-        for item in checkpoint_state.get(
-            "execution_results", checkpoint_payload.get("step_results", [])
-        )
-    ]
-    # Restore execution status: if a plan exists with pending steps, mark
-    # as EXECUTING so downstream checkpoint saves reflect the real phase.
-    # Never restore ABORTED/DONE — those are terminal states from a prior
-    # run and we are actively resuming.
-    raw_status = checkpoint_state.get("status", "")
-    if raw_status in ("executing", "debugging", "revising_plan"):
-        try:
-            orchestration_state.status = OrchestrationStatus(raw_status)
-        except ValueError:
-            pass
-    elif orchestration_state.plan and orchestration_state.current_step_index < len(
-        orchestration_state.plan
-    ):
-        orchestration_state.status = OrchestrationStatus.EXECUTING
-    _append_orchestration_event(
-        project_dir=orchestration_state.project_dir,
-        session_id=session_id,
-        task_id=task_id,
-        event_type=EventType.CHECKPOINT_LOADED,
-        details={
-            "checkpoint_name": checkpoint_payload.get("_resolved_checkpoint_name")
-            or checkpoint_payload.get("checkpoint_name"),
-            "requested_checkpoint_name": checkpoint_payload.get(
-                "_requested_checkpoint_name"
-            ),
-        },
-    )
-    if (
-        orchestration_state.completion_repair_attempts > 0
-        and orchestration_state.plan
-        and len(orchestration_state.execution_results)
-        == int(orchestration_state.current_step_index or 0)
-        and int(orchestration_state.current_step_index or 0)
-        == len(orchestration_state.plan) - 1
-    ):
-        stale_repair_step = orchestration_state.plan[-1]
-        orchestration_state.plan = orchestration_state.plan[
-            : orchestration_state.current_step_index
-        ]
-        orchestration_state.completion_repair_attempts = 0
-        task.steps = json.dumps(orchestration_state.plan)
-        emit_live(
-            "WARN",
-            "[ORCHESTRATION] Dropped a stale pending completion-repair step from the resume checkpoint and reset the repair budget",
-            metadata={
-                "phase": "resume",
-                "stale_completion_repair_step": stale_repair_step.get(
-                    "description", ""
-                ),
-            },
-        )
-    completed_step_count = max(
-        len(orchestration_state.execution_results),
-        int(orchestration_state.current_step_index or 0),
-    )
-    compatibility = (
-        ValidatorService.assess_plan_workspace_compatibility(
-            project_dir=orchestration_state.project_dir,
-            plan=orchestration_state.plan,
-            completed_step_count=completed_step_count,
-        )
-        if orchestration_state.plan
-        else {"compatible": True}
-    )
-    if orchestration_state.plan and orchestration_state.current_step_index >= len(
-        orchestration_state.plan
-    ):
-        orchestration_state.completion_repair_attempts = 0
-    return prompt, compatibility
-
-
-def _emit_dispatch_rejected(
-    *,
-    reason: str,
-    log_message: str,
-    db: Session,
-    session: SessionModel,
-    session_id: int,
-    task_id: int,
-    task_execution_id: Optional[int],
-    dispatch_project_dir: Optional[Path],
-    expected_session_instance_id: Optional[str],
-    celery_task_id: Optional[str],
-    queue_latency_seconds: Optional[float],
-    queued_event: Optional[Dict[str, Any]],
-    emit_live: Any,
-) -> Dict[str, Any]:
-    reject_details = {
-        "reason": reason,
-        "session_instance_id": session.instance_id,
-        "expected_session_instance_id": expected_session_instance_id,
-        "project_dir": str(dispatch_project_dir) if dispatch_project_dir else None,
-        "celery_task_id": celery_task_id,
-        "task_execution_id": task_execution_id,
-        "queue_latency_seconds": queue_latency_seconds,
-        "queued_event_id": (queued_event or {}).get("event_id"),
-        **_runtime_selection_details(db),
-    }
-    if dispatch_project_dir:
-        _append_orchestration_event(
-            project_dir=dispatch_project_dir,
-            session_id=session_id,
-            task_id=task_id,
-            event_type=EventType.TASK_DISPATCH_REJECTED,
-            details=reject_details,
-        )
-    if task_execution_id:
-        _clear_orphaned_running_state_without_active_execution(
-            db,
-            session_id=session_id,
-            task_id=task_id,
-        )
-    emit_live("WARN", log_message, metadata=reject_details)
-    return {"status": "ignored", "reason": reason}
+from app.tasks.worker_support.worker_helpers import (
+    _apply_checkpoint_payload,
+    _build_base_project_context,
+    _claim_queued_task_for_worker,
+    _coerce_utc_datetime,
+    _decode_context_snapshot_object,
+    _emit_dispatch_rejected,
+    _find_queued_event_for_dispatch,
+    _get_latest_session_task_link,
+    _get_next_pending_project_task,
+    _inject_progress_notes_into_context,
+    _parse_event_timestamp,
+    _restore_workspace_snapshot_if_needed,
+    _runtime_selection_details,
+    _should_reject_stale_dispatch_claim,
+    _sync_task_execution_from_task_state,
+    _sync_task_execution_state,
+)
 
 
 @celery_app.task(
@@ -2117,6 +1405,17 @@ from app.tasks.maintenance import (  # noqa: E402
     sweep_orphaned_running_sessions,
 )
 
+__all__ = [
+    "answer_human_intervention_query",
+    "cleanup_old_logs",
+    "execute_openclaw_task",
+    "execute_orchestration_task",
+    "generate_task_report",
+    "process_github_webhook",
+    "scheduled_task_execution",
+    "sweep_orphaned_running_sessions",
+]
+
 
 @celery_app.task(bind=True, max_retries=1, default_retry_delay=5)
 def answer_human_intervention_query(
@@ -2154,7 +1453,7 @@ def answer_human_intervention_query(
             session_id,
             req.task_id,
             "INFO",
-            f"[OPERATOR-QUERY] Processing operator question…",
+            "[OPERATOR-QUERY] Processing operator question…",
             session_instance_id=session.instance_id,
             metadata={
                 "phase": "human_intervention",

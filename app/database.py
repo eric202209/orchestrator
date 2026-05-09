@@ -37,6 +37,12 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 def init_db():
     """Initialize database tables and apply tracked schema migrations."""
     if is_sqlite:
+        database_path = settings.DATABASE_URL.removeprefix("sqlite:///")
+        if database_path and database_path != settings.DATABASE_URL:
+            from pathlib import Path
+
+            Path(database_path).parent.mkdir(parents=True, exist_ok=True)
+    if is_sqlite:
         with engine.connect() as conn:
             conn.execute(text("PRAGMA journal_mode=WAL"))
     Base.metadata.create_all(bind=engine)
