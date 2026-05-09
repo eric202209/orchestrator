@@ -39,6 +39,7 @@ MAX_TIMELINE_LIMIT = 300
 FAILURE_LIKE_EVENT_TYPES = frozenset(
     {
         EventType.TOOL_FAILED,
+        EventType.DEBUG_FEEDBACK_CAPTURED,
         EventType.REPAIR_REJECTED,
         EventType.COMPLETION_EVIDENCE_FAILED,
         EventType.WAITING_FOR_INPUT,
@@ -792,6 +793,8 @@ def _phase_for_event(event_type: str, details: Dict[str, Any]) -> str:
     }:
         return "failure"
     if event_type in {
+        EventType.DEBUG_FEEDBACK_CAPTURED,
+        EventType.DEBUG_REPAIR_ATTEMPTED,
         EventType.REPAIR_GENERATED,
         EventType.REPAIR_APPLIED,
         EventType.REPAIR_REJECTED,
@@ -826,9 +829,12 @@ def _decision_type_for_event(event_type: str, phase: str) -> str:
         return "validation"
     if event_type == EventType.RETRY_ENTERED:
         return "retry"
+    if event_type == EventType.DEBUG_REPAIR_ATTEMPTED:
+        return "retry"
     if event_type in {
         EventType.TASK_FAILED,
         EventType.TOOL_FAILED,
+        EventType.DEBUG_FEEDBACK_CAPTURED,
         EventType.WAITING_FOR_INPUT,
     }:
         return "failure"
@@ -868,6 +874,7 @@ def _severity_for_event(event_type: str, status: str, details: Dict[str, Any]) -
     if event_type in {
         EventType.TASK_FAILED,
         EventType.TOOL_FAILED,
+        EventType.DEBUG_FEEDBACK_CAPTURED,
         EventType.REPAIR_REJECTED,
         EventType.COMPLETION_EVIDENCE_FAILED,
     }:
@@ -906,6 +913,14 @@ def _summary_for_event(
         return f"{stage} validation recorded{status_suffix}."
     if event_type == EventType.RETRY_ENTERED:
         return f"Retry cycle started for task {task_id}."
+    if event_type == EventType.DEBUG_FEEDBACK_CAPTURED:
+        failure_class = _first_text(details.get("debug_failure_class"))
+        eligible = details.get("eligible_for_debug_repair")
+        suffix = "eligible" if eligible else "terminal"
+        return f"Debug feedback captured for task {task_id}: {failure_class or 'unknown'} ({suffix})."
+    if event_type == EventType.DEBUG_REPAIR_ATTEMPTED:
+        failure_class = _first_text(details.get("debug_failure_class"))
+        return f"Bounded debug repair attempted for task {task_id}: {failure_class or 'unknown'}."
     if event_type == EventType.TASK_FAILED:
         return f"Task {task_id} failed."
     if event_type == EventType.TASK_COMPLETED:
@@ -929,6 +944,17 @@ def _bounded_details(details: Dict[str, Any]) -> Dict[str, Any]:
         "checkpoint_name",
         "reason",
         "failure_envelope",
+        "debug_feedback_captured",
+        "debug_feedback_envelope",
+        "debug_failure_class",
+        "debug_repair_attempted",
+        "debug_repair_terminal_reason",
+        "debug_repair_used",
+        "debug_repair_step_count",
+        "debug_repair_validator_reasons",
+        "eligible_for_debug_repair",
+        "allowed",
+        "allowed_reason",
         "queue_latency_seconds",
         "queue_age_seconds",
         "task_execution_id",

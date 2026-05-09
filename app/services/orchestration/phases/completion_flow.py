@@ -16,6 +16,10 @@ from app.config import settings
 from app.services.error_handler import error_handler
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.events.telemetry import emit_phase_event
+from app.services.orchestration.debug_feedback import (
+    build_debug_feedback_envelope,
+    persist_debug_feedback_envelope,
+)
 from app.services.orchestration.context_assembly import (
     assemble_completion_repair_inputs,
     assemble_execution_prompt,
@@ -51,7 +55,6 @@ from app.services.orchestration.validation.parsing import extract_structured_tex
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.prompt_templates import OrchestrationStatus, StepResult
 from app.services.workspace.path_display import render_workspace_path_for_prompt
-
 
 RELATIVE_PATH_TOKEN_RE = re.compile(
     r"(?<![\w./-])("
@@ -613,6 +616,72 @@ def _attempt_completion_repair(
         )[:1200],
         root_cause="validation_failure",
     )
+    debug_feedback_envelope = build_debug_feedback_envelope(
+        task_execution_id=ctx.task_execution_id,
+        task_id=ctx.task_id,
+        step_index=len(orchestration_state.plan) + 1,
+        failure_phase=str(getattr(completion_validation, "stage", "completion")),
+        failed_command=str(
+            (getattr(completion_validation, "details", {}) or {}).get(
+                "verification_command"
+            )
+            or ""
+        ),
+        stdout="",
+        stderr=str(
+            (getattr(completion_validation, "details", {}) or {}).get(
+                "verification_output_preview"
+            )
+            or ""
+        ),
+        validator_reasons=list(getattr(completion_validation, "reasons", []) or [])[
+            :10
+        ],
+        changed_files=list(getattr(orchestration_state, "changed_files", []) or [])[
+            :20
+        ],
+        workspace_path=orchestration_state.project_dir,
+    )
+    debug_repair_used_ids = set(
+        int(item)
+        for item in (
+            getattr(orchestration_state, "debug_repair_task_execution_ids", []) or []
+        )
+        if str(item).isdigit()
+    )
+    if (
+        ctx.task_execution_id is not None
+        and int(ctx.task_execution_id) in debug_repair_used_ids
+    ):
+        append_orchestration_event(
+            project_dir=orchestration_state.project_dir,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            event_type=EventType.REPAIR_REJECTED,
+            details={
+                "phase": "completion",
+                "reason": "debug_repair_budget_exhausted",
+                "debug_repair_terminal_reason": "debug_repair_budget_exhausted",
+                "debug_repair_attempted": False,
+                "debug_repair_used": True,
+                "debug_failure_class": debug_feedback_envelope.failure_class,
+                "task_execution_id": ctx.task_execution_id,
+            },
+        )
+        return {"status": "failed", "reason": "debug_repair_budget_exhausted"}
+    if ctx.task_execution_id is not None:
+        orchestration_state.debug_repair_task_execution_ids = sorted(
+            {*debug_repair_used_ids, int(ctx.task_execution_id)}
+        )
+    persist_debug_feedback_envelope(
+        db=db,
+        session_id=ctx.session_id,
+        task_id=ctx.task_id,
+        session_instance_id=ctx.session_instance_id,
+        project_dir=orchestration_state.project_dir,
+        envelope=debug_feedback_envelope,
+    )
+    db.commit()
 
     next_attempt = orchestration_state.completion_repair_attempts + 1
     if next_attempt > ctx.completion_repair_budget:
@@ -677,6 +746,28 @@ def _attempt_completion_repair(
             },
             failure_envelope,
         ),
+    )
+    append_orchestration_event(
+        project_dir=orchestration_state.project_dir,
+        session_id=ctx.session_id,
+        task_id=ctx.task_id,
+        event_type=EventType.DEBUG_REPAIR_ATTEMPTED,
+        details={
+            "phase": "completion",
+            "debug_repair_attempted": True,
+            "debug_repair_used": True,
+            "debug_failure_class": debug_feedback_envelope.failure_class,
+            "debug_repair_step_count": 1,
+            "debug_repair_validator_reasons": list(
+                getattr(completion_validation, "reasons", []) or []
+            )[:10],
+            "task_execution_id": ctx.task_execution_id,
+            "allowed": (
+                debug_feedback_envelope.eligible_for_debug_repair
+                and next_attempt <= ctx.completion_repair_budget
+            ),
+            "allowed_reason": "eligible completion failure class within budget",
+        },
     )
 
     repair_context = assemble_completion_repair_inputs(ctx, completion_validation)
@@ -1353,6 +1444,26 @@ def finalize_successful_task(
         )
 
     if not completion_validation.accepted:
+        debug_feedback_envelope = build_debug_feedback_envelope(
+            task_execution_id=ctx.task_execution_id,
+            task_id=task_id,
+            step_index=len(orchestration_state.plan),
+            failure_phase="completion_validation",
+            failed_command="",
+            stdout="",
+            stderr="; ".join(completion_validation.reasons[:10]),
+            validator_reasons=completion_validation.reasons[:10],
+            changed_files=reported_changed_files[:20],
+            workspace_path=orchestration_state.project_dir,
+        )
+        persist_debug_feedback_envelope(
+            db=db,
+            session_id=session_id,
+            task_id=task_id,
+            session_instance_id=ctx.session_instance_id,
+            project_dir=orchestration_state.project_dir,
+            envelope=debug_feedback_envelope,
+        )
         append_orchestration_event(
             project_dir=orchestration_state.project_dir,
             session_id=session_id,
@@ -1503,6 +1614,27 @@ def finalize_successful_task(
                 "Completion verification failed: "
                 f"`{completion_verification_command}` "
                 f"({completion_verification_source or 'auto-detected'})"
+            )
+            debug_feedback_envelope = build_debug_feedback_envelope(
+                task_execution_id=ctx.task_execution_id,
+                task_id=task_id,
+                step_index=len(orchestration_state.plan),
+                failure_phase="completion_verification",
+                failed_command=completion_verification_command,
+                return_code=completion_verification.get("returncode"),
+                stdout="",
+                stderr=str(completion_verification.get("output") or ""),
+                validator_reasons=[verification_error],
+                changed_files=reported_changed_files[:20],
+                workspace_path=orchestration_state.project_dir,
+            )
+            persist_debug_feedback_envelope(
+                db=db,
+                session_id=session_id,
+                task_id=task_id,
+                session_instance_id=ctx.session_instance_id,
+                project_dir=orchestration_state.project_dir,
+                envelope=debug_feedback_envelope,
             )
             task.status = TaskStatus.FAILED
             task.completed_at = datetime.now(UTC)

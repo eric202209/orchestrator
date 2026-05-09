@@ -38,7 +38,6 @@ from app.services.orchestration.task_rules import (
 from app.services.task_service import TaskService
 from app.services.task_execution_service import create_task_execution
 
-
 logger = logging.getLogger(__name__)
 
 _ORPHANED_PLANNING_RECOVERY_SECONDS = 120
@@ -575,6 +574,7 @@ def _build_checkpoint_payload_from_session_state(
             "last_completion_validation": None,
             "relaxed_mode": False,
             "completion_repair_attempts": 0,
+            "debug_repair_task_execution_ids": [],
         },
         "current_step_index": current_step_index,
         "step_results": [],

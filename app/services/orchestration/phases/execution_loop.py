@@ -17,6 +17,12 @@ from app.services.orchestration.context_assembly import (
 )
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.events.telemetry import emit_phase_event
+from app.services.orchestration.debug_feedback import (
+    build_bounded_debug_repair_prompt,
+    build_debug_feedback_envelope,
+    normalize_bounded_debug_repair_payload,
+    persist_debug_feedback_envelope,
+)
 from app.services.orchestration.execution import ExecutorService
 from app.services.orchestration.execution.execution_flow import (
     assess_step_execution,
@@ -175,9 +181,8 @@ def execute_step_loop(
     # mid-HTTP-request. The pause is "guaranteed before the next step" not
     # "instantaneous".
     plan_revision_count = 0
-    for step_index in range(
-        orchestration_state.current_step_index, len(orchestration_state.plan)
-    ):
+    while orchestration_state.current_step_index < len(orchestration_state.plan):
+        step_index = orchestration_state.current_step_index
         step = orchestration_state.plan[step_index]
         db.refresh(session)
         if (
@@ -642,6 +647,40 @@ def execute_step_loop(
                 tool_failures=assessment.tool_failures,
             ),
         )
+        debug_feedback_envelope = None
+        if step_status == "failed":
+            debug_feedback_envelope = build_debug_feedback_envelope(
+                task_execution_id=ctx.task_execution_id,
+                task_id=task_id,
+                step_index=step_index + 1,
+                failure_phase=(
+                    "step_validation"
+                    if assessment.validation_verdict
+                    and not assessment.validation_verdict.accepted
+                    else "execution"
+                ),
+                failed_command=(
+                    str(verification_command or "").strip()
+                    or " && ".join(str(command) for command in (step_commands or []))
+                ),
+                return_code=step_result.get("returncode"),
+                stdout=step_output,
+                stderr="\n".join(
+                    part
+                    for part in [
+                        step_record.error_message,
+                        step_record.verification_output,
+                    ]
+                    if part
+                ),
+                validator_reasons=(
+                    assessment.validation_verdict.reasons
+                    if assessment.validation_verdict
+                    else []
+                ),
+                changed_files=step_record.files_changed,
+                workspace_path=orchestration_state.project_dir,
+            )
         step_finished_event = None
         try:
             step_finished_event = append_orchestration_event(
@@ -717,6 +756,20 @@ def execute_step_loop(
                 metadata={"phase": "executing", "step_index": step_index + 1},
             )
             continue
+
+        if debug_feedback_envelope is not None:
+            persist_debug_feedback_envelope(
+                db=db,
+                session_id=session_id,
+                task_id=task_id,
+                session_instance_id=session.instance_id if session else None,
+                project_dir=orchestration_state.project_dir,
+                envelope=debug_feedback_envelope,
+                parent_event_id=(step_finished_event or step_started_event or {}).get(
+                    "event_id"
+                ),
+            )
+            db.commit()
 
         extra_context = ""
         if step_status == "failed":
@@ -1045,7 +1098,122 @@ def execute_step_loop(
             max_attempts=max_attempts,
             failure_envelope=failure_envelope,
         )
-        debug_prompt = assemble_debugging_prompt(ctx, debug_inputs)
+        task_execution_id = ctx.task_execution_id
+        debug_repair_used_ids = set(
+            int(item)
+            for item in (
+                getattr(orchestration_state, "debug_repair_task_execution_ids", [])
+                or []
+            )
+            if str(item).isdigit()
+        )
+        phase7f_debug_repair_allowed = (
+            debug_feedback_envelope is not None
+            and debug_feedback_envelope.eligible_for_debug_repair
+            and task_execution_id is not None
+            and int(task_execution_id) not in debug_repair_used_ids
+        )
+        if (
+            debug_feedback_envelope is not None
+            and debug_feedback_envelope.eligible_for_debug_repair
+            and task_execution_id is not None
+            and int(task_execution_id) in debug_repair_used_ids
+        ):
+            terminal_message = (
+                "Phase 7F debug repair budget exhausted for this TaskExecution"
+            )
+            emit_live(
+                "ERROR",
+                f"[ORCHESTRATION] {terminal_message}",
+                metadata={
+                    "phase": "debugging",
+                    "step_index": step_index + 1,
+                    "debug_repair_terminal_reason": "debug_repair_budget_exhausted",
+                    "debug_failure_class": debug_feedback_envelope.failure_class,
+                    "task_execution_id": task_execution_id,
+                },
+            )
+            try:
+                append_orchestration_event(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    event_type=EventType.REPAIR_REJECTED,
+                    parent_event_id=(debugging_phase_event or {}).get("event_id"),
+                    details={
+                        "phase": "execution",
+                        "reason": "debug_repair_budget_exhausted",
+                        "debug_repair_terminal_reason": (
+                            "debug_repair_budget_exhausted"
+                        ),
+                        "debug_repair_attempted": False,
+                        "debug_repair_used": True,
+                        "debug_failure_class": debug_feedback_envelope.failure_class,
+                        "task_execution_id": task_execution_id,
+                        "step_index": step_index + 1,
+                    },
+                )
+            except Exception:
+                pass
+            orchestration_state.status = OrchestrationStatus.ABORTED
+            orchestration_state.abort_reason = terminal_message
+            task.status = TaskStatus.FAILED
+            task.error_message = (
+                terminal_message + f": {step_record.error_message[:500]}"
+            )
+            if session_task_link:
+                session_task_link.status = TaskStatus.FAILED
+                session_task_link.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            restore_workspace_snapshot_if_needed("debug repair budget exhausted")
+            write_project_state_snapshot_fn(db, project, task, session_id)
+            return {"status": "failed", "reason": "debug_repair_budget_exhausted"}
+
+        if phase7f_debug_repair_allowed:
+            debug_prompt = build_bounded_debug_repair_prompt(debug_feedback_envelope)
+            debug_prompt_mode = "phase7f_bounded_debug_repair"
+            orchestration_state.debug_repair_task_execution_ids = sorted(
+                {*debug_repair_used_ids, int(task_execution_id)}
+            )
+            save_orchestration_checkpoint(
+                db, session_id, task_id, prompt, orchestration_state
+            )
+            db.commit()
+        else:
+            debug_prompt = assemble_debugging_prompt(ctx, debug_inputs)
+            debug_prompt_mode = "legacy_debugging"
+
+        try:
+            append_orchestration_event(
+                project_dir=orchestration_state.project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                event_type=EventType.DEBUG_REPAIR_ATTEMPTED,
+                parent_event_id=(debugging_phase_event or {}).get("event_id"),
+                details={
+                    "phase": "execution",
+                    "debug_repair_attempted": True,
+                    "debug_repair_used": True,
+                    "debug_failure_class": (
+                        debug_feedback_envelope.failure_class
+                        if debug_feedback_envelope
+                        else failure_envelope.root_cause
+                    ),
+                    "debug_repair_step_count": 1,
+                    "task_execution_id": ctx.task_execution_id,
+                    "step_index": step_index + 1,
+                    "attempt": current_attempt,
+                    "allowed": phase7f_debug_repair_allowed,
+                    "allowed_reason": (
+                        "eligible failure class and no prior debug repair for TaskExecution"
+                        if phase7f_debug_repair_allowed
+                        else "Phase 7F bounded repair not eligible or already used for TaskExecution"
+                    ),
+                    "debug_prompt_mode": debug_prompt_mode,
+                },
+            )
+        except Exception:
+            pass
 
         debug_result = asyncio.run(
             runtime_service.execute_task(
@@ -1095,14 +1263,56 @@ def execute_step_loop(
                 logger.info("[ORCHESTRATION] Removed debug artifact: %s", _artifact)
 
         try:
-            success, debug_data, strategy_info = coerce_debug_step_result(
-                debug_result,
-                error_message=step_record.error_message,
-                step=step,
-                extract_structured_text=extract_structured_text,
-            )
-            if not success:
-                raise ValueError(f"Failed to parse debug result: {strategy_info}")
+            if phase7f_debug_repair_allowed:
+                repair_output = extract_structured_text(
+                    debug_result.get("output", "{}")
+                )
+                success, parsed_repair, strategy_info = (
+                    error_handler.attempt_json_parsing(
+                        repair_output, context="phase7f_debug_repair"
+                    )
+                )
+                debug_data = (
+                    normalize_bounded_debug_repair_payload(parsed_repair)
+                    if success
+                    else None
+                )
+                if not success or debug_data is None:
+                    append_orchestration_event(
+                        project_dir=orchestration_state.project_dir,
+                        session_id=session_id,
+                        task_id=task_id,
+                        event_type=EventType.REPAIR_REJECTED,
+                        parent_event_id=(debugging_phase_event or {}).get("event_id"),
+                        details={
+                            "phase": "execution",
+                            "reason": "phase7f_debug_repair_output_invalid",
+                            "debug_repair_terminal_reason": (
+                                "invalid_debug_repair_output"
+                            ),
+                            "debug_repair_attempted": True,
+                            "debug_repair_used": True,
+                            "debug_failure_class": (
+                                debug_feedback_envelope.failure_class
+                                if debug_feedback_envelope
+                                else None
+                            ),
+                            "task_execution_id": ctx.task_execution_id,
+                            "strategy": strategy_info,
+                        },
+                    )
+                    raise ValueError(
+                        f"Invalid Phase 7F debug repair output: {strategy_info}"
+                    )
+            else:
+                success, debug_data, strategy_info = coerce_debug_step_result(
+                    debug_result,
+                    error_message=step_record.error_message,
+                    step=step,
+                    extract_structured_text=extract_structured_text,
+                )
+                if not success:
+                    raise ValueError(f"Failed to parse debug result: {strategy_info}")
 
             fix_type = debug_data.get("fix_type", "code_fix")
             logger.info("[DEBUG-PARSE] Using strategy: %s", strategy_info)

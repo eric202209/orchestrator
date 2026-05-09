@@ -100,6 +100,7 @@ class OrchestrationState:
     last_completion_validation: Optional[Dict[str, Any]] = None
     relaxed_mode: bool = False
     completion_repair_attempts: int = 0
+    debug_repair_task_execution_ids: List[int] = field(default_factory=list)
     status: OrchestrationStatus = OrchestrationStatus.PLANNING
     abort_reason: str = ""
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())

@@ -53,6 +53,8 @@ class EventType:
     INTENT_OUTCOME_MISMATCH = "intent_outcome_mismatch"
 
     # ── Completion / repair ───────────────────────────────────────────────────
+    DEBUG_FEEDBACK_CAPTURED = "debug_feedback_captured"
+    DEBUG_REPAIR_ATTEMPTED = "debug_repair_attempted"
     REPAIR_GENERATED = "repair_generated"
     REPAIR_APPLIED = "repair_applied"
     REPAIR_REJECTED = "repair_rejected"

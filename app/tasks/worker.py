@@ -687,6 +687,11 @@ def _apply_checkpoint_payload(
     orchestration_state.completion_repair_attempts = int(
         checkpoint_state.get("completion_repair_attempts", 0) or 0
     )
+    orchestration_state.debug_repair_task_execution_ids = [
+        int(item)
+        for item in checkpoint_state.get("debug_repair_task_execution_ids", []) or []
+        if str(item).isdigit()
+    ]
     orchestration_state.execution_results = [
         _restore_step_result(item)
         for item in checkpoint_state.get(

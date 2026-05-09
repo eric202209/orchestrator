@@ -656,6 +656,9 @@ def build_orchestration_state_snapshot(
         "completion_repair_attempts": int(
             getattr(orchestration_state, "completion_repair_attempts", 0) or 0
         ),
+        "debug_repair_task_execution_ids": list(
+            getattr(orchestration_state, "debug_repair_task_execution_ids", []) or []
+        )[:20],
     }
 
 
@@ -717,6 +720,9 @@ def write_checkpoint_state_snapshot(
         "completion_repair_attempts": int(
             orchestration_state.get("completion_repair_attempts", 0) or 0
         ),
+        "debug_repair_task_execution_ids": list(
+            orchestration_state.get("debug_repair_task_execution_ids", []) or []
+        )[:20],
         "snapshot_index": _safe_jsonl_length(log_path),
     }
     _append_jsonl_line(log_path, payload)
@@ -867,6 +873,9 @@ def save_orchestration_checkpoint(
             "last_completion_validation": orchestration_state.last_completion_validation,
             "relaxed_mode": orchestration_state.relaxed_mode,
             "completion_repair_attempts": orchestration_state.completion_repair_attempts,
+            "debug_repair_task_execution_ids": (
+                orchestration_state.debug_repair_task_execution_ids
+            ),
             "execution_results": [
                 serialize_step_result(r) for r in orchestration_state.execution_results
             ],
