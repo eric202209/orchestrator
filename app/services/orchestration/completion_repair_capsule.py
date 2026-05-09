@@ -156,6 +156,7 @@ def build_completion_repair_capsule(
 def build_bounded_completion_repair_prompt(
     capsule: CompletionRepairCapsule,
     next_step_number: int,
+    evidence_capsule: Any = None,
 ) -> str:
     workspace = render_workspace_path_for_prompt(capsule.workspace_path)
     relevant_files = "\n".join(f"- {path}" for path in capsule.relevant_files)
@@ -164,6 +165,14 @@ def build_bounded_completion_repair_prompt(
     reasons = "\n".join(f"- {reason}" for reason in capsule.validation_reasons)
     if not reasons:
         reasons = "- Completion validation failed without detailed reasons."
+
+    evidence_section = ""
+    if evidence_capsule is not None:
+        from app.services.orchestration.evidence_capsule import render_evidence_section
+
+        rendered = render_evidence_section(evidence_capsule)
+        if rendered:
+            evidence_section = f"\n{rendered}\n"
 
     return f"""Return one minimal JSON completion repair step. Output JSON object only.
 
@@ -180,7 +189,7 @@ Relevant existing files:
 {relevant_files}
 
 Last execution step:
-{capsule.last_step_summary or "No execution results recorded."}
+{capsule.last_step_summary or "No execution results recorded."}{evidence_section}
 
 Rules:
 1. Return a single JSON object with keys: step_number, description, commands, verification, rollback, expected_files.

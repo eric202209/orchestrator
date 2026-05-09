@@ -16,6 +16,7 @@ from app.services.orchestration.debug_feedback import (
     build_debug_feedback_envelope,
     persist_debug_feedback_envelope,
 )
+from app.services.orchestration.evidence_capsule import collect_workspace_evidence
 from app.services.orchestration.completion_repair_capsule import (
     build_bounded_completion_repair_prompt,
     build_completion_repair_capsule,
@@ -183,15 +184,6 @@ def _attempt_completion_repair(
         orchestration_state.debug_repair_task_execution_ids = sorted(
             {*debug_repair_used_ids, int(ctx.task_execution_id)}
         )
-    persist_debug_feedback_envelope(
-        db=db,
-        session_id=ctx.session_id,
-        task_id=ctx.task_id,
-        session_instance_id=ctx.session_instance_id,
-        project_dir=orchestration_state.project_dir,
-        envelope=debug_feedback_envelope,
-    )
-    db.commit()
 
     next_attempt = orchestration_state.completion_repair_attempts + 1
     if next_attempt > ctx.completion_repair_budget:
@@ -238,6 +230,36 @@ def _attempt_completion_repair(
         completion_validation=completion_validation,
         orchestration_state=orchestration_state,
     )
+    _evidence_capsule = collect_workspace_evidence(
+        debug_feedback_envelope.failure_class,
+        orchestration_state.project_dir,
+        failure_context=debug_feedback_envelope.stderr_excerpt,
+    )
+    persist_debug_feedback_envelope(
+        db=db,
+        session_id=ctx.session_id,
+        task_id=ctx.task_id,
+        session_instance_id=ctx.session_instance_id,
+        project_dir=orchestration_state.project_dir,
+        envelope=debug_feedback_envelope,
+        evidence_capsule=_evidence_capsule,
+    )
+    if _evidence_capsule and not _evidence_capsule.is_empty():
+        append_orchestration_event(
+            project_dir=orchestration_state.project_dir,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            event_type=EventType.WORKSPACE_EVIDENCE_COLLECTED,
+            details={
+                "phase": "completion_repair",
+                "failure_class": debug_feedback_envelope.failure_class,
+                "evidence_chars_total": _evidence_capsule.total_chars,
+                "evidence_files_inspected": _evidence_capsule.files_inspected,
+                "evidence_matched_lines": _evidence_capsule.matched_line_count,
+                "commands_run": _evidence_capsule.commands_run,
+            },
+        )
+    db.commit()
 
     emit_live(
         "WARN",
@@ -306,6 +328,7 @@ def _attempt_completion_repair(
     raw_repair_prompt = build_bounded_completion_repair_prompt(
         repair_capsule,
         next_step_number,
+        _evidence_capsule,
     )
     repair_prompt = render_adapted_runtime_prompt(
         ctx.db,

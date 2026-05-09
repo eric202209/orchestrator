@@ -1,0 +1,273 @@
+"""Tests for Phase 7L WorkspaceEvidenceCapsule."""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from app.services.orchestration.evidence_capsule import (
+    WorkspaceEvidenceCapsule,
+    _commands_for_failure_class,
+    _extract_module_name,
+    _truncate,
+    collect_workspace_evidence,
+    render_evidence_section,
+)
+
+# ── _truncate ─────────────────────────────────────────────────────────────────
+
+
+def test_truncate_short_text_unchanged():
+    assert _truncate("hello", 100) == "hello"
+
+
+def test_truncate_long_text_adds_ellipsis():
+    result = _truncate("x" * 400, 350)
+    assert len(result) == 350
+    assert result.endswith("...")
+
+
+def test_truncate_strips_whitespace():
+    assert _truncate("  hello  ", 100) == "hello"
+
+
+# ── _extract_module_name ───────────────────────────────────────────────────────
+
+
+def test_extract_module_name_no_module():
+    assert _extract_module_name("No module named 'app.config'") == "app"
+
+
+def test_extract_module_name_import_line():
+    assert _extract_module_name("from fastapi import FastAPI") == "fastapi"
+
+
+def test_extract_module_name_none_on_empty():
+    assert _extract_module_name("") is None
+
+
+def test_extract_module_name_none_on_unrelated():
+    assert _extract_module_name("some random error text") is None
+
+
+# ── _commands_for_failure_class ────────────────────────────────────────────────
+
+
+def test_commands_module_not_found_contains_find():
+    cmds = _commands_for_failure_class(
+        "module_not_found", Path("."), "No module named 'requests'"
+    )
+    flat = [" ".join(c) for c in cmds]
+    assert any("find" in c for c in flat)
+
+
+def test_commands_module_not_found_with_module_contains_grep():
+    cmds = _commands_for_failure_class(
+        "module_not_found", Path("."), "No module named 'requests'"
+    )
+    flat = [" ".join(c) for c in cmds]
+    assert any("grep" in c and "requests" in c for c in flat)
+
+
+def test_commands_import_error_contains_grep():
+    cmds = _commands_for_failure_class(
+        "import_error", Path("."), "from app import config"
+    )
+    flat = [" ".join(c) for c in cmds]
+    assert any("grep" in c for c in flat)
+
+
+def test_commands_pytest_failure_contains_pytest():
+    cmds = _commands_for_failure_class("pytest_failure", Path("."), "")
+    flat = [" ".join(c) for c in cmds]
+    assert any("pytest" in c for c in flat)
+
+
+def test_commands_missing_dependency_contains_find_requirements():
+    cmds = _commands_for_failure_class("missing_dependency", Path("."), "")
+    flat = [" ".join(c) for c in cmds]
+    assert any("requirements" in c for c in flat)
+
+
+def test_commands_unknown_returns_find():
+    cmds = _commands_for_failure_class("unknown", Path("."), "")
+    assert len(cmds) >= 1
+    assert any("find" in " ".join(c) for c in cmds)
+
+
+# ── WorkspaceEvidenceCapsule ───────────────────────────────────────────────────
+
+
+def test_capsule_is_empty_when_no_results():
+    capsule = WorkspaceEvidenceCapsule(failure_class="unknown")
+    assert capsule.is_empty()
+
+
+def test_capsule_not_empty_when_has_results():
+    capsule = WorkspaceEvidenceCapsule(
+        failure_class="pytest_failure",
+        results={"find .": "app/main.py"},
+        total_chars=12,
+    )
+    assert not capsule.is_empty()
+
+
+# ── collect_workspace_evidence ─────────────────────────────────────────────────
+
+
+def test_collect_graceful_on_subprocess_failure(tmp_path):
+    with patch(
+        "app.services.orchestration.evidence_capsule._run_cmd",
+        return_value="",
+    ):
+        capsule = collect_workspace_evidence("module_not_found", tmp_path)
+    assert isinstance(capsule, WorkspaceEvidenceCapsule)
+    assert capsule.failure_class == "module_not_found"
+    assert capsule.total_chars == 0
+
+
+def test_collect_records_commands_run(tmp_path):
+    with patch(
+        "app.services.orchestration.evidence_capsule._run_cmd",
+        return_value="",
+    ):
+        capsule = collect_workspace_evidence("pytest_failure", tmp_path)
+    assert len(capsule.commands_run) >= 1
+
+
+def test_collect_budget_enforcement(tmp_path):
+    long_output = "x" * 400
+
+    with patch(
+        "app.services.orchestration.evidence_capsule._run_cmd",
+        return_value=long_output,
+    ):
+        capsule = collect_workspace_evidence("module_not_found", tmp_path)
+
+    assert capsule.total_chars <= 1500
+
+
+def test_collect_per_command_truncation(tmp_path):
+    long_output = "y" * 400
+
+    with patch(
+        "app.services.orchestration.evidence_capsule._run_cmd",
+        return_value=long_output,
+    ):
+        capsule = collect_workspace_evidence("pytest_failure", tmp_path)
+
+    for output in capsule.results.values():
+        if output:
+            assert len(output) <= 350
+
+
+def test_collect_empty_capsule_on_all_failures(tmp_path):
+    with patch(
+        "app.services.orchestration.evidence_capsule.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd="find", timeout=5),
+    ):
+        capsule = collect_workspace_evidence("syntax_error", tmp_path)
+    assert capsule.total_chars == 0
+
+
+# ── render_evidence_section ───────────────────────────────────────────────────
+
+
+def test_render_empty_capsule_returns_empty_string():
+    capsule = WorkspaceEvidenceCapsule(failure_class="unknown")
+    assert render_evidence_section(capsule) == ""
+
+
+def test_render_capsule_with_results_includes_command():
+    capsule = WorkspaceEvidenceCapsule(
+        failure_class="pytest_failure",
+        results={"python3 -m pytest -q": "1 failed"},
+        total_chars=8,
+    )
+    section = render_evidence_section(capsule)
+    assert "Workspace evidence:" in section
+    assert "python3 -m pytest -q" in section
+    assert "1 failed" in section
+
+
+def test_render_skips_empty_command_results():
+    capsule = WorkspaceEvidenceCapsule(
+        failure_class="module_not_found",
+        commands_run=["find . -name '*.py'", "grep -rn import app ."],
+        results={"find . -name '*.py'": "", "grep -rn import app .": "app/main.py"},
+        total_chars=11,
+    )
+    section = render_evidence_section(capsule)
+    assert "find . -name '*.py'" not in section
+    assert "app/main.py" in section
+
+
+# ── Integration: prompt injection check ───────────────────────────────────────
+
+
+def test_build_bounded_debug_repair_prompt_includes_evidence():
+    from app.services.orchestration.debug_feedback import (
+        DebugFeedbackEnvelope,
+        build_bounded_debug_repair_prompt,
+    )
+
+    envelope = DebugFeedbackEnvelope(
+        task_execution_id=1,
+        task_id=1,
+        step_index=0,
+        failure_phase="execution",
+        failure_class="pytest_failure",
+        workspace_path=".",
+    )
+    capsule = WorkspaceEvidenceCapsule(
+        failure_class="pytest_failure",
+        results={"python3 -m pytest -q": "1 failed in 0.1s"},
+        total_chars=18,
+    )
+    prompt = build_bounded_debug_repair_prompt(envelope, capsule)
+    assert "Workspace evidence:" in prompt
+    assert "1 failed" in prompt
+
+
+def test_build_bounded_debug_repair_prompt_no_evidence_section_when_none():
+    from app.services.orchestration.debug_feedback import (
+        DebugFeedbackEnvelope,
+        build_bounded_debug_repair_prompt,
+    )
+
+    envelope = DebugFeedbackEnvelope(
+        task_execution_id=1,
+        task_id=1,
+        step_index=0,
+        failure_phase="execution",
+        failure_class="pytest_failure",
+        workspace_path=".",
+    )
+    prompt = build_bounded_debug_repair_prompt(envelope, None)
+    assert "Workspace evidence:" not in prompt
+
+
+def test_build_bounded_completion_repair_prompt_includes_evidence():
+    from app.services.orchestration.completion_repair_capsule import (
+        CompletionRepairCapsule,
+        build_bounded_completion_repair_prompt,
+    )
+
+    repair_capsule = CompletionRepairCapsule(
+        validation_reasons=["missing file app/main.py"],
+        relevant_files=["app/main.py"],
+        last_step_summary="Step 1: done",
+        workspace_path=".",
+        task_prompt_excerpt="Build a FastAPI app",
+    )
+    evidence = WorkspaceEvidenceCapsule(
+        failure_class="completion_validation_failed",
+        results={"find . -maxdepth 2": "app/main.py"},
+        total_chars=11,
+    )
+    prompt = build_bounded_completion_repair_prompt(repair_capsule, 2, evidence)
+    assert "Workspace evidence:" in prompt
+    assert "app/main.py" in prompt

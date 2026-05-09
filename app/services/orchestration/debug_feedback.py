@@ -205,6 +205,7 @@ def persist_debug_feedback_envelope(
     project_dir: Any,
     envelope: DebugFeedbackEnvelope,
     parent_event_id: Optional[str] = None,
+    evidence_capsule: Optional[Any] = None,
 ) -> Optional[dict[str, Any]]:
     """Store debug feedback in LogEntry metadata and the event journal."""
 
@@ -218,6 +219,19 @@ def persist_debug_feedback_envelope(
         "debug_feedback_envelope": payload,
         "task_execution_id": envelope.task_execution_id,
         "task_id": task_id,
+        "evidence_chars_total": (
+            getattr(evidence_capsule, "total_chars", 0) if evidence_capsule else 0
+        ),
+        "evidence_files_inspected": (
+            getattr(evidence_capsule, "files_inspected", []) if evidence_capsule else []
+        ),
+        "evidence_matched_lines": (
+            getattr(evidence_capsule, "matched_line_count", 0)
+            if evidence_capsule
+            else 0
+        ),
+        "evidence_capsule_used": evidence_capsule is not None
+        and not getattr(evidence_capsule, "is_empty", lambda: True)(),
     }
     db.add(
         LogEntry(
@@ -256,7 +270,10 @@ def persist_debug_feedback_envelope(
         return None
 
 
-def build_bounded_debug_repair_prompt(envelope: DebugFeedbackEnvelope) -> str:
+def build_bounded_debug_repair_prompt(
+    envelope: DebugFeedbackEnvelope,
+    evidence_capsule: Optional[Any] = None,
+) -> str:
     """Render the bounded Phase 7F debug repair prompt body."""
 
     workspace = render_workspace_path_for_prompt(Path(envelope.workspace_path or "."))
@@ -265,6 +282,13 @@ def build_bounded_debug_repair_prompt(envelope: DebugFeedbackEnvelope) -> str:
         "stderr_excerpt": envelope.stderr_excerpt,
         "pytest_excerpt": envelope.pytest_excerpt,
     }
+    evidence_section = ""
+    if evidence_capsule is not None:
+        from app.services.orchestration.evidence_capsule import render_evidence_section
+
+        rendered = render_evidence_section(evidence_capsule)
+        if rendered:
+            evidence_section = f"\n{rendered}\n"
     return (
         "Return a bare JSON array of one minimal debug repair step. "
         "Do not return prose, markdown, comments, explanations, or fenced code.\n\n"
@@ -275,7 +299,8 @@ def build_bounded_debug_repair_prompt(envelope: DebugFeedbackEnvelope) -> str:
         "Validator reasons:\n"
         f"{json.dumps(envelope.validator_reasons[:8], ensure_ascii=True)}\n"
         "Failure excerpts:\n"
-        f"{json.dumps(excerpts, ensure_ascii=True)[:1800]}\n\n"
+        f"{json.dumps(excerpts, ensure_ascii=True)[:1800]}\n"
+        f"{evidence_section}\n"
         "Rules:\n"
         "1. Output exactly one JSON array containing one step object.\n"
         "2. The step object must include title, command, and verification_command.\n"

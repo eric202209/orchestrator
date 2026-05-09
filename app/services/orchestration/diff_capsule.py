@@ -161,8 +161,18 @@ def build_diff_capsule(
     )
 
 
-def build_bounded_diff_repair_prompt(capsule: DiffCapsule) -> str:
+def build_bounded_diff_repair_prompt(
+    capsule: DiffCapsule,
+    evidence_capsule: Optional[Any] = None,
+) -> str:
     workspace = render_workspace_path_for_prompt(Path(capsule.workspace_path or "."))
+    evidence_section = ""
+    if evidence_capsule is not None:
+        from app.services.orchestration.evidence_capsule import render_evidence_section
+
+        rendered = render_evidence_section(evidence_capsule)
+        if rendered:
+            evidence_section = f"\n{rendered}\n"
     return (
         "Return a bare JSON array of one minimal debug repair step. "
         "Do not return prose, markdown, comments, explanations, or fenced code.\n\n"
@@ -171,7 +181,8 @@ def build_bounded_diff_repair_prompt(capsule: DiffCapsule) -> str:
         f"Primary file: {capsule.primary_file}\n"
         f"Failure line: {capsule.failure_line}\n\n"
         "Unified diff capsule:\n"
-        f"{capsule.diff_text}\n\n"
+        f"{capsule.diff_text}\n"
+        f"{evidence_section}\n"
         "Rules:\n"
         "1. Output exactly one JSON array containing one step object.\n"
         "2. The step object must include title, command, and verification_command.\n"

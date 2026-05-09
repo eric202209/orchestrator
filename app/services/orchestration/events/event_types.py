@@ -71,6 +71,7 @@ class EventType:
 
     # ── Reliability / evidence ───────────────────────────────────────────────
     COMPLETION_EVIDENCE_FAILED = "completion_evidence_failed"
+    WORKSPACE_EVIDENCE_COLLECTED = "workspace_evidence_collected"
 
 
 _ALL_EVENT_TYPES: frozenset[str] = frozenset(

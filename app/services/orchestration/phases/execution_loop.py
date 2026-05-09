@@ -28,6 +28,7 @@ from app.services.orchestration.diff_capsule import (
     build_diff_capsule,
     snapshot_file_contents,
 )
+from app.services.orchestration.evidence_capsule import collect_workspace_evidence
 from app.services.orchestration.execution import ExecutorService
 from app.services.orchestration.execution.execution_flow import (
     assess_step_execution,
@@ -769,20 +770,6 @@ def execute_step_loop(
             )
             continue
 
-        if debug_feedback_envelope is not None:
-            persist_debug_feedback_envelope(
-                db=db,
-                session_id=session_id,
-                task_id=task_id,
-                session_instance_id=session.instance_id if session else None,
-                project_dir=orchestration_state.project_dir,
-                envelope=debug_feedback_envelope,
-                parent_event_id=(step_finished_event or step_started_event or {}).get(
-                    "event_id"
-                ),
-            )
-            db.commit()
-
         extra_context = ""
         if step_status == "failed":
             cleanup_summary = ExecutorService.cleanup_failed_step_artefacts(
@@ -1182,6 +1169,41 @@ def execute_step_loop(
             return {"status": "failed", "reason": "debug_repair_budget_exhausted"}
 
         if phase7f_debug_repair_allowed:
+            _evidence_capsule = collect_workspace_evidence(
+                debug_feedback_envelope.failure_class,
+                orchestration_state.project_dir,
+                failure_context=debug_feedback_envelope.stderr_excerpt,
+            )
+            persist_debug_feedback_envelope(
+                db=db,
+                session_id=session_id,
+                task_id=task_id,
+                session_instance_id=session.instance_id if session else None,
+                project_dir=orchestration_state.project_dir,
+                envelope=debug_feedback_envelope,
+                parent_event_id=(step_finished_event or step_started_event or {}).get(
+                    "event_id"
+                ),
+                evidence_capsule=_evidence_capsule,
+            )
+            if _evidence_capsule and not _evidence_capsule.is_empty():
+                append_orchestration_event(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    event_type=EventType.WORKSPACE_EVIDENCE_COLLECTED,
+                    parent_event_id=(
+                        step_finished_event or step_started_event or {}
+                    ).get("event_id"),
+                    details={
+                        "phase": "execution",
+                        "failure_class": debug_feedback_envelope.failure_class,
+                        "evidence_chars_total": _evidence_capsule.total_chars,
+                        "evidence_files_inspected": _evidence_capsule.files_inspected,
+                        "evidence_matched_lines": _evidence_capsule.matched_line_count,
+                        "commands_run": _evidence_capsule.commands_run,
+                    },
+                )
             diff_capsule = build_diff_capsule(
                 pre_checksum=pre_step_file_snapshot,
                 project_dir=orchestration_state.project_dir,
@@ -1189,12 +1211,14 @@ def execute_step_loop(
                 envelope=debug_feedback_envelope,
             )
             if diff_capsule is not None:
-                debug_prompt = build_bounded_diff_repair_prompt(diff_capsule)
+                debug_prompt = build_bounded_diff_repair_prompt(
+                    diff_capsule, _evidence_capsule
+                )
                 debug_prompt_mode = "phase7g_diff_repair"
                 diff_repair_fallback_reason = None
             else:
                 debug_prompt = build_bounded_debug_repair_prompt(
-                    debug_feedback_envelope
+                    debug_feedback_envelope, _evidence_capsule
                 )
                 debug_prompt_mode = "phase7f_bounded_debug_repair"
                 if not debug_feedback_envelope.changed_files:
@@ -1220,6 +1244,19 @@ def execute_step_loop(
             diff_repair_fallback_reason = None
             debug_prompt = assemble_debugging_prompt(ctx, debug_inputs)
             debug_prompt_mode = "legacy_debugging"
+            if debug_feedback_envelope is not None:
+                persist_debug_feedback_envelope(
+                    db=db,
+                    session_id=session_id,
+                    task_id=task_id,
+                    session_instance_id=session.instance_id if session else None,
+                    project_dir=orchestration_state.project_dir,
+                    envelope=debug_feedback_envelope,
+                    parent_event_id=(
+                        step_finished_event or step_started_event or {}
+                    ).get("event_id"),
+                )
+                db.commit()
 
         try:
             append_orchestration_event(
