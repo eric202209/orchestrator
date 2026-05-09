@@ -41,13 +41,17 @@ def _table_names(engine: Engine) -> set[str]:
 
 def _ensure_migrations_table(engine: Engine) -> None:
     with engine.begin() as connection:
-        connection.execute(text("""
+        connection.execute(
+            text(
+                """
                 CREATE TABLE IF NOT EXISTS schema_migrations (
                     version VARCHAR(64) PRIMARY KEY,
                     description VARCHAR(255) NOT NULL,
                     applied_at DATETIME NOT NULL
                 )
-                """))
+                """
+            )
+        )
 
 
 def _get_applied_versions(engine: Engine) -> set[str]:
@@ -62,10 +66,12 @@ def _get_applied_versions(engine: Engine) -> set[str]:
 def _record_migration(engine: Engine, migration: Migration) -> None:
     with engine.begin() as connection:
         connection.execute(
-            text("""
+            text(
+                """
                 INSERT INTO schema_migrations (version, description, applied_at)
                 VALUES (:version, :description, :applied_at)
-                """),
+                """
+            ),
             {
                 "version": migration.version,
                 "description": migration.description,
@@ -196,19 +202,27 @@ def _migration_001_runtime_columns(engine: Engine) -> None:
                 for statement in statements:
                     connection.execute(text(statement))
                 if "metadata" in existing_columns:
-                    connection.execute(text("""
+                    connection.execute(
+                        text(
+                            """
                             UPDATE log_entries
                             SET log_metadata = metadata
                             WHERE log_metadata IS NULL AND metadata IS NOT NULL
-                            """))
+                            """
+                        )
+                    )
         with engine.begin() as connection:
             if not _has_index(
                 engine, "log_entries", "ix_log_entries_session_instance_id"
             ):
-                connection.execute(text("""
+                connection.execute(
+                    text(
+                        """
                         CREATE INDEX ix_log_entries_session_instance_id
                         ON log_entries (session_instance_id)
-                        """))
+                        """
+                    )
+                )
 
 
 def _migration_002_session_name_soft_delete(engine: Engine) -> None:
@@ -216,19 +230,27 @@ def _migration_002_session_name_soft_delete(engine: Engine) -> None:
         return
 
     with engine.begin() as connection:
-        connection.execute(text("""
+        connection.execute(
+            text(
+                """
                 UPDATE sessions
                 SET name = name || '__deleted__' || id
                 WHERE deleted_at IS NOT NULL
                   AND name NOT LIKE '%__deleted__%'
-                """))
+                """
+            )
+        )
 
         if not _has_index(engine, "sessions", "ix_sessions_project_name_active"):
-            connection.execute(text("""
+            connection.execute(
+                text(
+                    """
                     CREATE UNIQUE INDEX ix_sessions_project_name_active
                     ON sessions (project_id, name)
                     WHERE deleted_at IS NULL
-                    """))
+                    """
+                )
+            )
 
 
 def _migration_003_planning_sessions(engine: Engine) -> None:
@@ -236,7 +258,9 @@ def _migration_003_planning_sessions(engine: Engine) -> None:
 
     with engine.begin() as connection:
         if "planning_sessions" not in table_names:
-            connection.execute(text("""
+            connection.execute(
+                text(
+                    """
                     CREATE TABLE planning_sessions (
                         id INTEGER PRIMARY KEY,
                         project_id INTEGER NOT NULL,
@@ -257,10 +281,14 @@ def _migration_003_planning_sessions(engine: Engine) -> None:
                         FOREIGN KEY(project_id) REFERENCES projects (id),
                         FOREIGN KEY(finalized_plan_id) REFERENCES plans (id)
                     )
-                    """))
+                    """
+                )
+            )
 
         if "planning_messages" not in table_names:
-            connection.execute(text("""
+            connection.execute(
+                text(
+                    """
                     CREATE TABLE planning_messages (
                         id INTEGER PRIMARY KEY,
                         planning_session_id INTEGER NOT NULL,
@@ -271,10 +299,14 @@ def _migration_003_planning_sessions(engine: Engine) -> None:
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY(planning_session_id) REFERENCES planning_sessions (id)
                     )
-                    """))
+                    """
+                )
+            )
 
         if "planning_artifacts" not in table_names:
-            connection.execute(text("""
+            connection.execute(
+                text(
+                    """
                     CREATE TABLE planning_artifacts (
                         id INTEGER PRIMARY KEY,
                         planning_session_id INTEGER NOT NULL,
@@ -286,7 +318,9 @@ def _migration_003_planning_sessions(engine: Engine) -> None:
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY(planning_session_id) REFERENCES planning_sessions (id)
                     )
-                    """))
+                    """
+                )
+            )
 
         if not _has_index(
             engine, "planning_sessions", "ix_planning_sessions_project_id"
@@ -321,11 +355,15 @@ def _migration_003_planning_sessions(engine: Engine) -> None:
         if not _has_index(
             engine, "planning_sessions", "ux_planning_sessions_one_active"
         ):
-            connection.execute(text("""
+            connection.execute(
+                text(
+                    """
                     CREATE UNIQUE INDEX ux_planning_sessions_one_active
                     ON planning_sessions (project_id)
                     WHERE status IN ('active', 'waiting_for_input')
-                    """))
+                    """
+                )
+            )
         if not _has_index(
             engine, "planning_messages", "ix_planning_messages_planning_session_id"
         ):
@@ -412,7 +450,9 @@ def _migration_006_planning_artifact_versioning(engine: Engine) -> None:
                     "CREATE INDEX ix_planning_artifacts_is_latest ON planning_artifacts (is_latest)"
                 )
             )
-        connection.execute(text("""
+        connection.execute(
+            text(
+                """
                 UPDATE planning_artifacts
                 SET is_latest = 1
                 WHERE id IN (
@@ -420,8 +460,12 @@ def _migration_006_planning_artifact_versioning(engine: Engine) -> None:
                     FROM planning_artifacts
                     GROUP BY planning_session_id, artifact_type
                 )
-                """))
-        connection.execute(text("""
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
                 UPDATE planning_artifacts
                 SET is_latest = 0
                 WHERE id NOT IN (
@@ -429,14 +473,18 @@ def _migration_006_planning_artifact_versioning(engine: Engine) -> None:
                     FROM planning_artifacts
                     GROUP BY planning_session_id, artifact_type
                 )
-                """))
+                """
+            )
+        )
 
 
 def _migration_007_intervention_requests(engine: Engine) -> None:
     table_names = _table_names(engine)
     if "intervention_requests" not in table_names:
         with engine.begin() as connection:
-            connection.execute(text("""
+            connection.execute(
+                text(
+                    """
                     CREATE TABLE intervention_requests (
                         id INTEGER PRIMARY KEY,
                         session_id INTEGER NOT NULL,
@@ -457,7 +505,9 @@ def _migration_007_intervention_requests(engine: Engine) -> None:
                         FOREIGN KEY(task_id) REFERENCES tasks (id),
                         FOREIGN KEY(project_id) REFERENCES projects (id)
                     )
-                    """))
+                    """
+                )
+            )
 
     with engine.begin() as connection:
         if not _has_index(
@@ -520,7 +570,9 @@ def _migration_009_execution_failure_summaries(engine: Engine) -> None:
     table_names = _table_names(engine)
     if "execution_failure_summaries" not in table_names:
         with engine.begin() as connection:
-            connection.execute(text("""
+            connection.execute(
+                text(
+                    """
                     CREATE TABLE execution_failure_summaries (
                         id INTEGER PRIMARY KEY,
                         session_id INTEGER NOT NULL UNIQUE,
@@ -532,7 +584,9 @@ def _migration_009_execution_failure_summaries(engine: Engine) -> None:
                         FOREIGN KEY(session_id) REFERENCES sessions (id),
                         FOREIGN KEY(replan_planning_session_id) REFERENCES planning_sessions (id)
                     )
-                    """))
+                    """
+                )
+            )
     with engine.begin() as connection:
         if not _has_index(
             engine,

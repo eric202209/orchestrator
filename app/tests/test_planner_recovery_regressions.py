@@ -37,10 +37,12 @@ class _RetryCapableSelfTask:
 
 
 def test_planner_marks_architecture_inspection_as_review_only():
-    parsed = PlannerService.parse_markdown("""
+    parsed = PlannerService.parse_markdown(
+        """
 ## Task List
 - [ ] TASK_START: Inspect current project architecture | Review the real files, tests, fixtures, and extension points before implementation.
-""")
+"""
+    )
 
     assert parsed
     assert parsed[0].execution_profile == "review_only"

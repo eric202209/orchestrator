@@ -17,7 +17,8 @@ SPEC.loader.exec_module(module)
 
 
 def _schema(conn: sqlite3.Connection) -> None:
-    conn.executescript("""
+    conn.executescript(
+        """
         create table sessions (
             id integer primary key,
             project_id integer,
@@ -53,7 +54,8 @@ def _schema(conn: sqlite3.Connection) -> None:
             message text,
             created_at text
         );
-        """)
+        """
+    )
 
 
 def test_phase6b_evidence_report_passes_for_coherent_runtime_state(tmp_path):
