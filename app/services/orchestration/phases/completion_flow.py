@@ -55,6 +55,7 @@ from app.services.orchestration.validation.parsing import (
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.prompt_templates import OrchestrationStatus, StepResult
 from app.services.orchestration.phases.completion_repair import (
+    _augment_completion_verification_command,
     _classify_completion_verification_failure,
     _completion_failure_signature,
     _completion_repair_invalid_paths,
@@ -64,6 +65,15 @@ from app.services.orchestration.phases.completion_repair import (
     _extract_reported_changed_files,
     _repeats_prior_completion_failure,
 )
+
+__all__ = [
+    "_attempt_completion_repair",
+    "_augment_completion_verification_command",
+    "_classify_completion_verification_failure",
+    "_execute_completion_verification",
+    "_run_evaluator",
+    "finalize_successful_task",
+]
 
 
 def _attempt_completion_repair(
