@@ -88,6 +88,8 @@ class _FakeRuntime:
         if not self.responses:
             raise AssertionError("Fake runtime received unexpected prompt")
         response = self.responses.pop(0)
+        if callable(response):
+            response = response()
         return dict(response)
 
     def reports_context_overflow(self, result):
@@ -107,7 +109,14 @@ def _normalize_step(raw_step, project_dir, logger_obj, step_number):
     return dict(raw_step)
 
 
-def _make_run_context(db_session, tmp_path, *, runtime, used_debug_repair=False):
+def _make_run_context(
+    db_session,
+    tmp_path,
+    *,
+    runtime,
+    used_debug_repair=False,
+    expected_files=None,
+):
     project_dir, project, session, task, execution = _seed_execution(
         db_session, tmp_path
     )
@@ -135,7 +144,7 @@ def _make_run_context(db_session, tmp_path, *, runtime, used_debug_repair=False)
                 "commands": ["pytest tests/test_demo.py"],
                 "verification": "",
                 "rollback": None,
-                "expected_files": [],
+                "expected_files": list(expected_files or []),
             }
         ],
         reasoning_artifact={
@@ -382,6 +391,78 @@ def test_phase7f_valid_bounded_repair_is_retried_and_succeeds(db_session, tmp_pa
         "python3 -c \"print('fixed')\""
     ]
     assert ctx.orchestration_state.current_step_index == 1
+
+
+def test_phase7g_diff_repair_prompt_is_used_when_capsule_available(
+    db_session, tmp_path
+):
+    holder = {}
+
+    def fail_after_file_change():
+        source = holder["project_dir"] / "src" / "demo.py"
+        source.write_text("VALUE = 2\n", encoding="utf-8")
+        return {
+            "status": "failed",
+            "output": "FAILED tests/test_demo.py::test_value",
+            "error": "AssertionError: expected 1",
+            "files_changed": ["src/demo.py"],
+            "returncode": 1,
+        }
+
+    runtime = _FakeRuntime(
+        [
+            fail_after_file_change,
+            {
+                "output": json.dumps(
+                    [
+                        {
+                            "title": "Fix value",
+                            "command": "python3 -c \"from pathlib import Path; Path('src/demo.py').write_text('VALUE = 1\\\\n')\"",
+                            "verification_command": "python3 -m py_compile src/demo.py",
+                        }
+                    ]
+                )
+            },
+            {
+                "status": "success",
+                "output": "fixed",
+                "files_changed": ["src/demo.py"],
+            },
+        ]
+    )
+    ctx, _execution = _make_run_context(
+        db_session, tmp_path, runtime=runtime, expected_files=["src/demo.py"]
+    )
+    holder["project_dir"] = ctx.orchestration_state.project_dir
+    (holder["project_dir"] / "src").mkdir(parents=True)
+    (holder["project_dir"] / "src" / "demo.py").write_text(
+        "VALUE = 1\n", encoding="utf-8"
+    )
+
+    result = execute_step_loop(
+        ctx=ctx,
+        extract_structured_text=_extract_structured_text,
+        normalize_step=_normalize_step,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: [],
+        workspace_violation_error_cls=RuntimeError,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        record_live_log_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "completed"
+    assert "Unified diff capsule" in runtime.prompts[1]
+    assert "Return a bare JSON array" in runtime.prompts[1]
+    events = read_orchestration_events(
+        ctx.orchestration_state.project_dir, ctx.session_id, ctx.task_id
+    )
+    attempted = [
+        event
+        for event in events
+        if event["event_type"] == EventType.DEBUG_REPAIR_ATTEMPTED
+    ]
+    assert attempted[-1]["details"]["debug_prompt_mode"] == "phase7g_diff_repair"
+    assert attempted[-1]["details"]["diff_capsule_primary_file"] == "src/demo.py"
+    assert attempted[-1]["details"]["diff_capsule_line_count"] > 0
 
 
 def test_phase7f_invalid_bounded_repair_terminalizes(db_session, tmp_path):

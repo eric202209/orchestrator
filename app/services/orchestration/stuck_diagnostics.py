@@ -7,7 +7,6 @@ from datetime import datetime
 import re
 from typing import Optional
 
-
 PLANNING_RESPONSE_MESSAGES = {
     "[ORCHESTRATION] Planning response received; parsing and validating plan",
     "[OPENCLAW] Request returned output; awaiting orchestration validation",

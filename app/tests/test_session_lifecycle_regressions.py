@@ -30,7 +30,6 @@ from app.services.session.session_lifecycle_service import (
 from app.services.workspace.checkpoint_service import CheckpointError
 from fastapi import HTTPException
 
-
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 

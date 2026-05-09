@@ -16,7 +16,6 @@ from app.dependencies import get_current_active_user, get_current_user
 from app.models import Base, User
 from app.services.auth_rate_limit import clear_auth_rate_limits
 
-
 SEMANTIC_TEST_MODULES = {
     "test_decision_timeline_endpoint.py",
     "test_orchestration_event_journal.py",

@@ -13,7 +13,6 @@ from typing import Callable, Iterable
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
-
 MigrationFn = Callable[[Engine], None]
 
 

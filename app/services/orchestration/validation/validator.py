@@ -21,7 +21,6 @@ from ..types import (
     ValidationVerdict,
 )
 
-
 SOURCE_EXTENSIONS = {
     ".py",
     ".js",
@@ -862,7 +861,7 @@ class ValidatorService:
 
     @staticmethod
     def _plan_missing_required_fields(
-        plan: List[Dict[str, Any]]
+        plan: List[Dict[str, Any]],
     ) -> Dict[str, List[int]]:
         missing_description: List[int] = []
         missing_commands: List[int] = []
@@ -905,7 +904,7 @@ class ValidatorService:
 
     @staticmethod
     def _plan_contains_unsafe_command_paths(
-        plan: List[Dict[str, Any]]
+        plan: List[Dict[str, Any]],
     ) -> Dict[int, List[str]]:
         """Detect command paths that violate the task-workspace contract."""
 
@@ -1087,7 +1086,7 @@ class ValidatorService:
 
     @staticmethod
     def _plan_contains_duplicated_path_roots(
-        plan: List[Dict[str, Any]]
+        plan: List[Dict[str, Any]],
     ) -> Dict[int, List[str]]:
         """Detect repeated root segments like frontend/src/frontend/src in plan text."""
 

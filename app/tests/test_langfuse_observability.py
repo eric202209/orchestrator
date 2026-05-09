@@ -30,7 +30,6 @@ from app.services.observability.langfuse import (
     update_langfuse_observation as ulo_langfuse,
 )
 
-
 # -----------------------------------------------------------------------
 # Module-level (backwards-compatible) API
 # -----------------------------------------------------------------------

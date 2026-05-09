@@ -9,6 +9,8 @@ import re
 from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
 
+from app.services.orchestration.validation.parsing import _find_json_substring
+
 logger = logging.getLogger(__name__)
 
 
@@ -255,50 +257,7 @@ class EnhancedErrorHandler:
         if not text:
             return None
 
-        # Try to find start of JSON
-        json_start = text.find("{")
-        if json_start == -1:
-            json_start = text.find("[")
-
-        if json_start == -1:
-            return None
-
-        # Try to find matching end
-        brace_count = 0
-        bracket_count = 0
-        in_string = False
-        escape_next = False
-
-        for i, char in enumerate(text[json_start:], json_start):
-            if escape_next:
-                escape_next = False
-                continue
-
-            if char == "\\" and in_string:
-                escape_next = True
-                continue
-
-            if char == '"' and not escape_next:
-                in_string = not in_string
-                continue
-
-            if in_string:
-                continue
-
-            if char == "{":
-                brace_count += 1
-            elif char == "}":
-                brace_count -= 1
-            elif char == "[":
-                bracket_count += 1
-            elif char == "]":
-                bracket_count -= 1
-
-            # Check if we've found a complete JSON structure
-            if brace_count == 0 and bracket_count == 0 and i > json_start:
-                return text[json_start : i + 1]
-
-        return None
+        return _find_json_substring(text)
 
     def _extract_embedded_json_payload(self, text: str) -> Optional[str]:
         """Recover JSON that was embedded as an escaped string inside another payload."""

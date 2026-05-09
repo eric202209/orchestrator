@@ -29,7 +29,6 @@ from app.services.workspace.system_settings import (
 )
 from app.services.task_execution_service import create_task_execution
 
-
 DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS = 1800
 MAX_AUTOMATIC_TASK_RECOVERY_ATTEMPTS = 1
 

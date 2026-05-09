@@ -37,7 +37,9 @@ def render_openclaw_prompt(envelope: PromptEnvelope) -> str:
 def render_qwen_compact_json_prompt(envelope: PromptEnvelope) -> str:
     """Render a smaller JSON envelope for compact-context local models."""
 
+    expected_output = (envelope.expected_output or "").strip()
     payload = {
+        "response_start": "[" if "array" in expected_output.lower() else "{",
         "objective": envelope.objective.strip(),
         "mode": envelope.execution_mode.strip(),
         "instructions": [
@@ -46,7 +48,7 @@ def render_qwen_compact_json_prompt(envelope: PromptEnvelope) -> str:
         "context": {
             key: value for key, value in envelope.context.items() if value is not None
         },
-        "expected_output": (envelope.expected_output or "").strip(),
+        "expected_output": expected_output,
         "body": (envelope.prompt_body or "").strip(),
     }
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))

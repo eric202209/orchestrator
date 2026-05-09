@@ -42,7 +42,6 @@ from app.services.orchestration.phases.failure_flow import (
     record_failure_knowledge_for_stopped_session,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

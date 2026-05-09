@@ -25,7 +25,6 @@ from app.services.streaming_health import (
     unregister_stream_connection,
 )
 
-
 logger = logging.getLogger(__name__)
 
 

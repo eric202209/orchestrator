@@ -23,7 +23,6 @@ from app.services.session.session_runtime_service import ensure_task_workspace
 from app.services.task_execution_service import create_task_execution
 from app.services.tool_tracking_service import ToolTrackingService
 
-
 logger = logging.getLogger(__name__)
 
 

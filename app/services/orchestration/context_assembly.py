@@ -19,7 +19,6 @@ from app.services.prompt_templates import PromptTemplates, StepResult
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 from app.services.workspace.system_settings import get_effective_adaptation_profile
 
-
 _IGNORED_PARTS = {"node_modules", ".openclaw", "__pycache__", ".git", "dist", "build"}
 _PATH_TOKEN_RE = re.compile(
     r"(?<![\w./-])([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+\.[A-Za-z0-9_.-]+)(?![\w./-])"
@@ -374,7 +373,11 @@ def render_adapted_runtime_prompt(
     instructions: Optional[Iterable[str]] = None,
     context: Optional[Dict[str, Any]] = None,
     expected_output: Optional[str] = None,
+    direct: bool = False,
 ) -> str:
+    if direct:
+        return prompt_body
+
     profile_name = get_effective_adaptation_profile(db=db)
     envelope = PromptEnvelope(
         objective=objective,

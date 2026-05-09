@@ -20,8 +20,11 @@ from app.services.orchestration.debug_feedback import (
     build_debug_feedback_envelope,
     persist_debug_feedback_envelope,
 )
+from app.services.orchestration.completion_repair_capsule import (
+    build_bounded_completion_repair_prompt,
+    build_completion_repair_capsule,
+)
 from app.services.orchestration.context_assembly import (
-    assemble_completion_repair_inputs,
     assemble_execution_prompt,
     assemble_task_summary_prompt,
     collect_workspace_inventory_paths,
@@ -51,7 +54,10 @@ from app.services.orchestration.types import (
     OrchestrationRunContext,
     ValidationVerdict,
 )
-from app.services.orchestration.validation.parsing import extract_structured_text
+from app.services.orchestration.validation.parsing import (
+    build_json_compliance_retry_prompt,
+    extract_structured_text,
+)
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.prompt_templates import OrchestrationStatus, StepResult
 from app.services.workspace.path_display import render_workspace_path_for_prompt
@@ -723,6 +729,11 @@ def _attempt_completion_repair(
 
     orchestration_state.completion_repair_attempts = next_attempt
     next_step_number = len(orchestration_state.plan) + 1
+    repair_capsule = build_completion_repair_capsule(
+        task_prompt=ctx.prompt,
+        completion_validation=completion_validation,
+        orchestration_state=orchestration_state,
+    )
 
     emit_live(
         "WARN",
@@ -733,19 +744,19 @@ def _attempt_completion_repair(
             "reasons": completion_validation.reasons[:10],
         },
     )
-    append_orchestration_event(
-        project_dir=orchestration_state.project_dir,
-        session_id=ctx.session_id,
-        task_id=ctx.task_id,
-        event_type=EventType.REPAIR_GENERATED,
-        details=attach_failure_envelope(
-            {
-                "phase": "completion_repair",
-                "attempt": orchestration_state.completion_repair_attempts,
-                "reasons": completion_validation.reasons[:10],
-            },
-            failure_envelope,
-        ),
+    repair_generated_details = attach_failure_envelope(
+        {
+            "phase": "completion_repair",
+            "attempt": orchestration_state.completion_repair_attempts,
+            "reasons": completion_validation.reasons[:10],
+            "completion_repair_prompt_mode": "phase7h_capsule",
+            "capsule_relevant_file_count": len(repair_capsule.relevant_files),
+            "capsule_last_step_present": bool(repair_capsule.last_step_summary),
+            "envelope_mode": "direct_capsule",
+            "compliance_retry_attempted": False,
+            "compliance_retry_succeeded": False,
+        },
+        failure_envelope,
     )
     append_orchestration_event(
         project_dir=orchestration_state.project_dir,
@@ -767,19 +778,15 @@ def _attempt_completion_repair(
                 and next_attempt <= ctx.completion_repair_budget
             ),
             "allowed_reason": "eligible completion failure class within budget",
+            "envelope_mode": "direct_capsule",
+            "compliance_retry_attempted": False,
+            "compliance_retry_succeeded": False,
         },
     )
 
-    repair_context = assemble_completion_repair_inputs(ctx, completion_validation)
-    raw_repair_prompt = _build_completion_repair_prompt(
-        task_prompt=ctx.prompt,
-        completion_validation=completion_validation,
-        project_dir=orchestration_state.project_dir,
-        prior_results_summary=repair_context["prior_results_summary"],
-        project_context=repair_context["project_context"],
-        next_step_number=next_step_number,
-        workspace_inventory=repair_context["workspace_inventory"],
-        failure_envelope=failure_envelope,
+    raw_repair_prompt = build_bounded_completion_repair_prompt(
+        repair_capsule,
+        next_step_number,
     )
     repair_prompt = render_adapted_runtime_prompt(
         ctx.db,
@@ -796,6 +803,7 @@ def _attempt_completion_repair(
             "Next Step Number": next_step_number,
         },
         expected_output="JSON object describing one repair step.",
+        direct=True,
     )
     repair_plan_result = asyncio.run(
         ctx.runtime_service.execute_task(repair_prompt, timeout_seconds=120)
@@ -810,6 +818,39 @@ def _attempt_completion_repair(
             success, repair_data, strategy_info = error_handler.attempt_json_parsing(
                 fallback_output, context="completion_repair"
             )
+
+    if not success:
+        repair_generated_details["compliance_retry_attempted"] = True
+        compliance_prompt = build_json_compliance_retry_prompt(
+            repair_output,
+            expected_shape="object",
+        )
+        try:
+            compliance_result = asyncio.run(
+                ctx.runtime_service.execute_task(
+                    compliance_prompt,
+                    timeout_seconds=120,
+                )
+            )
+            compliance_output = extract_structured_text(
+                compliance_result.get("output", "{}")
+            )
+            success, repair_data, strategy_info = error_handler.attempt_json_parsing(
+                compliance_output, context="completion_repair_compliance_retry"
+            )
+        except Exception as compliance_error:
+            success = False
+            repair_data = None
+            strategy_info = f"Compliance retry failed: {str(compliance_error)[:200]}"
+        repair_generated_details["compliance_retry_succeeded"] = bool(success)
+
+    append_orchestration_event(
+        project_dir=orchestration_state.project_dir,
+        session_id=ctx.session_id,
+        task_id=ctx.task_id,
+        event_type=EventType.REPAIR_GENERATED,
+        details=repair_generated_details,
+    )
 
     if not success:
         logger.warning(

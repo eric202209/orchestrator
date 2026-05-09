@@ -23,6 +23,11 @@ from app.services.orchestration.debug_feedback import (
     normalize_bounded_debug_repair_payload,
     persist_debug_feedback_envelope,
 )
+from app.services.orchestration.diff_capsule import (
+    build_bounded_diff_repair_prompt,
+    build_diff_capsule,
+    snapshot_file_contents,
+)
 from app.services.orchestration.execution import ExecutorService
 from app.services.orchestration.execution.execution_flow import (
     assess_step_execution,
@@ -56,6 +61,9 @@ from app.services.orchestration.types import (
     classify_failure_root_cause,
 )
 from app.services.orchestration.validation.validator import ValidatorService
+from app.services.orchestration.validation.parsing import (
+    build_json_compliance_retry_prompt,
+)
 from app.services.orchestration.validation.workspace_guard import (
     compute_workspace_checksum,
     detect_scope_violations,
@@ -304,6 +312,7 @@ def execute_step_loop(
             expected_files = step.get("expected_files", [])
         scope_violations: list = []
         pre_step_checksum: dict = {}
+        pre_step_file_snapshot: dict = {}
 
         logger.info(
             "[ORCHESTRATION] Executing step %s/%s: %s...",
@@ -347,6 +356,9 @@ def execute_step_loop(
 
         # Pre-task audit: snapshot workspace before the step runs
         pre_step_checksum = compute_workspace_checksum(orchestration_state.project_dir)
+        pre_step_file_snapshot = snapshot_file_contents(
+            orchestration_state.project_dir, expected_files
+        )
 
         execution_prompt = assemble_execution_prompt(ctx, step)
 
@@ -1170,8 +1182,32 @@ def execute_step_loop(
             return {"status": "failed", "reason": "debug_repair_budget_exhausted"}
 
         if phase7f_debug_repair_allowed:
-            debug_prompt = build_bounded_debug_repair_prompt(debug_feedback_envelope)
-            debug_prompt_mode = "phase7f_bounded_debug_repair"
+            diff_capsule = build_diff_capsule(
+                pre_checksum=pre_step_file_snapshot,
+                project_dir=orchestration_state.project_dir,
+                changed_files=debug_feedback_envelope.changed_files,
+                envelope=debug_feedback_envelope,
+            )
+            if diff_capsule is not None:
+                debug_prompt = build_bounded_diff_repair_prompt(diff_capsule)
+                debug_prompt_mode = "phase7g_diff_repair"
+                diff_repair_fallback_reason = None
+            else:
+                debug_prompt = build_bounded_debug_repair_prompt(
+                    debug_feedback_envelope
+                )
+                debug_prompt_mode = "phase7f_bounded_debug_repair"
+                if not debug_feedback_envelope.changed_files:
+                    diff_repair_fallback_reason = "no_changed_files"
+                elif debug_feedback_envelope.failure_class not in {
+                    "pytest_failure",
+                    "runtime_assertion_failure",
+                    "syntax_error",
+                    "import_error",
+                }:
+                    diff_repair_fallback_reason = "ineligible_failure_class"
+                else:
+                    diff_repair_fallback_reason = "diff_capsule_unavailable"
             orchestration_state.debug_repair_task_execution_ids = sorted(
                 {*debug_repair_used_ids, int(task_execution_id)}
             )
@@ -1180,6 +1216,8 @@ def execute_step_loop(
             )
             db.commit()
         else:
+            diff_capsule = None
+            diff_repair_fallback_reason = None
             debug_prompt = assemble_debugging_prompt(ctx, debug_inputs)
             debug_prompt_mode = "legacy_debugging"
 
@@ -1210,6 +1248,24 @@ def execute_step_loop(
                         else "Phase 7F bounded repair not eligible or already used for TaskExecution"
                     ),
                     "debug_prompt_mode": debug_prompt_mode,
+                    "envelope_mode": (
+                        "direct_capsule"
+                        if debug_prompt_mode
+                        in {
+                            "phase7g_diff_repair",
+                            "phase7f_bounded_debug_repair",
+                        }
+                        else "legacy_envelope"
+                    ),
+                    "compliance_retry_attempted": False,
+                    "compliance_retry_succeeded": False,
+                    "diff_capsule_primary_file": (
+                        diff_capsule.primary_file if diff_capsule else None
+                    ),
+                    "diff_capsule_line_count": (
+                        diff_capsule.diff_line_count if diff_capsule else 0
+                    ),
+                    "diff_repair_fallback_reason": diff_repair_fallback_reason,
                 },
             )
         except Exception:
@@ -1272,6 +1328,64 @@ def execute_step_loop(
                         repair_output, context="phase7f_debug_repair"
                     )
                 )
+                compliance_retry_attempted = False
+                compliance_retry_succeeded = False
+                if not success:
+                    compliance_retry_attempted = True
+                    compliance_prompt = build_json_compliance_retry_prompt(
+                        repair_output,
+                        expected_shape="array or object",
+                    )
+                    try:
+                        compliance_result = asyncio.run(
+                            runtime_service.execute_task(
+                                compliance_prompt,
+                                timeout_seconds=DEBUG_TIMEOUT_SECONDS,
+                            )
+                        )
+                        compliance_output = extract_structured_text(
+                            compliance_result.get("output", "{}")
+                        )
+                        success, parsed_repair, strategy_info = (
+                            error_handler.attempt_json_parsing(
+                                compliance_output,
+                                context="phase7f_debug_repair_compliance_retry",
+                            )
+                        )
+                    except Exception as compliance_error:
+                        success = False
+                        parsed_repair = None
+                        strategy_info = (
+                            "Compliance retry failed: " f"{str(compliance_error)[:200]}"
+                        )
+                    compliance_retry_succeeded = bool(success)
+                    try:
+                        append_orchestration_event(
+                            project_dir=orchestration_state.project_dir,
+                            session_id=session_id,
+                            task_id=task_id,
+                            event_type=EventType.DEBUG_REPAIR_ATTEMPTED,
+                            parent_event_id=(debugging_phase_event or {}).get(
+                                "event_id"
+                            ),
+                            details={
+                                "phase": "execution",
+                                "debug_repair_attempted": True,
+                                "debug_repair_used": True,
+                                "debug_prompt_mode": debug_prompt_mode,
+                                "envelope_mode": "direct_capsule",
+                                "task_execution_id": ctx.task_execution_id,
+                                "step_index": step_index + 1,
+                                "compliance_retry_attempted": (
+                                    compliance_retry_attempted
+                                ),
+                                "compliance_retry_succeeded": (
+                                    compliance_retry_succeeded
+                                ),
+                            },
+                        )
+                    except Exception:
+                        pass
                 debug_data = (
                     normalize_bounded_debug_repair_payload(parsed_repair)
                     if success
@@ -1299,6 +1413,8 @@ def execute_step_loop(
                             ),
                             "task_execution_id": ctx.task_execution_id,
                             "strategy": strategy_info,
+                            "compliance_retry_attempted": (compliance_retry_attempted),
+                            "compliance_retry_succeeded": (compliance_retry_succeeded),
                         },
                     )
                     raise ValueError(

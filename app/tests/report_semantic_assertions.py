@@ -13,7 +13,6 @@ from app.services.orchestration.policy_simulation import (
 )
 from app.services.orchestration.replay import AUTHORITATIVE_RECONSTRUCTED_FIELDS
 
-
 GOLDEN_ROOT = Path(__file__).parent / "golden"
 
 

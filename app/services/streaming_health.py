@@ -8,7 +8,6 @@ from datetime import UTC, datetime, timedelta
 from threading import Lock
 from typing import Any, Dict
 
-
 _STREAM_KINDS = (
     "session_logs",
     "session_status",

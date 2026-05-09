@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-
 WORKFLOW_PROFILES: Dict[str, List[str]] = {
     "fullstack_scaffold": [
         "create_frontend_skeleton",

@@ -6,7 +6,6 @@ import sqlite3
 import sys
 from pathlib import Path
 
-
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2] / "scripts" / "phase6b_evidence_report.py"
 )

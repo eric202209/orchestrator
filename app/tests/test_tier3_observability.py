@@ -21,7 +21,6 @@ from app.services.orchestration.persistence import (
     write_session_fingerprint_index,
 )
 
-
 # ── Fingerprint index ────────────────────────────────────────────────────────
 
 

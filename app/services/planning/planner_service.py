@@ -6,7 +6,6 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional
 
-
 TASK_LINE_RE = re.compile(
     r"^\s*(?:[-*]|\d+\.)\s*(?:\[(?: |x)?\]\s*)?(?:TASK_START:\s*)?(?P<title>[^|\n:]+?)(?:\s*(?:\||:)\s*(?P<description>.+))?\s*$",
     re.IGNORECASE | re.MULTILINE,

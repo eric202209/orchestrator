@@ -15,7 +15,6 @@ from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
 
-
 HYDRATION_EXCLUDED_NAMES = {
     ".openclaw",
     "__pycache__",

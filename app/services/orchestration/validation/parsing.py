@@ -7,7 +7,6 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-
 _VISIBLE_TEXT_KEYS = (
     "finalAssistantVisibleText",
     "final_assistant_visible_text",
@@ -15,6 +14,20 @@ _VISIBLE_TEXT_KEYS = (
     "output_text",
     "content_text",
 )
+
+
+def build_json_compliance_retry_prompt(
+    previous_response: Any,
+    *,
+    expected_shape: str = "array or object",
+) -> str:
+    previous_excerpt = str(previous_response or "")[:400]
+    return (
+        "Your previous response was not valid JSON.\n"
+        f"Return only a JSON {expected_shape} with no surrounding text.\n"
+        "Previous response:\n"
+        f"{previous_excerpt}"
+    )
 
 
 def _strip_markdown_fences(text: str) -> str:
@@ -29,19 +42,44 @@ def _find_json_substring(text: str) -> Optional[str]:
     if not stripped:
         return None
 
-    start_positions = [
-        idx for idx in (stripped.find("["), stripped.find("{")) if idx >= 0
-    ]
-    if not start_positions:
+    candidates = sorted(
+        idx for char in ("[", "{") for idx in _all_positions(stripped, char)
+    )[:8]
+    for json_start in candidates:
+        result = _extract_from_position(stripped, json_start)
+        if result is None:
+            continue
+        try:
+            json.loads(result)
+        except json.JSONDecodeError:
+            continue
+        return result
+
+    return None
+
+
+def _all_positions(text: str, char: str) -> List[int]:
+    positions: List[int] = []
+    start = 0
+    while True:
+        idx = text.find(char, start)
+        if idx < 0:
+            return positions
+        positions.append(idx)
+        start = idx + 1
+
+
+def _extract_from_position(text: str, start: int) -> Optional[str]:
+    stripped = str(text or "")
+    if start < 0 or start >= len(stripped):
         return None
-    json_start = min(start_positions)
 
     brace_count = 0
     bracket_count = 0
     in_string = False
     escape_next = False
 
-    for idx, char in enumerate(stripped[json_start:], json_start):
+    for idx, char in enumerate(stripped[start:], start):
         if escape_next:
             escape_next = False
             continue
@@ -61,8 +99,8 @@ def _find_json_substring(text: str) -> Optional[str]:
             bracket_count += 1
         elif char == "]":
             bracket_count -= 1
-        if brace_count == 0 and bracket_count == 0 and idx > json_start:
-            return stripped[json_start : idx + 1]
+        if brace_count == 0 and bracket_count == 0 and idx > start:
+            return stripped[start : idx + 1]
 
     return None
 

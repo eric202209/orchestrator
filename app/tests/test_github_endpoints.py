@@ -10,7 +10,6 @@ from app.config import settings
 from app.main import app
 from app.api.v1.endpoints import github as github_endpoint
 
-
 client = TestClient(app)
 
 
