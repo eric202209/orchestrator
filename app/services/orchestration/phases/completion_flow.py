@@ -371,6 +371,8 @@ def _classify_completion_verification_failure(
         "no test suite found",
         "module not found",
         "cannot find module",
+        "no module named",
+        "modulenotfounderror",
     )
 
     if not any(marker in lowered for marker in missing_dependency_markers):
@@ -755,6 +757,21 @@ def _attempt_completion_repair(
             "envelope_mode": "direct_capsule",
             "compliance_retry_attempted": False,
             "compliance_retry_succeeded": False,
+            "completion_repair_source": (
+                (getattr(completion_validation, "details", {}) or {}).get(
+                    "completion_repair_source"
+                )
+            ),
+            "verification_command": (
+                (getattr(completion_validation, "details", {}) or {}).get(
+                    "verification_command"
+                )
+            ),
+            "failure_class": (
+                (getattr(completion_validation, "details", {}) or {}).get(
+                    "failure_class"
+                )
+            ),
         },
         failure_envelope,
     )
@@ -1651,77 +1668,175 @@ def finalize_successful_task(
                     write_project_state_snapshot_fn(db, project, task, session_id)
                     return {"status": "failed", "reason": "completion_repair_failed"}
 
-            verification_error = (
-                "Completion verification failed: "
-                f"`{completion_verification_command}` "
-                f"({completion_verification_source or 'auto-detected'})"
-            )
-            debug_feedback_envelope = build_debug_feedback_envelope(
-                task_execution_id=ctx.task_execution_id,
-                task_id=task_id,
-                step_index=len(orchestration_state.plan),
-                failure_phase="completion_verification",
-                failed_command=completion_verification_command,
-                return_code=completion_verification.get("returncode"),
-                stdout="",
-                stderr=str(completion_verification.get("output") or ""),
-                validator_reasons=[verification_error],
-                changed_files=reported_changed_files[:20],
-                workspace_path=orchestration_state.project_dir,
-            )
-            persist_debug_feedback_envelope(
-                db=db,
-                session_id=session_id,
-                task_id=task_id,
-                session_instance_id=ctx.session_instance_id,
-                project_dir=orchestration_state.project_dir,
-                envelope=debug_feedback_envelope,
-            )
-            task.status = TaskStatus.FAILED
-            task.completed_at = datetime.now(UTC)
-            task.error_message = (
-                verification_error
-                + ": "
-                + str(completion_verification.get("output") or "")[:1500]
-            )
-            task.current_step = len(orchestration_state.plan)
-            task.workspace_status = "blocked"
-            orchestration_state.status = OrchestrationStatus.ABORTED
-            orchestration_state.abort_reason = verification_error
-            if session_task_link:
-                session_task_link.status = TaskStatus.FAILED
-                session_task_link.completed_at = task.completed_at
-            if session:
-                session.status = "paused"
-                session.is_active = False
-                set_session_alert(session, "error", task.error_message[:2000])
-            db.commit()
-            emit_live(
-                "ERROR",
-                "[ORCHESTRATION] Task completion verification failed",
-                metadata={
-                    "phase": "task_verification",
-                    "command": completion_verification_command,
-                    "source": completion_verification_source,
-                    "output": str(completion_verification.get("output") or "")[:2000],
-                },
-            )
-            save_orchestration_checkpoint_fn(
-                db, session_id, task_id, prompt, orchestration_state
-            )
-            append_orchestration_event(
-                project_dir=orchestration_state.project_dir,
-                session_id=session_id,
-                task_id=task_id,
-                event_type=EventType.PHASE_FINISHED,
-                details={
-                    "phase": "task_summary",
-                    "status": "verification_failed",
-                    "verification_command": completion_verification_command,
-                },
-            )
-            write_project_state_snapshot_fn(db, project, task, session_id)
-            return {"status": "failed", "reason": "completion_verification_failed"}
+            if not completion_verification.get("success", False):
+                verification_error = (
+                    "Completion verification failed: "
+                    f"`{completion_verification_command}` "
+                    f"({completion_verification_source or 'auto-detected'})"
+                )
+                debug_feedback_envelope = build_debug_feedback_envelope(
+                    task_execution_id=ctx.task_execution_id,
+                    task_id=task_id,
+                    step_index=len(orchestration_state.plan),
+                    failure_phase="completion_verification",
+                    failed_command=completion_verification_command,
+                    return_code=completion_verification.get("returncode"),
+                    stdout="",
+                    stderr=str(completion_verification.get("output") or ""),
+                    validator_reasons=[verification_error],
+                    changed_files=reported_changed_files[:20],
+                    workspace_path=orchestration_state.project_dir,
+                )
+                persist_debug_feedback_envelope(
+                    db=db,
+                    session_id=session_id,
+                    task_id=task_id,
+                    session_instance_id=ctx.session_instance_id,
+                    project_dir=orchestration_state.project_dir,
+                    envelope=debug_feedback_envelope,
+                )
+
+                debug_repair_used_ids = set(
+                    getattr(
+                        orchestration_state,
+                        "debug_repair_task_execution_ids",
+                        [],
+                    )
+                    or []
+                )
+                task_execution_id = (
+                    int(ctx.task_execution_id)
+                    if ctx.task_execution_id is not None
+                    else None
+                )
+                if (
+                    debug_feedback_envelope.eligible_for_debug_repair
+                    and task_execution_id is not None
+                    and task_execution_id not in debug_repair_used_ids
+                ):
+                    orchestration_state.debug_repair_task_execution_ids = sorted(
+                        {*debug_repair_used_ids, task_execution_id}
+                    )
+                    fallback_verdict = ValidationVerdict(
+                        stage="completion_verification",
+                        status="repair_required",
+                        profile=(
+                            getattr(completion_validation, "profile", None)
+                            or "implementation"
+                        ),
+                        reasons=[
+                            verification_error
+                            + ": "
+                            + str(completion_verification.get("output") or "")[:400]
+                        ],
+                        details={
+                            "expected_core_files": reported_changed_files[:20],
+                            "verification_command": completion_verification_command,
+                            "verification_source": (
+                                completion_verification_source or "auto-detected"
+                            ),
+                            "verification_output_preview": str(
+                                completion_verification.get("output") or ""
+                            )[:400],
+                            "completion_repair_source": (
+                                "final_completion_verification"
+                            ),
+                            "failure_class": debug_feedback_envelope.failure_class,
+                        },
+                    )
+                    record_validation_verdict(
+                        db,
+                        session_id,
+                        task_id,
+                        orchestration_state,
+                        fallback_verdict,
+                    )
+                    db.commit()
+                    repair_result = _attempt_completion_repair(
+                        ctx=ctx,
+                        completion_validation=fallback_verdict,
+                        save_orchestration_checkpoint_fn=(
+                            save_orchestration_checkpoint_fn
+                        ),
+                    )
+                    save_orchestration_checkpoint_fn(
+                        db, session_id, task_id, prompt, orchestration_state
+                    )
+                    if repair_result.get("status") == "success":
+                        emit_live(
+                            "INFO",
+                            "[ORCHESTRATION] Final verification repair applied, rerunning verification",
+                            metadata={
+                                "phase": "completion_repair",
+                                "completion_repair_source": (
+                                    "final_completion_verification"
+                                ),
+                                "command": completion_verification_command,
+                                "failure_class": (
+                                    debug_feedback_envelope.failure_class
+                                ),
+                            },
+                        )
+                        completion_verification = _execute_completion_verification(
+                            project_dir=orchestration_state.project_dir,
+                            command=completion_verification_command,
+                        )
+                    else:
+                        verification_error = "Completion repair failed: " + str(
+                            repair_result.get("reason") or "unknown reason"
+                        )
+
+                if not completion_verification.get("success", False):
+                    task.status = TaskStatus.FAILED
+                    task.completed_at = datetime.now(UTC)
+                    task.error_message = (
+                        verification_error
+                        + ": "
+                        + str(completion_verification.get("output") or "")[:1500]
+                    )
+                    task.current_step = len(orchestration_state.plan)
+                    task.workspace_status = "blocked"
+                    orchestration_state.status = OrchestrationStatus.ABORTED
+                    orchestration_state.abort_reason = verification_error
+                    if session_task_link:
+                        session_task_link.status = TaskStatus.FAILED
+                        session_task_link.completed_at = task.completed_at
+                    if session:
+                        session.status = "paused"
+                        session.is_active = False
+                        set_session_alert(session, "error", task.error_message[:2000])
+                    db.commit()
+                    emit_live(
+                        "ERROR",
+                        "[ORCHESTRATION] Task completion verification failed",
+                        metadata={
+                            "phase": "task_verification",
+                            "command": completion_verification_command,
+                            "source": completion_verification_source,
+                            "output": str(completion_verification.get("output") or "")[
+                                :2000
+                            ],
+                        },
+                    )
+                    save_orchestration_checkpoint_fn(
+                        db, session_id, task_id, prompt, orchestration_state
+                    )
+                    append_orchestration_event(
+                        project_dir=orchestration_state.project_dir,
+                        session_id=session_id,
+                        task_id=task_id,
+                        event_type=EventType.PHASE_FINISHED,
+                        details={
+                            "phase": "task_summary",
+                            "status": "verification_failed",
+                            "verification_command": completion_verification_command,
+                        },
+                    )
+                    write_project_state_snapshot_fn(db, project, task, session_id)
+                    return {
+                        "status": "failed",
+                        "reason": "completion_verification_failed",
+                    }
 
     baseline_publish_result = None
     baseline_publish_validation = None
