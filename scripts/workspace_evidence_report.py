@@ -228,6 +228,24 @@ def summarize(conn: sqlite3.Connection, limit: int) -> dict[str, Any]:
         evidence_rows = [*evidence_rows, *journal_evidence_rows]
         repair_attempt_rows = [*repair_attempt_rows, *journal_repair_attempt_rows]
         final_status = context
+        debug_feedback = debug_rows[-1] if debug_rows else {}
+        if not evidence_rows and (
+            debug_feedback.get("evidence_capsule_used")
+            or int(debug_feedback.get("evidence_chars_total") or 0) > 0
+        ):
+            evidence_rows = [
+                {
+                    "failure_class": _failure_class(debug_feedback),
+                    "evidence_chars_total": int(
+                        debug_feedback.get("evidence_chars_total") or 0
+                    ),
+                    "commands_run": debug_feedback.get("commands_run") or [],
+                    "evidence_files_inspected": debug_feedback.get(
+                        "evidence_files_inspected"
+                    )
+                    or [],
+                }
+            ]
         failure_class = _failure_class(
             debug_rows[-1] if debug_rows else evidence_rows[-1] if evidence_rows else {}
         )
@@ -248,7 +266,6 @@ def summarize(conn: sqlite3.Connection, limit: int) -> dict[str, Any]:
                 if str(item).strip()
             )
 
-        debug_feedback = debug_rows[-1] if debug_rows else {}
         capsule_used = bool(debug_feedback.get("evidence_capsule_used"))
         collected = bool(evidence_rows)
         command_count = len(evidence_commands)

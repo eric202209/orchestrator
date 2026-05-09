@@ -17,8 +17,7 @@ SPEC.loader.exec_module(module)
 
 
 def _schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
+    conn.executescript("""
         create table projects (
             id integer primary key,
             name text,
@@ -49,8 +48,7 @@ def _schema(conn: sqlite3.Connection) -> None:
             message text,
             log_metadata text
         );
-        """
-    )
+        """)
 
 
 def test_workspace_evidence_report_merges_log_and_journal_evidence(tmp_path):
@@ -112,3 +110,46 @@ def test_workspace_evidence_report_merges_log_and_journal_evidence(tmp_path):
     assert summary["average_evidence_chars"] == 42
     assert summary["by_failure_class"]["pytest_failure"]["evidence_collected"] == 1
     assert summary["top_evidence_files"] == [("tests/test_demo.py", 1)]
+
+
+def test_workspace_evidence_report_uses_metadata_when_journal_is_gone(tmp_path):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _schema(conn)
+    workspace = tmp_path / "removed-project"
+    conn.execute(
+        "insert into projects values (1, 'removed-project', ?)", (str(workspace),)
+    )
+    conn.execute("insert into sessions values (10, 1, 'stopped')")
+    conn.execute("insert into tasks values (20, 1, 'failed')")
+    conn.execute("insert into task_executions values (30, 10, 20, 'failed')")
+    conn.execute(
+        "insert into log_entries values (?, ?, ?, ?, ?, ?, ?)",
+        (
+            100,
+            10,
+            20,
+            30,
+            "WARN",
+            "Debug feedback captured",
+            json.dumps(
+                {
+                    "event_type": "debug_feedback_captured",
+                    "debug_failure_class": "pytest_failure",
+                    "debug_feedback_envelope": {
+                        "failure_class": "pytest_failure",
+                        "eligible_for_debug_repair": True,
+                    },
+                    "evidence_capsule_used": True,
+                    "evidence_chars_total": 77,
+                }
+            ),
+        ),
+    )
+
+    summary = module.summarize(conn, limit=10)
+
+    assert summary["workspace_evidence_collected"] == 1
+    assert summary["average_evidence_chars"] == 77
+    assert summary["by_failure_class"]["pytest_failure"]["evidence_collected"] == 1
+    assert summary["top_evidence_files"] == []
