@@ -373,10 +373,9 @@ orchestrator/
 - `./stop_all.sh`
 - `./scripts/orchestrator-mobile-api.sh`
 - `./scripts/security_check.sh`
-- `./scripts/check-logs-status.sh`
-- `./scripts/sync-logs.sh`
-- `./scripts/cleanup-logs.sh`
 - `./scripts/format-python.sh`
+- `./scripts/capture_replay_report.py`
+- `./scripts/inspect_session_state.py`
 
 ## Runtime Files You Can Ignore
 

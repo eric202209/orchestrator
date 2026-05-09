@@ -33,6 +33,9 @@ check_pattern() {
         ! -path "./frontend/dist/*" \
         ! -path "./build/*" \
         ! -path "./checkpoints/*" \
+        ! -path "./logs/*" \
+        ! -path "./qdrant/*" \
+        ! -path "./run/*" \
         ! -path "./frontend/package-lock.json" \
         ! -path "./frontend/pnpm-lock.yaml" \
         ! -path "./.git/*" \
@@ -100,4 +103,3 @@ else
     echo "Consider adding them to .gitignore if they're environment-specific."
     exit 1
 fi
-

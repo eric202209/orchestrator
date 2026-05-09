@@ -48,7 +48,7 @@ Usage:
 Environment:
   MOBILE_GATEWAY_API_KEY       Shared key required by Orchestrator /api/v1/mobile/*
   OPENCLAW_API_KEY             Fallback if MOBILE_GATEWAY_API_KEY is not set
-  ORCHESTRATOR_MOBILE_BASE_URL Defaults to ORCHESTRATOR_MOBILE_BASE_URL
+  ORCHESTRATOR_MOBILE_BASE_URL Defaults to http://127.0.0.1:8080/api/v1
   .env / .env.local            Auto-loaded from the orchestrator project root
 EOF
 }
@@ -83,6 +83,13 @@ main() {
         usage
         exit 1
     fi
+
+    case "${command}" in
+        -h|--help|help)
+            usage
+            exit 0
+            ;;
+    esac
 
     require_api_key
 
@@ -131,9 +138,6 @@ main() {
             else
                 api_get "/mobile/projects/${project_id}/tasks"
             fi
-            ;;
-        -h|--help|help)
-            usage
             ;;
         *)
             echo "Unknown command: ${command}" >&2

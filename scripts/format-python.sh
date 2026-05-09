@@ -1,19 +1,21 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Format Python files with Black
-# This script should be run on a machine with Black installed
 
-set -e
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+VENV_PYTHON="${PROJECT_ROOT}/venv/bin/python"
 
 echo "Formatting Python files with Black..."
-cd "$(dirname "$0")/.."
+cd "${PROJECT_ROOT}"
 
-# Install black if not present
-if ! command -v black &> /dev/null; then
-    echo "Installing Black..."
-    pip install black
+if [ -x "${VENV_PYTHON}" ]; then
+    PYTHON="${VENV_PYTHON}"
+else
+    PYTHON="${PYTHON:-python3}"
 fi
 
-# Run Black on the app directory
-black app/
+"${PYTHON}" -m black app/
 
 echo "✅ Formatting complete!"

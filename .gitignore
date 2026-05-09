@@ -79,10 +79,8 @@ dump.rdb
 # Checkpoint files (runtime state)
 checkpoints/
 
-# Qdrant binary and data
-bin/
-data/qdrant/
-*.qdrant-initialized
+# Local Qdrant runtime bundle
+qdrant/
 
 # Documentation
 docs/*
@@ -90,7 +88,6 @@ docs/*
 # Scripts to stop services (should be run locally)
 stop_all.sh
 start_all.sh
-restart_all.sh
 
 # Configuration files in config/ directory (tracked)
 config/*.conf
@@ -103,6 +100,7 @@ run/
 backend.pid
 frontend.pid
 worker.pid
+qdrant.pid
 
 # alembic
 alembic

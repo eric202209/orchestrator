@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Force kill all orchestrator processes
 echo "🛑 Killing all orchestrator processes..."
@@ -13,6 +13,11 @@ pkill -9 -f "uvicorn app.main" 2>/dev/null
 pkill -9 -f "celery.*worker" 2>/dev/null
 pkill -9 -f "vite" 2>/dev/null
 pkill -9 -f "pnpm dev" 2>/dev/null
+if [ -f "run/qdrant.pid" ]; then
+    kill "$(cat run/qdrant.pid)" 2>/dev/null && echo "  Killed Qdrant" || true
+    rm -f "run/qdrant.pid"
+fi
+pkill -f "qdrant/bin/qdrant" 2>/dev/null && echo "  Killed Qdrant" || true
 
 sleep 2
 
