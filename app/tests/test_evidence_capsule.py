@@ -12,6 +12,7 @@ from app.services.orchestration.evidence_capsule import (
     WorkspaceEvidenceCapsule,
     _commands_for_failure_class,
     _extract_module_name,
+    _sanitize_output,
     _truncate,
     collect_workspace_evidence,
     render_evidence_section,
@@ -83,7 +84,9 @@ def test_commands_import_error_contains_grep():
 def test_commands_pytest_failure_contains_pytest():
     cmds = _commands_for_failure_class("pytest_failure", Path("."), "")
     flat = [" ".join(c) for c in cmds]
-    assert any("pytest" in c for c in flat)
+    assert all("pytest" not in c for c in flat)
+    assert any(c.startswith("find") for c in flat)
+    assert any(c.startswith("grep") for c in flat)
 
 
 def test_commands_missing_dependency_contains_find_requirements():
@@ -171,6 +174,41 @@ def test_collect_empty_capsule_on_all_failures(tmp_path):
     ):
         capsule = collect_workspace_evidence("syntax_error", tmp_path)
     assert capsule.total_chars == 0
+
+
+def test_collect_pytest_failure_does_not_mutate_workspace(tmp_path):
+    before = {path.relative_to(tmp_path) for path in tmp_path.rglob("*")}
+
+    collect_workspace_evidence("pytest_failure", tmp_path)
+
+    after = {path.relative_to(tmp_path) for path in tmp_path.rglob("*")}
+    assert after == before
+
+
+def test_commands_use_portable_find_and_grep_only():
+    failure_classes = [
+        "module_not_found",
+        "import_error",
+        "pytest_failure",
+        "syntax_error",
+        "missing_dependency",
+        "completion_validation_failed",
+    ]
+    for failure_class in failure_classes:
+        cmds = _commands_for_failure_class(failure_class, Path("."), "")
+        assert cmds
+        assert {cmd[0] for cmd in cmds} <= {"find", "grep"}
+
+
+def test_sanitize_output_drops_secret_lines():
+    output = _sanitize_output(
+        "app/main.py\n.env:SECRET_KEY=abc\nconfig.py:API_TOKEN=def\nsafe.txt"
+    )
+    assert "app/main.py" in output
+    assert "safe.txt" in output
+    assert ".env" not in output
+    assert "SECRET_KEY" not in output
+    assert "API_TOKEN" not in output
 
 
 # ── render_evidence_section ───────────────────────────────────────────────────

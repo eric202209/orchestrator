@@ -19,6 +19,15 @@ _TOTAL_TIMEOUT = 15
 
 _MODULE_RE = re.compile(r"No module named '([A-Za-z0-9_. ]+)'")
 _IMPORT_RE = re.compile(r"(?:from|import)\s+([A-Za-z0-9_.]+)")
+_SENSITIVE_MARKERS = (
+    ".env",
+    "secret",
+    "token",
+    "password",
+    "api_key",
+    "apikey",
+    "private_key",
+)
 
 
 @dataclass
@@ -52,9 +61,20 @@ def _run_cmd(args: list[str], cwd: Path, timeout: int = _PER_CMD_TIMEOUT) -> str
             timeout=timeout,
         )
         raw = (result.stdout or "") + (result.stderr or "")
-        return _truncate(raw.strip())
+        return _truncate(_sanitize_output(raw))
     except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
         return ""
+
+
+def _sanitize_output(text: str) -> str:
+    """Drop lines likely to expose secrets or secret-bearing filenames."""
+    safe_lines: list[str] = []
+    for line in str(text or "").splitlines():
+        lowered = line.lower()
+        if any(marker in lowered for marker in _SENSITIVE_MARKERS):
+            continue
+        safe_lines.append(line)
+    return "\n".join(safe_lines).strip()
 
 
 def _extract_module_name(failure_context: str) -> Optional[str]:
@@ -86,8 +106,23 @@ def _commands_for_failure_class(
 
     elif failure_class == "pytest_failure":
         cmds.append(
-            ["python3", "-m", "pytest", "-q", "--tb=short", "--no-header", "-x"]
+            [
+                "find",
+                ".",
+                "-maxdepth",
+                "4",
+                "-type",
+                "f",
+                "(",
+                "-name",
+                "test_*.py",
+                "-o",
+                "-name",
+                "*_test.py",
+                ")",
+            ]
         )
+        cmds.append(["grep", "-rn", "assert ", ".", "--include=*.py"])
         cmds.append(["find", ".", "-maxdepth", "3", "-name", "conftest.py"])
 
     elif failure_class == "syntax_error":
