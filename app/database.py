@@ -1,34 +1,24 @@
 """Database initialization."""
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
 from app.config import settings
 from app.models import Base
 from app.db_migrations import run_schema_migrations
 
-is_sqlite = "sqlite" in settings.DATABASE_URL
-engine_kwargs = {
-    "pool_pre_ping": True,
-}
-if is_sqlite:
-    engine_kwargs.update(
-        {
-            "poolclass": NullPool,
-            "connect_args": {"check_same_thread": False, "timeout": 30},
-        }
-    )
-else:
-    engine_kwargs.update(
-        {
-            "pool_size": 5,
-            "max_overflow": 10,
-            "pool_recycle": 3600,
-        }
-    )
-
-# Create database engine with backend-appropriate pool settings.
-engine = create_engine(settings.DATABASE_URL, **engine_kwargs)
+# Create database engine with optimized pool settings
+engine = create_engine(
+    settings.DATABASE_URL,
+    pool_size=5,  # Keep 5 connections in pool
+    max_overflow=10,  # Allow up to 10 additional connections
+    pool_recycle=3600,  # Recycle connections after 1 hour
+    pool_pre_ping=True,  # Verify connection before use
+    connect_args=(
+        {"check_same_thread": False, "timeout": 30}
+        if "sqlite" in settings.DATABASE_URL
+        else {}
+    ),
+)
 
 # Create session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -36,15 +26,6 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_db():
     """Initialize database tables and apply tracked schema migrations."""
-    if is_sqlite:
-        database_path = settings.DATABASE_URL.removeprefix("sqlite:///")
-        if database_path and database_path != settings.DATABASE_URL:
-            from pathlib import Path
-
-            Path(database_path).parent.mkdir(parents=True, exist_ok=True)
-    if is_sqlite:
-        with engine.connect() as conn:
-            conn.execute(text("PRAGMA journal_mode=WAL"))
     Base.metadata.create_all(bind=engine)
     run_schema_migrations(engine)
 

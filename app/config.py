@@ -5,17 +5,6 @@ from typing import List
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-VAR_DIR = BASE_DIR / "var"
-LEGACY_DATABASE_PATH = BASE_DIR / "orchestrator.db"
-DEFAULT_DATABASE_PATH = (
-    LEGACY_DATABASE_PATH
-    if LEGACY_DATABASE_PATH.exists()
-    else VAR_DIR / "orchestrator.db"
-)
-LEGACY_CHECKPOINT_DIR = BASE_DIR / "checkpoints"
-DEFAULT_CHECKPOINT_DIR = (
-    LEGACY_CHECKPOINT_DIR if LEGACY_CHECKPOINT_DIR.exists() else VAR_DIR / "checkpoints"
-)
 
 
 class Settings(BaseSettings):
@@ -52,7 +41,7 @@ class Settings(BaseSettings):
 
     # Database
     # Absolute path derived from config.py location — CWD-independent.
-    DATABASE_URL: str = f"sqlite:///{DEFAULT_DATABASE_PATH}"
+    DATABASE_URL: str = f"sqlite:///{BASE_DIR}/orchestrator.db"
 
     # Auth
     SECRET_KEY: str = "your-secret-key-change-in-production"
@@ -97,7 +86,7 @@ class Settings(BaseSettings):
     # Celery Task Queue
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/1"
-    CHECKPOINT_DIR: str = str(DEFAULT_CHECKPOINT_DIR)
+    CHECKPOINT_DIR: str = str(BASE_DIR / "checkpoints")
 
     # GitHub
     GITHUB_TOKEN: str = ""

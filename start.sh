@@ -100,7 +100,11 @@ ensure_frontend_deps() {
 ensure_database() {
     echo -e "${BLUE}🗄️  Checking database...${NC}"
     cd "${PROJECT_ROOT}"
-    "${VENV_DIR}/bin/python" -c "from app.database import init_db; init_db(); print('✅ Database ready')"
+    if [ ! -f "${PROJECT_ROOT}/orchestrator.db" ]; then
+        "${VENV_DIR}/bin/python" -c "from app.database import init_db; init_db(); print('✅ Database initialized')"
+    else
+        echo -e "${GREEN}✅ Database exists${NC}"
+    fi
     echo ""
 }
 
@@ -153,6 +157,18 @@ check_process() {
     # Last resort: fuser
     if command -v fuser &> /dev/null; then
         if fuser $port/tcp &> /dev/null; then
+            return 0
+        fi
+    fi
+
+    # Minimal environments may not have lsof/netstat/fuser. For HTTP services,
+    # use the service endpoint as a port reachability fallback.
+    if [ "$port" = "${BACKEND_PORT}" ]; then
+        if curl -fsS "http://127.0.0.1:${port}/health" > /dev/null 2>&1; then
+            return 0
+        fi
+    elif [ "$port" = "3000" ]; then
+        if curl -fsS "http://127.0.0.1:${port}" > /dev/null 2>&1; then
             return 0
         fi
     fi
@@ -240,7 +256,7 @@ start_qdrant() {
     fi
 
     QDRANT__STORAGE__STORAGE_PATH="${QDRANT_STORAGE}" \
-        nohup "${QDRANT_BIN}" \
+        setsid nohup "${QDRANT_BIN}" \
         >> "${LOG_DIR}/qdrant.log" 2>&1 &
     echo $! > "${PID_DIR}/qdrant.pid"
 
@@ -285,7 +301,7 @@ start_backend() {
     # Start backend in background with comprehensive timeout configuration
     # LOGS DIRECTIVE: Write directly to var/logs/ for history preservation.
     cleanup_pid_file "${PID_DIR}/backend.pid"
-    nohup "${VENV_DIR}/bin/uvicorn" app.main:app \
+    setsid nohup "${VENV_DIR}/bin/uvicorn" app.main:app \
         --host "${BACKEND_HOST}" \
         --port "${BACKEND_PORT}" \
         --timeout-keep-alive 5 \
@@ -340,7 +356,7 @@ start_workers() {
     # Start worker in background
     # LOGS DIRECTIVE: Write directly to var/logs/ for history preservation.
     cleanup_pid_file "${PID_DIR}/worker.pid"
-    nohup "${VENV_DIR}/bin/celery" \
+    setsid nohup "${VENV_DIR}/bin/celery" \
         -A app.celery_app worker \
         --loglevel=info \
         >> "${LOG_DIR}/worker.log" 2>&1 &
@@ -395,7 +411,7 @@ start_frontend() {
     # Start frontend in background
     # LOGS DIRECTIVE: Write directly to var/logs/ for history preservation.
     cleanup_pid_file "${PID_DIR}/frontend.pid"
-    nohup pnpm dev >> "${LOG_DIR}/frontend.log" 2>&1 &
+    setsid nohup pnpm dev >> "${LOG_DIR}/frontend.log" 2>&1 &
     local frontend_pid=$!
     echo "${frontend_pid}" > "${PID_DIR}/frontend.pid"
     
@@ -485,10 +501,14 @@ main() {
 
     # Ask if user wants to stop existing processes
     if check_process "uvicorn app.main:app" || check_process "vite" || check_process "celery"; then
-        read -p "Existing processes detected. Stop them and restart? (y/n): " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            stop_existing
+        if [ -t 0 ]; then
+            read -p "Existing processes detected. Stop them and restart? (y/n): " -n 1 -r
+            echo
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                stop_existing
+            fi
+        else
+            echo -e "${YELLOW}Existing processes detected; leaving them running in non-interactive mode.${NC}"
         fi
     fi
     
