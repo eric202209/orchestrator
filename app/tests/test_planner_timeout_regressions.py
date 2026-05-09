@@ -213,6 +213,52 @@ def test_minimal_and_ultra_minimal_planning_prompts_include_contract_example():
         assert "No markdown. No prose." in prompt
 
 
+def test_planning_repair_normalizes_fenced_json_array(tmp_path):
+    events = []
+    plan_json = json.dumps(_valid_three_step_plan())
+
+    class Runtime:
+        async def invoke_prompt(self, *args, **kwargs):
+            return {"output": f"```json\n{plan_json}\n```"}
+
+    result = PlannerService.repair_output(
+        runtime_service=Runtime(),
+        task_description="Build a small Python utility",
+        malformed_output="not json",
+        project_dir=tmp_path,
+        timeout_seconds=10,
+        logger=logging.getLogger("test.planning_repair_normalizes_fenced_json_array"),
+        emit_live=lambda level, message, metadata=None: events.append(
+            (level, message, metadata or {})
+        ),
+        reason="plan_validation_failed",
+    )
+
+    assert result["output"] == plan_json
+    assert any(
+        metadata.get("reason") == "planning_repair_fenced_json_normalized"
+        for _, _, metadata in events
+    )
+
+
+def test_planning_repair_still_rejects_prose_output(tmp_path):
+    class Runtime:
+        async def invoke_prompt(self, *args, **kwargs):
+            return {"output": "Here is the repaired plan: []"}
+
+    with pytest.raises(PlanningRepairOutputContractViolation):
+        PlannerService.repair_output(
+            runtime_service=Runtime(),
+            task_description="Build a small Python utility",
+            malformed_output="not json",
+            project_dir=tmp_path,
+            timeout_seconds=10,
+            logger=logging.getLogger("test.planning_repair_still_rejects_prose_output"),
+            emit_live=lambda *args, **kwargs: None,
+            reason="plan_validation_failed",
+        )
+
+
 def test_minimal_prompt_retry_emits_prompt_size_diagnostics(tmp_path):
     events = []
     captured = {}
@@ -1834,6 +1880,7 @@ def test_planning_repair_no_output_timeout_classification():
     ]
     assert retry_events
     assert retry_events[0]["next_repair_attempt"] == 2
+    assert retry_events[0]["next_strategy"] == "compact_repair_prompt"
     no_output_events = [
         metadata
         for level, message, metadata in events
@@ -1858,10 +1905,12 @@ def test_planning_repair_no_output_timeout_classification():
 
 def test_planning_repair_no_output_retry_can_succeed():
     attempts = {"count": 0}
+    prompts = []
 
     class Runtime:
         async def invoke_prompt(self, prompt, **kwargs):
             attempts["count"] += 1
+            prompts.append(prompt)
             if attempts["count"] == 1:
                 exc = RuntimeError("OpenClaw prompt produced no output before 30s")
                 exc.runtime_diagnostics = {
@@ -1889,6 +1938,8 @@ def test_planning_repair_no_output_retry_can_succeed():
     )
 
     assert attempts["count"] == 2
+    assert len(prompts[1]) < len(prompts[0])
+    assert "Repair this invalid plan into 3 to 4 executable steps." in prompts[1]
     assert result == {"output": '[{"step_number":1}]'}
 
 
@@ -1932,43 +1983,36 @@ def test_planning_repair_returned_prose_raises_output_contract_violation():
     assert contract_events[0]["repair_attempts"] == 1
 
 
-def test_planning_repair_returned_fenced_json_raises_output_contract_violation():
+def test_planning_repair_returned_fenced_json_is_normalized_before_parsing():
     events = []
+    fenced_payload = '[{"step": 1, "commands": ["echo hi"], "verification": "echo hi"}]'
 
     class Runtime:
         async def invoke_prompt(self, prompt, **kwargs):
-            return {
-                "output": '```json\n[{"step": 1, "commands": ["echo hi"], "verification": "echo hi"}]\n```'
-            }
+            return {"output": f"```json\n{fenced_payload}\n```"}
 
-    with pytest.raises(PlanningRepairOutputContractViolation) as exc_info:
-        PlannerService.repair_output(
-            runtime_service=Runtime(),
-            task_description="Build a page",
-            malformed_output='{"steps":"bad"}',
-            project_dir=__import__("pathlib").Path("/tmp/project"),
-            timeout_seconds=300,
-            logger=logging.getLogger("test.planning_repair_fenced_json"),
-            emit_live=lambda level, message, metadata=None: events.append(
-                (level, message, metadata or {})
-            ),
-            reason="json_parse_failed",
-            rejection_reasons=["commands must be an array"],
-            knowledge_context=None,
-            session_id=1,
-            task_id=2,
-        )
+    result = PlannerService.repair_output(
+        runtime_service=Runtime(),
+        task_description="Build a page",
+        malformed_output='{"steps":"bad"}',
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+        timeout_seconds=300,
+        logger=logging.getLogger("test.planning_repair_fenced_json"),
+        emit_live=lambda level, message, metadata=None: events.append(
+            (level, message, metadata or {})
+        ),
+        reason="json_parse_failed",
+        rejection_reasons=["commands must be an array"],
+        knowledge_context=None,
+        session_id=1,
+        task_id=2,
+    )
 
-    assert exc_info.value.runtime_diagnostics["output_contract_violated"] is True
-    assert exc_info.value.runtime_diagnostics["repair_output_fenced"] is True
-    assert "markdown-fenced" in str(exc_info.value)
-    contract_events = [
-        metadata
+    assert result["output"] == fenced_payload
+    assert any(
+        metadata.get("reason") == "planning_repair_fenced_json_normalized"
         for _, _, metadata in events
-        if metadata.get("reason") == "repair_output_contract_violation"
-    ]
-    assert contract_events
-    assert contract_events[0]["repair_output_fenced"] is True
+    )
 
 
 def test_planning_repair_bare_json_array_does_not_raise_output_contract_violation():

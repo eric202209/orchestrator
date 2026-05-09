@@ -17,9 +17,12 @@ from app.services.workspace.project_isolation_service import (
 
 HYDRATION_EXCLUDED_NAMES = {
     ".openclaw",
+    ".venv",
     "__pycache__",
     "node_modules",
     ".pytest_cache",
+    "site-packages",
+    "venv",
 }
 TASK_REPORT_RE = re.compile(r"^task_report_\d+\.md$", re.IGNORECASE)
 LEGACY_BASELINE_DIR_NAME = ".project-baseline"

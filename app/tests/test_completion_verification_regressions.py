@@ -22,6 +22,7 @@ from app.services.orchestration.phases.completion_flow import (
 from app.services.orchestration.types import OrchestrationRunContext, ValidationVerdict
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.prompt_templates import OrchestrationState, StepResult
+from app.services.task_service import TaskService
 
 
 class _FakeRuntime:
@@ -57,6 +58,10 @@ def test_missing_jest_binary_is_treated_as_repairable_completion_verification():
     assert verdict.stage == "completion_verification"
     assert "dependencies are missing or not installed" in verdict.reasons[0]
     assert verdict.details["verification_command"] == "pnpm test"
+    assert (
+        verdict.details["completion_repair_source"] == "final_completion_verification"
+    )
+    assert verdict.details["failure_class"] == "missing_dependency"
     assert "src/utils/format.test.ts" in verdict.details["expected_core_files"]
 
 
@@ -81,6 +86,10 @@ def test_python_no_module_named_is_repairable_completion_verification():
     assert verdict.stage == "completion_verification"
     assert "repairable test/module issue" in verdict.reasons[0]
     assert verdict.details["verification_command"] == "pytest"
+    assert (
+        verdict.details["completion_repair_source"] == "final_completion_verification"
+    )
+    assert verdict.details["failure_class"] == "module_not_found"
 
 
 def test_python_modulenotfounderror_prefix_is_repairable_completion_verification():
@@ -208,6 +217,35 @@ def test_verification_completion_does_not_require_execution_results(tmp_path):
         "Completion contract requires at least one recorded execution result"
         not in verdict.reasons
     )
+
+
+def test_workspace_consistency_ignores_virtualenv_vendor_javascript(tmp_path):
+    project_dir = tmp_path / "project"
+    (project_dir / "tests").mkdir(parents=True)
+    (project_dir / ".venv" / "lib" / "python3.12" / "site-packages" / "urllib3").mkdir(
+        parents=True
+    )
+    (project_dir / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    (project_dir / "tests" / "test_app.py").write_text(
+        "def test_ok():\n    assert True\n",
+        encoding="utf-8",
+    )
+    (
+        project_dir
+        / ".venv"
+        / "lib"
+        / "python3.12"
+        / "site-packages"
+        / "urllib3"
+        / "emscripten_fetch_worker.js"
+    ).write_text("self.onmessage = () => {};\n", encoding="utf-8")
+
+    consistency = TaskService(None).analyze_workspace_consistency(project_dir)
+
+    assert consistency["dominant_stack"] == "python"
+    assert consistency["mixed_stack"] is False
+    assert consistency["node_source_count"] == 0
+    assert consistency["node_files"] == []
 
 
 def test_completion_validation_rejects_reported_files_that_never_materialized(tmp_path):

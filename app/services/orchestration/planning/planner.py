@@ -24,6 +24,7 @@ from app.services.workspace.path_display import render_workspace_path_for_prompt
 
 PLANNING_REPAIR_MAX_KNOWLEDGE_ITEMS = 0
 PLANNING_REPAIR_MAX_KNOWLEDGE_ITEM_CHARS = 0
+PLANNING_REPAIR_COMPACT_MALFORMED_OUTPUT_CHARS = 800
 PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS = 1700
 PLANNING_REPAIR_MAX_VALIDATION_ERROR_CHARS = 500
 REPAIR_PROMPT_MAX_CHARS = 6000
@@ -973,6 +974,28 @@ Return only a JSON array matching this shape. No markdown. No prose.
         )
 
     @staticmethod
+    def _normalize_repair_json_array_output(output_text: str) -> Optional[str]:
+        """Normalize fenced JSON arrays before the main planning parser runs."""
+        stripped = str(output_text or "").strip()
+        if not stripped.startswith("```"):
+            return stripped if stripped.startswith("[") else None
+
+        match = re.match(
+            r"^```(?:json)?\s*(?P<body>\[.*\])\s*```\s*$",
+            stripped,
+            flags=re.DOTALL,
+        )
+        if not match:
+            return None
+
+        candidate = match.group("body").strip()
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+        return candidate if isinstance(parsed, list) else None
+
+    @staticmethod
     async def _invoke_repair_prompt(
         runtime_service: Any,
         repair_prompt: str,
@@ -1071,6 +1094,40 @@ Rules:
 13. Never use heredoc (`<<'EOF'`, `<<'PY'`, `<<'HEREDOC'`, etc.). Always use printf for all file writes.
 14. No heredocs in loops, multi-file heredocs, or multiple heredoc commands.
 15. No `\\'` inside single-quoted strings; use double quotes instead.
+"""
+        return PlannerService.apply_prompt_profile(prompt, prompt_profile)
+
+    @staticmethod
+    def build_compact_planning_repair_prompt(
+        malformed_output: str,
+        rejection_reasons: Optional[List[str]] = None,
+        prompt_profile: str = "default",
+    ) -> str:
+        broken_output = _compact_invalid_output_excerpt(malformed_output)[
+            :PLANNING_REPAIR_COMPACT_MALFORMED_OUTPUT_CHARS
+        ]
+        reason_lines = "\n".join(
+            f"- {reason[:140]}" for reason in (rejection_reasons or [])[:4]
+        )
+        prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
+No prose. No markdown fences. No plan.json. No explanation.
+
+Repair this invalid plan into 3 to 4 executable steps.
+
+Validation errors:
+{reason_lines or "- malformed or non-runnable planning output"}
+
+Invalid output excerpt:
+{broken_output}
+
+Schema per step:
+step_number, description, commands, verification, rollback, expected_files.
+
+Rules:
+- commands must be short shell strings.
+- verification must be one real command using `python -m`, `node -e`, or `npm run build`.
+- expected_files must be relative paths only.
+- no background processes, dev servers, absolute paths, heredocs, prose, markdown, or extra keys.
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 
@@ -1262,6 +1319,7 @@ Rules:
         task_id: Optional[int] = None,
         _no_output_retry_used: bool = False,
         _repair_attempt_number: int = 1,
+        _compact_no_output_retry: bool = False,
     ) -> Dict[str, Any]:
         repair_build_started_at = time.monotonic()
         logger.warning(
@@ -1269,17 +1327,24 @@ Rules:
             f"attempting repair ({reason})"
         )
         repair_timeout = min(timeout_seconds, PLANNING_REPAIR_TIMEOUT_SECONDS)
-        repair_prompt = cls.build_planning_repair_prompt(
-            task_description,
-            malformed_output,
-            project_dir,
-            rejection_reasons=rejection_reasons,
-            prompt_profile=prompt_profile,
-            workflow_profile=workflow_profile,
-            workflow_phases=workflow_phases,
-            workspace_has_existing_files=workspace_has_existing_files,
-            knowledge_context=knowledge_context,
-        )
+        if _compact_no_output_retry:
+            repair_prompt = cls.build_compact_planning_repair_prompt(
+                malformed_output,
+                rejection_reasons=rejection_reasons,
+                prompt_profile=prompt_profile,
+            )
+        else:
+            repair_prompt = cls.build_planning_repair_prompt(
+                task_description,
+                malformed_output,
+                project_dir,
+                rejection_reasons=rejection_reasons,
+                prompt_profile=prompt_profile,
+                workflow_profile=workflow_profile,
+                workflow_phases=workflow_phases,
+                workspace_has_existing_files=workspace_has_existing_files,
+                knowledge_context=knowledge_context,
+            )
         validation_error_chars = sum(
             len(str(reason_text or "")[:180])
             for reason_text in (rejection_reasons or [])[:5]
@@ -1293,7 +1358,8 @@ Rules:
             "[ORCHESTRATION] session_id=%s task_id=%s repair_prompt_chars=%s "
             "malformed_output_chars=%s validation_error_chars=%s knowledge_context_chars=%s "
             "includes_project_context=false includes_non_project_context=false "
-            "repair_reason=%s repair_prompt_build_seconds=%.3f repair_attempts=%s",
+            "repair_reason=%s repair_prompt_build_seconds=%.3f repair_attempts=%s "
+            "compact_no_output_retry=%s",
             session_id,
             task_id,
             len(repair_prompt),
@@ -1303,6 +1369,7 @@ Rules:
             reason[:120],
             repair_prompt_build_seconds,
             _repair_attempt_number,
+            _compact_no_output_retry,
         )
         if len(repair_prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS:
             budget_error = cls._build_repair_prompt_budget_error(
@@ -1363,6 +1430,7 @@ Rules:
                 "phase": "planning",
                 "attempt": "repair",
                 "strategy": "repair_prompt",
+                "compact_no_output_retry": _compact_no_output_retry,
                 "timeout_seconds": repair_timeout,
                 "repair_prompt_chars": len(repair_prompt),
                 "malformed_output_chars": compact_malformed_output_chars,
@@ -1390,7 +1458,10 @@ Rules:
             repair_output_token_estimate = max(0, (repair_output_chars + 3) // 4)
             repair_truncated = "...<truncated" in repair_output_text.lower()
             parser_validation_seconds = time.monotonic() - parser_started_at
-            if not repair_output_text.lstrip().startswith("["):
+            normalized_repair_output_text = cls._normalize_repair_json_array_output(
+                repair_output_text
+            )
+            if normalized_repair_output_text is None:
                 is_fenced = repair_output_text.lstrip().startswith("```")
                 contract_reason = (
                     "repair returned markdown-fenced JSON; expected bare JSON array"
@@ -1432,6 +1503,19 @@ Rules:
                 raise PlanningRepairOutputContractViolation(
                     contract_reason,
                     diagnostics,
+                )
+            if normalized_repair_output_text != repair_output_text:
+                result["output"] = normalized_repair_output_text
+                emit_live(
+                    "WARN",
+                    "[ORCHESTRATION] Planning repair returned fenced JSON; normalized to a bare JSON array.",
+                    metadata={
+                        "phase": "planning",
+                        "reason": "planning_repair_fenced_json_normalized",
+                        "repair_attempts": _repair_attempt_number,
+                        "repair_output_chars": repair_output_chars,
+                        "normalized_output_chars": len(normalized_repair_output_text),
+                    },
                 )
             if repair_duration_seconds > repair_timeout:
                 raise TimeoutError(
@@ -1510,6 +1594,7 @@ Rules:
                             "repair_reason": reason[:240],
                             "repair_attempts": _repair_attempt_number,
                             "next_repair_attempt": _repair_attempt_number + 1,
+                            "next_strategy": "compact_repair_prompt",
                             "timeout_boundary": diagnostics.get("timeout_boundary")
                             or "repair_no_output",
                         },
@@ -1533,6 +1618,7 @@ Rules:
                         task_id=task_id,
                         _no_output_retry_used=True,
                         _repair_attempt_number=_repair_attempt_number + 1,
+                        _compact_no_output_retry=True,
                     )
                 timeout_exc = PlanningRepairNoOutputTimeout(
                     (

@@ -392,10 +392,21 @@ def _classify_completion_verification_failure(
             "Completion verification could not run because the test runner or project "
             f"dependencies are missing or not installed for `{command}`"
         )
+        failure_class = "missing_dependency"
     else:
         reason = (
             "Completion verification found a repairable test/module issue under "
             f"`{command}`"
+        )
+        failure_class = (
+            "module_not_found"
+            if (
+                "no module named" in lowered
+                or "modulenotfounderror" in lowered
+                or "module not found" in lowered
+                or "cannot find module" in lowered
+            )
+            else "completion_validation_failed"
         )
     if preview:
         reason += f": {preview}"
@@ -410,6 +421,8 @@ def _classify_completion_verification_failure(
             "verification_command": command,
             "verification_source": source or "auto-detected",
             "verification_output_preview": preview,
+            "completion_repair_source": "final_completion_verification",
+            "failure_class": failure_class,
         },
     )
 
