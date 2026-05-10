@@ -6,6 +6,7 @@ handled by `../start.sh`; service logs are written directly to `../logs/`.
 ## Session And Replay Inspection
 
 - `capture_replay_report.py` - capture semantic replay reports from event journals.
+- `capture_task_evidence_bundle.py` - capture a stable per-TaskExecution evidence bundle.
 - `phase6b_evidence_report.py` - collect session/task evidence across logs, replay, and endpoints.
 - `inspect_session_state.py` - inspect one session in SQLite.
 - `inspect_task_execution_attempts.py` - inspect task execution attempts.
