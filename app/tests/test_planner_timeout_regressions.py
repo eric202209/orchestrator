@@ -3133,6 +3133,185 @@ def test_malformed_shell_quoting_workspace_guard_failure_routes_to_repair(
     assert diagnostics[0]["semantic_violation_codes"] == ["malformed_shell_quoting"]
 
 
+def test_post_repair_malformed_shell_quoting_gets_one_targeted_second_repair(
+    tmp_path, monkeypatch
+):
+    initial_plan = [
+        {
+            "step_number": 1,
+            "description": "Create FastAPI route",
+            "commands": ["printf 'from fastapi import FastAPI\\n' > main.py"],
+            "verification": "echo ok",
+            "rollback": "rm -f main.py",
+            "expected_files": ["main.py"],
+        }
+    ]
+    first_repair_plan = [
+        {
+            "step_number": 1,
+            "description": "Create FastAPI route",
+            "commands": ["printf 'from fastapi import FastAPI\\n' > main.py"],
+            "verification": (
+                'PYTHONPATH=src .venv/bin/python -c "from main import app; '
+                "assert app.title == 'FastAPI'"
+            ),
+            "rollback": "rm -f main.py",
+            "expected_files": ["main.py"],
+        }
+    ]
+    second_repair_plan = [
+        {
+            "step_number": 1,
+            "description": "Create FastAPI route",
+            "commands": ["printf 'from fastapi import FastAPI\\n' > main.py"],
+            "verification": "python -m pytest -q",
+            "rollback": "rm -f main.py",
+            "expected_files": ["main.py"],
+        }
+    ]
+
+    orchestration_state = MagicMock()
+    orchestration_state.project_dir = tmp_path
+    orchestration_state.project_context = ""
+    orchestration_state.plan = []
+    orchestration_state.current_step_index = 0
+    orchestration_state.reasoning_artifact = None
+    orchestration_state.validation_history = []
+    orchestration_state.phase_history = []
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {}
+
+        async def execute_task(self, *args, **kwargs):
+            return {"status": "completed", "output": json.dumps(initial_plan)}
+
+    task = MagicMock()
+    task.title = "Repair weak verification then malformed quoting"
+    task.description = "Repair weak verification then malformed quoting"
+    events = []
+
+    ctx = OrchestrationRunContext(
+        db=MagicMock(),
+        session=MagicMock(instance_id=None),
+        project=MagicMock(),
+        task=task,
+        session_task_link=MagicMock(),
+        session_id=141,
+        task_id=28,
+        prompt="Build a FastAPI canary",
+        timeout_seconds=300,
+        execution_profile="full_lifecycle",
+        validation_profile="standard",
+        runs_in_canonical_baseline=False,
+        orchestration_state=orchestration_state,
+        runtime_service=Runtime(),
+        task_service=MagicMock(),
+        logger=logging.getLogger("test.post_repair_malformed_shell_second_pass"),
+        emit_live=lambda level, message, metadata=None: events.append(
+            (level, message, metadata or {})
+        ),
+        error_handler=MagicMock(),
+    )
+    ctx.error_handler.attempt_json_parsing = lambda output, **kwargs: (
+        True,
+        json.loads(output),
+        "json",
+    )
+
+    _patch_planning_flow_external_writes(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow._build_reasoning_artifact",
+        lambda *args, **kwargs: {
+            "intent": "Create FastAPI canary",
+            "workspace_facts": [],
+            "planned_actions": [],
+            "verification_plan": ["Run pytest"],
+        },
+    )
+    monkeypatch.setattr(
+        ValidatorService,
+        "validate_reasoning_artifact",
+        staticmethod(
+            lambda *args, **kwargs: type(
+                "Verdict",
+                (),
+                {"accepted": True, "status": "accepted", "reasons": []},
+            )()
+        ),
+    )
+    monkeypatch.setattr(
+        ValidatorService,
+        "validate_plan",
+        staticmethod(
+            lambda *args, **kwargs: type(
+                "Verdict",
+                (),
+                {
+                    "accepted": True,
+                    "warning": False,
+                    "status": "accepted",
+                    "reasons": [],
+                    "details": {},
+                    "verdict": {"status": "accepted"},
+                },
+            )()
+        ),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "should_start_with_minimal_prompt",
+        staticmethod(lambda *args, **kwargs: False),
+    )
+    repair_calls = []
+
+    def repair_output(cls, *args, **kwargs):
+        repair_calls.append(kwargs)
+        if len(repair_calls) == 1:
+            return {"output": json.dumps(first_repair_plan)}
+        return {"output": json.dumps(second_repair_plan)}
+
+    monkeypatch.setattr(PlannerService, "repair_output", classmethod(repair_output))
+
+    def normalize_plan(*args, **kwargs):
+        plan = args[3]
+        if any(
+            "PYTHONPATH=src .venv/bin/python -c" in str(step.get("verification") or "")
+            for step in plan
+        ):
+            raise RuntimeError(
+                "step 1 verification blocked: Command contains malformed shell quoting"
+            )
+        return plan
+
+    result = execute_planning_phase(
+        ctx=ctx,
+        workspace_review={"has_existing_files": False},
+        extract_structured_text=extract_structured_text,
+        extract_plan_steps=lambda value: value if isinstance(value, list) else None,
+        looks_like_truncated_multistep_plan=lambda text, plan: False,
+        normalize_plan_with_live_logging=normalize_plan,
+        workspace_violation_error_cls=RuntimeError,
+    )
+
+    assert result == {"status": "completed"}
+    assert len(repair_calls) == 2
+    assert repair_calls[0]["reason"].startswith("plan_contains_immediate_repair_issues")
+    assert repair_calls[1]["reason"].startswith("post_repair_malformed_shell_quoting")
+    assert repair_calls[1]["rejection_reasons"] == [
+        "Malformed shell quoting: emit one valid shell command string; avoid "
+        "unmatched quotes, mixed quote escaping, and python -c snippets with nested "
+        "quotes"
+    ]
+    assert ctx.orchestration_state.plan == second_repair_plan
+    diagnostics = [
+        metadata
+        for level, message, metadata in events
+        if message == "[OPENCLAW][PLANNING_DIAGNOSTICS] contract violation detected"
+    ]
+    assert diagnostics[-1]["semantic_violation_codes"] == ["malformed_shell_quoting"]
+
+
 def test_planning_repair_timeout_budget_is_enforced(monkeypatch):
     from app.services.orchestration import planning as planning_pkg
 
@@ -3458,6 +3637,23 @@ def test_targeted_second_repair_reason_does_not_add_brittle_eligibility():
         )
         is None
     )
+
+
+def test_targeted_second_repair_reason_centralizes_malformed_shell_eligibility():
+    retry_state = _PlanningRetryState()
+    retry_state.repair_prompt_used = True
+
+    reason = _get_targeted_second_repair_reason(
+        retry_state=retry_state,
+        malformed_shell_quoting_violation=True,
+    )
+
+    assert reason is not None
+    assert reason.issue_key == "malformed_shell_quoting"
+    assert reason.event_reason == "post_repair_malformed_shell_quoting_second_pass"
+    assert reason.semantic_violation_code == "malformed_shell_quoting"
+    assert reason.cap_attribute == "post_repair_malformed_shell_second_repair_used"
+    assert "python -c snippets" in reason.rejection_text
 
 
 def test_post_repair_weak_verification_gets_one_targeted_second_repair(

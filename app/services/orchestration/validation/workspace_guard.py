@@ -295,8 +295,7 @@ def is_workspace_cd_escape(command: str, project_dir: str | Path) -> bool:
         return False
 
     cd_workspace_fragment = re.compile(
-        r"\bcd\s+(?:--\s+)?[\"']?[^;&|`$()<>]*"
-        + re.escape(_WORKSPACE_STEM),
+        r"\bcd\s+(?:--\s+)?[\"']?[^;&|`$()<>]*" + re.escape(_WORKSPACE_STEM),
     )
     if cd_workspace_fragment.search(text):
         return True

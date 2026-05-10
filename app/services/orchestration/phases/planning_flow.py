@@ -828,17 +828,36 @@ def execute_planning_phase(
                     "Planning output",
                 )
             except workspace_violation_error_cls as exc:
-                if (
-                    _is_repairable_malformed_shell_quoting_violation(exc)
-                    and not retry_state.repair_prompt_used
-                ):
+                if _is_repairable_malformed_shell_quoting_violation(exc):
+                    second_repair_reason = None
+                    if retry_state.repair_prompt_used:
+                        second_repair_reason = _get_targeted_second_repair_reason(
+                            retry_state=retry_state,
+                            malformed_shell_quoting_violation=True,
+                        )
+                        if not second_repair_reason or second_repair_reason.cap_used:
+                            raise
                     contract_violations = [
                         "Plan contains malformed shell quoting in runnable commands"
                     ]
-                    retry_state.last_repair_reason = "malformed_shell_quoting"
+                    repair_reason = (
+                        second_repair_reason.retry_reason
+                        if second_repair_reason
+                        else "malformed_shell_quoting"
+                    )
+                    rejection_reasons = (
+                        [second_repair_reason.rejection_text]
+                        if second_repair_reason
+                        else [
+                            "Malformed shell quoting: emit one valid shell command "
+                            "string; avoid unmatched quotes, mixed quote escaping, "
+                            "and python -c snippets with nested quotes"
+                        ]
+                    )
+                    retry_state.last_repair_reason = repair_reason
                     _emit_planning_diagnostics_contract_violation(
                         ctx,
-                        reason="malformed_shell_quoting",
+                        reason=repair_reason,
                         contract_violations=contract_violations,
                         semantic_violation_codes=["malformed_shell_quoting"],
                         output_text=output_text,
@@ -848,13 +867,17 @@ def execute_planning_phase(
                         ctx=ctx,
                         planning_timeout_seconds=planning_timeout_seconds,
                         malformed_output=output_text,
-                        reason="malformed_shell_quoting: " + str(exc)[:300],
-                        rejection_reasons=[
-                            "Malformed shell quoting: do not put escaped apostrophes like `\\'` inside single-quoted strings"
-                        ],
+                        reason=f"{repair_reason}: " + str(exc)[:300],
+                        rejection_reasons=rejection_reasons,
                         prompt_profile=prompt_profile,
                     )
                     retry_state.repair_prompt_used = True
+                    if second_repair_reason:
+                        setattr(
+                            retry_state,
+                            second_repair_reason.cap_attribute,
+                            True,
+                        )
                     retry_state.consecutive_failures += 1
                     continue
                 raise

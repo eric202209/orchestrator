@@ -468,6 +468,7 @@ class _PlanningRetryState:
         self.repair_prompt_used = False
         self.post_repair_blocking_second_repair_used = False
         self.post_repair_validation_second_repair_used = False
+        self.post_repair_malformed_shell_second_repair_used = False
         self.last_repair_reason = ""
 
     @property
@@ -545,6 +546,22 @@ _SECOND_REPAIR_VALIDATOR_POLICIES: dict[str, _SecondRepairPolicy] = {
     ),
 }
 
+_SECOND_REPAIR_WORKSPACE_POLICIES: dict[str, _SecondRepairPolicy] = {
+    "malformed_shell_quoting": _SecondRepairPolicy(
+        issue_key="malformed_shell_quoting",
+        issue_label="malformed shell quoting",
+        retry_reason="post_repair_malformed_shell_quoting",
+        event_reason="post_repair_malformed_shell_quoting_second_pass",
+        semantic_violation_code="malformed_shell_quoting",
+        cap_attribute="post_repair_malformed_shell_second_repair_used",
+        rejection_template=(
+            "Malformed shell quoting: emit one valid shell command string; "
+            "avoid unmatched quotes, mixed quote escaping, and python -c "
+            "snippets with nested quotes"
+        ),
+    ),
+}
+
 
 def _second_repair_reason_from_policy(
     retry_state: _PlanningRetryState,
@@ -570,9 +587,14 @@ def _get_targeted_second_repair_reason(
     retry_state: _PlanningRetryState,
     blocking_repair_issues: dict[str, list[int]] | None = None,
     plan_verdict: Any | None = None,
+    malformed_shell_quoting_violation: bool = False,
 ) -> _SecondRepairReason | None:
     if not retry_state.repair_prompt_used:
         return None
+
+    if malformed_shell_quoting_violation:
+        policy = _SECOND_REPAIR_WORKSPACE_POLICIES["malformed_shell_quoting"]
+        return _second_repair_reason_from_policy(retry_state, policy, [])
 
     issue_keys = set((blocking_repair_issues or {}).keys())
     if len(issue_keys) == 1:
