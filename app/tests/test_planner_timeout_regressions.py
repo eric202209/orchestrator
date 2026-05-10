@@ -1469,10 +1469,11 @@ def test_planning_repair_reasons_include_heredoc_and_inline_python_subcodes():
     )
 
     rendered = "\n".join(reasons)
-    assert "heredoc_command_shape:" in rendered
-    assert "steps [1]" in rendered
-    assert "brittle_inline_python:" in rendered
-    assert "steps [2]" in rendered
+    assert "Step [1]: invalid heredoc shape" in rendered
+    assert "disallowed_heredoc_shape" in rendered
+    assert "No heredoc" in rendered
+    assert "Step [2]: brittle inline Python" in rendered
+    assert "No nested python -c" in rendered
     assert "placeholder_only_implementation:" in rendered
     assert reasons[-1] == "Plan contains brittle heredoc-heavy or malformed commands"
 
@@ -4929,11 +4930,12 @@ def test_repair_rejection_reasons_prepend_oversized_command_details():
 
     enriched = _build_repair_rejection_reasons(reasons, details)
 
-    assert enriched[0].startswith("oversized_command_length:")
-    assert "steps [2, 3]" in enriched[0]
+    assert enriched[0].startswith("Step [2, 3]:")
+    assert "oversized_command_length" in enriched[0]
     assert "step 2: 1684 chars" in enriched[0]
     assert "step 3: 1668 chars" in enriched[0]
     assert "max 900" in enriched[0]
+    assert "No heredoc" in enriched[0]
     assert enriched[1:] == reasons
 
 
@@ -4946,9 +4948,10 @@ def test_repair_rejection_reasons_prepend_multiple_heredoc_details():
 
     enriched = _build_repair_rejection_reasons(reasons, details)
 
-    assert enriched[0].startswith("multiple_heredoc_across_plan:")
+    assert enriched[0].startswith("Plan:")
     assert "3 heredoc blocks found" in enriched[0]
-    assert "Replace every heredoc" in enriched[0]
+    assert "multiple_heredoc_across_plan" in enriched[0]
+    assert "No heredoc" in enriched[0]
     assert enriched[1:] == reasons
 
 
@@ -4965,10 +4968,10 @@ def test_repair_rejection_reasons_prepend_too_many_lines_step_details():
 
     enriched = _build_repair_rejection_reasons(reasons, details)
 
-    assert enriched[0].startswith("too_many_lines:")
-    assert "step [1, 3]" in enriched[0]
-    assert "commands exceed line limit" in enriched[0]
-    assert "Use printf or split content across steps" in enriched[0]
+    assert enriched[0].startswith("Step [1, 3]:")
+    assert "too_many_lines" in enriched[0]
+    assert "Rewrite using printf for file writes" in enriched[0]
+    assert "No heredoc" in enriched[0]
     assert enriched[1:] == reasons
 
 
@@ -5009,9 +5012,9 @@ def test_repair_rejection_reasons_prepend_heredoc_shape_subcodes():
 
     enriched = _build_repair_rejection_reasons(reasons, details)
 
-    assert enriched[0].startswith("heredoc_command_shape:")
+    assert enriched[0].startswith("Step [1]:")
     assert "disallowed_heredoc_shape" in enriched[0]
-    assert "steps [1]" in enriched[0]
+    assert "No heredoc" in enriched[0]
     assert enriched[1:] == reasons
 
 
@@ -5033,7 +5036,7 @@ def test_repair_prompt_includes_injected_oversized_rejection_line():
     )
 
     assert "Validation error:" in prompt
-    assert "oversized_command_length: steps [2]" in prompt
+    assert "Step [2]: command body too long (oversized_command_length" in prompt
     assert "step 2: 1684 chars" in prompt
 
 
@@ -5058,8 +5061,8 @@ def test_repair_prompt_includes_injected_brittle_shape_rejection_lines():
     )
 
     assert "Validation error:" in prompt
-    assert "multiple_heredoc_across_plan: 2 heredoc blocks found" in prompt
-    assert "too_many_lines: step [1]" in prompt
+    assert "Plan: 2 heredoc blocks found (multiple_heredoc_across_plan)" in prompt
+    assert "Step [1]: command body too long (too_many_lines)" in prompt
 
 
 def test_repair_prompt_includes_injected_weak_verification_rejection_line():

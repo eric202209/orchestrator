@@ -79,9 +79,10 @@ def _build_repair_rejection_reasons(
             )
 
         targeted_reasons.append(
-            f"oversized_command_length: steps {step_numbers} have oversized commands "
-            f"({length_clause}; max {MAX_PLANNING_COMMAND_CHARS}). Replace these steps "
-            "with short scaffold or edit commands only."
+            f"Step {step_numbers}: command body too long "
+            f"(oversized_command_length; {length_clause}; max "
+            f"{MAX_PLANNING_COMMAND_CHARS}). Rewrite as short printf/file edit "
+            "commands. No heredoc."
         )
 
     if "multiple_heredoc_across_plan" in subcodes:
@@ -95,9 +96,8 @@ def _build_repair_rejection_reasons(
             else "multiple heredoc blocks found"
         )
         targeted_reasons.append(
-            "multiple_heredoc_across_plan: "
-            f"{count_clause}. Replace every heredoc with short printf or "
-            "package-manager/editor-friendly commands."
+            f"Plan: {count_clause} (multiple_heredoc_across_plan). Rewrite file "
+            "writes with printf. No heredoc."
         )
 
     step_details = details.get("brittle_command_step_details") or {}
@@ -124,12 +124,10 @@ def _build_repair_rejection_reasons(
                 )
             }
         )
-        step_clause = f" in steps {heredoc_steps}" if heredoc_steps else ""
         targeted_reasons.append(
-            "heredoc_command_shape: "
-            f"{', '.join(sorted(heredoc_subcodes))}{step_clause}. "
-            "Remove all heredoc syntax (`<<EOF`, `<<'PY'`, cat heredocs, and looped "
-            "heredocs); use short printf or existing project commands instead."
+            f"Step {heredoc_steps}: invalid heredoc shape "
+            f"({', '.join(sorted(heredoc_subcodes))}). Rewrite file writes with "
+            "printf. No heredoc."
         )
 
     if "brittle_inline_python" in subcodes:
@@ -145,13 +143,10 @@ def _build_repair_rejection_reasons(
                 )
             }
         )
-        step_clause = f" in steps {inline_python_steps}" if inline_python_steps else ""
         targeted_reasons.append(
-            "brittle_inline_python: "
-            f"nested `python -c` command shape{step_clause}. Replace with "
-            "short package-manager/editor-friendly commands or simple printf writes; "
-            "do not embed f-strings, JSON strings, semicolon-heavy code, or mixed "
-            "shell quoting in one command."
+            f"Step {inline_python_steps}: brittle inline Python "
+            "(brittle_inline_python). Rewrite as short printf/file edit commands. "
+            "No nested python -c."
         )
 
     if details.get("placeholder_only_implementation"):
@@ -174,8 +169,8 @@ def _build_repair_rejection_reasons(
         ]
         if too_many_line_steps:
             targeted_reasons.append(
-                f"too_many_lines: step {too_many_line_steps} commands exceed "
-                "line limit. Use printf or split content across steps."
+                f"Step {too_many_line_steps}: command body too long "
+                "(too_many_lines). Rewrite using printf for file writes. No heredoc."
             )
 
     weak_verification_steps = _normalized_step_numbers(
