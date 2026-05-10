@@ -16,6 +16,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.failure_taxonomy import (  # noqa: E402
+    contract_reason,
+    parse_log_metadata,
+    status_key,
+    terminal_reason_from_rows,
+)
+
 try:
     from app.services.orchestration.task_rules import get_workflow_profile
 except Exception:  # pragma: no cover - fallback for damaged local envs
@@ -40,18 +47,8 @@ def _rows(
     return [dict(row) for row in conn.execute(query, params).fetchall()]
 
 
-def _parse_metadata(value: Any) -> dict[str, Any]:
-    if not value:
-        return {}
-    try:
-        parsed = json.loads(value)
-    except (TypeError, ValueError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
 def _status(value: Any) -> str:
-    return str(value or "").strip().lower()
+    return status_key(value)
 
 
 def _recent_task_execution_ids(conn: sqlite3.Connection, limit: int) -> list[int]:
@@ -195,62 +192,6 @@ def _contains_negated_marker(text: str, markers: tuple[str, ...]) -> bool:
     return False
 
 
-def _contract_reason(metadata: dict[str, Any]) -> str:
-    value = (
-        metadata.get("contract_violation_type")
-        or metadata.get("reason")
-        or _first_text(metadata.get("contract_violations"))
-        or "unknown"
-    )
-    return str(value).strip() or "unknown"
-
-
-def _first_text(value: Any) -> str | None:
-    if isinstance(value, list) and value:
-        return str(value[0])
-    if isinstance(value, str):
-        return value
-    return None
-
-
-def _terminal_reason(rows: list[dict[str, Any]], context: dict[str, Any]) -> str:
-    known_terminal_reasons = {
-        "planning_validation_failed_after_repair",
-        "planning_repair_prompt_too_large",
-        "workspace_isolation_violation",
-        "repair_output_contract_violation",
-        "planning_repair_no_output_timeout",
-        "planning_repair_timeout",
-        "planning_timeout",
-        "reasoning_artifact_validation_failed",
-        "completion_validation_failed",
-        "pytest_failure",
-        "module_not_found",
-        "import_error",
-        "missing_dependency",
-        "syntax_error",
-        "runtime_assertion_failure",
-    }
-    for row in reversed(rows):
-        metadata = _parse_metadata(row.get("log_metadata"))
-        details = metadata.get("details")
-        if not isinstance(details, dict):
-            details = {}
-        candidates = (
-            details.get("reason"),
-            metadata.get("reason"),
-            metadata.get("failure_type"),
-        )
-        for candidate in candidates:
-            text = str(candidate or "").strip()
-            if text in known_terminal_reasons:
-                return text
-    error_message = str(context.get("error_message") or "").strip()
-    if error_message:
-        return error_message[:180]
-    return ""
-
-
 def summarize(
     conn: sqlite3.Connection,
     *,
@@ -262,7 +203,7 @@ def summarize(
         context = _execution_context(conn, task_execution_id)
         metadata_rows = _metadata_rows(conn, task_execution_id)
         parsed_rows = [
-            {**row, "metadata": _parse_metadata(row.get("log_metadata"))}
+            {**row, "metadata": parse_log_metadata(row.get("log_metadata"))}
             for row in metadata_rows
         ]
         contract_rows = [
@@ -306,7 +247,7 @@ def summarize(
             or row["metadata"].get("source") == "stored_task_plan"
             for row in parsed_rows
         )
-        contract_reasons = [_contract_reason(row["metadata"]) for row in contract_rows]
+        contract_reasons = [contract_reason(row["metadata"]) for row in contract_rows]
         semantic_codes: list[str] = []
         brittle_subcodes: list[str] = []
         for row in contract_rows:
@@ -341,7 +282,7 @@ def summarize(
             "contract_reasons": contract_reasons,
             "semantic_violation_codes": sorted(set(semantic_codes)),
             "brittle_command_subcodes": sorted(set(brittle_subcodes)),
-            "terminal_reason": _terminal_reason(metadata_rows, context),
+            "terminal_reason": terminal_reason_from_rows(metadata_rows, context),
             "final_task_status": _status(context.get("task_status")),
             "final_task_execution_status": _status(
                 context.get("task_execution_status")

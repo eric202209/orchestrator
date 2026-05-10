@@ -16,27 +16,22 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-TERMINAL_SESSION_STATUSES = {"completed", "done", "failed", "stopped", "cancelled"}
-DONE_STATUSES = {"completed", "done", "success", "succeeded"}
-FAILED_EXECUTION_STATUSES = {"failed", "cancelled"}
+from scripts.failure_taxonomy import (  # noqa: E402
+    FAILED_EXECUTION_STATUSES,
+    TERMINAL_REASON_PRIORITY,
+    TERMINAL_SESSION_STATUSES,
+    latest_terminal_reason,
+    parse_log_metadata,
+    status_key,
+    terminal_class as classify_terminal_class,
+)
+
 RUNTIME_LOG_FILTER = "(message like '%[OPENCLAW]%' or message like '%[PERFORMANCE]%')"
 SECOND_REPAIR_REASONS = {
     "post_repair_weak_verification_second_pass",
     "post_repair_background_process_second_pass",
     "post_repair_missing_verification_second_pass",
 }
-TERMINAL_REASON_PRIORITY = (
-    "planning_validation_failed_after_repair",
-    "planning_invalid_commands_after_repair",
-    "planning_context_overflow",
-    "planning_openclaw_lock_contention",
-    "planning_timeout",
-    "repair_output_contract_violation",
-    "planning_repair_no_output_timeout",
-    "malformed_planning_output_repair_timeout",
-    "workspace isolation violation",
-    "workspace_isolation_violation",
-)
 JOURNAL_TERMINAL_EVENT_TYPES = {
     "task_failed",
     "completion_evidence_failed",
@@ -63,18 +58,8 @@ def _one(
     return dict(row) if row is not None else None
 
 
-def _parse_metadata(value: Any) -> dict[str, Any]:
-    if not value:
-        return {}
-    try:
-        parsed = json.loads(value)
-    except (TypeError, ValueError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
 def _status(value: Any) -> str:
-    return str(value or "").strip().lower()
+    return status_key(value)
 
 
 def _number(value: Any) -> float | None:
@@ -92,43 +77,6 @@ def _mean_or_none(values: Iterable[float]) -> float | None:
     return round(mean(collected), 3)
 
 
-def _latest_terminal_reason(metadata_rows: list[dict[str, Any]]) -> str | None:
-    reasons: list[str] = []
-    for row in metadata_rows:
-        metadata = _parse_metadata(row.get("log_metadata"))
-        reason = str(metadata.get("reason") or "").strip()
-        if reason:
-            reasons.append(reason)
-    for preferred in TERMINAL_REASON_PRIORITY:
-        if preferred in reasons:
-            return preferred
-    return reasons[0] if reasons else None
-
-
-def _terminal_class(
-    *,
-    session: dict[str, Any],
-    task_executions: list[dict[str, Any]],
-    metadata_rows: list[dict[str, Any]],
-) -> str:
-    reason = _latest_terminal_reason(metadata_rows)
-    if reason:
-        return reason
-
-    execution_statuses = {_status(row.get("status")) for row in task_executions}
-    if execution_statuses & FAILED_EXECUTION_STATUSES:
-        return "task_execution_failed"
-
-    session_status = _status(session.get("status"))
-    if session_status in DONE_STATUSES:
-        return "DONE"
-    if session_status in TERMINAL_SESSION_STATUSES:
-        return session_status
-    if not task_executions:
-        return f"{session_status or 'unknown'}_no_task_execution"
-    return session_status or "unknown"
-
-
 def _metadata_evidence(metadata_rows: list[dict[str, Any]]) -> dict[str, Any]:
     planning_durations: list[float] = []
     repair_durations: list[float] = []
@@ -137,7 +85,7 @@ def _metadata_evidence(metadata_rows: list[dict[str, Any]]) -> dict[str, Any]:
     diagnostic_reason = None
 
     for row in metadata_rows:
-        metadata = _parse_metadata(row.get("log_metadata"))
+        metadata = parse_log_metadata(row.get("log_metadata"))
         message = str(row.get("message") or "")
         reason = str(metadata.get("reason") or "").strip()
         if reason and diagnostic_reason is None:
@@ -223,7 +171,7 @@ def _timeline_terminal_event(
     if not enabled:
         return {"checked": False, "has_terminal_event": None, "error": None}
 
-    terminal_reason = _latest_terminal_reason(metadata_rows)
+    terminal_reason = latest_terminal_reason(metadata_rows)
     if terminal_reason in TERMINAL_REASON_PRIORITY:
         return {"checked": True, "has_terminal_event": True, "error": None}
 
@@ -308,7 +256,7 @@ def _session_report(
     )
 
     evidence = _metadata_evidence(metadata_rows)
-    terminal_class = _terminal_class(
+    terminal = classify_terminal_class(
         session=session,
         task_executions=task_executions,
         metadata_rows=metadata_rows,
@@ -318,18 +266,18 @@ def _session_report(
         for row in task_executions
         if _status(row.get("status")) in FAILED_EXECUTION_STATUSES
     )
-    terminal = terminal_class != "DONE" and _status(session.get("status")) in (
+    is_terminal = terminal != "DONE" and _status(session.get("status")) in (
         TERMINAL_SESSION_STATUSES | {"failed"}
     )
-    terminal = terminal or (terminal_class != "DONE" and failed_execution_count > 0)
+    is_terminal = is_terminal or (terminal != "DONE" and failed_execution_count > 0)
     failure_summary_explains = bool(
-        failure_summary or evidence["diagnostic_reason"] or terminal_class == "DONE"
+        failure_summary or evidence["diagnostic_reason"] or terminal == "DONE"
     )
     timeline = _timeline_terminal_event(
         session,
         task_executions=task_executions,
         metadata_rows=metadata_rows,
-        enabled=check_timeline and terminal,
+        enabled=check_timeline and is_terminal,
     )
 
     return {
@@ -341,7 +289,7 @@ def _session_report(
         "created_at": session.get("created_at"),
         "started_at": session.get("started_at"),
         "stopped_at": session.get("stopped_at"),
-        "terminal_class": terminal_class,
+        "terminal_class": terminal,
         "repair_used": bool(evidence["repair_used"]),
         "second_repair_used": bool(evidence["second_repair_used"]),
         "avg_planning_duration_seconds": _mean_or_none(evidence["planning_durations"]),
@@ -357,7 +305,7 @@ def _session_report(
         },
         "task_execution_count": len(task_executions),
         "failed_task_execution_count": failed_execution_count,
-        "terminal": terminal,
+        "terminal": is_terminal,
     }
 
 

@@ -314,8 +314,9 @@ def build_bounded_debug_repair_prompt(
         "2. The step object must include title, command, and verification_command.\n"
         "3. Keep the fix atomic; do not rewrite unrelated files.\n"
         "4. Use relative paths only; no absolute paths, `..`, or `~`.\n"
-        "5. Do not bypass validators, workspace boundaries, or verification.\n"
-        "6. Do not request additional retries or describe policy.\n"
+        f"5. Commands execute from the workspace root ({workspace}). Do not cd into the workspace root or any path containing vault/projects; you are already there.\n"
+        "6. Do not bypass validators, workspace boundaries, or verification.\n"
+        "7. Do not request additional retries or describe policy.\n"
     )
 
 

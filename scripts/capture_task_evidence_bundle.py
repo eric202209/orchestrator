@@ -17,6 +17,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.failure_taxonomy import failure_class, parse_log_metadata  # noqa: E402
+
 DEFAULT_WORKSPACE_ROOT = REPO_ROOT.parent
 EXPECTED_FILES = (
     "metadata.json",
@@ -46,16 +48,6 @@ def _one(
 ) -> dict[str, Any] | None:
     row = conn.execute(query, params).fetchone()
     return dict(row) if row is not None else None
-
-
-def _parse_metadata(value: Any) -> dict[str, Any]:
-    if not value:
-        return {}
-    try:
-        parsed = json.loads(value)
-    except (TypeError, ValueError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
 
 
 def _status(value: Any) -> str:
@@ -235,7 +227,7 @@ def _metadata_payload(
 
 def _logs_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     levels = Counter(str(row.get("level") or "UNKNOWN") for row in rows)
-    parsed = [_parse_metadata(row.get("log_metadata")) for row in rows]
+    parsed = [parse_log_metadata(row.get("log_metadata")) for row in rows]
     event_types = Counter(
         str(metadata.get("event_type"))
         for metadata in parsed
@@ -346,7 +338,7 @@ def _decision_timeline(
             }
         )
     for row in rows:
-        metadata = _parse_metadata(row.get("log_metadata"))
+        metadata = parse_log_metadata(row.get("log_metadata"))
         event_type = metadata.get("event_type")
         reason = metadata.get("reason")
         if not event_type and not reason:
@@ -377,7 +369,7 @@ def _workspace_evidence_summary(
     evidence_rows: list[dict[str, Any]] = []
     debug_rows: list[dict[str, Any]] = []
     for row in rows:
-        metadata = _parse_metadata(row.get("log_metadata"))
+        metadata = parse_log_metadata(row.get("log_metadata"))
         if metadata.get("event_type") == "workspace_evidence_collected":
             evidence_rows.append(metadata)
         if metadata.get("event_type") == "debug_feedback_captured" or metadata.get(
@@ -397,7 +389,7 @@ def _workspace_evidence_summary(
         ):
             evidence_rows.append(
                 {
-                    "failure_class": _failure_class(latest_debug),
+                    "failure_class": failure_class(latest_debug),
                     "evidence_chars_total": int(
                         latest_debug.get("evidence_chars_total") or 0
                     ),
@@ -427,25 +419,13 @@ def _workspace_evidence_summary(
         "evidence_command_count": len([cmd for cmd in commands if cmd.strip()]),
         "evidence_localization_count": len([path for path in files if path.strip()]),
         "failure_class": (
-            _failure_class(latest_debug or evidence_rows[-1])
+            failure_class(latest_debug or evidence_rows[-1])
             if (latest_debug or evidence_rows)
             else "unknown"
         ),
         "commands_run": commands,
         "evidence_files_inspected": files,
     }
-
-
-def _failure_class(metadata: dict[str, Any]) -> str:
-    envelope = metadata.get("debug_feedback_envelope")
-    if not isinstance(envelope, dict):
-        envelope = {}
-    return str(
-        metadata.get("debug_failure_class")
-        or metadata.get("failure_class")
-        or envelope.get("failure_class")
-        or "unknown"
-    )
 
 
 def _planning_contract_summary(

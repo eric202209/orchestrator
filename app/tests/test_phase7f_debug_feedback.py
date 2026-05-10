@@ -338,6 +338,11 @@ def test_bounded_debug_repair_prompt_requires_json_array(tmp_path):
     assert "one minimal debug repair step" in prompt
     assert "Do not return prose" in prompt
     assert "No module named" in prompt
+    assert "Commands execute from the workspace root" in prompt
+    assert (
+        "Do not cd into the workspace root or any path containing vault/projects"
+        in prompt
+    )
     assert "full session history" not in prompt.lower()
     assert "task_execution_id" not in prompt
 

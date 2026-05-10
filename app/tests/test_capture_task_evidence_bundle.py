@@ -78,7 +78,12 @@ def _schema(conn: sqlite3.Connection) -> None:
     )
 
 
-def _seed(conn: sqlite3.Connection, workspace_path: str) -> None:
+def _seed(
+    conn: sqlite3.Connection,
+    workspace_path: str,
+    *,
+    include_failure_summary: bool = True,
+) -> None:
     conn.execute(
         "insert into projects values (1, 'bundle-project', ?)", (workspace_path,)
     )
@@ -173,10 +178,11 @@ def _seed(conn: sqlite3.Connection, workspace_path: str) -> None:
             "now",
         ),
     )
-    conn.execute(
-        "insert into execution_failure_summaries values (?, ?, ?, ?, ?, ?, ?)",
-        (1, 10, "Stored failure summary", None, "now", None, None),
-    )
+    if include_failure_summary:
+        conn.execute(
+            "insert into execution_failure_summaries values (?, ?, ?, ?, ?, ?, ?)",
+            (1, 10, "Stored failure summary", None, "now", None, None),
+        )
 
 
 def _load(bundle_dir: Path, filename: str) -> dict:
@@ -258,3 +264,64 @@ def test_capture_task_evidence_bundle_degrades_when_workspace_missing(tmp_path):
     assert replay["available"] is False
     assert replay["reason"] == "workspace_missing"
     assert timeline["available"] is True
+
+
+def test_capture_task_evidence_bundle_degrades_when_failure_summary_missing(
+    tmp_path,
+):
+    db_path = tmp_path / "bundle.db"
+    conn = sqlite3.connect(db_path)
+    _schema(conn)
+    _seed(
+        conn,
+        str(tmp_path / "missing-workspace"),
+        include_failure_summary=False,
+    )
+    conn.commit()
+    conn.close()
+
+    bundle_dir = module.capture_bundle(
+        db_path=str(db_path),
+        session_id=10,
+        task_id=20,
+        task_execution_id=30,
+        output_dir=tmp_path / "bundles",
+    )
+
+    failure_summary = _load(bundle_dir, "failure_summary.json")
+
+    assert failure_summary["available"] is False
+    assert failure_summary["reason"] == "stored_failure_summary_missing"
+    assert "Debug feedback captured" in failure_summary["summary"]
+
+
+def test_capture_task_evidence_bundle_degrades_for_missing_task_execution(
+    tmp_path,
+):
+    db_path = tmp_path / "bundle.db"
+    conn = sqlite3.connect(db_path)
+    _schema(conn)
+    conn.commit()
+    conn.close()
+
+    bundle_dir = module.capture_bundle(
+        db_path=str(db_path),
+        session_id=133,
+        task_id=19,
+        task_execution_id=141,
+        output_dir=tmp_path / "bundles",
+    )
+
+    assert sorted(path.name for path in bundle_dir.iterdir()) == sorted(
+        module.EXPECTED_FILES
+    )
+    metadata = _load(bundle_dir, "metadata.json")
+    replay = _load(bundle_dir, "replay_report.semantic.json")
+    planning = _load(bundle_dir, "planning_contract_summary.json")
+
+    assert metadata["context"]["available"] is False
+    assert metadata["context"]["reason"] == "task_execution_not_found"
+    assert metadata["event_journal"]["reason"] == "workspace_path_missing"
+    assert replay["available"] is False
+    assert replay["reason"] == "workspace_path_missing"
+    assert planning["available"] is False

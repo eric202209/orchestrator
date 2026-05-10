@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import sqlite3
 from statistics import mean
+import sys
 from typing import Any
 
 DEBUG_FEEDBACK = "debug_feedback_captured"
@@ -17,6 +18,15 @@ WORKSPACE_EVIDENCE = "workspace_evidence_collected"
 DEBUG_REPAIR_ATTEMPTED = "debug_repair_attempted"
 REPAIR_REJECTED = "repair_rejected"
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.failure_taxonomy import (  # noqa: E402
+    failure_class as extract_failure_class,
+    parse_log_metadata,
+    status_key,
+)
+
 DEFAULT_WORKSPACE_ROOT = REPO_ROOT.parent
 
 
@@ -32,18 +42,8 @@ def _rows(
     return [dict(row) for row in conn.execute(query, params).fetchall()]
 
 
-def _parse_metadata(value: Any) -> dict[str, Any]:
-    if not value:
-        return {}
-    try:
-        parsed = json.loads(value)
-    except (TypeError, ValueError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
 def _status(value: Any) -> str:
-    return str(value or "").strip().lower()
+    return status_key(value)
 
 
 def _mean(values: list[int]) -> float:
@@ -52,18 +52,6 @@ def _mean(values: list[int]) -> float:
 
 def _event_type(metadata: dict[str, Any]) -> str:
     return str(metadata.get("event_type") or "").strip()
-
-
-def _failure_class(metadata: dict[str, Any]) -> str:
-    envelope = metadata.get("debug_feedback_envelope")
-    if not isinstance(envelope, dict):
-        envelope = {}
-    return str(
-        metadata.get("debug_failure_class")
-        or metadata.get("failure_class")
-        or envelope.get("failure_class")
-        or "unknown"
-    )
 
 
 def _execution_context(
@@ -195,7 +183,7 @@ def summarize(conn: sqlite3.Connection, limit: int) -> dict[str, Any]:
     for task_execution_id in task_execution_ids:
         metadata_rows = _metadata_rows(conn, task_execution_id)
         parsed_rows = [
-            _parse_metadata(row.get("log_metadata")) for row in metadata_rows
+            parse_log_metadata(row.get("log_metadata")) for row in metadata_rows
         ]
         debug_rows = [
             metadata
@@ -235,7 +223,7 @@ def summarize(conn: sqlite3.Connection, limit: int) -> dict[str, Any]:
         ):
             evidence_rows = [
                 {
-                    "failure_class": _failure_class(debug_feedback),
+                    "failure_class": extract_failure_class(debug_feedback),
                     "evidence_chars_total": int(
                         debug_feedback.get("evidence_chars_total") or 0
                     ),
@@ -246,7 +234,7 @@ def summarize(conn: sqlite3.Connection, limit: int) -> dict[str, Any]:
                     or [],
                 }
             ]
-        failure_class = _failure_class(
+        class_name = extract_failure_class(
             debug_rows[-1] if debug_rows else evidence_rows[-1] if evidence_rows else {}
         )
         evidence_chars = sum(
@@ -283,7 +271,7 @@ def summarize(conn: sqlite3.Connection, limit: int) -> dict[str, Any]:
         records.append(
             {
                 "task_execution_id": task_execution_id,
-                "failure_class": failure_class,
+                "failure_class": class_name,
                 "workspace_evidence_collected": collected,
                 "workspace_evidence_partial": evidence_partial,
                 "workspace_evidence_empty": evidence_empty,

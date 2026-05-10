@@ -162,6 +162,20 @@ def test_embedding_failure_returns_sqlite_fallback(svc, db):
     assert ctx.confidence == 0.3
 
 
+def test_empty_qdrant_skips_embedding_and_uses_sqlite_fallback(svc, db):
+    _make_item(db, title="Empty Qdrant", knowledge_type=KnowledgeType.format_guide)
+    with patch.object(svc, "_embed", side_effect=AssertionError("should not embed")):
+        ctx = svc.retrieve(
+            query="format guide",
+            trigger_phase="planning",
+            knowledge_types=[KnowledgeType.format_guide],
+            db=db,
+        )
+
+    assert any(ref.title == "Empty Qdrant" for ref in ctx.retrieved_items)
+    assert ctx.retrieval_reason == "sqlite_fallback_qdrant_or_embedding_unavailable"
+
+
 def test_max_total_chars_budget_enforced(svc, db):
     # Each item has 800 chars of content; 3 × 800 = 2400 > 2000 limit
     long_content = "x" * 800

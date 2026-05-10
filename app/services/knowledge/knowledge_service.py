@@ -54,7 +54,11 @@ class KnowledgeService:
             self._client = QdrantClient(url=qdrant_url)
         self._collection = collection_name
         self._embedding_model = embedding_model
-        self._openai = OpenAI(api_key=settings.OPENAI_API_KEY or "no-key")
+        self._openai = OpenAI(
+            api_key=settings.OPENAI_API_KEY or "no-key",
+            max_retries=0,
+            timeout=10.0,
+        )
         self._ensure_collection()
 
     # ------------------------------------------------------------------
@@ -89,6 +93,9 @@ class KnowledgeService:
         top_k: int = settings.KNOWLEDGE_MAX_ITEMS,
         db: Session = None,
     ) -> KnowledgeContext:
+        if not self._has_indexed_points():
+            return self._sqlite_fallback(trigger_phase, knowledge_types, top_k, db)
+
         try:
             vector = self._embed(query)
         except Exception:
@@ -175,6 +182,14 @@ class KnowledgeService:
             limit=top_k,
         )
         return result.points
+
+    def _has_indexed_points(self) -> bool:
+        try:
+            return (
+                int(self._client.count(collection_name=self._collection).count or 0) > 0
+            )
+        except Exception:
+            return True
 
     def _apply_budget(
         self,
