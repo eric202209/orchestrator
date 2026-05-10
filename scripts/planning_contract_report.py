@@ -223,6 +223,13 @@ def _terminal_reason(rows: list[dict[str, Any]], context: dict[str, Any]) -> str
         "planning_repair_timeout",
         "planning_timeout",
         "reasoning_artifact_validation_failed",
+        "completion_validation_failed",
+        "pytest_failure",
+        "module_not_found",
+        "import_error",
+        "missing_dependency",
+        "syntax_error",
+        "runtime_assertion_failure",
     }
     for row in reversed(rows):
         metadata = _parse_metadata(row.get("log_metadata"))
@@ -371,6 +378,9 @@ def _aggregate(
         for record in records
         if str(record["terminal_reason"]).strip()
     )
+    recovered_records = [
+        record for record in records if record["planning_repair_recovered"]
+    ]
 
     return {
         "task_execution_count": len(records),
@@ -393,8 +403,58 @@ def _aggregate(
         "diagnostic_change_candidates": diagnostic_candidates,
         "workflow_profiles": dict(workflow_profiles),
         "terminal_reasons": dict(terminal_reasons),
+        "recovered_outcomes": _recovered_outcomes(recovered_records),
+        "recovered_outcomes_by_contract_reason": _recovered_outcomes_by_key(
+            recovered_records, _record_contract_reason_keys
+        ),
+        "recovered_outcomes_by_workflow_profile": _recovered_outcomes_by_key(
+            recovered_records, lambda record: [str(record["workflow_profile"])]
+        ),
         "records": records,
     }
+
+
+def _record_contract_reason_keys(record: dict[str, Any]) -> list[str]:
+    reasons = [str(reason) for reason in record.get("contract_reasons") or []]
+    return reasons or ["no_contract_reason"]
+
+
+def _recovered_outcomes(records: list[dict[str, Any]]) -> dict[str, Any]:
+    total = len(records)
+    done = [record for record in records if _record_is_done(record)]
+    not_done = [record for record in records if not _record_is_done(record)]
+    terminal_reasons = Counter(
+        str(record["terminal_reason"])
+        for record in not_done
+        if str(record["terminal_reason"]).strip()
+    )
+    return {
+        "total": total,
+        "done": len(done),
+        "not_done": len(not_done),
+        "done_rate": round(len(done) / total, 3) if total else 0.0,
+        "terminal_reasons": dict(
+            sorted(terminal_reasons.items(), key=lambda item: (-item[1], item[0]))
+        ),
+        "not_done_task_executions": [
+            int(record["task_execution_id"]) for record in not_done
+        ],
+    }
+
+
+def _record_is_done(record: dict[str, Any]) -> bool:
+    return (
+        str(record.get("final_task_status") or "").lower() == "done"
+        or str(record.get("final_task_execution_status") or "").lower() == "done"
+    )
+
+
+def _recovered_outcomes_by_key(records: list[dict[str, Any]], key_fn: Any) -> dict:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        for key in key_fn(record):
+            grouped[str(key)].append(record)
+    return {key: _recovered_outcomes(grouped[key]) for key in sorted(grouped)}
 
 
 def print_report(summary: dict[str, Any]) -> None:
@@ -422,6 +482,25 @@ def print_report(summary: dict[str, Any]) -> None:
             print(f"- {count}x {reason}")
     else:
         print("- none")
+    recovered = summary["recovered_outcomes"]
+    print(
+        "Recovered planning outcomes: "
+        f"done={recovered['done']}/{recovered['total']} "
+        f"not_done={recovered['not_done']} "
+        f"done_rate={recovered['done_rate']}"
+    )
+    print("Recovered outcomes by contract reason:")
+    for reason, data in summary["recovered_outcomes_by_contract_reason"].items():
+        print(
+            f"- {reason}: done={data['done']}/{data['total']} "
+            f"not_done={data['not_done']} done_rate={data['done_rate']}"
+        )
+    print("Recovered outcomes by workflow profile:")
+    for profile, data in summary["recovered_outcomes_by_workflow_profile"].items():
+        print(
+            f"- {profile}: done={data['done']}/{data['total']} "
+            f"not_done={data['not_done']} done_rate={data['done_rate']}"
+        )
     print("Terminal reasons:")
     for reason, count in sorted(summary["terminal_reasons"].items()):
         print(f"- {count}x {reason}")

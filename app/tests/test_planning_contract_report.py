@@ -233,3 +233,93 @@ def test_planning_contract_report_counts_saved_plan_reuse_as_completed():
     assert record["initial_planning_seen"] is True
     assert record["saved_plan_reused"] is True
     assert record["planning_repair_count"] == 0
+
+
+def test_planning_contract_report_groups_recovered_downstream_outcomes():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _schema(conn)
+    reason = "plan_contains_brittle_heredoc_heavy_or_malformed_commands"
+    _insert_recovered_execution(
+        conn,
+        task_execution_id=10,
+        reason=reason,
+        task_status="done",
+        execution_status="done",
+    )
+    _insert_recovered_execution(
+        conn,
+        task_execution_id=11,
+        reason=reason,
+        task_status="failed",
+        execution_status="failed",
+        terminal_reason="completion_validation_failed",
+    )
+
+    summary = module.summarize(conn, limit=10)
+
+    assert summary["planning_repair_recovered"] == 2
+    assert summary["recovered_outcomes"] == {
+        "total": 2,
+        "done": 1,
+        "not_done": 1,
+        "done_rate": 0.5,
+        "terminal_reasons": {"completion_validation_failed": 1},
+        "not_done_task_executions": [11],
+    }
+    assert summary["recovered_outcomes_by_contract_reason"][reason]["done"] == 1
+    assert summary["recovered_outcomes_by_contract_reason"][reason]["not_done"] == 1
+    assert (
+        summary["recovered_outcomes_by_workflow_profile"]["backend_only"]["done_rate"]
+        == 0.5
+    )
+
+
+def _insert_recovered_execution(
+    conn: sqlite3.Connection,
+    *,
+    task_execution_id: int,
+    reason: str,
+    task_status: str,
+    execution_status: str,
+    terminal_reason: str = "",
+) -> None:
+    _insert_execution(
+        conn,
+        task_execution_id=task_execution_id,
+        task_status=task_status,
+        execution_status=execution_status,
+    )
+    _insert_log(
+        conn,
+        log_id=task_execution_id * 10,
+        task_execution_id=task_execution_id,
+        message="[OPENCLAW][PLANNING_DIAGNOSTICS] contract violation detected",
+        metadata={
+            "phase": "planning",
+            "contract_violation_type": reason,
+            "brittle_command_subcodes": ["too_many_lines"],
+        },
+    )
+    _insert_log(
+        conn,
+        log_id=task_execution_id * 10 + 1,
+        task_execution_id=task_execution_id,
+        message="[ORCHESTRATION] Planning repair attempt is now running",
+        metadata={"phase": "planning", "attempt": "repair"},
+    )
+    _insert_log(
+        conn,
+        log_id=task_execution_id * 10 + 2,
+        task_execution_id=task_execution_id,
+        message="[ORCHESTRATION] Generated 2 steps in plan",
+        metadata={"phase": "planning"},
+    )
+    if terminal_reason:
+        _insert_log(
+            conn,
+            log_id=task_execution_id * 10 + 3,
+            task_execution_id=task_execution_id,
+            message="[ORCHESTRATION] Task failed after recovered planning",
+            metadata={"reason": terminal_reason},
+        )
