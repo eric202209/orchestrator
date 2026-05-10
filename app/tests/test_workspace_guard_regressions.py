@@ -6,6 +6,7 @@ import pytest
 
 from app.services.orchestration.validation.workspace_guard import (
     TaskWorkspaceViolationError,
+    is_workspace_cd_escape,
     normalize_command,
     normalize_step,
 )
@@ -177,6 +178,38 @@ def test_normalize_command_allows_return_to_workspace_root_after_child_cd(tmp_pa
         normalized
         == "cd frontend && rm -rf node_modules package-lock.json && rm -rf frontend"
     )
+
+
+def test_workspace_cd_escape_flags_workspace_relative_fragment(tmp_path):
+    project_dir = tmp_path / "vault" / "projects" / "phase-7o-next"
+    project_dir.mkdir(parents=True)
+
+    command = "cd vault/projects/phase-7o-next/backend && python3 -m pytest -v"
+
+    assert is_workspace_cd_escape(command, project_dir)
+    with pytest.raises(TaskWorkspaceViolationError, match="workspace path"):
+        normalize_command(command, project_dir)
+
+
+def test_workspace_cd_escape_flags_absolute_workspace_path(tmp_path):
+    project_dir = tmp_path / "vault" / "projects" / "phase-7o-next"
+    project_dir.mkdir(parents=True)
+
+    command = f"cd {project_dir}/backend && python3 -m pytest -v"
+
+    assert is_workspace_cd_escape(command, project_dir)
+    with pytest.raises(TaskWorkspaceViolationError, match="workspace path"):
+        normalize_command(command, project_dir)
+
+
+def test_workspace_cd_escape_allows_legitimate_relative_subdir(tmp_path):
+    project_dir = tmp_path / "vault" / "projects" / "phase-7o-next"
+    (project_dir / "src").mkdir(parents=True)
+
+    command = "cd src && python3 -m pytest -v"
+
+    assert not is_workspace_cd_escape(command, project_dir)
+    assert normalize_command(command, project_dir) == command
 
 
 def test_normalize_command_rejects_malformed_shell_quoting(tmp_path):

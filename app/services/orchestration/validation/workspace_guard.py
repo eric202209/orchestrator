@@ -36,6 +36,7 @@ _TRANSIENT_EXPECTED_FILE_PARTS = frozenset(
         ".pytest_cache",
     }
 )
+_WORKSPACE_STEM = "vault/projects"
 
 
 def strip_heredoc_bodies(command_text: str) -> str:
@@ -286,10 +287,44 @@ def _normalize_write_pseudo_command(command: str, project_dir: Path) -> Optional
     return f"write {normalized_target}: {description}"
 
 
+def is_workspace_cd_escape(command: str, project_dir: str | Path) -> bool:
+    """Detect commands that try to cd into the already-active workspace root."""
+
+    text = str(command or "")
+    if not text:
+        return False
+
+    cd_workspace_fragment = re.compile(
+        r"\bcd\s+(?:--\s+)?[\"']?[^;&|`$()<>]*"
+        + re.escape(_WORKSPACE_STEM),
+    )
+    if cd_workspace_fragment.search(text):
+        return True
+
+    project_dir_text = str(project_dir).replace("\\", "/").rstrip("/")
+    if not project_dir_text:
+        return False
+
+    cd_project_dir = re.compile(
+        r"\bcd\s+(?:--\s+)?[\"']?" + re.escape(project_dir_text) + r"(?:[\"'\s;&|/]|$)"
+    )
+    return bool(cd_project_dir.search(text.replace("\\", "/")))
+
+
+def assert_no_workspace_cd_escape(command: str, project_dir: str | Path) -> None:
+    if is_workspace_cd_escape(command, project_dir):
+        raise TaskWorkspaceViolationError(
+            "Command tried to cd into the workspace path. Commands already execute "
+            "from the workspace root; use relative paths from the workspace root "
+            "instead and do not cd into vault/projects or the absolute workspace path."
+        )
+
+
 def normalize_command(command: str, project_dir: Path) -> str:
     normalized = (command or "").strip()
     if not normalized:
         raise TaskWorkspaceViolationError("Empty command is not allowed")
+    assert_no_workspace_cd_escape(normalized, project_dir)
 
     write_pseudo_command = _normalize_write_pseudo_command(normalized, project_dir)
     if write_pseudo_command is not None:

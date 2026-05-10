@@ -157,6 +157,8 @@ def test_bounded_completion_repair_prompt_excludes_broad_context(tmp_path):
     assert "step=1 verdict=success" not in prompt
     assert "src/main.py" in prompt
     assert "tests/test_format.py" in prompt
+    assert "Commands execute from the workspace root" in prompt
+    assert "Do not cd into the workspace root or any path containing vault/projects" in prompt
     assert len(prompt) < 4000
 
 

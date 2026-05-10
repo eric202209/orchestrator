@@ -13,6 +13,10 @@ from sqlalchemy.orm import Session
 from .executor import ExecutorService
 from .runtime import build_workspace_discovery_step
 from ..types import ValidationVerdict
+from ..validation.workspace_guard import (
+    TaskWorkspaceViolationError,
+    assert_no_workspace_cd_escape,
+)
 from ..validation.validator import ValidatorService
 
 
@@ -163,6 +167,15 @@ def execute_verification_command(
             "command": raw_command,
             "returncode": 0,
             "output": "",
+        }
+    try:
+        assert_no_workspace_cd_escape(raw_command, project_dir)
+    except TaskWorkspaceViolationError as exc:
+        return {
+            "success": False,
+            "command": raw_command,
+            "returncode": 2,
+            "output": str(exc),
         }
 
     try:
