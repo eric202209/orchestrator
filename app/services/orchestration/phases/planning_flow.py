@@ -56,6 +56,7 @@ from app.services.orchestration.phases.planning_support import (
     _semantic_codes_for_immediate_repair_issues,
     _should_repair_truncated_single_step_plan,
     _terminal_validation_failure_details,
+    _truncated_multistep_collapse_diagnostics,
 )
 
 
@@ -686,6 +687,15 @@ def execute_planning_phase(
                 looks_like_truncated_multistep_plan(output_text, extracted_plan)
                 and not retry_state.minimal_prompt_used
             ):
+                truncated_diagnostics = _truncated_multistep_collapse_diagnostics(
+                    output_text=output_text,
+                    extracted_plan=extracted_plan,
+                    repair_stage=(
+                        "after_first_repair"
+                        if retry_state.repair_prompt_used
+                        else "before_first_repair"
+                    ),
+                )
                 if _should_repair_truncated_single_step_plan(
                     prompt_profile=prompt_profile,
                     extracted_plan=extracted_plan,
@@ -712,6 +722,7 @@ def execute_planning_phase(
                         contract_violations=[
                             "truncated multi-step plan collapsed into a single step"
                         ],
+                        contract_diagnostics=truncated_diagnostics,
                         output_text=output_text,
                         strategy_info="truncated_multistep_plan_repair_requested",
                     )
@@ -721,7 +732,10 @@ def execute_planning_phase(
                         planning_timeout_seconds=planning_timeout_seconds,
                         malformed_output=output_text,
                         reason="truncated_multistep_plan_detected",
-                        rejection_reasons=[TRUNCATED_PLAN_REPAIR_REJECTION_REASON],
+                        rejection_reasons=_build_repair_rejection_reasons(
+                            [TRUNCATED_PLAN_REPAIR_REJECTION_REASON],
+                            truncated_diagnostics,
+                        ),
                         prompt_profile=prompt_profile,
                     )
                     retry_state.repair_prompt_used = True
@@ -734,6 +748,7 @@ def execute_planning_phase(
                         contract_violations=[
                             "truncated multi-step plan collapsed into a single step"
                         ],
+                        contract_diagnostics=truncated_diagnostics,
                         output_text=output_text,
                         strategy_info="truncated_multistep_plan_minimal_retry",
                     )
@@ -751,12 +766,18 @@ def execute_planning_phase(
                 looks_like_truncated_multistep_plan(output_text, extracted_plan)
                 and not retry_state.repair_prompt_used
             ):
+                truncated_diagnostics = _truncated_multistep_collapse_diagnostics(
+                    output_text=output_text,
+                    extracted_plan=extracted_plan,
+                    repair_stage="before_first_repair",
+                )
                 _emit_planning_diagnostics_contract_violation(
                     ctx,
                     reason="truncated_multistep_plan_after_minimal",
                     contract_violations=[
                         "truncated multi-step plan collapsed into a single step"
                     ],
+                    contract_diagnostics=truncated_diagnostics,
                     output_text=output_text,
                     strategy_info="truncated_multistep_plan_after_minimal",
                 )
@@ -768,7 +789,10 @@ def execute_planning_phase(
                     planning_timeout_seconds=planning_timeout_seconds,
                     malformed_output=output_text,
                     reason="truncated_multistep_plan_after_minimal",
-                    rejection_reasons=[TRUNCATED_PLAN_REPAIR_REJECTION_REASON],
+                    rejection_reasons=_build_repair_rejection_reasons(
+                        [TRUNCATED_PLAN_REPAIR_REJECTION_REASON],
+                        truncated_diagnostics,
+                    ),
                     prompt_profile=prompt_profile,
                 )
                 retry_state.repair_prompt_used = True
@@ -776,6 +800,11 @@ def execute_planning_phase(
                 continue
 
             if looks_like_truncated_multistep_plan(output_text, extracted_plan):
+                truncated_diagnostics = _truncated_multistep_collapse_diagnostics(
+                    output_text=output_text,
+                    extracted_plan=extracted_plan,
+                    repair_stage="after_first_repair",
+                )
                 ctx.orchestration_state.status = OrchestrationStatus.ABORTED
                 ctx.orchestration_state.abort_reason = (
                     "Planning output collapsed a multi-step plan into a single step"
@@ -787,6 +816,16 @@ def execute_planning_phase(
                     phase="planning",
                     message="[ORCHESTRATION] Planning output was truncated into a single-step plan",
                     details={"reason": "truncated_multistep_plan_after_retry"},
+                )
+                _emit_planning_diagnostics_contract_violation(
+                    ctx,
+                    reason="truncated_multistep_plan_after_retry",
+                    contract_violations=[
+                        "truncated multi-step plan collapsed into a single step"
+                    ],
+                    contract_diagnostics=truncated_diagnostics,
+                    output_text=output_text,
+                    strategy_info="truncated_multistep_plan_after_retry",
                 )
                 _finalize_planning_terminal_failure(
                     ctx=ctx,

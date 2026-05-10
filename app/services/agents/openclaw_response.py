@@ -34,6 +34,7 @@ def stream_diagnostics_summary(diagnostics: Dict[str, Any]) -> str:
                 f"invocation_timeout_arg={invocation.get('timeout_arg')}",
                 "invocation_no_output_timeout="
                 f"{invocation.get('no_output_timeout_seconds')}",
+                f"prompt_sha256_12={invocation.get('prompt_sha256_12')}",
             ]
         )
     parts.extend(
@@ -43,6 +44,9 @@ def stream_diagnostics_summary(diagnostics: Dict[str, Any]) -> str:
             f"timed_out={diagnostics.get('timed_out')}",
             f"cancelled={diagnostics.get('cancelled')}",
             f"return_code={diagnostics.get('return_code')}",
+            f"process_pid={diagnostics.get('process_pid')}",
+            "subprocess_started_after="
+            f"{diagnostics.get('subprocess_started_after_seconds')}",
             f"first_output_after={first_rendered}",
             f"last_output_after={last_rendered}",
             f"max_silent_gap={gap_rendered}",

@@ -18,6 +18,7 @@ import subprocess
 import logging
 import asyncio
 import contextlib
+import hashlib
 import os
 import shutil
 import shlex
@@ -345,6 +346,9 @@ class OpenClawSessionService:
             "cwd": cwd,
             "isolate_workspace_context": isolate_workspace_context,
             "prompt_size": len(prompt or ""),
+            "prompt_sha256_12": hashlib.sha256(
+                (prompt or "").encode("utf-8")
+            ).hexdigest()[:12],
             "no_output_timeout_seconds": no_output_timeout_seconds,
         }
 
@@ -404,12 +408,21 @@ class OpenClawSessionService:
             ),
         }
 
+        subprocess_start_started_at = time.monotonic()
         process = await asyncio.create_subprocess_exec(
             *full_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             limit=self.STREAM_READ_LIMIT,
             cwd=cwd,
+        )
+        subprocess_started_at = time.monotonic()
+        diagnostics["process_pid"] = process.pid
+        diagnostics["subprocess_start_seconds"] = round(
+            subprocess_started_at - subprocess_start_started_at, 3
+        )
+        diagnostics["subprocess_started_after_seconds"] = round(
+            subprocess_started_at - started_at, 3
         )
 
         async def collect_stream(stream, chunks: List[str], stream_name: str) -> None:
@@ -457,10 +470,14 @@ class OpenClawSessionService:
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     if first_output_task not in done and stream_task not in done:
+                        no_output_elapsed = time.monotonic() - started_at
                         diagnostics["no_output_timeout"] = True
                         diagnostics["timed_out"] = True
                         diagnostics["cancelled"] = True
                         diagnostics["timeout_boundary"] = "repair_no_output"
+                        diagnostics["no_output_timeout_elapsed_seconds"] = round(
+                            no_output_elapsed, 3
+                        )
                         try:
                             process.kill()
                         except ProcessLookupError:

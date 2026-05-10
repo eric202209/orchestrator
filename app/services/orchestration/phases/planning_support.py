@@ -21,6 +21,79 @@ TRUNCATED_PLAN_REPAIR_REJECTION_REASON = (
 )
 
 
+def _truncated_multistep_collapse_diagnostics(
+    *,
+    output_text: str,
+    extracted_plan: Any,
+    repair_stage: str,
+) -> dict[str, Any]:
+    """Describe a collapsed multi-step response without changing policy."""
+
+    text = output_text or ""
+    raw_step_mentions = re.findall(
+        r'(?:\\)?["\']step_number(?:\\)?["\']\s*:\s*(\d+)',
+        text,
+        flags=re.IGNORECASE,
+    )
+    step_mentions: list[int] = []
+    for raw_step in raw_step_mentions:
+        try:
+            step_mentions.append(int(raw_step))
+        except (TypeError, ValueError):
+            continue
+
+    description_mentions = len(
+        re.findall(
+            r'(?:\\)?["\']description(?:\\)?["\']\s*:',
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+    original_step_count = max(
+        len(set(step_mentions)),
+        max(step_mentions) if step_mentions else 0,
+        description_mentions,
+        len(extracted_plan or []) if isinstance(extracted_plan, list) else 0,
+    )
+
+    absorbing_step = None
+    if isinstance(extracted_plan, list) and extracted_plan:
+        first_step = extracted_plan[0]
+        if isinstance(first_step, dict):
+            try:
+                absorbing_step = int(first_step.get("step_number") or 1)
+            except (TypeError, ValueError):
+                absorbing_step = 1
+        else:
+            absorbing_step = 1
+
+    subcodes = [
+        (
+            f"original_steps_detected_{original_step_count}"
+            if original_step_count > 1
+            else "original_steps_unknown"
+        ),
+        (
+            f"absorbed_into_step_{absorbing_step}"
+            if absorbing_step is not None
+            else "absorbed_step_unknown"
+        ),
+        (
+            "collapse_after_first_repair"
+            if repair_stage == "after_first_repair"
+            else "collapse_before_first_repair"
+        ),
+    ]
+    return {
+        "truncated_multistep_subcodes": subcodes,
+        "truncated_multistep_original_step_count": (
+            original_step_count if original_step_count > 1 else None
+        ),
+        "truncated_multistep_absorbing_step": absorbing_step,
+        "truncated_multistep_repair_stage": repair_stage,
+    }
+
+
 def _normalized_step_numbers(raw_steps: Any) -> list[int]:
     step_numbers: list[int] = []
     if isinstance(raw_steps, dict):
@@ -194,6 +267,24 @@ def _build_repair_rejection_reasons(
             "command that proves behavior for each implementation-heavy step."
         )
 
+    truncated_subcodes = details.get("truncated_multistep_subcodes") or []
+    if truncated_subcodes:
+        original_step_count = details.get("truncated_multistep_original_step_count")
+        absorbing_step = details.get("truncated_multistep_absorbing_step")
+        step_clause = (
+            f"step {absorbing_step}" if absorbing_step is not None else "one step"
+        )
+        return_clause = (
+            f"Return {original_step_count} separate step objects"
+            if original_step_count
+            else "Return separate step objects"
+        )
+        targeted_reasons.append(
+            f"{return_clause}; do not merge into {step_clause}. "
+            "truncated_multistep_subcodes: "
+            f"{', '.join(str(code) for code in truncated_subcodes)}."
+        )
+
     return targeted_reasons + base_reasons
 
 
@@ -213,6 +304,27 @@ def _brittle_command_diagnostic_details(
     return diagnostics
 
 
+def _truncated_multistep_diagnostic_details(
+    verdict_details: Dict[str, Any] | None,
+) -> dict[str, Any]:
+    details = verdict_details or {}
+    subcodes = details.get("truncated_multistep_subcodes") or []
+    if not subcodes:
+        return {}
+    return {
+        "truncated_multistep_subcodes": list(subcodes),
+        "truncated_multistep_original_step_count": details.get(
+            "truncated_multistep_original_step_count"
+        ),
+        "truncated_multistep_absorbing_step": details.get(
+            "truncated_multistep_absorbing_step"
+        ),
+        "truncated_multistep_repair_stage": details.get(
+            "truncated_multistep_repair_stage"
+        ),
+    }
+
+
 def _plan_contract_diagnostics(
     verdict_details: Dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -227,6 +339,7 @@ def _plan_contract_diagnostics(
         )
     }
     diagnostics.update(_brittle_command_diagnostic_details(details))
+    diagnostics.update(_truncated_multistep_diagnostic_details(details))
     return diagnostics
 
 
@@ -236,6 +349,7 @@ def _terminal_validation_failure_details(plan_verdict: Any) -> dict[str, Any]:
         "validation_reasons": list(plan_verdict.reasons or [])[:5],
     }
     details.update(_brittle_command_diagnostic_details(plan_verdict.details))
+    details.update(_truncated_multistep_diagnostic_details(plan_verdict.details))
     return details
 
 
@@ -426,6 +540,7 @@ def _emit_planning_diagnostics_contract_violation(
         "command_total_chars": diagnostics.get("command_total_chars"),
     }
     metadata.update(_brittle_command_diagnostic_details(diagnostics))
+    metadata.update(_truncated_multistep_diagnostic_details(diagnostics))
     ctx.emit_live(
         "WARN",
         "[OPENCLAW][PLANNING_DIAGNOSTICS] contract violation detected",

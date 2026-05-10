@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import json
 import time
@@ -17,6 +18,7 @@ from app.services.orchestration.phases.planning_flow import (
     _plan_contract_diagnostics,
     _should_repair_truncated_single_step_plan,
     _terminal_validation_failure_details,
+    _truncated_multistep_collapse_diagnostics,
     TRUNCATED_PLAN_REPAIR_REJECTION_REASON,
     execute_planning_phase,
 )
@@ -364,6 +366,8 @@ def test_planning_model_calls_use_interprocess_lock(tmp_path, monkeypatch):
     )
 
     assert result["status"] == "completed"
+    assert result["_planning_lock_diagnostics"]["planning_lock_path"] == str(lock_path)
+    assert result["_planning_lock_diagnostics"]["planning_lock_wait_seconds"] >= 0
     assert captured["prompt"] == "[]"
     assert captured["kwargs"]["timeout_seconds"] == 120
     assert captured["lock_exists_during_call"] is True
@@ -1746,6 +1750,10 @@ def test_openclaw_invocation_metadata_redacts_prompt_and_captures_flags():
     assert metadata["cwd"] == "/tmp/isolated"
     assert metadata["isolate_workspace_context"] is True
     assert metadata["prompt_size"] == len("secret prompt")
+    assert (
+        metadata["prompt_sha256_12"]
+        == hashlib.sha256(b"secret prompt").hexdigest()[:12]
+    )
     assert metadata["no_output_timeout_seconds"] == 200
     assert "secret prompt" not in json.dumps(metadata)
 
@@ -1822,6 +1830,7 @@ def test_planning_repair_logs_duration(caplog):
     assert "parser_validation_seconds" in duration_events[0]
     assert duration_events[0]["repair_attempts"] == 1
     assert duration_events[0]["repair_output_chars"] > 0
+    assert duration_events[0]["planning_lock_wait_seconds"] >= 0
 
 
 def test_planning_repair_timeout_emits_runtime_diagnostics(monkeypatch):
@@ -1944,6 +1953,7 @@ def test_planning_repair_no_output_timeout_classification():
     assert metadata["return_code"] == -9
     assert metadata["cancelled"] is True
     assert metadata["timeout_boundary"] == "repair_no_output"
+    assert metadata["planning_lock_wait_seconds"] >= 0
 
 
 def test_planning_repair_no_output_retry_can_succeed():
@@ -5083,6 +5093,50 @@ def test_repair_prompt_includes_injected_weak_verification_rejection_line():
     assert "pytest, python -m, or npm run build" in prompt
 
 
+def test_repair_prompt_includes_injected_truncated_multistep_subcodes():
+    malformed_output = (
+        '[{"step_number":1,"description":"Create files",'
+        '"commands":["printf ..."],"verification":"python -m pytest"},'
+        '{"step_number":2,"description":"Wire behavior"},'
+        '{"step_number":3,"description":"Verify behavior"}]'
+    )
+    extracted_plan = [
+        {
+            "step_number": 1,
+            "description": "Create files and wire behavior and verify behavior",
+            "commands": ["printf ..."],
+            "verification": "python -m pytest",
+            "rollback": None,
+            "expected_files": ["app.py"],
+        }
+    ]
+    details = _truncated_multistep_collapse_diagnostics(
+        output_text=malformed_output,
+        extracted_plan=extracted_plan,
+        repair_stage="after_first_repair",
+    )
+
+    reasons = _build_repair_rejection_reasons(
+        [TRUNCATED_PLAN_REPAIR_REJECTION_REASON],
+        details,
+    )
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Build a small app",
+        malformed_output=malformed_output,
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+        rejection_reasons=reasons,
+    )
+
+    assert details["truncated_multistep_subcodes"] == [
+        "original_steps_detected_3",
+        "absorbed_into_step_1",
+        "collapse_after_first_repair",
+    ]
+    assert "truncated_multistep_subcodes:" in prompt
+    assert "Return 3 separate step objects" in prompt
+    assert "do not merge into step 1" in prompt
+
+
 # Phase 6Q: expose brittle-command subcodes in planning events
 
 
@@ -5120,6 +5174,30 @@ def test_plan_contract_diagnostics_omit_brittle_keys_when_absent():
     assert "brittle_command_step_details" not in diagnostics
 
 
+def test_plan_contract_diagnostics_include_truncated_multistep_subcodes():
+    diagnostics = _plan_contract_diagnostics(
+        {
+            "truncated_multistep_subcodes": [
+                "original_steps_detected_3",
+                "absorbed_into_step_1",
+                "collapse_before_first_repair",
+            ],
+            "truncated_multistep_original_step_count": 3,
+            "truncated_multistep_absorbing_step": 1,
+            "truncated_multistep_repair_stage": "before_first_repair",
+        }
+    )
+
+    assert diagnostics["truncated_multistep_subcodes"] == [
+        "original_steps_detected_3",
+        "absorbed_into_step_1",
+        "collapse_before_first_repair",
+    ]
+    assert diagnostics["truncated_multistep_original_step_count"] == 3
+    assert diagnostics["truncated_multistep_absorbing_step"] == 1
+    assert diagnostics["truncated_multistep_repair_stage"] == "before_first_repair"
+
+
 def test_planning_contract_violation_event_includes_brittle_subcodes():
     events = []
     ctx = MagicMock(
@@ -5152,6 +5230,49 @@ def test_planning_contract_violation_event_includes_brittle_subcodes():
     metadata = events[0][2]
     assert metadata["brittle_command_subcodes"] == ["oversized_command_length"]
     assert metadata["brittle_command_step_details"] == {2: ["oversized_command_length"]}
+
+
+def test_planning_contract_violation_event_includes_truncated_subcodes():
+    events = []
+    ctx = MagicMock(
+        session_id=55,
+        task_id=10,
+        task_execution_id=38,
+        emit_live=lambda level, message, metadata=None: events.append(
+            (level, message, metadata or {})
+        ),
+    )
+
+    _emit_planning_diagnostics_contract_violation(
+        ctx,
+        reason="truncated_multistep_plan_detected",
+        contract_violations=["truncated multi-step plan collapsed into a single step"],
+        contract_diagnostics={
+            "truncated_multistep_subcodes": [
+                "original_steps_detected_3",
+                "absorbed_into_step_1",
+                "collapse_before_first_repair",
+            ],
+            "truncated_multistep_original_step_count": 3,
+            "truncated_multistep_absorbing_step": 1,
+            "truncated_multistep_repair_stage": "before_first_repair",
+        },
+        output_text='[{"step_number":1},{"step_number":2}]',
+        strategy_info="truncated_multistep_plan_repair_requested",
+    )
+
+    metadata = events[0][2]
+    assert metadata["contract_violation_type"] == (
+        "truncated_multi_step_plan_collapsed_into_a_single_step"
+    )
+    assert metadata["truncated_multistep_subcodes"] == [
+        "original_steps_detected_3",
+        "absorbed_into_step_1",
+        "collapse_before_first_repair",
+    ]
+    assert metadata["truncated_multistep_original_step_count"] == 3
+    assert metadata["truncated_multistep_absorbing_step"] == 1
+    assert metadata["truncated_multistep_repair_stage"] == "before_first_repair"
 
 
 def test_terminal_validation_failure_details_include_brittle_subcodes_when_present():

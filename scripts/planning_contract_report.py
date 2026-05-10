@@ -250,6 +250,7 @@ def summarize(
         contract_reasons = [contract_reason(row["metadata"]) for row in contract_rows]
         semantic_codes: list[str] = []
         brittle_subcodes: list[str] = []
+        truncated_subcodes: list[str] = []
         for row in contract_rows:
             metadata = row["metadata"]
             semantic_codes.extend(
@@ -260,6 +261,11 @@ def summarize(
             brittle_subcodes.extend(
                 str(code)
                 for code in (metadata.get("brittle_command_subcodes") or [])
+                if str(code).strip()
+            )
+            truncated_subcodes.extend(
+                str(code)
+                for code in (metadata.get("truncated_multistep_subcodes") or [])
                 if str(code).strip()
             )
         repair_attempt_count = len(repair_start_rows)
@@ -282,6 +288,7 @@ def summarize(
             "contract_reasons": contract_reasons,
             "semantic_violation_codes": sorted(set(semantic_codes)),
             "brittle_command_subcodes": sorted(set(brittle_subcodes)),
+            "truncated_multistep_subcodes": sorted(set(truncated_subcodes)),
             "terminal_reason": terminal_reason_from_rows(metadata_rows, context),
             "final_task_status": _status(context.get("task_status")),
             "final_task_execution_status": _status(

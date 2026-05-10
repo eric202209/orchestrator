@@ -242,11 +242,44 @@ class PlannerService:
     def _openclaw_planning_lock():
         OPENCLAW_PLANNING_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
         with OPENCLAW_PLANNING_LOCK_PATH.open("a", encoding="utf-8") as handle:
+            wait_started_at = time.monotonic()
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            lock_diagnostics = {
+                "planning_lock_path": str(OPENCLAW_PLANNING_LOCK_PATH),
+                "planning_lock_wait_seconds": round(
+                    time.monotonic() - wait_started_at, 3
+                ),
+            }
             try:
-                yield
+                yield lock_diagnostics
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _attach_planning_lock_diagnostics(
+        result: Dict[str, Any],
+        lock_diagnostics: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not lock_diagnostics:
+            return result
+        diagnostics = result.get("diagnostics")
+        if isinstance(diagnostics, dict):
+            diagnostics.update(lock_diagnostics)
+        result["_planning_lock_diagnostics"] = dict(lock_diagnostics)
+        return result
+
+    @staticmethod
+    def _attach_planning_lock_exception_diagnostics(
+        exc: Exception,
+        lock_diagnostics: Dict[str, Any],
+    ) -> None:
+        if not lock_diagnostics:
+            return
+        diagnostics = getattr(exc, "runtime_diagnostics", None)
+        if isinstance(diagnostics, dict):
+            diagnostics.update(lock_diagnostics)
+            return
+        exc.runtime_diagnostics = dict(lock_diagnostics)  # type: ignore[attr-defined]
 
     @classmethod
     async def _execute_task_with_planning_lock(
@@ -255,8 +288,13 @@ class PlannerService:
         prompt: str,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        with cls._openclaw_planning_lock():
-            return await runtime_service.execute_task(prompt, **kwargs)
+        with cls._openclaw_planning_lock() as lock_diagnostics:
+            try:
+                result = await runtime_service.execute_task(prompt, **kwargs)
+            except Exception as exc:
+                cls._attach_planning_lock_exception_diagnostics(exc, lock_diagnostics)
+                raise
+            return cls._attach_planning_lock_diagnostics(result, lock_diagnostics)
 
     _WEAK_VERIFICATION_MARKERS = (
         "test -f",
@@ -1003,14 +1041,23 @@ Return only a JSON array matching this shape. No markdown. No prose.
     ) -> Dict[str, Any]:
         invoke_prompt = getattr(runtime_service, "invoke_prompt", None)
         if callable(invoke_prompt):
-            with PlannerService._openclaw_planning_lock():
-                return await invoke_prompt(
-                    repair_prompt,
-                    timeout_seconds=repair_timeout,
-                    source_brain="local",
-                    session_prefix="planning-repair",
-                    isolate_workspace_context=False,
-                    no_output_timeout_seconds=PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS,
+            with PlannerService._openclaw_planning_lock() as lock_diagnostics:
+                try:
+                    result = await invoke_prompt(
+                        repair_prompt,
+                        timeout_seconds=repair_timeout,
+                        source_brain="local",
+                        session_prefix="planning-repair",
+                        isolate_workspace_context=False,
+                        no_output_timeout_seconds=PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS,
+                    )
+                except Exception as exc:
+                    PlannerService._attach_planning_lock_exception_diagnostics(
+                        exc, lock_diagnostics
+                    )
+                    raise
+                return PlannerService._attach_planning_lock_diagnostics(
+                    result, lock_diagnostics
                 )
 
         return await PlannerService._execute_task_with_planning_lock(
@@ -1458,6 +1505,16 @@ Rules:
             )
             repair_duration_seconds = time.monotonic() - repair_started_at
             parser_started_at = time.monotonic()
+            runtime_diagnostics = result.get("diagnostics")
+            if not isinstance(runtime_diagnostics, dict):
+                runtime_diagnostics = {}
+            lock_diagnostics = result.get("_planning_lock_diagnostics")
+            if isinstance(lock_diagnostics, dict):
+                runtime_diagnostics = {**runtime_diagnostics, **lock_diagnostics}
+            planning_lock_wait_seconds = result.get(
+                "planning_lock_wait_seconds",
+                runtime_diagnostics.get("planning_lock_wait_seconds"),
+            )
             repair_output_text = str(result.get("output") or "")
             repair_output_chars = len(repair_output_text)
             repair_output_token_estimate = max(0, (repair_output_chars + 3) // 4)
@@ -1564,8 +1621,16 @@ Rules:
                     "repair_output_token_estimate": repair_output_token_estimate,
                     "repair_output_truncated": repair_truncated,
                     "repair_attempts": _repair_attempt_number,
+                    "planning_lock_wait_seconds": planning_lock_wait_seconds,
+                    "openclaw_process_seconds": runtime_diagnostics.get(
+                        "duration_seconds"
+                    ),
+                    "openclaw_first_output_after_seconds": runtime_diagnostics.get(
+                        "first_output_after_seconds"
+                    ),
                 },
             )
+            result.pop("_planning_lock_diagnostics", None)
             return result
         except PlanningRepairOutputContractViolation:
             raise
@@ -1602,6 +1667,13 @@ Rules:
                             "next_strategy": "compact_repair_prompt",
                             "timeout_boundary": diagnostics.get("timeout_boundary")
                             or "repair_no_output",
+                            "planning_lock_wait_seconds": diagnostics.get(
+                                "planning_lock_wait_seconds"
+                            ),
+                            "openclaw_process_seconds": diagnostics.get(
+                                "duration_seconds"
+                            ),
+                            "process_pid": diagnostics.get("process_pid"),
                         },
                     )
                     return cls.repair_output(
@@ -1681,6 +1753,14 @@ Rules:
                         "timeout_boundary": diagnostics.get("timeout_boundary")
                         or "repair_no_output",
                         "parser_validation_seconds": None,
+                        "planning_lock_wait_seconds": diagnostics.get(
+                            "planning_lock_wait_seconds"
+                        ),
+                        "openclaw_process_seconds": diagnostics.get("duration_seconds"),
+                        "openclaw_no_output_elapsed_seconds": diagnostics.get(
+                            "no_output_timeout_elapsed_seconds"
+                        ),
+                        "process_pid": diagnostics.get("process_pid"),
                     },
                 )
                 raise timeout_exc from exc

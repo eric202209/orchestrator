@@ -198,6 +198,40 @@ def test_planning_contract_report_threshold_requires_distinct_executions():
     assert summary["diagnostic_change_candidates"] == {reason: 3}
 
 
+def test_planning_contract_report_summarizes_truncated_subcodes():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _schema(conn)
+    reason = "truncated_multi_step_plan_collapsed_into_a_single_step"
+    _insert_execution(conn, task_execution_id=10, execution_status="failed")
+    _insert_log(
+        conn,
+        log_id=1,
+        task_execution_id=10,
+        message="[OPENCLAW][PLANNING_DIAGNOSTICS] contract violation detected",
+        metadata={
+            "phase": "planning",
+            "reason": "truncated_multistep_plan_detected",
+            "contract_violation_type": reason,
+            "truncated_multistep_subcodes": [
+                "original_steps_detected_3",
+                "absorbed_into_step_1",
+                "collapse_before_first_repair",
+            ],
+        },
+    )
+
+    summary = module.summarize(conn, limit=10)
+    record = summary["records"][0]
+
+    assert record["contract_reasons"] == [reason]
+    assert record["truncated_multistep_subcodes"] == [
+        "absorbed_into_step_1",
+        "collapse_before_first_repair",
+        "original_steps_detected_3",
+    ]
+
+
 def test_planning_contract_report_fallback_profile_handles_negated_frontend(
     monkeypatch,
 ):
