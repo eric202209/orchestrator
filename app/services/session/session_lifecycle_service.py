@@ -386,6 +386,104 @@ def recover_stale_running_sessions(
     return recovered_sessions
 
 
+def reconcile_terminal_running_sessions(
+    db: Session,
+    sessions: list[SessionModel] | None = None,
+) -> list[dict[str, Any]]:
+    """Pause/stop sessions that still say running after terminal task execution.
+
+    This catches persisted state drift where the task execution and session-task
+    link reached a terminal state, but the session row was not updated. The UI
+    should not show such sessions as actively running.
+    """
+
+    query = db.query(SessionModel).filter(
+        SessionModel.status == "running",
+        SessionModel.deleted_at.is_(None),
+    )
+    if sessions is not None:
+        session_ids = [
+            session.id for session in sessions if session.status == "running"
+        ]
+        if not session_ids:
+            return []
+        query = query.filter(SessionModel.id.in_(session_ids))
+
+    reconciled: list[dict[str, Any]] = []
+    for session in query.all():
+        running_execution_exists = (
+            db.query(TaskExecution.id)
+            .filter(
+                TaskExecution.session_id == session.id,
+                TaskExecution.status == TaskStatus.RUNNING,
+            )
+            .first()
+            is not None
+        )
+        if running_execution_exists:
+            continue
+
+        latest_execution = (
+            db.query(TaskExecution)
+            .filter(TaskExecution.session_id == session.id)
+            .order_by(
+                TaskExecution.completed_at.desc().nullslast(),
+                TaskExecution.started_at.desc().nullslast(),
+                TaskExecution.created_at.desc().nullslast(),
+                TaskExecution.id.desc(),
+            )
+            .first()
+        )
+        if latest_execution is None:
+            continue
+
+        if latest_execution.status == TaskStatus.FAILED:
+            next_status = "paused"
+            alert_level = "error"
+            alert_message = (
+                "Recovered session status after its latest task execution failed."
+            )
+        elif latest_execution.status in (TaskStatus.CANCELLED, TaskStatus.DONE):
+            next_status = "stopped"
+            alert_level = None
+            alert_message = None
+        else:
+            continue
+
+        session.status = next_status
+        session.is_active = False
+        if next_status == "paused":
+            session.paused_at = session.paused_at or datetime.now(timezone.utc)
+        else:
+            session.stopped_at = session.stopped_at or datetime.now(timezone.utc)
+        set_session_alert(db, session, alert_level, alert_message)
+        db.add(
+            LogEntry(
+                session_id=session.id,
+                task_id=latest_execution.task_id,
+                task_execution_id=latest_execution.id,
+                session_instance_id=session.instance_id,
+                level="WARN",
+                message=(
+                    "Reconciled stale running session after terminal task execution"
+                ),
+            )
+        )
+        reconciled.append(
+            {
+                "session_id": session.id,
+                "task_execution_id": latest_execution.id,
+                "previous_status": "running",
+                "next_status": next_status,
+                "terminal_task_status": latest_execution.status.value,
+            }
+        )
+
+    if reconciled:
+        db.commit()
+    return reconciled
+
+
 def _ensure_session_task_ready_for_resume(
     db: Session,
     *,

@@ -90,6 +90,9 @@ from app.services.orchestration.replay import reconstruct_execution_state
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
+from app.services.session.session_lifecycle_service import (
+    reconcile_terminal_running_sessions,
+)
 
 
 def _serialize_session_timestamp(value: datetime | None) -> str | None:
@@ -214,9 +217,11 @@ def list_sessions(
     if status:
         query = query.filter(SessionModel.status == status)
 
-    return (
+    sessions = (
         query.order_by(SessionModel.created_at.desc()).offset(skip).limit(limit).all()
     )
+    reconcile_terminal_running_sessions(db, sessions)
+    return sessions
 
 
 @router.get("/projects/{project_id}/sessions", response_model=List[SessionResponse])
@@ -247,6 +252,7 @@ def get_project_sessions(
         query = query.filter(SessionModel.is_active == is_active)
 
     sessions = query.offset(skip).limit(limit).all()
+    reconcile_terminal_running_sessions(db, sessions)
     return sessions
 
 
@@ -264,6 +270,8 @@ def get_session(
     )
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    reconcile_terminal_running_sessions(db, [session])
+    db.refresh(session)
 
     # Get associated logs
     log_count = db.query(LogEntry).filter(LogEntry.session_id == session_id).count()

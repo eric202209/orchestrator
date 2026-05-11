@@ -791,6 +791,8 @@ class PlannerService:
                 "rollback": rollback,
                 "expected_files": expected_files,
             }
+            if isinstance(raw_step, dict) and isinstance(raw_step.get("ops"), list):
+                step["ops"] = raw_step["ops"]
 
             sanitized_plan.append(step)
 
@@ -914,6 +916,14 @@ class PlannerService:
             step_number = int(step.get("step_number") or index)
             commands = step.get("commands", []) or []
             expected_files = step.get("expected_files", []) or []
+            ops = step.get("ops") or []
+            has_write_file_ops = isinstance(ops, list) and any(
+                isinstance(operation, dict) and operation.get("op") == "write_file"
+                for operation in ops
+            )
+            ops_only = has_write_file_ops and not any(
+                str(command or "").strip() for command in commands
+            )
             for command in commands:
                 rendered = str(command or "").strip()
                 lowered = rendered.lower()
@@ -938,7 +948,9 @@ class PlannerService:
                     )
                 ):
                     issues["placeholder_only_steps"].append(step_number)
-                if PlannerService._verification_is_weak(step.get("verification")):
+                if not ops_only and PlannerService._verification_is_weak(
+                    step.get("verification")
+                ):
                     issues["weak_verification_steps"].append(step_number)
         return {key: sorted(set(value)) for key, value in issues.items() if value}
 
@@ -978,9 +990,9 @@ class PlannerService:
                 violations.append(f"non-object step at position {index}")
                 continue
             missing = [key for key in PLANNING_STEP_REQUIRED_KEYS if key not in step]
-            extra = [
-                key for key in step.keys() if key not in PLANNING_STEP_REQUIRED_KEYS
-            ]
+            allowed_step_keys = set(PLANNING_STEP_REQUIRED_KEYS)
+            allowed_step_keys.add("ops")
+            extra = [key for key in step.keys() if key not in allowed_step_keys]
             if missing:
                 violations.append(
                     f"step {index} missing required keys: {', '.join(missing)}"

@@ -23,6 +23,7 @@ from app.models import (
 )
 from app.services.session.session_lifecycle_service import (
     pause_session_lifecycle,
+    reconcile_terminal_running_sessions,
     resume_session_lifecycle,
     start_session_lifecycle,
     stop_session_lifecycle,
@@ -155,6 +156,67 @@ def test_start_recovers_orphaned_planning_run_before_restarting(
         .first()
     )
     assert recovery_log is not None
+
+
+def test_reconcile_terminal_running_session_after_failed_execution(db_session):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="running", is_active=True)
+    task = _make_task(db_session, project, status=TaskStatus.FAILED)
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.FAILED,
+        started_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
+    )
+    link = SessionTask(
+        session_id=session.id,
+        task_id=task.id,
+        status=TaskStatus.FAILED,
+        started_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
+    )
+    db_session.add_all([execution, link])
+    db_session.commit()
+
+    reconciled = reconcile_terminal_running_sessions(db_session, [session])
+
+    db_session.refresh(session)
+    assert reconciled == [
+        {
+            "session_id": session.id,
+            "task_execution_id": execution.id,
+            "previous_status": "running",
+            "next_status": "paused",
+            "terminal_task_status": "failed",
+        }
+    ]
+    assert session.status == "paused"
+    assert session.is_active is False
+    assert session.last_alert_level == "error"
+
+
+def test_reconcile_keeps_running_session_with_running_execution(db_session):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="running", is_active=True)
+    task = _make_task(db_session, project, status=TaskStatus.RUNNING)
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.RUNNING,
+        started_at=datetime.now(UTC),
+    )
+    db_session.add(execution)
+    db_session.commit()
+
+    reconciled = reconcile_terminal_running_sessions(db_session, [session])
+
+    db_session.refresh(session)
+    assert reconciled == []
+    assert session.status == "running"
+    assert session.is_active is True
 
 
 def test_start_already_paused_session_returns_400(db_session):

@@ -4,6 +4,7 @@ import pytest
 
 from app.services.orchestration.execution.executor import ExecutorService
 from app.services.orchestration.execution.step_support import step_needs_command_repair
+from app.services.orchestration.planning.planner import PlannerService
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.orchestration.validation.workspace_guard import (
     TaskWorkspaceViolationError,
@@ -103,3 +104,19 @@ def test_executor_write_file_ops_create_parent_directory(tmp_path):
 
 def test_ops_only_step_does_not_need_command_repair():
     assert step_needs_command_repair(_ops_only_step()) is False
+
+
+def test_plan_sanitizer_preserves_write_file_ops():
+    sanitized = PlannerService.sanitize_common_plan_issues([_ops_only_step()])
+
+    assert sanitized[0]["commands"] == []
+    assert sanitized[0]["ops"] == _ops_only_step()["ops"]
+
+
+def test_ops_only_step_with_null_verification_does_not_trigger_weak_repair():
+    step = _ops_only_step()
+    step["verification"] = None
+
+    issues = PlannerService.find_immediate_repair_step_issues([step])
+
+    assert "weak_verification_steps" not in issues

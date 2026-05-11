@@ -2777,6 +2777,33 @@ def test_planner_describes_contract_violations_before_repair():
     assert "background process command in steps [1]" in violations
 
 
+def test_planner_contract_violations_allow_optional_ops_key():
+    violations = PlannerService.describe_planning_contract_violations(
+        output_text="[]",
+        parse_success=True,
+        strategy_info="",
+        extracted_plan=[
+            {
+                "step_number": 1,
+                "description": "Create source file",
+                "commands": [],
+                "verification": "python -m py_compile app.py",
+                "rollback": "rm -f app.py",
+                "expected_files": ["app.py"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "app.py",
+                        "content": "print('ok')\n",
+                    }
+                ],
+            }
+        ],
+    )
+
+    assert not any("extra keys: ops" in violation for violation in violations)
+
+
 def test_planning_uses_workspace_plan_json_before_strict_retry(tmp_path, monkeypatch):
     plan = [
         {
