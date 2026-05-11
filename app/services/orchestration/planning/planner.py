@@ -1338,7 +1338,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
         prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 Do not create, edit, read, or write files during planning repair; return the JSON array as message text only.
-Repair the plan, not the task. Preserve valid steps; replace invalid ones.
+Repair the plan, not the task. Preserve valid steps.
 
 Bad:
 {broken_output}
@@ -1346,25 +1346,25 @@ Bad:
 {validation_error or default_validation_error}
 
 Strict output schema:
-JSON array only. Keys:
-step_number, description, commands, verification, rollback, expected_files.
+Keys: step_number, description, commands, verification, rollback, expected_files.
 
 Rules:
 1. Use 3 to 4 steps, numbered 1..N.
-2. commands: array of short shell strings.
-3. verification and rollback: one shell string or null.
-4. expected_files: array of relative paths.
+2. commands: short shell strings under 900 chars; split longer writes/setup across commands/steps.
+3. verification/rollback: one shell string or null.
+4. expected_files: relative path array.
 5. Relative paths only; no absolute paths, .., ~, or duplicated roots like frontend/src/frontend/src or backend/src/backend/src. Paths rooted exactly once.
-6. No background processes, &, nohup, disown, dev servers, or long commands.
-7. No prose, markdown, payloads, logs, session history, or extra JSON keys.
-8. Replace oversized source dumps with short setup/edit commands.
-9. expected_files steps must write real content; no separate mkdir/touch-only scaffold step for normal files.
-10. Verification must use `node -e`, `npm run build`, or `python -m`; no `test -f`, `grep -q`, `echo`, or `cd /... &&`.
-11. No /root/write_file.py, /tmp helpers, absolute helper scripts, or outside files.
-12. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. Use printf to overwrite only needed JSX body/CSS lines.
-13. Never use heredoc (`<<'EOF'`, `<<'PY'`, `<<'HEREDOC'`, etc.). Always use printf for all file writes.
-14. No heredocs in loops, multi-file heredocs, or multiple heredoc commands.
-15. No `\\'` inside single-quoted strings; use double quotes instead.
+6. No nested project folder; work in task workspace; do not `cd` into a new app/backend/frontend root.
+7. No background processes, &, nohup, disown, dev servers, or long commands.
+8. No prose, markdown, payloads, logs, session history, extra keys.
+9. Replace source dumps with short commands.
+10. expected_files steps must write real content; no separate mkdir/touch-only scaffold step for normal files.
+11. Verification must use `node -e`, `npm run build`, or `python -m`; no `test -f`, `grep -q`, `echo`, or `cd /... &&`.
+12. No /root/write_file.py, /tmp helpers, absolute helper scripts, outside files.
+13. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. Use printf to overwrite only needed JSX body/CSS lines.
+14. Never use heredoc (`<<'EOF'`, `<<'PY'`, `<<'HEREDOC'`, etc.). Always use printf for all file writes.
+15. No heredocs in loops, multi-file heredocs, or multiple heredoc commands.
+16. No `\\'` inside single-quoted strings; use double quotes instead.
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 
@@ -1395,7 +1395,7 @@ Schema per step:
 step_number, description, commands, verification, rollback, expected_files.
 
 Rules:
-- commands must be short shell strings.
+- commands must be short shell strings under 900 characters each; split longer file writes or setup into multiple commands/steps.
 - verification must be one real command using `python -m`, `node -e`, or `npm run build`.
 - expected_files must be relative paths only.
 - expected_files steps must write real content; no touch-only, TODO, pass, stub, or placeholder-only implementation.
