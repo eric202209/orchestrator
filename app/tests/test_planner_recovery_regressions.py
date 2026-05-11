@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from app.models import Project, Session as SessionModel, Task, TaskStatus
+from app.models import Project, Session as SessionModel, Task, TaskExecution, TaskStatus
 from app.services.orchestration.phases.failure_flow import handle_task_failure
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.planning.planner_service import PlannerService
@@ -34,6 +34,16 @@ class _RetryCapableSelfTask:
 
     def retry(self, exc):
         raise self._RetrySignal(exc)
+
+
+class _UnexpectedRetrySelfTask:
+    max_retries = 3
+
+    class request:
+        retries = 0
+
+    def retry(self, exc):
+        raise AssertionError("planning lock timeout should not schedule Celery retry")
 
 
 def test_planner_marks_architecture_inspection_as_review_only():
@@ -234,3 +244,102 @@ def test_celery_retry_leaves_task_pending_so_claim_can_succeed(db_session):
     ), f"task.status={task.status!r} — retry will fail with task_not_claimable:running"
     assert session.status == "running"
     assert session.is_active is True
+
+
+def test_planning_lock_wait_timeout_terminalizes_execution_without_retry(db_session):
+    project = Project(name="Planning Lock Timeout Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    session = SessionModel(
+        project_id=project.id,
+        name="Planning Lock Timeout Session",
+        status="running",
+        execution_mode="automatic",
+        is_active=True,
+    )
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+
+    task = Task(
+        project_id=project.id,
+        title="Config merge CLI",
+        description="Create config merge CLI",
+        status=TaskStatus.RUNNING,
+        task_subfolder="task-config-merge-cli",
+    )
+    db_session.add(task)
+    db_session.commit()
+    db_session.refresh(task)
+
+    task_execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.RUNNING,
+    )
+    db_session.add(task_execution)
+    db_session.commit()
+    db_session.refresh(task_execution)
+
+    timeout = TimeoutError(
+        "OpenClaw planning lock wait timed out after 30s: "
+        "/tmp/orchestrator-openclaw-planning.lock"
+    )
+    timeout.runtime_diagnostics = {
+        "timeout_boundary": "planning_lock_wait",
+        "planning_lock_wait_seconds": 30.0,
+    }
+
+    ctx = OrchestrationRunContext(
+        db=db_session,
+        session=session,
+        project=project,
+        task=task,
+        session_task_link=None,
+        session_id=session.id,
+        task_id=task.id,
+        prompt=task.description,
+        timeout_seconds=300,
+        execution_profile="full_lifecycle",
+        validation_profile="implementation",
+        runs_in_canonical_baseline=False,
+        orchestration_state=None,
+        runtime_service=None,
+        task_service=None,
+        logger=logging.getLogger(__name__),
+        emit_live=lambda *_args, **_kwargs: None,
+        error_handler=type(
+            "StubErrorHandler",
+            (),
+            {"should_retry": staticmethod(lambda _exc, _context: True)},
+        )(),
+        task_execution_id=task_execution.id,
+        restore_workspace_snapshot_if_needed=None,
+    )
+
+    try:
+        handle_task_failure(
+            self_task=_UnexpectedRetrySelfTask(),
+            ctx=ctx,
+            exc=timeout,
+            get_latest_session_task_link_fn=lambda *_args, **_kwargs: None,
+            write_project_state_snapshot_fn=lambda *_args, **_kwargs: None,
+            save_orchestration_checkpoint_fn=lambda *_args, **_kwargs: None,
+            record_live_log_fn=lambda *_args, **_kwargs: None,
+        )
+    except TimeoutError:
+        pass
+
+    db_session.refresh(task)
+    db_session.refresh(session)
+    db_session.refresh(task_execution)
+
+    assert task.status == TaskStatus.FAILED
+    assert task.completed_at is not None
+    assert session.status == "paused"
+    assert session.is_active is False
+    assert task_execution.status == TaskStatus.FAILED
+    assert task_execution.completed_at is not None

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
+import errno
 import fcntl
 import json
 import logging
@@ -41,6 +42,12 @@ OPENCLAW_PLANNING_LOCK_PATH = Path(
         "ORCHESTRATOR_OPENCLAW_PLANNING_LOCK",
         "/tmp/orchestrator-openclaw-planning.lock",
     )
+)
+OPENCLAW_PLANNING_LOCK_ACQUIRE_TIMEOUT_SECONDS = float(
+    os.environ.get("ORCHESTRATOR_OPENCLAW_PLANNING_LOCK_ACQUIRE_TIMEOUT_SECONDS", "30")
+)
+OPENCLAW_PLANNING_LOCK_POLL_SECONDS = float(
+    os.environ.get("ORCHESTRATOR_OPENCLAW_PLANNING_LOCK_POLL_SECONDS", "0.05")
 )
 PLANNING_REPAIR_STRIP_FIELD_NAMES = {
     "projectContext",
@@ -256,6 +263,60 @@ class PlannerService:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     @staticmethod
+    @asynccontextmanager
+    async def _openclaw_planning_lock_async():
+        OPENCLAW_PLANNING_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        handle = OPENCLAW_PLANNING_LOCK_PATH.open("a", encoding="utf-8")
+        wait_started_at = time.monotonic()
+        acquired = False
+        try:
+            while True:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except OSError as exc:
+                    if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                        raise
+
+                elapsed = time.monotonic() - wait_started_at
+                if elapsed >= OPENCLAW_PLANNING_LOCK_ACQUIRE_TIMEOUT_SECONDS:
+                    diagnostics = {
+                        "planning_lock_path": str(OPENCLAW_PLANNING_LOCK_PATH),
+                        "planning_lock_wait_seconds": round(elapsed, 3),
+                        "planning_lock_acquire_timeout_seconds": (
+                            OPENCLAW_PLANNING_LOCK_ACQUIRE_TIMEOUT_SECONDS
+                        ),
+                        "timeout_boundary": "planning_lock_wait",
+                    }
+                    timeout_exc = TimeoutError(
+                        "OpenClaw planning lock wait timed out after "
+                        f"{OPENCLAW_PLANNING_LOCK_ACQUIRE_TIMEOUT_SECONDS:g}s: "
+                        f"{OPENCLAW_PLANNING_LOCK_PATH}"
+                    )
+                    timeout_exc.runtime_diagnostics = diagnostics  # type: ignore[attr-defined]
+                    raise timeout_exc
+
+                remaining = OPENCLAW_PLANNING_LOCK_ACQUIRE_TIMEOUT_SECONDS - elapsed
+                await asyncio.sleep(
+                    min(OPENCLAW_PLANNING_LOCK_POLL_SECONDS, max(remaining, 0))
+                )
+
+            lock_diagnostics = {
+                "planning_lock_path": str(OPENCLAW_PLANNING_LOCK_PATH),
+                "planning_lock_wait_seconds": round(
+                    time.monotonic() - wait_started_at, 3
+                ),
+            }
+            try:
+                yield lock_diagnostics
+            finally:
+                if acquired:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+    @staticmethod
     def _attach_planning_lock_diagnostics(
         result: Dict[str, Any],
         lock_diagnostics: Dict[str, Any],
@@ -288,7 +349,7 @@ class PlannerService:
         prompt: str,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        with cls._openclaw_planning_lock() as lock_diagnostics:
+        async with cls._openclaw_planning_lock_async() as lock_diagnostics:
             try:
                 result = await runtime_service.execute_task(prompt, **kwargs)
             except Exception as exc:
@@ -1038,10 +1099,13 @@ Return only a JSON array matching this shape. No markdown. No prose.
         runtime_service: Any,
         repair_prompt: str,
         repair_timeout: int,
+        lock_diagnostics_out: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         invoke_prompt = getattr(runtime_service, "invoke_prompt", None)
         if callable(invoke_prompt):
-            with PlannerService._openclaw_planning_lock() as lock_diagnostics:
+            async with PlannerService._openclaw_planning_lock_async() as lock_diagnostics:
+                if lock_diagnostics_out is not None:
+                    lock_diagnostics_out.update(lock_diagnostics)
                 try:
                     result = await invoke_prompt(
                         repair_prompt,
@@ -1369,6 +1433,7 @@ Rules:
         knowledge_context: Any = None,
         session_id: Optional[int] = None,
         task_id: Optional[int] = None,
+        lock_wait_seconds: Optional[float] = None,
         _no_output_retry_used: bool = False,
         _repair_attempt_number: int = 1,
         _compact_no_output_retry: bool = False,
@@ -1492,6 +1557,9 @@ Rules:
         )
         repair_started_at = time.monotonic()
         invoke_started_at = repair_started_at
+        repair_lock_diagnostics: Dict[str, Any] = {}
+        if lock_wait_seconds is not None:
+            repair_lock_diagnostics["planning_lock_wait_seconds"] = lock_wait_seconds
         try:
             result = asyncio.run(
                 asyncio.wait_for(
@@ -1499,6 +1567,7 @@ Rules:
                         runtime_service,
                         repair_prompt,
                         repair_timeout,
+                        lock_diagnostics_out=repair_lock_diagnostics,
                     ),
                     timeout=repair_timeout,
                 )
@@ -1693,6 +1762,7 @@ Rules:
                         knowledge_context=knowledge_context,
                         session_id=session_id,
                         task_id=task_id,
+                        lock_wait_seconds=lock_wait_seconds,
                         _no_output_retry_used=True,
                         _repair_attempt_number=_repair_attempt_number + 1,
                         _compact_no_output_retry=True,
@@ -1765,6 +1835,9 @@ Rules:
                 )
                 raise timeout_exc from exc
             if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+                diagnostics = cls._get_runtime_diagnostics(exc)
+                if diagnostics:
+                    repair_lock_diagnostics.update(diagnostics)
                 timeout_exc = TimeoutError(
                     f"Planning repair timed out after {repair_timeout:g}s "
                     f"(duration={repair_duration_seconds:.2f}s)"
@@ -1800,6 +1873,9 @@ Rules:
                         "repair_reason": reason[:240],
                         "repair_attempts": _repair_attempt_number,
                         "timeout_boundary": "planner_wait_for",
+                        "planning_lock_wait_seconds": repair_lock_diagnostics.get(
+                            "planning_lock_wait_seconds"
+                        ),
                     },
                 )
                 raise timeout_exc from exc

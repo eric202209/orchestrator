@@ -1882,6 +1882,66 @@ def test_planning_repair_timeout_emits_runtime_diagnostics(monkeypatch):
     assert metadata["malformed_output_chars"] > 0
     assert metadata["repair_prompt_build_seconds"] >= 0
     assert metadata["openclaw_request_seconds"] >= 0
+    assert metadata["planning_lock_wait_seconds"] >= 0
+
+
+def test_planning_repair_lock_wait_timeout_emits_attribution(tmp_path, monkeypatch):
+    from app.services.orchestration.planning import planner as planner_module
+
+    events = []
+    called_runtime = False
+    lock_path = tmp_path / "planning.lock"
+
+    monkeypatch.setattr(planner_module, "OPENCLAW_PLANNING_LOCK_PATH", lock_path)
+    monkeypatch.setattr(
+        planner_module, "OPENCLAW_PLANNING_LOCK_ACQUIRE_TIMEOUT_SECONDS", 0.01
+    )
+    monkeypatch.setattr(planner_module, "OPENCLAW_PLANNING_LOCK_POLL_SECONDS", 0.001)
+
+    def busy_flock(_fd, flags):
+        if flags & planner_module.fcntl.LOCK_NB:
+            raise BlockingIOError(planner_module.errno.EAGAIN, "busy")
+        return None
+
+    monkeypatch.setattr(planner_module.fcntl, "flock", busy_flock)
+
+    class Runtime:
+        async def invoke_prompt(self, prompt, **kwargs):
+            nonlocal called_runtime
+            called_runtime = True
+            return {"output": '[{"step_number":1}]'}
+
+    with pytest.raises(TimeoutError):
+        PlannerService.repair_output(
+            runtime_service=Runtime(),
+            task_description="Build a page",
+            malformed_output='{"steps":"bad"}',
+            project_dir=tmp_path,
+            timeout_seconds=300,
+            logger=logging.getLogger("test.planning_repair_lock_wait_timeout"),
+            emit_live=lambda level, message, metadata=None: events.append(
+                (level, message, metadata or {})
+            ),
+            reason="json_parse_failed",
+            rejection_reasons=["commands must be an array"],
+            knowledge_context=None,
+            session_id=1,
+            task_id=2,
+        )
+
+    assert called_runtime is False
+    diagnostics_events = [
+        metadata
+        for level, message, metadata in events
+        if level == "ERROR"
+        and message
+        == "[ORCHESTRATION] Planning repair diagnostics captured timeout boundary"
+    ]
+    assert diagnostics_events
+    metadata = diagnostics_events[0]
+    assert metadata["reason"] == "malformed_planning_output_repair_timeout"
+    assert metadata["timeout_boundary"] == "planner_wait_for"
+    assert metadata["planning_lock_wait_seconds"] >= 0.01
 
 
 def test_planning_repair_no_output_timeout_classification():

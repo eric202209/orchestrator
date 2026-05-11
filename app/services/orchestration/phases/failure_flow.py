@@ -5,7 +5,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any, Callable, Optional
 
-from app.models import InterventionRequest, LogEntry, TaskStatus
+from app.models import InterventionRequest, LogEntry, TaskExecution, TaskStatus
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.events.telemetry import record_phase_event
 from app.services.orchestration.execution.runtime import write_project_state_snapshot
@@ -52,7 +52,13 @@ def handle_task_failure(
     )
     retry_count = int(getattr(getattr(self_task, "request", None), "retries", 0) or 0)
     max_retries = int(getattr(self_task, "max_retries", 0) or 0)
-    has_retry_capacity = should_retry and retry_count < max_retries
+    runtime_diagnostics = getattr(exc, "runtime_diagnostics", None) or {}
+    is_planning_lock_wait_timeout = runtime_diagnostics.get(
+        "timeout_boundary"
+    ) == "planning_lock_wait" or "OpenClaw planning lock wait timed out" in str(exc)
+    has_retry_capacity = (
+        should_retry and retry_count < max_retries and not is_planning_lock_wait_timeout
+    )
     is_timeout = (
         "time limit" in str(exc).lower()
         or "timeout" in str(exc).lower()
@@ -134,7 +140,11 @@ def handle_task_failure(
                 phase="failure",
                 status="error",
                 message=f"[ORCHESTRATION] Task {task_id} failed: {exc}",
-                details={"retryable": should_retry, "is_timeout": is_timeout},
+                details={
+                    "retryable": should_retry,
+                    "is_timeout": is_timeout,
+                    "planning_lock_wait_timeout": is_planning_lock_wait_timeout,
+                },
             )
             save_orchestration_checkpoint_fn(
                 db,
@@ -271,6 +281,19 @@ def handle_task_failure(
             "[ORCHESTRATION] Skipped workspace restore for task %s because the failure was a completion/baseline validation issue",
             task_id,
         )
+
+    task_execution_id = getattr(ctx, "task_execution_id", None) if ctx else None
+    if task_execution_id:
+        task_execution = (
+            db.query(TaskExecution)
+            .filter(TaskExecution.id == task_execution_id)
+            .first()
+        )
+        if task_execution:
+            task_execution.status = TaskStatus.FAILED
+            task_execution.completed_at = task_execution.completed_at or datetime.now(
+                UTC
+            )
 
     db.commit()
     write_project_state_snapshot_fn(db, project, task, session_id)
