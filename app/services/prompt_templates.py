@@ -310,7 +310,7 @@ Do not implement anything.
 4. No background processes, &, nohup, disown, dev servers, or long commands.
 5. Don't assume files exist; inspect before editing. Each command is a standalone shell command (no comma-joining).
 6. If prior artifacts are mentioned in context, extend them instead of recreating parallel implementations.
-7. Never use heredoc syntax (`<<'EOF'`, `<<'PY'`, etc.); use printf for all file writes. Keep each command under 900 characters.
+7. Never use heredoc syntax (`<<'EOF'`, `<<'PY'`, etc.); use printf for all file writes. Split file content across multiple short printf append commands; keep each printf argument under 200 characters and each command under 900 characters. For content with apostrophes use double-quoted `printf "..."` args.
 8. Prefer concise runnable shell or generating a small script/file during execution over embedding full source bodies in plan JSON.
 9. Include exactly one final meaningful verification/build step such as `npm run build`, `pytest`, or `python -m pytest`.
 10. Verification must use `node -e`, `npm run build`, `python -m`, or a project test command; no `test -f`, `grep -q`, or `echo`.

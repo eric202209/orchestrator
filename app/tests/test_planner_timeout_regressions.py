@@ -190,6 +190,8 @@ def test_initial_planning_prompt_contains_valid_json_contract_example():
     assert "If scaffold is used, do not use heredoc" in prompt
     assert "Never use heredoc syntax" in prompt
     assert "use printf for all file writes" in prompt
+    assert "keep each printf argument under 200 characters" in prompt
+    assert "multiple short printf append commands" in prompt
     assert "exactly these six keys and no extra keys" in prompt
     assert "No markdown. No prose." in prompt
     assert 'Objects like {"steps": [...]} instead of a top-level array' in prompt
@@ -713,6 +715,8 @@ def test_minimal_planning_prompt_requires_real_content_and_strong_verification()
     assert "inspect -> edit -> verify" in prompt
     assert "Never use heredoc syntax" in prompt
     assert "use printf for all file writes" in prompt
+    assert "keep each printf argument under 200 characters" in prompt
+    assert "never put a full source file in one printf" in prompt
     assert "never emit `python -c` commands" in prompt
     assert (
         "Do not put escaped apostrophes like `\\'` inside single-quoted strings"
@@ -1591,8 +1595,10 @@ def test_planning_repair_prompt_bans_external_helpers_and_heredoc():
     assert "<<'HEREDOC'" in prompt
     assert "Use printf to overwrite only needed JSX body/CSS lines" in prompt
     assert "Always use printf for all file writes" in prompt
+    assert "under 200 chars per printf arg" in prompt
+    assert "never write an entire file in a single printf" in prompt
     assert "exactly ONE heredoc across ENTIRE plan, all steps combined" not in prompt
-    assert "use double quotes instead" in prompt
+    assert "double-quoted" in prompt
     assert "use double quotes or heredoc" not in prompt
     assert "multiple heredoc commands" in prompt
     assert "Each step is a separate complete JSON object in the array" in prompt
@@ -1637,6 +1643,8 @@ def test_compact_planning_repair_prompt_preserves_phase7k_contract_rules():
     assert "no nested project folder" in prompt
     assert "no duplicated path roots" in prompt
     assert "never use heredoc syntax" in prompt
+    assert "under 200 chars per printf argument" in prompt
+    assert "never write an entire file in a single printf" in prompt
     assert "each step is a separate complete JSON object in the array" in prompt
     assert "never merge content from multiple steps into one step" in prompt
     assert "placeholder-only implementation" in prompt
@@ -1758,7 +1766,7 @@ def test_planning_repair_prompt_has_deterministic_compact_limit():
         )(),
     )
 
-    assert len(prompt) < 4200
+    assert len(prompt) < 4400
     assert len(prompt) < PLANNING_REPAIR_PROMPT_MAX_CHARS
     assert "...<truncated malformed planning output>..." in prompt
     assert "project context must be stripped" not in prompt

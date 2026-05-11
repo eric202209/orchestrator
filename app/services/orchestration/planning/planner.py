@@ -1037,9 +1037,9 @@ Rules:
 12. expected_files must be relative file paths or []
 13. Never use heredoc syntax (`<<'EOF'`, `<<'PY'`, etc.); use printf for all file writes
 14. Keep each command under 900 characters; planning describes runnable shell actions, not full source files
-15. Prefer concise `printf`, package-manager commands, or generating a small script/file during execution over embedding big file bodies in the plan JSON
+15. For file writes, use short append-style `printf` commands: split content across multiple `printf '...' >> file` commands, keep each printf argument under 200 characters, and never put a full source file in one printf.
 16. Avoid complex nested shell quoting; never emit `python -c` commands with f-strings, JSON strings, semicolons, or mixed quote escaping
-16a. Do not put escaped apostrophes like `\\'` inside single-quoted strings; use double quotes or safer file generation instead
+16a. Do not put escaped apostrophes like `\\'` inside single-quoted strings; for content with apostrophes use double-quoted `printf "..."` or split at the apostrophe boundary
 17. Do not join separate shell commands with commas
 18. No background processes, &, nohup, disown, dev servers, or long commands. Do not use background processes.
 19. Commands must be runnable shell, not prose. Do not emit pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
@@ -1474,7 +1474,7 @@ Keys: step_number, description, commands, verification, rollback, expected_files
 
 Rules:
 1. Use 3 to 4 steps, numbered 1..N.
-2. commands: short shell strings under 900 chars; split longer writes/setup across commands/steps.
+2. commands: short shell strings under 900 chars. For file writes: use one `printf '...' >> file` per logical block (under 200 chars per printf arg); never write an entire file in a single printf.
 3. verification/rollback: one shell string or null.
 4. expected_files: relative path array.
 5. Relative paths only; no absolute paths, .., ~, or duplicated roots like frontend/src/frontend/src or backend/src/backend/src. Paths rooted exactly once.
@@ -1488,7 +1488,7 @@ Rules:
 13. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. Use printf to overwrite only needed JSX body/CSS lines.
 14. Never use heredoc (`<<'EOF'`, `<<'PY'`, `<<'HEREDOC'`, etc.). Always use printf for all file writes.
 15. No heredocs in loops, multi-file heredocs, or multiple heredoc commands.
-16. No `\\'` inside single-quoted strings; use double quotes instead.
+16. No `\\'` inside single-quoted strings. For content with apostrophes use double-quoted `printf "..."` or split at the apostrophe boundary.
 17. Each step is a separate complete JSON object in the array. Never merge content from multiple steps into one step.
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
@@ -1520,7 +1520,9 @@ Schema per step:
 step_number, description, commands, verification, rollback, expected_files.
 
 Rules:
-- commands must be short shell strings under 900 characters each; split longer file writes or setup into multiple commands/steps.
+- commands must be short shell strings under 900 characters each.
+- for file writes: use one `printf '...' >> file` per logical block, under 200 chars per printf argument; never write an entire file in a single printf.
+- for content with apostrophes: use double-quoted `printf "..."` args; never use `\'` inside single-quoted strings.
 - verification must be one real command using `python -m`, `node -e`, or `npm run build`.
 - expected_files must be relative paths only.
 - expected_files steps must write real content; no touch-only, TODO, pass, stub, or placeholder-only implementation.
