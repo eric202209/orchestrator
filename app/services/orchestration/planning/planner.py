@@ -414,16 +414,27 @@ class PlannerService:
             len(planning_prompt),
             direct_timeout,
         )
-        try:
+
+        async def _do_request() -> Optional[str]:
             async with httpx.AsyncClient(timeout=direct_timeout) as client:
-                response = await client.post(
+                resp = await client.post(
                     f"{base_url}/chat/completions",
                     json=payload,
                     headers=headers,
                 )
-            response.raise_for_status()
-            body = response.json()
-            output = PlannerService._extract_chat_completion_content(body)
+            resp.raise_for_status()
+            return PlannerService._extract_chat_completion_content(resp.json())
+
+        try:
+            output = await asyncio.wait_for(
+                _do_request(), timeout=float(direct_timeout)
+            )
+        except asyncio.TimeoutError:
+            _logger.warning(
+                "[PLANNING_DIRECT] wall-clock timeout after %ds; falling back to OpenClaw",
+                direct_timeout,
+            )
+            return None
         except Exception as exc:
             _logger.warning(
                 "[PLANNING_DIRECT] failed after %.1fs (%s: %s); falling back to OpenClaw",
@@ -1024,11 +1035,11 @@ Rules:
 10. `verification` must be a single shell string or null
 11. `rollback` must be a single shell string or null
 12. expected_files must be relative file paths or []
-13. Do not use heredoc-heavy commands, `cat > file <<EOF`, or large generated code inside planning output
+13. Never use heredoc syntax (`<<'EOF'`, `<<'PY'`, etc.); use printf for all file writes
 14. Keep each command under 900 characters; planning describes runnable shell actions, not full source files
 15. Prefer concise `printf`, package-manager commands, or generating a small script/file during execution over embedding big file bodies in the plan JSON
 16. Avoid complex nested shell quoting; never emit `python -c` commands with f-strings, JSON strings, semicolons, or mixed quote escaping
-16a. Do not put escaped apostrophes like `\\'` inside single-quoted strings; use double quotes, heredoc, or safer file generation instead
+16a. Do not put escaped apostrophes like `\\'` inside single-quoted strings; use double quotes or safer file generation instead
 17. Do not join separate shell commands with commas
 18. No background processes, &, nohup, disown, dev servers, or long commands. Do not use background processes.
 19. Commands must be runnable shell, not prose. Do not emit pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
@@ -1478,6 +1489,7 @@ Rules:
 14. Never use heredoc (`<<'EOF'`, `<<'PY'`, `<<'HEREDOC'`, etc.). Always use printf for all file writes.
 15. No heredocs in loops, multi-file heredocs, or multiple heredoc commands.
 16. No `\\'` inside single-quoted strings; use double quotes instead.
+17. Each step is a separate complete JSON object in the array. Never merge content from multiple steps into one step.
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 
@@ -1517,6 +1529,7 @@ Rules:
 - no background processes, dev servers, absolute paths, heredocs, prose, markdown, or extra keys.
 - never use heredoc syntax (`<<EOF`, `<<'PY'`, `cat > file <<`, looped heredocs); use short printf or existing project commands.
 - avoid brittle `python -c` with f-strings, JSON strings, semicolon-heavy code, or mixed quote escaping.
+- each step is a separate complete JSON object in the array; never merge content from multiple steps into one step.
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
 
