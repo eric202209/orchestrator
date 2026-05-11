@@ -77,6 +77,50 @@ __all__ = [
 ]
 
 
+_OPENCLAW_DIAGNOSTIC_KEYS = {
+    "aborted",
+    "source",
+    "generatedAt",
+    "workspaceDir",
+    "systemPrompt",
+    "sandbox",
+    "bootstrapMaxChars",
+}
+_VISIBLE_TEXT_KEYS = {
+    "finalAssistantVisibleText",
+    "final_assistant_visible_text",
+    "text",
+    "output_text",
+    "content_text",
+}
+
+
+def _extract_completion_repair_json_text(value: Any) -> str:
+    """Preserve direct repair JSON while still unwrapping OpenClaw payloads."""
+
+    if not isinstance(value, str):
+        return extract_structured_text(value)
+
+    stripped = value.strip()
+    if not stripped:
+        return ""
+
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return extract_structured_text(value)
+
+    if isinstance(parsed, (dict, list)):
+        if isinstance(parsed, dict) and (
+            _VISIBLE_TEXT_KEYS.intersection(parsed.keys())
+            or _OPENCLAW_DIAGNOSTIC_KEYS.intersection(parsed.keys())
+        ):
+            return extract_structured_text(value)
+        return stripped
+
+    return extract_structured_text(value)
+
+
 def _attempt_completion_repair(
     *,
     ctx: OrchestrationRunContext,
@@ -350,7 +394,9 @@ def _attempt_completion_repair(
     repair_plan_result = asyncio.run(
         ctx.runtime_service.execute_task(repair_prompt, timeout_seconds=120)
     )
-    repair_output = extract_structured_text(repair_plan_result.get("output", "{}"))
+    repair_output = _extract_completion_repair_json_text(
+        repair_plan_result.get("output", "{}")
+    )
     success, repair_data, strategy_info = error_handler.attempt_json_parsing(
         repair_output, context="completion_repair"
     )
@@ -374,7 +420,7 @@ def _attempt_completion_repair(
                     timeout_seconds=120,
                 )
             )
-            compliance_output = extract_structured_text(
+            compliance_output = _extract_completion_repair_json_text(
                 compliance_result.get("output", "{}")
             )
             success, repair_data, strategy_info = error_handler.attempt_json_parsing(
