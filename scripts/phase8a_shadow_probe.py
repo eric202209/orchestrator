@@ -161,6 +161,7 @@ def run_direct_chat_completion(
     max_tokens: int,
     temperature: float,
     api_key: str,
+    disable_thinking: bool,
 ) -> dict[str, Any]:
     url = f"{base_url.rstrip('/')}/chat/completions"
     payload = {
@@ -170,6 +171,9 @@ def run_direct_chat_completion(
         "max_tokens": max_tokens,
         "stream": True,
     }
+    if disable_thinking:
+        payload["enable_thinking"] = False
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -416,6 +420,19 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=240)
     parser.add_argument("--max-tokens", type=int, default=2048)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument(
+        "--no-think-prefix",
+        action="store_true",
+        help="Prefix the prompt with /no_think for Qwen3 no-thinking probes.",
+    )
+    parser.add_argument(
+        "--disable-thinking",
+        action="store_true",
+        help=(
+            "Pass enable_thinking=false and "
+            "chat_template_kwargs.enable_thinking=false to vLLM."
+        ),
+    )
     parser.add_argument("--run-openclaw", action="store_true")
     parser.add_argument("--openclaw-timeout", type=int, default=240)
     parser.add_argument("--openclaw-executable")
@@ -427,10 +444,17 @@ def main() -> int:
         prompt_file=args.prompt_file,
         bundle_dir=args.bundle_dir,
     )
+    prompt_transforms: list[str] = []
+    if args.no_think_prefix:
+        prompt = "/no_think\n" + prompt
+        prompt_transforms.append("no_think_prefix")
+    if args.disable_thinking:
+        prompt_transforms.append("disable_thinking_request")
     results: dict[str, Any] = {
         "schema_version": 1,
         "note": DEFAULT_GATEWAY_NOTE,
         "prompt_source": prompt_source,
+        "prompt_transforms": prompt_transforms,
         "prompt_chars": len(prompt),
         "direct": run_direct_chat_completion(
             prompt,
@@ -440,6 +464,7 @@ def main() -> int:
             max_tokens=args.max_tokens,
             temperature=args.temperature,
             api_key=args.api_key,
+            disable_thinking=args.disable_thinking,
         ),
     }
     if args.run_openclaw:

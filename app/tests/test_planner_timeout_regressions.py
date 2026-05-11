@@ -374,6 +374,144 @@ def test_planning_model_calls_use_interprocess_lock(tmp_path, monkeypatch):
     assert lock_path.exists()
 
 
+def test_planning_repair_uses_direct_no_thinking_chat_path(monkeypatch):
+    from app.services.orchestration.planning import planner as planner_module
+
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '[{"step_number":1,"description":"ok","commands":[],"verification":null,"rollback":null,"expected_files":[]}]'
+                        }
+                    }
+                ]
+            }
+
+    class Client:
+        def __init__(self, timeout):
+            captured["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers, json):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["payload"] = json
+            return Response()
+
+    class Runtime:
+        db = object()
+
+        def get_backend_metadata(self):
+            return {"backend": "local_openclaw"}
+
+        async def invoke_prompt(self, *args, **kwargs):
+            raise AssertionError("OpenClaw fallback should not run on direct success")
+
+    monkeypatch.setattr(planner_module.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(
+        planner_module.settings,
+        "ORCHESTRATOR_PLANNING_REPAIR_DIRECT_ENABLED",
+        True,
+    )
+    monkeypatch.setattr(
+        planner_module.settings,
+        "ORCHESTRATOR_PLANNING_REPAIR_DIRECT_BASE_URL",
+        "http://localhost:8000/v1",
+    )
+    monkeypatch.setattr(
+        planner_module.settings,
+        "ORCHESTRATOR_PLANNING_REPAIR_DIRECT_MODEL",
+        "qwen-local",
+    )
+    monkeypatch.setattr(
+        planner_module.settings,
+        "ORCHESTRATOR_PLANNING_REPAIR_DIRECT_DISABLE_THINKING",
+        True,
+    )
+
+    result = asyncio.run(
+        PlannerService._invoke_repair_prompt(
+            Runtime(),
+            "repair me",
+            repair_timeout=60,
+        )
+    )
+
+    assert result["backend"] == "direct_chat_completions"
+    assert result["output"].startswith("[")
+    assert captured["url"] == "http://localhost:8000/v1/chat/completions"
+    assert captured["timeout"] == 60
+    assert captured["payload"]["model"] == "qwen-local"
+    assert captured["payload"]["messages"] == [{"role": "user", "content": "repair me"}]
+    assert captured["payload"]["enable_thinking"] is False
+    assert captured["payload"]["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_planning_repair_falls_back_to_openclaw_when_direct_fails(monkeypatch):
+    from app.services.orchestration.planning import planner as planner_module
+
+    captured = {}
+
+    class Client:
+        def __init__(self, timeout):
+            captured["direct_timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, *args, **kwargs):
+            raise RuntimeError("direct unavailable")
+
+    class Runtime:
+        db = object()
+
+        def get_backend_metadata(self):
+            return {"backend": "local_openclaw"}
+
+        async def invoke_prompt(self, prompt, **kwargs):
+            captured["fallback_prompt"] = prompt
+            captured["fallback_kwargs"] = kwargs
+            return {"status": "completed", "output": "[]"}
+
+    monkeypatch.setattr(planner_module.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(
+        planner_module.settings,
+        "ORCHESTRATOR_PLANNING_REPAIR_DIRECT_ENABLED",
+        True,
+    )
+
+    result = asyncio.run(
+        PlannerService._invoke_repair_prompt(
+            Runtime(),
+            "repair me",
+            repair_timeout=60,
+        )
+    )
+
+    assert result["output"] == "[]"
+    assert captured["direct_timeout"] == 60
+    assert captured["fallback_prompt"] == "repair me"
+    assert (
+        captured["fallback_kwargs"]["no_output_timeout_seconds"]
+        == PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS
+    )
+
+
 def test_minimal_prompt_retry_flags_ultra_dense_prompt_without_changing_retry(
     tmp_path,
     monkeypatch,

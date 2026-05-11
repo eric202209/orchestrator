@@ -14,6 +14,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import httpx
+
 from ..policy import (
     MINIMAL_PLANNING_TIMEOUT_SECONDS,
     PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS,
@@ -21,7 +23,10 @@ from ..policy import (
     STRICT_JSON_RETRY_TIMEOUT_SECONDS,
     ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS,
 )
+from app.config import settings
 from app.services.workspace.path_display import render_workspace_path_for_prompt
+
+_logger = logging.getLogger(__name__)
 
 PLANNING_REPAIR_MAX_KNOWLEDGE_ITEMS = 0
 PLANNING_REPAIR_MAX_KNOWLEDGE_ITEM_CHARS = 0
@@ -1101,6 +1106,14 @@ Return only a JSON array matching this shape. No markdown. No prose.
         repair_timeout: int,
         lock_diagnostics_out: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        direct_result = await PlannerService._invoke_direct_no_thinking_repair(
+            runtime_service,
+            repair_prompt,
+            repair_timeout,
+        )
+        if direct_result is not None:
+            return direct_result
+
         invoke_prompt = getattr(runtime_service, "invoke_prompt", None)
         if callable(invoke_prompt):
             async with PlannerService._openclaw_planning_lock_async() as lock_diagnostics:
@@ -1130,6 +1143,153 @@ Return only a JSON array matching this shape. No markdown. No prose.
             timeout_seconds=repair_timeout,
             reuse_task_session=False,
         )
+
+    @staticmethod
+    def _should_try_direct_no_thinking_repair(runtime_service: Any) -> bool:
+        if not settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_ENABLED:
+            _logger.info(
+                "[REPAIR_DIRECT] skip: "
+                "ORCHESTRATOR_PLANNING_REPAIR_DIRECT_ENABLED=false"
+            )
+            return False
+        if not settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_BASE_URL.strip():
+            _logger.info("[REPAIR_DIRECT] skip: base_url empty")
+            return False
+        if not settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_MODEL.strip():
+            _logger.info("[REPAIR_DIRECT] skip: model empty")
+            return False
+        backend_metadata = {}
+        get_backend_metadata = getattr(runtime_service, "get_backend_metadata", None)
+        if callable(get_backend_metadata):
+            try:
+                backend_metadata = get_backend_metadata() or {}
+            except Exception:
+                backend_metadata = {}
+        backend_name = str(backend_metadata.get("backend") or "").strip()
+        if backend_name != "local_openclaw":
+            _logger.info(
+                "[REPAIR_DIRECT] skip: backend_name=%r (not local_openclaw)",
+                backend_name,
+            )
+            return False
+        has_db = hasattr(runtime_service, "db")
+        if not has_db:
+            _logger.info("[REPAIR_DIRECT] skip: runtime_service has no db attr")
+        return has_db
+
+    @staticmethod
+    async def _invoke_direct_no_thinking_repair(
+        runtime_service: Any,
+        repair_prompt: str,
+        repair_timeout: int,
+    ) -> Optional[Dict[str, Any]]:
+        if not PlannerService._should_try_direct_no_thinking_repair(runtime_service):
+            return None
+
+        base_url = settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_BASE_URL.rstrip("/")
+        model = settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_MODEL.strip()
+        payload: Dict[str, Any] = {
+            "model": model,
+            "messages": [{"role": "user", "content": repair_prompt}],
+            "temperature": 0,
+            "max_tokens": 2048,
+            "stream": False,
+        }
+        if settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_DISABLE_THINKING:
+            payload["enable_thinking"] = False
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
+
+        headers = {"Content-Type": "application/json"}
+        api_key = settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_API_KEY.strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        started_at = time.monotonic()
+        direct_timeout = max(
+            1,
+            min(
+                repair_timeout,
+                settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_TIMEOUT_SECONDS,
+            ),
+        )
+        _logger.info(
+            "[REPAIR_DIRECT] attempting direct no-thinking repair "
+            "url=%s model=%s timeout=%ds",
+            f"{base_url}/chat/completions",
+            model,
+            direct_timeout,
+        )
+        try:
+            async with httpx.AsyncClient(timeout=direct_timeout) as client:
+                response = await client.post(
+                    f"{base_url}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                )
+            response.raise_for_status()
+            body = response.json()
+            output = PlannerService._extract_chat_completion_content(body)
+        except Exception as exc:
+            _logger.warning(
+                "[REPAIR_DIRECT] failed after %.1fs (%s: %s); falling back to OpenClaw",
+                time.monotonic() - started_at,
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            return None
+
+        if not output.strip():
+            _logger.warning(
+                "[REPAIR_DIRECT] empty output from direct call; "
+                "falling back to OpenClaw"
+            )
+            return None
+
+        duration_seconds = time.monotonic() - started_at
+        _logger.info(
+            "[REPAIR_DIRECT] success planning_repair_direct=True "
+            "backend=direct_chat_completions duration=%.1fs output_chars=%s",
+            duration_seconds,
+            len(output),
+        )
+        return {
+            "status": "completed",
+            "output": output,
+            "backend": "direct_chat_completions",
+            "model_family": model,
+            "diagnostics": {
+                "planning_repair_direct": True,
+                "disable_thinking": (
+                    settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_DISABLE_THINKING
+                ),
+                "duration_seconds": round(duration_seconds, 3),
+                "timeout_seconds": direct_timeout,
+            },
+        }
+
+    @staticmethod
+    def _extract_chat_completion_content(body: Any) -> str:
+        if not isinstance(body, dict):
+            return ""
+        choices = body.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return ""
+        first = choices[0]
+        if not isinstance(first, dict):
+            return ""
+        message = first.get("message")
+        if not isinstance(message, dict):
+            return ""
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: List[str] = []
+            for item in content:
+                if isinstance(item, dict) and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+            return "".join(parts)
+        return ""
 
     @staticmethod
     def _get_runtime_diagnostics(exc: Exception) -> Dict[str, Any]:
@@ -1691,6 +1851,21 @@ Rules:
                     "repair_output_truncated": repair_truncated,
                     "repair_attempts": _repair_attempt_number,
                     "planning_lock_wait_seconds": planning_lock_wait_seconds,
+                    "repair_backend": result.get("backend"),
+                    "planning_repair_direct": runtime_diagnostics.get(
+                        "planning_repair_direct"
+                    )
+                    is True,
+                    "direct_repair_seconds": (
+                        runtime_diagnostics.get("duration_seconds")
+                        if runtime_diagnostics.get("planning_repair_direct") is True
+                        else None
+                    ),
+                    "direct_repair_timeout_seconds": (
+                        runtime_diagnostics.get("timeout_seconds")
+                        if runtime_diagnostics.get("planning_repair_direct") is True
+                        else None
+                    ),
                     "openclaw_process_seconds": runtime_diagnostics.get(
                         "duration_seconds"
                     ),
