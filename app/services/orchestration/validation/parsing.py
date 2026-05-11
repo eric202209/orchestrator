@@ -50,12 +50,55 @@ def _find_json_substring(text: str) -> Optional[str]:
         if result is None:
             continue
         try:
-            json.loads(result)
+            parsed = json.loads(result)
         except json.JSONDecodeError:
+            continue
+        if _should_skip_nested_non_plan_candidate(stripped, result, parsed):
             continue
         return result
 
     return None
+
+
+def _has_step_shape(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    step_keys = {"step_number", "commands", "description"}
+    return bool(step_keys.intersection(value.keys()))
+
+
+def _should_skip_nested_non_plan_candidate(
+    source_text: str, candidate_text: str, parsed_candidate: Any
+) -> bool:
+    """Avoid treating JSON-looking content inside a plan string as the plan."""
+
+    source = _strip_markdown_fences(str(source_text or "")).lstrip()
+    candidate = str(candidate_text or "").lstrip()
+    if not source.startswith("[") or candidate == source:
+        return False
+    if candidate.startswith("{"):
+        return isinstance(parsed_candidate, dict) and not _has_step_shape(
+            parsed_candidate
+        )
+    if candidate.startswith("["):
+        return not (
+            isinstance(parsed_candidate, list)
+            and parsed_candidate
+            and _has_step_shape(parsed_candidate[0])
+        )
+    return False
+
+
+def _looks_like_raw_plan_array_text(text: str) -> bool:
+    stripped = _strip_markdown_fences(str(text or "")).lstrip()
+    if not stripped.startswith("["):
+        return False
+    return bool(
+        re.search(
+            r'"(?:step_number|commands|description|expected_files|ops)"\s*:',
+            stripped[:4000],
+        )
+    )
 
 
 def _all_positions(text: str, char: str) -> List[int]:
@@ -464,6 +507,8 @@ def extract_structured_text(value: Any) -> str:
         return ""
 
     if isinstance(value, str):
+        if _looks_like_raw_plan_array_text(value):
+            return _strip_markdown_fences(value)
         parsed = _parse_nested_json_text(value)
         nested_text = _extract_visible_text_payload(parsed)
         if nested_text and nested_text.strip():

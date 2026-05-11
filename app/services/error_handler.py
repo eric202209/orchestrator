@@ -9,7 +9,11 @@ import re
 from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
 
-from app.services.orchestration.validation.parsing import _find_json_substring
+from app.services.orchestration.validation.parsing import (
+    _find_json_substring,
+    _strip_markdown_fences,
+    _should_skip_nested_non_plan_candidate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +40,11 @@ class EnhancedErrorHandler:
 
         # Strategy 1: Direct JSON parsing
         try:
-            return True, json.loads(text), ""
+            parsed = json.loads(text)
+            if not self._should_skip_non_plan_candidate_for_planning(
+                context, text, text, parsed
+            ):
+                return True, parsed, ""
         except json.JSONDecodeError as e:
             logger.debug(f"[JSON-PARSE] Strategy 1 failed: {e}")
 
@@ -44,15 +52,42 @@ class EnhancedErrorHandler:
         cleaned = self._clean_markdown_fences(text)
         if cleaned != text:
             try:
-                return True, json.loads(cleaned), "Cleaned markdown fences"
+                parsed_cleaned = json.loads(cleaned)
+                if not self._should_skip_non_plan_candidate_for_planning(
+                    context, text, cleaned, parsed_cleaned
+                ):
+                    return True, parsed_cleaned, "Cleaned markdown fences"
             except json.JSONDecodeError as e:
                 logger.debug(f"[JSON-PARSE] Strategy 2 failed: {e}")
+            fixed_cleaned = self._fix_common_json_errors(cleaned)
+            if fixed_cleaned != cleaned:
+                try:
+                    parsed_fixed_cleaned = json.loads(fixed_cleaned)
+                    if self._should_skip_non_plan_candidate_for_planning(
+                        context, text, fixed_cleaned, parsed_fixed_cleaned
+                    ):
+                        raise json.JSONDecodeError(
+                            "non-plan JSON candidate", fixed_cleaned, 0
+                        )
+                    return (
+                        True,
+                        parsed_fixed_cleaned,
+                        "Cleaned markdown fences and fixed common errors",
+                    )
+                except json.JSONDecodeError as e:
+                    logger.debug(f"[JSON-PARSE] Strategy 2 fixed failed: {e}")
 
         # Strategy 3: Extract JSON from mixed content
         extracted = self._extract_json_from_text(text)
         if extracted:
             try:
-                return True, json.loads(extracted), "Extracted from mixed content"
+                parsed_extracted = json.loads(extracted)
+                if not _should_skip_nested_non_plan_candidate(
+                    text, extracted, parsed_extracted
+                ) and not self._should_skip_non_plan_candidate_for_planning(
+                    context, text, extracted, parsed_extracted
+                ):
+                    return True, parsed_extracted, "Extracted from mixed content"
             except json.JSONDecodeError as e:
                 logger.debug(f"[JSON-PARSE] Strategy 3 failed: {e}")
 
@@ -60,7 +95,11 @@ class EnhancedErrorHandler:
         fixed = self._fix_common_json_errors(text)
         if fixed != text:
             try:
-                return True, json.loads(fixed), "Fixed common errors"
+                parsed_fixed = json.loads(fixed)
+                if not self._should_skip_non_plan_candidate_for_planning(
+                    context, text, fixed, parsed_fixed
+                ):
+                    return True, parsed_fixed, "Fixed common errors"
             except json.JSONDecodeError as e:
                 logger.debug(f"[JSON-PARSE] Strategy 4 failed: {e}")
 
@@ -69,7 +108,11 @@ class EnhancedErrorHandler:
         if found:
             # Try direct parsing first
             try:
-                return True, json.loads(found), "Found JSON in text"
+                parsed_found = json.loads(found)
+                if not self._should_skip_non_plan_candidate_for_planning(
+                    context, text, found, parsed_found
+                ):
+                    return True, parsed_found, "Found JSON in text"
             except json.JSONDecodeError as e:
                 logger.debug(f"[JSON-PARSE] Strategy 5 direct failed: {e}")
 
@@ -77,7 +120,15 @@ class EnhancedErrorHandler:
             fixed = self._fix_common_json_errors(found)
             if fixed != found:
                 try:
-                    return True, json.loads(fixed), "Found and fixed JSON in text"
+                    parsed_fixed_found = json.loads(fixed)
+                    if not self._should_skip_non_plan_candidate_for_planning(
+                        context, text, fixed, parsed_fixed_found
+                    ):
+                        return (
+                            True,
+                            parsed_fixed_found,
+                            "Found and fixed JSON in text",
+                        )
                 except json.JSONDecodeError as e:
                     logger.debug(f"[JSON-PARSE] Strategy 5 fixed failed: {e}")
 
@@ -85,16 +136,29 @@ class EnhancedErrorHandler:
         embedded = self._extract_embedded_json_payload(text)
         if embedded:
             try:
-                return True, json.loads(embedded), "Extracted embedded JSON payload"
+                parsed_embedded = json.loads(embedded)
+                if not self._should_skip_non_plan_candidate_for_planning(
+                    context, text, embedded, parsed_embedded
+                ):
+                    return (
+                        True,
+                        parsed_embedded,
+                        "Extracted embedded JSON payload",
+                    )
             except json.JSONDecodeError as e:
                 logger.debug(f"[JSON-PARSE] Strategy 6 direct failed: {e}")
 
             fixed = self._fix_common_json_errors(embedded)
             if fixed != embedded:
                 try:
+                    parsed_fixed_embedded = json.loads(fixed)
+                    if self._should_skip_non_plan_candidate_for_planning(
+                        context, text, fixed, parsed_fixed_embedded
+                    ):
+                        raise json.JSONDecodeError("non-plan JSON candidate", fixed, 0)
                     return (
                         True,
-                        json.loads(fixed),
+                        parsed_fixed_embedded,
                         "Extracted and fixed embedded JSON payload",
                     )
                 except json.JSONDecodeError as e:
@@ -104,6 +168,36 @@ class EnhancedErrorHandler:
         error_msg = f"Failed to parse {context} after {self.max_retries} attempts"
         logger.error(f"[JSON-PARSE] All strategies failed. Last attempt: {text[:200]}")
         return False, None, error_msg
+
+    def _should_skip_non_plan_candidate_for_planning(
+        self, context: str, source_text: str, candidate_text: str, parsed: Any
+    ) -> bool:
+        if context != "planning":
+            return False
+
+        source = _strip_markdown_fences(str(source_text or "")).lstrip()
+        candidate = _strip_markdown_fences(str(candidate_text or "")).lstrip()
+        source_looks_like_plan = source.startswith("[") or bool(
+            re.search(r'"(?:step_number|commands|description)"\s*:', source[:3000])
+        )
+        if not source_looks_like_plan:
+            return False
+
+        if source == candidate:
+            return False
+
+        return not self._parsed_value_has_plan_shape(parsed)
+
+    @staticmethod
+    def _parsed_value_has_plan_shape(parsed: Any) -> bool:
+        step_keys = {"step_number", "commands", "description"}
+        if isinstance(parsed, dict):
+            return bool(step_keys.intersection(parsed.keys()))
+        if isinstance(parsed, list) and parsed:
+            return isinstance(parsed[0], dict) and bool(
+                step_keys.intersection(parsed[0].keys())
+            )
+        return False
 
     def _clean_markdown_fences(self, text: str) -> str:
         """Remove markdown code fences and extract JSON."""
@@ -250,7 +344,83 @@ class EnhancedErrorHandler:
             return prefix + "".join(result) + suffix
 
         fixed = re.sub(commands_pattern, repair_commands_block, fixed, flags=re.DOTALL)
+        fixed = self._repair_ops_content_strings(fixed)
         return fixed
+
+    def _repair_ops_content_strings(self, text: str) -> str:
+        """Escape unescaped quotes inside ops[].content string values."""
+
+        key_pattern = '"content"'
+        result: list[str] = []
+        cursor = 0
+
+        while True:
+            key_index = text.find(key_pattern, cursor)
+            if key_index < 0:
+                result.append(text[cursor:])
+                break
+
+            colon_index = text.find(":", key_index + len(key_pattern))
+            if colon_index < 0:
+                result.append(text[cursor:])
+                break
+
+            value_start = colon_index + 1
+            while value_start < len(text) and text[value_start].isspace():
+                value_start += 1
+
+            if value_start >= len(text) or text[value_start] != '"':
+                result.append(text[cursor:value_start])
+                cursor = value_start
+                continue
+
+            closing_quote = self._find_plan_string_closing_quote(text, value_start)
+            if closing_quote is None:
+                result.append(text[cursor:])
+                break
+
+            raw_value = text[value_start + 1 : closing_quote]
+            result.append(text[cursor : value_start + 1])
+            result.append(re.sub(r'(?<!\\)"', r'\\"', raw_value))
+            result.append('"')
+            cursor = closing_quote + 1
+
+        return "".join(result)
+
+    @staticmethod
+    def _find_plan_string_closing_quote(text: str, value_start: int) -> Optional[int]:
+        escape_next = False
+        idx = value_start + 1
+        while idx < len(text):
+            char = text[idx]
+            if escape_next:
+                escape_next = False
+                idx += 1
+                continue
+            if char == "\\":
+                escape_next = True
+                idx += 1
+                continue
+            if char != '"':
+                idx += 1
+                continue
+
+            next_nonspace = idx + 1
+            while next_nonspace < len(text) and text[next_nonspace].isspace():
+                next_nonspace += 1
+            if next_nonspace >= len(text):
+                return idx
+
+            if text[next_nonspace] == "}":
+                after_object = next_nonspace + 1
+                while after_object < len(text) and text[after_object].isspace():
+                    after_object += 1
+                if after_object >= len(text) or text[after_object] in ",]":
+                    return idx
+
+            idx += 1
+
+        return None
 
     def _find_json_in_text(self, text: str) -> Optional[str]:
         """Find complete JSON array or object in text."""
