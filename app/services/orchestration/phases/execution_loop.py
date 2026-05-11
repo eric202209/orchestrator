@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from app.models import TaskStatus
@@ -231,6 +232,7 @@ def execute_step_loop(
 
         step_description = step.get("description", f"Step {step_index + 1}")
         step_commands = step.get("commands", [])
+        step_ops = step.get("ops", [])
         verification_command = step.get("verification")
         rollback_command = step.get("rollback")
         expected_files = step.get("expected_files", [])
@@ -308,6 +310,7 @@ def execute_step_loop(
 
             step_description = step.get("description", f"Step {step_index + 1}")
             step_commands = step.get("commands", [])
+            step_ops = step.get("ops", [])
             verification_command = step.get("verification")
             rollback_command = step.get("rollback")
             expected_files = step.get("expected_files", [])
@@ -350,7 +353,8 @@ def execute_step_loop(
             pass
 
         logger.info(
-            "[ORCHESTRATION] Step data: commands=%s, verification=%s",
+            "[ORCHESTRATION] Step data: ops=%s, commands=%s, verification=%s",
+            step_ops,
             step_commands,
             verification_command,
         )
@@ -361,52 +365,94 @@ def execute_step_loop(
             orchestration_state.project_dir, expected_files
         )
 
-        execution_prompt = assemble_execution_prompt(ctx, step)
-
-        step_timeout_seconds = determine_step_timeout(
-            timeout_seconds=timeout_seconds,
-            total_steps=len(orchestration_state.plan),
-            execution_profile=execution_profile,
-            step_description=step_description,
-            task_prompt=prompt,
+        ops_result = ExecutorService.execute_file_ops(
+            Path(orchestration_state.project_dir), step_ops
         )
+        if not ops_result.get("success", False):
+            step_result = {
+                "status": "failed",
+                "output": ops_result.get("output", ""),
+                "error": ops_result.get("output", "write_file operation failed"),
+                "files_changed": ops_result.get("files_changed", []),
+            }
+            step_started_at = datetime.now(timezone.utc)
+        else:
+            if ops_result.get("files_changed"):
+                emit_live(
+                    "INFO",
+                    (
+                        f"[ORCHESTRATION] Applied {len(ops_result['files_changed'])} "
+                        "structured file operation(s)"
+                    ),
+                    metadata={
+                        "phase": "executing",
+                        "step_index": step_index + 1,
+                        "ops": "write_file",
+                        "files_changed": ops_result["files_changed"][:20],
+                    },
+                )
 
         step_started_at = datetime.now(timezone.utc)
-        step_result = asyncio.run(
-            runtime_service.execute_task(
-                execution_prompt,
-                timeout_seconds=step_timeout_seconds,
-            )
-        )
-        if runtime_service.reports_context_overflow(step_result):
-            logger.warning(
-                "[ORCHESTRATION] Execution prompt exceeded context window at step %s; "
-                "retrying with compact prompt",
-                step_index + 1,
-            )
-            emit_live(
-                "WARN",
-                f"[ORCHESTRATION] Step {step_index + 1} execution prompt exceeded context window; retrying compact",
-                metadata={
-                    "phase": "executing",
-                    "step_index": step_index + 1,
-                    "compact_retry": True,
-                },
-            )
-            compact_execution_prompt = assemble_execution_prompt(
-                ctx, step, compact=True
-            )
-            step_result = asyncio.run(
-                runtime_service.execute_task(
-                    compact_execution_prompt,
-                    timeout_seconds=step_timeout_seconds,
+        if ops_result.get("success", False):
+            if any(str(command or "").strip() for command in (step_commands or [])):
+                execution_prompt = assemble_execution_prompt(ctx, step)
+                step_timeout_seconds = determine_step_timeout(
+                    timeout_seconds=timeout_seconds,
+                    total_steps=len(orchestration_state.plan),
+                    execution_profile=execution_profile,
+                    step_description=step_description,
+                    task_prompt=prompt,
                 )
-            )
+                step_result = asyncio.run(
+                    runtime_service.execute_task(
+                        execution_prompt,
+                        timeout_seconds=step_timeout_seconds,
+                    )
+                )
+                if runtime_service.reports_context_overflow(step_result):
+                    logger.warning(
+                        "[ORCHESTRATION] Execution prompt exceeded context window at step %s; "
+                        "retrying with compact prompt",
+                        step_index + 1,
+                    )
+                    emit_live(
+                        "WARN",
+                        f"[ORCHESTRATION] Step {step_index + 1} execution prompt exceeded context window; retrying compact",
+                        metadata={
+                            "phase": "executing",
+                            "step_index": step_index + 1,
+                            "compact_retry": True,
+                        },
+                    )
+                    compact_execution_prompt = assemble_execution_prompt(
+                        ctx, step, compact=True
+                    )
+                    step_result = asyncio.run(
+                        runtime_service.execute_task(
+                            compact_execution_prompt,
+                            timeout_seconds=step_timeout_seconds,
+                        )
+                    )
+            else:
+                step_result = {
+                    "status": "completed",
+                    "output": ops_result.get("output", ""),
+                    "verification_output": "",
+                    "files_changed": ops_result.get("files_changed", []),
+                }
         step_result = coerce_execution_step_result(
             step_result,
             expected_files=expected_files,
             extract_structured_text=extract_structured_text,
         )
+        if ops_result.get("files_changed"):
+            merged_files_changed = list(
+                dict.fromkeys(
+                    list(ops_result.get("files_changed") or [])
+                    + list(step_result.get("files_changed") or [])
+                )
+            )
+            step_result["files_changed"] = merged_files_changed
 
         # Agent-initiated HITL: detect sentinel before assessment so the step
         # does not count as failed. The sentinel means "I need operator

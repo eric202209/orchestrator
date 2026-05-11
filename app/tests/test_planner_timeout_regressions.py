@@ -187,12 +187,12 @@ def test_initial_planning_prompt_contains_valid_json_contract_example():
     )
     assert "no `test -f`, `grep -q`, or `echo`" in prompt
     assert "Prefer scaffold: `npm create vite@latest . -- --template react`" in prompt
-    assert "If scaffold is used, do not use heredoc" in prompt
+    assert "If scaffold is used, use `ops`" in prompt
     assert "Never use heredoc syntax" in prompt
-    assert "use printf for all file writes" in prompt
-    assert "keep each printf argument under 200 characters" in prompt
-    assert "multiple short printf append commands" in prompt
-    assert "exactly these six keys and no extra keys" in prompt
+    assert "Optional `ops` may contain only `write_file` operations" in prompt
+    assert '"op": "write_file"' in prompt
+    assert '"commands": []' in prompt
+    assert "no extra keys except optional `ops`" in prompt
     assert "No markdown. No prose." in prompt
     assert 'Objects like {"steps": [...]} instead of a top-level array' in prompt
 
@@ -215,7 +215,11 @@ def test_minimal_and_ultra_minimal_planning_prompts_include_contract_example():
         assert "Valid minimal JSON example:" in prompt
         assert '"step_number": 1' in prompt
         assert '"commands": ["rg --files . | sort"]' in prompt
-        assert "exactly these keys and no extra keys" in prompt
+        assert "optional" in prompt
+        assert "ops" in prompt
+        assert (
+            "no other keys" in prompt or "no extra keys except optional `ops`" in prompt
+        )
         assert "No markdown. No prose." in prompt
 
 
@@ -714,9 +718,9 @@ def test_minimal_planning_prompt_requires_real_content_and_strong_verification()
     assert "Include exactly one final meaningful verification/build step" in prompt
     assert "inspect -> edit -> verify" in prompt
     assert "Never use heredoc syntax" in prompt
-    assert "use printf for all file writes" in prompt
-    assert "keep each printf argument under 200 characters" in prompt
-    assert "never put a full source file in one printf" in prompt
+    assert "prefer `ops`" in prompt
+    assert '"op":"write_file"' in prompt
+    assert "do not shell-quote file bodies" in prompt
     assert "never emit `python -c` commands" in prompt
     assert (
         "Do not put escaped apostrophes like `\\'` inside single-quoted strings"
@@ -732,9 +736,9 @@ def test_minimal_planning_prompt_requires_real_content_and_strong_verification()
     )
     assert "no `test -f`, `grep -q`, or `echo`" in prompt
     assert "Prefer scaffold: `npm create vite@latest . -- --template react`" in prompt
-    assert "If scaffold is used, do not use heredoc" in prompt
+    assert "If scaffold is used, use `ops`" in prompt
     assert (
-        "Each step must include exactly these keys and no extra keys: step_number, description, commands, verification, rollback, expected_files"
+        "Each step must include these required keys, optional ops, and no other keys: step_number, description, commands, verification, rollback, expected_files"
         in prompt
     )
     assert "`step_number` must be a unique integer" in prompt
@@ -1593,12 +1597,12 @@ def test_planning_repair_prompt_bans_external_helpers_and_heredoc():
     assert "<<'EOF'" in prompt
     assert "<<'PY'" in prompt
     assert "<<'HEREDOC'" in prompt
-    assert "Use printf to overwrite only needed JSX body/CSS lines" in prompt
-    assert "Always use printf for all file writes" in prompt
-    assert "under 200 chars per printf arg" in prompt
-    assert "never write an entire file in a single printf" in prompt
+    assert "Use ops to overwrite only needed JSX body/CSS files" in prompt
+    assert "prefer ops" in prompt
+    assert "do not shell-quote file bodies" in prompt
+    assert "write_file" in prompt
     assert "exactly ONE heredoc across ENTIRE plan, all steps combined" not in prompt
-    assert "double-quoted" in prompt
+    assert "use `ops` write_file instead of shell quoting" in prompt
     assert "use double quotes or heredoc" not in prompt
     assert "multiple heredoc commands" in prompt
     assert "Each step is a separate complete JSON object in the array" in prompt
@@ -1643,8 +1647,8 @@ def test_compact_planning_repair_prompt_preserves_phase7k_contract_rules():
     assert "no nested project folder" in prompt
     assert "no duplicated path roots" in prompt
     assert "never use heredoc syntax" in prompt
-    assert "under 200 chars per printf argument" in prompt
-    assert "never write an entire file in a single printf" in prompt
+    assert "prefer ops" in prompt
+    assert "do not shell-quote file bodies" in prompt
     assert "each step is a separate complete JSON object in the array" in prompt
     assert "never merge content from multiple steps into one step" in prompt
     assert "placeholder-only implementation" in prompt
@@ -5193,7 +5197,7 @@ def test_repair_rejection_reasons_prepend_too_many_lines_step_details():
 
     assert enriched[0].startswith("Step [1, 3]:")
     assert "too_many_lines" in enriched[0]
-    assert "Rewrite using printf for file writes" in enriched[0]
+    assert "Use ops write_file for file bodies" in enriched[0]
     assert "No heredoc" in enriched[0]
     assert enriched[1:] == reasons
 

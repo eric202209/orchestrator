@@ -26,6 +26,10 @@ from .workspace_checks import (
     iter_candidate_files as _iter_candidate_files,
     split_content_issue_severity as _split_content_issue_severity,
 )
+from .workspace_guard import (
+    TaskWorkspaceViolationError,
+    normalize_path_reference,
+)
 
 WORKFLOW_PHASE_ORDER = {
     "fullstack_scaffold": [
@@ -103,6 +107,7 @@ class ValidatorService:
         invalid_verification: List[int] = []
         invalid_rollback: List[int] = []
         invalid_expected_files: List[int] = []
+        invalid_ops: List[int] = []
         missing_required_fields: Dict[int, List[str]] = {}
         extra_fields: Dict[int, List[str]] = {}
         required_fields = {
@@ -113,6 +118,8 @@ class ValidatorService:
             "rollback",
             "expected_files",
         }
+        allowed_fields = set(required_fields)
+        allowed_fields.add("ops")
 
         for index, step in enumerate(plan, start=1):
             if not isinstance(step, dict):
@@ -121,7 +128,7 @@ class ValidatorService:
             missing_fields = sorted(required_fields.difference(step.keys()))
             if missing_fields:
                 missing_required_fields[index] = missing_fields
-            extras = sorted(set(step.keys()).difference(required_fields))
+            extras = sorted(set(step.keys()).difference(allowed_fields))
             if extras:
                 extra_fields[index] = extras
             if not isinstance(step.get("step_number"), int):
@@ -145,6 +152,24 @@ class ValidatorService:
                 or any(not isinstance(path, str) for path in expected_files)
             ):
                 invalid_expected_files.append(index)
+            ops = step.get("ops", [])
+            if ops is not None:
+                if not isinstance(ops, list):
+                    invalid_ops.append(index)
+                else:
+                    for operation in ops:
+                        if not isinstance(operation, dict):
+                            invalid_ops.append(index)
+                            break
+                        if operation.get("op") != "write_file":
+                            invalid_ops.append(index)
+                            break
+                        if not isinstance(operation.get("path"), str):
+                            invalid_ops.append(index)
+                            break
+                        if not isinstance(operation.get("content"), str):
+                            invalid_ops.append(index)
+                            break
 
         if non_dict_steps:
             errors.append("Plan contains non-object steps")
@@ -175,8 +200,30 @@ class ValidatorService:
         if invalid_expected_files:
             errors.append("Plan expected_files must be arrays of strings")
             details["invalid_expected_files_steps"] = invalid_expected_files
+        if invalid_ops:
+            errors.append(
+                "Plan ops must be arrays of write_file objects with string path and content"
+            )
+            details["invalid_ops_steps"] = sorted(set(invalid_ops))
 
         return {"valid": not errors, "errors": errors, "details": details}
+
+    @staticmethod
+    def _plan_invalid_file_ops_paths(
+        plan: List[Dict[str, Any]], project_dir: Path
+    ) -> List[int]:
+        invalid_steps: List[int] = []
+        for index, step in enumerate(plan, start=1):
+            step_number = step.get("step_number", index)
+            for operation in step.get("ops", []) or []:
+                try:
+                    normalize_path_reference(
+                        str(operation.get("path") or ""), project_dir
+                    )
+                except TaskWorkspaceViolationError:
+                    invalid_steps.append(int(step_number))
+                    break
+        return sorted(set(invalid_steps))
 
     @classmethod
     def validate_reasoning_artifact(
@@ -839,8 +886,16 @@ class ValidatorService:
                 missing_description.append(step_number)
 
             commands = step.get("commands", [])
-            if not isinstance(commands, list) or not any(
-                str(command or "").strip() for command in commands
+            ops = step.get("ops", [])
+            has_write_file_ops = isinstance(ops, list) and any(
+                isinstance(operation, dict)
+                and operation.get("op") == "write_file"
+                and str(operation.get("path") or "").strip()
+                for operation in ops
+            )
+            if not isinstance(commands, list) or (
+                not any(str(command or "").strip() for command in commands)
+                and not has_write_file_ops
             ):
                 missing_commands.append(step_number)
 
@@ -1244,6 +1299,17 @@ class ValidatorService:
         if not schema_validation["valid"]:
             rejected.extend(schema_validation["errors"])
             details.update(schema_validation["details"])
+
+        if project_dir is not None:
+            invalid_ops_path_steps = cls._plan_invalid_file_ops_paths(
+                plan, Path(project_dir)
+            )
+            if invalid_ops_path_steps:
+                rejected.append(
+                    "Plan write_file operations must stay inside the task workspace "
+                    f"(steps: {invalid_ops_path_steps[:5]})"
+                )
+                details["invalid_ops_path_steps"] = invalid_ops_path_steps
 
         command_budget = cls._plan_command_budget_diagnostics(plan, output_text)
         details["step_count"] = command_budget["step_count"]

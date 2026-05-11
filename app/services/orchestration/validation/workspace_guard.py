@@ -452,6 +452,50 @@ def normalize_expected_files(
     return normalized_files
 
 
+def normalize_file_ops(
+    ops: Any,
+    project_dir: Path,
+    step_index: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Normalize structured file operations while preserving file content."""
+
+    if ops is None:
+        return []
+    if not isinstance(ops, list):
+        raise TaskWorkspaceViolationError("ops must be a JSON array")
+
+    normalized_ops: List[Dict[str, Any]] = []
+    step_label = f"step {step_index}" if step_index is not None else "step"
+    for op_index, operation in enumerate(ops, start=1):
+        if not isinstance(operation, dict):
+            raise TaskWorkspaceViolationError(
+                f"{step_label} op {op_index} must be an object"
+            )
+        op_name = str(operation.get("op") or "").strip()
+        if op_name != "write_file":
+            raise TaskWorkspaceViolationError(
+                f"{step_label} op {op_index} has unsupported op: {op_name or '<empty>'}"
+            )
+        raw_path = str(operation.get("path") or "").strip()
+        if not raw_path:
+            raise TaskWorkspaceViolationError(
+                f"{step_label} op {op_index} missing path"
+            )
+        content = operation.get("content")
+        if not isinstance(content, str):
+            raise TaskWorkspaceViolationError(
+                f"{step_label} op {op_index} content must be a string"
+            )
+        normalized_ops.append(
+            {
+                "op": "write_file",
+                "path": normalize_path_reference(raw_path, project_dir),
+                "content": content,
+            }
+        )
+    return normalized_ops
+
+
 def _normalize_optional_command_field(
     value: Any,
     project_dir: Path,
@@ -555,6 +599,9 @@ def normalize_step(
 
     normalized_step["expected_files"] = normalize_expected_files(
         step.get("expected_files", []), project_dir, logger_obj, step_index
+    )
+    normalized_step["ops"] = normalize_file_ops(
+        step.get("ops", []), project_dir, step_index
     )
     return normalized_step
 

@@ -244,7 +244,7 @@ def _build_repair_rejection_reasons(
         if too_many_line_steps:
             targeted_reasons.append(
                 f"Step {too_many_line_steps}: command body too long "
-                "(too_many_lines). Rewrite using printf for file writes. No heredoc."
+                "(too_many_lines). Use ops write_file for file bodies. No heredoc."
             )
 
     weak_verification_steps = _normalized_step_numbers(

@@ -93,7 +93,10 @@ PLANNING_VALID_MINIMAL_JSON_EXAMPLE = """[
   {
     "step_number": 2,
     "description": "Create the smallest required implementation files",
-    "commands": ["mkdir -p src && printf 'export default function App() { return <main>Board Game Cafe</main>; }\\\\n' > src/App.tsx"],
+    "ops": [
+      {"op": "write_file", "path": "src/App.tsx", "content": "export default function App() { return <main>Board Game Cafe</main>; }\\n"}
+    ],
+    "commands": [],
     "verification": "node -e \\"const fs=require('fs'); if(!fs.readFileSync('src/App.tsx','utf8').includes('Board Game Cafe')) process.exit(1)\\"",
     "rollback": "rm -f src/App.tsx",
     "expected_files": ["src/App.tsx"]
@@ -1028,18 +1031,18 @@ Rules:
 3. If a step will later need file-read or file-write tools, keep the planned path relative; the executor will expand it to an absolute path under {display_project_dir}
 4. Do not use absolute paths, .., or ~
 5. Return 3 or 4 small sequential steps maximum
-6. Each step must include exactly these keys and no extra keys: step_number, description, commands, verification, rollback, expected_files
+6. Each step must include these required keys, optional ops, and no other keys: step_number, description, commands, verification, rollback, expected_files
 7. `step_number` must be a unique integer and the sequence must be exactly 1, 2, 3...
-8. Do not omit keys and do not invent extra keys inside step objects
-9. `commands` must be an array of non-empty strings
+8. Do not omit keys and do not invent extra keys inside step objects except optional `ops`
+9. `commands` must be an array of strings; it may be empty when `ops` contains file writes
 10. `verification` must be a single shell string or null
 11. `rollback` must be a single shell string or null
 12. expected_files must be relative file paths or []
-13. Never use heredoc syntax (`<<'EOF'`, `<<'PY'`, etc.); use printf for all file writes
-14. Keep each command under 900 characters; planning describes runnable shell actions, not full source files
-15. For file writes, use short append-style `printf` commands: split content across multiple `printf '...' >> file` commands, keep each printf argument under 200 characters, and never put a full source file in one printf.
+13. For file creation/overwrite, prefer `ops`: `[{{"op":"write_file","path":"relative/path","content":"file contents"}}]`; the executor writes content directly, so do not shell-quote file bodies.
+14. Keep each command under 900 characters; commands describe runnable shell actions, not full source files
+15. Use commands for installs, builds, tests, inspection, and verification. Never use heredoc syntax. Use `ops` for file bodies.
 16. Avoid complex nested shell quoting; never emit `python -c` commands with f-strings, JSON strings, semicolons, or mixed quote escaping
-16a. Do not put escaped apostrophes like `\\'` inside single-quoted strings; for content with apostrophes use double-quoted `printf "..."` or split at the apostrophe boundary
+16a. Do not put escaped apostrophes like `\\'` inside single-quoted strings; for content with apostrophes use `ops` write_file
 17. Do not join separate shell commands with commas
 18. No background processes, &, nohup, disown, dev servers, or long commands. Do not use background processes.
 19. Commands must be runnable shell, not prose. Do not emit pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
@@ -1048,10 +1051,10 @@ Rules:
 22. Prefer package-manager/editor-friendly commands and one-file-at-a-time edits
 23. Preserve the JSON-only output mode from the first instruction.
 24. If the workspace already has files, start by inspecting or extending them before re-scaffolding
-25. For implementation steps that list expected_files, at least one command must materially write or edit file contents; do not use touch-only or placeholder-only steps
+25. For implementation steps that list expected_files, at least one command or `ops` write_file must materially write or edit file contents; do not use touch-only or placeholder-only steps
 26. Verification must use `node -e`, `npm run build`, `python -m`, or a project test command; no `test -f`, `grep -q`, or `echo`. For implementation-heavy steps, verification must prove behavior or content.
 27. Prefer an inspect -> edit -> verify sequence grounded in the current workspace
-28. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. If scaffold is used, do not use heredoc; use printf to overwrite only needed JSX body/CSS lines.
+28. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. If scaffold is used, use `ops` to overwrite only needed JSX body/CSS files.
 
 Invalid outputs:
 - Markdown fences around JSON
@@ -1098,22 +1101,22 @@ Requirements:
 3. If a step will later use file-read or file-write tools, keep that path relative in the plan; execution will expand it under {display_project_dir}
 4. No long inline source dumps, no heredoc-heavy commands, no absolute paths, no .., no ~
 5. Keep each command under 900 characters and avoid embedding generated source bodies in the JSON
-6. Prefer concise shell commands or creating a small script/file during execution over inline code dumps
-6a. No escaped apostrophes like `\\'` inside single-quoted strings; use double quotes, heredoc, or safer file generation
-7. Each step must contain exactly these keys and no extra keys:
+6. Prefer `ops` write_file entries for file creation or overwrite instead of shell-quoting file content
+6a. No escaped apostrophes like `\\'` inside single-quoted strings; use `ops` write_file for content with quotes
+7. Each step must contain exactly these required keys, plus optional `ops`, and no other keys:
    step_number, description, commands, verification, rollback, expected_files
 8. step_number values must be unique integers and exactly 1, 2, 3... in order
-9. commands must be a JSON array of non-empty strings
+9. commands must be a JSON array of shell strings; it may be empty only when `ops` writes files
 10. verification and rollback must each be one shell string or null
 11. No background processes, &, nohup, disown, dev servers, or long commands.
 12. Keep each command short and machine-runnable
 13. If the workspace already has files, inspect or extend them before re-scaffolding
-14. For implementation steps with expected_files, include at least one command that writes real file content, not just mkdir/touch
+14. For implementation steps with expected_files, include at least one command or `ops` write_file that writes real file content, not just mkdir/touch
 15. Verification must use `node -e`, `npm run build`, `python -m`, or a project test command; no `test -f`, `grep -q`, or `echo`.
 16. Commands must be runnable shell, not pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
 17. Do not create or cd into a nested project folder; run directly from {display_project_dir}
 18. Include exactly one final meaningful verification/build step
-19. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. If scaffold is used, do not use heredoc; use printf to overwrite only needed JSX body/CSS lines.
+19. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. If scaffold is used, use `ops` write_file to overwrite only needed JSX body/CSS files.
 
 Invalid outputs:
 - Markdown fences around JSON
@@ -1470,25 +1473,27 @@ Bad:
 {validation_error or default_validation_error}
 
 Strict output schema:
-Keys: step_number, description, commands, verification, rollback, expected_files.
+Required keys: step_number, description, commands, verification, rollback, expected_files.
+Optional key: ops.
 
 Rules:
 1. Use 3 to 4 steps, numbered 1..N.
-2. commands: short shell strings under 900 chars. For file writes: use one `printf '...' >> file` per logical block (under 200 chars per printf arg); never write an entire file in a single printf.
+2. commands: short shell strings under 900 chars for installs, builds, tests, inspection, and verification.
+2a. For file creation/overwrite, prefer ops: [{{"op":"write_file","path":"relative/path","content":"file contents"}}]. The executor writes content directly; do not shell-quote file bodies.
 3. verification/rollback: one shell string or null.
 4. expected_files: relative path array.
 5. Relative paths only; no absolute paths, .., ~, or duplicated roots like frontend/src/frontend/src or backend/src/backend/src. Paths rooted exactly once.
 6. No nested project folder; work in task workspace; do not `cd` into a new app/backend/frontend root.
 7. No background processes, &, nohup, disown, dev servers, or long commands.
-8. No prose, markdown, payloads, logs, session history, extra keys.
+8. No prose, markdown, payloads, logs, session history, or extra keys beyond optional ops.
 9. Replace source dumps with short commands.
 10. expected_files steps must write real content; no separate mkdir/touch-only scaffold step for normal files.
 11. Verification must use `node -e`, `npm run build`, or `python -m`; no `test -f`, `grep -q`, `echo`, or `cd /... &&`.
 12. No /root/write_file.py, /tmp helpers, absolute helper scripts, outside files.
-13. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. Use printf to overwrite only needed JSX body/CSS lines.
-14. Never use heredoc (`<<'EOF'`, `<<'PY'`, `<<'HEREDOC'`, etc.). Always use printf for all file writes.
+13. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. Use ops to overwrite only needed JSX body/CSS files.
+14. Never use heredoc (`<<'EOF'`, `<<'PY'`, `<<'HEREDOC'`, etc.). Prefer ops for file writes.
 15. No heredocs in loops, multi-file heredocs, or multiple heredoc commands.
-16. No `\\'` inside single-quoted strings. For content with apostrophes use double-quoted `printf "..."` or split at the apostrophe boundary.
+16. No `\\'` inside single-quoted strings. For content with apostrophes use `ops` write_file instead of shell quoting.
 17. Each step is a separate complete JSON object in the array. Never merge content from multiple steps into one step.
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
@@ -1517,19 +1522,18 @@ Invalid output excerpt:
 {broken_output}
 
 Schema per step:
-step_number, description, commands, verification, rollback, expected_files.
+step_number, description, commands, verification, rollback, expected_files, optional ops.
 
 Rules:
 - commands must be short shell strings under 900 characters each.
-- for file writes: use one `printf '...' >> file` per logical block, under 200 chars per printf argument; never write an entire file in a single printf.
-- for content with apostrophes: use double-quoted `printf "..."` args; never use `\'` inside single-quoted strings.
+- for file creation/overwrite, prefer ops: [{{"op":"write_file","path":"relative/path","content":"file contents"}}]. The executor writes content directly; do not shell-quote file bodies.
 - verification must be one real command using `python -m`, `node -e`, or `npm run build`.
 - expected_files must be relative paths only.
 - expected_files steps must write real content; no touch-only, TODO, pass, stub, or placeholder-only implementation.
 - no nested project folder; run directly in the task workspace and do not `cd` into a new app/backend/frontend root.
 - no duplicated path roots like frontend/src/frontend/src or backend/src/backend/src.
-- no background processes, dev servers, absolute paths, heredocs, prose, markdown, or extra keys.
-- never use heredoc syntax (`<<EOF`, `<<'PY'`, `cat > file <<`, looped heredocs); use short printf or existing project commands.
+- no background processes, dev servers, absolute paths, heredocs, prose, markdown, or extra keys beyond optional ops.
+- never use heredoc syntax (`<<EOF`, `<<'PY'`, `cat > file <<`, looped heredocs); use ops or existing project commands.
 - avoid brittle `python -c` with f-strings, JSON strings, semicolon-heavy code, or mixed quote escaping.
 - each step is a separate complete JSON object in the array; never merge content from multiple steps into one step.
 """

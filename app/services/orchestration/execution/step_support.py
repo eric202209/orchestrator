@@ -19,6 +19,14 @@ from app.services.workspace.path_display import render_workspace_path_for_prompt
 
 def step_needs_command_repair(step: Dict[str, Any]) -> bool:
     commands = step.get("commands", [])
+    ops = step.get("ops", [])
+    if isinstance(ops, list) and any(
+        isinstance(operation, dict)
+        and operation.get("op") == "write_file"
+        and str(operation.get("path") or "").strip()
+        for operation in ops
+    ):
+        return False
     if not isinstance(commands, list):
         return True
     return not any(str(command or "").strip() for command in commands)
@@ -63,22 +71,26 @@ Rules:
 1. Working directory is {prompt_project_dir}
 2. Use relative paths only
 3. Do not use .., ~, or absolute paths
-4. commands must be a non-empty JSON array of shell commands
-5. verification and rollback may be null
-6. expected_files must be a JSON array
-7. Keep the step intent the same
-8. Output JSON object only, no prose
-9. If expected_files already exist but are empty or stubbed, replace touch-only commands with commands that write real content into those files
-10. Use verification stronger than file-existence checks for implementation-heavy steps
+4. commands must be a JSON array of shell commands; it may be empty only when ops writes files
+5. Optional ops may contain write_file objects: {{"op":"write_file","path":"relative/file","content":"..."}}
+6. verification and rollback may be null
+7. expected_files must be a JSON array
+8. Keep the step intent the same
+9. Output JSON object only, no prose
+10. If expected_files already exist but are empty or stubbed, use ops write_file entries to write real content into those files
+11. Use verification stronger than file-existence checks for implementation-heavy steps
 
 Example:
 {{
   "step_number": 1,
-  "description": "Inspect project structure and locate implementation entry points",
-  "commands": ["rg --files . | head -100"],
-  "verification": "test -d . && echo ok",
+  "description": "Create a small configuration file",
+  "commands": [],
+  "ops": [
+    {{"op": "write_file", "path": "src/config.js", "content": "export const ready = true;\\n"}}
+  ],
+  "verification": "node -e \"import('./src/config.js').then(m => {{ if (!m.ready) process.exit(1) }})\"",
   "rollback": null,
-  "expected_files": []
+  "expected_files": ["src/config.js"]
 }}
 """
 

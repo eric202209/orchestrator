@@ -296,6 +296,91 @@ class ExecutorService:
     _MIN_MEANINGFUL_BYTES = 4  # shared with patch_04
 
     @staticmethod
+    def _resolve_write_file_path(project_dir: Path, raw_path: str) -> Path:
+        path_text = str(raw_path or "").strip().strip("'\"\\")
+        if not path_text:
+            raise ValueError("write_file path is empty")
+        if path_text.startswith("~"):
+            raise ValueError(f"write_file path uses home directory: {path_text}")
+
+        candidate = Path(path_text)
+        resolved = (
+            candidate.resolve()
+            if candidate.is_absolute()
+            else (project_dir / candidate).resolve()
+        )
+        normalized_project_dir = project_dir.resolve()
+        if not resolved.is_relative_to(normalized_project_dir):
+            raise ValueError(
+                f"write_file path escapes task workspace: {path_text} -> {resolved}"
+            )
+        return resolved
+
+    @staticmethod
+    def execute_file_ops(project_dir: Path, ops: Any) -> Dict[str, Any]:
+        """Execute structured file operations without shell quoting."""
+
+        if not ops:
+            return {
+                "success": True,
+                "files_changed": [],
+                "output": "",
+            }
+        if not isinstance(ops, list):
+            return {
+                "success": False,
+                "files_changed": [],
+                "output": "ops must be a JSON array",
+            }
+
+        files_changed: List[str] = []
+        output_lines: List[str] = []
+        normalized_project_dir = project_dir.resolve()
+
+        for index, operation in enumerate(ops, start=1):
+            if not isinstance(operation, dict):
+                return {
+                    "success": False,
+                    "files_changed": files_changed,
+                    "output": f"op {index} must be an object",
+                }
+            if operation.get("op") != "write_file":
+                return {
+                    "success": False,
+                    "files_changed": files_changed,
+                    "output": f"op {index} unsupported op: {operation.get('op')}",
+                }
+            content = operation.get("content")
+            if not isinstance(content, str):
+                return {
+                    "success": False,
+                    "files_changed": files_changed,
+                    "output": f"op {index} content must be a string",
+                }
+            try:
+                target = ExecutorService._resolve_write_file_path(
+                    normalized_project_dir,
+                    str(operation.get("path") or ""),
+                )
+            except ValueError as exc:
+                return {
+                    "success": False,
+                    "files_changed": files_changed,
+                    "output": str(exc),
+                }
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            relative = target.relative_to(normalized_project_dir).as_posix()
+            files_changed.append(relative)
+            output_lines.append(f"write_file {relative} ({len(content)} chars)")
+
+        return {
+            "success": True,
+            "files_changed": files_changed,
+            "output": "\n".join(output_lines),
+        }
+
+    @staticmethod
     def cleanup_failed_step_artefacts(
         project_dir: Path,
         step: Dict[str, Any],

@@ -284,7 +284,7 @@ Do not implement anything.
 **Execution Boundary:**
 1. Every command MUST run inside `{project_dir}`
 2. Use relative paths only in shell commands and `expected_files`
-3. If execution later needs a file-read or file-write tool, keep the path relative here; the executor will expand it into an absolute path rooted under `{project_dir}`
+3. Keep any planned file-read/write path relative; execution expands it under `{project_dir}`
 4. Do NOT use `..`, `~`, or absolute paths in planning output
 5. Do NOT create sibling project folders under `{workspace_root}`
 6. Assume the working directory is already `{project_dir}`
@@ -297,24 +297,25 @@ Do not implement anything.
 5. Avoid README files, notes files, summaries, or explanation documents unless required by the task
 6. Prefer the smallest workable plan; each step should change one concern only
 7. `step_number` values must be unique integers and exactly 1, 2, 3... in order
-8. Every step object must include exactly these six keys and no extra keys: step_number, description, commands, verification, rollback, expected_files
-9. `commands` must be a JSON array of non-empty strings
+8. Required keys, with no extra keys except optional `ops`: step_number, description, commands, verification, rollback, expected_files
+9. `commands` must be a JSON array of strings; it may be empty when `ops` contains file writes
 10. `verification` must always be present and must be one shell string or null
 11. `rollback` must always be present and must be one shell string or null
 12. `expected_files` must always be present and must be a JSON array of relative path strings (or [])
+13. Optional `ops` may contain only `write_file` operations with relative `path` and string `content`
 
 **Planning Rules:**
-1. Short targeted runnable shell commands only. `commands` must not be prose or pseudo-commands such as `"write src/foo.js: exports X"`, `"create files"`, `"set up project"`, or `"implement component"`.
+1. Short runnable shell only. `commands` must not be prose or pseudo-commands such as `"create files"` or `"implement component"`.
 2. Incremental: create dirs first, one file at a time, install deps in a separate step from code changes.
 3. Relative paths everywhere — no `..`, `~`, absolute paths, `cd ... && ...`, nested project folders, or `{project_dir}/` prefixes in `expected_files`.
 4. No background processes, &, nohup, disown, dev servers, or long commands.
 5. Don't assume files exist; inspect before editing. Each command is a standalone shell command (no comma-joining).
 6. If prior artifacts are mentioned in context, extend them instead of recreating parallel implementations.
-7. Never use heredoc syntax; use printf for all file writes. Use multiple short printf append commands (`>>`); keep each printf argument under 200 characters. Use double-quoted printf for apostrophes.
-8. Prefer concise runnable shell or generating a small script/file during execution over embedding full source bodies in plan JSON.
+7. For file creation/overwrite, prefer `ops`: `[{{"op":"write_file","path":"relative/path","content":"file contents"}}]`; do not shell-quote file bodies.
+8. Keep `commands` for shell tasks such as installs, builds, tests, inspection, and verification. Never use heredoc syntax. Use `ops` for file bodies.
 9. Include exactly one final meaningful verification/build step such as `npm run build`, `pytest`, or `python -m pytest`.
 10. Verification must use `node -e`, `npm run build`, `python -m`, or a project test command; no `test -f`, `grep -q`, or `echo`.
-11. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. If scaffold is used, do not use heredoc; use printf to overwrite only needed JSX body/CSS lines.
+11. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. If scaffold is used, use `ops` to overwrite only needed JSX body/CSS files.
 
 **Execution Profile Rules:**
 {execution_profile_rules}
@@ -341,7 +342,10 @@ Do not implement anything.
   {{
     "step_number": 2,
     "description": "Create the smallest required implementation files",
-    "commands": ["mkdir -p src && printf 'export default function App() {{ return <main>Board Game Cafe</main>; }}\\\\n' > src/App.tsx"],
+    "ops": [
+      {{"op": "write_file", "path": "src/App.tsx", "content": "export default function App() {{ return <main>Board Game Cafe</main>; }}\\n"}}
+    ],
+    "commands": [],
     "verification": "node -e \\"const fs=require('fs'); if(!fs.readFileSync('src/App.tsx','utf8').includes('Board Game Cafe')) process.exit(1)\\"",
     "rollback": "rm -f src/App.tsx",
     "expected_files": ["src/App.tsx"]
