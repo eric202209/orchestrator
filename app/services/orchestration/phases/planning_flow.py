@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict
 
 from celery.exceptions import SoftTimeLimitExceeded
 
-from app.models import TaskStatus
+from app.models import TaskExecution, TaskStatus
 from app.schemas.knowledge import KnowledgeContext
 from app.services.orchestration.context_assembly import (
     assemble_planning_prompt,
@@ -80,6 +80,15 @@ def _finalize_planning_terminal_failure(
         ctx.session.is_active = False
         ctx.session.paused_at = completed_at
         set_session_alert(ctx.session, "error", failure_reason[:2000])
+    if ctx.task_execution_id:
+        task_execution = (
+            ctx.db.query(TaskExecution)
+            .filter(TaskExecution.id == ctx.task_execution_id)
+            .first()
+        )
+        if task_execution:
+            task_execution.status = TaskStatus.FAILED
+            task_execution.completed_at = task_execution.completed_at or completed_at
     ctx.db.commit()
     if generate_failure_summary:
         try:

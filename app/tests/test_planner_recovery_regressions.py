@@ -4,6 +4,9 @@ import logging
 
 from app.models import Project, Session as SessionModel, Task, TaskExecution, TaskStatus
 from app.services.orchestration.phases.failure_flow import handle_task_failure
+from app.services.orchestration.phases.planning_flow import (
+    _finalize_planning_timeout_failure,
+)
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.planning.planner_service import PlannerService
 from app.services.session.session_runtime_service import build_task_execution_prompt
@@ -332,6 +335,94 @@ def test_planning_lock_wait_timeout_terminalizes_execution_without_retry(db_sess
         )
     except TimeoutError:
         pass
+
+    db_session.refresh(task)
+    db_session.refresh(session)
+    db_session.refresh(task_execution)
+
+    assert task.status == TaskStatus.FAILED
+    assert task.completed_at is not None
+    assert session.status == "paused"
+    assert session.is_active is False
+    assert task_execution.status == TaskStatus.FAILED
+    assert task_execution.completed_at is not None
+
+
+def test_initial_planning_timeout_terminalizes_task_execution(db_session, monkeypatch):
+    project = Project(name="Planning Timeout Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    session = SessionModel(
+        project_id=project.id,
+        name="Planning Timeout Session",
+        status="running",
+        execution_mode="automatic",
+        is_active=True,
+    )
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+
+    task = Task(
+        project_id=project.id,
+        title="Node line statistics CLI",
+        description="Create node line stats CLI",
+        status=TaskStatus.RUNNING,
+        task_subfolder="task-node-line-statistics-cli",
+    )
+    db_session.add(task)
+    db_session.commit()
+    db_session.refresh(task)
+
+    task_execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.RUNNING,
+    )
+    db_session.add(task_execution)
+    db_session.commit()
+    db_session.refresh(task_execution)
+
+    monkeypatch.setattr(
+        "app.services.session.replan_service.get_or_generate_failure_summary",
+        lambda *_args, **_kwargs: "summary",
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.failure_flow.record_failure_knowledge_for_stopped_session",
+        lambda **_kwargs: True,
+    )
+
+    ctx = OrchestrationRunContext(
+        db=db_session,
+        session=session,
+        project=project,
+        task=task,
+        session_task_link=None,
+        session_id=session.id,
+        task_id=task.id,
+        prompt=task.description,
+        timeout_seconds=300,
+        execution_profile="full_lifecycle",
+        validation_profile="implementation",
+        runs_in_canonical_baseline=False,
+        orchestration_state=None,
+        runtime_service=None,
+        task_service=None,
+        logger=logging.getLogger(__name__),
+        emit_live=lambda *_args, **_kwargs: None,
+        error_handler=None,
+        task_execution_id=task_execution.id,
+        restore_workspace_snapshot_if_needed=None,
+    )
+
+    _finalize_planning_timeout_failure(
+        ctx=ctx,
+        failure_type="planning_context_overflow",
+        failure_reason="Planning timed out or exceeded context after 300s",
+    )
 
     db_session.refresh(task)
     db_session.refresh(session)
