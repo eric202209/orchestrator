@@ -37,6 +37,7 @@ REPAIR_PROMPT_MAX_CHARS = 6000
 PLANNING_REPAIR_PROMPT_MAX_CHARS = REPAIR_PROMPT_MAX_CHARS
 MINIMAL_PLANNING_PROMPT_TOKEN_DIAGNOSTIC_THRESHOLD = 6000
 PLANNING_REPAIR_ALLOWED_KNOWLEDGE_TYPES = {"format_guide", "task_example"}
+DIRECT_PLANNING_PROMPT_CHAR_CAP = 12000
 STRUCTURALLY_EMPTY_FILENAMES = frozenset({"__init__.py", "__init__.pyi", ".gitkeep"})
 OPENCLAW_SESSION_LOCK_MARKERS = (
     "session file locked",
@@ -347,6 +348,112 @@ class PlannerService:
             return
         exc.runtime_diagnostics = dict(lock_diagnostics)  # type: ignore[attr-defined]
 
+    @staticmethod
+    def _should_try_direct_no_thinking_planning(
+        runtime_service: Any, prompt_chars: int
+    ) -> bool:
+        if not settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_ENABLED:
+            return False
+        if not settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_BASE_URL.strip():
+            return False
+        if not settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_MODEL.strip():
+            return False
+        if prompt_chars > DIRECT_PLANNING_PROMPT_CHAR_CAP:
+            _logger.info(
+                "[PLANNING_DIRECT] skip: prompt_chars=%d > cap=%d",
+                prompt_chars,
+                DIRECT_PLANNING_PROMPT_CHAR_CAP,
+            )
+            return False
+        backend_metadata: Dict[str, Any] = {}
+        get_backend_metadata = getattr(runtime_service, "get_backend_metadata", None)
+        if callable(get_backend_metadata):
+            try:
+                backend_metadata = get_backend_metadata() or {}
+            except Exception:
+                backend_metadata = {}
+        backend_name = str(backend_metadata.get("backend") or "").strip()
+        if backend_name != "local_openclaw":
+            _logger.info(
+                "[PLANNING_DIRECT] skip: backend_name=%r (not local_openclaw)",
+                backend_name,
+            )
+            return False
+        return True
+
+    @classmethod
+    async def _invoke_direct_no_thinking_planning(
+        cls, runtime_service: Any, planning_prompt: str
+    ) -> Optional[Dict[str, Any]]:
+        import time as _time
+
+        import httpx
+
+        base_url = settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_BASE_URL.rstrip("/")
+        model = settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_MODEL
+        api_key = settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_API_KEY
+        direct_timeout = settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_TIMEOUT_SECONDS
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": planning_prompt}],
+            "temperature": 0.0,
+            "max_tokens": 2048,
+            "stream": False,
+            "enable_thinking": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        headers: Dict[str, str] = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        started_at = _time.monotonic()
+        _logger.info(
+            "[PLANNING_DIRECT] attempting direct no-thinking planning url=%s model=%s"
+            " prompt_chars=%d timeout=%ds",
+            f"{base_url}/chat/completions",
+            model,
+            len(planning_prompt),
+            direct_timeout,
+        )
+        try:
+            async with httpx.AsyncClient(timeout=direct_timeout) as client:
+                response = await client.post(
+                    f"{base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                )
+            response.raise_for_status()
+            body = response.json()
+            output = PlannerService._extract_chat_completion_content(body)
+        except Exception as exc:
+            _logger.warning(
+                "[PLANNING_DIRECT] failed after %.1fs (%s: %s); falling back to OpenClaw",
+                _time.monotonic() - started_at,
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            return None
+        if not output.strip():
+            _logger.warning(
+                "[PLANNING_DIRECT] empty output after %.1fs; falling back to OpenClaw",
+                _time.monotonic() - started_at,
+            )
+            return None
+        duration_seconds = _time.monotonic() - started_at
+        _logger.info(
+            "[PLANNING_DIRECT] success planning_direct=True backend=direct_chat_completions"
+            " duration=%.1fs output_chars=%d",
+            duration_seconds,
+            len(output),
+        )
+        return {
+            "output": output,
+            "planning_direct": True,
+            "planning_backend": "direct_chat_completions",
+            "direct_planning_seconds": round(duration_seconds, 3),
+            "direct_planning_prompt_chars": len(planning_prompt),
+            "direct_planning_timeout_seconds": direct_timeout,
+        }
+
     @classmethod
     async def _execute_task_with_planning_lock(
         cls,
@@ -354,6 +461,12 @@ class PlannerService:
         prompt: str,
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        if cls._should_try_direct_no_thinking_planning(runtime_service, len(prompt)):
+            direct = await cls._invoke_direct_no_thinking_planning(
+                runtime_service, prompt
+            )
+            if direct is not None:
+                return direct
         async with cls._openclaw_planning_lock_async() as lock_diagnostics:
             try:
                 result = await runtime_service.execute_task(prompt, **kwargs)
