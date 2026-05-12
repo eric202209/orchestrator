@@ -17,6 +17,18 @@ from app.services.orchestration.types import FailureEnvelope
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 
 
+_PROSE_COMMAND_PATTERN = re.compile(
+    r"^(?:"
+    r"(?:Replace|Update|Add|Remove|Change|Install|Create|Edit|Modify|Delete|Ensure|Rewrite|Refactor|Fix|Move|Set)\s+(?:(?:the|a|an|your|this|that|all)\s+)?(?:command|verification|test|tests|config|file|dependency|import|assertion|function|package|path|code|setting|debug|src|app|broken|missing)\b"
+    r"|Set\s+[A-Za-z_][A-Za-z0-9_]*\s*="
+    r")"
+)
+
+
+def _is_prose_command(cmd: str) -> bool:
+    return bool(_PROSE_COMMAND_PATTERN.match(str(cmd or "").strip()))
+
+
 def step_needs_command_repair(step: Dict[str, Any]) -> bool:
     commands = step.get("commands", [])
     ops = step.get("ops", [])
@@ -71,14 +83,16 @@ Rules:
 1. Working directory is {prompt_project_dir}
 2. Use relative paths only
 3. Do not use .., ~, or absolute paths
-4. commands must be a JSON array of shell commands; it may be empty only when ops writes files
-5. Optional ops may contain write_file objects: {{"op":"write_file","path":"relative/file","content":"..."}}
-6. verification and rollback may be null
-7. expected_files must be a JSON array
-8. Keep the step intent the same
-9. Output JSON object only, no prose
-10. If expected_files already exist but are empty or stubbed, use ops write_file entries to write real content into those files
-11. Use verification stronger than file-existence checks for implementation-heavy steps
+4. commands must be a JSON array of runnable shell strings, not prose instructions
+5. commands may be empty only when ops writes files
+6. Optional ops may contain write_file objects: {{"op":"write_file","path":"relative/file","content":"..."}}
+7. Prefer ops write_file entries for file rewrites; do not use heredoc rewrites
+8. verification and rollback may be null
+9. expected_files must be a JSON array
+10. Keep the step intent the same
+11. Output JSON object only, no prose
+12. If expected_files already exist but are empty or stubbed, use ops write_file entries to write real content into those files
+13. Use verification stronger than file-existence checks for implementation-heavy steps
 
 Example:
 {{
@@ -197,6 +211,14 @@ def coerce_execution_step_result(
 ) -> Dict[str, Any]:
     """Recover a structured step result when the model returned prose instead of JSON."""
     result = dict(raw_result or {})
+
+    if (
+        result.get("status") in {"completed", "success"}
+        and result.get("files_changed")
+        and str(result.get("output") or "").strip().startswith("write_file ")
+    ):
+        return result
+
     output_text = extract_structured_text(result.get("output", ""))
 
     if isinstance(result.get("output"), dict):
@@ -340,10 +362,14 @@ def _infer_debug_payload_from_text(
     else:
         fix_type = "code_fix"
 
+    fix_str = (fix or "").strip()[:1200]
+    if fix_type == "command_fix" and _is_prose_command(fix_str):
+        fix_type = "code_fix"
+
     payload: Dict[str, Any] = {
         "fix_type": fix_type,
         "analysis": analysis[:1200],
-        "fix": (fix or "").strip()[:1200],
+        "fix": fix_str,
         "confidence": _normalize_debug_confidence(confidence or normalized),
     }
 
@@ -381,7 +407,9 @@ def _infer_debug_payload_from_text(
                     "Retry the step without expecting these files: "
                     + ", ".join(missing_expected_files)
                 )[:1200]
-            if payload["fix_type"] == "code_fix":
+            if payload["fix_type"] == "code_fix" and not _is_prose_command(
+                payload.get("fix", "")
+            ):
                 payload["fix_type"] = "command_fix"
 
     if (

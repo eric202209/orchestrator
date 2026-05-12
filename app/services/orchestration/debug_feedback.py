@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.models import LogEntry
 from app.services.orchestration.events.event_types import EventType
+from app.services.orchestration.execution.step_support import _is_prose_command
 from app.services.orchestration.persistence import append_orchestration_event
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 
@@ -312,11 +313,13 @@ def build_bounded_debug_repair_prompt(
         "Rules:\n"
         "1. Output exactly one JSON array containing one step object.\n"
         "2. The step object must include title, command, and verification_command.\n"
-        "3. Keep the fix atomic; do not rewrite unrelated files.\n"
-        "4. Use relative paths only; no absolute paths, `..`, or `~`.\n"
-        f"5. Commands execute from the workspace root ({workspace}). Do not cd into the workspace root or any path containing vault/projects; you are already there.\n"
-        "6. Do not bypass validators, workspace boundaries, or verification.\n"
-        "7. Do not request additional retries or describe policy.\n"
+        "3. command and verification_command must be runnable shell strings, not prose instructions.\n"
+        "4. Keep the fix atomic; do not rewrite unrelated files.\n"
+        "5. Do not use heredoc rewrites; keep file changes minimal and command-driven.\n"
+        "6. Use relative paths only; no absolute paths, `..`, or `~`.\n"
+        f"7. Commands execute from the workspace root ({workspace}). Do not cd into the workspace root or any path containing vault/projects; you are already there.\n"
+        "8. Do not bypass validators, workspace boundaries, or verification.\n"
+        "9. Do not request additional retries or describe policy.\n"
     )
 
 
@@ -341,6 +344,9 @@ def normalize_bounded_debug_repair_payload(
         expected_files = [expected_files]
     if not isinstance(expected_files, list):
         expected_files = []
+
+    if _is_prose_command(command):
+        return None
 
     return {
         "fix_type": "command_fix",

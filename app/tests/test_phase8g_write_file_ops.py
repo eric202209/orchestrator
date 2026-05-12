@@ -3,7 +3,10 @@ from pathlib import Path
 import pytest
 
 from app.services.orchestration.execution.executor import ExecutorService
-from app.services.orchestration.execution.step_support import step_needs_command_repair
+from app.services.orchestration.execution.step_support import (
+    coerce_execution_step_result,
+    step_needs_command_repair,
+)
 from app.services.orchestration.planning.planner import PlannerService
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.orchestration.validation.workspace_guard import (
@@ -120,3 +123,20 @@ def test_ops_only_step_with_null_verification_does_not_trigger_weak_repair():
     issues = PlannerService.find_immediate_repair_step_issues([step])
 
     assert "weak_verification_steps" not in issues
+
+
+def test_write_file_step_result_bypasses_model_output_json_recovery():
+    result = {
+        "status": "completed",
+        "output": "write_file csv_summary.py (1420 chars)",
+        "verification_output": "",
+        "files_changed": ["csv_summary.py"],
+    }
+
+    coerced = coerce_execution_step_result(
+        result,
+        expected_files=["csv_summary.py"],
+        extract_structured_text=str,
+    )
+
+    assert coerced == result
