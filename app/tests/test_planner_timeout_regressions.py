@@ -1057,6 +1057,92 @@ def test_validator_does_not_set_placeholder_flag_for_non_stub_plan(tmp_path):
     )
 
 
+def test_validator_allows_todo_fixture_content_for_report_generator(tmp_path):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create sample files for the TODO report generator",
+            "commands": [
+                "mkdir -p fixtures",
+                "printf '# Sample\\nTODO: Add intro\\nFIXME: Broken link\\n' > fixtures/sample.md",
+            ],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "fixtures/sample.txt",
+                    "content": "TODO: Refactor logic\nFIXME: Memory leak\n",
+                }
+            ],
+            "verification": "test -f fixtures/sample.md && test -f fixtures/sample.txt",
+            "rollback": "rm -rf fixtures",
+            "expected_files": ["fixtures/sample.md", "fixtures/sample.txt"],
+        },
+        {
+            "step_number": 2,
+            "description": "Implement the TODO report generator",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "todo_report.py",
+                    "content": "from pathlib import Path\nMARKERS = ('TODO', 'FIXME')\ntry:\n    print(Path('fixtures/sample.md').read_text())\nexcept OSError:\n    pass\n",
+                }
+            ],
+            "verification": "python3 -m py_compile todo_report.py",
+            "rollback": "rm -f todo_report.py",
+            "expected_files": ["todo_report.py"],
+        },
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Build a TODO and FIXME report generator with sample fixture files",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert "placeholder_only_implementation" not in verdict.details
+    assert (
+        "Plan appears to generate placeholder or stub implementations"
+        not in verdict.reasons
+    )
+
+
+def test_validator_flags_write_file_stub_python_body(tmp_path):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Build the health service",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "services/health.py",
+                    "content": "class ServiceStatus:\n    pass\n",
+                }
+            ],
+            "verification": "python3 -m py_compile services/health.py",
+            "rollback": "rm -f services/health.py",
+            "expected_files": ["services/health.py"],
+        }
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Build a distributed workflow health checker",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.details["placeholder_only_implementation"] is True
+    assert (
+        "Plan appears to generate placeholder or stub implementations"
+        in verdict.reasons
+    )
+
+
 def test_validator_rejects_non_runnable_pseudo_command_with_code(tmp_path):
     verdict = ValidatorService.validate_plan(
         [

@@ -57,6 +57,43 @@ NESTED_PROJECT_STRUCTURAL_DIRS = {
     "lib",
     "spec",
 }
+PLACEHOLDER_FIXTURE_PATH_PARTS = {
+    "fixture",
+    "fixtures",
+    "sample",
+    "samples",
+    "test_data",
+    "testdata",
+}
+
+
+def _path_allows_fixture_placeholder_content(path: Path) -> bool:
+    parts = {part.lower() for part in path.parts}
+    if parts.intersection(PLACEHOLDER_FIXTURE_PATH_PARTS):
+        return True
+    return path.name.lower().startswith(("sample.", "fixture."))
+
+
+def _path_allows_todo_fixme_literals(path: Path) -> bool:
+    lowered_name = path.name.lower()
+    return "todo" in lowered_name or "fixme" in lowered_name
+
+
+def _python_has_stub_pass(content: str) -> bool:
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return True
+
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not isinstance(body, list) or len(body) != 1:
+            continue
+        if isinstance(body[0], ast.Pass) and isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            return True
+    return False
 
 
 def iter_candidate_files(project_dir: Path, file_paths: Iterable[str]) -> List[Path]:
@@ -115,9 +152,25 @@ def detect_placeholder_content(path: Path) -> List[str]:
 
     reasons: List[str] = []
     lowered = content.lower()
-    if re.search(r"^\s*pass\s*$", content, flags=re.MULTILINE):
+    fixture_placeholder_content = _path_allows_fixture_placeholder_content(path)
+    todo_fixme_literals = _path_allows_todo_fixme_literals(path)
+    if re.search(r"^\s*pass\s*$", content, flags=re.MULTILINE) and (
+        path.suffix != ".py" or _python_has_stub_pass(content)
+    ):
         reasons.append(f"{path.name} still contains `pass` placeholders")
-    if "todo" in lowered or "placeholder" in lowered:
+    if (
+        (
+            "todo" in lowered
+            and not fixture_placeholder_content
+            and not todo_fixme_literals
+        )
+        or (
+            "fixme" in lowered
+            and not fixture_placeholder_content
+            and not todo_fixme_literals
+        )
+        or ("placeholder" in lowered and not fixture_placeholder_content)
+    ):
         reasons.append(f"{path.name} still contains TODO or placeholder markers")
     if "notimplemented" in lowered or "raise notimplementederror" in lowered:
         reasons.append(f"{path.name} still contains not-implemented markers")

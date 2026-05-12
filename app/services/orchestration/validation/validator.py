@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import ast
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from ..policy import apply_validation_policy
@@ -41,6 +42,21 @@ WORKFLOW_PHASE_ORDER = {
 }
 MAX_INITIAL_PLAN_STEPS = 4
 MAX_PLANNING_COMMAND_CHARS = 900
+PLAN_STRUCTURAL_PLACEHOLDER_MARKER_PATTERN = re.compile(
+    r"\b(?:placeholder|stub|notimplemented|notimplementederror)\b|"
+    r"\bnot[-_\s]*implemented\b",
+    re.IGNORECASE,
+)
+PLAN_PASS_MARKER_PATTERN = re.compile(r"\bpass\b", re.IGNORECASE)
+PLAN_TODO_FIXME_MARKER_PATTERN = re.compile(r"\b(?:todo|fixme)\b", re.IGNORECASE)
+PLACEHOLDER_FIXTURE_PATH_PARTS = {
+    "fixture",
+    "fixtures",
+    "sample",
+    "samples",
+    "test_data",
+    "testdata",
+}
 
 
 class ValidatorService:
@@ -498,19 +514,147 @@ class ValidatorService:
         return seen_python and seen_node
 
     @staticmethod
-    def _plan_contains_placeholder_intent(plan: List[Dict[str, Any]]) -> bool:
-        placeholder_markers = (
-            "pass",
-            "todo",
-            "notimplemented",
-            "placeholder",
-            "stub",
+    def _plan_contains_placeholder_intent(
+        plan: List[Dict[str, Any]], task_prompt: str = ""
+    ) -> bool:
+        allow_todo_fixme_literals = ValidatorService._task_allows_todo_fixme_literals(
+            task_prompt
         )
+
         for step in plan:
-            for command in step.get("commands", []) or []:
-                lowered = str(command or "").lower()
-                if any(marker in lowered for marker in placeholder_markers):
+            for operation in step.get("ops", []) or []:
+                if not isinstance(operation, dict):
+                    continue
+                if operation.get("op") != "write_file":
+                    continue
+                if ValidatorService._write_file_content_has_placeholder_implementation(
+                    str(operation.get("path", "")),
+                    str(operation.get("content", "")),
+                    allow_todo_fixme_literals=allow_todo_fixme_literals,
+                ):
                     return True
+
+            for command in step.get("commands", []) or []:
+                if ValidatorService._command_writes_placeholder_implementation(
+                    str(command or ""),
+                    allow_todo_fixme_literals=allow_todo_fixme_literals,
+                ):
+                    return True
+        return False
+
+    @staticmethod
+    def _task_allows_todo_fixme_literals(task_prompt: str) -> bool:
+        lowered = str(task_prompt or "").lower()
+        if not any(marker in lowered for marker in ("todo", "fixme")):
+            return False
+        return any(
+            intent in lowered
+            for intent in (
+                "report",
+                "scan",
+                "scanner",
+                "generator",
+                "detect",
+                "extract",
+                "list",
+                "summar",
+            )
+        )
+
+    @staticmethod
+    def _write_file_content_has_placeholder_implementation(
+        path_text: str, content: str, *, allow_todo_fixme_literals: bool = False
+    ) -> bool:
+        raw = str(content or "")
+        if ValidatorService._path_allows_placeholder_fixture_content(path_text):
+            return False
+
+        if PLAN_STRUCTURAL_PLACEHOLDER_MARKER_PATTERN.search(raw):
+            return True
+        if not allow_todo_fixme_literals and PLAN_TODO_FIXME_MARKER_PATTERN.search(raw):
+            return True
+        if not PLAN_PASS_MARKER_PATTERN.search(raw):
+            return False
+
+        if Path(str(path_text or "")).suffix.lower() != ".py":
+            return True
+
+        try:
+            tree = ast.parse(raw)
+        except SyntaxError:
+            return True
+
+        for node in ast.walk(tree):
+            body = getattr(node, "body", None)
+            if not isinstance(body, list) or len(body) != 1:
+                continue
+            if isinstance(body[0], ast.Pass) and isinstance(
+                node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _path_allows_placeholder_fixture_content(path_text: str) -> bool:
+        path = Path(str(path_text or "").strip())
+        parts = {part.lower() for part in path.parts}
+        if parts.intersection(PLACEHOLDER_FIXTURE_PATH_PARTS):
+            return True
+        lowered_name = path.name.lower()
+        return lowered_name.startswith(("sample.", "fixture."))
+
+    @staticmethod
+    def _command_write_targets(command: str) -> List[str]:
+        targets = ValidatorService._single_file_write_heredoc_targets(command)
+        try:
+            tokens = shlex.split(str(command or ""), posix=True)
+        except ValueError:
+            tokens = str(command or "").split()
+
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
+            if token in {">", ">>"} and index + 1 < len(tokens):
+                targets.append(tokens[index + 1])
+                index += 2
+                continue
+            if token.startswith((">", ">>")) and token not in {">&1", ">&2"}:
+                target = token.lstrip(">")
+                if target:
+                    targets.append(target)
+            if token == "tee":
+                next_index = index + 1
+                while next_index < len(tokens) and tokens[next_index].startswith("-"):
+                    next_index += 1
+                if next_index < len(tokens):
+                    targets.append(tokens[next_index])
+            index += 1
+
+        return [target for target in targets if target]
+
+    @staticmethod
+    def _command_writes_placeholder_implementation(
+        command: str, *, allow_todo_fixme_literals: bool = False
+    ) -> bool:
+        raw = str(command or "")
+        has_marker = (
+            PLAN_STRUCTURAL_PLACEHOLDER_MARKER_PATTERN.search(raw)
+            or PLAN_PASS_MARKER_PATTERN.search(raw)
+            or (
+                not allow_todo_fixme_literals
+                and PLAN_TODO_FIXME_MARKER_PATTERN.search(raw)
+            )
+        )
+        if not has_marker:
+            return False
+
+        targets = ValidatorService._command_write_targets(raw)
+        if targets:
+            return not all(
+                ValidatorService._path_allows_placeholder_fixture_content(target)
+                for target in targets
+            )
+
         return False
 
     @staticmethod
@@ -1480,7 +1624,7 @@ class ValidatorService:
                 )
                 details["weak_verification_steps"] = weak_verification_steps
 
-            if cls._plan_contains_placeholder_intent(plan):
+            if cls._plan_contains_placeholder_intent(plan, task_prompt):
                 repairable.append(
                     "Plan appears to generate placeholder or stub implementations"
                 )

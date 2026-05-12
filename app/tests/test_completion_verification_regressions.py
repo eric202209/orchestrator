@@ -350,6 +350,46 @@ def test_detect_placeholder_content_accepts_single_quoted_python_main_guard(tmp_
     )
 
 
+def test_detect_placeholder_content_allows_fixture_todo_markers(tmp_path):
+    fixture = tmp_path / "fixtures" / "sample.md"
+    fixture.parent.mkdir()
+    fixture.write_text(
+        "# Sample\nTODO: Add intro\nFIXME: Broken link\n",
+        encoding="utf-8",
+    )
+
+    reasons = ValidatorService._detect_placeholder_content(fixture)
+
+    assert reasons == []
+
+
+def test_detect_placeholder_content_allows_todo_report_literals_and_except_pass(
+    tmp_path,
+):
+    report = tmp_path / "todo_report.py"
+    report.write_text(
+        "MARKERS = ['TODO', 'FIXME']\n"
+        "try:\n"
+        "    value = 1\n"
+        "except OSError:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    reasons = ValidatorService._detect_placeholder_content(report)
+
+    assert reasons == []
+
+
+def test_detect_placeholder_content_still_flags_stub_python_pass(tmp_path):
+    service = tmp_path / "health.py"
+    service.write_text("class ServiceStatus:\n    pass\n", encoding="utf-8")
+
+    reasons = ValidatorService._detect_placeholder_content(service)
+
+    assert reasons == ["health.py still contains `pass` placeholders"]
+
+
 def _seed_finalize_ctx(db_session, tmp_path):
     project_dir = tmp_path / "project"
     project_dir.mkdir()
