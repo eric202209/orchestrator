@@ -17,6 +17,11 @@ from ..types import (
 )
 
 from .persistence import persist_validation_result as _persist_validation_result
+from app.services.orchestration.file_ops_contract import (
+    operation_has_file_op_path,
+    validate_file_op_shape,
+)
+from .placeholder_policy import path_allows_placeholder_fixture_content
 from .workspace_checks import (
     NESTED_PROJECT_STRUCTURAL_DIRS,
     SOURCE_EXTENSIONS,
@@ -49,14 +54,6 @@ PLAN_STRUCTURAL_PLACEHOLDER_MARKER_PATTERN = re.compile(
 )
 PLAN_PASS_MARKER_PATTERN = re.compile(r"\bpass\b", re.IGNORECASE)
 PLAN_TODO_FIXME_MARKER_PATTERN = re.compile(r"\b(?:todo|fixme)\b", re.IGNORECASE)
-PLACEHOLDER_FIXTURE_PATH_PARTS = {
-    "fixture",
-    "fixtures",
-    "sample",
-    "samples",
-    "test_data",
-    "testdata",
-}
 
 
 class ValidatorService:
@@ -174,16 +171,7 @@ class ValidatorService:
                     invalid_ops.append(index)
                 else:
                     for operation in ops:
-                        if not isinstance(operation, dict):
-                            invalid_ops.append(index)
-                            break
-                        if operation.get("op") != "write_file":
-                            invalid_ops.append(index)
-                            break
-                        if not isinstance(operation.get("path"), str):
-                            invalid_ops.append(index)
-                            break
-                        if not isinstance(operation.get("content"), str):
+                        if not validate_file_op_shape(operation):
                             invalid_ops.append(index)
                             break
 
@@ -218,7 +206,7 @@ class ValidatorService:
             details["invalid_expected_files_steps"] = invalid_expected_files
         if invalid_ops:
             errors.append(
-                "Plan ops must be arrays of write_file objects with string path and content"
+                "Plan ops must be arrays of supported operation objects with valid string fields"
             )
             details["invalid_ops_steps"] = sorted(set(invalid_ops))
 
@@ -596,12 +584,7 @@ class ValidatorService:
 
     @staticmethod
     def _path_allows_placeholder_fixture_content(path_text: str) -> bool:
-        path = Path(str(path_text or "").strip())
-        parts = {part.lower() for part in path.parts}
-        if parts.intersection(PLACEHOLDER_FIXTURE_PATH_PARTS):
-            return True
-        lowered_name = path.name.lower()
-        return lowered_name.startswith(("sample.", "fixture."))
+        return path_allows_placeholder_fixture_content(path_text)
 
     @staticmethod
     def _command_write_targets(command: str) -> List[str]:
@@ -1031,15 +1014,12 @@ class ValidatorService:
 
             commands = step.get("commands", [])
             ops = step.get("ops", [])
-            has_write_file_ops = isinstance(ops, list) and any(
-                isinstance(operation, dict)
-                and operation.get("op") == "write_file"
-                and str(operation.get("path") or "").strip()
-                for operation in ops
+            has_file_ops = isinstance(ops, list) and any(
+                operation_has_file_op_path(operation) for operation in ops
             )
             if not isinstance(commands, list) or (
                 not any(str(command or "").strip() for command in commands)
-                and not has_write_file_ops
+                and not has_file_ops
             ):
                 missing_commands.append(step_number)
 
@@ -1450,7 +1430,8 @@ class ValidatorService:
             )
             if invalid_ops_path_steps:
                 rejected.append(
-                    "Plan write_file operations must stay inside the task workspace "
+                    "Plan write_file operations must stay inside the task workspace; "
+                    "other file operations must stay inside the task workspace "
                     f"(steps: {invalid_ops_path_steps[:5]})"
                 )
                 details["invalid_ops_path_steps"] = invalid_ops_path_steps

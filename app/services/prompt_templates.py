@@ -21,6 +21,9 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import UTC, datetime
 from enum import Enum
+from app.services.orchestration.file_ops_contract import (
+    render_supported_file_ops,
+)
 from app.services.workspace.system_settings import get_effective_workspace_root
 
 # ---------------------------------------------------------------------------
@@ -298,11 +301,11 @@ Do not implement anything.
 6. Prefer the smallest workable plan; each step should change one concern only
 7. `step_number` values must be unique integers and exactly 1, 2, 3... in order
 8. Required keys, with no extra keys except optional `ops`: step_number, description, commands, verification, rollback, expected_files
-9. `commands` must be a JSON array of strings; it may be empty when `ops` contains file writes
+9. `commands` must be a JSON array of strings; it may be empty when `ops` contains deterministic file operations
 10. `verification` must always be present and must be one shell string or null
 11. `rollback` must always be present and must be one shell string or null
 12. `expected_files` must always be present and must be a JSON array of relative path strings (or [])
-13. Optional `ops` may contain only `write_file` operations with relative `path` and string `content`
+13. Optional `ops` may contain these operations with relative `path` values and required string fields: {supported_file_ops}
 
 **Planning Rules:**
 1. Short runnable shell only. `commands` must not be prose or pseudo-commands such as `"create files"` or `"implement component"`.
@@ -311,8 +314,8 @@ Do not implement anything.
 4. No background processes, &, nohup, disown, dev servers, or long commands.
 5. Don't assume files exist; inspect before editing. Each command is a standalone shell command (no comma-joining).
 6. If prior artifacts are mentioned in context, extend them instead of recreating parallel implementations.
-7. For file creation/overwrite, prefer `ops`: `[{{"op":"write_file","path":"relative/path","content":"file contents"}}]`; do not shell-quote file bodies.
-8. Keep `commands` for shell tasks such as installs, builds, tests, inspection, and verification. Never use heredoc syntax. Use `ops` for file bodies.
+7. For routine file changes, prefer `ops`: `[{{"op":"write_file","path":"relative/path","content":"file contents"}}]`; do not shell-quote file bodies. Use append_file for appends, replace_in_file for exact literal edits, mkdir for directories, and delete_file for file deletion.
+8. Keep `commands` for shell tasks such as installs, builds, tests, inspection, and verification. Never use heredoc syntax. Use `ops` for file bodies and deterministic file mutations.
 9. Include exactly one final meaningful verification/build step such as `npm run build`, `pytest`, or `python -m pytest`.
 10. Verification must use `node -e`, `npm run build`, `python -m`, or a project test command; no `test -f`, `grep -q`, or `echo`.
 11. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. If scaffold is used, use `ops` to overwrite only needed JSX body/CSS files.
@@ -915,6 +918,7 @@ Examples:
             "workspace_root": ws_root,
             "project_dir": proj_dir,
             "workflow_guidance": workflow_guidance,
+            "supported_file_ops": render_supported_file_ops(),
         }
 
         return cls.render("task_planning", **context)

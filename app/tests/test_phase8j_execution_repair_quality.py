@@ -3,9 +3,9 @@
 import pytest
 
 from app.services.orchestration.execution.step_support import (
-    _is_prose_command,
     build_step_repair_prompt,
     _infer_debug_payload_from_text,
+    is_runnable_shell_command_fix,
 )
 from app.services.orchestration.debug_feedback import (
     DebugFeedbackEnvelope,
@@ -13,41 +13,40 @@ from app.services.orchestration.debug_feedback import (
     normalize_bounded_debug_repair_payload,
 )
 
-
-# --- _is_prose_command ---
+# --- typed command-fix validation ---
 
 
 @pytest.mark.parametrize(
     "cmd,expected",
     [
-        ("Replace the verification command with pytest tests/", True),
-        ("Replace verification command with pytest", True),
-        ("Update the import in app.py to use os.path", True),
-        ("Add the missing dependency to requirements.txt", True),
-        ("Remove the broken assertion from the test", True),
-        ("Change the function signature to accept kwargs", True),
-        ("Install the package using pip install requests", True),
-        ("Create the missing __init__.py file", True),
-        ("Edit the config to set DEBUG=False", True),
-        ("Fix the broken test", True),
-        ("Move the config to src/", True),
-        ("Set DEBUG=False in app.py", True),
-        ("Ensure the path exists before writing", True),
-        ("Rewrite the test to avoid subprocess usage", True),
-        # real shell commands — must NOT be flagged
-        ("pytest tests/", False),
-        ("python -m pytest app/tests/ -q", False),
-        ("npm run build", False),
-        ("pip install -r requirements.txt", False),
-        ("git add .", False),
-        ("mkdir -p src/components", False),
-        ("PYTHONPATH=. pytest app/tests/", False),
-        ("", False),
+        ("Replace the verification command with pytest tests/", False),
+        ("Replace verification command with pytest", False),
+        ("Update the import in app.py to use os.path", False),
+        ("Add the missing dependency to requirements.txt", False),
+        ("Remove the broken assertion from the test", False),
+        ("Change the function signature to accept kwargs", False),
+        ("Install the package using pip install requests", False),
+        ("Create the missing __init__.py file", False),
+        ("Edit the config to set DEBUG=False", False),
+        ("Fix the broken test", False),
+        ("Move the config to src/", False),
+        ("Set DEBUG=False in app.py", False),
+        ("Ensure the path exists before writing", False),
+        ("Rewrite the test to avoid subprocess usage", False),
         ("replace without capital", False),
+        # real shell commands
+        ("pytest tests/", True),
+        ("python -m pytest app/tests/ -q", True),
+        ("npm run build", True),
+        ("pip install -r requirements.txt", True),
+        ("git add .", True),
+        ("mkdir -p src/components", True),
+        ("PYTHONPATH=. pytest app/tests/", True),
+        ("", False),
     ],
 )
-def test_is_prose_command(cmd, expected):
-    assert _is_prose_command(cmd) is expected
+def test_command_fix_requires_runnable_shell_token(cmd, expected):
+    assert is_runnable_shell_command_fix(cmd) is expected
 
 
 # --- normalize_bounded_debug_repair_payload: prose command rejection ---
@@ -128,7 +127,7 @@ def test_infer_real_command_fix_stays():
     result = _infer_debug_payload_from_text(text, error_message="", step=None)
     # fix_type depends on markers, but if command_fix it must not be prose
     if result and result.get("fix_type") == "command_fix":
-        assert not _is_prose_command(result.get("fix", ""))
+        assert is_runnable_shell_command_fix(result.get("fix", ""))
 
 
 def test_step_repair_prompt_requires_runnable_commands_and_write_file_ops(tmp_path):

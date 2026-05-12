@@ -54,6 +54,7 @@ load_env() {
 prepare_logs() {
     mkdir -p "${LOG_DIR}"
     mkdir -p "${PID_DIR}"
+    mkdir -p "${PROJECT_ROOT}/checkpoints"
     mkdir -p "${QDRANT_BIN_DIR}"
     mkdir -p "${QDRANT_DATA_DIR}"
     mkdir -p "${QDRANT_SNAPSHOTS_DIR}"
@@ -61,6 +62,21 @@ prepare_logs() {
     : > "${LOG_DIR}/worker.log"
     : > "${LOG_DIR}/frontend.log"
     : > "${LOG_DIR}/qdrant.log"
+}
+
+normalize_runtime_ownership() {
+    local owner_uid
+    local owner_gid
+
+    owner_uid="$(stat -c '%u' "${PROJECT_ROOT}" 2>/dev/null || true)"
+    owner_gid="$(stat -c '%g' "${PROJECT_ROOT}" 2>/dev/null || true)"
+    [ -n "${owner_uid}" ] && [ -n "${owner_gid}" ] || return 0
+
+    chown -R "${owner_uid}:${owner_gid}" \
+        "${PROJECT_ROOT}/checkpoints" \
+        "${PID_DIR}" \
+        "${LOG_DIR}" \
+        2>/dev/null || true
 }
 
 cleanup_pid_file() {
@@ -360,6 +376,7 @@ start_workers() {
     # Load environment variables from .env file
     load_env
     echo -e "${GREEN}✅ Environment loaded for workers${NC}"
+    normalize_runtime_ownership
     
     # Kill any existing workers
     if check_process "celery -A app.celery_app worker"; then

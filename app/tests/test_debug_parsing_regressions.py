@@ -36,7 +36,7 @@ def test_debug_parser_recovers_prose_response_and_trims_bad_expected_files():
 
     assert success is True
     assert strategy == "Inferred structured debug payload from prose"
-    assert debug_data["fix_type"] == "command_fix"
+    assert debug_data["fix_type"] == "code_fix"
     assert "README.md" in debug_data["analysis"]
     assert debug_data["expected_files"] == ["package.json", "src"]
     assert debug_data["confidence"] == "HIGH"
@@ -61,6 +61,25 @@ def test_debug_parser_still_accepts_json_payloads():
     assert debug_data["fix_type"] == "command_fix"
     assert debug_data["fix"] == "rg --files . | head -50"
     assert strategy in {"", "Found JSON in text", "Extracted from mixed content"}
+
+
+def test_debug_parser_demotes_json_command_fix_with_non_runnable_fix():
+    raw_result = {
+        "output": (
+            '{"fix_type":"command_fix","analysis":"Need code edit",'
+            '"fix":"Update the test to use pytest","confidence":"MEDIUM"}'
+        )
+    }
+
+    success, debug_data, _ = coerce_debug_step_result(
+        raw_result,
+        error_message="pytest failed",
+        step={"commands": ["pytest"]},
+        extract_structured_text=extract_structured_text,
+    )
+
+    assert success is True
+    assert debug_data["fix_type"] == "code_fix"
 
 
 def test_plan_revision_prompt_serializes_original_plan():

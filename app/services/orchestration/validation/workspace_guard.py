@@ -12,6 +12,12 @@ from typing import Any, Dict, List, Optional
 
 from app.services.orchestration.persistence import record_live_log
 
+from app.services.orchestration.file_ops_contract import (
+    CONTENT_FILE_OPS,
+    SUPPORTED_FILE_OPS,
+    expected_file_op_keys,
+)
+
 
 class TaskWorkspaceViolationError(ValueError):
     """Raised when a planned command escapes the task workspace."""
@@ -472,27 +478,45 @@ def normalize_file_ops(
                 f"{step_label} op {op_index} must be an object"
             )
         op_name = str(operation.get("op") or "").strip()
-        if op_name != "write_file":
+        if op_name not in SUPPORTED_FILE_OPS:
             raise TaskWorkspaceViolationError(
                 f"{step_label} op {op_index} has unsupported op: {op_name or '<empty>'}"
+            )
+        expected_keys = expected_file_op_keys(op_name)
+        if set(operation.keys()) != expected_keys:
+            raise TaskWorkspaceViolationError(
+                f"{step_label} op {op_index} must contain keys: {sorted(expected_keys)}"
             )
         raw_path = str(operation.get("path") or "").strip()
         if not raw_path:
             raise TaskWorkspaceViolationError(
                 f"{step_label} op {op_index} missing path"
             )
-        content = operation.get("content")
-        if not isinstance(content, str):
-            raise TaskWorkspaceViolationError(
-                f"{step_label} op {op_index} content must be a string"
-            )
-        normalized_ops.append(
-            {
-                "op": "write_file",
-                "path": normalize_path_reference(raw_path, project_dir),
-                "content": content,
-            }
-        )
+        normalized_operation: Dict[str, Any] = {
+            "op": op_name,
+            "path": normalize_path_reference(raw_path, project_dir),
+        }
+        if op_name in CONTENT_FILE_OPS:
+            content = operation.get("content")
+            if not isinstance(content, str):
+                raise TaskWorkspaceViolationError(
+                    f"{step_label} op {op_index} content must be a string"
+                )
+            normalized_operation["content"] = content
+        elif op_name == "replace_in_file":
+            old = operation.get("old")
+            new = operation.get("new")
+            if not isinstance(old, str):
+                raise TaskWorkspaceViolationError(
+                    f"{step_label} op {op_index} old must be a string"
+                )
+            if not isinstance(new, str):
+                raise TaskWorkspaceViolationError(
+                    f"{step_label} op {op_index} new must be a string"
+                )
+            normalized_operation["old"] = old
+            normalized_operation["new"] = new
+        normalized_ops.append(normalized_operation)
     return normalized_ops
 
 

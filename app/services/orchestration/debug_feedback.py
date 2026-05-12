@@ -17,7 +17,9 @@ from sqlalchemy.orm import Session
 
 from app.models import LogEntry
 from app.services.orchestration.events.event_types import EventType
-from app.services.orchestration.execution.step_support import _is_prose_command
+from app.services.orchestration.execution.step_support import (
+    is_runnable_shell_command_fix,
+)
 from app.services.orchestration.persistence import append_orchestration_event
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 
@@ -345,7 +347,7 @@ def normalize_bounded_debug_repair_payload(
     if not isinstance(expected_files, list):
         expected_files = []
 
-    if _is_prose_command(command):
+    if not is_runnable_shell_command_fix(command):
         return None
 
     return {

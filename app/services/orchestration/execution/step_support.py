@@ -6,6 +6,8 @@ import asyncio
 import json
 import logging
 import re
+import shlex
+import shutil
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -14,29 +16,122 @@ from sqlalchemy.orm import Session
 from app.services.error_handler import error_handler
 from app.services.orchestration.context_assembly import render_adapted_runtime_prompt
 from app.services.orchestration.types import FailureEnvelope
+from app.services.orchestration.file_ops_contract import (
+    operation_has_file_op_path,
+    render_supported_file_ops,
+)
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 
-
-_PROSE_COMMAND_PATTERN = re.compile(
-    r"^(?:"
-    r"(?:Replace|Update|Add|Remove|Change|Install|Create|Edit|Modify|Delete|Ensure|Rewrite|Refactor|Fix|Move|Set)\s+(?:(?:the|a|an|your|this|that|all)\s+)?(?:command|verification|test|tests|config|file|dependency|import|assertion|function|package|path|code|setting|debug|src|app|broken|missing)\b"
-    r"|Set\s+[A-Za-z_][A-Za-z0-9_]*\s*="
-    r")"
+_SHELL_BUILTIN_COMMAND_TOKENS = frozenset(
+    {
+        "alias",
+        "bg",
+        "break",
+        "cd",
+        "command",
+        "continue",
+        "declare",
+        "dirs",
+        "echo",
+        "eval",
+        "exec",
+        "exit",
+        "export",
+        "false",
+        "fg",
+        "hash",
+        "jobs",
+        "let",
+        "local",
+        "popd",
+        "printf",
+        "pushd",
+        "pwd",
+        "read",
+        "readonly",
+        "return",
+        "set",
+        "shift",
+        "source",
+        "test",
+        "times",
+        "trap",
+        "true",
+        "type",
+        "ulimit",
+        "umask",
+        "unalias",
+        "unset",
+    }
+)
+_COMMON_PROJECT_COMMAND_TOKENS = frozenset(
+    {
+        "bash",
+        "bun",
+        "cargo",
+        "cat",
+        "chmod",
+        "cp",
+        "deno",
+        "git",
+        "go",
+        "grep",
+        "make",
+        "mkdir",
+        "mv",
+        "node",
+        "npm",
+        "npx",
+        "pip",
+        "pip3",
+        "pnpm",
+        "poetry",
+        "pytest",
+        "python",
+        "python3",
+        "rm",
+        "rg",
+        "ruff",
+        "sed",
+        "sh",
+        "touch",
+        "uv",
+        "yarn",
+    }
 )
 
 
-def _is_prose_command(cmd: str) -> bool:
-    return bool(_PROSE_COMMAND_PATTERN.match(str(cmd or "").strip()))
+def _shell_executable_token(command_text: str) -> Optional[str]:
+    try:
+        tokens = shlex.split(str(command_text or ""), posix=True)
+    except ValueError:
+        return None
+
+    for token in tokens:
+        if not token or "=" in token and token.split("=", 1)[0].isidentifier():
+            continue
+        return token
+    return None
+
+
+def is_runnable_shell_command_fix(command_text: str) -> bool:
+    token = _shell_executable_token(command_text)
+    if not token:
+        return False
+    if "/" in token:
+        return token.startswith("./") or token.startswith("scripts/")
+    return (
+        token in _SHELL_BUILTIN_COMMAND_TOKENS
+        or token in _COMMON_PROJECT_COMMAND_TOKENS
+        or shutil.which(token) is not None
+    )
 
 
 def step_needs_command_repair(step: Dict[str, Any]) -> bool:
     commands = step.get("commands", [])
     ops = step.get("ops", [])
     if isinstance(ops, list) and any(
-        isinstance(operation, dict)
-        and operation.get("op") == "write_file"
-        and str(operation.get("path") or "").strip()
-        for operation in ops
+        operation_has_file_op_path(operation) for operation in ops
     ):
         return False
     if not isinstance(commands, list):
@@ -84,9 +179,9 @@ Rules:
 2. Use relative paths only
 3. Do not use .., ~, or absolute paths
 4. commands must be a JSON array of runnable shell strings, not prose instructions
-5. commands may be empty only when ops writes files
-6. Optional ops may contain write_file objects: {{"op":"write_file","path":"relative/file","content":"..."}}
-7. Prefer ops write_file entries for file rewrites; do not use heredoc rewrites
+5. commands may be empty when ops contains deterministic file operations
+6. Optional ops may contain these operation objects: {render_supported_file_ops()}
+7. Prefer ops write_file entries for file rewrites, and use other ops for routine deterministic file changes; do not use heredoc rewrites
 8. verification and rollback may be null
 9. expected_files must be a JSON array
 10. Keep the step intent the same
@@ -284,6 +379,13 @@ def coerce_debug_step_result(
         output_text, context="debug"
     )
     if success and isinstance(parsed_data, dict):
+        if parsed_data.get(
+            "fix_type"
+        ) == "command_fix" and not is_runnable_shell_command_fix(
+            str(parsed_data.get("fix") or "")
+        ):
+            parsed_data = dict(parsed_data)
+            parsed_data["fix_type"] = "code_fix"
         return True, parsed_data, strategy_info
 
     inferred = _infer_debug_payload_from_text(
@@ -363,7 +465,7 @@ def _infer_debug_payload_from_text(
         fix_type = "code_fix"
 
     fix_str = (fix or "").strip()[:1200]
-    if fix_type == "command_fix" and _is_prose_command(fix_str):
+    if fix_type == "command_fix" and not is_runnable_shell_command_fix(fix_str):
         fix_type = "code_fix"
 
     payload: Dict[str, Any] = {
@@ -407,7 +509,7 @@ def _infer_debug_payload_from_text(
                     "Retry the step without expecting these files: "
                     + ", ".join(missing_expected_files)
                 )[:1200]
-            if payload["fix_type"] == "code_fix" and not _is_prose_command(
+            if payload["fix_type"] == "code_fix" and is_runnable_shell_command_fix(
                 payload.get("fix", "")
             ):
                 payload["fix_type"] = "command_fix"

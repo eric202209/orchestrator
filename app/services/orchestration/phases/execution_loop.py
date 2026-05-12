@@ -39,6 +39,7 @@ from app.services.orchestration.execution.execution_flow import (
 from app.services.orchestration.execution.step_support import (
     coerce_debug_step_result,
     coerce_execution_step_result,
+    is_runnable_shell_command_fix,
     repair_step_commands_with_self_correction,
     step_needs_command_repair,
 )
@@ -1764,10 +1765,19 @@ def execute_step_loop(
                 )
                 step_updated = False
                 if fix_type == "command_fix" and debug_data.get("fix"):
-                    step["commands"] = [
-                        debug_data.get("fix", step_commands[0] if step_commands else "")
-                    ]
-                    step_updated = True
+                    if not is_runnable_shell_command_fix(str(debug_data.get("fix"))):
+                        logger.warning(
+                            "[ORCHESTRATION] Ignoring non-runnable command_fix payload before retrying step %s",
+                            step_index + 1,
+                        )
+                        fix_type = "code_fix"
+                    else:
+                        step["commands"] = [
+                            debug_data.get(
+                                "fix", step_commands[0] if step_commands else ""
+                            )
+                        ]
+                        step_updated = True
                 if isinstance(debug_data.get("expected_files"), list):
                     step["expected_files"] = debug_data.get("expected_files", [])
                     step_updated = True

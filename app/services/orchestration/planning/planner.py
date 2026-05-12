@@ -24,6 +24,10 @@ from ..policy import (
     ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS,
 )
 from app.config import settings
+from app.services.orchestration.file_ops_contract import (
+    operation_has_file_op_path,
+    render_supported_file_ops,
+)
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 
 _logger = logging.getLogger(__name__)
@@ -917,11 +921,10 @@ class PlannerService:
             commands = step.get("commands", []) or []
             expected_files = step.get("expected_files", []) or []
             ops = step.get("ops") or []
-            has_write_file_ops = isinstance(ops, list) and any(
-                isinstance(operation, dict) and operation.get("op") == "write_file"
-                for operation in ops
+            has_file_ops = isinstance(ops, list) and any(
+                operation_has_file_op_path(operation) for operation in ops
             )
-            ops_only = has_write_file_ops and not any(
+            ops_only = has_file_ops and not any(
                 str(command or "").strip() for command in commands
             )
             for command in commands:
@@ -1046,11 +1049,11 @@ Rules:
 6. Each step must include these required keys, optional ops, and no other keys: step_number, description, commands, verification, rollback, expected_files
 7. `step_number` must be a unique integer and the sequence must be exactly 1, 2, 3...
 8. Do not omit keys and do not invent extra keys inside step objects except optional `ops`
-9. `commands` must be an array of strings; it may be empty when `ops` contains file writes
+9. `commands` must be an array of strings; it may be empty when `ops` contains deterministic file operations
 10. `verification` must be a single shell string or null
 11. `rollback` must be a single shell string or null
 12. expected_files must be relative file paths or []
-13. For file creation/overwrite, prefer `ops`: `[{{"op":"write_file","path":"relative/path","content":"file contents"}}]`; the executor writes content directly, so do not shell-quote file bodies.
+13. For file creation/overwrite, prefer `ops`: `[{{"op":"write_file","path":"relative/path","content":"file contents"}}]`; the executor writes content directly, so do not shell-quote file bodies. For routine workspace changes, `ops` supports: {render_supported_file_ops()}.
 14. Keep each command under 900 characters; commands describe runnable shell actions, not full source files
 15. Use commands for installs, builds, tests, inspection, and verification. Never use heredoc syntax. Use `ops` for file bodies.
 16. Avoid complex nested shell quoting; never emit `python -c` commands with f-strings, JSON strings, semicolons, or mixed quote escaping
@@ -1063,7 +1066,7 @@ Rules:
 22. Prefer package-manager/editor-friendly commands and one-file-at-a-time edits
 23. Preserve the JSON-only output mode from the first instruction.
 24. If the workspace already has files, start by inspecting or extending them before re-scaffolding
-25. For implementation steps that list expected_files, at least one command or `ops` write_file must materially write or edit file contents; do not use touch-only or placeholder-only steps
+25. For implementation steps that list expected_files, at least one command or file-mutating `ops` entry must materially write or edit file contents; do not use touch-only or placeholder-only steps
 26. Verification must use `node -e`, `npm run build`, `python -m`, or a project test command; no `test -f`, `grep -q`, or `echo`. For implementation-heavy steps, verification must prove behavior or content.
 27. Prefer an inspect -> edit -> verify sequence grounded in the current workspace
 28. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. If scaffold is used, use `ops` to overwrite only needed JSX body/CSS files.
@@ -1113,22 +1116,22 @@ Requirements:
 3. If a step will later use file-read or file-write tools, keep that path relative in the plan; execution will expand it under {display_project_dir}
 4. No long inline source dumps, no heredoc-heavy commands, no absolute paths, no .., no ~
 5. Keep each command under 900 characters and avoid embedding generated source bodies in the JSON
-6. Prefer `ops` write_file entries for file creation or overwrite instead of shell-quoting file content
-6a. No escaped apostrophes like `\\'` inside single-quoted strings; use `ops` write_file for content with quotes
+6. Prefer `ops` entries for routine file changes instead of shell-quoting file content; supported ops are: {render_supported_file_ops()}
+6a. No escaped apostrophes like `\\'` inside single-quoted strings; use `ops` write_file or append_file for content with quotes
 7. Each step must contain exactly these required keys, plus optional `ops`, and no other keys:
    step_number, description, commands, verification, rollback, expected_files
 8. step_number values must be unique integers and exactly 1, 2, 3... in order
-9. commands must be a JSON array of shell strings; it may be empty only when `ops` writes files
+9. commands must be a JSON array of shell strings; it may be empty when `ops` contains deterministic file operations
 10. verification and rollback must each be one shell string or null
 11. No background processes, &, nohup, disown, dev servers, or long commands.
 12. Keep each command short and machine-runnable
 13. If the workspace already has files, inspect or extend them before re-scaffolding
-14. For implementation steps with expected_files, include at least one command or `ops` write_file that writes real file content, not just mkdir/touch
+14. For implementation steps with expected_files, include at least one command or file-mutating `ops` entry that writes real file content, not just mkdir/touch
 15. Verification must use `node -e`, `npm run build`, `python -m`, or a project test command; no `test -f`, `grep -q`, or `echo`.
 16. Commands must be runnable shell, not pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
 17. Do not create or cd into a nested project folder; run directly from {display_project_dir}
 18. Include exactly one final meaningful verification/build step
-19. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. If scaffold is used, use `ops` write_file to overwrite only needed JSX body/CSS files.
+19. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. If scaffold is used, use `ops` write_file or replace_in_file to update only needed JSX body/CSS files.
 
 Invalid outputs:
 - Markdown fences around JSON

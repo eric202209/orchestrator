@@ -7,6 +7,8 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
+from .placeholder_policy import path_allows_placeholder_fixture_content
+
 SOURCE_EXTENSIONS = {
     ".py",
     ".js",
@@ -57,21 +59,10 @@ NESTED_PROJECT_STRUCTURAL_DIRS = {
     "lib",
     "spec",
 }
-PLACEHOLDER_FIXTURE_PATH_PARTS = {
-    "fixture",
-    "fixtures",
-    "sample",
-    "samples",
-    "test_data",
-    "testdata",
-}
 
 
 def _path_allows_fixture_placeholder_content(path: Path) -> bool:
-    parts = {part.lower() for part in path.parts}
-    if parts.intersection(PLACEHOLDER_FIXTURE_PATH_PARTS):
-        return True
-    return path.name.lower().startswith(("sample.", "fixture."))
+    return path_allows_placeholder_fixture_content(path)
 
 
 def _path_allows_todo_fixme_literals(path: Path) -> bool:

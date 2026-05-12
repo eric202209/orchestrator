@@ -11,6 +11,10 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from app.models import LogEntry
+from app.services.orchestration.file_ops_contract import (
+    CONTENT_FILE_OPS,
+    SUPPORTED_FILE_OPS,
+)
 
 
 class ExecutorService:
@@ -296,12 +300,12 @@ class ExecutorService:
     _MIN_MEANINGFUL_BYTES = 4  # shared with patch_04
 
     @staticmethod
-    def _resolve_write_file_path(project_dir: Path, raw_path: str) -> Path:
+    def _resolve_op_path(project_dir: Path, raw_path: str, op_name: str) -> Path:
         path_text = str(raw_path or "").strip().strip("'\"\\")
         if not path_text:
-            raise ValueError("write_file path is empty")
+            raise ValueError(f"{op_name} path is empty")
         if path_text.startswith("~"):
-            raise ValueError(f"write_file path uses home directory: {path_text}")
+            raise ValueError(f"{op_name} path uses home directory: {path_text}")
 
         candidate = Path(path_text)
         resolved = (
@@ -312,9 +316,13 @@ class ExecutorService:
         normalized_project_dir = project_dir.resolve()
         if not resolved.is_relative_to(normalized_project_dir):
             raise ValueError(
-                f"write_file path escapes task workspace: {path_text} -> {resolved}"
+                f"{op_name} path escapes task workspace: {path_text} -> {resolved}"
             )
         return resolved
+
+    @staticmethod
+    def _resolve_write_file_path(project_dir: Path, raw_path: str) -> Path:
+        return ExecutorService._resolve_op_path(project_dir, raw_path, "write_file")
 
     @staticmethod
     def execute_file_ops(project_dir: Path, ops: Any) -> Dict[str, Any]:
@@ -344,23 +352,18 @@ class ExecutorService:
                     "files_changed": files_changed,
                     "output": f"op {index} must be an object",
                 }
-            if operation.get("op") != "write_file":
+            op_name = operation.get("op")
+            if op_name not in SUPPORTED_FILE_OPS:
                 return {
                     "success": False,
                     "files_changed": files_changed,
-                    "output": f"op {index} unsupported op: {operation.get('op')}",
-                }
-            content = operation.get("content")
-            if not isinstance(content, str):
-                return {
-                    "success": False,
-                    "files_changed": files_changed,
-                    "output": f"op {index} content must be a string",
+                    "output": f"op {index} unsupported op: {op_name}",
                 }
             try:
-                target = ExecutorService._resolve_write_file_path(
+                target = ExecutorService._resolve_op_path(
                     normalized_project_dir,
                     str(operation.get("path") or ""),
+                    str(op_name),
                 )
             except ValueError as exc:
                 return {
@@ -368,11 +371,113 @@ class ExecutorService:
                     "files_changed": files_changed,
                     "output": str(exc),
                 }
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
             relative = target.relative_to(normalized_project_dir).as_posix()
+
+            if op_name == "mkdir":
+                target.mkdir(parents=True, exist_ok=True)
+                output_lines.append(f"mkdir {relative}")
+                continue
+
+            if op_name == "delete_file":
+                if not target.exists():
+                    return {
+                        "success": False,
+                        "files_changed": files_changed,
+                        "output": f"delete_file target does not exist: {relative}",
+                    }
+                if not target.is_file():
+                    return {
+                        "success": False,
+                        "files_changed": files_changed,
+                        "output": f"delete_file target is not a file: {relative}",
+                    }
+                target.unlink()
+                files_changed.append(relative)
+                output_lines.append(f"delete_file {relative}")
+                continue
+
+            if op_name in CONTENT_FILE_OPS:
+                content = operation.get("content")
+                if not isinstance(content, str):
+                    return {
+                        "success": False,
+                        "files_changed": files_changed,
+                        "output": f"op {index} content must be a string",
+                    }
+                if op_name == "write_file":
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(content, encoding="utf-8")
+                    output_lines.append(f"write_file {relative} ({len(content)} chars)")
+                else:
+                    if not target.parent.exists():
+                        return {
+                            "success": False,
+                            "files_changed": files_changed,
+                            "output": f"append_file parent directory does not exist: {target.parent.relative_to(normalized_project_dir).as_posix()}",
+                        }
+                    if not target.parent.is_dir():
+                        return {
+                            "success": False,
+                            "files_changed": files_changed,
+                            "output": f"append_file parent is not a directory: {target.parent.relative_to(normalized_project_dir).as_posix()}",
+                        }
+                    with target.open("a", encoding="utf-8") as handle:
+                        handle.write(content)
+                    output_lines.append(
+                        f"append_file {relative} ({len(content)} chars)"
+                    )
+                files_changed.append(relative)
+                continue
+
+            old = operation.get("old")
+            new = operation.get("new")
+            if not isinstance(old, str):
+                return {
+                    "success": False,
+                    "files_changed": files_changed,
+                    "output": f"op {index} old must be a string",
+                }
+            if not isinstance(new, str):
+                return {
+                    "success": False,
+                    "files_changed": files_changed,
+                    "output": f"op {index} new must be a string",
+                }
+            if old == "":
+                return {
+                    "success": False,
+                    "files_changed": files_changed,
+                    "output": f"replace_in_file old text is empty: {relative}",
+                }
+            if not target.exists():
+                return {
+                    "success": False,
+                    "files_changed": files_changed,
+                    "output": f"replace_in_file target does not exist: {relative}",
+                }
+            if not target.is_file():
+                return {
+                    "success": False,
+                    "files_changed": files_changed,
+                    "output": f"replace_in_file target is not a file: {relative}",
+                }
+            original = target.read_text(encoding="utf-8")
+            occurrence_count = original.count(old)
+            if occurrence_count == 0:
+                return {
+                    "success": False,
+                    "files_changed": files_changed,
+                    "output": f"replace_in_file old text not found in {relative}",
+                }
+            if occurrence_count > 1:
+                return {
+                    "success": False,
+                    "files_changed": files_changed,
+                    "output": f"replace_in_file old text is ambiguous in {relative}: {occurrence_count} occurrences",
+                }
+            target.write_text(original.replace(old, new, 1), encoding="utf-8")
             files_changed.append(relative)
-            output_lines.append(f"write_file {relative} ({len(content)} chars)")
+            output_lines.append(f"replace_in_file {relative} (1 replacement)")
 
         return {
             "success": True,

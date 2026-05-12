@@ -189,7 +189,8 @@ def test_initial_planning_prompt_contains_valid_json_contract_example():
     assert "Prefer scaffold: `npm create vite@latest . -- --template react`" in prompt
     assert "If scaffold is used, use `ops`" in prompt
     assert "Never use heredoc syntax" in prompt
-    assert "Optional `ops` may contain only `write_file` operations" in prompt
+    assert "Optional `ops` may contain these operations" in prompt
+    assert "append_file, delete_file, mkdir, replace_in_file, write_file" in prompt
     assert '"op": "write_file"' in prompt
     assert '"commands": []' in prompt
     assert "no extra keys except optional `ops`" in prompt
