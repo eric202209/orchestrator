@@ -6,6 +6,7 @@ from app.services.orchestration.execution.step_support import (
     build_step_repair_prompt,
     _infer_debug_payload_from_text,
     is_runnable_shell_command_fix,
+    normalize_runnable_shell_command_fix,
 )
 from app.services.orchestration.execution.execution_flow import stub_expected_files
 from app.services.orchestration.debug_feedback import (
@@ -129,6 +130,15 @@ def test_infer_real_command_fix_stays():
     # fix_type depends on markers, but if command_fix it must not be prose
     if result and result.get("fix_type") == "command_fix":
         assert is_runnable_shell_command_fix(result.get("fix", ""))
+
+
+def test_command_fix_strips_short_run_label_before_validation():
+    command = "Run: cd /tmp/example && node -e \"console.log('patched')\""
+
+    assert normalize_runnable_shell_command_fix(command) == (
+        "cd /tmp/example && node -e \"console.log('patched')\""
+    )
+    assert is_runnable_shell_command_fix(command) is True
 
 
 def test_step_repair_prompt_requires_runnable_commands_and_write_file_ops(tmp_path):

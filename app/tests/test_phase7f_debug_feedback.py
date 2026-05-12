@@ -116,6 +116,7 @@ def _make_run_context(
     runtime,
     used_debug_repair=False,
     expected_files=None,
+    step_overrides=None,
 ):
     project_dir, project, session, task, execution = _seed_execution(
         db_session, tmp_path
@@ -131,22 +132,23 @@ def _make_run_context(
     )
     link.status = TaskStatus.RUNNING
     db_session.commit()
+    step = {
+        "step_number": 1,
+        "description": "Run tests",
+        "commands": ["pytest tests/test_demo.py"],
+        "verification": "",
+        "rollback": None,
+        "expected_files": list(expected_files or []),
+    }
+    if step_overrides:
+        step.update(step_overrides)
     state = OrchestrationState(
         session_id=str(session.id),
         task_description="Run a pytest-backed repair task",
         project_name=project.name,
         project_context="",
         task_id=task.id,
-        plan=[
-            {
-                "step_number": 1,
-                "description": "Run tests",
-                "commands": ["pytest tests/test_demo.py"],
-                "verification": "",
-                "rollback": None,
-                "expected_files": list(expected_files or []),
-            }
-        ],
+        plan=[step],
         reasoning_artifact={
             "intent": "Run tests and repair a simple runtime failure",
             "workspace_facts": [f"project_dir={project_dir}"],
@@ -417,6 +419,126 @@ def test_phase7f_valid_bounded_repair_is_retried_and_succeeds(db_session, tmp_pa
         "python3 -c \"print('fixed')\""
     ]
     assert ctx.orchestration_state.current_step_index == 1
+
+
+def test_command_fix_replaces_failed_structured_ops_before_retry(db_session, tmp_path):
+    runtime = _FakeRuntime(
+        [
+            {
+                "output": json.dumps(
+                    {
+                        "fix_type": "command_fix",
+                        "analysis": "Run a direct JSON update instead of retrying the stale replace op.",
+                        "fix": "node -e \"console.log('patched')\"",
+                        "confidence": "HIGH",
+                    }
+                )
+            },
+            {
+                "status": "success",
+                "output": "patched",
+                "files_changed": ["package.json"],
+            },
+        ]
+    )
+    ctx, _execution = _make_run_context(
+        db_session,
+        tmp_path,
+        runtime=runtime,
+        step_overrides={
+            "description": "Update package.json",
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "package.json",
+                    "old": '"version": "1.0.0"',
+                    "new": '"version": "1.1.0"',
+                }
+            ],
+            "commands": [],
+            "expected_files": ["package.json"],
+        },
+    )
+    (ctx.orchestration_state.project_dir / "package.json").write_text(
+        '{"name":"demo","version":"1.1.0"}\n',
+        encoding="utf-8",
+    )
+
+    result = execute_step_loop(
+        ctx=ctx,
+        extract_structured_text=_extract_structured_text,
+        normalize_step=_normalize_step,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: [],
+        workspace_violation_error_cls=RuntimeError,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        record_live_log_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "completed"
+    repaired_step = ctx.orchestration_state.plan[0]
+    assert repaired_step["commands"] == ["node -e \"console.log('patched')\""]
+    assert repaired_step.get("ops") == []
+
+
+def test_non_actionable_code_fix_for_structured_ops_is_rejected(db_session, tmp_path):
+    runtime = _FakeRuntime(
+        [
+            {
+                "output": json.dumps(
+                    {
+                        "fix_type": "code_fix",
+                        "analysis": "The JSON needs a scripts field.",
+                        "fix": "Edit package.json to add scripts.test.",
+                        "confidence": "MEDIUM",
+                    }
+                )
+            },
+            {
+                "status": "success",
+                "output": "this retry should not run",
+            },
+        ]
+    )
+    ctx, _execution = _make_run_context(
+        db_session,
+        tmp_path,
+        runtime=runtime,
+        step_overrides={
+            "description": "Update package.json",
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "package.json",
+                    "old": '"version": "1.0.0"',
+                    "new": '"version": "1.1.0"',
+                }
+            ],
+            "commands": [],
+            "expected_files": ["package.json"],
+        },
+    )
+    (ctx.orchestration_state.project_dir / "package.json").write_text(
+        '{"name":"demo","version":"1.1.0"}\n',
+        encoding="utf-8",
+    )
+
+    result = execute_step_loop(
+        ctx=ctx,
+        extract_structured_text=_extract_structured_text,
+        normalize_step=_normalize_step,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: [],
+        workspace_violation_error_cls=RuntimeError,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        record_live_log_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result == {
+        "status": "failed",
+        "reason": "non_actionable_code_fix_for_structured_ops",
+    }
+    assert len(runtime.prompts) == 1
+    assert ctx.task.status == TaskStatus.FAILED
+    assert "not actionable" in ctx.task.error_message
 
 
 def test_phase7g_diff_repair_prompt_is_used_when_capsule_available(

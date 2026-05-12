@@ -82,6 +82,27 @@ def test_debug_parser_demotes_json_command_fix_with_non_runnable_fix():
     assert debug_data["fix_type"] == "code_fix"
 
 
+def test_debug_parser_promotes_json_code_fix_with_runnable_fix():
+    raw_result = {
+        "output": (
+            '{"fix_type":"code_fix","analysis":"Use a direct package update",'
+            '"fix":"cd /tmp/project && node -e \\"console.log(1)\\"",'
+            '"confidence":"HIGH"}'
+        )
+    }
+
+    success, debug_data, _ = coerce_debug_step_result(
+        raw_result,
+        error_message="replace_in_file old text not found",
+        step={"ops": [{"op": "replace_in_file", "path": "package.json"}]},
+        extract_structured_text=extract_structured_text,
+    )
+
+    assert success is True
+    assert debug_data["fix_type"] == "command_fix"
+    assert debug_data["fix"] == 'cd /tmp/project && node -e "console.log(1)"'
+
+
 def test_plan_revision_prompt_serializes_original_plan():
     prompt = PromptTemplates.build_plan_revision_prompt(
         original_plan=[

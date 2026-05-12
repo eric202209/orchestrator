@@ -1748,6 +1748,80 @@ def execute_step_loop(
                 continue
 
             if fix_type in {"code_fix", "command_fix"}:
+                debug_files_changed = debug_result.get("files_changed")
+                debug_changed_files = (
+                    debug_files_changed if isinstance(debug_files_changed, list) else []
+                )
+                structured_ops_present = isinstance(step.get("ops"), list) and bool(
+                    step.get("ops")
+                )
+                actionable_step_fields = any(
+                    key in debug_data for key in ("expected_files", "verification")
+                )
+                if (
+                    fix_type == "code_fix"
+                    and structured_ops_present
+                    and not debug_changed_files
+                    and not actionable_step_fields
+                ):
+                    reason = "non_actionable_code_fix_for_structured_ops"
+                    logger.warning(
+                        "[ORCHESTRATION] Rejecting non-actionable code_fix before retrying structured ops for step %s",
+                        step_index + 1,
+                    )
+                    emit_live(
+                        "ERROR",
+                        "[ORCHESTRATION] Debug repair was not actionable for structured file operations; stopping instead of retrying the same failed ops",
+                        metadata={
+                            "phase": "debugging",
+                            "step_index": step_index + 1,
+                            "reason": reason,
+                            "fix_type": fix_type,
+                            "structured_ops_present": True,
+                        },
+                    )
+                    orchestration_state.status = OrchestrationStatus.ABORTED
+                    orchestration_state.abort_reason = (
+                        "Debug repair was not actionable for structured file operations"
+                    )
+                    task.status = TaskStatus.FAILED
+                    task.error_message = orchestration_state.abort_reason
+                    if session_task_link:
+                        session_task_link.status = TaskStatus.FAILED
+                        session_task_link.completed_at = datetime.now(timezone.utc)
+                    db.commit()
+                    try:
+                        phase_finished_event = append_orchestration_event(
+                            project_dir=orchestration_state.project_dir,
+                            session_id=session_id,
+                            task_id=task_id,
+                            event_type=EventType.REPAIR_REJECTED,
+                            parent_event_id=(debugging_phase_event or {}).get(
+                                "event_id"
+                            ),
+                            details={
+                                "phase": "debugging",
+                                "status": "repair_rejected",
+                                "step_index": step_index + 1,
+                                "reason": reason,
+                                "fix_type": fix_type,
+                                "structured_ops_present": True,
+                            },
+                        )
+                        write_orchestration_state_snapshot(
+                            project_dir=orchestration_state.project_dir,
+                            session_id=session_id,
+                            task_id=task_id,
+                            orchestration_state=orchestration_state,
+                            trigger="repair_rejected",
+                            related_event_id=phase_finished_event.get("event_id"),
+                        )
+                    except Exception:
+                        pass
+                    restore_workspace_snapshot_if_needed(reason)
+                    write_project_state_snapshot_fn(db, project, task, session_id)
+                    return {"status": "failed", "reason": reason}
+
                 logger.info(
                     "[ORCHESTRATION] Applying %s before retrying step %s",
                     fix_type,
@@ -1778,6 +1852,8 @@ def execute_step_loop(
                                 "fix", step_commands[0] if step_commands else ""
                             )
                         ]
+                        if isinstance(step.get("ops"), list):
+                            step["ops"] = []
                         step_updated = True
                 if isinstance(debug_data.get("expected_files"), list):
                     step["expected_files"] = debug_data.get("expected_files", [])

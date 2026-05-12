@@ -102,7 +102,10 @@ _COMMON_PROJECT_COMMAND_TOKENS = frozenset(
 
 def _shell_executable_token(command_text: str) -> Optional[str]:
     try:
-        tokens = shlex.split(str(command_text or ""), posix=True)
+        tokens = shlex.split(
+            normalize_runnable_shell_command_fix(str(command_text or "")),
+            posix=True,
+        )
     except ValueError:
         return None
 
@@ -111,6 +114,25 @@ def _shell_executable_token(command_text: str) -> Optional[str]:
             continue
         return token
     return None
+
+
+def normalize_runnable_shell_command_fix(command_text: str) -> str:
+    command = str(command_text or "").strip()
+    command = re.sub(r"^```(?:bash|sh|shell)?\s*", "", command, flags=re.IGNORECASE)
+    command = re.sub(r"\s*```$", "", command).strip()
+    command = re.sub(
+        r"^(?:run|command|fix|execute)\s*:\s*",
+        "",
+        command,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
+    if (
+        (command.startswith("`") and command.endswith("`"))
+        or (command.startswith('"') and command.endswith('"'))
+    ) and len(command) >= 2:
+        command = command[1:-1].strip()
+    return command
 
 
 def is_runnable_shell_command_fix(command_text: str) -> bool:
@@ -377,13 +399,23 @@ def coerce_debug_step_result(
         output_text, context="debug"
     )
     if success and isinstance(parsed_data, dict):
-        if parsed_data.get(
-            "fix_type"
-        ) == "command_fix" and not is_runnable_shell_command_fix(
-            str(parsed_data.get("fix") or "")
-        ):
+        if parsed_data.get("fix_type") == "command_fix":
             parsed_data = dict(parsed_data)
-            parsed_data["fix_type"] = "code_fix"
+            fix_command = normalize_runnable_shell_command_fix(
+                str(parsed_data.get("fix") or "")
+            )
+            if is_runnable_shell_command_fix(fix_command):
+                parsed_data["fix"] = fix_command
+            else:
+                parsed_data["fix_type"] = "code_fix"
+        elif parsed_data.get("fix_type") == "code_fix":
+            fix_command = normalize_runnable_shell_command_fix(
+                str(parsed_data.get("fix") or "")
+            )
+            if is_runnable_shell_command_fix(fix_command):
+                parsed_data = dict(parsed_data)
+                parsed_data["fix_type"] = "command_fix"
+                parsed_data["fix"] = fix_command
         return True, parsed_data, strategy_info
 
     inferred = _infer_debug_payload_from_text(
@@ -463,8 +495,12 @@ def _infer_debug_payload_from_text(
         fix_type = "code_fix"
 
     fix_str = (fix or "").strip()[:1200]
-    if fix_type == "command_fix" and not is_runnable_shell_command_fix(fix_str):
-        fix_type = "code_fix"
+    if fix_type == "command_fix":
+        normalized_fix_str = normalize_runnable_shell_command_fix(fix_str)
+        if is_runnable_shell_command_fix(normalized_fix_str):
+            fix_str = normalized_fix_str[:1200]
+        else:
+            fix_type = "code_fix"
 
     payload: Dict[str, Any] = {
         "fix_type": fix_type,

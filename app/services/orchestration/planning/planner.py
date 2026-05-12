@@ -43,7 +43,6 @@ MINIMAL_PLANNING_PROMPT_TOKEN_DIAGNOSTIC_THRESHOLD = 6000
 PLANNING_REPAIR_ALLOWED_KNOWLEDGE_TYPES = {
     "failure_memory",
     "debug_case",
-    "format_guide",
 }
 DIRECT_PLANNING_PROMPT_CHAR_CAP = 12000
 STRUCTURALLY_EMPTY_FILENAMES = frozenset({"__init__.py", "__init__.pyi", ".gitkeep"})
@@ -138,6 +137,8 @@ def _render_knowledge_block(knowledge_context: Any) -> str:
 
 def _render_repair_knowledge_block(knowledge_context: Any) -> str:
     if not knowledge_context or not getattr(knowledge_context, "retrieved_items", None):
+        return ""
+    if not bool(getattr(knowledge_context, "matched_failure_memory", False)):
         return ""
 
     lines = [
