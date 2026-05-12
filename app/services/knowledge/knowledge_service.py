@@ -40,6 +40,20 @@ _TYPE_RANK: dict[str, int] = {
 }
 
 
+def _knowledge_type_values(knowledge_types: list[str]) -> list[str]:
+    return [str(getattr(item, "value", item)) for item in knowledge_types]
+
+
+def _applies_to_candidates(trigger_phase: str, knowledge_types: list[str]) -> list[str]:
+    candidates = [trigger_phase, "all"]
+    type_values = set(_knowledge_type_values(knowledge_types))
+    if trigger_phase == "validation" and type_values.intersection(
+        {KnowledgeType.failure_memory.value, KnowledgeType.debug_case.value}
+    ):
+        candidates.insert(1, "failure")
+    return list(dict.fromkeys(candidates))
+
+
 class KnowledgeService:
     def __init__(
         self,
@@ -169,11 +183,17 @@ class KnowledgeService:
         if knowledge_types:
             conditions.append(
                 FieldCondition(
-                    key="knowledge_type", match=MatchAny(any=knowledge_types)
+                    key="knowledge_type",
+                    match=MatchAny(any=_knowledge_type_values(knowledge_types)),
                 )
             )
         conditions.append(
-            FieldCondition(key="applies_to", match=MatchAny(any=[trigger_phase, "all"]))
+            FieldCondition(
+                key="applies_to",
+                match=MatchAny(
+                    any=_applies_to_candidates(trigger_phase, knowledge_types)
+                ),
+            )
         )
         result = self._client.query_points(
             collection_name=self._collection,
@@ -243,14 +263,20 @@ class KnowledgeService:
             return self._build_context([], None, trigger_phase, reason)
         rows = (
             db.query(KnowledgeItem)
-            .filter(KnowledgeItem.knowledge_type.in_(knowledge_types))
+            .filter(
+                KnowledgeItem.knowledge_type.in_(
+                    _knowledge_type_values(knowledge_types)
+                )
+            )
             .order_by(KnowledgeItem.priority.desc(), KnowledgeItem.updated_at.desc())
             .all()
         )
+        applies_to_candidates = _applies_to_candidates(trigger_phase, knowledge_types)
         filtered = [
             r
             for r in rows
-            if r.applies_to and (trigger_phase in r.applies_to or "all" in r.applies_to)
+            if r.applies_to
+            and any(phase in r.applies_to for phase in applies_to_candidates)
         ][:top_k]
         scored = [(item, 0.3) for item in filtered]
         scored = self._apply_budget(scored, None)

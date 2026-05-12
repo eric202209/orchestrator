@@ -23,6 +23,7 @@ from app.services.name_formatter import humanize_display_name
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.persistence import append_orchestration_event
 from app.services.orchestration.context_assembly import render_adapted_runtime_prompt
+from app.services.authz import project_access_filter
 from app.services.session.session_runtime_service import ensure_task_workspace
 from app.services.task_execution_service import create_task_execution
 from app.services.task_service import TaskService
@@ -410,7 +411,11 @@ def get_all_tasks(
     current_user=Depends(get_current_active_user),
 ):
     """Get all tasks across all projects"""
-    query = db.query(Task)
+    query = (
+        db.query(Task)
+        .join(Project, Project.id == Task.project_id)
+        .filter(Project.deleted_at.is_(None), project_access_filter(db, current_user))
+    )
 
     if status:
         try:

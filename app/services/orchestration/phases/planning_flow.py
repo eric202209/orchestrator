@@ -1196,7 +1196,11 @@ def execute_planning_phase(
                 validation_knowledge_ctx = _retrieve_knowledge(
                     ctx,
                     trigger_phase="validation",
-                    knowledge_types=["format_guide", "debug_case"],
+                    knowledge_types=[
+                        "failure_memory",
+                        "format_guide",
+                        "debug_case",
+                    ],
                 )
                 if validation_knowledge_ctx:
                     _log_knowledge_usage(
@@ -1864,12 +1868,23 @@ def _retrieve_knowledge(
             collection_name=settings.QDRANT_COLLECTION_NAME,
             embedding_model=settings.OPENAI_EMBEDDING_MODEL,
         )
-        return svc.retrieve(
+        knowledge_ctx = svc.retrieve(
             query=ctx.prompt or "",
             trigger_phase=trigger_phase,
             knowledge_types=knowledge_types,
             db=ctx.db,
         )
+        ctx.logger.info(
+            "[KNOWLEDGE] Retrieval phase=%s types=%s items=%d reason=%s "
+            "matched_failure_memory=%s recommended_action=%s",
+            trigger_phase,
+            ",".join(knowledge_types),
+            len(knowledge_ctx.retrieved_items),
+            knowledge_ctx.retrieval_reason,
+            knowledge_ctx.matched_failure_memory,
+            knowledge_ctx.recommended_action.value,
+        )
+        return knowledge_ctx
     except Exception as exc:
         ctx.logger.debug("[KNOWLEDGE] Retrieval skipped (%s): %s", trigger_phase, exc)
         return None

@@ -109,6 +109,27 @@ def test_applies_to_planning_not_returned_for_failure(svc, db):
     assert not any(ref.title == "Planning Only" for ref in ctx.retrieved_items)
 
 
+def test_validation_retrieval_can_use_failure_memory_from_sqlite_fallback(svc, db):
+    item = _make_item(
+        db,
+        title="Package Metadata Planning Repair Failure",
+        content="Prior repair failed because the final verification step had no command.",
+        applies_to=["failure"],
+        knowledge_type=KnowledgeType.failure_memory,
+        priority=10,
+    )
+    with patch.object(svc, "_has_indexed_points", return_value=False):
+        ctx = svc.retrieve(
+            query="plan validation failed after repair",
+            trigger_phase="validation",
+            knowledge_types=[KnowledgeType.failure_memory, KnowledgeType.debug_case],
+            db=db,
+        )
+    assert any(ref.id == item.id for ref in ctx.retrieved_items)
+    assert ctx.trigger_phase == "validation"
+    assert ctx.matched_failure_memory is True
+
+
 def test_max_items_budget_enforced(svc, db):
     items = []
     for i in range(5):
