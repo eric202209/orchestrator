@@ -68,6 +68,7 @@ from app.services.orchestration.validation.parsing import (
     build_json_compliance_retry_prompt,
 )
 from app.services.orchestration.validation.workspace_guard import (
+    TaskOperationContractViolation,
     compute_workspace_checksum,
     detect_scope_violations,
     summarize_step_changes,
@@ -1826,6 +1827,37 @@ def execute_step_loop(
                     pass
                 continue
 
+        except TaskOperationContractViolation as exc:
+            orchestration_state.status = OrchestrationStatus.ABORTED
+            orchestration_state.abort_reason = f"Operation contract violation: {exc}"
+            task.status = TaskStatus.FAILED
+            task.error_message = str(exc)
+            db.commit()
+            try:
+                phase_finished_event = append_orchestration_event(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    event_type=EventType.PHASE_FINISHED,
+                    parent_event_id=(debugging_phase_event or {}).get("event_id"),
+                    details={
+                        "phase": "debugging",
+                        "status": "op_contract_violation",
+                        "step_index": step_index + 1,
+                    },
+                )
+                write_orchestration_state_snapshot(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    orchestration_state=orchestration_state,
+                    trigger="phase_finished",
+                    related_event_id=phase_finished_event.get("event_id"),
+                )
+            except Exception:
+                pass
+            restore_workspace_snapshot_if_needed("operation contract violation")
+            return {"status": "failed", "reason": "op_contract_violation"}
         except workspace_violation_error_cls as exc:
             orchestration_state.status = OrchestrationStatus.ABORTED
             orchestration_state.abort_reason = f"Workspace isolation violation: {exc}"

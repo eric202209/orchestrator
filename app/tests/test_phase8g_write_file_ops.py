@@ -10,6 +10,7 @@ from app.services.orchestration.execution.step_support import (
 from app.services.orchestration.planning.planner import PlannerService
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.orchestration.file_ops_contract import (
+    normalize_replace_in_file_aliases,
     operation_has_file_op_path,
     validate_file_op_shape,
 )
@@ -17,6 +18,7 @@ from app.services.orchestration.validation.placeholder_policy import (
     path_allows_placeholder_fixture_content,
 )
 from app.services.orchestration.validation.workspace_guard import (
+    TaskOperationContractViolation,
     TaskWorkspaceViolationError,
     normalize_step,
 )
@@ -126,7 +128,7 @@ def test_phase8k_plan_schema_accepts_expanded_file_ops():
     assert result == {"valid": True, "errors": [], "details": {}}
 
 
-def test_phase8k_plan_schema_rejects_unknown_op_shape():
+def test_phase8m_plan_schema_allows_unknown_op_metadata():
     step = _ops_only_step()
     step["ops"] = [
         {"op": "mkdir", "path": "src", "content": "unexpected"},
@@ -134,17 +136,87 @@ def test_phase8k_plan_schema_rejects_unknown_op_shape():
 
     result = ValidatorService.validate_plan_schema([step])
 
-    assert result["valid"] is False
-    assert result["details"]["invalid_ops_steps"] == [1]
+    assert result == {"valid": True, "errors": [], "details": {}}
 
 
-def test_phase8l_file_op_contract_rejects_extra_keys():
+def test_phase8l_file_op_contract_strips_extra_keys():
     assert validate_file_op_shape({"op": "mkdir", "path": "src"}) is True
     assert (
         validate_file_op_shape({"op": "mkdir", "path": "src", "content": "unexpected"})
-        is False
+        is True
     )
     assert operation_has_file_op_path({"op": "delete_file", "path": "tmp/out.txt"})
+
+
+def test_phase8m_replace_in_file_aliases_normalize_to_contract():
+    assert normalize_replace_in_file_aliases(
+        {
+            "op": "replace_in_file",
+            "path": "README.md",
+            "search": "draft",
+            "replace": "ready",
+            "comment": "model metadata",
+        }
+    ) == {
+        "op": "replace_in_file",
+        "path": "README.md",
+        "old": "draft",
+        "new": "ready",
+    }
+    assert normalize_replace_in_file_aliases(
+        {
+            "op": "replace_in_file",
+            "path": "README.md",
+            "match": "draft",
+            "replace": "ready",
+        }
+    ) == {
+        "op": "replace_in_file",
+        "path": "README.md",
+        "old": "draft",
+        "new": "ready",
+    }
+    assert normalize_replace_in_file_aliases(
+        {
+            "op": "replace_in_file",
+            "path": "README.md",
+            "pattern": "draft",
+            "replacement": "ready",
+        }
+    ) == {
+        "op": "replace_in_file",
+        "path": "README.md",
+        "old": "draft",
+        "new": "ready",
+    }
+    assert normalize_replace_in_file_aliases(
+        {
+            "op": "replace_in_file",
+            "path": "README.md",
+            "old_string": "draft",
+            "new_string": "ready",
+        }
+    ) == {
+        "op": "replace_in_file",
+        "path": "README.md",
+        "old": "draft",
+        "new": "ready",
+    }
+
+
+def test_phase8m_replace_in_file_conflicting_aliases_do_not_normalize():
+    assert (
+        validate_file_op_shape(
+            {
+                "op": "replace_in_file",
+                "path": "README.md",
+                "old": "draft",
+                "search": "alpha",
+                "new": "ready",
+            }
+        )
+        is False
+    )
 
 
 def test_phase8l_placeholder_fixture_policy_is_shared():
@@ -188,6 +260,41 @@ def test_phase8k_normalize_step_preserves_expanded_ops(tmp_path):
         {"op": "replace_in_file", "path": "README.md", "old": "Usage", "new": "API"},
         {"op": "delete_file", "path": "tmp/output.txt"},
     ]
+
+
+def test_phase8m_normalize_step_accepts_replace_aliases_and_strips_metadata(tmp_path):
+    step = _ops_only_step()
+    step["ops"] = [
+        {
+            "op": "replace_in_file",
+            "path": "./README.md",
+            "search": "draft",
+            "replace": "ready",
+            "comment": "extra model note",
+        },
+    ]
+
+    normalized = normalize_step(step, tmp_path, None, 1)
+
+    assert normalized["ops"] == [
+        {"op": "replace_in_file", "path": "README.md", "old": "draft", "new": "ready"}
+    ]
+
+
+def test_phase8m_normalize_step_rejects_conflicting_replace_aliases(tmp_path):
+    step = _ops_only_step()
+    step["ops"] = [
+        {
+            "op": "replace_in_file",
+            "path": "./README.md",
+            "old": "draft",
+            "search": "alpha",
+            "new": "ready",
+        },
+    ]
+
+    with pytest.raises(TaskOperationContractViolation):
+        normalize_step(step, tmp_path, None, 1)
 
 
 def test_phase8k_executor_runs_file_ops_in_order_and_reports_changed_files(tmp_path):

@@ -377,6 +377,18 @@ _TERMINAL_REASON_POLICIES: Dict[str, Dict[str, str]] = {
             "contract strict and inspect the repair output format."
         ),
     },
+    "op_contract_violation": {
+        "title": "Operation Contract Violation",
+        "summary_prefix": "Planning terminalized after a structured operation contract violation",
+        "no_further_repair_reason": (
+            "Operation contract violations are terminal because a structured file "
+            "operation did not match the executor-owned schema."
+        ),
+        "operator_next_action": (
+            "Inspect the malformed op shape, update contract normalization or "
+            "repair handling if the intent is unambiguous, then rerun."
+        ),
+    },
     "workspace isolation violation": {
         "title": "Workspace Isolation Violation",
         "summary_prefix": "Execution terminalized after a workspace isolation violation",

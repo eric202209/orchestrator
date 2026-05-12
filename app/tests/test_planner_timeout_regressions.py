@@ -3,7 +3,7 @@ import hashlib
 import logging
 import json
 import time
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -34,6 +34,9 @@ from app.services.orchestration.planning.planner import (
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.orchestration.validation.parsing import extract_structured_text
+from app.services.orchestration.validation.workspace_guard import (
+    TaskOperationContractViolation,
+)
 from app.services.orchestration.policy import (
     MINIMAL_PLANNING_TIMEOUT_SECONDS,
     ORCHESTRATION_TASK_SOFT_TIME_LIMIT_SECONDS,
@@ -110,6 +113,93 @@ def _patch_planning_flow_external_writes(monkeypatch):
         "app.services.orchestration.phases.planning_flow.maybe_emit_divergence_detected",
         lambda *args, **kwargs: None,
     )
+
+
+def test_operation_contract_violation_terminal_reason_is_not_workspace_isolation(
+    tmp_path, monkeypatch
+):
+    _patch_planning_flow_external_writes(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow._build_reasoning_artifact",
+        lambda *args, **kwargs: {
+            "intent": "Patch a file with ops",
+            "workspace_facts": ["README.md exists"],
+            "planned_actions": ["Use replace_in_file"],
+            "verification_plan": ["Check README.md"],
+        },
+    )
+    monkeypatch.setattr(
+        ValidatorService,
+        "validate_reasoning_artifact",
+        classmethod(
+            lambda cls, *args, **kwargs: type(
+                "Verdict",
+                (),
+                {"accepted": True, "status": "accepted", "reasons": []},
+            )()
+        ),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "should_start_with_minimal_prompt",
+        staticmethod(lambda *args, **kwargs: False),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "find_immediate_repair_step_issues",
+        staticmethod(lambda *args, **kwargs: {}),
+    )
+
+    task = MagicMock()
+    task.title = "Patch README"
+    task.description = "Use replace_in_file ops"
+    session = MagicMock(instance_id=None)
+    ctx = OrchestrationRunContext(
+        db=MagicMock(),
+        session=session,
+        project=MagicMock(),
+        task=task,
+        session_task_link=MagicMock(),
+        session_id=45,
+        task_id=6,
+        prompt="Patch README",
+        timeout_seconds=300,
+        execution_profile="implementation",
+        validation_profile="standard",
+        runs_in_canonical_baseline=False,
+        orchestration_state=MagicMock(project_dir=tmp_path, plan=None),
+        runtime_service=MagicMock(),
+        task_service=MagicMock(),
+        logger=logging.getLogger("test.op_contract_violation"),
+        emit_live=lambda *args, **kwargs: None,
+        error_handler=MagicMock(),
+        task_execution_id=None,
+    )
+    ctx.runtime_service.execute_task = AsyncMock(
+        return_value={"output": json.dumps(_valid_three_step_plan())}
+    )
+    ctx.error_handler.attempt_json_parsing = lambda *args, **kwargs: (
+        True,
+        _valid_three_step_plan(),
+        "ok",
+    )
+
+    def _raise_operation_contract(*args, **kwargs):
+        raise TaskOperationContractViolation("step 1 op 1 must contain keys")
+
+    result = execute_planning_phase(
+        ctx=ctx,
+        workspace_review={"has_existing_files": False},
+        extract_structured_text=extract_structured_text,
+        extract_plan_steps=lambda value: value if isinstance(value, list) else None,
+        looks_like_truncated_multistep_plan=lambda text, plan: False,
+        normalize_plan_with_live_logging=_raise_operation_contract,
+        workspace_violation_error_cls=RuntimeError,
+    )
+
+    assert result == {"status": "failed", "reason": "op_contract_violation"}
+    assert task.status == TaskStatus.FAILED
+    assert "step 1 op 1" in task.error_message
 
 
 def test_build_task_with_clean_architecture_does_not_start_minimal_first():

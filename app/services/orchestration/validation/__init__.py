@@ -7,6 +7,7 @@ from .parsing import (
 )
 from .validator import ValidatorService
 from .workspace_guard import (
+    TaskOperationContractViolation,
     TaskWorkspaceViolationError,
     normalize_plan_with_live_logging,
     normalize_step,
@@ -14,6 +15,7 @@ from .workspace_guard import (
 
 __all__ = [
     "ValidatorService",
+    "TaskOperationContractViolation",
     "TaskWorkspaceViolationError",
     "normalize_plan_with_live_logging",
     "normalize_step",

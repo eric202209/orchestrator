@@ -16,11 +16,16 @@ from app.services.orchestration.file_ops_contract import (
     CONTENT_FILE_OPS,
     SUPPORTED_FILE_OPS,
     expected_file_op_keys,
+    normalize_file_op_shape,
 )
 
 
 class TaskWorkspaceViolationError(ValueError):
     """Raised when a planned command escapes the task workspace."""
+
+
+class TaskOperationContractViolation(ValueError):
+    """Raised when a structured operation has an invalid contract shape."""
 
 
 _ALLOWED_ABSOLUTE_SINK_PATHS = frozenset(
@@ -468,28 +473,29 @@ def normalize_file_ops(
     if ops is None:
         return []
     if not isinstance(ops, list):
-        raise TaskWorkspaceViolationError("ops must be a JSON array")
+        raise TaskOperationContractViolation("ops must be a JSON array")
 
     normalized_ops: List[Dict[str, Any]] = []
     step_label = f"step {step_index}" if step_index is not None else "step"
     for op_index, operation in enumerate(ops, start=1):
         if not isinstance(operation, dict):
-            raise TaskWorkspaceViolationError(
+            raise TaskOperationContractViolation(
                 f"{step_label} op {op_index} must be an object"
             )
+        operation = normalize_file_op_shape(operation)
         op_name = str(operation.get("op") or "").strip()
         if op_name not in SUPPORTED_FILE_OPS:
-            raise TaskWorkspaceViolationError(
+            raise TaskOperationContractViolation(
                 f"{step_label} op {op_index} has unsupported op: {op_name or '<empty>'}"
             )
         expected_keys = expected_file_op_keys(op_name)
         if set(operation.keys()) != expected_keys:
-            raise TaskWorkspaceViolationError(
+            raise TaskOperationContractViolation(
                 f"{step_label} op {op_index} must contain keys: {sorted(expected_keys)}"
             )
         raw_path = str(operation.get("path") or "").strip()
         if not raw_path:
-            raise TaskWorkspaceViolationError(
+            raise TaskOperationContractViolation(
                 f"{step_label} op {op_index} missing path"
             )
         normalized_operation: Dict[str, Any] = {
@@ -499,7 +505,7 @@ def normalize_file_ops(
         if op_name in CONTENT_FILE_OPS:
             content = operation.get("content")
             if not isinstance(content, str):
-                raise TaskWorkspaceViolationError(
+                raise TaskOperationContractViolation(
                     f"{step_label} op {op_index} content must be a string"
                 )
             normalized_operation["content"] = content
@@ -507,11 +513,11 @@ def normalize_file_ops(
             old = operation.get("old")
             new = operation.get("new")
             if not isinstance(old, str):
-                raise TaskWorkspaceViolationError(
+                raise TaskOperationContractViolation(
                     f"{step_label} op {op_index} old must be a string"
                 )
             if not isinstance(new, str):
-                raise TaskWorkspaceViolationError(
+                raise TaskOperationContractViolation(
                     f"{step_label} op {op_index} new must be a string"
                 )
             normalized_operation["old"] = old
@@ -724,6 +730,19 @@ def normalize_plan_with_live_logging(
 ) -> List[Dict[str, Any]]:
     try:
         return normalize_plan(plan, project_dir, logger_obj)
+    except TaskOperationContractViolation as exc:
+        detail = str(exc)
+        logger_obj.error("[CONTRACT] %s blocked: %s", stage, detail)
+        record_live_log(
+            db,
+            session_id,
+            task_id,
+            "ERROR",
+            f"[CONTRACT] {stage} blocked: {detail}",
+            session_instance_id=session_instance_id,
+            metadata={"stage": stage, "project_dir": str(project_dir)},
+        )
+        raise
     except TaskWorkspaceViolationError as exc:
         detail = str(exc)
         logger_obj.error("[ISOLATION] %s blocked: %s", stage, detail)

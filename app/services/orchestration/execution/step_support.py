@@ -7,7 +7,6 @@ import json
 import logging
 import re
 import shlex
-import shutil
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -123,7 +122,6 @@ def is_runnable_shell_command_fix(command_text: str) -> bool:
     return (
         token in _SHELL_BUILTIN_COMMAND_TOKENS
         or token in _COMMON_PROJECT_COMMAND_TOKENS
-        or shutil.which(token) is not None
     )
 
 

@@ -95,6 +95,7 @@ from .types import (
     ValidationVerdict,
 )
 from .validation import (
+    TaskOperationContractViolation,
     TaskWorkspaceViolationError,
     extract_plan_steps,
     extract_structured_text,
@@ -175,6 +176,7 @@ __all__ = [
     "is_long_running_verification_task",
     "missing_expected_files",
     "repeated_tool_path_failure_decision",
+    "TaskOperationContractViolation",
     "TaskWorkspaceViolationError",
     "normalize_plan_with_live_logging",
     "normalize_step",

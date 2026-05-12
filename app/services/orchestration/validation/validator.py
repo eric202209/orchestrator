@@ -554,7 +554,7 @@ class ValidatorService:
         path_text: str, content: str, *, allow_todo_fixme_literals: bool = False
     ) -> bool:
         raw = str(content or "")
-        if ValidatorService._path_allows_placeholder_fixture_content(path_text):
+        if path_allows_placeholder_fixture_content(path_text):
             return False
 
         if PLAN_STRUCTURAL_PLACEHOLDER_MARKER_PATTERN.search(raw):
@@ -581,10 +581,6 @@ class ValidatorService:
             ):
                 return True
         return False
-
-    @staticmethod
-    def _path_allows_placeholder_fixture_content(path_text: str) -> bool:
-        return path_allows_placeholder_fixture_content(path_text)
 
     @staticmethod
     def _command_write_targets(command: str) -> List[str]:
@@ -634,8 +630,7 @@ class ValidatorService:
         targets = ValidatorService._command_write_targets(raw)
         if targets:
             return not all(
-                ValidatorService._path_allows_placeholder_fixture_content(target)
-                for target in targets
+                path_allows_placeholder_fixture_content(target) for target in targets
             )
 
         return False

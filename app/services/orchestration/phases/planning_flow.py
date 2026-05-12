@@ -37,6 +37,9 @@ from app.services.orchestration.validation.parsing import (
     extract_plan_steps_from_summary_text,
 )
 from app.services.orchestration.validation.validator import ValidatorService
+from app.services.orchestration.validation.workspace_guard import (
+    TaskOperationContractViolation,
+)
 from app.services.prompt_templates import OrchestrationStatus, estimate_token_count
 
 # Circuit breaker: abort planning after this many consecutive validation failures
@@ -1450,6 +1453,26 @@ def execute_planning_phase(
             ctx.restore_workspace_snapshot_if_needed(
                 "planning repair prompt budget exceeded"
             )
+        return {"status": "failed", "reason": failure_type}
+    except TaskOperationContractViolation as exc:
+        failure_type = "op_contract_violation"
+        ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+        ctx.orchestration_state.abort_reason = f"Operation contract violation: {exc}"
+        emit_phase_event(
+            ctx.orchestration_state,
+            ctx.emit_live,
+            level="ERROR",
+            phase="planning",
+            message=f"[ORCHESTRATION] Planning output blocked: {exc}",
+            details={"reason": failure_type},
+        )
+        _finalize_planning_terminal_failure(
+            ctx=ctx,
+            failure_type=failure_type,
+            failure_reason=str(exc),
+        )
+        if ctx.restore_workspace_snapshot_if_needed:
+            ctx.restore_workspace_snapshot_if_needed("operation contract violation")
         return {"status": "failed", "reason": failure_type}
     except workspace_violation_error_cls as exc:
         ctx.orchestration_state.status = OrchestrationStatus.ABORTED
