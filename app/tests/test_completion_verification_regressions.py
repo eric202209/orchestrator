@@ -219,6 +219,204 @@ def test_verification_completion_does_not_require_execution_results(tmp_path):
     )
 
 
+def test_completion_validation_accepts_readme_package_mutation_without_source(
+    tmp_path,
+):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    (project_dir / "package.json").write_text(
+        '{\n  "name": "demo",\n  "version": "0.2.0"\n}\n',
+        encoding="utf-8",
+    )
+    (project_dir / "README.md").write_text(
+        "# Demo\n\nStatus: ready\n\n## Changelog\n",
+        encoding="utf-8",
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=[
+            {
+                "step_number": 1,
+                "description": "Update package metadata and README status",
+                "ops": [
+                    {
+                        "op": "replace_in_file",
+                        "path": "package.json",
+                        "old": '"version": "0.1.0"',
+                        "new": '"version": "0.2.0"',
+                    },
+                    {
+                        "op": "append_file",
+                        "path": "README.md",
+                        "content": "\n## Changelog\n",
+                    },
+                ],
+                "commands": [],
+                "verification": "test -f README.md",
+                "expected_files": ["package.json", "README.md"],
+            }
+        ],
+        task_prompt="Update package.json version and append README changelog.",
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": ["package.json", "README.md"],
+        },
+    )
+
+    assert verdict.accepted is True
+    assert "No core implementation source files were produced" not in verdict.reasons
+    assert verdict.details["mutation_completion"]["materialized_files"] == [
+        "package.json",
+        "README.md",
+    ]
+
+
+def test_completion_validation_accepts_docs_mutation_without_source(tmp_path):
+    project_dir = tmp_path / "project"
+    (project_dir / "docs" / "archive").mkdir(parents=True)
+    (project_dir / "docs" / "index.md").write_text(
+        "# Docs\n\nLifecycle: stable\n\n## Links\n",
+        encoding="utf-8",
+    )
+    (project_dir / "docs" / "archive" / "README.md").write_text(
+        "# Archive\n",
+        encoding="utf-8",
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=[
+            {
+                "step_number": 1,
+                "description": "Update docs lifecycle and archive docs",
+                "ops": [
+                    {
+                        "op": "replace_in_file",
+                        "path": "docs/index.md",
+                        "old": "alpha",
+                        "new": "stable",
+                    },
+                    {
+                        "op": "write_file",
+                        "path": "docs/archive/README.md",
+                        "content": "# Archive\n",
+                    },
+                    {"op": "delete_file", "path": "docs/draft.md"},
+                ],
+                "commands": [],
+                "verification": "test -f docs/archive/README.md",
+                "expected_files": ["docs/index.md", "docs/archive/README.md"],
+            }
+        ],
+        task_prompt="Replace docs lifecycle marker and create docs archive README.",
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": [
+                "docs/index.md",
+                "docs/archive/README.md",
+                "docs/draft.md (deleted)",
+            ],
+        },
+    )
+
+    assert verdict.accepted is True
+    assert "No core implementation source files were produced" not in verdict.reasons
+    assert verdict.details["mutation_completion"]["matched_reported_files"] == [
+        "docs/index.md",
+        "docs/archive/README.md",
+    ]
+
+
+def test_completion_validation_still_rejects_code_task_with_only_package_json(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    (project_dir / "package.json").write_text(
+        '{"scripts": {"test": "echo missing"}}\n',
+        encoding="utf-8",
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=[
+            {
+                "step_number": 1,
+                "description": "Create app scaffold",
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "package.json",
+                        "content": '{"scripts": {"test": "echo missing"}}\n',
+                    }
+                ],
+                "commands": [],
+                "verification": "test -f package.json",
+                "expected_files": ["package.json"],
+            }
+        ],
+        task_prompt="Build a React app with source implementation.",
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": ["package.json"],
+        },
+    )
+
+    assert verdict.accepted is False
+    assert "No core implementation source files were produced" in verdict.reasons
+
+
+def test_completion_validation_does_not_treat_generic_update_as_mutation_task(
+    tmp_path,
+):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    (project_dir / "README.md").write_text(
+        "# Notes\n\nUpdated docs only.\n",
+        encoding="utf-8",
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=[
+            {
+                "step_number": 1,
+                "description": "Update README only",
+                "ops": [
+                    {
+                        "op": "append_file",
+                        "path": "README.md",
+                        "content": "\nUpdated docs only.\n",
+                    }
+                ],
+                "commands": [],
+                "verification": "test -f README.md",
+                "expected_files": ["README.md"],
+            }
+        ],
+        task_prompt="Update the React app to add feature X.",
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": ["README.md"],
+        },
+    )
+
+    assert verdict.accepted is False
+    assert "No core implementation source files were produced" in verdict.reasons
+    assert verdict.details["mutation_completion"]["mutation_task"] is False
+
+
 def test_workspace_consistency_ignores_virtualenv_vendor_javascript(tmp_path):
     project_dir = tmp_path / "project"
     (project_dir / "tests").mkdir(parents=True)

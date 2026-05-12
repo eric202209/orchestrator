@@ -473,6 +473,125 @@ class ValidatorService:
         }
 
     @staticmethod
+    def _normalize_reported_changed_file(path_text: str) -> str:
+        value = str(path_text or "").strip()
+        if value.endswith(" (deleted)"):
+            value = value[: -len(" (deleted)")].strip()
+        return value.lstrip("./")
+
+    @staticmethod
+    def _task_looks_like_mutation_task(
+        task_prompt: str,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> bool:
+        text = " ".join(
+            str(value or "") for value in (title, description, task_prompt)
+        ).lower()
+        mutation_terms = {
+            "append",
+            "archive",
+            "changelog",
+            "config",
+            "delete",
+            "docs",
+            "documentation",
+            "manifest",
+            "metadata",
+            "package.json",
+            "readme",
+            "release notes",
+            "remove",
+            "replace",
+            "version",
+        }
+        build_terms = {
+            "add feature",
+            "build",
+            "create app",
+            "create application",
+            "frontend",
+            "implement app",
+            "react app",
+            "scaffold",
+            "source implementation",
+            "update the api",
+            "update the app",
+            "update the react",
+        }
+        has_mutation_term = any(term in text for term in mutation_terms)
+        has_build_term = any(term in text for term in build_terms)
+        return has_mutation_term and not has_build_term
+
+    @classmethod
+    def _mutation_expected_files(cls, plan: List[Dict[str, Any]]) -> List[str]:
+        files: List[str] = []
+        seen = set()
+
+        def add(path_text: Any) -> None:
+            normalized = str(path_text or "").strip().rstrip("/").lstrip("./")
+            if not normalized or normalized in seen:
+                return
+            if Path(normalized).suffix.lower() in SOURCE_EXTENSIONS:
+                return
+            seen.add(normalized)
+            files.append(normalized)
+
+        for step in plan:
+            for operation in step.get("ops", []) or []:
+                if not isinstance(operation, dict):
+                    continue
+                if str(operation.get("op") or "") in {"delete_file", "mkdir"}:
+                    continue
+                add(operation.get("path"))
+            for raw_path in step.get("expected_files", []) or []:
+                add(raw_path)
+
+        return files
+
+    @classmethod
+    def _mutation_completion_evidence(
+        cls,
+        *,
+        project_dir: Path,
+        plan: List[Dict[str, Any]],
+        task_prompt: str,
+        reported_changed_files: List[str],
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        expected_files = cls._mutation_expected_files(plan)
+        materialized_files = [
+            path_text
+            for path_text in expected_files
+            if (project_dir / path_text).resolve().is_file()
+        ]
+        normalized_reported = {
+            cls._normalize_reported_changed_file(path_text)
+            for path_text in reported_changed_files
+        }
+        matched_reported_files = [
+            path_text
+            for path_text in materialized_files
+            if path_text in normalized_reported
+        ]
+        mutation_task = cls._task_looks_like_mutation_task(
+            task_prompt, title=title, description=description
+        )
+        supported = bool(
+            mutation_task
+            and materialized_files
+            and (not reported_changed_files or bool(matched_reported_files))
+        )
+        return {
+            "supported": supported,
+            "mutation_task": mutation_task,
+            "expected_files": expected_files[:20],
+            "materialized_files": materialized_files[:20],
+            "matched_reported_files": matched_reported_files[:20],
+        }
+
+    @staticmethod
     def _plan_contains_stack_conflict(
         plan: List[Dict[str, Any]], task_prompt: str
     ) -> bool:
@@ -1791,6 +1910,14 @@ class ValidatorService:
             for path in (completion_evidence.get("reported_changed_files") or [])
             if str(path).strip()
         ]
+        mutation_completion = cls._mutation_completion_evidence(
+            project_dir=project_dir,
+            plan=plan,
+            task_prompt=task_prompt,
+            reported_changed_files=reported_changed_files,
+            title=title,
+            description=description,
+        )
         contract = {
             "execution_profile": execution_profile,
             "validation_profile": profile,
@@ -1801,6 +1928,7 @@ class ValidatorService:
             "requires_source_outputs": profile in {"implementation", "integration"},
         }
         details["completion_contract"] = contract
+        details["mutation_completion"] = mutation_completion
         if not contract["summary_generated"]:
             rejected.append("Completion contract requires a generated task summary")
         if (
@@ -1860,7 +1988,11 @@ class ValidatorService:
             rejected.extend(rejected_placeholder_reasons[:10])
             details["placeholder_reasons"] = placeholder_reasons[:20]
 
-        if profile == "implementation" and not candidate_files:
+        if (
+            profile == "implementation"
+            and not candidate_files
+            and not mutation_completion["supported"]
+        ):
             if nested_matches:
                 target = warnings if relaxed_mode else repairable
                 target.append(
@@ -1875,6 +2007,7 @@ class ValidatorService:
             elif (
                 workspace_summary["source_file_count"] <= 0
                 and workspace_summary["config_file_count"] > 0
+                and not mutation_completion["supported"]
             ):
                 rejected.append(
                     "Workspace contains only framework/config scaffolding without any implementation source files"
