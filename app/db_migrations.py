@@ -609,6 +609,19 @@ def _migration_010_rename_awaiting_input(engine: Engine) -> None:
         )
 
 
+def _migration_011_project_user_ownership(engine: Engine) -> None:
+    if "projects" not in _table_names(engine):
+        return
+
+    with engine.begin() as connection:
+        if not _has_column(engine, "projects", "user_id"):
+            connection.execute(text("ALTER TABLE projects ADD COLUMN user_id INTEGER"))
+        if not _has_index(engine, "projects", "ix_projects_user_id"):
+            connection.execute(
+                text("CREATE INDEX ix_projects_user_id ON projects (user_id)")
+            )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -659,6 +672,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="010_rename_awaiting_input",
         description="Rename session status waiting_for_human to awaiting_input",
         upgrade=_migration_010_rename_awaiting_input,
+    ),
+    Migration(
+        version="011_project_user_ownership",
+        description="Add nullable user ownership to projects",
+        upgrade=_migration_011_project_user_ownership,
     ),
 )
 

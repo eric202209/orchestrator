@@ -18,6 +18,7 @@ from app.api.v1.endpoints import isolation, permissions, context
 from app.api.v1.endpoints.knowledge import router as knowledge_router
 from app.api.v1.endpoints.project_logs import router as project_logs_router
 from app.dependencies import get_current_active_user
+from app.services.health import api_root_payload, health_payload
 
 # Import auth router separately
 from app.api.v1.endpoints.auth import router as auth_router
@@ -28,19 +29,18 @@ api_router = APIRouter()
 @api_router.get("/health", tags=["health"])
 async def health_check():
     """Health check endpoint for OpenClaw dashboard"""
-    return {"status": "healthy"}
+    payload, status_code = health_payload()
+    if status_code == 200:
+        return payload
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(status_code=status_code, content=payload)
 
 
 @api_router.get("/", tags=["root"])
 async def root():
     """Root API endpoint"""
-    return {
-        "name": "AI Dev Agent Orchestrator",
-        "version": "1.0.0",
-        "status": "running",
-        "docs": "/docs",
-        "openapi": "/openapi.json",
-    }
+    return api_root_payload()
 
 
 # Authentication (must be included first for JWT to work)

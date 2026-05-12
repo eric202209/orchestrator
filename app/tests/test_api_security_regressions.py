@@ -2,10 +2,19 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
+from app.auth import create_access_token
 from app.config import settings
-from app.models import Project, Session as SessionModel, Task, TaskStatus, User
+from app.models import (
+    PlanningSession,
+    Project,
+    Session as SessionModel,
+    Task,
+    TaskStatus,
+    User,
+)
 from app.api.v1.endpoints.auth import generate_keypair
 from app.services.auth_rate_limit import clear_auth_rate_limits, enforce_auth_rate_limit
+from app.dependencies import get_current_active_user, get_current_user
 
 
 def test_session_create_starts_pending_and_inactive(authenticated_client, db_session):
@@ -129,6 +138,174 @@ def test_session_routes_require_authentication(api_client, db_session):
     db_session.refresh(session)
 
     response = api_client.get(f"/api/v1/sessions/{session.id}")
+
+    assert response.status_code == 401
+
+
+def test_inactive_user_bearer_token_is_rejected(api_client, db_session):
+    inactive_user = User(
+        email="inactive-bearer@example.com",
+        hashed_password="not-used",
+        is_active=False,
+    )
+    db_session.add(inactive_user)
+    db_session.commit()
+
+    token = create_access_token({"sub": inactive_user.email})
+    response = api_client.get(
+        "/api/v1/sessions",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_project_routes_filter_by_current_user(api_app, db_session):
+    user_one = User(
+        id=101,
+        email="owner-one@example.com",
+        hashed_password="not-used",
+        is_active=True,
+    )
+    user_two = User(
+        id=202,
+        email="owner-two@example.com",
+        hashed_password="not-used",
+        is_active=True,
+    )
+    own_project = Project(name="Own Project", user_id=user_one.id)
+    other_project = Project(name="Other Project", user_id=user_two.id)
+    db_session.add_all([user_one, user_two, own_project, other_project])
+    db_session.commit()
+    db_session.refresh(own_project)
+    db_session.refresh(other_project)
+
+    def override_current_user():
+        return user_one
+
+    api_app.dependency_overrides[get_current_user] = override_current_user
+    api_app.dependency_overrides[get_current_active_user] = override_current_user
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(api_app) as client:
+        list_response = client.get("/api/v1/projects")
+        other_response = client.get(f"/api/v1/projects/{other_project.id}")
+
+    assert list_response.status_code == 200
+    assert [project["id"] for project in list_response.json()] == [own_project.id]
+    assert other_response.status_code == 404
+
+
+def test_session_routes_filter_by_project_owner(api_app, db_session):
+    user_one = User(
+        id=301,
+        email="session-owner@example.com",
+        hashed_password="not-used",
+        is_active=True,
+    )
+    user_two = User(
+        id=302,
+        email="session-other@example.com",
+        hashed_password="not-used",
+        is_active=True,
+    )
+    own_project = Project(name="Own Session Project", user_id=user_one.id)
+    other_project = Project(name="Other Session Project", user_id=user_two.id)
+    db_session.add_all([user_one, user_two, own_project, other_project])
+    db_session.flush()
+    own_session = SessionModel(project_id=own_project.id, name="Own Session")
+    other_session = SessionModel(project_id=other_project.id, name="Other Session")
+    db_session.add_all([own_session, other_session])
+    db_session.commit()
+    db_session.refresh(own_session)
+    db_session.refresh(other_session)
+
+    def override_current_user():
+        return user_one
+
+    api_app.dependency_overrides[get_current_user] = override_current_user
+    api_app.dependency_overrides[get_current_active_user] = override_current_user
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(api_app) as client:
+        list_response = client.get("/api/v1/sessions")
+        other_response = client.get(f"/api/v1/sessions/{other_session.id}")
+
+    assert list_response.status_code == 200
+    assert [session["id"] for session in list_response.json()] == [own_session.id]
+    assert other_response.status_code == 404
+
+
+def test_planning_session_routes_filter_by_project_owner(api_app, db_session):
+    user_one = User(
+        id=401,
+        email="planning-owner@example.com",
+        hashed_password="not-used",
+        is_active=True,
+    )
+    user_two = User(
+        id=402,
+        email="planning-other@example.com",
+        hashed_password="not-used",
+        is_active=True,
+    )
+    own_project = Project(name="Own Planning Project", user_id=user_one.id)
+    other_project = Project(name="Other Planning Project", user_id=user_two.id)
+    db_session.add_all([user_one, user_two, own_project, other_project])
+    db_session.flush()
+    own_session = PlanningSession(
+        project_id=own_project.id,
+        title="Own Plan",
+        prompt="Plan mine",
+    )
+    other_session = PlanningSession(
+        project_id=other_project.id,
+        title="Other Plan",
+        prompt="Plan other",
+    )
+    db_session.add_all([own_session, other_session])
+    db_session.commit()
+    db_session.refresh(own_session)
+    db_session.refresh(other_session)
+
+    def override_current_user():
+        return user_one
+
+    api_app.dependency_overrides[get_current_user] = override_current_user
+    api_app.dependency_overrides[get_current_active_user] = override_current_user
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(api_app) as client:
+        list_response = client.get("/api/v1/planning/sessions")
+        other_response = client.get(f"/api/v1/planning/sessions/{other_session.id}")
+
+    assert list_response.status_code == 200
+    assert [session["id"] for session in list_response.json()] == [own_session.id]
+    assert other_response.status_code == 404
+
+
+def test_tool_track_requires_authentication(api_client, db_session):
+    project = Project(name="Tool Track Project")
+    db_session.add(project)
+    db_session.flush()
+    session = SessionModel(project_id=project.id, name="Tool Track Session")
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+
+    response = api_client.post(
+        f"/api/v1/sessions/{session.id}/tools/track",
+        json={
+            "execution_id": "exec-1",
+            "tool_name": "shell",
+            "params": {},
+            "result": "ok",
+            "success": True,
+        },
+    )
 
     assert response.status_code == 401
 

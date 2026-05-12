@@ -181,3 +181,9 @@ def test_unauthenticated_create_issue_is_rejected():
     )
 
     assert response.status_code == 401
+
+
+def test_unauthenticated_repo_info_is_rejected():
+    response = client.get("/api/v1/github/repos/Openclaw/clawmobile")
+
+    assert response.status_code == 401

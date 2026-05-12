@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.auth import verify_token
 from app.database import get_db_session as create_db_session
 from app.models import LogEntry, Session as SessionModel, User
+from app.services.authz import get_session_for_user
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
@@ -182,10 +183,12 @@ async def stream_session_logs(
         await websocket.close(code=1008, reason="Authentication required")
         return
 
-    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
-    if not session:
+    try:
+        session = get_session_for_user(db, session_id, current_user)
+    except HTTPException:
         logger.warning(
-            "WebSocket connection rejected: session %s not found", session_id
+            "WebSocket connection rejected: session %s not found or unauthorized",
+            session_id,
         )
         await websocket.close(code=1008, reason="Session not found")
         return
@@ -409,8 +412,9 @@ async def stream_session_status(
         await websocket.close(code=1008, reason="Authentication required")
         return
 
-    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
-    if not session:
+    try:
+        session = get_session_for_user(db, session_id, current_user)
+    except HTTPException:
         await websocket.close(code=1008, reason="Session not found")
         return
 

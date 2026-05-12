@@ -135,7 +135,11 @@ async def github_webhook(
 
 
 @router.get("/github/repos/{owner}/{repo}")
-async def get_repo_info(owner: str, repo: str):
+async def get_repo_info(
+    owner: str,
+    repo: str,
+    current_user: User = Depends(get_current_active_user),
+):
     """Get repository information from GitHub"""
     try:
         service = GitHubService()

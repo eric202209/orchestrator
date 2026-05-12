@@ -30,6 +30,7 @@ from app.services.name_formatter import humanize_display_name
 from app.services.task_service import TaskService
 from app.config import settings
 from app.dependencies import get_current_active_user
+from app.services.authz import get_project_for_user, project_access_filter
 
 router = APIRouter()
 
@@ -48,6 +49,7 @@ def create_project(
     project_data["workspace_path"] = normalize_project_workspace_path(
         project.workspace_path, project.name, db=db
     )
+    project_data["user_id"] = current_user.id
     db_project = Project(**project_data)
     db.add(db_project)
     db.commit()
@@ -56,11 +58,16 @@ def create_project(
 
 
 @router.get("/projects", response_model=List[ProjectResponse])
-def get_projects(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+def get_projects(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
     """Get all active (non-deleted) projects"""
     projects = (
         db.query(Project)
-        .filter(Project.deleted_at.is_(None))
+        .filter(Project.deleted_at.is_(None), project_access_filter(db, current_user))
         .offset(skip)
         .limit(limit)
         .all()
@@ -88,6 +95,7 @@ def purge_soft_deleted_projects(
         db.query(Project)
         .filter(Project.deleted_at.isnot(None))
         .filter(Project.deleted_at < cutoff_date)
+        .filter(project_access_filter(db, current_user))
         .all()
     )
 
@@ -161,16 +169,13 @@ def purge_soft_deleted_projects(
 
 
 @router.get("/projects/{project_id}", response_model=ProjectResponse)
-def get_project(project_id: int, db: Session = Depends(get_db)):
+def get_project(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
     """Get a specific project"""
-    project = (
-        db.query(Project)
-        .filter(Project.id == project_id, Project.deleted_at.is_(None))
-        .first()
-    )
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    return project
+    return get_project_for_user(db, project_id, current_user)
 
 
 @router.post("/projects/{project_id}/baseline/rebuild")
@@ -180,13 +185,7 @@ def rebuild_project_baseline(
     current_user=Depends(get_current_active_user),
 ):
     """Rebuild the canonical project baseline from promoted task workspaces."""
-    project = (
-        db.query(Project)
-        .filter(Project.id == project_id, Project.deleted_at.is_(None))
-        .first()
-    )
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = get_project_for_user(db, project_id, current_user)
 
     result = TaskService(db).rebuild_project_baseline(project)
     return {
@@ -204,13 +203,7 @@ def update_project(
     current_user=Depends(get_current_active_user),
 ):
     """Update a project"""
-    db_project = (
-        db.query(Project)
-        .filter(Project.id == project_id, Project.deleted_at.is_(None))
-        .first()
-    )
-    if not db_project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    db_project = get_project_for_user(db, project_id, current_user)
 
     update_data = project_update.model_dump(exclude_unset=True)
     if "name" in update_data and update_data["name"] is not None:
@@ -239,13 +232,7 @@ def delete_project(
     from app.models import Session, TaskCheckpoint
     from app.services.workspace.checkpoint_service import CheckpointService
 
-    db_project = (
-        db.query(Project)
-        .filter(Project.id == project_id, Project.deleted_at.is_(None))
-        .first()
-    )
-    if not db_project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    db_project = get_project_for_user(db, project_id, current_user)
 
     session_ids = [
         session_id

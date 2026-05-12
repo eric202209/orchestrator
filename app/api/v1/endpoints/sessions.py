@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status, WebSocket
 from fastapi.requests import Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 from typing import List, Optional, Any, Dict
 from datetime import datetime, timezone
@@ -105,10 +105,27 @@ def _serialize_session_timestamp(value: datetime | None) -> str | None:
 
 from app.services.orchestration import is_known_event_type
 from app.dependencies import get_current_active_user, get_current_user
+from app.services.authz import (
+    get_project_for_user,
+    get_session_for_user,
+    project_access_filter,
+)
 
 router = APIRouter()
 
 DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS = 1800
+MAX_TOOL_TRACK_JSON_CHARS = 20_000
+
+
+def _require_session_access(db: Session, session_id: int, current_user) -> SessionModel:
+    return get_session_for_user(db, session_id, current_user)
+
+
+def _json_payload_size(value: Any) -> int:
+    try:
+        return len(json.dumps(value, default=str))
+    except (TypeError, ValueError):
+        return MAX_TOOL_TRACK_JSON_CHARS + 1
 
 
 def _serialize_intervention(req: InterventionRequest) -> Dict[str, Any]:
@@ -156,16 +173,8 @@ def create_session(
     current_user=Depends(get_current_active_user),
 ):
     """Create a new orchestration session."""
-    # Verify project exists
-    from app.models import Project
-
-    project = (
-        db.query(Project)
-        .filter(Project.id == session.project_id, Project.deleted_at.is_(None))
-        .first()
-    )
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    # Verify project exists and is accessible to this user.
+    get_project_for_user(db, session.project_id, current_user)
 
     session_data = session.model_dump()
     session_data["name"] = _ensure_unique_session_name(
@@ -208,7 +217,15 @@ def list_sessions(
     project_id: Optional[int] = None,
 ):
     """List sessions across projects for authenticated dashboard use."""
-    query = db.query(SessionModel).filter(SessionModel.deleted_at.is_(None))
+    query = (
+        db.query(SessionModel)
+        .join(Project, Project.id == SessionModel.project_id)
+        .filter(
+            SessionModel.deleted_at.is_(None),
+            Project.deleted_at.is_(None),
+            project_access_filter(db, current_user),
+        )
+    )
 
     if project_id is not None:
         query = query.filter(SessionModel.project_id == project_id)
@@ -234,15 +251,7 @@ def get_project_sessions(
     is_active: Optional[bool] = None,
 ):
     """Get all sessions for a project with filtering"""
-    from app.models import Project
-
-    project = (
-        db.query(Project)
-        .filter(Project.id == project_id, Project.deleted_at.is_(None))
-        .first()
-    )
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    get_project_for_user(db, project_id, current_user)
 
     query = db.query(SessionModel).filter(
         SessionModel.project_id == project_id,
@@ -263,13 +272,7 @@ def get_session(
     current_user=Depends(get_current_user),
 ):
     """Get a specific session with detailed information"""
-    session = (
-        db.query(SessionModel)
-        .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
-        .first()
-    )
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+    session = _require_session_access(db, session_id, current_user)
     reconcile_terminal_running_sessions(db, [session])
     db.refresh(session)
 
@@ -301,13 +304,7 @@ def update_session(
     current_user=Depends(get_current_user),
 ):
     """Update a session"""
-    db_session = (
-        db.query(SessionModel)
-        .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
-        .first()
-    )
-    if not db_session:
-        raise HTTPException(status_code=404, detail="Session not found")
+    db_session = _require_session_access(db, session_id, current_user)
 
     update_data = session_update.model_dump(exclude_unset=True)
     if "execution_mode" in update_data and update_data["execution_mode"] not in {
@@ -346,13 +343,7 @@ def refresh_session_tasks(
     """Refresh a session against the latest project task list and queue the next task if applicable."""
     from app.services.task_service import TaskService
 
-    session = (
-        db.query(SessionModel)
-        .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
-        .first()
-    )
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+    session = _require_session_access(db, session_id, current_user)
 
     if not session.project_id:
         raise HTTPException(
@@ -414,13 +405,7 @@ def run_session_task(
 ):
     """Queue a specific task for manual execution inside a session."""
     enforce_api_rate_limit(request, "task_run", current_user=current_user)
-    session = (
-        db.query(SessionModel)
-        .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
-        .first()
-    )
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+    session = _require_session_access(db, session_id, current_user)
 
     if not session.instance_id:
         session.instance_id = str(uuid.uuid4())
@@ -453,11 +438,7 @@ def delete_session(
 
     logger.info(f"DELETE /sessions/{session_id} - Starting deletion")
 
-    db_session = (
-        db.query(SessionModel)
-        .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
-        .first()
-    )
+    db_session = _require_session_access(db, session_id, current_user)
     if not db_session:
         logger.warning(f"DELETE /sessions/{session_id} - Session not found")
         raise HTTPException(status_code=404, detail="Session not found")
@@ -516,6 +497,7 @@ async def start_openclaw_session_compat(
     current_user=Depends(get_current_user),
 ):
     """Backward-compatible alias for older OpenClaw-specific clients."""
+    _require_session_access(db, session_id, current_user)
 
     return await _start_agent_session_payload(
         db, session_id, task_description=request.task_description
@@ -530,6 +512,7 @@ async def execute_task(
     current_user=Depends(get_current_user),
 ):
     """Execute a task via the active orchestration runtime."""
+    _require_session_access(db, session_id, current_user)
     return await _execute_task_payload(db, session_id, task_request)
 
 
@@ -558,6 +541,7 @@ def get_tool_execution_history(
     tool_name: Optional[str] = None,
 ):
     """Get tool execution history for a session"""
+    _require_session_access(db, session_id, current_user)
     return _get_tool_execution_history_payload(
         db, session_id, task_id=task_id, limit=limit, tool_name=tool_name
     )
@@ -571,20 +555,34 @@ def get_session_statistics(
     days: int = 7,
 ):
     """Get statistics for a session"""
+    _require_session_access(db, session_id, current_user)
     return _get_session_statistics_payload(db, session_id, days=days)
+
+
+class ToolTrackRequest(BaseModel):
+    execution_id: str = Field(min_length=1, max_length=128)
+    tool_name: str = Field(min_length=1, max_length=128)
+    params: Dict[str, Any] = Field(default_factory=dict)
+    result: Any
+    success: bool
+    task_id: Optional[int] = None
+    session_instance_id: Optional[str] = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def enforce_payload_caps(self):
+        if _json_payload_size(self.params) > MAX_TOOL_TRACK_JSON_CHARS:
+            raise ValueError("params payload is too large")
+        if _json_payload_size(self.result) > MAX_TOOL_TRACK_JSON_CHARS:
+            raise ValueError("result payload is too large")
+        return self
 
 
 @router.post("/sessions/{session_id}/tools/track")
 def track_tool_execution(
     session_id: int,
-    execution_id: str,
-    tool_name: str,
-    params: dict,
-    result: Any,
-    success: bool,
+    body: ToolTrackRequest,
     db: Session = Depends(get_db),
-    task_id: Optional[int] = None,
-    session_instance_id: Optional[str] = None,  # NEW: For log isolation
+    current_user=Depends(get_current_active_user),
 ):
     """Manually track a tool execution with instance tracking
 
@@ -602,16 +600,17 @@ def track_tool_execution(
     Returns:
         Tracked execution result
     """
+    _require_session_access(db, session_id, current_user)
     return _track_tool_execution_payload(
         db,
         session_id=session_id,
-        execution_id=execution_id,
-        tool_name=tool_name,
-        params=params,
-        result=result,
-        success=success,
-        task_id=task_id,
-        session_instance_id=session_instance_id,
+        execution_id=body.execution_id,
+        tool_name=body.tool_name,
+        params=body.params,
+        result=body.result,
+        success=body.success,
+        task_id=body.task_id,
+        session_instance_id=body.session_instance_id,
     )
 
 
@@ -624,6 +623,7 @@ async def start_session_lifecycle_endpoint(
 ):
     """Start a session lifecycle and queue work when applicable."""
     enforce_api_rate_limit(request, "session_start", current_user=current_user)
+    _require_session_access(db, session_id, current_user)
     return await _start_session_lifecycle(db, session_id)
 
 
@@ -636,6 +636,7 @@ async def stop_session(
     force: bool = False,
 ):
     """Stop a running session gracefully."""
+    _require_session_access(db, session_id, current_user)
     initiated_by = (
         getattr(current_user, "email", None)
         or str(getattr(current_user, "id", None) or "")
@@ -661,6 +662,7 @@ async def pause_session(
 
     Saves current state and pauses execution
     """
+    _require_session_access(db, session_id, current_user)
     return await _pause_session_lifecycle(db, session_id)
 
 
@@ -675,6 +677,7 @@ async def resume_session(
 
     Restores saved state and continues execution
     """
+    _require_session_access(db, session_id, current_user)
     return await _resume_session_lifecycle(db, session_id)
 
 
@@ -706,6 +709,7 @@ async def request_human_intervention(
     Sets session.status = 'awaiting_input'. The session can be resumed
     once the operator submits a reply, approval, or denial.
     """
+    _require_session_access(db, session_id, current_user)
     result = await _request_human_intervention_lifecycle(
         db,
         session_id,
@@ -730,13 +734,7 @@ def list_session_interventions(
     current_user=Depends(get_current_user),
 ):
     """List intervention requests for a session (all or pending-only)."""
-    session = (
-        db.query(SessionModel)
-        .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
-        .first()
-    )
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+    _require_session_access(db, session_id, current_user)
 
     if pending_only:
         items = _get_pending_interventions(db, session_id=session_id, limit=limit)
@@ -763,6 +761,7 @@ def reply_to_intervention(
     transitions the session from 'awaiting_input' → 'paused' so it can be
     resumed via the normal resume endpoint.
     """
+    _require_session_access(db, session_id, current_user)
     _get_session_intervention_or_404(db, session_id, intervention_id)
     req = _submit_intervention_reply(
         db,
@@ -788,6 +787,7 @@ def approve_session_intervention(
     Injects approval context into the checkpoint and transitions session to
     'paused' so it can continue after the operator-proposed action.
     """
+    _require_session_access(db, session_id, current_user)
     _get_session_intervention_or_404(db, session_id, intervention_id)
     req = _approve_intervention(
         db,
@@ -815,6 +815,7 @@ def deny_session_intervention(
     Injects denial context into the checkpoint. The operator can steer the
     session toward an alternative approach via the resume endpoint.
     """
+    _require_session_access(db, session_id, current_user)
     _get_session_intervention_or_404(db, session_id, intervention_id)
     req = _deny_intervention(
         db,
@@ -949,6 +950,7 @@ def get_failure_summary(
     scraping if the LLM is unavailable). Idempotent — subsequent calls return
     the cached record.
     """
+    _require_session_access(db, session_id, current_user)
     record = _get_or_generate_failure_summary(db, session_id)
     payload = _serialize_failure_summary(db, record)
     payload["diagnostics"] = _latest_failure_diagnostics(db, session_id)
@@ -973,6 +975,7 @@ def submit_operator_feedback(
     """
     if not body.feedback.strip():
         raise HTTPException(status_code=400, detail="feedback must not be empty")
+    _require_session_access(db, session_id, current_user)
     record = _store_operator_feedback(db, session_id, body.feedback)
     payload = _serialize_failure_summary(db, record)
     payload["message"] = "Operator feedback saved."
@@ -991,6 +994,7 @@ def replan_session(
     replan or retry. Returns the new planning_session_id so the frontend can
     navigate to Project Architect.
     """
+    _require_session_access(db, session_id, current_user)
     return _trigger_replan(db, session_id)
 
 
@@ -1014,13 +1018,7 @@ def get_session_task_events(
             detail=f"Unknown event_type '{event_type}'",
         )
 
-    session = (
-        db.query(SessionModel)
-        .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
-        .first()
-    )
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+    session = _require_session_access(db, session_id, current_user)
 
     project = db.query(Project).filter(Project.id == session.project_id).first()
     if not project:
@@ -1049,6 +1047,7 @@ def get_session_decision_timeline(
     current_user=Depends(get_current_user),
 ):
     """Return a read-only normalized decision timeline for a session."""
+    _require_session_access(db, session_id, current_user)
 
     return get_session_decision_timeline_payload(
         db,
@@ -1192,13 +1191,7 @@ def get_session_replay_reconstruction(
     sessions, emit events, write database rows, or influence runtime control.
     """
 
-    session = (
-        db.query(SessionModel)
-        .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
-        .first()
-    )
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+    session = _require_session_access(db, session_id, current_user)
 
     project = db.query(Project).filter(Project.id == session.project_id).first()
     if not project:
@@ -1240,6 +1233,7 @@ def get_session_state_diff(
     current_user=Depends(get_current_user),
 ):
     """Return a structured diff between two orchestration state snapshots."""
+    _require_session_access(db, session_id, current_user)
 
     return _get_session_state_diff_payload(
         db,
@@ -1258,6 +1252,7 @@ def get_session_divergence_compare(
     current_user=Depends(get_current_user),
 ):
     """Compare current session anomaly fingerprint with sibling sessions."""
+    _require_session_access(db, session_id, current_user)
 
     return _get_session_divergence_compare_payload(
         db,
@@ -1273,6 +1268,7 @@ def get_session_trace_export(
     current_user=Depends(get_current_user),
 ):
     """Return derived trace spans for the latest session task."""
+    _require_session_access(db, session_id, current_user)
 
     return _get_session_trace_export_payload(db, session_id)
 
@@ -1284,6 +1280,7 @@ def get_session_execution_dag(
     current_user=Depends(get_current_user),
 ):
     """Return a DAG view derived from events and checkpoint lineage."""
+    _require_session_access(db, session_id, current_user)
 
     return _get_session_execution_dag_payload(db, session_id)
 
@@ -1295,6 +1292,7 @@ def get_session_focus_mode(
     current_user=Depends(get_current_user),
 ):
     """Return operator focus-mode payload with low-signal noise suppressed."""
+    _require_session_access(db, session_id, current_user)
 
     return _get_session_focus_mode_payload(db, session_id)
 
@@ -1306,6 +1304,7 @@ def get_session_mobile_interruptions(
     current_user=Depends(get_current_user),
 ):
     """Return interruption-first mobile cards for approvals, retry, and stop."""
+    _require_session_access(db, session_id, current_user)
 
     return _get_session_mobile_interruptions_payload(db, session_id)
 
@@ -1318,6 +1317,7 @@ def get_session_dispatch_watchdog(
     current_user=Depends(get_current_user),
 ):
     """Return queue/claim watchdog state for session tasks."""
+    _require_session_access(db, session_id, current_user)
 
     if sync_alert:
         return _refresh_session_dispatch_watchdog_alert(db, session_id)
@@ -1332,6 +1332,7 @@ def get_prompt_template(
     current_user=Depends(get_current_user),
 ):
     """Get a prompt template for the session"""
+    _require_session_access(db, session_id, current_user)
     template = PromptTemplates.get_template(template_name)
     if not template:
         raise HTTPException(
@@ -1367,6 +1368,7 @@ def get_session_logs(
     Returns:
         List of log entries
     """
+    _require_session_access(db, session_id, current_user)
     return _get_session_logs_payload(db, session_id, limit=limit, offset=offset)
 
 
@@ -1397,6 +1399,7 @@ def get_sorted_logs(
     Returns:
         Sorted list of log entries
     """
+    _require_session_access(db, session_id, current_user)
     return _get_sorted_logs_payload(
         db,
         session_id,
@@ -1560,6 +1563,8 @@ async def check_session_overwrites(
     Returns:
         Overwrite protection result with safety status and warnings
     """
+    _require_session_access(db, session_id, current_user)
+    get_project_for_user(db, request.project_id, current_user)
     return _check_session_overwrites_payload(
         db,
         session_id,
@@ -1586,6 +1591,7 @@ async def create_session_backup(
         Backup result with path and file count
     """
     try:
+        _require_session_access(db, session_id, current_user)
         return _create_session_backup_payload(db, session_id)
     except HTTPException:
         raise
@@ -1610,6 +1616,7 @@ async def get_session_workspace_info(
         Workspace details including file count and last modified date
     """
     try:
+        _require_session_access(db, session_id, current_user)
         return _get_session_workspace_info_payload(db, session_id)
     except HTTPException:
         raise
@@ -1633,6 +1640,7 @@ async def save_session_checkpoint(
     Returns:
         Checkpoint metadata including path and timestamp
     """
+    _require_session_access(db, session_id, current_user)
     return await _save_session_checkpoint_payload(db, session_id)
 
 
@@ -1653,6 +1661,7 @@ async def list_session_checkpoints(
         List of checkpoint metadata (oldest first)
     """
     try:
+        _require_session_access(db, session_id, current_user)
         return _list_session_checkpoints_payload(db, session_id)
     except HTTPException:
         raise
@@ -1671,6 +1680,7 @@ async def inspect_session_checkpoint(
 ):
     """Return operator-friendly metadata for one checkpoint."""
     try:
+        _require_session_access(db, session_id, current_user)
         return _inspect_session_checkpoint_payload(db, session_id, checkpoint_name)
     except HTTPException:
         raise
@@ -1698,6 +1708,7 @@ async def load_session_checkpoint(
     Returns:
         Resume result with new session key
     """
+    _require_session_access(db, session_id, current_user)
     return await _load_session_checkpoint_payload(db, session_id, checkpoint_name)
 
 
@@ -1709,6 +1720,7 @@ async def replay_session_checkpoint(
     current_user=Depends(get_current_user),
 ):
     """Resume execution from a selected checkpoint for operator replay."""
+    _require_session_access(db, session_id, current_user)
     return await _replay_session_checkpoint_payload(db, session_id, checkpoint_name)
 
 
@@ -1751,6 +1763,7 @@ async def counterfactual_replay_session_checkpoint(
         }.items()
         if v is not None
     }
+    _require_session_access(db, session_id, current_user)
     return await _replay_session_checkpoint_counterfactual_payload(
         db, session_id, checkpoint_name, overrides=overrides
     )
@@ -1775,6 +1788,7 @@ async def delete_session_checkpoint(
         Deletion result
     """
     try:
+        _require_session_access(db, session_id, current_user)
         return _delete_session_checkpoint_payload(db, session_id, checkpoint_name)
     except HTTPException:
         raise
@@ -1805,6 +1819,7 @@ async def cleanup_session_checkpoints(
         Cleanup statistics
     """
     try:
+        _require_session_access(db, session_id, current_user)
         return _cleanup_session_checkpoints_payload(
             db, session_id, keep_latest=keep_latest, max_age_hours=max_age_hours
         )
@@ -1823,6 +1838,7 @@ def get_session_knowledge_usage(
     current_user=Depends(get_current_user),
 ):
     """Return knowledge references used in a session, grouped by trigger_phase."""
+    _require_session_access(db, session_id, current_user)
     return get_session_knowledge_usage_payload(db, session_id)
 
 

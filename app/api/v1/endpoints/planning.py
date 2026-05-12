@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from pydantic import Field
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.dependencies import get_current_active_user
-from app.models import Project, User
+from app.models import PlanningSession, Project, User
 from app.schemas import (
     PlanResponse,
     PlanningSessionCommitRequest,
@@ -21,6 +21,7 @@ from app.schemas import (
     TaskResponse,
 )
 from app.services.planning.planning_session_service import PlanningSessionService
+from app.services.authz import get_project_for_user, project_access_filter
 
 router = APIRouter(prefix="/planning")
 
@@ -30,13 +31,29 @@ class PlanningCommitResponse(PlanningSessionResponse):
     tasks: List[TaskResponse] = Field(default_factory=list)
 
 
+def _authorize_planning_session(
+    db: Session, session_id: int, current_user: User
+) -> None:
+    service = PlanningSessionService(db)
+    session = service.get_session(session_id)
+    get_project_for_user(db, session.project_id, current_user)
+
+
 @router.get("/sessions", response_model=List[PlanningSessionSummaryResponse])
 def list_planning_sessions(
     project_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    _current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_user),
 ):
-    return PlanningSessionService(db).list_sessions(project_id=project_id)
+    if project_id is not None:
+        get_project_for_user(db, project_id, current_user)
+    query = db.query(PlanningSession).join(Project).filter(Project.deleted_at.is_(None))
+    query = query.filter(project_access_filter(db, current_user))
+    if project_id is not None:
+        query = query.filter(PlanningSession.project_id == project_id)
+    return query.order_by(
+        PlanningSession.created_at.desc(), PlanningSession.id.desc()
+    ).all()
 
 
 @router.post(
@@ -47,15 +64,9 @@ def list_planning_sessions(
 def start_planning_session(
     payload: PlanningSessionCreateRequest,
     db: Session = Depends(get_db),
-    _current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_user),
 ):
-    project = (
-        db.query(Project)
-        .filter(Project.id == payload.project_id, Project.deleted_at.is_(None))
-        .first()
-    )
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = get_project_for_user(db, payload.project_id, current_user)
 
     service = PlanningSessionService(db)
     session = service.start_session(
@@ -71,8 +82,9 @@ def start_planning_session(
 def get_planning_session(
     session_id: int,
     db: Session = Depends(get_db),
-    _current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_user),
 ):
+    _authorize_planning_session(db, session_id, current_user)
     service = PlanningSessionService(db)
     session = service.get_session(session_id)
     return service.build_session_payload(session)
@@ -83,8 +95,9 @@ def respond_to_planning_session(
     session_id: int,
     payload: PlanningSessionRespondRequest,
     db: Session = Depends(get_db),
-    _current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_user),
 ):
+    _authorize_planning_session(db, session_id, current_user)
     service = PlanningSessionService(db)
     session = service.respond(session_id, payload.response)
     return service.build_session_payload(session)
@@ -94,8 +107,9 @@ def respond_to_planning_session(
 def retry_planning_session(
     session_id: int,
     db: Session = Depends(get_db),
-    _current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_user),
 ):
+    _authorize_planning_session(db, session_id, current_user)
     service = PlanningSessionService(db)
     session = service.retry(session_id)
     return service.build_session_payload(session)
@@ -105,8 +119,9 @@ def retry_planning_session(
 def cancel_planning_session(
     session_id: int,
     db: Session = Depends(get_db),
-    _current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_user),
 ):
+    _authorize_planning_session(db, session_id, current_user)
     service = PlanningSessionService(db)
     session = service.cancel(session_id)
     return service.build_session_payload(session)
@@ -116,8 +131,9 @@ def cancel_planning_session(
 def delete_planning_session(
     session_id: int,
     db: Session = Depends(get_db),
-    _current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_user),
 ):
+    _authorize_planning_session(db, session_id, current_user)
     service = PlanningSessionService(db)
     service.delete_terminal_session(session_id)
     return None
@@ -128,8 +144,9 @@ def commit_planning_session(
     session_id: int,
     payload: PlanningSessionCommitRequest,
     db: Session = Depends(get_db),
-    _current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_user),
 ):
+    _authorize_planning_session(db, session_id, current_user)
     service = PlanningSessionService(db)
     session, plan, tasks = service.commit(
         session_id,
