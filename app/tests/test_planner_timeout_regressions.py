@@ -677,7 +677,7 @@ def test_minimal_planning_prompt_keeps_workflow_rules_for_existing_fullstack_wor
     assert "Extend or verify existing files instead of re-scaffolding" in prompt
     assert "Never use parent-directory traversal like `../backend`" in prompt
     assert "`verification` must be a single shell string or null" in prompt
-    assert "Do not use background processes" in prompt
+    assert "No heredocs, background processes" in prompt
 
 
 def test_large_planning_context_is_compressed_before_first_attempt():
@@ -805,22 +805,16 @@ def test_minimal_planning_prompt_requires_real_content_and_strong_verification()
     assert "Commands must be runnable shell, not prose" in prompt
     assert "Do not create or cd into a nested project folder" in prompt
     assert "Return 3 or 4 small sequential steps maximum" in prompt
-    assert "Keep each command under 900 characters" in prompt
+    assert "keep under 900 chars" in prompt
     assert "Include exactly one final meaningful verification/build step" in prompt
     assert "inspect -> edit -> verify" in prompt
-    assert "Never use heredoc syntax" in prompt
-    assert "prefer `ops`" in prompt
-    assert '"op":"write_file"' in prompt
-    assert "do not shell-quote file bodies" in prompt
-    assert "never emit `python -c` commands" in prompt
-    assert (
-        "Do not put escaped apostrophes like `\\'` inside single-quoted strings"
-        in prompt
-    )
-    assert (
-        "No background processes, &, nohup, disown, dev servers, or long commands"
-        in prompt
-    )
+    assert "Use `ops` for file writes" in prompt
+    assert '"op": "write_file"' in prompt
+    assert "fallback limits" in prompt
+    assert "If content needs quoting, move that content into `ops`" in prompt
+    assert "For import assertions, create a tiny test file with `ops`" in prompt
+    assert "do not put inline `python -c` snippets in commands" in prompt
+    assert "No heredocs, background processes, absolute helpers" in prompt
     assert (
         "Verification must use `node -e`, `npm run build`, `python -m`, or a project test command"
         in prompt
@@ -1766,22 +1760,15 @@ def test_planning_repair_prompt_bans_external_helpers_and_heredoc():
     assert "/root/write_file.py" in prompt
     assert "absolute helper scripts" in prompt
     assert "no `test -f`, `grep -q`, `echo`, or `cd /... &&`" in prompt
-    assert "No `\\'` inside single-quoted strings" in prompt
     assert "{{ return <main>Ready</main>; }}" not in prompt
     assert "npm create vite@latest . -- --template react" in prompt
     assert "it creates src/App.jsx and src/App.css" in prompt
-    assert "Never use heredoc" in prompt
-    assert "<<'EOF'" in prompt
-    assert "<<'PY'" in prompt
-    assert "<<'HEREDOC'" in prompt
     assert "Use ops to overwrite only needed JSX body/CSS files" in prompt
-    assert "prefer ops" in prompt
-    assert "do not shell-quote file bodies" in prompt
+    assert "Use `ops` for file writes" in prompt
+    assert "fallback limits" in prompt
     assert "write_file" in prompt
     assert "exactly ONE heredoc across ENTIRE plan, all steps combined" not in prompt
-    assert "use `ops` write_file instead of shell quoting" in prompt
     assert "use double quotes or heredoc" not in prompt
-    assert "multiple heredoc commands" in prompt
     assert "Each step is a separate complete JSON object in the array" in prompt
     assert "Never merge content from multiple steps into one step" in prompt
 
@@ -1807,7 +1794,8 @@ def test_planning_repair_reasons_include_heredoc_and_inline_python_subcodes():
     assert "disallowed_heredoc_shape" in rendered
     assert "No heredoc" in rendered
     assert "Step [2]: brittle inline Python" in rendered
-    assert "No nested python -c" in rendered
+    assert "python -m py_compile" in rendered
+    assert "tiny test file with ops" in rendered
     assert "placeholder_only_implementation:" in rendered
     assert reasons[-1] == "Plan contains brittle heredoc-heavy or malformed commands"
 
@@ -1823,13 +1811,11 @@ def test_compact_planning_repair_prompt_preserves_phase7k_contract_rules():
 
     assert "no nested project folder" in prompt
     assert "no duplicated path roots" in prompt
-    assert "never use heredoc syntax" in prompt
-    assert "prefer ops" in prompt
-    assert "do not shell-quote file bodies" in prompt
+    assert "Use `ops` for file writes" in prompt
+    assert "fallback limits" in prompt
     assert "each step is a separate complete JSON object in the array" in prompt
     assert "never merge content from multiple steps into one step" in prompt
     assert "placeholder-only implementation" in prompt
-    assert "avoid brittle `python -c`" in prompt
 
 
 def test_planning_repair_prompt_includes_truncated_plan_restart_hint():
@@ -5562,6 +5548,13 @@ def test_repair_prompt_includes_injected_truncated_multistep_subcodes():
 
 
 def test_plan_contract_diagnostics_include_brittle_subcodes_when_present():
+    shadow_warnings = [
+        {
+            "rule_id": "model_behavior.command_length_prompt_patch",
+            "category": "model_behavior_patch",
+            "shadow_candidate": True,
+        }
+    ]
     diagnostics = _plan_contract_diagnostics(
         {
             "step_count": 3,
@@ -5570,6 +5563,7 @@ def test_plan_contract_diagnostics_include_brittle_subcodes_when_present():
             "command_total_chars": 2445,
             "brittle_command_subcodes": ["oversized_command_length"],
             "brittle_command_step_details": {2: ["oversized_command_length"]},
+            "shadow_warnings": shadow_warnings,
         }
     )
 
@@ -5579,6 +5573,7 @@ def test_plan_contract_diagnostics_include_brittle_subcodes_when_present():
     assert diagnostics["brittle_command_step_details"] == {
         2: ["oversized_command_length"]
     }
+    assert diagnostics["shadow_warnings"] == shadow_warnings
 
 
 def test_plan_contract_diagnostics_omit_brittle_keys_when_absent():
@@ -5621,6 +5616,13 @@ def test_plan_contract_diagnostics_include_truncated_multistep_subcodes():
 
 def test_planning_contract_violation_event_includes_brittle_subcodes():
     events = []
+    shadow_warnings = [
+        {
+            "rule_id": "model_behavior.command_length_prompt_patch",
+            "category": "model_behavior_patch",
+            "shadow_candidate": True,
+        }
+    ]
     ctx = MagicMock(
         session_id=55,
         task_id=10,
@@ -5643,6 +5645,7 @@ def test_planning_contract_violation_event_includes_brittle_subcodes():
             "command_total_chars": 2445,
             "brittle_command_subcodes": ["oversized_command_length"],
             "brittle_command_step_details": {2: ["oversized_command_length"]},
+            "shadow_warnings": shadow_warnings,
         },
         output_text='[{"step_number":2}]',
         strategy_info="plan_validation_failed",
@@ -5651,6 +5654,7 @@ def test_planning_contract_violation_event_includes_brittle_subcodes():
     metadata = events[0][2]
     assert metadata["brittle_command_subcodes"] == ["oversized_command_length"]
     assert metadata["brittle_command_step_details"] == {2: ["oversized_command_length"]}
+    assert metadata["shadow_warnings"] == shadow_warnings
 
 
 def test_planning_contract_violation_event_includes_truncated_subcodes():
@@ -5697,6 +5701,13 @@ def test_planning_contract_violation_event_includes_truncated_subcodes():
 
 
 def test_terminal_validation_failure_details_include_brittle_subcodes_when_present():
+    shadow_warnings = [
+        {
+            "rule_id": "model_behavior.command_length_prompt_patch",
+            "category": "model_behavior_patch",
+            "shadow_candidate": True,
+        }
+    ]
     verdict = type(
         "Verdict",
         (),
@@ -5705,6 +5716,7 @@ def test_terminal_validation_failure_details_include_brittle_subcodes_when_prese
             "details": {
                 "brittle_command_subcodes": ["oversized_command_length"],
                 "brittle_command_step_details": {2: ["oversized_command_length"]},
+                "shadow_warnings": shadow_warnings,
             },
         },
     )()
@@ -5717,6 +5729,7 @@ def test_terminal_validation_failure_details_include_brittle_subcodes_when_prese
     ]
     assert details["brittle_command_subcodes"] == ["oversized_command_length"]
     assert details["brittle_command_step_details"] == {2: ["oversized_command_length"]}
+    assert details["shadow_warnings"] == shadow_warnings
 
 
 def test_terminal_validation_failure_details_omit_brittle_keys_when_absent():
@@ -5737,3 +5750,39 @@ def test_terminal_validation_failure_details_omit_brittle_keys_when_absent():
             "Plan contains brittle heredoc-heavy or malformed commands"
         ],
     }
+
+
+def test_shadow_warnings_do_not_change_plan_validation_status():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Write source through a brittle shell fallback",
+            "commands": [
+                "cat > src/app.py <<'PY'\n"
+                + "print('hello')\n" * 80
+                + "PY\ncat > src/extra.py <<'PY'\nprint('extra')\nPY"
+            ],
+            "verification": "python -m py_compile src/app.py",
+            "rollback": "rm -f src/app.py",
+            "expected_files": ["src/app.py"],
+        }
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Create a small Python implementation",
+        execution_profile="implementation",
+    )
+
+    assert verdict.repairable
+    assert (
+        "Plan contains brittle heredoc-heavy or malformed commands" in verdict.reasons
+    )
+
+    shadow_warnings = verdict.details["shadow_warnings"]
+    rule_ids = {warning["rule_id"] for warning in shadow_warnings}
+
+    assert "model_behavior.heredoc_guidance" in rule_ids
+    assert "model_behavior.command_length_prompt_patch" in rule_ids
+    assert all(warning["shadow_candidate"] is True for warning in shadow_warnings)

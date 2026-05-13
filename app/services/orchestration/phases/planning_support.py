@@ -220,7 +220,9 @@ def _build_repair_rejection_reasons(
         step_label = f"Step {inline_python_steps}" if inline_python_steps else "Plan"
         targeted_reasons.append(
             f"{step_label}: brittle inline Python (brittle_inline_python). "
-            "Rewrite as short printf/file edit commands. No nested python -c."
+            "Use ops for file content and verify Python with python -m py_compile, "
+            "python -m unittest, or python -m pytest. If an import assertion is "
+            "needed, create a tiny test file with ops instead of inline python -c."
         )
 
     if details.get("placeholder_only_implementation"):
@@ -325,6 +327,20 @@ def _truncated_multistep_diagnostic_details(
     }
 
 
+def _shadow_warning_details(
+    verdict_details: Dict[str, Any] | None,
+) -> dict[str, Any]:
+    details = verdict_details or {}
+    warnings = details.get("shadow_warnings") or []
+    if not isinstance(warnings, list) or not warnings:
+        return {}
+    return {
+        "shadow_warnings": [
+            warning for warning in warnings[:10] if isinstance(warning, dict)
+        ]
+    }
+
+
 def _plan_contract_diagnostics(
     verdict_details: Dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -340,6 +356,7 @@ def _plan_contract_diagnostics(
     }
     diagnostics.update(_brittle_command_diagnostic_details(details))
     diagnostics.update(_truncated_multistep_diagnostic_details(details))
+    diagnostics.update(_shadow_warning_details(details))
     return diagnostics
 
 
@@ -350,6 +367,7 @@ def _terminal_validation_failure_details(plan_verdict: Any) -> dict[str, Any]:
     }
     details.update(_brittle_command_diagnostic_details(plan_verdict.details))
     details.update(_truncated_multistep_diagnostic_details(plan_verdict.details))
+    details.update(_shadow_warning_details(plan_verdict.details))
     return details
 
 
@@ -541,6 +559,7 @@ def _emit_planning_diagnostics_contract_violation(
     }
     metadata.update(_brittle_command_diagnostic_details(diagnostics))
     metadata.update(_truncated_multistep_diagnostic_details(diagnostics))
+    metadata.update(_shadow_warning_details(diagnostics))
     ctx.emit_live(
         "WARN",
         "[OPENCLAW][PLANNING_DIAGNOSTICS] contract violation detected",

@@ -345,6 +345,13 @@ def test_decision_timeline_preserves_validation_diagnostics(
                         "brittle_command_step_details": {
                             "2": ["oversized_command_length"]
                         },
+                        "shadow_warnings": [
+                            {
+                                "rule_id": "model_behavior.command_length_prompt_patch",
+                                "category": "model_behavior_patch",
+                                "shadow_candidate": True,
+                            }
+                        ],
                         "max_command_length": 1456,
                     },
                 )
@@ -364,6 +371,13 @@ def test_decision_timeline_preserves_validation_diagnostics(
         assert details["brittle_command_step_details"] == {
             "2": ["oversized_command_length"]
         }
+        assert details["shadow_warnings"] == [
+            {
+                "rule_id": "model_behavior.command_length_prompt_patch",
+                "category": "model_behavior_patch",
+                "shadow_candidate": True,
+            }
+        ]
         assert details["max_command_length"] == 1456
 
 
@@ -865,6 +879,13 @@ def test_decision_timeline_surfaces_terminal_planning_failure_metadata(
                             "2": ["oversized_command_length"]
                         },
                         "brittle_command_step_command_lengths": {"2": [1684]},
+                        "shadow_warnings": [
+                            {
+                                "rule_id": "model_behavior.command_length_prompt_patch",
+                                "category": "model_behavior_patch",
+                                "shadow_candidate": True,
+                            }
+                        ],
                     }
                 ),
             )
@@ -894,6 +915,13 @@ def test_decision_timeline_surfaces_terminal_planning_failure_metadata(
         assert failure["details"]["brittle_command_step_details"] == {
             "2": ["oversized_command_length"]
         }
+        assert failure["details"]["shadow_warnings"] == [
+            {
+                "rule_id": "model_behavior.command_length_prompt_patch",
+                "category": "model_behavior_patch",
+                "shadow_candidate": True,
+            }
+        ]
         assert failure["details"]["repair_attempted"] is True
         assert failure["details"]["targeted_second_repair_attempted"] is False
         assert "Brittle-command" in failure["details"]["no_further_repair_reason"]

@@ -946,6 +946,98 @@ class ValidatorService:
         }
 
     @staticmethod
+    def _shadow_rule_warnings(
+        command_budget: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Report downgrade candidates without changing validation status."""
+
+        subcodes = set(command_budget.get("brittle_command_subcodes") or [])
+        step_details = command_budget.get("brittle_command_step_details") or {}
+        warnings: List[Dict[str, Any]] = []
+
+        def _steps_for(codes: set[str]) -> List[int]:
+            steps: List[int] = []
+            for raw_step, raw_codes in step_details.items():
+                if codes.intersection(set(raw_codes or [])):
+                    try:
+                        steps.append(int(raw_step))
+                    except (TypeError, ValueError):
+                        continue
+            return sorted(set(steps))
+
+        heredoc_codes = {
+            "disallowed_heredoc_shape",
+            "multiple_heredoc_in_command",
+            "looped_heredoc",
+            "unsafe_heredoc_target",
+            "multiple_heredoc_across_plan",
+            "markdown_wrapped_heredoc",
+        }
+        if subcodes.intersection(heredoc_codes):
+            warnings.append(
+                {
+                    "rule_id": "model_behavior.heredoc_guidance",
+                    "category": "model_behavior_patch",
+                    "current_owner": "validator.command_budget_diagnostics",
+                    "current_behavior": "repair_required",
+                    "shadow_candidate": True,
+                    "proposed_shadow_behavior": "warning_after_live_evidence",
+                    "fallback_detectors": [
+                        "structured_ops_contract",
+                        "workspace_guard",
+                        "completion_verification",
+                    ],
+                    "subcodes": sorted(subcodes.intersection(heredoc_codes)),
+                    "steps": _steps_for(heredoc_codes),
+                }
+            )
+
+        if "oversized_command_length" in subcodes:
+            warnings.append(
+                {
+                    "rule_id": "model_behavior.command_length_prompt_patch",
+                    "category": "model_behavior_patch",
+                    "current_owner": "validator.command_budget_diagnostics",
+                    "current_behavior": "repair_required",
+                    "shadow_candidate": True,
+                    "proposed_shadow_behavior": "warning_for_non_file_writing_commands",
+                    "fallback_detectors": [
+                        "structured_ops_contract",
+                        "completion_verification",
+                    ],
+                    "subcodes": ["oversized_command_length"],
+                    "steps": command_budget.get("oversized_command_steps") or [],
+                }
+            )
+
+        malformed_shell_quoting_steps = (
+            command_budget.get("malformed_shell_quoting_steps") or []
+        )
+        printf_or_shell_codes = {"brittle_inline_python", "too_many_lines"}
+        if malformed_shell_quoting_steps or subcodes.intersection(
+            printf_or_shell_codes
+        ):
+            warnings.append(
+                {
+                    "rule_id": "model_behavior.shell_quoting_patch",
+                    "category": "model_behavior_patch",
+                    "current_owner": "validator.command_budget_diagnostics",
+                    "current_behavior": "repair_required",
+                    "shadow_candidate": True,
+                    "proposed_shadow_behavior": "shell_fallback_warning",
+                    "fallback_detectors": [
+                        "structured_ops_contract",
+                        "executor_command_preflight",
+                        "completion_verification",
+                    ],
+                    "subcodes": sorted(subcodes.intersection(printf_or_shell_codes)),
+                    "steps": sorted(set(malformed_shell_quoting_steps)),
+                }
+            )
+
+        return warnings
+
+    @staticmethod
     def _command_has_malformed_shell_quoting(command: str) -> bool:
         raw = str(command or "")
         if "\\'" in raw and re.search(r"\bprintf\s+'", raw):
@@ -1607,6 +1699,9 @@ class ValidatorService:
         details["max_command_length"] = command_budget["max_command_length"]
         details["heredoc_command_count"] = command_budget["heredoc_command_count"]
         details["command_total_chars"] = command_budget["command_total_chars"]
+        shadow_warnings = cls._shadow_rule_warnings(command_budget)
+        if shadow_warnings:
+            details["shadow_warnings"] = shadow_warnings
         if command_budget.get("oversized_command_steps"):
             details["oversized_command_steps"] = command_budget[
                 "oversized_command_steps"

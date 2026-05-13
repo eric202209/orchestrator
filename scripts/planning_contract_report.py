@@ -251,6 +251,7 @@ def summarize(
         semantic_codes: list[str] = []
         brittle_subcodes: list[str] = []
         truncated_subcodes: list[str] = []
+        shadow_warning_rule_ids: list[str] = []
         for row in contract_rows:
             metadata = row["metadata"]
             semantic_codes.extend(
@@ -268,6 +269,12 @@ def summarize(
                 for code in (metadata.get("truncated_multistep_subcodes") or [])
                 if str(code).strip()
             )
+            for warning in metadata.get("shadow_warnings") or []:
+                if not isinstance(warning, dict):
+                    continue
+                rule_id = str(warning.get("rule_id") or "").strip()
+                if rule_id:
+                    shadow_warning_rule_ids.append(rule_id)
         repair_attempt_count = len(repair_start_rows)
         record = {
             "task_execution_id": task_execution_id,
@@ -289,6 +296,7 @@ def summarize(
             "semantic_violation_codes": sorted(set(semantic_codes)),
             "brittle_command_subcodes": sorted(set(brittle_subcodes)),
             "truncated_multistep_subcodes": sorted(set(truncated_subcodes)),
+            "shadow_warning_rule_ids": sorted(set(shadow_warning_rule_ids)),
             "terminal_reason": terminal_reason_from_rows(metadata_rows, context),
             "final_task_status": _status(context.get("task_status")),
             "final_task_execution_status": _status(
@@ -326,6 +334,11 @@ def _aggregate(
         for record in records
         if str(record["terminal_reason"]).strip()
     )
+    shadow_warning_rule_counts = Counter(
+        rule_id
+        for record in records
+        for rule_id in (record.get("shadow_warning_rule_ids") or [])
+    )
     recovered_records = [
         record for record in records if record["planning_repair_recovered"]
     ]
@@ -351,6 +364,11 @@ def _aggregate(
         "diagnostic_change_candidates": diagnostic_candidates,
         "workflow_profiles": dict(workflow_profiles),
         "terminal_reasons": dict(terminal_reasons),
+        "shadow_warning_rule_counts": dict(
+            sorted(
+                shadow_warning_rule_counts.items(), key=lambda item: (-item[1], item[0])
+            )
+        ),
         "recovered_outcomes": _recovered_outcomes(recovered_records),
         "recovered_outcomes_by_contract_reason": _recovered_outcomes_by_key(
             recovered_records, _record_contract_reason_keys
@@ -452,6 +470,12 @@ def print_report(summary: dict[str, Any]) -> None:
     print("Terminal reasons:")
     for reason, count in sorted(summary["terminal_reasons"].items()):
         print(f"- {count}x {reason}")
+    print("Shadow warning rules:")
+    if summary["shadow_warning_rule_counts"]:
+        for rule_id, count in summary["shadow_warning_rule_counts"].items():
+            print(f"- {count}x {rule_id}")
+    else:
+        print("- none")
 
 
 def main() -> int:

@@ -119,6 +119,30 @@ PLANNING_VALID_MINIMAL_JSON_EXAMPLE = """[
 ]"""
 
 
+def _render_ops_first_contract() -> str:
+    return (
+        "Use `ops` for file writes; put source in write_file/append_file/replace_in_file, not shell. "
+        f"Supported ops: {render_supported_file_ops()}."
+    )
+
+
+def _render_shell_fallback_limits() -> str:
+    return (
+        "Shell is only for installs, builds, tests, inspection, and small commands; "
+        "keep under 900 chars, relative, runnable. "
+        "No heredocs, background processes, absolute helpers, parent traversal, pseudo-commands. "
+        "If content needs quoting, move that content into `ops`."
+    )
+
+
+def _render_python_verification_contract() -> str:
+    return (
+        "For Python verify with `python -m py_compile`, unittest, or pytest. "
+        "For import assertions, create a tiny test file with `ops`; "
+        "do not put inline `python -c` snippets in commands."
+    )
+
+
 def _render_knowledge_block(knowledge_context: Any) -> str:
     if not knowledge_context or not getattr(knowledge_context, "retrieved_items", None):
         return ""
@@ -1102,6 +1126,9 @@ class PlannerService:
             workflow_phases=workflow_phases,
             workspace_has_existing_files=workspace_has_existing_files,
         )
+        ops_contract = _render_ops_first_contract()
+        shell_fallback_limits = _render_shell_fallback_limits()
+        python_verification_contract = _render_python_verification_contract()
         prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 Do not implement anything.
@@ -1125,14 +1152,11 @@ Rules:
 10. `verification` must be a single shell string or null
 11. `rollback` must be a single shell string or null
 12. expected_files must be relative file paths or []
-13. For file creation/overwrite, prefer `ops`: `[{{"op":"write_file","path":"relative/path","content":"file contents"}}]`; the executor writes content directly, so do not shell-quote file bodies. For routine workspace changes, `ops` supports: {render_supported_file_ops()}.
-14. Keep each command under 900 characters; commands describe runnable shell actions, not full source files
-15. Use commands for installs, builds, tests, inspection, and verification. Never use heredoc syntax. Use `ops` for file bodies.
-16. Avoid complex nested shell quoting; never emit `python -c` commands with f-strings, JSON strings, semicolons, or mixed quote escaping
-16a. Do not put escaped apostrophes like `\\'` inside single-quoted strings; for content with apostrophes use `ops` write_file
-17. Do not join separate shell commands with commas
-18. No background processes, &, nohup, disown, dev servers, or long commands. Do not use background processes.
-19. Commands must be runnable shell, not prose. Do not emit pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
+13. {ops_contract}
+14. Shell fallback limits: {shell_fallback_limits}
+15. Do not join separate shell commands with commas
+16. Commands must be runnable shell, not prose. Do not emit pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
+17. {python_verification_contract}
 20. Do not create or cd into a nested project folder; run directly from {display_project_dir}
 21. Include exactly one final meaningful verification/build step such as `npm run build`, `pytest`, or `python -m pytest`
 22. Prefer package-manager/editor-friendly commands and one-file-at-a-time edits
@@ -1172,6 +1196,9 @@ Return only a JSON array matching this shape. No markdown. No prose.
             workflow_phases=workflow_phases,
             workspace_has_existing_files=workspace_has_existing_files,
         )
+        ops_contract = _render_ops_first_contract()
+        shell_fallback_limits = _render_shell_fallback_limits()
+        python_verification_contract = _render_python_verification_contract()
         prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 
@@ -1186,16 +1213,15 @@ Requirements:
 1. 2 to 4 steps only
 2. Use short relative shell commands only, and keep expected_files relative
 3. If a step will later use file-read or file-write tools, keep that path relative in the plan; execution will expand it under {display_project_dir}
-4. No long inline source dumps, no heredoc-heavy commands, no absolute paths, no .., no ~
-5. Keep each command under 900 characters and avoid embedding generated source bodies in the JSON
-6. Prefer `ops` entries for routine file changes instead of shell-quoting file content; supported ops are: {render_supported_file_ops()}
-6a. No escaped apostrophes like `\\'` inside single-quoted strings; use `ops` write_file or append_file for content with quotes
+4. {ops_contract}
+5. Shell fallback limits: {shell_fallback_limits}
+6. {python_verification_contract}
 7. Each step must contain exactly these required keys, plus optional `ops`, and no other keys:
    step_number, description, commands, verification, rollback, expected_files
 8. step_number values must be unique integers and exactly 1, 2, 3... in order
 9. commands must be a JSON array of shell strings; it may be empty when `ops` contains deterministic file operations
 10. verification and rollback must each be one shell string or null
-11. No background processes, &, nohup, disown, dev servers, or long commands.
+11. No background processes, &, nohup, disown, or dev servers.
 12. Keep each command short and machine-runnable
 13. If the workspace already has files, inspect or extend them before re-scaffolding
 14. For implementation steps with expected_files, include at least one command or file-mutating `ops` entry that writes real file content, not just mkdir/touch
@@ -1549,6 +1575,9 @@ Return only a JSON array matching this shape. No markdown. No prose.
         default_validation_error = (
             "Validation error:\n- malformed or non-runnable planning output\n"
         )
+        ops_contract = _render_ops_first_contract()
+        shell_fallback_limits = _render_shell_fallback_limits()
+        python_verification_contract = _render_python_verification_contract()
         prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 Do not create, edit, read, or write files during planning repair; return the JSON array as message text only.
@@ -1560,28 +1589,25 @@ Bad:
 {validation_error or default_validation_error}
 
 {knowledge_block + chr(10) if knowledge_block else ""}
-Strict output schema:
-Required keys: step_number, description, commands, verification, rollback, expected_files.
-Optional key: ops.
+Strict output schema: step_number, description, commands, verification,
+rollback, expected_files; optional ops.
 
 Rules:
 1. Use 3 to 4 steps, numbered 1..N.
-2. commands: short shell strings under 900 chars for installs, builds, tests, inspection, and verification.
-2a. For file creation/overwrite, prefer ops: [{{"op":"write_file","path":"relative/path","content":"file contents"}}]. The executor writes content directly; do not shell-quote file bodies.
+2. {ops_contract}
+2a. Shell fallback limits: {shell_fallback_limits}
+2b. {python_verification_contract}
 3. verification/rollback: one shell string or null.
 4. expected_files: relative path array.
-5. Relative paths only; no absolute paths, .., ~, or duplicated roots like frontend/src/frontend/src or backend/src/backend/src. Paths rooted exactly once.
-6. No nested project folder; work in task workspace; do not `cd` into a new app/backend/frontend root.
-7. No background processes, &, nohup, disown, dev servers, or long commands.
+5. Relative paths only; no absolute paths, .., ~, frontend/src/frontend/src, or backend/src/backend/src; rooted exactly once.
+6. No nested project folder; work in task workspace.
+7. No background processes, &, nohup, disown, or dev servers.
 8. No prose, markdown, payloads, logs, session history, or extra keys beyond optional ops.
 9. Replace source dumps with short commands.
 10. expected_files steps must write real content; no separate mkdir/touch-only scaffold step for normal files.
 11. Verification must use `node -e`, `npm run build`, or `python -m`; no `test -f`, `grep -q`, `echo`, or `cd /... &&`.
 12. No /root/write_file.py, /tmp helpers, absolute helper scripts, outside files.
 13. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. Use ops to overwrite only needed JSX body/CSS files.
-14. Never use heredoc (`<<'EOF'`, `<<'PY'`, `<<'HEREDOC'`, etc.). Prefer ops for file writes.
-15. No heredocs in loops, multi-file heredocs, or multiple heredoc commands.
-16. No `\\'` inside single-quoted strings. For content with apostrophes use `ops` write_file instead of shell quoting.
 17. Each step is a separate complete JSON object in the array. Never merge content from multiple steps into one step.
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
@@ -1598,6 +1624,9 @@ Rules:
         reason_lines = "\n".join(
             f"- {reason[:140]}" for reason in (rejection_reasons or [])[:4]
         )
+        ops_contract = _render_ops_first_contract()
+        shell_fallback_limits = _render_shell_fallback_limits()
+        python_verification_contract = _render_python_verification_contract()
         prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 
@@ -1614,15 +1643,15 @@ step_number, description, commands, verification, rollback, expected_files, opti
 
 Rules:
 - commands must be short shell strings under 900 characters each.
-- for file creation/overwrite, prefer ops: [{{"op":"write_file","path":"relative/path","content":"file contents"}}]. The executor writes content directly; do not shell-quote file bodies.
+- {ops_contract}
+- shell fallback limits: {shell_fallback_limits}
+- {python_verification_contract}
 - verification must be one real command using `python -m`, `node -e`, or `npm run build`.
 - expected_files must be relative paths only.
 - expected_files steps must write real content; no touch-only, TODO, pass, stub, or placeholder-only implementation.
 - no nested project folder; run directly in the task workspace and do not `cd` into a new app/backend/frontend root.
 - no duplicated path roots like frontend/src/frontend/src or backend/src/backend/src.
-- no background processes, dev servers, absolute paths, heredocs, prose, markdown, or extra keys beyond optional ops.
-- never use heredoc syntax (`<<EOF`, `<<'PY'`, `cat > file <<`, looped heredocs); use ops or existing project commands.
-- avoid brittle `python -c` with f-strings, JSON strings, semicolon-heavy code, or mixed quote escaping.
+- no background processes, dev servers, absolute paths, prose, markdown, or extra keys beyond optional ops.
 - each step is a separate complete JSON object in the array; never merge content from multiple steps into one step.
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)

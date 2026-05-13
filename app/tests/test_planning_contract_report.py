@@ -137,6 +137,13 @@ def test_planning_contract_report_summarizes_repair_recovery():
                 "Plan contains brittle heredoc-heavy or malformed commands"
             ],
             "brittle_command_subcodes": ["brittle_inline_python"],
+            "shadow_warnings": [
+                {
+                    "rule_id": "model_behavior.shell_quoting_patch",
+                    "category": "model_behavior_patch",
+                    "shadow_candidate": True,
+                }
+            ],
         },
     )
     _insert_log(
@@ -168,8 +175,12 @@ def test_planning_contract_report_summarizes_repair_recovery():
     assert summary["initial_contract_failed"] == 1
     assert summary["planning_repair_attempted"] == 1
     assert summary["planning_repair_recovered"] == 1
+    assert summary["shadow_warning_rule_counts"] == {
+        "model_behavior.shell_quoting_patch": 1
+    }
     assert record["workflow_profile"] == "backend_only"
     assert record["brittle_command_subcodes"] == ["brittle_inline_python"]
+    assert record["shadow_warning_rule_ids"] == ["model_behavior.shell_quoting_patch"]
 
 
 def test_planning_contract_report_threshold_requires_distinct_executions():
