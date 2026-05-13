@@ -176,7 +176,7 @@ export default function SettingsPage() {
             <input value={name} onChange={(e) => setName(e.target.value)} className="w-full rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-white" />
           </div>
         </div>
-        <button onClick={handleProfileSave} disabled={savingProfile} className="mt-4 inline-flex items-center gap-2 rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] px-4 py-2 text-slate-950 hover:bg-[color:var(--oc-action-hover)] disabled:opacity-50">
+        <button onClick={handleProfileSave} disabled={savingProfile} className="mt-4 inline-flex items-center gap-2 rounded-lg border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] px-4 py-2 text-white hover:bg-[color:var(--oc-action-hover)] disabled:opacity-50">
           <Save className="h-4 w-4" />
           {savingProfile ? 'Saving...' : 'Save Profile'}
         </button>
@@ -333,7 +333,7 @@ export default function SettingsPage() {
             )}
           </div>
         </div>
-        <button onClick={() => handleSystemSave(false)} disabled={savingSystem} className="mt-4 inline-flex items-center gap-2 rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] px-4 py-2 text-slate-950 hover:bg-[color:var(--oc-action-hover)] disabled:opacity-50">
+        <button onClick={() => handleSystemSave(false)} disabled={savingSystem} className="mt-4 inline-flex items-center gap-2 rounded-lg border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] px-4 py-2 text-white hover:bg-[color:var(--oc-action-hover)] disabled:opacity-50">
           <Save className="h-4 w-4" />
           {savingSystem ? 'Saving...' : 'Save System Settings'}
         </button>
@@ -369,7 +369,7 @@ export default function SettingsPage() {
               <RefreshCw className="h-4 w-4" />
               Rotate Key
             </button>
-            <button onClick={() => handleSystemSave(false)} disabled={savingSystem} className="inline-flex items-center gap-2 rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] px-4 py-2 text-slate-950 hover:bg-[color:var(--oc-action-hover)] disabled:opacity-50">
+            <button onClick={() => handleSystemSave(false)} disabled={savingSystem} className="inline-flex items-center gap-2 rounded-lg border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] px-4 py-2 text-white hover:bg-[color:var(--oc-action-hover)] disabled:opacity-50">
               <KeyRound className="h-4 w-4" />
               Save Mobile Key
             </button>
@@ -392,7 +392,7 @@ export default function SettingsPage() {
             <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="w-full rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-white" />
           </div>
         </div>
-        <button onClick={handlePasswordChange} disabled={changingPassword || !currentPassword || !newPassword} className="mt-4 inline-flex items-center gap-2 rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] px-4 py-2 text-slate-950 hover:bg-[color:var(--oc-action-hover)] disabled:opacity-50">
+        <button onClick={handlePasswordChange} disabled={changingPassword || !currentPassword || !newPassword} className="mt-4 inline-flex items-center gap-2 rounded-lg border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] px-4 py-2 text-white hover:bg-[color:var(--oc-action-hover)] disabled:opacity-50">
           <Save className="h-4 w-4" />
           {changingPassword ? 'Updating...' : 'Change Password'}
         </button>

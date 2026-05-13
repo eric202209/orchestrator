@@ -199,7 +199,7 @@ function Dashboard() {
         <div>
           <h1 className="text-lg font-semibold text-white">Dashboard</h1>
           {accountLabel && (
-            <p className="text-sm text-slate-500 mt-0.5">{accountLabel}</p>
+            <p className="text-sm text-slate-400 mt-0.5">{accountLabel}</p>
           )}
         </div>
         <button
@@ -214,34 +214,34 @@ function Dashboard() {
       {/* Stats Grid */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
         <div className="bg-[color:var(--oc-surface)] rounded-lg p-4 border border-[color:var(--oc-border-soft)]">
-          <p className="text-xs text-slate-400 mb-2">Projects</p>
+          <p className="text-[10px] font-medium uppercase tracking-wider text-slate-400 mb-2">Projects</p>
           <div className="flex items-end justify-between">
             <p className="text-2xl font-semibold text-white">{stats.totalProjects}</p>
-            <GitBranch className="h-5 w-5 text-slate-500" />
+            <GitBranch className="h-5 w-5 text-primary-500/60" />
           </div>
         </div>
 
         <div className="bg-[color:var(--oc-surface)] rounded-lg p-4 border border-[color:var(--oc-border-soft)]">
-          <p className="text-xs text-slate-400 mb-2">Tasks</p>
+          <p className="text-[10px] font-medium uppercase tracking-wider text-slate-400 mb-2">Tasks</p>
           <div className="flex items-end justify-between">
             <p className="text-2xl font-semibold text-white">{stats.totalTasks}</p>
-            <FileText className="h-5 w-5 text-slate-500" />
+            <FileText className="h-5 w-5 text-slate-400" />
           </div>
         </div>
 
         <div className="bg-[color:var(--oc-surface)] rounded-lg p-4 border border-[color:var(--oc-border-soft)]">
-          <p className="text-xs text-slate-400 mb-2">Running</p>
+          <p className="text-[10px] font-medium uppercase tracking-wider text-slate-400 mb-2">Running</p>
           <div className="flex items-end justify-between">
             <p className="text-2xl font-semibold text-primary-300">{stats.activeTasks}</p>
-            <Activity className="h-5 w-5 text-primary-600" />
+            <Activity className="h-5 w-5 text-primary-400" />
           </div>
         </div>
 
         <div className="bg-[color:var(--oc-surface)] rounded-lg p-4 border border-[color:var(--oc-border-soft)]">
-          <p className="text-xs text-slate-400 mb-2">Completed</p>
+          <p className="text-[10px] font-medium uppercase tracking-wider text-slate-400 mb-2">Completed</p>
           <div className="flex items-end justify-between">
             <p className="text-2xl font-semibold text-emerald-400">{stats.completedTasks}</p>
-            <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+            <CheckCircle2 className="h-5 w-5 text-emerald-500" />
           </div>
         </div>
       </div>
@@ -253,7 +253,7 @@ function Dashboard() {
           className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
             activeTab === 'overview'
               ? 'text-white border-primary-500'
-              : 'text-slate-500 border-transparent hover:text-slate-300'
+              : 'text-slate-400 border-transparent hover:text-slate-200'
           }`}
         >
           Overview
@@ -263,7 +263,7 @@ function Dashboard() {
           className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
             activeTab === 'projects'
               ? 'text-white border-primary-500'
-              : 'text-slate-500 border-transparent hover:text-slate-300'
+              : 'text-slate-400 border-transparent hover:text-slate-200'
           }`}
         >
           Projects
@@ -273,7 +273,7 @@ function Dashboard() {
           className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
             activeTab === 'tasks'
               ? 'text-white border-primary-500'
-              : 'text-slate-500 border-transparent hover:text-slate-300'
+              : 'text-slate-400 border-transparent hover:text-slate-200'
           }`}
         >
           Tasks
@@ -295,7 +295,7 @@ function Dashboard() {
                     description="Create a project to start orchestrating AI development tasks"
                   />
                 ) : (
-                  <div className="divide-y divide-slate-700/60">
+                  <div className="divide-y divide-[color:var(--oc-border-soft)]">
                     {tasks.slice(-5).reverse().map((task) => (
                       <div key={task.id} className="flex items-center justify-between py-3">
                         <div>
@@ -347,7 +347,7 @@ function Dashboard() {
                 {filteredProjects.map((project) => (
                   <div key={project.id} className="bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)] p-4 hover:border-[color:var(--oc-border)] transition-colors">
                     <div className="flex items-start justify-between mb-3">
-                      <GitBranch className="h-4 w-4 text-slate-500 mt-0.5" />
+                      <GitBranch className="h-4 w-4 text-primary-500/70 mt-0.5" />
                       <div className="flex gap-1.5">
                         {project.github_url && (
                           <a
@@ -370,7 +370,7 @@ function Dashboard() {
                       </div>
                     </div>
                     <h3 className="text-sm font-semibold text-white mb-1">{project.name}</h3>
-                    <div className="flex items-center justify-between text-xs text-slate-500">
+                    <div className="flex items-center justify-between text-xs text-slate-400">
                       <span>{project.branch}</span>
                       <span>{formatDistanceToNow(new Date(project.created_at), { addSuffix: true })}</span>
                     </div>
@@ -390,7 +390,7 @@ function Dashboard() {
                 <p className="text-xs text-slate-500 mt-1">Create a project and add tasks to get started</p>
               </div>
             ) : (
-              <div className="bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)] divide-y divide-slate-700/60">
+              <div className="bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)] divide-y divide-[color:var(--oc-border-soft)]">
                 {tasks.map((task) => (
                   <div key={task.id} className="flex items-center justify-between gap-4 px-4 py-3">
                     <div className="min-w-0 flex-1">
@@ -417,7 +417,7 @@ function Dashboard() {
             <form onSubmit={handleCreateProject}>
               <div className="space-y-3">
                 <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1.5">
+                  <label className="block text-xs font-medium text-slate-300 mb-1.5">
                     Project Name
                   </label>
                   <input
@@ -442,7 +442,7 @@ function Dashboard() {
                   <button
                     type="submit"
                     disabled={!newProjectName.trim() || creatingProject}
-                    className="flex-1 border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm px-3 py-2 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    className="flex-1 border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm px-3 py-2 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                   >
                     {creatingProject ? (
                       <>

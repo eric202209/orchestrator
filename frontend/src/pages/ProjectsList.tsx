@@ -205,7 +205,7 @@ function ProjectsList() {
           </div>
           <button
             onClick={() => setShowCreateProject(true)}
-            className="flex items-center gap-1.5 border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm px-3 py-1.5 rounded-md transition-colors"
+            className="flex items-center gap-1.5 border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm px-3 py-1.5 rounded-md transition-colors"
           >
             <Plus className="h-4 w-4" />
             New Project
@@ -392,7 +392,7 @@ function ProjectsList() {
                   <button
                     type="submit"
                     disabled={!newProjectName.trim() || creatingProject}
-                    className="flex-1 border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm px-3 py-2 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    className="flex-1 border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm px-3 py-2 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                   >
                     {creatingProject ? (
                       <>

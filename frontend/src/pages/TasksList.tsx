@@ -117,7 +117,7 @@ function TasksList() {
               }`}
             >
               {filter.label}
-              <span className="ml-1 text-slate-500">{count}</span>
+              <span className="ml-1 text-slate-400">{count}</span>
             </button>
           );
         })}
@@ -135,14 +135,14 @@ function TasksList() {
           }
         />
       ) : (
-        <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] divide-y divide-slate-700/60">
+        <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] divide-y divide-[color:var(--oc-border-soft)]">
           {filteredTasks.map((task) => {
             const project = projects[task.project_id || 0];
             return (
               <Link
                 key={task.id}
                 to={`/projects/${task.project_id}/tasks/${task.id}`}
-                className="flex items-center gap-4 px-4 py-3 hover:bg-[color:var(--oc-surface-raised)]/40 transition-colors group"
+                className="flex items-center gap-4 px-4 py-3 hover:bg-[color:var(--oc-surface-raised)] transition-colors group"
               >
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-slate-200 group-hover:text-white transition-colors line-clamp-1">
@@ -153,7 +153,7 @@ function TasksList() {
                       {task.description}
                     </p>
                   )}
-                  <div className="flex items-center gap-3 mt-1 text-xs text-slate-500">
+                  <div className="flex items-center gap-3 mt-1 text-xs text-slate-400">
                     {project && (
                       <span className="flex items-center gap-1">
                         <GitBranch className="h-3 w-3" />
@@ -176,19 +176,19 @@ function TasksList() {
       {tasks.length > 0 && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
-            <p className="text-xs text-slate-400 mb-1.5">Pending</p>
+            <p className="text-[10px] font-medium uppercase tracking-wider text-slate-400 mb-1.5">Pending</p>
             <p className="text-xl font-semibold text-white">{tasks.filter(t => t.status === 'pending').length}</p>
           </div>
           <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
-            <p className="text-xs text-slate-400 mb-1.5">Running</p>
+            <p className="text-[10px] font-medium uppercase tracking-wider text-slate-400 mb-1.5">Running</p>
             <p className="text-xl font-semibold text-primary-400">{tasks.filter(t => t.status === 'running').length}</p>
           </div>
           <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
-            <p className="text-xs text-slate-400 mb-1.5">Done</p>
+            <p className="text-[10px] font-medium uppercase tracking-wider text-slate-400 mb-1.5">Done</p>
             <p className="text-xl font-semibold text-emerald-400">{tasks.filter(t => t.status === 'done').length}</p>
           </div>
           <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
-            <p className="text-xs text-slate-400 mb-1.5">Failed</p>
+            <p className="text-[10px] font-medium uppercase tracking-wider text-slate-400 mb-1.5">Failed</p>
             <p className="text-xl font-semibold text-red-400">{tasks.filter(t => t.status === 'failed').length}</p>
           </div>
         </div>

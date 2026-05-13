@@ -1,23 +1,48 @@
 @import "tailwindcss";
 @config "../tailwind.config.js";
 
-:root {
-  --oc-canvas: #0a0b0f;
-  --oc-shell: #0d0e13;
-  --oc-surface: #191b22;
-  --oc-surface-raised: #222630;
-  --oc-surface-deep: #101219;
-  --oc-border: #3a414f;
-  --oc-border-soft: rgba(154, 164, 178, 0.24);
-  --oc-accent: #78a2ff;
-  --oc-action: #56616f;
-  --oc-action-hover: #667386;
-  --oc-text-primary: #f3f3f3;
-  --oc-text-secondary: #c1c1c1;
-  --oc-text-tertiary: #949494;
+@theme {
+  /*
+   * Map slate-* → zinc values (warm neutral gray).
+   * All components use text-slate-* — this makes them read as warm gray
+   * against neutral dark surfaces instead of cool-blue against navy.
+   */
+  --color-white:      #f4f4f5;
+  --color-slate-50:   #fafafa;
+  --color-slate-100:  #f4f4f5;
+  --color-slate-200:  #e4e4e7;
+  --color-slate-300:  #d1d1d6;
+  --color-slate-400:  #a1a1aa;
+  --color-slate-500:  #71717a;
+  --color-slate-600:  #52525b;
+  --color-slate-700:  #3f3f46;
+  --color-slate-800:  #27272a;
+  --color-slate-900:  #18181b;
+  --color-slate-950:  #09090b;
+}
 
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
-  line-height: 1.5;
+:root {
+  /* Neutral dark — not navy. Warm gray family reads naturally long-term. */
+  --oc-canvas:        #111113;
+  --oc-shell:         #17171a;
+  --oc-surface:       #1c1c1f;
+  --oc-surface-raised:#242428;
+  --oc-surface-deep:  #0e0e10;
+
+  /* Hairline white borders — glass edge, not colored boxes */
+  --oc-border:        rgba(255, 255, 255, 0.09);
+  --oc-border-soft:   rgba(255, 255, 255, 0.05);
+
+  --oc-accent:        #3b82f6;   /* blue-500 — no green component */
+  --oc-action:        #1d4ed8;   /* blue-700 — dark, confident */
+  --oc-action-hover:  #2563eb;   /* blue-600 — lightens on hover */
+
+  --oc-text-primary:  #f4f4f5;
+  --oc-text-secondary:#a1a1aa;
+  --oc-text-tertiary: #71717a;
+
+  font-family: 'Outfit', system-ui, sans-serif;
+  line-height: 1.6;
   font-weight: 400;
 
   color-scheme: dark;
@@ -30,11 +55,7 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
-html {
-  background-color: var(--oc-canvas);
-}
-
-body {
+html, body {
   margin: 0;
   min-height: 100vh;
   background-color: var(--oc-canvas);
@@ -44,25 +65,47 @@ body {
   min-height: 100vh;
 }
 
-/* Stuck task notification animations */
-@keyframes slideIn {
-  from {
-    transform: translateX(100%);
-    opacity: 0;
-  }
-  to {
-    transform: translateX(0);
-    opacity: 1;
-  }
+/* Panel depth — applies to every card/panel automatically */
+.rounded-lg.border,
+.rounded-xl.border {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.2),
+    0 4px 12px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
+/* Input focus ring */
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.20) !important;
+  outline: none !important;
+}
+
+/* Monospace for data / timestamps */
+.font-mono, code, pre {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+/* Slim scrollbar */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.10); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(59,130,246,0.35); }
+
+/* Live indicator pulse for running/active status dots */
+@keyframes livePulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
+.dot-live { animation: livePulse 2s ease-in-out infinite; }
+
+/* Slide notifications */
+@keyframes slideIn {
+  from { transform: translateX(100%); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
 @keyframes slideOut {
-  from {
-    transform: translateX(0);
-    opacity: 1;
-  }
-  to {
-    transform: translateX(100%);
-    opacity: 0;
-  }
+  from { transform: translateX(0);    opacity: 1; }
+  to   { transform: translateX(100%); opacity: 0; }
 }

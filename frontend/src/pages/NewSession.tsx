@@ -116,7 +116,7 @@ function NewSession() {
           <p className="text-slate-400 mb-6">Please create a project first or check your connection.</p>
           <Link
             to="/projects"
-            className="bg-primary-500 hover:border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white px-6 py-2 rounded-lg transition-colors"
+            className="bg-primary-500 hover:border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] text-white px-6 py-2 rounded-lg transition-colors"
           >
             Go to Projects
           </Link>
@@ -260,7 +260,7 @@ function NewSession() {
             <button
               type="submit"
               disabled={submitting || !sessionName.trim()}
-              className="w-full bg-primary-500 hover:border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white px-6 py-3 rounded-lg transition-all font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              className="w-full bg-primary-500 hover:border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] text-white px-6 py-3 rounded-lg transition-all font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
               {submitting ? (
                 <>

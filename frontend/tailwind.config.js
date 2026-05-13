@@ -7,17 +7,18 @@ export default {
   theme: {
     extend: {
       colors: {
+        /* Blue family — matches --oc-accent: #3b82f6 */
         primary: {
-          50: '#f0f9ff',
-          100: '#e8efff',
-          200: '#d4e1ff',
-          300: '#b4caff',
-          400: '#93b4ff',
-          500: '#78a2ff',
-          600: '#5d86ea',
-          700: '#496bbd',
-          800: '#334f91',
-          900: '#293f73',
+          50:  '#eff6ff',
+          100: '#dbeafe',
+          200: '#bfdbfe',
+          300: '#93c5fd',
+          400: '#60a5fa',
+          500: '#3b82f6',
+          600: '#2563eb',
+          700: '#1d4ed8',
+          800: '#1e40af',
+          900: '#1e3a8a',
         },
       },
     },

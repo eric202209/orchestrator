@@ -1949,7 +1949,7 @@ export default function SessionDetail() {
             <button
               onClick={handleAddOperatorGuidance}
               disabled={interventionSubmitting || !interventionPrompt.trim()}
-              className="flex items-center gap-1.5 rounded border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] px-3 py-2 text-xs text-slate-950 transition-colors hover:bg-[color:var(--oc-action-hover)] disabled:opacity-50"
+              className="flex items-center gap-1.5 rounded border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] px-3 py-2 text-xs text-white transition-colors hover:bg-[color:var(--oc-action-hover)] disabled:opacity-50"
             >
               <MessageCircle className="h-3 w-3" />
               {interventionSubmitting ? 'Sending...' : 'Send'}
@@ -2093,7 +2093,7 @@ export default function SessionDetail() {
             )}
             <button
               onClick={handleStartSession}
-              className="flex items-center gap-2 px-4 py-2 border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] rounded-lg text-sm transition-colors"
+              className="flex items-center gap-2 px-4 py-2 border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] rounded-lg text-sm transition-colors"
             >
               <Play className="h-4 w-4" />
               Start
@@ -2211,7 +2211,7 @@ export default function SessionDetail() {
                     setCheckpointActionIntent(null);
                     await handleStartSessionFresh();
                   }}
-                  className="rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] px-3 py-2 text-sm text-slate-950 transition-colors hover:bg-[color:var(--oc-action-hover)]"
+                  className="rounded-lg border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] px-3 py-2 text-sm text-white transition-colors hover:bg-[color:var(--oc-action-hover)]"
                 >
                   Start Fresh Instead
                 </button>

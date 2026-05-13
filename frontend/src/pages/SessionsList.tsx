@@ -197,7 +197,7 @@ function SessionsList() {
           </p>
         </div>
       ) : (
-        <div className="overflow-hidden rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] divide-y divide-slate-700/60">
+        <div className="overflow-hidden rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] divide-y divide-[color:var(--oc-border-soft)]">
           {visibleSessions.map((session) => {
             const project = projects[session.project_id || 0];
             const isLegacySession = isLegacyTaskExecutionSession(
@@ -213,8 +213,8 @@ function SessionsList() {
                 to={`/sessions/${session.id}`}
                 className={`group grid gap-3 border-l-[3px] px-4 py-3 transition-colors md:grid-cols-[minmax(0,1.4fr)_minmax(160px,0.8fr)_minmax(120px,0.5fr)] md:items-center ${accentClass} ${
                   isMuted
-                    ? 'opacity-95 hover:bg-[color:var(--oc-surface-raised)]/40 hover:opacity-100'
-                    : 'hover:bg-[color:var(--oc-surface-raised)]/40'
+                    ? 'opacity-70 hover:bg-[color:var(--oc-surface-raised)] hover:opacity-100'
+                    : 'hover:bg-[color:var(--oc-surface-raised)]'
                 }`}
               >
                 <div className="min-w-0">

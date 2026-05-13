@@ -14,10 +14,11 @@ export function Button({
   ...props 
 }: ButtonProps) {
   const variants = {
-    default: 'border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)]',
-    ghost: 'text-slate-400 hover:bg-[color:var(--oc-surface)] hover:text-slate-100',
-    outline: 'border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] text-slate-300 hover:border-[color:var(--oc-border)] hover:text-white',
-    destructive: 'bg-red-600 hover:bg-red-500 text-white'
+    /* border matches the button family (blue), not the surface family (navy) */
+    default: 'border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)]',
+    ghost: 'text-slate-400 hover:bg-[color:var(--oc-surface-raised)] hover:text-slate-200',
+    outline: 'border border-[color:var(--oc-border)] bg-[color:var(--oc-surface-deep)] text-slate-300 hover:border-[color:var(--oc-border)] hover:text-white',
+    destructive: 'border border-red-700 bg-red-700 hover:bg-red-600 hover:border-red-500 text-white'
   };
 
   const sizes = {

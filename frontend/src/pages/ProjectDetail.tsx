@@ -109,7 +109,7 @@ function ProjectDetail() {
           <p className="text-sm text-slate-400 mb-4">{error}</p>
           <button
             onClick={() => navigate('/projects')}
-            className="border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] px-4 py-2 rounded-md text-sm transition-colors"
+            className="border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] px-4 py-2 rounded-md text-sm transition-colors"
           >
             Back to Projects
           </button>
@@ -475,8 +475,8 @@ function ProjectDetail() {
             <ArrowLeft className="h-4 w-4" />
           </Link>
           <h1 className="text-lg font-semibold text-white">{project.name}</h1>
-          <span className="flex items-center gap-1 text-xs text-slate-500">
-            <GitBranch className="h-3.5 w-3.5" />
+          <span className="flex items-center gap-1 text-xs text-slate-400">
+            <GitBranch className="h-3.5 w-3.5 text-primary-500/60" />
             {project.branch}
           </span>
         </div>
@@ -549,7 +549,7 @@ function ProjectDetail() {
         {editingProjectMeta ? (
           <div className="space-y-3">
             <div>
-              <label className="mb-1.5 block text-xs font-medium text-slate-400">Description</label>
+              <label className="mb-1.5 block text-xs font-medium text-slate-300">Description</label>
               <textarea
                 value={projectDescriptionDraft}
                 onChange={(e) => setProjectDescriptionDraft(e.target.value)}
@@ -558,7 +558,7 @@ function ProjectDetail() {
               />
             </div>
             <div>
-              <label className="mb-1.5 block text-xs font-medium text-slate-400">Rules</label>
+              <label className="mb-1.5 block text-xs font-medium text-slate-300">Rules</label>
               <textarea
                 value={projectRulesDraft}
                 onChange={(e) => setProjectRulesDraft(e.target.value)}
@@ -582,7 +582,7 @@ function ProjectDetail() {
                 type="button"
                 onClick={handleSaveProjectMeta}
                 disabled={savingProjectMeta}
-                className="rounded-md border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] px-3 py-1.5 text-sm text-slate-950 transition-colors hover:bg-[color:var(--oc-action-hover)] disabled:opacity-50"
+                className="rounded-md border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] px-3 py-1.5 text-sm text-white transition-colors hover:bg-[color:var(--oc-action-hover)] disabled:opacity-50"
               >
                 {savingProjectMeta ? 'Saving...' : 'Save Brief'}
               </button>
@@ -607,7 +607,7 @@ function ProjectDetail() {
       </div>
 
       {/* Meta row */}
-      <div className="flex items-center gap-4 text-xs text-slate-500">
+      <div className="flex items-center gap-4 text-xs text-slate-400">
         {project.github_url && (
           <span className="truncate max-w-[280px]">Repo: {project.github_url}</span>
         )}
@@ -662,7 +662,7 @@ function ProjectDetail() {
             <h2 className="text-sm font-medium text-white">Runs</h2>
             <button
               onClick={() => navigate(`/sessions/new?project_id=${id}`)}
-              className="flex items-center gap-1.5 border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm px-3 py-1.5 rounded-md transition-colors"
+              className="flex items-center gap-1.5 border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm px-3 py-1.5 rounded-md transition-colors"
             >
               <Plus className="h-4 w-4" />
               New Run
@@ -680,7 +680,7 @@ function ProjectDetail() {
               }}
             />
           ) : (
-            <div className="bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)] divide-y divide-slate-700/60">
+            <div className="bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)] divide-y divide-[color:var(--oc-border-soft)]">
               {sessions.map((session) => {
                 const isLegacySession = isLegacyTaskExecutionSession(
                   session,
@@ -712,7 +712,7 @@ function ProjectDetail() {
                     {session.description && (
                       <p className="text-xs text-slate-400 mt-0.5 line-clamp-1">{session.description}</p>
                     )}
-                    <div className="flex items-center gap-3 mt-1 text-xs text-slate-500">
+                    <div className="flex items-center gap-3 mt-1 text-xs text-slate-400">
                       <span className="flex items-center gap-1">
                         <Clock className="h-3 w-3" />
                         {formatDistanceToNow(new Date(session.created_at), { addSuffix: true })}
@@ -748,7 +748,7 @@ function ProjectDetail() {
             <h2 className="text-sm font-medium text-white">Tasks</h2>
             <button
               onClick={() => setShowCreateTask(true)}
-              className="flex items-center gap-1.5 border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm px-3 py-1.5 rounded-md transition-colors"
+              className="flex items-center gap-1.5 border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm px-3 py-1.5 rounded-md transition-colors"
             >
               <Plus className="h-4 w-4" />
               Add Task
@@ -802,7 +802,7 @@ function ProjectDetail() {
                 </div>
               )}
 
-              <div className="bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)] divide-y divide-slate-700/60">
+              <div className="bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)] divide-y divide-[color:var(--oc-border-soft)]">
                 {tasks.map((task) => (
                   <div key={task.id} className="px-4 py-4 hover:bg-[color:var(--oc-surface-raised)] transition-colors">
                     <div className="flex items-start justify-between gap-4">
@@ -825,7 +825,7 @@ function ProjectDetail() {
                               </span>
                             )}
                           </div>
-                          <div className="flex items-center gap-3 mt-2 text-xs text-slate-500">
+                          <div className="flex items-center gap-3 mt-2 text-xs text-slate-400">
                             <span className="flex items-center gap-1">
                               <Clock className="h-3 w-3" />
                               {formatDistanceToNow(new Date(task.created_at), { addSuffix: true })}
@@ -833,7 +833,7 @@ function ProjectDetail() {
                             {task.current_step > 0 && <span>Step {task.current_step}</span>}
                           </div>
                           {task.promotion_note && (
-                            <p className="mt-2 text-xs text-slate-500">
+                            <p className="mt-2 text-xs text-slate-400">
                               Review note: {task.promotion_note}
                             </p>
                           )}
@@ -844,7 +844,7 @@ function ProjectDetail() {
                         {task.status !== 'running' && (
                           <button
                             onClick={() => handleRerunTask(task)}
-                            className="rounded-md border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] px-3 py-1.5 text-xs font-medium text-slate-950 transition-colors hover:bg-[color:var(--oc-action-hover)]"
+                            className="rounded-md border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[color:var(--oc-action-hover)]"
                           >
                             {task.status === 'done' ? 'Run again' : 'Run'}
                           </button>
@@ -910,7 +910,7 @@ function ProjectDetail() {
             <form onSubmit={handleCreateTask}>
               <div className="space-y-4">
                 <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1.5">
+                  <label className="block text-xs font-medium text-slate-300 mb-1.5">
                     Task Title <span className="text-red-400">*</span>
                   </label>
                   <input
@@ -923,7 +923,7 @@ function ProjectDetail() {
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1.5">
+                  <label className="block text-xs font-medium text-slate-300 mb-1.5">
                     Description
                   </label>
                   <textarea
@@ -980,7 +980,7 @@ function ProjectDetail() {
                   <button
                     type="submit"
                     disabled={!taskTitle.trim() || creatingTask}
-                    className="flex-1 border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm px-3 py-2 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    className="flex-1 border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm px-3 py-2 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                   >
                     {creatingTask ? (
                       <>
@@ -1006,7 +1006,7 @@ function ProjectDetail() {
             <form onSubmit={(e) => { e.preventDefault(); handleUpdateTask(editingTaskId); }}>
               <div className="space-y-4">
                 <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1.5">
+                  <label className="block text-xs font-medium text-slate-300 mb-1.5">
                     Task Title *
                   </label>
                   <input
@@ -1019,7 +1019,7 @@ function ProjectDetail() {
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1.5">
+                  <label className="block text-xs font-medium text-slate-300 mb-1.5">
                     Description
                   </label>
                   <textarea
@@ -1031,7 +1031,7 @@ function ProjectDetail() {
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1.5">
+                  <label className="block text-xs font-medium text-slate-300 mb-1.5">
                     Step-by-Step Plan (JSON)
                   </label>
                   <textarea
@@ -1053,7 +1053,7 @@ function ProjectDetail() {
                   <button
                     type="submit"
                     disabled={!editTitle.trim() || updatingTask}
-                    className="flex-1 border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm px-3 py-2 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    className="flex-1 border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm px-3 py-2 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                   >
                     {updatingTask ? (
                       <>

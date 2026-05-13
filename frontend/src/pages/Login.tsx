@@ -104,7 +104,7 @@ function Login() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full flex items-center justify-center gap-2 border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm font-medium py-2 px-4 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed mt-2"
+              className="w-full flex items-center justify-center gap-2 border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm font-medium py-2 px-4 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed mt-2"
             >
               {loading ? (
                 <div className="h-4 w-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
