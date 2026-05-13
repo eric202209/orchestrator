@@ -13,6 +13,7 @@ from typing_extensions import Protocol, runtime_checkable
 
 from app.services.model_adaptation import render_prompt_for_profile
 from app.services.model_adaptation.schemas import PromptEnvelope
+from app.models import LogEntry
 from app.services.orchestration.hitl_sentinel import render as render_hitl_sentinel
 from app.services.orchestration.workflow_profiles import get_workflow_phases
 from app.services.prompt_templates import PromptTemplates, StepResult
@@ -332,16 +333,57 @@ def _shape_project_context(
     workspace_summary: str,
     recent_history: str,
     validation_history: str,
+    operator_guidance: str = "",
     max_chars: int,
 ) -> str:
     sections = [
         ("Project context", _trim_text(base_context, max_chars // 2)),
+        ("Operator guidance", _trim_text(operator_guidance, max_chars // 4)),
         ("Workspace truth", _trim_text(workspace_summary, max_chars // 2)),
         ("Recent orchestration history", _trim_text(recent_history, max_chars // 4)),
         ("Recent validation history", _trim_text(validation_history, max_chars // 4)),
     ]
     parts = [f"{label}:\n{content}" for label, content in sections if content]
     return _trim_text("\n\n".join(parts), max_chars)
+
+
+def _recent_operator_guidance(
+    db: Any,
+    *,
+    session_id: Any,
+    task_id: Any,
+    max_entries: int = 3,
+    max_chars: int = 700,
+) -> str:
+    try:
+        numeric_session_id = int(session_id)
+    except (TypeError, ValueError):
+        return ""
+    try:
+        query = (
+            db.query(LogEntry)
+            .filter(LogEntry.session_id == numeric_session_id)
+            .filter(LogEntry.message.like("[OPERATOR_GUIDANCE]%"))
+        )
+        try:
+            numeric_task_id = int(task_id) if task_id is not None else None
+        except (TypeError, ValueError):
+            numeric_task_id = None
+        if numeric_task_id is not None:
+            query = query.filter(
+                (LogEntry.task_id == numeric_task_id) | (LogEntry.task_id.is_(None))
+            )
+        entries = query.order_by(LogEntry.id.desc()).limit(max_entries).all()
+    except Exception:
+        return ""
+
+    lines: List[str] = []
+    for entry in reversed(entries):
+        text = str(entry.message or "")
+        text = text.replace("[OPERATOR_GUIDANCE]", "", 1).strip()
+        if text:
+            lines.append(f"- {text}")
+    return _trim_text("\n".join(lines), max_chars=max_chars)
 
 
 def _render_knowledge_block(knowledge_context: Any) -> str:
@@ -407,6 +449,13 @@ def assemble_planning_prompt(
     project_context = _shape_project_context(
         ctx.orchestration_state.project_context,
         workspace_summary=workspace_summary,
+        operator_guidance=_recent_operator_guidance(
+            ctx.db,
+            session_id=ctx.orchestration_state.session_id,
+            task_id=getattr(ctx.orchestration_state, "task_id", None),
+            max_entries=3,
+            max_chars=350,
+        ),
         recent_history=_condense_dict_events(
             ctx.orchestration_state.phase_history, max_entries=4
         ),
@@ -483,6 +532,13 @@ def assemble_execution_prompt(
     project_context = _shape_project_context(
         ctx.orchestration_state.project_context,
         workspace_summary=workspace_summary,
+        operator_guidance=_recent_operator_guidance(
+            ctx.db,
+            session_id=ctx.orchestration_state.session_id,
+            task_id=getattr(ctx.orchestration_state, "task_id", None),
+            max_entries=4,
+            max_chars=700 if not compact else 350,
+        ),
         recent_history=_condense_dict_events(
             ctx.orchestration_state.phase_history,
             max_entries=recent_history_entries,
@@ -539,6 +595,13 @@ def assemble_debugging_prompt(
     prompt_project_dir = render_workspace_path_for_prompt(
         ctx.orchestration_state.project_dir, db=ctx.db
     )
+    operator_guidance = _recent_operator_guidance(
+        ctx.db,
+        session_id=ctx.orchestration_state.session_id,
+        task_id=getattr(ctx.orchestration_state, "task_id", None),
+        max_entries=4,
+        max_chars=700 if not inputs.compact else 350,
+    )
     raw_prompt = PromptTemplates.build_debugging_prompt(
         step_description=inputs.step_description,
         error_message=inputs.error_message,
@@ -558,6 +621,10 @@ def assemble_debugging_prompt(
         raw_prompt += (
             "\n\nNormalized execution error:\n"
             + inputs.failure_envelope.to_prompt_block(max_chars=1800)
+        )
+    if operator_guidance:
+        raw_prompt += (
+            "\n\nOperator guidance received during this session:\n" + operator_guidance
         )
     return render_adapted_runtime_prompt(
         ctx.db,
@@ -589,6 +656,13 @@ def assemble_plan_revision_prompt(
     prompt_project_dir = render_workspace_path_for_prompt(
         ctx.orchestration_state.project_dir, db=ctx.db
     )
+    operator_guidance = _recent_operator_guidance(
+        ctx.db,
+        session_id=ctx.orchestration_state.session_id,
+        task_id=getattr(ctx.orchestration_state, "task_id", None),
+        max_entries=4,
+        max_chars=700,
+    )
     raw_prompt = PromptTemplates.build_plan_revision_prompt(
         original_plan=ctx.orchestration_state.plan,
         failed_steps=failed_steps,
@@ -597,6 +671,10 @@ def assemble_plan_revision_prompt(
         workspace_root=str(ctx.orchestration_state.workspace_root),
         project_dir=prompt_project_dir,
     )
+    if operator_guidance:
+        raw_prompt += (
+            "\n\nOperator guidance received during this session:\n" + operator_guidance
+        )
     return render_adapted_runtime_prompt(
         ctx.db,
         objective="Revise the remaining orchestration plan without discarding completed work.",
@@ -664,6 +742,13 @@ def assemble_completion_repair_inputs(
     project_context = _shape_project_context(
         ctx.orchestration_state.project_context,
         workspace_summary=workspace_summary,
+        operator_guidance=_recent_operator_guidance(
+            ctx.db,
+            session_id=ctx.orchestration_state.session_id,
+            task_id=getattr(ctx.orchestration_state, "task_id", None),
+            max_entries=4,
+            max_chars=700,
+        ),
         recent_history=_condense_dict_events(
             ctx.orchestration_state.phase_history, max_entries=4, max_chars=700
         ),

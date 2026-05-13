@@ -63,6 +63,7 @@ from .session_lifecycle_service import (
     stop_session_lifecycle,
 )
 from .intervention_service import (
+    add_operator_guidance,
     approve_intervention,
     create_intervention_request,
     deny_intervention,
@@ -116,6 +117,7 @@ __all__ = [
     # resume
     "ResumeError",
     "ResumeSessionService",
+    "add_operator_guidance",
     "approve_intervention",
     "create_intervention_request",
     "deny_intervention",

@@ -890,10 +890,10 @@ export function SessionTimelinePanel({
   repairGenealogy = [],
 }: SessionTimelinePanelProps) {
   return (
-    <div className="space-y-4">
+    <div className="min-w-0 space-y-4 overflow-x-hidden">
       {(offTrackMoment || repairGenealogy.length > 0) && (
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
-          <div className="rounded-lg border border-amber-700/60 bg-amber-950/20 p-4">
+        <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+          <div className="min-w-0 overflow-hidden rounded-lg border border-amber-700/60 bg-amber-950/20 p-4">
             <div className="mb-3 flex items-center justify-between gap-3">
               <h3 className="text-sm font-semibold text-amber-100">Off-Track Moment</h3>
               {offTrackMoment && (
@@ -928,7 +928,7 @@ export function SessionTimelinePanel({
             )}
           </div>
 
-          <div className="rounded-lg border border-orange-800/50 bg-slate-800 p-4">
+          <div className="min-w-0 overflow-hidden rounded-lg border border-orange-800/50 bg-slate-800 p-4">
             <div className="mb-3 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-slate-200">Repair Genealogy</h3>
               <span className="text-xs text-slate-400">{repairGenealogy.length} nodes</span>
@@ -940,7 +940,7 @@ export function SessionTimelinePanel({
             ) : (
               <div className="max-h-72 space-y-2 overflow-y-auto">
                 {repairGenealogy.map((node, index) => (
-                  <div key={node.id} className="relative pl-5">
+                  <div key={node.id} className="relative min-w-0 pl-5">
                     {index < repairGenealogy.length - 1 && (
                       <span className="absolute left-1.5 top-7 h-[calc(100%-0.25rem)] w-px bg-slate-700" />
                     )}
@@ -954,7 +954,7 @@ export function SessionTimelinePanel({
                         node.status === 'abandoned' && 'border-amber-400 bg-amber-500/40'
                       )}
                     />
-                    <div className="rounded-md border border-slate-700 bg-slate-950/30 p-3">
+                    <div className="min-w-0 overflow-hidden rounded-md border border-slate-700 bg-slate-950/30 p-3">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="flex flex-wrap items-center gap-2">
                           <span
@@ -1001,7 +1001,7 @@ export function SessionTimelinePanel({
         </div>
       )}
 
-      <div className="rounded-lg border border-slate-600 bg-slate-800 p-4">
+      <div className="min-w-0 overflow-hidden rounded-lg border border-slate-600 bg-slate-800 p-4">
         <div className="mb-3 flex items-center justify-between">
           <h3 className="text-sm font-semibold text-slate-200">Decision Timeline</h3>
           <span className="text-xs text-slate-400">{decisionEvents.length} events</span>
@@ -1020,7 +1020,7 @@ export function SessionTimelinePanel({
                 const diagnosticReasons = getDiagnosticReasons(event.details);
 
                 return (
-                  <div key={event.id} className="rounded-md border border-slate-700 p-3">
+                  <div key={event.id} className="min-w-0 overflow-hidden rounded-md border border-slate-700 p-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex flex-wrap items-center gap-2">
                         <span
@@ -1091,7 +1091,7 @@ export function SessionTimelinePanel({
         </div>
       </div>
 
-      <div className="rounded-lg border border-slate-600 bg-slate-800 p-4">
+      <div className="min-w-0 overflow-hidden rounded-lg border border-slate-600 bg-slate-800 p-4">
         <div className="mb-3 flex items-center justify-between">
           <h3 className="text-sm font-semibold text-slate-200">Causal Spans</h3>
           <span className="text-xs text-slate-400">{timelineSpans.length} spans</span>
@@ -1103,7 +1103,7 @@ export function SessionTimelinePanel({
         ) : (
           <div className="max-h-56 space-y-2 overflow-y-auto">
             {timelineSpans.slice().reverse().map((span) => (
-              <div key={span.id} className="rounded-md border border-slate-700 p-3">
+              <div key={span.id} className="min-w-0 overflow-hidden rounded-md border border-slate-700 p-3">
                 <div className="flex items-center justify-between gap-3">
                   <div className="flex items-center gap-2">
                     <span
@@ -1131,8 +1131,8 @@ export function SessionTimelinePanel({
                   </div>
                   <span className="text-xs text-slate-400">{formatDateTime(span.started_at)}</span>
                 </div>
-                <p className="mt-2 text-sm font-medium text-slate-200">{span.title}</p>
-                <p className="mt-1 text-sm text-slate-400">{span.summary}</p>
+                <p className="mt-2 break-words text-sm font-medium text-slate-200">{span.title}</p>
+                <p className="mt-1 break-words text-sm text-slate-400">{span.summary}</p>
                 <p className="mt-1 text-xs text-slate-400">{span.event_count} linked events</p>
               </div>
             ))}
@@ -1140,7 +1140,7 @@ export function SessionTimelinePanel({
         )}
       </div>
 
-      <div className="rounded-lg border border-slate-600 bg-slate-800 p-4">
+      <div className="min-w-0 overflow-hidden rounded-lg border border-slate-600 bg-slate-800 p-4">
         <div className="mb-3 flex items-center justify-between">
           <h3 className="text-sm font-semibold text-slate-200">Execution Timeline</h3>
           <span className="text-xs text-slate-400">{timelineEvents.length} events</span>
@@ -1155,11 +1155,11 @@ export function SessionTimelinePanel({
               .slice()
               .reverse()
               .map((event) => (
-                <div key={event.id} className="rounded-md border border-slate-700 p-2">
+                <div key={event.id} className="min-w-0 overflow-hidden rounded-md border border-slate-700 p-2">
                   <div className="flex items-center justify-between">
                     <span
                       className={cn(
-                        'text-xs font-medium uppercase',
+                        'break-words text-xs font-medium uppercase',
                         event.type === 'error' && 'text-red-400',
                         event.type === 'planning' && 'text-violet-400',
                         event.type === 'executing' && 'text-blue-400',

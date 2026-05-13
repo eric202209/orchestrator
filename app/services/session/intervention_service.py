@@ -238,6 +238,23 @@ def _inject_reply_into_checkpoint(
     intervention_id: int,
 ) -> Optional[str]:
     """Prepend operator guidance into the latest checkpoint context."""
+    entry = f"[Operator {intervention_type} #{intervention_id}]: {reply_text}"
+    return _append_guidance_to_checkpoint(
+        db,
+        session_id,
+        entry,
+        checkpoint_prefix="intervention_reply",
+    )
+
+
+def _append_guidance_to_checkpoint(
+    db: DBSession,
+    session_id: int,
+    entry: str,
+    *,
+    checkpoint_prefix: str,
+) -> Optional[str]:
+    """Append guidance to the latest checkpoint without changing session status."""
     from app.services.orchestration.persistence import CheckpointData
     from app.services.workspace.checkpoint_service import CheckpointService
 
@@ -247,15 +264,12 @@ def _inject_reply_into_checkpoint(
         if not raw:
             return None
         data = CheckpointData.from_dict(raw)
-        entry = f"[Operator {intervention_type} #{intervention_id}]: {reply_text}"
         data.context.human_guidance = (
             (data.context.human_guidance + "\n" + entry).strip()
             if data.context.human_guidance
             else entry
         )
-        reply_checkpoint_name = (
-            f"intervention_reply_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
-        )
+        reply_checkpoint_name = f"{checkpoint_prefix}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
         checkpoint_service.save_checkpoint(
             session_id=session_id,
             checkpoint_name=reply_checkpoint_name,
@@ -266,8 +280,79 @@ def _inject_reply_into_checkpoint(
         )
         return reply_checkpoint_name
     except Exception as exc:
-        logger.warning("Could not inject reply into checkpoint: %s", exc)
+        logger.warning("Could not inject operator guidance into checkpoint: %s", exc)
         return None
+
+
+def add_operator_guidance(
+    db: DBSession,
+    *,
+    session_id: int,
+    guidance: str,
+    operator_id: Optional[str] = None,
+    task_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Store non-blocking operator guidance for the running session.
+
+    This is intentionally separate from InterventionRequest: it does not pause
+    the session, revoke workers, or create a pending approval/reply workflow.
+    Prompt assembly reads the logged guidance on the next LLM boundary.
+    """
+    guidance_text = (guidance or "").strip()
+    if not guidance_text:
+        raise HTTPException(status_code=400, detail="guidance must not be empty")
+
+    session = get_session_or_404(db, session_id)
+    if session.status in {"completed", "stopped"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot add guidance for session in state '{session.status}'",
+        )
+
+    resolved_task_id = task_id
+    if resolved_task_id is None:
+        latest_link = (
+            db.query(SessionTask)
+            .filter(SessionTask.session_id == session_id)
+            .order_by(SessionTask.id.desc())
+            .first()
+        )
+        if latest_link:
+            resolved_task_id = latest_link.task_id
+
+    entry = f"[Operator guidance]: {guidance_text}"
+    checkpoint_name = _append_guidance_to_checkpoint(
+        db,
+        session_id,
+        entry,
+        checkpoint_prefix="operator_guidance",
+    )
+    metadata = {
+        "event_type": "operator_guidance_added",
+        "operator_guidance": True,
+        "non_blocking": True,
+        "guidance": guidance_text,
+        "operator_id": operator_id,
+        "checkpoint_name": checkpoint_name,
+    }
+    db.add(
+        LogEntry(
+            session_id=session_id,
+            task_id=resolved_task_id,
+            session_instance_id=session.instance_id,
+            level="INFO",
+            message=f"[OPERATOR_GUIDANCE] {guidance_text[:500]}",
+            log_metadata=json.dumps(metadata),
+        )
+    )
+    db.commit()
+    return {
+        "session_id": session_id,
+        "task_id": resolved_task_id,
+        "checkpoint_name": checkpoint_name,
+        "non_blocking": True,
+        "message": "Guidance added. The running session was not paused.",
+    }
 
 
 def _sync_linked_permission(

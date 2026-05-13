@@ -154,12 +154,10 @@ export default function SessionDetail() {
   const [failureSummary, setFailureSummary] = useState<ExecutionFailureSummary | null>(null);
   const [knowledgeUsage, setKnowledgeUsage] = useState<Record<string, KnowledgeUsageEntry[]>>({});
   const [failureSummaryLoading, setFailureSummaryLoading] = useState(false);
-  const [showInterventionForm, setShowInterventionForm] = useState(false);
   const [showAgentInterventionModal, setShowAgentInterventionModal] = useState(false);
   const [interventionToast, setInterventionToast] = useState<InterventionToastState | null>(null);
   const [checkpointActionIntent, setCheckpointActionIntent] = useState<CheckpointActionIntent | null>(null);
   const [interventionPrompt, setInterventionPrompt] = useState('');
-  const [interventionType, setInterventionType] = useState<'guidance' | 'approval'>('guidance');
   const [interventionSubmitting, setInterventionSubmitting] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1900,29 +1898,66 @@ export default function SessionDetail() {
     }
   }, [pushTimelineEvent, session, sessionId]);
 
-  const handleRequestIntervention = async () => {
+  const handleAddOperatorGuidance = async () => {
     if (!sessionId || !interventionPrompt.trim()) return;
     setInterventionSubmitting(true);
     try {
-      await sessionsAPI.requestIntervention(Number(sessionId), {
-        prompt: interventionPrompt.trim(),
-        intervention_type: interventionType,
+      await sessionsAPI.addOperatorGuidance(Number(sessionId), {
+        guidance: interventionPrompt.trim(),
       });
-      pushTimelineEvent('Human intervention requested', 'INFO');
-      const [updatedSession, interventionsRes] = await Promise.all([
-        sessionsAPI.getById(Number(sessionId)),
-        sessionsAPI.listInterventions(Number(sessionId), true),
-      ]);
-      setSession(updatedSession.data);
-      setInterventions(interventionsRes.data.interventions || []);
+      pushTimelineEvent('Operator guidance added', 'INFO');
       await loadDecisionTimeline(Number(sessionId));
       setInterventionPrompt('');
-      setShowInterventionForm(false);
     } catch (error) {
-      console.error('Failed to request intervention:', error);
+      console.error('Failed to add operator guidance:', error);
     } finally {
       setInterventionSubmitting(false);
     }
+  };
+
+  const renderOperatorGuidanceComposer = () => {
+    if (!session || TERMINAL_SESSION_STATUSES.has(session.status)) {
+      return null;
+    }
+
+    return (
+      <div className="rounded-lg border border-slate-700 bg-slate-900/70 p-3">
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-slate-100">
+            <MessageCircle className="h-4 w-4 text-sky-300" />
+            By the way
+          </div>
+          <span className="text-xs text-slate-500">Next agent turn</span>
+        </div>
+        <div className="flex flex-col gap-2 md:flex-row">
+          <textarea
+            rows={2}
+            value={interventionPrompt}
+            onChange={(e) => setInterventionPrompt(e.target.value)}
+            placeholder="Prefer the smaller fix; avoid changing auth files."
+            className="min-h-[44px] flex-1 resize-none rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none"
+          />
+          <div className="flex items-end justify-end gap-2">
+            {interventionPrompt && (
+              <button
+                onClick={() => setInterventionPrompt('')}
+                className="rounded px-3 py-2 text-xs text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200"
+              >
+                Clear
+              </button>
+            )}
+            <button
+              onClick={handleAddOperatorGuidance}
+              disabled={interventionSubmitting || !interventionPrompt.trim()}
+              className="flex items-center gap-1.5 rounded bg-sky-700 px-3 py-2 text-xs text-white transition-colors hover:bg-sky-600 disabled:opacity-50"
+            >
+              <MessageCircle className="h-3 w-3" />
+              {interventionSubmitting ? 'Sending...' : 'Send'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   };
 
   useEffect(() => {
@@ -1973,14 +2008,6 @@ export default function SessionDetail() {
           <div className="flex flex-col gap-2">
             <div className="flex items-center gap-2">
               <button
-                onClick={() => setShowInterventionForm((v) => !v)}
-                className="flex items-center gap-2 px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm transition-colors"
-                title="You manually pause the run and create a review/guidance request yourself"
-              >
-                <MessageCircle className="h-4 w-4" />
-                Manual Intervention
-              </button>
-              <button
                 onClick={handlePauseSession}
                 className="flex items-center gap-2 px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg text-sm transition-colors"
               >
@@ -2002,45 +2029,6 @@ export default function SessionDetail() {
                 Force Stop
               </button>
             </div>
-            {showInterventionForm && (
-              <div className="rounded-lg border border-amber-700/50 bg-amber-900/20 p-3 space-y-2">
-                <div className="flex items-center gap-2">
-                  <select
-                    value={interventionType}
-                    onChange={(e) => setInterventionType(e.target.value as 'guidance' | 'approval')}
-                    className="rounded border border-slate-600 bg-slate-800 px-2 py-1.5 text-xs text-slate-200 focus:border-amber-500 focus:outline-none"
-                  >
-                    <option value="guidance">Guidance</option>
-                    <option value="approval">Approval</option>
-                  </select>
-                  <span className="text-xs text-amber-300">You are creating this request manually. Use it when you want to pause and intervene yourself.</span>
-                </div>
-                <textarea
-                  autoFocus
-                  rows={3}
-                  value={interventionPrompt}
-                  onChange={(e) => setInterventionPrompt(e.target.value)}
-                  placeholder="Example: stop after migrations and wait for my review before editing production config"
-                  className="w-full rounded border border-slate-600 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-amber-500 focus:outline-none resize-none"
-                />
-                <div className="flex items-center gap-2 justify-end">
-                  <button
-                    onClick={() => { setShowInterventionForm(false); setInterventionPrompt(''); }}
-                    className="px-3 py-1.5 text-xs text-slate-400 hover:text-slate-200 transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleRequestIntervention}
-                    disabled={interventionSubmitting || !interventionPrompt.trim()}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded text-xs transition-colors"
-                  >
-                    <MessageCircle className="h-3 w-3" />
-                    {interventionSubmitting ? 'Sending…' : 'Submit'}
-                  </button>
-                </div>
-              </div>
-            )}
           </div>
         );
 
@@ -2340,6 +2328,8 @@ export default function SessionDetail() {
         wsConnected={wsConnected}
       />
 
+      {renderOperatorGuidanceComposer()}
+
       {interventionToast && (
         <div className="fixed right-4 top-4 z-50 w-full max-w-md animate-[slideIn_220ms_ease-out]">
           <Alert
@@ -2398,7 +2388,7 @@ export default function SessionDetail() {
         tasksCount={tasks.length}
       />
 
-      <div className="min-h-[400px]">
+      <div className="min-h-[400px] min-w-0 overflow-x-hidden">
         {activeTab === 'logs' && (
           <SessionLogsPanel
             displayLogs={displayLogs}

@@ -26,6 +26,7 @@ from app.models import (
     TaskStatus,
 )
 from app.services.session.intervention_service import (
+    add_operator_guidance,
     approve_intervention,
     create_intervention_request,
     deny_intervention,
@@ -197,6 +198,41 @@ class TestCreateInterventionRequest:
         meta = json.loads(log.log_metadata)
         assert meta["event_type"] == "human_intervention_requested"
         assert meta["intervention_id"] == req.id
+
+
+class TestAddOperatorGuidance:
+    def test_records_non_blocking_guidance_without_pausing_session(
+        self, db_session: Session, running_session: SessionModel
+    ):
+        result = add_operator_guidance(
+            db_session,
+            session_id=running_session.id,
+            guidance="By the way, prefer the smaller fix.",
+            operator_id="operator@example.com",
+        )
+
+        db_session.refresh(running_session)
+        assert running_session.status == "running"
+        assert result["non_blocking"] is True
+
+        interventions = (
+            db_session.query(InterventionRequest)
+            .filter(InterventionRequest.session_id == running_session.id)
+            .all()
+        )
+        assert interventions == []
+
+        log = (
+            db_session.query(LogEntry)
+            .filter(LogEntry.session_id == running_session.id)
+            .order_by(LogEntry.id.desc())
+            .first()
+        )
+        assert log is not None
+        assert log.message.startswith("[OPERATOR_GUIDANCE]")
+        meta = json.loads(log.log_metadata)
+        assert meta["event_type"] == "operator_guidance_added"
+        assert meta["non_blocking"] is True
 
 
 class TestSubmitInterventionReply:

@@ -596,6 +596,18 @@ export const sessionsAPI = {
     }
   ) => apiClient.post<InterventionRequest>(`/sessions/${sessionId}/request-intervention`, data),
 
+  addOperatorGuidance: (
+    sessionId: number,
+    data: { guidance: string; task_id?: number }
+  ) =>
+    apiClient.post<{
+      session_id: number;
+      task_id?: number | null;
+      checkpoint_name?: string | null;
+      non_blocking: boolean;
+      message: string;
+    }>(`/sessions/${sessionId}/operator-guidance`, data),
+
   listInterventions: (sessionId: number, pendingOnly?: boolean) =>
     apiClient.get<{ session_id: number; interventions: InterventionRequest[]; total: number }>(
       `/sessions/${sessionId}/interventions`,

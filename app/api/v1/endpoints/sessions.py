@@ -32,6 +32,7 @@ from app.schemas import (
 )
 from app.services import (
     PromptTemplates,
+    add_operator_guidance as _add_operator_guidance,
     approve_intervention as _approve_intervention,
     create_intervention_request as _create_intervention_request,
     deny_intervention as _deny_intervention,
@@ -693,6 +694,11 @@ class InterventionReplyBody(BaseModel):
     reply: str
 
 
+class OperatorGuidanceBody(BaseModel):
+    guidance: str
+    task_id: Optional[int] = None
+
+
 class DenyInterventionBody(BaseModel):
     reason: Optional[str] = None
 
@@ -723,6 +729,29 @@ async def request_human_intervention(
     payload = _serialize_intervention(req)
     payload["message"] = result["message"]
     return payload
+
+
+@router.post("/sessions/{session_id}/operator-guidance")
+def add_session_operator_guidance(
+    session_id: int,
+    body: OperatorGuidanceBody,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Add non-blocking operator guidance to the next agent prompt boundary.
+
+    Unlike /request-intervention, this endpoint does not pause the session,
+    revoke Celery tasks, or create a pending intervention request.
+    """
+    _require_session_access(db, session_id, current_user)
+    return _add_operator_guidance(
+        db,
+        session_id=session_id,
+        task_id=body.task_id,
+        guidance=body.guidance,
+        operator_id=getattr(current_user, "email", None)
+        or getattr(current_user, "id", None),
+    )
 
 
 @router.get("/sessions/{session_id}/interventions")

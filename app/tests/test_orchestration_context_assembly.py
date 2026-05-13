@@ -3,13 +3,17 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from app.services.orchestration.context_assembly import (
+    DebugPromptInputs,
     assemble_completion_repair_inputs,
+    assemble_debugging_prompt,
     assemble_execution_prompt,
+    assemble_plan_revision_prompt,
     assemble_planning_prompt,
     build_workspace_inventory_summary,
     collect_workspace_inventory_paths,
     sanitize_progress_notes_for_workspace,
 )
+from app.models import LogEntry
 from app.services.prompt_templates import OrchestrationState, StepResult
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 
@@ -170,6 +174,57 @@ def test_completion_repair_inputs_are_summary_only_and_workspace_driven(tmp_path
     assert "src/main.ts" in assembled["workspace_inventory"]
     assert "step=1 verdict=success" in assembled["prior_results_summary"]
     assert len(assembled["project_context"]) < 3000
+
+
+def test_operator_guidance_reaches_next_runtime_boundaries(tmp_path, db_session):
+    ctx = _make_ctx(tmp_path)
+    ctx.db = db_session
+    db_session.add(
+        LogEntry(
+            session_id=11,
+            task_id=22,
+            level="INFO",
+            message="[OPERATOR_GUIDANCE] Prefer the smaller fix.",
+            log_metadata="{}",
+        )
+    )
+    db_session.commit()
+
+    step = {
+        "description": "Run tests",
+        "commands": ["npm test"],
+        "verification": "npm test",
+        "rollback": None,
+        "expected_files": ["tests/main.test.ts"],
+    }
+    execution_prompt = assemble_execution_prompt(ctx, step)
+    debugging_prompt = assemble_debugging_prompt(
+        ctx,
+        DebugPromptInputs(
+            step_description="Run tests",
+            error_message="failed",
+            command_output="",
+            verification_output="",
+            attempt_number=1,
+            max_attempts=2,
+        ),
+    )
+    revision_prompt = assemble_plan_revision_prompt(
+        ctx,
+        failed_steps=[
+            StepResult(step_number=1, status="failed", error_message="failed")
+        ],
+        debug_analysis="Need a smaller fix.",
+    )
+    completion_inputs = assemble_completion_repair_inputs(
+        ctx,
+        SimpleNamespace(details={"expected_core_files": ["tests/main.test.ts"]}),
+    )
+
+    assert "Prefer the smaller fix." in execution_prompt
+    assert "Prefer the smaller fix." in debugging_prompt
+    assert "Prefer the smaller fix." in revision_prompt
+    assert "Prefer the smaller fix." in completion_inputs["project_context"]
 
 
 def test_progress_notes_filter_stale_file_references_against_live_workspace(tmp_path):
