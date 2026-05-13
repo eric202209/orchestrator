@@ -2372,6 +2372,11 @@ export default function SessionDetail() {
           summary={failureSummary}
           loading={failureSummaryLoading}
           onFeedbackSubmit={handleFeedbackSubmit}
+          onOpenProjectArchitect={() => {
+            if (project) {
+              navigate(`/projects/${project.id}?tab=planner`);
+            }
+          }}
           onReplan={handleReplan}
         />
       )}

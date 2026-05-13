@@ -22,6 +22,7 @@ import { StatusBadge } from '@/components/ui';
 import {
   Activity,
   AlertTriangle,
+  ChevronDown,
   Clock,
   ExternalLink,
   MessageCircle,
@@ -893,11 +894,11 @@ export function SessionTimelinePanel({
     <div className="min-w-0 space-y-4 overflow-x-hidden">
       {(offTrackMoment || repairGenealogy.length > 0) && (
         <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
-          <div className="min-w-0 overflow-hidden rounded-lg border border-amber-700/60 bg-amber-950/20 p-4">
+          <div className="min-w-0 overflow-hidden rounded-lg border border-amber-500/45 border-l-4 border-l-amber-400 bg-slate-800 p-4 shadow-sm shadow-black/20">
             <div className="mb-3 flex items-center justify-between gap-3">
-              <h3 className="text-sm font-semibold text-amber-100">Off-Track Moment</h3>
+              <h3 className="text-sm font-semibold text-slate-100">Off-Track Moment</h3>
               {offTrackMoment && (
-                <span className="rounded-sm border border-amber-700/70 px-1.5 py-0.5 text-xs uppercase text-amber-200">
+                <span className="rounded-sm border border-amber-400/50 bg-amber-400/15 px-1.5 py-0.5 text-xs uppercase text-amber-200">
                   {offTrackMoment.trigger.replace(/_/g, ' ')}
                 </span>
               )}
@@ -910,7 +911,7 @@ export function SessionTimelinePanel({
               <div className="space-y-2">
                 <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
                   <span>{formatDateTime(offTrackMoment.timestamp)}</span>
-                  <span className="rounded-sm border border-slate-700 px-1.5 py-0.5 uppercase">
+                  <span className="rounded-sm border border-amber-400/35 bg-amber-400/10 px-1.5 py-0.5 uppercase text-amber-200">
                     {offTrackMoment.phase}
                   </span>
                   {typeof offTrackMoment.health_score === 'number' && (
@@ -920,7 +921,7 @@ export function SessionTimelinePanel({
                   )}
                 </div>
                 <p className="break-words text-sm text-slate-100">{offTrackMoment.reason}</p>
-                <p className="break-words text-xs text-slate-500">
+                <p className="break-words text-xs text-slate-400">
                   {offTrackMoment.event_type}
                   {offTrackMoment.event_id ? ` • ${offTrackMoment.event_id}` : ''}
                 </p>
@@ -928,10 +929,10 @@ export function SessionTimelinePanel({
             )}
           </div>
 
-          <div className="min-w-0 overflow-hidden rounded-lg border border-orange-800/50 bg-slate-800 p-4">
+          <div className="min-w-0 overflow-hidden rounded-lg border border-orange-500/40 border-l-4 border-l-orange-400 bg-slate-800 p-4 shadow-sm shadow-black/20">
             <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-slate-200">Repair Genealogy</h3>
-              <span className="text-xs text-slate-400">{repairGenealogy.length} nodes</span>
+              <h3 className="text-sm font-semibold text-slate-100">Repair History</h3>
+              <span className="text-xs text-slate-400">{repairGenealogy.length} events</span>
             </div>
             {repairGenealogy.length === 0 ? (
               <p className="text-sm text-slate-400">
@@ -942,7 +943,7 @@ export function SessionTimelinePanel({
                 {repairGenealogy.map((node, index) => (
                   <div key={node.id} className="relative min-w-0 pl-5">
                     {index < repairGenealogy.length - 1 && (
-                      <span className="absolute left-1.5 top-7 h-[calc(100%-0.25rem)] w-px bg-slate-700" />
+                      <span className="absolute left-1.5 top-7 h-[calc(100%-0.25rem)] w-px bg-slate-600" />
                     )}
                     <span
                       className={cn(
@@ -954,7 +955,7 @@ export function SessionTimelinePanel({
                         node.status === 'abandoned' && 'border-amber-400 bg-amber-500/40'
                       )}
                     />
-                    <div className="min-w-0 overflow-hidden rounded-md border border-slate-700 bg-slate-950/30 p-3">
+                    <div className="min-w-0 overflow-hidden rounded-md border border-slate-700 bg-slate-900/80 p-3">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="flex flex-wrap items-center gap-2">
                           <span
@@ -969,7 +970,7 @@ export function SessionTimelinePanel({
                           >
                             {node.title}
                           </span>
-                          <span className="rounded-sm border border-slate-700 px-1.5 py-0.5 text-xs uppercase text-slate-400">
+                          <span className="rounded-sm border border-orange-400/30 bg-orange-400/10 px-1.5 py-0.5 text-xs uppercase text-orange-200">
                             {node.status}
                           </span>
                         </div>
@@ -978,13 +979,13 @@ export function SessionTimelinePanel({
                         </span>
                       </div>
                       {(node.validator || node.reason) && (
-                        <p className="mt-1 break-words text-xs text-slate-400">
+                        <p className="mt-1 break-words text-xs text-slate-300">
                           {[node.validator, node.reason].filter(Boolean).join(' | ')}
                         </p>
                       )}
                       {node.details && Object.keys(node.details).length > 0 && (
                         <details className="mt-2">
-                          <summary className="cursor-pointer text-xs text-slate-500">
+                          <summary className="cursor-pointer text-xs text-slate-500 hover:text-slate-300">
                             Raw event details
                           </summary>
                           <pre className="mt-2 max-h-36 overflow-auto rounded bg-slate-950 p-2 text-xs text-slate-400">
@@ -1848,6 +1849,7 @@ interface FailureSummaryPanelProps {
   summary: ExecutionFailureSummary | null;
   loading: boolean;
   onFeedbackSubmit: (feedback: string) => Promise<void>;
+  onOpenProjectArchitect?: () => void;
   onReplan: () => Promise<void>;
 }
 
@@ -1855,17 +1857,19 @@ export function FailureSummaryPanel({
   summary,
   loading,
   onFeedbackSubmit,
+  onOpenProjectArchitect,
   onReplan,
 }: FailureSummaryPanelProps) {
   const [feedback, setFeedback] = useState('');
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [replanning, setReplanning] = useState(false);
 
   if (loading) {
     return (
-      <div className="rounded-lg border border-red-800/50 bg-red-900/10 p-4">
-        <p className="flex items-center gap-2 text-sm text-red-300">
-          <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-red-400 border-t-transparent" />
+      <div className="rounded-lg border border-orange-500/40 border-l-4 border-l-orange-400 bg-slate-800 p-4 shadow-sm shadow-black/20">
+        <p className="flex items-center gap-2 text-sm text-slate-200">
+          <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-orange-300 border-t-transparent" />
           Generating failure summary…
         </p>
       </div>
@@ -1886,23 +1890,41 @@ export function FailureSummaryPanel({
 
   return (
     <div className="space-y-4">
-      <div className="rounded-lg border border-red-800/50 bg-red-900/10 p-4">
-        <div className="mb-3 flex items-center gap-2">
-          <AlertTriangle className="h-5 w-5 text-red-400" />
-          <span className="font-semibold text-red-200">Execution Failure Summary</span>
-          {hasPriorReplan && (
-            <span className="rounded bg-sky-800/50 px-2 py-0.5 text-xs text-sky-300">
-              Replan {replanStatus ? replanStatus.replace(/_/g, ' ') : 'started'}
-            </span>
-          )}
+      <div className="rounded-lg border border-orange-500/40 border-l-4 border-l-orange-400 bg-slate-800 p-4 shadow-sm shadow-black/20">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="mb-1 flex flex-wrap items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-orange-300" />
+              <span className="font-semibold text-slate-100">Recovery needed</span>
+              {hasPriorReplan && (
+                <span className="rounded bg-sky-800/50 px-2 py-0.5 text-xs text-sky-300">
+                  Replan {replanStatus ? replanStatus.replace(/_/g, ' ') : 'started'}
+                </span>
+              )}
+            </div>
+            <p className="text-sm text-slate-300">
+              This session ended before all work completed. Review the summary only if
+              you need details, then send recovery guidance to Project Architect.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setDetailsOpen((value) => !value)}
+            className="flex items-center gap-1.5 rounded-md border border-slate-600 bg-slate-900/40 px-3 py-1.5 text-xs text-slate-200 transition-colors hover:border-orange-400/60 hover:text-white"
+          >
+            {detailsOpen ? 'Hide details' : 'Show details'}
+            <ChevronDown className={cn('h-3.5 w-3.5 transition-transform', detailsOpen && 'rotate-180')} />
+          </button>
         </div>
-        <div className="space-y-3 rounded bg-slate-950/60 p-3">
-          {renderMarkdownSummary(summary.summary)}
-        </div>
-        {summary.diagnostics && (
-          <div className="mt-3 rounded-md border border-red-900/60 bg-slate-950/40 p-3">
+        {detailsOpen && (
+          <div className="mt-4 space-y-3 rounded border border-slate-700 bg-slate-900/80 p-3">
+            {renderMarkdownSummary(summary.summary)}
+          </div>
+        )}
+        {detailsOpen && summary.diagnostics && (
+          <div className="mt-3 rounded-md border border-red-500/35 border-l-4 border-l-red-400 bg-slate-900/80 p-3">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs font-medium uppercase text-red-300">
+              <span className="text-xs font-medium uppercase text-red-200">
                 Failure diagnostics
               </span>
               {summary.diagnostics.task_execution_id && (
@@ -1921,7 +1943,7 @@ export function FailureSummaryPanel({
                 {diagnosticBadges.map((badge) => (
                   <span
                     key={badge}
-                    className="rounded-sm border border-red-900/70 bg-red-950/30 px-1.5 py-0.5 text-xs text-red-200"
+                    className="rounded-sm border border-red-400/30 bg-red-400/10 px-1.5 py-0.5 text-xs text-red-200"
                   >
                     {badge}
                   </span>
@@ -1955,10 +1977,11 @@ export function FailureSummaryPanel({
 
       {canStartReplan && (
         <div className="rounded-lg border border-slate-700 bg-slate-800/30 p-4 space-y-3">
-          <p className="text-sm font-medium text-slate-300">Operator Feedback (optional)</p>
+          <p className="text-sm font-medium text-slate-300">Recovery guidance</p>
           <p className="text-xs text-slate-400">
-            Add high-level direction before replanning. The agent receives both the failure
-            summary and your guidance when creating the revised plan.
+            Add high-level direction before replanning. If you type guidance here and
+            send to Project Architect, it is saved first and included with the failure
+            summary.
             {hasPriorReplan && replanStatus
               ? ` Previous Project Architect run is ${replanStatus.replace(/_/g, ' ')}, so you can start another.`
               : ''}
@@ -1993,6 +2016,10 @@ export function FailureSummaryPanel({
               onClick={async () => {
                 setReplanning(true);
                 try {
+                  if (feedback.trim()) {
+                    await onFeedbackSubmit(feedback.trim());
+                    setFeedback('');
+                  }
                   await onReplan();
                 } finally {
                   setReplanning(false);
@@ -2002,19 +2029,32 @@ export function FailureSummaryPanel({
             >
               {replanning
                 ? 'Starting replan…'
-                : hasPriorReplan
-                  ? 'Send to Project Architect Again'
-                  : 'Send to Project Architect'}
+                : feedback.trim()
+                  ? 'Save and Send to Project Architect'
+                  : hasPriorReplan
+                    ? 'Send to Project Architect Again'
+                    : 'Send to Project Architect'}
             </button>
           </div>
         </div>
       )}
 
       {replanStillOwnsFlow && (
-        <p className="text-xs text-slate-400">
-          Replan started as planning session #{summary.replan_planning_session_id}. Open Project
-          Architect to review and commit the revised plan.
-        </p>
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-sky-900/50 bg-sky-950/20 p-3">
+          <p className="text-xs text-slate-300">
+            Replan started as planning session #{summary.replan_planning_session_id}.
+            Review and commit the revised plan in Project Architect.
+          </p>
+          {onOpenProjectArchitect && (
+            <button
+              type="button"
+              onClick={onOpenProjectArchitect}
+              className="rounded-md bg-sky-700 px-3 py-1.5 text-xs text-white transition-colors hover:bg-sky-600"
+            >
+              Open Project Architect
+            </button>
+          )}
+        </div>
       )}
     </div>
   );

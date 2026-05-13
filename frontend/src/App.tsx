@@ -17,7 +17,7 @@ const SettingsPage = lazy(() => import('@/pages/SettingsPage'));
 
 function RouteFallback() {
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-950 text-slate-100">
+    <div className="flex min-h-screen items-center justify-center bg-slate-900 text-slate-100">
       <LoadingSpinner size="lg" />
     </div>
   );

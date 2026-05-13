@@ -41,19 +41,19 @@ function Login() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-950 p-4">
+    <div className="min-h-screen flex items-center justify-center bg-slate-900 p-4">
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
           <div className="mx-auto h-10 w-10 bg-slate-800 border border-slate-700 rounded-lg flex items-center justify-center mb-4">
             <Lock className="h-5 w-5 text-slate-400" />
           </div>
           <h2 className="text-lg font-semibold text-white">Sign in</h2>
-          <p className="mt-1 text-sm text-slate-500">
+          <p className="mt-1 text-sm text-slate-400">
             Orchestrator
           </p>
         </div>
 
-        <div className="bg-slate-800 rounded-lg border border-slate-700 p-6">
+        <div className="bg-slate-800 rounded-lg border border-slate-700 p-6 shadow-xl shadow-black/20">
           <form className="space-y-4" onSubmit={handleSubmit}>
             {error && (
               <div className="bg-red-500/10 border border-red-500/20 text-red-400 px-3 py-2 rounded-md text-xs">
@@ -75,7 +75,7 @@ function Login() {
                   required
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  className="pl-9 w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 focus:border-sky-500"
+                  className="pl-9 w-full bg-slate-900 border border-slate-600 rounded-md px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-sky-500 focus:border-sky-500"
                   placeholder="you@example.com"
                 />
               </div>
@@ -95,7 +95,7 @@ function Login() {
                   required
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="pl-9 w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 focus:border-sky-500"
+                  className="pl-9 w-full bg-slate-900 border border-slate-600 rounded-md px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-sky-500 focus:border-sky-500"
                   placeholder="••••••••"
                 />
               </div>
@@ -117,7 +117,7 @@ function Login() {
           </form>
 
           <div className="mt-5 text-center">
-            <p className="text-xs text-slate-500">
+            <p className="text-xs text-slate-400">
               No account?{' '}
               <Link to="/register" className="text-sky-400 hover:text-sky-300">
                 Create one

@@ -5,8 +5,8 @@ import type { Session, Project, Task } from '../types/api';
 import { isLegacyTaskExecutionSession } from '../lib/sessionIdentity';
 import {
   Terminal,
-  Plus,
   Clock,
+  Search,
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { EmptyState, StatusBadge, Skeleton } from '../components/ui';
@@ -26,12 +26,48 @@ const sessionAccentClasses: Record<string, string> = {
 };
 
 const mutedSessionStatuses = new Set(['stopped', 'cancelled', 'canceled']);
+const activeSessionStatuses = new Set(['running', 'paused', 'awaiting_input', 'pending']);
+const terminalProblemStatuses = new Set(['failed', 'error']);
+
+type SessionFilter = 'all' | 'active' | 'needs_attention' | 'completed' | 'stopped';
+
+const sessionFilterLabels: Array<{ key: SessionFilter; label: string }> = [
+  { key: 'all', label: 'All' },
+  { key: 'active', label: 'Active' },
+  { key: 'needs_attention', label: 'Needs attention' },
+  { key: 'completed', label: 'Completed' },
+  { key: 'stopped', label: 'Stopped' },
+];
+
+const getSessionTime = (session: Session): number => {
+  const candidate =
+    session.updated_at ||
+    session.stopped_at ||
+    session.paused_at ||
+    session.resumed_at ||
+    session.started_at ||
+    session.created_at;
+  return candidate ? new Date(candidate).getTime() : 0;
+};
+
+const matchesSessionFilter = (session: Session, filter: SessionFilter): boolean => {
+  const statusKey = session.status?.toLowerCase() || '';
+  if (filter === 'active') return activeSessionStatuses.has(statusKey);
+  if (filter === 'needs_attention') {
+    return terminalProblemStatuses.has(statusKey) || statusKey === 'awaiting_input';
+  }
+  if (filter === 'completed') return ['done', 'completed'].includes(statusKey);
+  if (filter === 'stopped') return mutedSessionStatuses.has(statusKey);
+  return true;
+};
 
 function SessionsList() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [projects, setProjects] = useState<Record<number, Project>>({});
   const [tasksByProject, setTasksByProject] = useState<Record<number, Task[]>>({});
   const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState<SessionFilter>('all');
+  const [query, setQuery] = useState('');
 
   useEffect(() => {
     const fetchSessions = async () => {
@@ -81,18 +117,58 @@ function SessionsList() {
     fetchSessions();
   }, []);
 
+  const visibleSessions = sessions
+    .filter((session) => {
+      if (!matchesSessionFilter(session, filter)) return false;
+      const project = projects[session.project_id || 0];
+      const haystack =
+        `${session.name || ''} ${session.description || ''} ${project?.name || ''}`.toLowerCase();
+      return !query.trim() || haystack.includes(query.trim().toLowerCase());
+    })
+    .sort((a, b) => getSessionTime(b) - getSessionTime(a));
+
   return (
-    <div className="space-y-5">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold text-white">Sessions</h1>
-        <Link
-          to="/sessions/new"
-          className="bg-sky-600 hover:bg-sky-500 text-white text-sm px-3 py-1.5 rounded-md transition-colors flex items-center gap-1.5"
-        >
-          <Plus className="h-4 w-4" />
-          New Session
-        </Link>
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h1 className="text-lg font-semibold text-white">Sessions</h1>
+          <p className="mt-0.5 text-xs text-slate-400">
+            {sessions.length} session{sessions.length !== 1 ? 's' : ''} · {Object.keys(projects).length} project{Object.keys(projects).length !== 1 ? 's' : ''}
+          </p>
+        </div>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search..."
+              className="w-full rounded-md border border-slate-600 bg-slate-800 py-1.5 pl-8 pr-3 text-xs text-white placeholder-slate-400 hover:border-slate-500 focus:border-sky-500 focus:outline-none sm:w-44"
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        {sessionFilterLabels.map((item) => {
+          const selected = filter === item.key;
+          const count = sessions.filter((session) => matchesSessionFilter(session, item.key)).length;
+          return (
+            <button
+              key={item.key}
+              type="button"
+              onClick={() => setFilter(item.key)}
+              className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                selected
+                  ? 'border-sky-500 bg-sky-500/10 text-white'
+                  : 'border-slate-600 bg-slate-800 text-slate-300 hover:border-slate-500 hover:text-white'
+              }`}
+            >
+              {item.label}
+              <span className={selected ? 'ml-1 text-sky-200/80' : 'ml-1 text-slate-400'}>{count}</span>
+            </button>
+          );
+        })}
       </div>
 
       {/* Sessions List */}
@@ -110,15 +186,19 @@ function SessionsList() {
         <EmptyState
           icon={Terminal}
           title="No sessions yet"
-          description="Create your first AI session to start orchestrating development tasks"
-          action={{
-            label: 'Create Session',
-            onClick: () => { window.location.href = '/sessions/new'; }
-          }}
+          description="Sessions are created from a project so each run stays tied to project context."
         />
+      ) : visibleSessions.length === 0 ? (
+        <div className="rounded-lg border border-slate-700 bg-slate-800 p-8 text-center">
+          <Terminal className="mx-auto mb-3 h-8 w-8 text-slate-500" />
+          <h2 className="text-sm font-medium text-white">No matching sessions</h2>
+          <p className="mt-1 text-sm text-slate-400">
+            Adjust the status filter or search text to inspect another run.
+          </p>
+        </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {sessions.map((session) => {
+        <div className="overflow-hidden rounded-lg border border-slate-700 bg-slate-800 divide-y divide-slate-700/60">
+          {visibleSessions.map((session) => {
             const project = projects[session.project_id || 0];
             const isLegacySession = isLegacyTaskExecutionSession(
               session,
@@ -131,38 +211,40 @@ function SessionsList() {
               <Link
                 key={session.id}
                 to={`/sessions/${session.id}`}
-                className={`bg-slate-800 rounded-lg border border-l-[3px] ${accentClass} p-4 transition-colors group ${
+                className={`group grid gap-3 border-l-[3px] px-4 py-3 transition-colors md:grid-cols-[minmax(0,1.4fr)_minmax(160px,0.8fr)_minmax(120px,0.5fr)] md:items-center ${accentClass} ${
                   isMuted
-                    ? 'border-slate-800 opacity-70 hover:opacity-90 hover:border-slate-700'
-                    : 'border-slate-700 hover:border-slate-600'
+                    ? 'opacity-95 hover:bg-slate-700/40 hover:opacity-100'
+                    : 'hover:bg-slate-700/40'
                 }`}
               >
-                <div className="flex items-start justify-between mb-3">
-                  <StatusBadge status={session.status} size="sm" />
-                  {project && (
-                    <span className="text-xs text-slate-500">{project.name}</span>
-                  )}
-                </div>
-
-                <div className="mb-1 flex flex-wrap items-center gap-2">
-                  <h3 className="text-sm font-medium text-slate-200 group-hover:text-white transition-colors line-clamp-1">
+                <div className="min-w-0">
+                  <div className="mb-1 flex flex-wrap items-center gap-2">
+                    <StatusBadge status={session.status} size="sm" />
+                    {isLegacySession && (
+                      <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-300">
+                        Legacy
+                      </span>
+                    )}
+                  </div>
+                  <h3 className="truncate text-sm font-medium text-slate-100 transition-colors group-hover:text-white">
                     {session.name}
                   </h3>
-                  {isLegacySession && (
-                    <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-300">
-                      Legacy task execution session
-                    </span>
+                  {session.description && (
+                    <p className="mt-1 line-clamp-1 text-xs text-slate-400">
+                      {session.description}
+                    </p>
                   )}
                 </div>
 
-                {session.description && (
-                  <p className="text-xs text-slate-400 mb-3 line-clamp-2">
-                    {session.description}
+                <div className="min-w-0 text-xs text-slate-400">
+                  <p className="truncate text-slate-300">{project?.name || 'Unknown project'}</p>
+                  <p className="mt-1 text-slate-400">
+                    {session.execution_mode ? `${session.execution_mode} mode` : 'workflow session'}
                   </p>
-                )}
+                </div>
 
-                <div className="flex items-center justify-between text-xs text-slate-500 pt-3 border-t border-slate-700">
-                  <span>{formatDistanceToNow(new Date(session.created_at), { addSuffix: true })}</span>
+                <div className="flex items-center justify-between gap-3 text-xs text-slate-400 md:justify-end">
+                  <span>{formatDistanceToNow(new Date(getSessionTime(session) || session.created_at), { addSuffix: true })}</span>
                   {session.started_at && (
                     <span className="flex items-center gap-1">
                       <Clock className="h-3 w-3" />

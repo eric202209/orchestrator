@@ -386,6 +386,10 @@ def _recent_operator_guidance(
     return _trim_text("\n".join(lines), max_chars=max_chars)
 
 
+def _state_session_id(orchestration_state: Any) -> Any:
+    return getattr(orchestration_state, "session_id", None)
+
+
 def _render_knowledge_block(knowledge_context: Any) -> str:
     """Render KNOWLEDGE REFERENCES block from a KnowledgeContext.
 
@@ -451,7 +455,7 @@ def assemble_planning_prompt(
         workspace_summary=workspace_summary,
         operator_guidance=_recent_operator_guidance(
             ctx.db,
-            session_id=ctx.orchestration_state.session_id,
+            session_id=_state_session_id(ctx.orchestration_state),
             task_id=getattr(ctx.orchestration_state, "task_id", None),
             max_entries=3,
             max_chars=350,
@@ -534,7 +538,7 @@ def assemble_execution_prompt(
         workspace_summary=workspace_summary,
         operator_guidance=_recent_operator_guidance(
             ctx.db,
-            session_id=ctx.orchestration_state.session_id,
+            session_id=_state_session_id(ctx.orchestration_state),
             task_id=getattr(ctx.orchestration_state, "task_id", None),
             max_entries=4,
             max_chars=700 if not compact else 350,
@@ -597,7 +601,7 @@ def assemble_debugging_prompt(
     )
     operator_guidance = _recent_operator_guidance(
         ctx.db,
-        session_id=ctx.orchestration_state.session_id,
+        session_id=_state_session_id(ctx.orchestration_state),
         task_id=getattr(ctx.orchestration_state, "task_id", None),
         max_entries=4,
         max_chars=700 if not inputs.compact else 350,
@@ -658,7 +662,7 @@ def assemble_plan_revision_prompt(
     )
     operator_guidance = _recent_operator_guidance(
         ctx.db,
-        session_id=ctx.orchestration_state.session_id,
+        session_id=_state_session_id(ctx.orchestration_state),
         task_id=getattr(ctx.orchestration_state, "task_id", None),
         max_entries=4,
         max_chars=700,
@@ -744,7 +748,7 @@ def assemble_completion_repair_inputs(
         workspace_summary=workspace_summary,
         operator_guidance=_recent_operator_guidance(
             ctx.db,
-            session_id=ctx.orchestration_state.session_id,
+            session_id=_state_session_id(ctx.orchestration_state),
             task_id=getattr(ctx.orchestration_state, "task_id", None),
             max_entries=4,
             max_chars=700,

@@ -45,12 +45,12 @@ export default function AppShell() {
   const location = useLocation();
 
   return (
-    <div className="min-h-screen bg-slate-950 flex">
+    <div className="min-h-screen bg-slate-900 flex">
       {/* Desktop Sidebar */}
-      <aside className="hidden md:flex md:w-56 md:flex-col md:fixed md:inset-y-0 bg-slate-950 border-r border-slate-800/60">
+      <aside className="hidden md:flex md:w-56 md:flex-col md:fixed md:inset-y-0 bg-slate-900 border-r border-slate-700/70">
         <div className="flex flex-col flex-1 min-h-0">
           {/* Logo */}
-          <div className="flex items-center gap-2 h-14 px-5 border-b border-slate-800/60">
+          <div className="flex items-center gap-2 h-14 px-5 border-b border-slate-700/70">
             <Activity className="h-5 w-5 text-sky-500" />
             <span className="text-sm font-semibold text-white tracking-tight">Orchestrator</span>
           </div>
@@ -80,8 +80,8 @@ export default function AppShell() {
           </nav>
 
           {/* Footer */}
-          <div className="px-5 py-3 border-t border-slate-800/60">
-            <div className="text-xs text-slate-600">v1.0.0</div>
+          <div className="px-5 py-3 border-t border-slate-700/70">
+            <div className="text-xs text-slate-500">v1.0.0</div>
           </div>
         </div>
       </aside>
@@ -93,8 +93,8 @@ export default function AppShell() {
             className="fixed inset-0 bg-black/60 z-40 md:hidden"
             onClick={() => setMobileMenuOpen(false)}
           />
-          <div className="fixed inset-y-0 left-0 w-56 bg-slate-950 border-r border-slate-800/60 z-50 md:hidden">
-            <div className="flex items-center justify-between h-14 px-4 border-b border-slate-800/60">
+          <div className="fixed inset-y-0 left-0 w-56 bg-slate-900 border-r border-slate-700/70 z-50 md:hidden">
+            <div className="flex items-center justify-between h-14 px-4 border-b border-slate-700/70">
               <div className="flex items-center gap-2">
                 <Activity className="h-5 w-5 text-sky-500" />
                 <span className="text-sm font-semibold text-white">Orchestrator</span>
@@ -135,9 +135,9 @@ export default function AppShell() {
       )}
 
       {/* Main Content */}
-      <div className="flex-1 md:ml-56">
+      <div className="min-w-0 flex-1 overflow-x-hidden md:ml-56">
         {/* Mobile Header */}
-        <header className="md:hidden h-14 bg-slate-950 border-b border-slate-800/60 sticky top-0 z-30">
+        <header className="md:hidden h-14 bg-slate-900 border-b border-slate-700/70 sticky top-0 z-30">
           <div className="flex items-center justify-between h-full px-4">
             <button
               onClick={() => setMobileMenuOpen(true)}
@@ -154,7 +154,7 @@ export default function AppShell() {
         </header>
 
         {/* Page Content */}
-        <main className="p-5 sm:p-6 lg:p-8">
+        <main className="box-border w-full max-w-full p-5 sm:p-6 lg:p-8">
           <Outlet />
         </main>
       </div>

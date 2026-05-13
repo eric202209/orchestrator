@@ -60,8 +60,8 @@ function Register() {
 
   if (success) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-primary-900 to-slate-900 p-4">
-        <div className="max-w-md w-full bg-slate-800/50 backdrop-blur rounded-xl p-8 shadow-xl border border-slate-700 text-center">
+      <div className="min-h-screen flex items-center justify-center bg-slate-900 p-4">
+        <div className="max-w-md w-full bg-slate-800 rounded-xl p-8 shadow-xl shadow-black/20 border border-slate-700 text-center">
           <div className="mx-auto h-16 w-16 bg-green-500 rounded-full flex items-center justify-center mb-4">
             <User className="h-8 w-8 text-white" />
           </div>
@@ -81,7 +81,7 @@ function Register() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-primary-900 to-slate-900 p-4">
+    <div className="min-h-screen flex items-center justify-center bg-slate-900 p-4">
       <div className="max-w-md w-full space-y-8">
         <div className="text-center">
           <div className="mx-auto h-16 w-16 bg-primary-500 rounded-full flex items-center justify-center">
@@ -93,7 +93,7 @@ function Register() {
           </p>
         </div>
 
-        <div className="bg-slate-800/50 backdrop-blur rounded-xl p-8 shadow-xl border border-slate-700">
+        <div className="bg-slate-800 rounded-xl p-8 shadow-xl shadow-black/20 border border-slate-700">
           <form className="space-y-6" onSubmit={handleSubmit}>
             {error && (
               <div className="bg-red-500/10 border border-red-500/20 text-red-400 px-4 py-3 rounded-lg text-sm">
