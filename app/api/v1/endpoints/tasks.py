@@ -833,10 +833,14 @@ def promote_task_workspace(
         raise HTTPException(status_code=404, detail="Project not found")
 
     task.workspace_status = "promoted"
-    task.promoted_at = datetime.utcnow()
+    task.promoted_at = datetime.now(UTC)
     task.promotion_note = (payload.note or "").strip() or None
     task.updated_at = datetime.now(UTC)
-    baseline_result = TaskService(db).promote_task_into_baseline(project, task)
+    task_service = TaskService(db)
+    baseline_result = task_service.promote_task_into_baseline(project, task)
+    promoted_workspace_archive_result = task_service.archive_promoted_task_workspace(
+        project, task, reason="manual_promotion"
+    )
     db.commit()
     db.refresh(task)
     db.add(
@@ -845,6 +849,14 @@ def promote_task_workspace(
             level="INFO",
             message=(
                 f"Workspace promoted into project baseline ({baseline_result['files_copied']} files copied)"
+            ),
+            log_metadata=json.dumps(
+                {
+                    "baseline_result": baseline_result,
+                    "promoted_workspace_archive_result": (
+                        promoted_workspace_archive_result
+                    ),
+                }
             ),
         )
     )

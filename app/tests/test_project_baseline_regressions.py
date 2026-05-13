@@ -112,6 +112,45 @@ def test_project_gitignore_guard_preserves_existing_rules_and_is_idempotent(
     assert contents.count(".openclaw/") == 1
 
 
+def test_rebuild_project_baseline_preserves_project_gitignore_guard(
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "rebuild-gitignore"
+    project_root.mkdir(parents=True)
+    gitignore = project_root / ".gitignore"
+    gitignore.write_text("dist/\n", encoding="utf-8")
+    project = Project(
+        name="rebuild-gitignore",
+        workspace_path=str(project_root),
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task_dir = project_root / "task-promoted"
+    task_dir.mkdir()
+    (task_dir / "README.md").write_text("accepted", encoding="utf-8")
+    task = Task(
+        project_id=project.id,
+        title="Promoted task",
+        description="Accepted work",
+        status=TaskStatus.DONE,
+        workspace_status="promoted",
+        task_subfolder="task-promoted",
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    result = TaskService(db_session).rebuild_project_baseline(project)
+
+    assert result["files_copied"] == 1
+    contents = gitignore.read_text(encoding="utf-8")
+    assert contents.startswith("dist/\n")
+    assert ".openclaw/" in contents
+    assert "__pycache__/" in contents
+
+
 def test_promoted_workspace_archive_removes_visible_task_folder_but_preserves_rebuild_source(
     db_session,
     tmp_path: Path,
@@ -166,6 +205,52 @@ def test_promoted_workspace_archive_removes_visible_task_folder_but_preserves_re
     assert result["promoted_task_count"] == 1
     assert result["files_copied"] == 1
     assert (project_root / "README.md").read_text(encoding="utf-8") == "accepted"
+
+
+def test_manual_promote_endpoint_archives_visible_task_workspace(
+    authenticated_client,
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "manual-promote-archive"
+    project_root.mkdir(parents=True)
+    project = Project(
+        name="manual-promote-archive",
+        workspace_path=str(project_root),
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task_dir = project_root / "task-manual"
+    task_dir.mkdir()
+    (task_dir / "README.md").write_text("manual", encoding="utf-8")
+    task = Task(
+        project_id=project.id,
+        title="Manual promote",
+        description="Accepted manually",
+        status=TaskStatus.DONE,
+        workspace_status="ready",
+        task_subfolder="task-manual",
+    )
+    db_session.add(task)
+    db_session.commit()
+    db_session.refresh(task)
+
+    response = authenticated_client.post(
+        f"/api/v1/tasks/{task.id}/promote",
+        json={"note": "accepted"},
+    )
+
+    assert response.status_code == 200
+    db_session.refresh(task)
+    assert not task_dir.exists()
+    assert task.workspace_status == "promoted"
+    assert task.task_subfolder.startswith(".openclaw/promoted-workspace-archive/")
+    assert (project_root / "README.md").read_text(encoding="utf-8") == "manual"
+    assert (project_root / task.task_subfolder / "README.md").read_text(
+        encoding="utf-8"
+    ) == "manual"
 
 
 def test_workspace_shape_audit_distinguishes_baseline_from_retained_sandboxes(

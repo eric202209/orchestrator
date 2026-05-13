@@ -995,6 +995,7 @@ class TaskService:
     def rebuild_project_baseline(self, project: Project) -> dict:
         baseline_dir = self.get_project_baseline_dir(project)
         baseline_dir.mkdir(parents=True, exist_ok=True)
+        self.ensure_project_gitignore_guard(project)
         self._clear_project_root_baseline_contents(project)
 
         merged_tasks = [
@@ -1016,6 +1017,7 @@ class TaskService:
                 }
             )
             total_files += result["files_copied"]
+        self.ensure_project_gitignore_guard(project)
 
         return {
             "baseline_path": str(baseline_dir),
@@ -1040,6 +1042,7 @@ class TaskService:
         }
         preserved_names = set(HYDRATION_EXCLUDED_NAMES)
         preserved_names.add(LEGACY_BASELINE_DIR_NAME)
+        preserved_names.add(".gitignore")
         preserved_names.update(task_subfolders)
 
         for child in project_root.iterdir():
