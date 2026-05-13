@@ -156,7 +156,21 @@ def test_python_completion_verification_detects_python_module_pytest(tmp_path):
 
     command, source = _detect_completion_verification_command(project_dir)
 
-    assert command == "python3 -m pytest"
+    assert command.endswith(" -m pytest")
+    assert source == "python test suite detected"
+
+
+def test_python_completion_verification_prefers_project_venv(tmp_path):
+    project_dir = tmp_path / "project"
+    (project_dir / "tests").mkdir(parents=True)
+    (project_dir / "venv" / "bin").mkdir(parents=True)
+    python_bin = project_dir / "venv" / "bin" / "python"
+    python_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    python_bin.chmod(python_bin.stat().st_mode | 0o111)
+
+    command, source = _detect_completion_verification_command(project_dir)
+
+    assert command == f"{python_bin} -m pytest"
     assert source == "python test suite detected"
 
 
@@ -184,6 +198,29 @@ def test_python_module_pytest_completion_verification_imports_workspace_root(
     )
 
     assert result["success"] is True
+
+
+def test_completion_verification_executes_project_venv_python(tmp_path):
+    project_dir = tmp_path / "project"
+    (project_dir / "tests").mkdir(parents=True)
+    (project_dir / "venv" / "bin").mkdir(parents=True)
+    marker = project_dir / "used-venv-python"
+    python_bin = project_dir / "venv" / "bin" / "python"
+    python_bin.write_text(
+        "#!/bin/sh\n" f"touch {marker}\n" "exit 0\n",
+        encoding="utf-8",
+    )
+    python_bin.chmod(python_bin.stat().st_mode | 0o111)
+
+    command, _ = _detect_completion_verification_command(project_dir)
+    result = _execute_completion_verification(
+        project_dir=project_dir,
+        command=command,
+        timeout_seconds=10,
+    )
+
+    assert result["success"] is True
+    assert marker.exists()
 
 
 def test_completion_verification_rejects_shell_metacharacters(tmp_path):
@@ -310,6 +347,8 @@ def test_completion_validation_accepts_readme_package_mutation_without_source(
 
     assert verdict.accepted is True
     assert "No core implementation source files were produced" not in verdict.reasons
+    assert verdict.details["completion_contract"]["validation_profile"] == "mutation"
+    assert verdict.details["completion_contract"]["requires_source_outputs"] is False
     assert verdict.details["mutation_completion"]["materialized_files"] == [
         "package.json",
         "README.md",
@@ -369,6 +408,7 @@ def test_completion_validation_accepts_docs_mutation_without_source(tmp_path):
 
     assert verdict.accepted is True
     assert "No core implementation source files were produced" not in verdict.reasons
+    assert verdict.details["completion_contract"]["validation_profile"] == "mutation"
     assert verdict.details["mutation_completion"]["matched_reported_files"] == [
         "docs/index.md",
         "docs/archive/README.md",
@@ -456,6 +496,32 @@ def test_completion_validation_does_not_treat_generic_update_as_mutation_task(
     assert verdict.accepted is False
     assert "No core implementation source files were produced" in verdict.reasons
     assert verdict.details["mutation_completion"]["mutation_task"] is False
+
+
+def test_validation_profile_infers_mutation_before_node_implementation_marker():
+    profile = ValidatorService.infer_validation_profile(
+        task_prompt=(
+            "Update package.json and README.md only. In package.json keep version "
+            "1.1.0 and add scripts.test. Verify with node -e. Do not create app "
+            "source files."
+        ),
+        execution_profile="full_lifecycle",
+        title="Phase 9D package docs mutation",
+        description="Metadata/docs-only package update",
+    )
+
+    assert profile == "mutation"
+
+
+def test_validation_profile_keeps_source_implementation_for_app_builds():
+    profile = ValidatorService.infer_validation_profile(
+        task_prompt="Build a React app and update package.json scripts.",
+        execution_profile="full_lifecycle",
+        title="React app implementation",
+        description="Create application source implementation",
+    )
+
+    assert profile == "implementation"
 
 
 def test_workspace_consistency_ignores_virtualenv_vendor_javascript(tmp_path):

@@ -45,6 +45,22 @@ def test_validate_passes_with_valid_secret_and_default_backend(monkeypatch):
     config_module.validate_runtime_secrets()
 
 
+def test_settings_defuses_accidental_app_db_override():
+    from app.config import DEFAULT_DATABASE_URL, Settings
+
+    settings = Settings(DATABASE_URL="sqlite:///app.db")
+
+    assert settings.DATABASE_URL == DEFAULT_DATABASE_URL
+
+
+def test_settings_anchors_relative_sqlite_database_to_project_root():
+    from app.config import BASE_DIR, Settings
+
+    settings = Settings(DATABASE_URL="sqlite:///./orchestrator.db")
+
+    assert settings.DATABASE_URL == f"sqlite:///{BASE_DIR / 'orchestrator.db'}"
+
+
 def test_validate_raises_on_default_secret_key(monkeypatch):
     with pytest.raises(RuntimeError, match="SECRET_KEY"):
         _call_validate(monkeypatch, secret_key="your-secret-key-change-in-production")

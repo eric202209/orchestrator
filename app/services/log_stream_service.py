@@ -9,7 +9,8 @@ import json
 from typing import Optional, Generator, Dict, Any, List
 from datetime import datetime
 from sqlalchemy.orm import Session
-from sqlalchemy import create_engine, func
+from sqlalchemy import func
+from app.database import SessionLocal
 from app.models import LogEntry, Session as SessionModel
 
 logger = logging.getLogger(__name__)
@@ -270,8 +271,7 @@ class LogStreamService:
 # Backward compatibility: keep the standalone functions
 def get_db_session():
     """Get database session for log streaming"""
-    engine = create_engine("sqlite:///./orchestrator.db")
-    return Session(bind=engine)
+    return SessionLocal()
 
 
 def get_project_logs_summary_for_db(db: Session, project_id: int) -> Dict[str, Any]:

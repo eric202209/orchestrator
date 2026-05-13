@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -220,9 +222,39 @@ def _detect_completion_verification_command(
         if (project_dir / "pyproject.toml").exists() or (
             project_dir / "tests"
         ).exists():
-            return "python3 -m pytest", "python test suite detected"
+            return (
+                f"{shlex.quote(_completion_verification_python(project_dir))} -m pytest",
+                "python test suite detected",
+            )
 
     return None, None
+
+
+def _completion_verification_python(project_dir: Path) -> str:
+    """Prefer the nearest project/repo virtualenv for Python verification."""
+
+    candidates = [
+        project_dir / "venv" / "bin" / "python",
+        project_dir / ".venv" / "bin" / "python",
+    ]
+    for parent in [project_dir, *project_dir.parents]:
+        candidates.extend(
+            [
+                parent / "venv" / "bin" / "python",
+                parent / ".venv" / "bin" / "python",
+            ]
+        )
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.exists() and os.access(resolved, os.X_OK):
+            return str(resolved)
+
+    return sys.executable or "python3"
 
 
 def _augment_completion_verification_command(command: str, test_script: str) -> str:

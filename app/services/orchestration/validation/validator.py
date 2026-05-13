@@ -320,8 +320,9 @@ class ValidatorService:
             confidence=confidence,
         )
 
-    @staticmethod
+    @classmethod
     def infer_validation_profile(
+        cls,
         task_prompt: str,
         execution_profile: str,
         title: Optional[str] = None,
@@ -330,6 +331,10 @@ class ValidatorService:
         combined = " ".join(
             [task_prompt or "", title or "", description or "", execution_profile or ""]
         ).lower()
+        if cls._task_looks_like_mutation_task(
+            task_prompt, title=title, description=description
+        ):
+            return "mutation"
         implementation_markers = (
             "set up",
             "setup",
@@ -488,6 +493,12 @@ class ValidatorService:
         text = " ".join(
             str(value or "") for value in (title, description, task_prompt)
         ).lower()
+        build_detection_text = re.sub(
+            r"\b(?:do not|don't|without)\s+"
+            r"(?:create|build|implement|scaffold|add)\b[^.;\n]*",
+            " ",
+            text,
+        )
         mutation_terms = {
             "append",
             "archive",
@@ -520,7 +531,7 @@ class ValidatorService:
             "update the react",
         }
         has_mutation_term = any(term in text for term in mutation_terms)
-        has_build_term = any(term in text for term in build_terms)
+        has_build_term = any(term in build_detection_text for term in build_terms)
         return has_mutation_term and not has_build_term
 
     @classmethod

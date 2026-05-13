@@ -1,10 +1,12 @@
 """Configuration settings"""
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
 from typing import List
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+DEFAULT_DATABASE_URL = f"sqlite:///{BASE_DIR}/orchestrator.db"
 
 
 class Settings(BaseSettings):
@@ -41,7 +43,32 @@ class Settings(BaseSettings):
 
     # Database
     # Absolute path derived from config.py location — CWD-independent.
-    DATABASE_URL: str = f"sqlite:///{BASE_DIR}/orchestrator.db"
+    DATABASE_URL: str = DEFAULT_DATABASE_URL
+
+    @field_validator("DATABASE_URL")
+    @classmethod
+    def normalize_database_url(cls, value: str) -> str:
+        """Keep local SQLite DBs anchored to this project, not caller CWD."""
+
+        database_url = str(value or "").strip() or DEFAULT_DATABASE_URL
+        sqlite_prefix = "sqlite:///"
+        if not database_url.startswith(sqlite_prefix):
+            return database_url
+
+        raw_path = database_url[len(sqlite_prefix) :]
+        sqlite_path = raw_path.split("?", 1)[0]
+        if sqlite_path in {"", ":memory:"}:
+            return database_url
+
+        path = Path(sqlite_path)
+        if path.name == "app.db":
+            return DEFAULT_DATABASE_URL
+        if not path.is_absolute():
+            suffix = ""
+            if "?" in raw_path:
+                suffix = "?" + raw_path.split("?", 1)[1]
+            return f"sqlite:///{(BASE_DIR / path).resolve()}{suffix}"
+        return database_url
 
     # Auth
     SECRET_KEY: str = "your-secret-key-change-in-production"
