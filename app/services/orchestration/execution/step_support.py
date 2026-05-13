@@ -17,9 +17,11 @@ from app.services.orchestration.context_assembly import render_adapted_runtime_p
 from app.services.orchestration.types import FailureEnvelope
 from app.services.orchestration.file_ops_contract import (
     operation_has_file_op_path,
-    normalize_file_op_shape,
     render_supported_file_ops,
-    validate_file_op_shape,
+)
+from app.services.orchestration.execution.structured_op_repair import (
+    extract_wrapped_assistant_text,
+    normalize_replacement_ops,
 )
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 
@@ -403,6 +405,13 @@ def coerce_debug_step_result(
         try:
             raw_parsed_data = json.loads(raw_stripped_output)
             if isinstance(raw_parsed_data, dict):
+                wrapped_payload = _extract_wrapped_debug_payload(raw_parsed_data)
+                if wrapped_payload is not None:
+                    return (
+                        True,
+                        _finalize_debug_payload(wrapped_payload),
+                        "Parsed wrapped assistant debug JSON",
+                    )
                 return (
                     True,
                     _finalize_debug_payload(raw_parsed_data),
@@ -436,6 +445,13 @@ def coerce_debug_step_result(
             output_text, context="debug"
         )
     if success and isinstance(parsed_data, dict):
+        wrapped_payload = _extract_wrapped_debug_payload(parsed_data)
+        if wrapped_payload is not None:
+            return (
+                True,
+                _finalize_debug_payload(wrapped_payload),
+                "Parsed wrapped assistant debug JSON",
+            )
         return True, _finalize_debug_payload(parsed_data), strategy_info
 
     inferred = _infer_debug_payload_from_text(
@@ -451,7 +467,7 @@ def coerce_debug_step_result(
 
 def _finalize_debug_payload(parsed_data: Dict[str, Any]) -> Dict[str, Any]:
     payload = dict(parsed_data)
-    replacement_ops = _normalize_debug_replacement_ops(payload)
+    replacement_ops = normalize_replacement_ops(payload)
     if replacement_ops:
         payload["fix_type"] = "ops_fix"
         payload["ops"] = replacement_ops
@@ -474,6 +490,25 @@ def _finalize_debug_payload(parsed_data: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
+def _extract_wrapped_debug_payload(
+    parsed_data: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    assistant_text = extract_wrapped_assistant_text(parsed_data)
+    if not assistant_text:
+        return None
+
+    fenced_payload = _extract_fenced_debug_json(assistant_text)
+    if isinstance(fenced_payload, dict):
+        return fenced_payload
+
+    success, inner_payload, _strategy_info = error_handler.attempt_json_parsing(
+        assistant_text, context="debug"
+    )
+    if success and isinstance(inner_payload, dict):
+        return inner_payload
+    return None
+
+
 def _extract_fenced_debug_json(text: str) -> Optional[Dict[str, Any]]:
     for match in re.finditer(
         r"```(?:json)?\s*(\{.*?\})\s*```",
@@ -487,33 +522,6 @@ def _extract_fenced_debug_json(text: str) -> Optional[Dict[str, Any]]:
         if isinstance(parsed, dict):
             return parsed
     return None
-
-
-def _normalize_debug_replacement_ops(
-    parsed_data: Dict[str, Any]
-) -> list[Dict[str, Any]]:
-    raw_ops = None
-    if isinstance(parsed_data.get("ops"), list):
-        raw_ops = parsed_data.get("ops")
-    elif isinstance(parsed_data.get("replacement_ops"), list):
-        raw_ops = parsed_data.get("replacement_ops")
-    elif isinstance(parsed_data.get("replacement_op"), dict):
-        raw_ops = [parsed_data.get("replacement_op")]
-    elif isinstance(parsed_data.get("op"), dict):
-        raw_ops = [parsed_data.get("op")]
-
-    if not raw_ops:
-        return []
-
-    normalized_ops: list[Dict[str, Any]] = []
-    for operation in raw_ops:
-        if not isinstance(operation, dict):
-            return []
-        normalized = normalize_file_op_shape(operation)
-        if not validate_file_op_shape(normalized):
-            return []
-        normalized_ops.append(normalized)
-    return normalized_ops
 
 
 def _infer_debug_payload_from_text(

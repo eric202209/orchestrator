@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from app.services.prompt_templates import PromptTemplates, StepResult
 from app.services.orchestration.execution.step_support import coerce_debug_step_result
 from app.services.orchestration.validation.parsing import (
@@ -162,6 +164,46 @@ def test_debug_parser_accepts_fenced_typed_structured_op_repair():
     assert strategy in {"Parsed fenced debug JSON", "Parsed full debug JSON"}
     assert debug_data["fix_type"] == "ops_fix"
     assert debug_data["ops"][0]["op"] == "write_file"
+
+
+def test_debug_parser_accepts_wrapped_fenced_typed_structured_op_repair():
+    raw_result = {
+        "output": json.dumps(
+            {
+                "projectContextChars": 15365,
+                "nonProjectContextChars": 33281,
+                "finalAssistantVisibleText": (
+                    "```json\n"
+                    "{\n"
+                    '  "fix_type": "replace_op",\n'
+                    '  "analysis": "Rewrite README.md because the exact replacement is stale.",\n'
+                    '  "replacement_ops": [\n'
+                    '    {"op": "write_file", "path": "README.md", "content": "# Demo\\n\\n## Changelog\\n- 1.1.0\\n"}\n'
+                    "  ],\n"
+                    '  "confidence": "HIGH"\n'
+                    "}\n```"
+                ),
+            }
+        )
+    }
+
+    success, debug_data, strategy = coerce_debug_step_result(
+        raw_result,
+        error_message="replace_in_file old text not found in README.md",
+        step={"ops": [{"op": "replace_in_file", "path": "README.md"}]},
+        extract_structured_text=extract_structured_text,
+    )
+
+    assert success is True
+    assert strategy == "Parsed wrapped assistant debug JSON"
+    assert debug_data["fix_type"] == "ops_fix"
+    assert debug_data["ops"] == [
+        {
+            "op": "write_file",
+            "path": "README.md",
+            "content": "# Demo\n\n## Changelog\n- 1.1.0\n",
+        }
+    ]
 
 
 def test_plan_revision_prompt_serializes_original_plan():

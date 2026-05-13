@@ -615,6 +615,124 @@ def test_typed_ops_fix_replaces_failed_structured_ops_before_retry(
     ]
 
 
+def test_wrapped_typed_ops_fix_applies_to_repeated_structured_op_failures(
+    db_session, tmp_path
+):
+    runtime = _FakeRuntime(
+        [
+            {
+                "output": json.dumps(
+                    {
+                        "fix_type": "replace_op",
+                        "analysis": "Rewrite package.json because exact replacement is stale.",
+                        "replacement_ops": [
+                            {
+                                "op": "write_file",
+                                "path": "package.json",
+                                "content": '{"name":"demo","version":"1.1.0","scripts":{"test":"echo test ok"}}\n',
+                            }
+                        ],
+                        "expected_files": ["package.json"],
+                    }
+                )
+            },
+            {
+                "output": json.dumps(
+                    {
+                        "projectContextChars": 15365,
+                        "nonProjectContextChars": 33281,
+                        "finalAssistantVisibleText": (
+                            "```json\n"
+                            "{\n"
+                            '  "fix_type": "replace_op",\n'
+                            '  "analysis": "Rewrite README.md because exact replacement is stale.",\n'
+                            '  "replacement_ops": [\n'
+                            '    {"op": "write_file", "path": "README.md", "content": "# Demo\\n\\nPackage metadata fixture.\\n\\n## Changelog\\n- 1.1.0\\n"}\n'
+                            "  ],\n"
+                            '  "confidence": "HIGH"\n'
+                            "}\n```"
+                        ),
+                    }
+                )
+            },
+        ]
+    )
+    ctx, _execution = _make_run_context(
+        db_session,
+        tmp_path,
+        runtime=runtime,
+        step_overrides={
+            "description": "Update package.json",
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "package.json",
+                    "old": '"version": "1.0.0"',
+                    "new": '"version": "1.1.0"',
+                }
+            ],
+            "commands": [],
+            "expected_files": ["package.json"],
+        },
+    )
+    ctx.orchestration_state.plan.append(
+        {
+            "step_number": 2,
+            "description": "Update README.md version",
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "README.md",
+                    "old": "Version: 1.0.0",
+                    "new": "Version: 1.1.0",
+                }
+            ],
+            "commands": [],
+            "verification": "",
+            "rollback": None,
+            "expected_files": ["README.md"],
+        }
+    )
+    ctx.orchestration_state.reasoning_artifact["planned_actions"] = [
+        "Update package.json",
+        "Update README.md version",
+    ]
+    (ctx.orchestration_state.project_dir / "package.json").write_text(
+        '{"name":"demo","version":"1.1.0"}\n',
+        encoding="utf-8",
+    )
+    (ctx.orchestration_state.project_dir / "README.md").write_text(
+        "# Demo\n\nPackage metadata fixture.\n",
+        encoding="utf-8",
+    )
+
+    result = execute_step_loop(
+        ctx=ctx,
+        extract_structured_text=_extract_structured_text,
+        normalize_step=_normalize_step,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: [],
+        workspace_violation_error_cls=RuntimeError,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        record_live_log_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "completed", result
+    assert len(runtime.prompts) == 2
+    assert ctx.orchestration_state.plan[0]["ops"][0]["op"] == "write_file"
+    assert ctx.orchestration_state.plan[1]["ops"] == [
+        {
+            "op": "write_file",
+            "path": "README.md",
+            "content": (
+                "# Demo\n\nPackage metadata fixture.\n\n## Changelog\n- 1.1.0\n"
+            ),
+        }
+    ]
+    assert "1.1.0" in (ctx.orchestration_state.project_dir / "README.md").read_text(
+        encoding="utf-8"
+    )
+
+
 def test_phase7g_diff_repair_prompt_is_used_when_capsule_available(
     db_session, tmp_path
 ):
