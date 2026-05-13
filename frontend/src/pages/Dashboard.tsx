@@ -213,31 +213,31 @@ function Dashboard() {
 
       {/* Stats Grid */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-        <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+        <div className="bg-[color:var(--oc-surface)] rounded-lg p-4 border border-[color:var(--oc-border-soft)]">
           <p className="text-xs text-slate-400 mb-2">Projects</p>
           <div className="flex items-end justify-between">
             <p className="text-2xl font-semibold text-white">{stats.totalProjects}</p>
-            <GitBranch className="h-5 w-5 text-slate-600" />
+            <GitBranch className="h-5 w-5 text-slate-500" />
           </div>
         </div>
 
-        <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+        <div className="bg-[color:var(--oc-surface)] rounded-lg p-4 border border-[color:var(--oc-border-soft)]">
           <p className="text-xs text-slate-400 mb-2">Tasks</p>
           <div className="flex items-end justify-between">
             <p className="text-2xl font-semibold text-white">{stats.totalTasks}</p>
-            <FileText className="h-5 w-5 text-slate-600" />
+            <FileText className="h-5 w-5 text-slate-500" />
           </div>
         </div>
 
-        <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+        <div className="bg-[color:var(--oc-surface)] rounded-lg p-4 border border-[color:var(--oc-border-soft)]">
           <p className="text-xs text-slate-400 mb-2">Running</p>
           <div className="flex items-end justify-between">
-            <p className="text-2xl font-semibold text-sky-400">{stats.activeTasks}</p>
-            <Activity className="h-5 w-5 text-sky-600" />
+            <p className="text-2xl font-semibold text-primary-300">{stats.activeTasks}</p>
+            <Activity className="h-5 w-5 text-primary-600" />
           </div>
         </div>
 
-        <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+        <div className="bg-[color:var(--oc-surface)] rounded-lg p-4 border border-[color:var(--oc-border-soft)]">
           <p className="text-xs text-slate-400 mb-2">Completed</p>
           <div className="flex items-end justify-between">
             <p className="text-2xl font-semibold text-emerald-400">{stats.completedTasks}</p>
@@ -247,12 +247,12 @@ function Dashboard() {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-0 mb-5 border-b border-slate-700">
+      <div className="flex gap-0 mb-5 border-b border-[color:var(--oc-border-soft)]">
         <button
           onClick={() => setActiveTab('overview')}
           className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
             activeTab === 'overview'
-              ? 'text-white border-sky-500'
+              ? 'text-white border-primary-500'
               : 'text-slate-500 border-transparent hover:text-slate-300'
           }`}
         >
@@ -262,7 +262,7 @@ function Dashboard() {
           onClick={() => setActiveTab('projects')}
           className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
             activeTab === 'projects'
-              ? 'text-white border-sky-500'
+              ? 'text-white border-primary-500'
               : 'text-slate-500 border-transparent hover:text-slate-300'
           }`}
         >
@@ -272,7 +272,7 @@ function Dashboard() {
           onClick={() => setActiveTab('tasks')}
           className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
             activeTab === 'tasks'
-              ? 'text-white border-sky-500'
+              ? 'text-white border-primary-500'
               : 'text-slate-500 border-transparent hover:text-slate-300'
           }`}
         >
@@ -283,8 +283,8 @@ function Dashboard() {
         {/* Content */}
         {activeTab === 'overview' && (
           <div className="space-y-4">
-            <div className="bg-slate-800 rounded-lg border border-slate-700">
-              <div className="px-5 py-3 border-b border-slate-700">
+            <div className="bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)]">
+              <div className="px-5 py-3 border-b border-[color:var(--oc-border-soft)]">
                 <h2 className="text-sm font-medium text-white">Recent Activity</h2>
               </div>
               <div className="px-5 py-3">
@@ -325,7 +325,7 @@ function Dashboard() {
                     placeholder="Search..."
                     value={projectSearchQuery}
                     onChange={(e) => setProjectSearchQuery(e.target.value)}
-                    className="w-44 bg-slate-800 border border-slate-700 rounded-md py-1.5 pl-8 pr-3 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-slate-600 hover:border-slate-600"
+                    className="w-44 bg-[color:var(--oc-surface)] border border-[color:var(--oc-border-soft)] rounded-md py-1.5 pl-8 pr-3 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-[color:var(--oc-border)] hover:border-[color:var(--oc-border)]"
                   />
                 </div>
               </div>
@@ -345,7 +345,7 @@ function Dashboard() {
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                 {filteredProjects.map((project) => (
-                  <div key={project.id} className="bg-slate-800 rounded-lg border border-slate-700 p-4 hover:border-slate-600 transition-colors">
+                  <div key={project.id} className="bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)] p-4 hover:border-[color:var(--oc-border)] transition-colors">
                     <div className="flex items-start justify-between mb-3">
                       <GitBranch className="h-4 w-4 text-slate-500 mt-0.5" />
                       <div className="flex gap-1.5">
@@ -384,13 +384,13 @@ function Dashboard() {
         {activeTab === 'tasks' && (
           <div>
             {tasks.length === 0 ? (
-              <div className="bg-slate-800 rounded-lg border border-slate-700 p-10 text-center">
-                <FileText className="h-10 w-10 mx-auto mb-3 text-slate-600" />
+              <div className="bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)] p-10 text-center">
+                <FileText className="h-10 w-10 mx-auto mb-3 text-slate-500" />
                 <p className="text-sm font-medium text-slate-300">No tasks yet</p>
                 <p className="text-xs text-slate-500 mt-1">Create a project and add tasks to get started</p>
               </div>
             ) : (
-              <div className="bg-slate-800 rounded-lg border border-slate-700 divide-y divide-slate-700/60">
+              <div className="bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)] divide-y divide-slate-700/60">
                 {tasks.map((task) => (
                   <div key={task.id} className="flex items-center justify-between gap-4 px-4 py-3">
                     <div className="min-w-0 flex-1">
@@ -412,7 +412,7 @@ function Dashboard() {
       {/* Create Project Modal */}
       {showCreateProject && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-slate-900 rounded-lg border border-slate-700 p-5 w-full max-w-sm mx-4 shadow-2xl">
+          <div className="bg-[color:var(--oc-shell)] rounded-lg border border-[color:var(--oc-border-soft)] p-5 w-full max-w-sm mx-4 shadow-2xl">
             <h3 className="text-sm font-semibold text-white mb-4">New Project</h3>
             <form onSubmit={handleCreateProject}>
               <div className="space-y-3">
@@ -426,7 +426,7 @@ function Dashboard() {
                     onChange={(e) => {
                       setNewProjectName(e.target.value);
                     }}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 focus:border-sky-500"
+                    className="w-full bg-[color:var(--oc-surface-deep)] border border-[color:var(--oc-border-soft)] rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-primary-500/60 focus:border-primary-500"
                     placeholder="My Project"
                     autoFocus
                   />
@@ -435,14 +435,14 @@ function Dashboard() {
                   <button
                     type="button"
                     onClick={() => setShowCreateProject(false)}
-                    className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm px-3 py-2 rounded-md transition-colors"
+                    className="flex-1 bg-[color:var(--oc-surface)] hover:bg-[color:var(--oc-surface-raised)] text-slate-300 text-sm px-3 py-2 rounded-md transition-colors"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
                     disabled={!newProjectName.trim() || creatingProject}
-                    className="flex-1 bg-sky-600 hover:bg-sky-500 text-white text-sm px-3 py-2 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    className="flex-1 border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm px-3 py-2 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                   >
                     {creatingProject ? (
                       <>

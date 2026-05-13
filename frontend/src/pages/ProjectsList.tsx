@@ -188,7 +188,7 @@ function ProjectsList() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-5">
         <div>
           <h1 className="text-lg font-semibold text-white">Projects</h1>
-          <p className="text-xs text-slate-500 mt-0.5">
+          <p className="text-xs text-slate-400 mt-0.5">
             {projects.length} project{projects.length !== 1 ? 's' : ''}
           </p>
         </div>
@@ -200,12 +200,12 @@ function ProjectsList() {
               placeholder="Search..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-44 bg-slate-800 border border-slate-700 rounded-md py-1.5 pl-8 pr-3 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-slate-600 hover:border-slate-600"
+              className="w-44 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] py-1.5 pl-8 pr-3 text-xs text-white placeholder-slate-400 hover:border-[color:var(--oc-border)] focus:border-primary-500 focus:outline-none"
             />
           </div>
           <button
             onClick={() => setShowCreateProject(true)}
-            className="flex items-center gap-1.5 bg-sky-600 hover:bg-sky-500 text-white text-sm px-3 py-1.5 rounded-md transition-colors"
+            className="flex items-center gap-1.5 border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm px-3 py-1.5 rounded-md transition-colors"
           >
             <Plus className="h-4 w-4" />
             New Project
@@ -236,10 +236,10 @@ function ProjectsList() {
               <div
                 key={project.id}
                 onClick={() => navigate(`/projects/${project.id}`)}
-                className="bg-slate-800 rounded-lg border border-slate-700 p-4 hover:border-slate-600 transition-colors group cursor-pointer"
+                className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4 transition-colors group cursor-pointer hover:border-[color:var(--oc-border)]"
               >
                 <div className="flex items-start justify-between mb-3">
-                  <GitBranch className="h-4 w-4 text-slate-500 mt-0.5" />
+                  <GitBranch className="h-4 w-4 text-slate-400 mt-0.5" />
                   <div className="flex gap-1.5">
                     {project.github_url && (
                       <a
@@ -305,7 +305,7 @@ function ProjectsList() {
                       type="text"
                       value={editingName}
                       onChange={(e) => setEditingName(e.target.value)}
-                      className="w-full bg-slate-950 border border-sky-500 rounded-md px-2.5 py-1 text-sm text-white mb-2 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                      className="mb-2 w-full rounded-md border border-primary-500 bg-[color:var(--oc-surface-deep)] px-2.5 py-1 text-sm text-white focus:outline-none focus:ring-1 focus:ring-primary-500/60"
                       autoFocus
                       onClick={(e) => e.stopPropagation()}
                       onKeyDown={(e) => {
@@ -337,7 +337,7 @@ function ProjectsList() {
       {/* Create Project Modal */}
       {showCreateProject && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-slate-900 rounded-lg border border-slate-700 p-5 w-full max-w-md mx-4 shadow-2xl">
+          <div className="mx-4 w-full max-w-md rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-5 shadow-2xl">
             <h3 className="text-sm font-semibold text-white mb-4">New Project</h3>
             <form onSubmit={handleCreateProject}>
               <div className="space-y-3">
@@ -349,7 +349,7 @@ function ProjectsList() {
                     type="text"
                     value={newProjectName}
                     onChange={(e) => setNewProjectName(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 focus:border-sky-500"
+                    className="w-full rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500/50"
                     placeholder="My Project"
                     autoFocus
                   />
@@ -361,7 +361,7 @@ function ProjectsList() {
                   <textarea
                     value={newProjectDescription}
                     onChange={(e) => setNewProjectDescription(e.target.value)}
-                    className="min-h-[80px] w-full resize-y rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 focus:border-sky-500"
+                    className="min-h-[80px] w-full resize-y rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500/50"
                     placeholder="What this project is for, scope, expected deliverable..."
                   />
                 </div>
@@ -372,7 +372,7 @@ function ProjectsList() {
                   <textarea
                     value={newProjectRules}
                     onChange={(e) => setNewProjectRules(e.target.value)}
-                    className="min-h-[96px] w-full resize-y rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 focus:border-sky-500"
+                    className="min-h-[96px] w-full resize-y rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500/50"
                     placeholder="Constraints, style rules, forbidden tools, must-keep architecture..."
                   />
                 </div>
@@ -385,14 +385,14 @@ function ProjectsList() {
                       setNewProjectDescription('');
                       setNewProjectRules('');
                     }}
-                    className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm px-3 py-2 rounded-md transition-colors"
+                    className="flex-1 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-sm text-slate-300 transition-colors hover:border-[color:var(--oc-border)] hover:text-white"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
                     disabled={!newProjectName.trim() || creatingProject}
-                    className="flex-1 bg-sky-600 hover:bg-sky-500 text-white text-sm px-3 py-2 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    className="flex-1 border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm px-3 py-2 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                   >
                     {creatingProject ? (
                       <>

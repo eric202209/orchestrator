@@ -80,7 +80,7 @@ function TasksList() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-lg font-semibold text-white">Tasks</h1>
-          <p className="text-xs text-slate-500 mt-0.5">
+          <p className="text-xs text-slate-400 mt-0.5">
             {tasks.length} task{tasks.length !== 1 ? 's' : ''} · {Object.keys(projects).length} project{Object.keys(projects).length !== 1 ? 's' : ''}
           </p>
         </div>
@@ -93,7 +93,7 @@ function TasksList() {
               placeholder="Search..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-8 pr-3 py-1.5 bg-slate-800 border border-slate-700 rounded-md text-xs text-white placeholder-slate-500 focus:outline-none focus:border-slate-600 w-44"
+              className="w-44 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] py-1.5 pl-8 pr-3 text-xs text-white placeholder-slate-400 hover:border-[color:var(--oc-border)] focus:border-primary-500 focus:outline-none"
             />
           </div>
         </div>
@@ -112,8 +112,8 @@ function TasksList() {
               onClick={() => setStatusFilter(filter.key)}
               className={`rounded-full border px-3 py-1 text-xs transition-colors ${
                 statusFilter === filter.key
-                  ? 'border-sky-500 bg-sky-500/10 text-white'
-                  : 'border-slate-700 bg-slate-800 text-slate-400 hover:border-slate-600 hover:text-slate-200'
+                  ? 'border-primary-500 bg-primary-500/10 text-white'
+                  : 'border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] text-slate-300 hover:border-[color:var(--oc-border)] hover:text-white'
               }`}
             >
               {filter.label}
@@ -135,14 +135,14 @@ function TasksList() {
           }
         />
       ) : (
-        <div className="bg-slate-800 rounded-lg border border-slate-700 divide-y divide-slate-700/60">
+        <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] divide-y divide-slate-700/60">
           {filteredTasks.map((task) => {
             const project = projects[task.project_id || 0];
             return (
               <Link
                 key={task.id}
                 to={`/projects/${task.project_id}/tasks/${task.id}`}
-                className="flex items-center gap-4 px-4 py-3 hover:bg-slate-700/40 transition-colors group"
+                className="flex items-center gap-4 px-4 py-3 hover:bg-[color:var(--oc-surface-raised)]/40 transition-colors group"
               >
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-slate-200 group-hover:text-white transition-colors line-clamp-1">
@@ -175,19 +175,19 @@ function TasksList() {
       {/* Stats Footer */}
       {tasks.length > 0 && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <div className="bg-slate-800 rounded-lg border border-slate-700 p-4">
+          <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
             <p className="text-xs text-slate-400 mb-1.5">Pending</p>
             <p className="text-xl font-semibold text-white">{tasks.filter(t => t.status === 'pending').length}</p>
           </div>
-          <div className="bg-slate-800 rounded-lg border border-slate-700 p-4">
+          <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
             <p className="text-xs text-slate-400 mb-1.5">Running</p>
-            <p className="text-xl font-semibold text-sky-400">{tasks.filter(t => t.status === 'running').length}</p>
+            <p className="text-xl font-semibold text-primary-400">{tasks.filter(t => t.status === 'running').length}</p>
           </div>
-          <div className="bg-slate-800 rounded-lg border border-slate-700 p-4">
+          <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
             <p className="text-xs text-slate-400 mb-1.5">Done</p>
             <p className="text-xl font-semibold text-emerald-400">{tasks.filter(t => t.status === 'done').length}</p>
           </div>
-          <div className="bg-slate-800 rounded-lg border border-slate-700 p-4">
+          <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
             <p className="text-xs text-slate-400 mb-1.5">Failed</p>
             <p className="text-xl font-semibold text-red-400">{tasks.filter(t => t.status === 'failed').length}</p>
           </div>

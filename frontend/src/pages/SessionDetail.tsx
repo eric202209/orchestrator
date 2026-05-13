@@ -1921,10 +1921,10 @@ export default function SessionDetail() {
     }
 
     return (
-      <div className="rounded-lg border border-slate-700 bg-slate-900/70 p-3">
+      <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-3">
         <div className="mb-2 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2 text-sm font-medium text-slate-100">
-            <MessageCircle className="h-4 w-4 text-sky-300" />
+            <MessageCircle className="h-4 w-4 text-primary-300" />
             By the way
           </div>
           <span className="text-xs text-slate-500">Next agent turn</span>
@@ -1935,13 +1935,13 @@ export default function SessionDetail() {
             value={interventionPrompt}
             onChange={(e) => setInterventionPrompt(e.target.value)}
             placeholder="Prefer the smaller fix; avoid changing auth files."
-            className="min-h-[44px] flex-1 resize-none rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none"
+            className="min-h-[44px] flex-1 resize-none rounded border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-primary-500 focus:outline-none"
           />
           <div className="flex items-end justify-end gap-2">
             {interventionPrompt && (
               <button
                 onClick={() => setInterventionPrompt('')}
-                className="rounded px-3 py-2 text-xs text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200"
+                className="rounded px-3 py-2 text-xs text-slate-400 transition-colors hover:bg-[color:var(--oc-surface)] hover:text-slate-200"
               >
                 Clear
               </button>
@@ -1949,7 +1949,7 @@ export default function SessionDetail() {
             <button
               onClick={handleAddOperatorGuidance}
               disabled={interventionSubmitting || !interventionPrompt.trim()}
-              className="flex items-center gap-1.5 rounded bg-sky-700 px-3 py-2 text-xs text-white transition-colors hover:bg-sky-600 disabled:opacity-50"
+              className="flex items-center gap-1.5 rounded border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] px-3 py-2 text-xs text-slate-950 transition-colors hover:bg-[color:var(--oc-action-hover)] disabled:opacity-50"
             >
               <MessageCircle className="h-3 w-3" />
               {interventionSubmitting ? 'Sending...' : 'Send'}
@@ -2016,7 +2016,7 @@ export default function SessionDetail() {
               </button>
               <button
                 onClick={() => handleStopSession(false)}
-                className="flex items-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm transition-colors"
+                className="flex items-center gap-2 px-4 py-2 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] text-slate-300 hover:border-[color:var(--oc-border)] hover:text-white rounded-lg text-sm transition-colors"
               >
                 <Square className="h-4 w-4" />
                 Stop
@@ -2093,7 +2093,7 @@ export default function SessionDetail() {
             )}
             <button
               onClick={handleStartSession}
-              className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm transition-colors"
+              className="flex items-center gap-2 px-4 py-2 border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] rounded-lg text-sm transition-colors"
             >
               <Play className="h-4 w-4" />
               Start
@@ -2145,9 +2145,9 @@ export default function SessionDetail() {
   return (
     <div className="p-6 space-y-6">
       {checkpointActionIntent && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 py-6 backdrop-blur-sm">
-          <div className="w-full max-w-2xl rounded-2xl border border-slate-700 bg-slate-900 shadow-2xl">
-            <div className="flex items-start justify-between gap-4 border-b border-slate-800 px-6 py-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[color:var(--oc-surface-deep)] px-4 py-6 backdrop-blur-sm">
+          <div className="w-full max-w-2xl rounded-2xl border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-shell)] shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-[color:var(--oc-border-soft)] px-6 py-4">
               <div>
                 <p className="text-sm font-semibold text-emerald-300">
                   {checkpointActionIntent === 'resume' ? 'Choose A Resume Checkpoint' : 'Choose How To Restart'}
@@ -2158,7 +2158,7 @@ export default function SessionDetail() {
               </div>
               <button
                 onClick={() => setCheckpointActionIntent(null)}
-                className="rounded-md px-2 py-1 text-sm text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200"
+                className="rounded-md px-2 py-1 text-sm text-slate-400 transition-colors hover:bg-[color:var(--oc-surface)] hover:text-slate-200"
               >
                 Close
               </button>
@@ -2171,7 +2171,7 @@ export default function SessionDetail() {
                     setCheckpointActionIntent(null);
                     await replayCheckpoint(checkpoint.name);
                   }}
-                  className="w-full rounded-xl border border-slate-700 bg-slate-950/70 p-4 text-left transition-colors hover:border-emerald-600 hover:bg-slate-900"
+                  className="w-full rounded-xl border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-4 text-left transition-colors hover:border-emerald-600 hover:bg-[color:var(--oc-shell)]"
                 >
                   <div className="flex items-center justify-between gap-3">
                     <p className="text-sm font-medium text-white">
@@ -2198,10 +2198,10 @@ export default function SessionDetail() {
                 </button>
               ))}
             </div>
-            <div className="flex items-center justify-end gap-2 border-t border-slate-800 px-6 py-4">
+            <div className="flex items-center justify-end gap-2 border-t border-[color:var(--oc-border-soft)] px-6 py-4">
               <button
                 onClick={() => setCheckpointActionIntent(null)}
-                className="rounded-lg px-3 py-2 text-sm text-slate-300 transition-colors hover:bg-slate-800"
+                className="rounded-lg px-3 py-2 text-sm text-slate-300 transition-colors hover:bg-[color:var(--oc-surface)]"
               >
                 Cancel
               </button>
@@ -2211,7 +2211,7 @@ export default function SessionDetail() {
                     setCheckpointActionIntent(null);
                     await handleStartSessionFresh();
                   }}
-                  className="rounded-lg bg-blue-600 px-3 py-2 text-sm text-white transition-colors hover:bg-blue-500"
+                  className="rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] px-3 py-2 text-sm text-slate-950 transition-colors hover:bg-[color:var(--oc-action-hover)]"
                 >
                   Start Fresh Instead
                 </button>
@@ -2222,9 +2222,9 @@ export default function SessionDetail() {
       )}
 
       {showAgentInterventionModal && pendingAgentInterventions.length > 0 && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 py-6 backdrop-blur-sm">
-          <div className="w-full max-w-3xl rounded-2xl border border-amber-700/50 bg-slate-900 shadow-2xl">
-            <div className="flex items-start justify-between gap-4 border-b border-slate-800 px-6 py-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[color:var(--oc-surface-deep)] px-4 py-6 backdrop-blur-sm">
+          <div className="w-full max-w-3xl rounded-2xl border border-amber-700/50 bg-[color:var(--oc-shell)] shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-[color:var(--oc-border-soft)] px-6 py-4">
               <div>
                 <p className="text-sm font-semibold text-amber-300">OpenClaw Needs Your Input</p>
                 <p className="mt-1 text-sm text-slate-300">
@@ -2233,7 +2233,7 @@ export default function SessionDetail() {
               </div>
               <button
                 onClick={() => setShowAgentInterventionModal(false)}
-                className="rounded-md px-2 py-1 text-sm text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200"
+                className="rounded-md px-2 py-1 text-sm text-slate-400 transition-colors hover:bg-[color:var(--oc-surface)] hover:text-slate-200"
               >
                 Later
               </button>
@@ -2248,7 +2248,7 @@ export default function SessionDetail() {
                 </p>
               </div>
               {agentInterventionTimeline.length > 0 && (
-                <div className="mb-4 rounded-xl border border-slate-800 bg-slate-950/70 p-4">
+                <div className="mb-4 rounded-xl border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-4">
                   <p className="text-sm font-medium text-slate-100">Recent intervention timeline</p>
                   <div className="mt-3 space-y-3">
                     {agentInterventionTimeline.map((item) => {
@@ -2278,9 +2278,9 @@ export default function SessionDetail() {
                         <div key={item.id} className="flex gap-3">
                           <div className="flex flex-col items-center">
                             <div className="mt-1 h-2.5 w-2.5 rounded-full bg-amber-400" />
-                            <div className="mt-1 h-full min-h-6 w-px bg-slate-800 last:hidden" />
+                            <div className="mt-1 h-full min-h-6 w-px bg-[color:var(--oc-surface)] last:hidden" />
                           </div>
-                          <div className="flex-1 rounded-lg border border-slate-800 bg-slate-900/80 p-3">
+                          <div className="flex-1 rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-3">
                             <div className="flex items-center justify-between gap-3">
                               <p className="text-sm font-medium text-slate-100">{actionLabel}</p>
                               <span className={`rounded-full border px-2 py-0.5 text-[11px] uppercase tracking-wide ${statusTone}`}>

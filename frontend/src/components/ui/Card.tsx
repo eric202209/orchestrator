@@ -10,8 +10,8 @@ interface CardProps {
 export function Card({ children, className = '', onClick, hoverable = false }: CardProps) {
   return (
     <div
-      className={`bg-slate-800 rounded-lg border border-slate-700 p-4 ${
-        hoverable ? 'hover:border-slate-600 transition-colors cursor-pointer' : ''
+      className={`rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4 ${
+        hoverable ? 'cursor-pointer transition-colors hover:border-[color:var(--oc-border)]' : ''
       } ${className}`}
       onClick={onClick}
     >

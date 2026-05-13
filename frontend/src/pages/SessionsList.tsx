@@ -21,7 +21,7 @@ const sessionAccentClasses: Record<string, string> = {
   stopped: 'border-l-slate-600',
   cancelled: 'border-l-slate-600',
   canceled: 'border-l-slate-600',
-  running: 'border-l-sky-500/80',
+  running: 'border-l-primary-500/80',
   pending: 'border-l-slate-500',
 };
 
@@ -131,9 +131,9 @@ function SessionsList() {
     <div className="space-y-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-lg font-semibold text-white">Sessions</h1>
+          <h1 className="text-lg font-semibold text-white">Runs</h1>
           <p className="mt-0.5 text-xs text-slate-400">
-            {sessions.length} session{sessions.length !== 1 ? 's' : ''} · {Object.keys(projects).length} project{Object.keys(projects).length !== 1 ? 's' : ''}
+            {sessions.length} run{sessions.length !== 1 ? 's' : ''} · {Object.keys(projects).length} project{Object.keys(projects).length !== 1 ? 's' : ''}
           </p>
         </div>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -143,7 +143,7 @@ function SessionsList() {
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="Search..."
-              className="w-full rounded-md border border-slate-600 bg-slate-800 py-1.5 pl-8 pr-3 text-xs text-white placeholder-slate-400 hover:border-slate-500 focus:border-sky-500 focus:outline-none sm:w-44"
+              className="w-full rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] py-1.5 pl-8 pr-3 text-xs text-white placeholder-slate-400 hover:border-[color:var(--oc-border)] focus:border-primary-500 focus:outline-none sm:w-44"
             />
           </div>
         </div>
@@ -160,12 +160,12 @@ function SessionsList() {
               onClick={() => setFilter(item.key)}
               className={`rounded-full border px-3 py-1 text-xs transition-colors ${
                 selected
-                  ? 'border-sky-500 bg-sky-500/10 text-white'
-                  : 'border-slate-600 bg-slate-800 text-slate-300 hover:border-slate-500 hover:text-white'
+                  ? 'border-primary-500 bg-primary-500/10 text-white'
+                  : 'border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] text-slate-300 hover:border-[color:var(--oc-border)] hover:text-white'
               }`}
             >
               {item.label}
-              <span className={selected ? 'ml-1 text-sky-200/80' : 'ml-1 text-slate-400'}>{count}</span>
+              <span className={selected ? 'ml-1 text-primary-200/80' : 'ml-1 text-slate-400'}>{count}</span>
             </button>
           );
         })}
@@ -175,7 +175,7 @@ function SessionsList() {
       {loading ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
           {[1, 2, 3].map((i) => (
-            <div key={i} className="bg-slate-800 rounded-lg border border-slate-700 p-4">
+            <div key={i} className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
               <Skeleton className="h-5 w-3/4 mb-2" />
               <Skeleton className="h-4 w-1/2 mb-3" />
               <Skeleton className="h-8 w-full" />
@@ -185,19 +185,19 @@ function SessionsList() {
       ) : sessions.length === 0 ? (
         <EmptyState
           icon={Terminal}
-          title="No sessions yet"
-          description="Sessions are created from a project so each run stays tied to project context."
+          title="No runs yet"
+          description="Runs are created from a project so each execution stays tied to project context."
         />
       ) : visibleSessions.length === 0 ? (
-        <div className="rounded-lg border border-slate-700 bg-slate-800 p-8 text-center">
+        <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-8 text-center">
           <Terminal className="mx-auto mb-3 h-8 w-8 text-slate-500" />
-          <h2 className="text-sm font-medium text-white">No matching sessions</h2>
+          <h2 className="text-sm font-medium text-white">No matching runs</h2>
           <p className="mt-1 text-sm text-slate-400">
             Adjust the status filter or search text to inspect another run.
           </p>
         </div>
       ) : (
-        <div className="overflow-hidden rounded-lg border border-slate-700 bg-slate-800 divide-y divide-slate-700/60">
+        <div className="overflow-hidden rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] divide-y divide-slate-700/60">
           {visibleSessions.map((session) => {
             const project = projects[session.project_id || 0];
             const isLegacySession = isLegacyTaskExecutionSession(
@@ -213,8 +213,8 @@ function SessionsList() {
                 to={`/sessions/${session.id}`}
                 className={`group grid gap-3 border-l-[3px] px-4 py-3 transition-colors md:grid-cols-[minmax(0,1.4fr)_minmax(160px,0.8fr)_minmax(120px,0.5fr)] md:items-center ${accentClass} ${
                   isMuted
-                    ? 'opacity-95 hover:bg-slate-700/40 hover:opacity-100'
-                    : 'hover:bg-slate-700/40'
+                    ? 'opacity-95 hover:bg-[color:var(--oc-surface-raised)]/40 hover:opacity-100'
+                    : 'hover:bg-[color:var(--oc-surface-raised)]/40'
                 }`}
               >
                 <div className="min-w-0">

@@ -61,6 +61,17 @@ async function firstSessionHref(page: Page) {
     });
 }
 
+async function firstTaskHref(page: Page) {
+  return page
+    .locator('a[href*="/tasks/"]')
+    .evaluateAll((links) => {
+      const hrefs = links
+        .map((link) => link.getAttribute('href') || '')
+        .filter((href) => /^\/projects\/\d+\/tasks\/\d+/.test(href));
+      return hrefs[0] || '';
+    });
+}
+
 test.describe('Phase 9E UI sweep', () => {
   test.use({
     storageState: STORAGE_STATE,
@@ -101,6 +112,15 @@ test.describe('Phase 9E UI sweep', () => {
     await page.waitForLoadState('networkidle');
     const sessionHref = await firstSessionHref(page);
     expect(sessionHref, 'expected a session detail link').toBeTruthy();
+
+    await page.goto(`${FRONTEND_URL}/tasks`);
+    await page.waitForLoadState('networkidle');
+    const taskHref = await firstTaskHref(page);
+    expect(taskHref, 'expected a task detail link').toBeTruthy();
+    await page.goto(`${FRONTEND_URL}${taskHref}`);
+    await page.waitForLoadState('networkidle');
+    await capture(page, 'task-detail');
+    await expectNoHorizontalOverflow(page, 'task detail');
 
     await page.goto(`${FRONTEND_URL}${sessionHref}`);
     await page.waitForLoadState('networkidle');

@@ -161,44 +161,44 @@ export default function SettingsPage() {
       {message && <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-emerald-300">{message}</div>}
       {error && <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-red-300">{error}</div>}
 
-      <section className="rounded-lg border border-slate-700 bg-slate-800 p-6">
+      <section className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-6">
         <div className="flex items-center gap-3 mb-4">
-          <UserCircle2 className="h-5 w-5 text-sky-400" />
+          <UserCircle2 className="h-5 w-5 text-primary-300" />
           <h2 className="text-sm font-semibold text-white">Account</h2>
         </div>
         <div className="grid gap-4 md:grid-cols-2">
           <div>
             <label className="block text-sm text-slate-400 mb-2">Email</label>
-            <input value={settings.account.email} disabled className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-400" />
+            <input value={settings.account.email} disabled className="w-full rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-slate-400" />
           </div>
           <div>
             <label className="block text-sm text-slate-400 mb-2">Display Name</label>
-            <input value={name} onChange={(e) => setName(e.target.value)} className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white" />
+            <input value={name} onChange={(e) => setName(e.target.value)} className="w-full rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-white" />
           </div>
         </div>
-        <button onClick={handleProfileSave} disabled={savingProfile} className="mt-4 inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-white hover:bg-sky-500 disabled:opacity-50">
+        <button onClick={handleProfileSave} disabled={savingProfile} className="mt-4 inline-flex items-center gap-2 rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] px-4 py-2 text-slate-950 hover:bg-[color:var(--oc-action-hover)] disabled:opacity-50">
           <Save className="h-4 w-4" />
           {savingProfile ? 'Saving...' : 'Save Profile'}
         </button>
       </section>
 
-      <section className="rounded-lg border border-slate-700 bg-slate-800 p-6">
+      <section className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-6">
         <div className="flex items-center gap-3 mb-4">
-          <FolderCog className="h-5 w-5 text-sky-400" />
+          <FolderCog className="h-5 w-5 text-primary-300" />
           <h2 className="text-sm font-semibold text-white">System</h2>
         </div>
         <div className="space-y-4">
           <div>
             <label className="block text-sm text-slate-400 mb-2">OpenClaw Workspace Root</label>
-            <input value={workspaceRoot} onChange={(e) => setWorkspaceRoot(e.target.value)} className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white" />
+            <input value={workspaceRoot} onChange={(e) => setWorkspaceRoot(e.target.value)} className="w-full rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-white" />
             <p className="mt-2 text-xs text-slate-400">This becomes the root path used for project workspaces and isolation checks.</p>
           </div>
           <div className="grid gap-4 md:grid-cols-2">
-            <div className="rounded-lg border border-slate-700 bg-slate-950 p-4">
+            <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-4">
               <div className="text-sm text-slate-400">OpenClaw Gateway URL</div>
               <div className="mt-2 text-sm text-white break-all">{settings.system.openclaw_gateway_url}</div>
             </div>
-            <div className="rounded-lg border border-slate-700 bg-slate-950 p-4">
+            <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-4">
               <div className="text-sm text-slate-400">Recommended Mobile Base URL</div>
               <div className="mt-2 text-sm text-white break-all">{settings.system.mobile_base_url}</div>
             </div>
@@ -219,7 +219,7 @@ export default function SettingsPage() {
                     setAdaptationProfile(selected.config.adaptation_profiles[0] || '');
                   }
                 }}
-                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white"
+                className="w-full rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-white"
               >
                 {settings.system.supported_backends.map((backend) => (
                   <option key={backend.name} value={backend.name}>
@@ -233,7 +233,7 @@ export default function SettingsPage() {
               <input
                 value={agentModelFamily}
                 onChange={(e) => setAgentModelFamily(e.target.value)}
-                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white"
+                className="w-full rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-white"
               />
             </div>
           </div>
@@ -242,7 +242,7 @@ export default function SettingsPage() {
             <select
               value={adaptationProfile}
               onChange={(e) => setAdaptationProfile(e.target.value)}
-              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white"
+              className="w-full rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-white"
             >
               {settings.system.available_adaptation_profiles
                 .filter((profile) => {
@@ -267,7 +267,7 @@ export default function SettingsPage() {
             <select
               value={policyProfile}
               onChange={(e) => setPolicyProfile(e.target.value)}
-              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white"
+              className="w-full rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-white"
             >
               {settings.system.available_policy_profiles.map((profile) => (
                 <option key={profile.name} value={profile.name}>
@@ -282,7 +282,7 @@ export default function SettingsPage() {
               {settings.system.available_policy_profiles.find((profile) => profile.name === policyProfile)?.effects?.restore_behavior_label}
             </p>
           </div>
-          <div className="rounded-lg border border-slate-700 bg-slate-950 p-4">
+          <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-4">
             <div className="text-sm text-slate-400">Backend Capabilities</div>
             <div className="mt-2 text-xs text-slate-300">
               {Object.entries(activeBackendCapabilities)
@@ -295,7 +295,7 @@ export default function SettingsPage() {
             </div>
           </div>
           {activeBackendConfig && (
-            <div className="rounded-lg border border-slate-700 bg-slate-950 p-4">
+            <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-4">
               <div className="text-sm text-slate-400">Backend Configuration</div>
               <div className="mt-2 space-y-1 text-xs text-slate-300">
                 <div>Transport: {activeBackendConfig.transport_mode}</div>
@@ -311,7 +311,7 @@ export default function SettingsPage() {
               </div>
             </div>
           )}
-          <div className="rounded-lg border border-slate-700 bg-slate-950 p-4">
+          <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-4">
             <div className="text-sm text-slate-400">Backend Readiness</div>
             <div className="mt-2 text-sm text-white">
               {activeBackendHealth.ready ? 'Ready' : 'Unavailable'} ({activeBackendHealth.status})
@@ -333,26 +333,26 @@ export default function SettingsPage() {
             )}
           </div>
         </div>
-        <button onClick={() => handleSystemSave(false)} disabled={savingSystem} className="mt-4 inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-white hover:bg-sky-500 disabled:opacity-50">
+        <button onClick={() => handleSystemSave(false)} disabled={savingSystem} className="mt-4 inline-flex items-center gap-2 rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] px-4 py-2 text-slate-950 hover:bg-[color:var(--oc-action-hover)] disabled:opacity-50">
           <Save className="h-4 w-4" />
           {savingSystem ? 'Saving...' : 'Save System Settings'}
         </button>
       </section>
 
-      <section className="rounded-lg border border-slate-700 bg-slate-800 p-6">
+      <section className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-6">
         <div className="flex items-center gap-3 mb-4">
-          <Shield className="h-5 w-5 text-sky-400" />
+          <Shield className="h-5 w-5 text-primary-300" />
           <h2 className="text-sm font-semibold text-white">Mobile API Key</h2>
         </div>
         <div className="space-y-4">
-          <div className="rounded-lg border border-slate-700 bg-slate-950 p-4">
+          <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-4">
             <div className="text-sm text-slate-400">Current Key</div>
             <div className="mt-2 text-sm text-white">{settings.system.mobile_api_key_preview || 'Not configured'}</div>
             <div className="mt-1 text-xs text-slate-400">Source: {settings.system.mobile_api_key_source || 'none'}</div>
           </div>
           <div>
             <label className="block text-sm text-slate-400 mb-2">Set Custom Mobile API Key</label>
-            <input value={mobileApiKey} onChange={(e) => setMobileApiKey(e.target.value)} placeholder="Leave blank to keep current key" className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white" />
+            <input value={mobileApiKey} onChange={(e) => setMobileApiKey(e.target.value)} placeholder="Leave blank to keep current key" className="w-full rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-white" />
           </div>
           {revealedMobileSecret && (
             <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-amber-200 break-all">
@@ -361,15 +361,15 @@ export default function SettingsPage() {
             </div>
           )}
           <div className="flex flex-wrap gap-3">
-            <button onClick={handleRevealSecret} disabled={revealingSecret} className="inline-flex items-center gap-2 rounded-lg border border-slate-700 px-4 py-2 text-slate-200 hover:bg-slate-800 disabled:opacity-50">
+            <button onClick={handleRevealSecret} disabled={revealingSecret} className="inline-flex items-center gap-2 rounded-lg border border-[color:var(--oc-border-soft)] px-4 py-2 text-slate-200 hover:bg-[color:var(--oc-surface)] disabled:opacity-50">
               <Eye className="h-4 w-4" />
               {revealingSecret ? 'Revealing...' : 'Reveal Current Key'}
             </button>
-            <button onClick={() => handleSystemSave(true)} disabled={savingSystem} className="inline-flex items-center gap-2 rounded-lg border border-slate-700 px-4 py-2 text-slate-200 hover:bg-slate-800 disabled:opacity-50">
+            <button onClick={() => handleSystemSave(true)} disabled={savingSystem} className="inline-flex items-center gap-2 rounded-lg border border-[color:var(--oc-border-soft)] px-4 py-2 text-slate-200 hover:bg-[color:var(--oc-surface)] disabled:opacity-50">
               <RefreshCw className="h-4 w-4" />
               Rotate Key
             </button>
-            <button onClick={() => handleSystemSave(false)} disabled={savingSystem} className="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-white hover:bg-sky-500 disabled:opacity-50">
+            <button onClick={() => handleSystemSave(false)} disabled={savingSystem} className="inline-flex items-center gap-2 rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] px-4 py-2 text-slate-950 hover:bg-[color:var(--oc-action-hover)] disabled:opacity-50">
               <KeyRound className="h-4 w-4" />
               Save Mobile Key
             </button>
@@ -377,22 +377,22 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      <section className="rounded-lg border border-slate-700 bg-slate-800 p-6">
+      <section className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-6">
         <div className="flex items-center gap-3 mb-4">
-          <Shield className="h-5 w-5 text-sky-400" />
+          <Shield className="h-5 w-5 text-primary-300" />
           <h2 className="text-sm font-semibold text-white">Password</h2>
         </div>
         <div className="grid gap-4 md:grid-cols-2">
           <div>
             <label className="block text-sm text-slate-400 mb-2">Current Password</label>
-            <input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white" />
+            <input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} className="w-full rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-white" />
           </div>
           <div>
             <label className="block text-sm text-slate-400 mb-2">New Password</label>
-            <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white" />
+            <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="w-full rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-white" />
           </div>
         </div>
-        <button onClick={handlePasswordChange} disabled={changingPassword || !currentPassword || !newPassword} className="mt-4 inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-white hover:bg-sky-500 disabled:opacity-50">
+        <button onClick={handlePasswordChange} disabled={changingPassword || !currentPassword || !newPassword} className="mt-4 inline-flex items-center gap-2 rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] px-4 py-2 text-slate-950 hover:bg-[color:var(--oc-action-hover)] disabled:opacity-50">
           <Save className="h-4 w-4" />
           {changingPassword ? 'Updating...' : 'Change Password'}
         </button>

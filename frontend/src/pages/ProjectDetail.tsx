@@ -109,7 +109,7 @@ function ProjectDetail() {
           <p className="text-sm text-slate-400 mb-4">{error}</p>
           <button
             onClick={() => navigate('/projects')}
-            className="bg-sky-600 hover:bg-sky-500 text-white px-4 py-2 rounded-md text-sm transition-colors"
+            className="border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] px-4 py-2 rounded-md text-sm transition-colors"
           >
             Back to Projects
           </button>
@@ -137,7 +137,7 @@ function ProjectDetail() {
       case 'promoted':
         return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300';
       case 'ready':
-        return 'border-sky-500/30 bg-sky-500/10 text-sky-300';
+        return 'border-primary-500/30 bg-primary-400/10 text-primary-300';
       case 'changes_requested':
         return 'border-amber-500/30 bg-amber-500/10 text-amber-300';
       case 'blocked':
@@ -145,7 +145,7 @@ function ProjectDetail() {
       case 'in_progress':
         return 'border-indigo-500/30 bg-indigo-500/10 text-indigo-300';
       default:
-        return 'border-slate-600 bg-slate-700/40 text-slate-300';
+        return 'border-[color:var(--oc-border)] bg-[color:var(--oc-surface-raised)] text-slate-300';
     }
   };
 
@@ -154,7 +154,7 @@ function ProjectDetail() {
 
   const workspaceCountItems = workspaceOverview
     ? [
-        { key: 'ready', label: 'Ready', value: workspaceOverview.counts.ready || 0, className: 'text-sky-300' },
+        { key: 'ready', label: 'Ready', value: workspaceOverview.counts.ready || 0, className: 'text-primary-300' },
         { key: 'promoted', label: 'Promoted', value: workspaceOverview.counts.promoted || 0, className: 'text-emerald-300' },
         { key: 'changes_requested', label: 'Changes Requested', value: workspaceOverview.counts.changes_requested || 0, className: 'text-amber-300' },
         { key: 'blocked', label: 'Blocked', value: workspaceOverview.counts.blocked || 0, className: 'text-red-300' },
@@ -453,7 +453,7 @@ function ProjectDetail() {
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
-        <div className="h-8 w-8 border-2 border-sky-500/30 border-t-sky-500 rounded-full animate-spin" />
+        <div className="h-8 w-8 border-2 border-primary-500/30 border-t-primary-500 rounded-full animate-spin" />
       </div>
     );
   }
@@ -511,10 +511,10 @@ function ProjectDetail() {
           </button>
           {tasks.length > 0 && (
             <details className="relative">
-              <summary className="flex cursor-pointer list-none items-center rounded-md p-1 text-slate-500 transition-colors hover:bg-slate-800 hover:text-slate-300">
+              <summary className="flex cursor-pointer list-none items-center rounded-md p-1 text-slate-500 transition-colors hover:bg-[color:var(--oc-surface)] hover:text-slate-300">
                 <MoreHorizontal className="h-4 w-4" />
               </summary>
-              <div className="absolute right-0 z-20 mt-2 w-44 rounded-lg border border-slate-700 bg-slate-900 p-1 shadow-xl">
+              <div className="absolute right-0 z-20 mt-2 w-44 rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-shell)] p-1 shadow-xl">
                 <button
                   onClick={async () => {
                     if (!confirm('Delete all tasks in this project? This cannot be undone.')) return;
@@ -539,7 +539,7 @@ function ProjectDetail() {
       </div>
 
       {/* Project Brief */}
-      <div className="rounded-lg border border-slate-700 bg-slate-800 p-5">
+      <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-5">
         <div className="mb-3 flex items-center justify-between gap-4">
           <div>
             <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Project Brief</h2>
@@ -553,7 +553,7 @@ function ProjectDetail() {
               <textarea
                 value={projectDescriptionDraft}
                 onChange={(e) => setProjectDescriptionDraft(e.target.value)}
-                className="min-h-[80px] w-full resize-y rounded-md border border-slate-600 bg-slate-950 px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                className="min-h-[80px] w-full resize-y rounded-md border border-[color:var(--oc-border)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-primary-500/60"
                 placeholder="Project brief, scope, expected outcome..."
               />
             </div>
@@ -562,7 +562,7 @@ function ProjectDetail() {
               <textarea
                 value={projectRulesDraft}
                 onChange={(e) => setProjectRulesDraft(e.target.value)}
-                className="min-h-[96px] w-full resize-y rounded-md border border-slate-600 bg-slate-950 px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                className="min-h-[96px] w-full resize-y rounded-md border border-[color:var(--oc-border)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-primary-500/60"
                 placeholder="Constraints, must-follow instructions, architecture rules..."
               />
             </div>
@@ -574,7 +574,7 @@ function ProjectDetail() {
                   setProjectDescriptionDraft(project.description || '');
                   setProjectRulesDraft(project.project_rules || '');
                 }}
-                className="rounded-md bg-slate-700 px-3 py-1.5 text-sm text-white transition-colors hover:bg-slate-600"
+                className="rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-1.5 text-sm text-slate-300 transition-colors hover:border-[color:var(--oc-border)] hover:text-white"
               >
                 Cancel
               </button>
@@ -582,7 +582,7 @@ function ProjectDetail() {
                 type="button"
                 onClick={handleSaveProjectMeta}
                 disabled={savingProjectMeta}
-                className="rounded-md bg-sky-600 px-3 py-1.5 text-sm text-white transition-colors hover:bg-sky-500 disabled:opacity-50"
+                className="rounded-md border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] px-3 py-1.5 text-sm text-slate-950 transition-colors hover:bg-[color:var(--oc-action-hover)] disabled:opacity-50"
               >
                 {savingProjectMeta ? 'Saving...' : 'Save Brief'}
               </button>
@@ -618,16 +618,16 @@ function ProjectDetail() {
         </span>
         <span className="flex items-center gap-1">
           <Terminal className="h-3 w-3" />
-          {sessions.length} sessions
+          {sessions.length} runs
         </span>
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-0 border-b border-slate-700">
+      <div className="flex gap-0 border-b border-[color:var(--oc-border-soft)]">
         {[
           { key: 'tasks', label: 'Tasks' },
           { key: 'planner', label: 'Project Architect' },
-          { key: 'sessions', label: 'AI Sessions' },
+          { key: 'sessions', label: 'Runs' },
         ].map((tab) => (
           <button
             key={tab.key}
@@ -635,7 +635,7 @@ function ProjectDetail() {
             onClick={() => setActiveTab(tab.key as 'sessions' | 'tasks' | 'planner')}
             className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
               activeTab === tab.key
-                ? 'text-white border-sky-500'
+                ? 'text-white border-primary-500'
                 : 'text-slate-500 border-transparent hover:text-slate-300'
             }`}
           >
@@ -659,28 +659,28 @@ function ProjectDetail() {
       {activeTab === 'sessions' && (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-sm font-medium text-white">AI Sessions</h2>
+            <h2 className="text-sm font-medium text-white">Runs</h2>
             <button
               onClick={() => navigate(`/sessions/new?project_id=${id}`)}
-              className="flex items-center gap-1.5 bg-sky-600 hover:bg-sky-500 text-white text-sm px-3 py-1.5 rounded-md transition-colors"
+              className="flex items-center gap-1.5 border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm px-3 py-1.5 rounded-md transition-colors"
             >
               <Plus className="h-4 w-4" />
-              New Session
+              New Run
             </button>
           </div>
 
           {sessions.length === 0 ? (
             <EmptyState
               icon={Terminal}
-              title="No AI sessions yet"
-              description="Create a session to start orchestrating development tasks"
+              title="No runs yet"
+              description="Start a run when this project has work ready for OpenClaw."
               action={{
-                label: 'New Session',
+                label: 'New Run',
                 onClick: () => navigate(`/sessions/new?project_id=${id}`)
               }}
             />
           ) : (
-            <div className="bg-slate-800 rounded-lg border border-slate-700 divide-y divide-slate-700/60">
+            <div className="bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)] divide-y divide-slate-700/60">
               {sessions.map((session) => {
                 const isLegacySession = isLegacyTaskExecutionSession(
                   session,
@@ -698,7 +698,7 @@ function ProjectDetail() {
                   }}
                   role="button"
                   tabIndex={0}
-                  className="flex cursor-pointer items-center gap-4 px-4 py-3 transition-colors hover:bg-slate-700/40 focus:outline-none focus:ring-1 focus:ring-sky-500/70"
+                  className="flex cursor-pointer items-center gap-4 px-4 py-3 transition-colors hover:bg-[color:var(--oc-surface-raised)] focus:outline-none focus:ring-1 focus:ring-primary-500/60"
                 >
                   <div className="flex-1 min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
@@ -748,7 +748,7 @@ function ProjectDetail() {
             <h2 className="text-sm font-medium text-white">Tasks</h2>
             <button
               onClick={() => setShowCreateTask(true)}
-              className="flex items-center gap-1.5 bg-sky-600 hover:bg-sky-500 text-white text-sm px-3 py-1.5 rounded-md transition-colors"
+              className="flex items-center gap-1.5 border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm px-3 py-1.5 rounded-md transition-colors"
             >
               <Plus className="h-4 w-4" />
               Add Task
@@ -768,7 +768,7 @@ function ProjectDetail() {
           ) : (
             <div className="space-y-3">
               {workspaceOverview && (
-                <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
+                <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
                   <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between mb-3">
                     <div>
                       <p className="text-xs uppercase tracking-wide text-slate-500">Canonical Baseline</p>
@@ -784,7 +784,7 @@ function ProjectDetail() {
                     <button
                       onClick={handleRebuildBaseline}
                       disabled={rebuildingBaseline || (workspaceOverview.baseline.promoted_task_count || 0) === 0}
-                      className="rounded-md bg-slate-700 px-3 py-1.5 text-xs text-white transition-colors hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-1.5 text-xs text-slate-300 transition-colors hover:border-[color:var(--oc-border)] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {rebuildingBaseline ? 'Rebuilding...' : 'Rebuild Baseline'}
                     </button>
@@ -792,7 +792,7 @@ function ProjectDetail() {
                   {workspaceCountItems.length > 0 && (
                     <div className="flex flex-wrap gap-3">
                       {workspaceCountItems.map((item) => (
-                        <div key={item.key} className="rounded-md border border-slate-700 bg-slate-900/50 px-3 py-2">
+                        <div key={item.key} className="rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2">
                           <p className="text-xs uppercase tracking-wide text-slate-500">{item.label}</p>
                           <p className={`mt-1 text-lg font-semibold ${item.className}`}>{item.value}</p>
                         </div>
@@ -802,9 +802,9 @@ function ProjectDetail() {
                 </div>
               )}
 
-              <div className="bg-slate-800 rounded-lg border border-slate-700 divide-y divide-slate-700/60">
+              <div className="bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)] divide-y divide-slate-700/60">
                 {tasks.map((task) => (
-                  <div key={task.id} className="px-4 py-4 hover:bg-slate-700/30 transition-colors">
+                  <div key={task.id} className="px-4 py-4 hover:bg-[color:var(--oc-surface-raised)] transition-colors">
                     <div className="flex items-start justify-between gap-4">
                       <div className="flex items-start gap-3 flex-1 min-w-0">
                         <div className="p-1.5 rounded-md text-blue-400 bg-blue-400/10 mt-0.5 shrink-0">
@@ -820,7 +820,7 @@ function ProjectDetail() {
                               {formatWorkspaceStatus(task.workspace_status)}
                             </span>
                             {task.task_subfolder && (
-                              <span className="rounded-full border border-slate-600 px-2.5 py-0.5 text-xs text-slate-400">
+                              <span className="rounded-full border border-[color:var(--oc-border)] px-2.5 py-0.5 text-xs text-slate-400">
                                 {task.task_subfolder}
                               </span>
                             )}
@@ -844,20 +844,20 @@ function ProjectDetail() {
                         {task.status !== 'running' && (
                           <button
                             onClick={() => handleRerunTask(task)}
-                            className="rounded-md bg-blue-600/80 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-500"
+                            className="rounded-md border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] px-3 py-1.5 text-xs font-medium text-slate-950 transition-colors hover:bg-[color:var(--oc-action-hover)]"
                           >
                             {task.status === 'done' ? 'Run again' : 'Run'}
                           </button>
                         )}
                         <details className="relative">
-                          <summary className="flex cursor-pointer list-none items-center rounded-md p-1.5 text-slate-500 transition-colors hover:bg-slate-700 hover:text-slate-300">
+                          <summary className="flex cursor-pointer list-none items-center rounded-md p-1.5 text-slate-500 transition-colors hover:bg-[color:var(--oc-surface-raised)] hover:text-slate-300">
                             <MoreHorizontal className="h-4 w-4" />
                           </summary>
-                          <div className="absolute right-0 z-20 mt-2 w-56 rounded-lg border border-slate-700 bg-slate-900 p-1 shadow-xl">
+                          <div className="absolute right-0 z-20 mt-2 w-56 rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-shell)] p-1 shadow-xl">
                             {task.status !== 'running' && (
                               <button
                                 onClick={() => handleRerunTask(task, true)}
-                                className="w-full rounded-md px-2.5 py-2 text-left text-xs text-slate-300 transition-colors hover:bg-slate-800 hover:text-white"
+                                className="w-full rounded-md px-2.5 py-2 text-left text-xs text-slate-300 transition-colors hover:bg-[color:var(--oc-surface)] hover:text-white"
                               >
                                 Run in new isolated session
                               </button>
@@ -880,7 +880,7 @@ function ProjectDetail() {
                             )}
                             <button
                               onClick={() => startEditTask(task)}
-                              className="w-full rounded-md px-2.5 py-2 text-left text-xs text-slate-300 transition-colors hover:bg-slate-800 hover:text-white"
+                              className="w-full rounded-md px-2.5 py-2 text-left text-xs text-slate-300 transition-colors hover:bg-[color:var(--oc-surface)] hover:text-white"
                             >
                               Edit task
                             </button>
@@ -905,7 +905,7 @@ function ProjectDetail() {
       {/* Create Task Modal */}
       {showCreateTask && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-slate-800 rounded-lg border border-slate-700 p-5 w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto shadow-2xl">
+          <div className="bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)] p-5 w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto shadow-2xl">
             <h3 className="text-sm font-semibold text-white mb-4">Create New Task</h3>
             <form onSubmit={handleCreateTask}>
               <div className="space-y-4">
@@ -917,7 +917,7 @@ function ProjectDetail() {
                     type="text"
                     value={taskTitle}
                     onChange={(e) => setTaskTitle(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-600 rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 focus:border-sky-500"
+                    className="w-full bg-[color:var(--oc-surface-deep)] border border-[color:var(--oc-border)] rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-primary-500/60 focus:border-primary-500"
                     placeholder="e.g., Build a simple Vite website"
                     autoFocus
                   />
@@ -930,7 +930,7 @@ function ProjectDetail() {
                     value={taskDescription}
                     onChange={(e) => setTaskDescription(e.target.value)}
                     rows={3}
-                    className="w-full bg-slate-950 border border-slate-600 rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 resize-none"
+                    className="w-full bg-[color:var(--oc-surface-deep)] border border-[color:var(--oc-border)] rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-primary-500/60 resize-none"
                     placeholder="Describe what needs to be done..."
                   />
                 </div>
@@ -943,11 +943,11 @@ function ProjectDetail() {
                       type="button"
                       onClick={() => generateStepsFromDescription(taskDescription)}
                       disabled={generatingSteps || !taskDescription.trim()}
-                      className="text-xs bg-sky-600/20 hover:bg-sky-600/30 text-sky-400 px-2.5 py-1 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                      className="text-xs bg-primary-500/15 hover:bg-primary-500/20 text-primary-300 px-2.5 py-1 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
                     >
                       {generatingSteps ? (
                         <>
-                          <div className="h-3 w-3 border-2 border-sky-400/30 border-t-sky-400 rounded-full animate-spin" />
+                          <div className="h-3 w-3 border-2 border-primary-400/30 border-t-primary-400 rounded-full animate-spin" />
                           Generating...
                         </>
                       ) : (
@@ -962,7 +962,7 @@ function ProjectDetail() {
                     value={taskSteps}
                     onChange={(e) => setTaskSteps(e.target.value)}
                     rows={8}
-                    className="w-full bg-slate-950 border border-slate-600 rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 font-mono resize-none"
+                    className="w-full bg-[color:var(--oc-surface-deep)] border border-[color:var(--oc-border)] rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-primary-500/60 font-mono resize-none"
                     placeholder='{"task_name": "...", "description": "...", "step_by_step_plan": [{"step": 1, "title": "...", "details": "..."}]}'
                   />
                   <p className="text-xs text-slate-500 mt-1">
@@ -973,14 +973,14 @@ function ProjectDetail() {
                   <button
                     type="button"
                     onClick={() => setShowCreateTask(false)}
-                    className="flex-1 bg-slate-700 hover:bg-slate-600 text-white text-sm px-3 py-2 rounded-md transition-colors"
+                    className="flex-1 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] text-slate-300 hover:border-[color:var(--oc-border)] hover:text-white text-sm px-3 py-2 rounded-md transition-colors"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
                     disabled={!taskTitle.trim() || creatingTask}
-                    className="flex-1 bg-sky-600 hover:bg-sky-500 text-white text-sm px-3 py-2 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    className="flex-1 border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm px-3 py-2 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                   >
                     {creatingTask ? (
                       <>
@@ -1001,7 +1001,7 @@ function ProjectDetail() {
       {/* Edit Task Modal */}
       {editingTaskId && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-slate-800 rounded-lg border border-slate-700 p-5 w-full max-w-md mx-4 shadow-2xl">
+          <div className="bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)] p-5 w-full max-w-md mx-4 shadow-2xl">
             <h3 className="text-sm font-semibold text-white mb-4">Edit Task</h3>
             <form onSubmit={(e) => { e.preventDefault(); handleUpdateTask(editingTaskId); }}>
               <div className="space-y-4">
@@ -1013,7 +1013,7 @@ function ProjectDetail() {
                     type="text"
                     value={editTitle}
                     onChange={(e) => setEditTitle(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-600 rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 focus:border-sky-500"
+                    className="w-full bg-[color:var(--oc-surface-deep)] border border-[color:var(--oc-border)] rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-primary-500/60 focus:border-primary-500"
                     placeholder="e.g., Design homepage"
                     autoFocus
                   />
@@ -1026,7 +1026,7 @@ function ProjectDetail() {
                     value={editDescription}
                     onChange={(e) => setEditDescription(e.target.value)}
                     rows={3}
-                    className="w-full bg-slate-950 border border-slate-600 rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 resize-none"
+                    className="w-full bg-[color:var(--oc-surface-deep)] border border-[color:var(--oc-border)] rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-primary-500/60 resize-none"
                     placeholder="Describe what needs to be done..."
                   />
                 </div>
@@ -1038,7 +1038,7 @@ function ProjectDetail() {
                     value={editSteps}
                     onChange={(e) => setEditSteps(e.target.value)}
                     rows={4}
-                    className="w-full bg-slate-950 border border-slate-600 rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 resize-none font-mono"
+                    className="w-full bg-[color:var(--oc-surface-deep)] border border-[color:var(--oc-border)] rounded-md px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-primary-500/60 resize-none font-mono"
                     placeholder='[{"step": 1, "action": "Create component"}, {"step": 2, "action": "Add styling"}]'
                   />
                 </div>
@@ -1046,14 +1046,14 @@ function ProjectDetail() {
                   <button
                     type="button"
                     onClick={() => setEditingTaskId(null)}
-                    className="flex-1 bg-slate-700 hover:bg-slate-600 text-white text-sm px-3 py-2 rounded-md transition-colors"
+                    className="flex-1 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] text-slate-300 hover:border-[color:var(--oc-border)] hover:text-white text-sm px-3 py-2 rounded-md transition-colors"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
                     disabled={!editTitle.trim() || updatingTask}
-                    className="flex-1 bg-sky-600 hover:bg-sky-500 text-white text-sm px-3 py-2 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    className="flex-1 border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] text-sm px-3 py-2 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                   >
                     {updatingTask ? (
                       <>

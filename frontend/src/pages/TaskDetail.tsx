@@ -247,7 +247,7 @@ function TaskDetail() {
       )}
 
       {/* Task Content */}
-      <div className="bg-slate-800 rounded-lg border border-slate-700 p-6">
+      <div className="bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)] p-6">
         <div className="flex items-start justify-between mb-6">
           <div>
             <h2 className="text-xl font-bold text-white">
@@ -287,7 +287,7 @@ function TaskDetail() {
                 value={editForm.title}
                 onChange={(e) => setEditForm({ ...editForm, title: e.target.value })}
                 placeholder="Task title"
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
+                className="w-full px-3 py-2 bg-[color:var(--oc-surface-deep)] border border-[color:var(--oc-border-soft)] rounded-lg text-white focus:outline-none focus:ring-1 focus:ring-primary-500/60"
               />
             </div>
 
@@ -299,7 +299,7 @@ function TaskDetail() {
                 value={editForm.description}
                 onChange={(e) => setEditForm({ ...editForm, description: e.target.value })}
                 placeholder="Task description"
-                className="bg-slate-900 border-slate-700 min-h-[150px]"
+                className="bg-[color:var(--oc-shell)] border-[color:var(--oc-border-soft)] min-h-[150px]"
               />
             </div>
 
@@ -308,13 +308,13 @@ function TaskDetail() {
                 Step-by-Step Plan (JSON)
               </label>
               <p className="text-xs text-slate-500 mb-2">
-                Define task steps as a JSON array. Each step should have: <code className="bg-slate-700 px-1 rounded">{"{"} "action": "...", "description": "..." {"}"}</code>
+                Define task steps as a JSON array. Each step should have: <code className="rounded bg-[color:var(--oc-surface-raised)] px-1">{"{"} "action": "...", "description": "..." {"}"}</code>
               </p>
               <TextArea
                 value={editForm.steps}
                 onChange={(e) => setEditForm({ ...editForm, steps: e.target.value })}
                 placeholder='[{"action": "setup", "description": "Initialize project"}, {"action": "code", "description": "Write main code"}]'
-                className={`bg-slate-900 min-h-[300px] font-mono text-sm ${
+                className={`bg-[color:var(--oc-shell)] min-h-[300px] font-mono text-sm ${
                   stepsJsonState.valid
                     ? 'border-emerald-700/70 focus:ring-emerald-500'
                     : 'border-red-700/80 focus:ring-red-500'
@@ -329,7 +329,7 @@ function TaskDetail() {
               </p>
             </div>
 
-            <details className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
+            <details className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-4">
               <summary className="cursor-pointer text-sm font-medium text-slate-300">
                 Advanced / Dangerous
               </summary>
@@ -339,7 +339,7 @@ function TaskDetail() {
                     type="checkbox"
                     checked={allowCurrentStepEdit}
                     onChange={(event) => setAllowCurrentStepEdit(event.target.checked)}
-                    className="mt-0.5 h-4 w-4 rounded border-amber-500 bg-slate-950"
+                    className="mt-0.5 h-4 w-4 rounded border-amber-500 bg-[color:var(--oc-surface-deep)]"
                   />
                   <span>
                     I understand lowering this step may re-run earlier work and can overwrite or duplicate project files.
@@ -357,7 +357,7 @@ function TaskDetail() {
                     onChange={(e) =>
                       setEditForm({ ...editForm, current_step: parseInt(e.target.value) || 0 })
                     }
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                    className="w-full px-3 py-2 bg-[color:var(--oc-surface-deep)] border border-[color:var(--oc-border-soft)] rounded-lg text-white disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-1 focus:ring-primary-500/60"
                   />
                 </div>
               </div>
@@ -383,13 +383,13 @@ function TaskDetail() {
               </div>
             )}
 
-            <div className="rounded-lg border border-slate-600 bg-slate-700/40 p-4">
+            <div className="rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-surface-raised)] p-4">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1 text-xs capitalize text-slate-200">
+                <span className="rounded-full border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] px-3 py-1 text-xs capitalize text-slate-200">
                   Workspace: {String(task.workspace_status || 'not_created').replace(/_/g, ' ')}
                 </span>
                 {task.task_subfolder && (
-                  <span className="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-400">
+                  <span className="rounded-full border border-[color:var(--oc-border-soft)] px-3 py-1 text-xs text-slate-400">
                     {task.task_subfolder}
                   </span>
                 )}
@@ -404,7 +404,7 @@ function TaskDetail() {
               )}
               <div className="mt-4 flex flex-wrap gap-2">
                 {task.status !== 'running' && (
-                  <div className="flex items-center overflow-hidden rounded-md border border-sky-500/40">
+                  <div className="flex items-center overflow-hidden rounded-md border border-primary-500/40">
                     <Button
                       size="sm"
                       onClick={() => handleRerun(runInNewSession)}
@@ -412,7 +412,7 @@ function TaskDetail() {
                     >
                       {task.status === 'done' ? 'Run Again' : 'Run'}
                     </Button>
-                    <label className="flex items-center gap-1 border-l border-sky-500/30 bg-slate-900 px-2 text-xs text-slate-300">
+                    <label className="flex items-center gap-1 border-l border-primary-500/30 bg-[color:var(--oc-shell)] px-2 text-xs text-slate-300">
                       <ChevronDown className="h-3.5 w-3.5 text-slate-500" />
                       <select
                         value={runInNewSession ? 'new_session' : 'workflow'}
@@ -445,19 +445,19 @@ function TaskDetail() {
                   <FileJson className="h-4 w-4" />
                   Step-by-Step Plan
                 </h3>
-                <pre className="bg-slate-950 border border-slate-700 p-4 rounded-lg text-sm text-slate-300 overflow-x-auto font-mono">
+                <pre className="bg-[color:var(--oc-surface-deep)] border border-[color:var(--oc-border-soft)] p-4 rounded-lg text-sm text-slate-300 overflow-x-auto font-mono">
                   {typeof task.steps === 'string' ? task.steps : JSON.stringify(task.steps, null, 2)}
                 </pre>
               </div>
             )}
 
-            <div className="grid grid-cols-2 gap-4 pt-4 border-t border-slate-600">
+            <div className="grid grid-cols-2 gap-4 pt-4 border-t border-[color:var(--oc-border)]">
               <div>
                 <h3 className="text-sm font-medium text-slate-300 mb-1">Project</h3>
                 {task.project_id ? (
                   <Link
                     to={`/projects/${task.project_id || projectId}`}
-                    className="text-sm text-sky-300 hover:text-sky-200"
+                    className="text-sm text-primary-300 hover:text-primary-200"
                   >
                     {project?.name || `Project ${task.project_id}`}
                   </Link>
@@ -470,7 +470,7 @@ function TaskDetail() {
                 {task.session_id ? (
                   <Link
                     to={`/sessions/${task.session_id}`}
-                    className="text-sm text-sky-300 hover:text-sky-200"
+                    className="text-sm text-primary-300 hover:text-primary-200"
                   >
                     Session {task.session_id}
                   </Link>

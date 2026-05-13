@@ -60,8 +60,8 @@ function Register() {
 
   if (success) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-900 p-4">
-        <div className="max-w-md w-full bg-slate-800 rounded-xl p-8 shadow-xl shadow-black/20 border border-slate-700 text-center">
+      <div className="min-h-screen flex items-center justify-center bg-[color:var(--oc-canvas)] p-4">
+        <div className="max-w-md w-full bg-[color:var(--oc-surface)] rounded-xl p-8 shadow-xl shadow-black/20 border border-[color:var(--oc-border-soft)] text-center">
           <div className="mx-auto h-16 w-16 bg-green-500 rounded-full flex items-center justify-center mb-4">
             <User className="h-8 w-8 text-white" />
           </div>
@@ -71,7 +71,7 @@ function Register() {
           </p>
           <Link
             to="/login"
-            className="inline-flex items-center gap-2 bg-primary-500 hover:bg-primary-600 text-white font-semibold py-3 px-6 rounded-lg transition-all"
+            className="inline-flex items-center gap-2 border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] font-semibold py-3 px-6 rounded-lg transition-all"
           >
             Sign in <ArrowRight className="h-4 w-4" />
           </Link>
@@ -81,7 +81,7 @@ function Register() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-900 p-4">
+    <div className="min-h-screen flex items-center justify-center bg-[color:var(--oc-canvas)] p-4">
       <div className="max-w-md w-full space-y-8">
         <div className="text-center">
           <div className="mx-auto h-16 w-16 bg-primary-500 rounded-full flex items-center justify-center">
@@ -93,7 +93,7 @@ function Register() {
           </p>
         </div>
 
-        <div className="bg-slate-800 rounded-xl p-8 shadow-xl shadow-black/20 border border-slate-700">
+        <div className="bg-[color:var(--oc-surface)] rounded-xl p-8 shadow-xl shadow-black/20 border border-[color:var(--oc-border-soft)]">
           <form className="space-y-6" onSubmit={handleSubmit}>
             {error && (
               <div className="bg-red-500/10 border border-red-500/20 text-red-400 px-4 py-3 rounded-lg text-sm">
@@ -120,7 +120,7 @@ function Register() {
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all"
+                className="w-full bg-[color:var(--oc-surface-deep)] border border-[color:var(--oc-border-soft)] rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500/60 focus:border-primary-500 transition-all"
                 placeholder="you@example.com"
               />
             </div>
@@ -149,7 +149,7 @@ function Register() {
                   required
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-3 pr-10 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all"
+                  className="w-full bg-[color:var(--oc-surface-deep)] border border-[color:var(--oc-border-soft)] rounded-lg px-4 py-3 pr-10 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500/60 focus:border-primary-500 transition-all"
                   placeholder="••••••••"
                 />
                 <button
@@ -162,7 +162,7 @@ function Register() {
               </div>
 
               {showRequirements && (
-                <div className="mt-2 p-3 bg-slate-900/30 rounded-lg border border-primary-500/30">
+                <div className="mt-2 p-3 bg-[color:var(--oc-surface-deep)] rounded-lg border border-primary-500/30">
                   <p className="text-xs text-slate-300 mb-2 font-semibold">Password requirements:</p>
                   <ul className="text-xs text-slate-400 space-y-1">
                     <li className="flex items-start gap-2">
@@ -195,7 +195,7 @@ function Register() {
                   required
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
-                  className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-3 pr-10 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all"
+                  className="w-full bg-[color:var(--oc-surface-deep)] border border-[color:var(--oc-border-soft)] rounded-lg px-4 py-3 pr-10 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500/60 focus:border-primary-500 transition-all"
                   placeholder="••••••••"
                 />
                 <button
@@ -211,7 +211,7 @@ function Register() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full flex items-center justify-center gap-2 bg-primary-500 hover:bg-primary-600 text-white font-semibold py-3 px-4 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              className="w-full flex items-center justify-center gap-2 border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] font-semibold py-3 px-4 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {loading ? (
                 <div className="h-5 w-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />

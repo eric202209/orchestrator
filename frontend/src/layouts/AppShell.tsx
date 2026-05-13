@@ -45,13 +45,13 @@ export default function AppShell() {
   const location = useLocation();
 
   return (
-    <div className="min-h-screen bg-slate-900 flex">
+    <div className="min-h-screen bg-[color:var(--oc-canvas)] flex">
       {/* Desktop Sidebar */}
-      <aside className="hidden md:flex md:w-56 md:flex-col md:fixed md:inset-y-0 bg-slate-900 border-r border-slate-700/70">
+      <aside className="hidden md:flex md:w-56 md:flex-col md:fixed md:inset-y-0 bg-[color:var(--oc-shell)] border-r border-[color:var(--oc-border-soft)]">
         <div className="flex flex-col flex-1 min-h-0">
           {/* Logo */}
-          <div className="flex items-center gap-2 h-14 px-5 border-b border-slate-700/70">
-            <Activity className="h-5 w-5 text-sky-500" />
+          <div className="flex items-center gap-2 h-14 px-5 border-b border-[color:var(--oc-border-soft)]">
+            <Activity className="h-5 w-5 text-primary-400" />
             <span className="text-sm font-semibold text-white tracking-tight">Orchestrator</span>
           </div>
 
@@ -68,11 +68,11 @@ export default function AppShell() {
                   className={cn(
                     'flex items-center gap-2.5 px-3 py-2 rounded-md transition-colors text-sm',
                     isActive
-                      ? 'bg-slate-800 text-white font-medium'
-                      : 'text-slate-400 hover:bg-slate-800/60 hover:text-slate-200'
+                      ? 'bg-[color:var(--oc-surface-raised)] text-white font-medium shadow-[inset_3px_0_0_var(--oc-accent)]'
+                      : 'text-slate-400 hover:bg-[color:var(--oc-surface)] hover:text-slate-200'
                   )}
                 >
-                  <item.icon className={cn('h-4 w-4 flex-shrink-0', isActive ? 'text-sky-400' : '')} />
+                  <item.icon className={cn('h-4 w-4 flex-shrink-0', isActive ? 'text-primary-300' : '')} />
                   <span>{item.title}</span>
                 </Link>
               );
@@ -80,7 +80,7 @@ export default function AppShell() {
           </nav>
 
           {/* Footer */}
-          <div className="px-5 py-3 border-t border-slate-700/70">
+          <div className="px-5 py-3 border-t border-[color:var(--oc-border-soft)]">
             <div className="text-xs text-slate-500">v1.0.0</div>
           </div>
         </div>
@@ -93,10 +93,10 @@ export default function AppShell() {
             className="fixed inset-0 bg-black/60 z-40 md:hidden"
             onClick={() => setMobileMenuOpen(false)}
           />
-          <div className="fixed inset-y-0 left-0 w-56 bg-slate-900 border-r border-slate-700/70 z-50 md:hidden">
-            <div className="flex items-center justify-between h-14 px-4 border-b border-slate-700/70">
+          <div className="fixed inset-y-0 left-0 w-56 bg-[color:var(--oc-shell)] border-r border-[color:var(--oc-border-soft)] z-50 md:hidden">
+            <div className="flex items-center justify-between h-14 px-4 border-b border-[color:var(--oc-border-soft)]">
               <div className="flex items-center gap-2">
-                <Activity className="h-5 w-5 text-sky-500" />
+                <Activity className="h-5 w-5 text-primary-400" />
                 <span className="text-sm font-semibold text-white">Orchestrator</span>
               </div>
               <button
@@ -120,11 +120,11 @@ export default function AppShell() {
                     className={cn(
                       'flex items-center gap-2.5 px-3 py-2 rounded-md transition-colors text-sm',
                       isActive
-                        ? 'bg-slate-800 text-white font-medium'
-                        : 'text-slate-400 hover:bg-slate-800/60 hover:text-slate-200'
+                        ? 'bg-[color:var(--oc-surface-raised)] text-white font-medium shadow-[inset_3px_0_0_var(--oc-accent)]'
+                        : 'text-slate-400 hover:bg-[color:var(--oc-surface)] hover:text-slate-200'
                     )}
                   >
-                    <item.icon className={cn('h-4 w-4 flex-shrink-0', isActive ? 'text-sky-400' : '')} />
+                    <item.icon className={cn('h-4 w-4 flex-shrink-0', isActive ? 'text-primary-300' : '')} />
                     <span>{item.title}</span>
                   </Link>
                 );
@@ -137,7 +137,7 @@ export default function AppShell() {
       {/* Main Content */}
       <div className="min-w-0 flex-1 overflow-x-hidden md:ml-56">
         {/* Mobile Header */}
-        <header className="md:hidden h-14 bg-slate-900 border-b border-slate-700/70 sticky top-0 z-30">
+        <header className="md:hidden h-14 bg-[color:var(--oc-shell)] border-b border-[color:var(--oc-border-soft)] sticky top-0 z-30">
           <div className="flex items-center justify-between h-full px-4">
             <button
               onClick={() => setMobileMenuOpen(true)}
@@ -146,7 +146,7 @@ export default function AppShell() {
               <Menu className="h-5 w-5" />
             </button>
             <div className="flex items-center gap-2">
-              <Activity className="h-5 w-5 text-sky-500" />
+              <Activity className="h-5 w-5 text-primary-400" />
               <span className="text-sm font-semibold text-white">Orchestrator</span>
             </div>
             <div className="w-5" />

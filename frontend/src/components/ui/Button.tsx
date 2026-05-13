@@ -14,9 +14,9 @@ export function Button({
   ...props 
 }: ButtonProps) {
   const variants = {
-    default: 'bg-primary-600 hover:bg-primary-500 text-white',
-    ghost: 'text-slate-400 hover:bg-slate-800 hover:text-slate-100',
-    outline: 'border border-slate-700 hover:border-slate-600 hover:bg-slate-800 text-slate-300 hover:text-white',
+    default: 'border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)]',
+    ghost: 'text-slate-400 hover:bg-[color:var(--oc-surface)] hover:text-slate-100',
+    outline: 'border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] text-slate-300 hover:border-[color:var(--oc-border)] hover:text-white',
     destructive: 'bg-red-600 hover:bg-red-500 text-white'
   };
 
@@ -29,7 +29,7 @@ export function Button({
   return (
     <button
       className={cn(
-        'inline-flex items-center justify-center font-medium rounded-md transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-1 focus:ring-offset-slate-900 disabled:opacity-40 disabled:cursor-not-allowed',
+        'inline-flex items-center justify-center rounded-md font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500/60 focus:ring-offset-1 focus:ring-offset-[color:var(--oc-canvas)] disabled:cursor-not-allowed disabled:opacity-40',
         variants[variant],
         sizes[size],
         className

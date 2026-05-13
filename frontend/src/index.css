@@ -2,13 +2,27 @@
 @config "../tailwind.config.js";
 
 :root {
+  --oc-canvas: #0a0b0f;
+  --oc-shell: #0d0e13;
+  --oc-surface: #191b22;
+  --oc-surface-raised: #222630;
+  --oc-surface-deep: #101219;
+  --oc-border: #3a414f;
+  --oc-border-soft: rgba(154, 164, 178, 0.24);
+  --oc-accent: #78a2ff;
+  --oc-action: #56616f;
+  --oc-action-hover: #667386;
+  --oc-text-primary: #f3f3f3;
+  --oc-text-secondary: #c1c1c1;
+  --oc-text-tertiary: #949494;
+
   font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
   line-height: 1.5;
   font-weight: 400;
 
   color-scheme: dark;
-  color: #e2e8f0;
-  background-color: #0f172a;
+  color: var(--oc-text-secondary);
+  background-color: var(--oc-canvas);
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -17,13 +31,13 @@
 }
 
 html {
-  background-color: #0f172a;
+  background-color: var(--oc-canvas);
 }
 
 body {
   margin: 0;
   min-height: 100vh;
-  background-color: #0f172a;
+  background-color: var(--oc-canvas);
 }
 
 #root {
@@ -52,4 +66,3 @@ body {
     opacity: 0;
   }
 }
-

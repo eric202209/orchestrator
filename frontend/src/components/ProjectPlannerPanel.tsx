@@ -61,9 +61,9 @@ const getStatusClass = (status: string) => {
     case 'failed':
       return 'border-red-500/30 bg-red-500/10 text-red-200'
     case 'cancelled':
-      return 'border-slate-600 bg-slate-700/40 text-slate-300'
+      return 'border-[color:var(--oc-border)] bg-[color:var(--oc-surface-raised)] text-slate-300'
     default:
-      return 'border-sky-500/30 bg-sky-500/10 text-sky-200'
+      return 'border-primary-500/30 bg-primary-500/10 text-slate-100'
   }
 }
 
@@ -147,7 +147,7 @@ const renderMarkdownText = (value: string) => {
     const content = codeLines.join('\n')
     codeLines = []
     nodes.push(
-      <pre key={`code-${nodes.length}`} className="overflow-x-auto rounded-lg bg-slate-950/80 p-3 text-xs text-slate-300">
+      <pre key={`code-${nodes.length}`} className="overflow-x-auto rounded-lg bg-[color:var(--oc-surface-deep)] p-3 text-xs text-slate-300">
         {content}
       </pre>
     )
@@ -706,7 +706,7 @@ export function ProjectPlannerPanel({
   ) => {
     if (tasks.length === 0) {
       return (
-        <div className="rounded-xl border border-dashed border-slate-700/60 bg-slate-900/30 px-4 py-8 text-center text-sm text-slate-500">
+        <div className="rounded-xl border border-dashed border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-4 py-8 text-center text-sm text-slate-500">
           No parsed tasks yet.
         </div>
       )
@@ -717,7 +717,7 @@ export function ProjectPlannerPanel({
         {tasks.map((task, index) => (
           <div
             key={index}
-            className="rounded-xl border border-slate-700/60 bg-slate-800/50 p-4"
+            className="rounded-xl border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4"
           >
             <div className="flex items-start gap-3">
               <input
@@ -730,7 +730,7 @@ export function ProjectPlannerPanel({
                     )
                   )
                 }
-                className="mt-1 h-4 w-4 rounded border-slate-600 bg-slate-800"
+                className="mt-1 h-4 w-4 rounded border-[color:var(--oc-border)] bg-[color:var(--oc-surface)]"
               />
               <div className="min-w-0 flex-1">
                 <div className="text-sm font-medium text-white">{task.title || 'Untitled task'}</div>
@@ -753,7 +753,7 @@ export function ProjectPlannerPanel({
 
   return (
     <div className="space-y-6">
-      <div className="border-b border-slate-700">
+      <div className="border-b border-[color:var(--oc-border-soft)]">
         <nav className="flex gap-0">
           {[
             { key: 'interactive', label: 'Interactive' },
@@ -778,7 +778,7 @@ export function ProjectPlannerPanel({
               }}
               className={`border-b-2 -mb-px px-4 py-2 text-sm font-medium transition-colors ${
                 plannerMode === tab.key
-                  ? 'border-sky-500 text-white'
+                  ? 'border-primary-500 text-white'
                   : 'border-transparent text-slate-500 hover:text-slate-300'
               }`}
             >
@@ -790,9 +790,9 @@ export function ProjectPlannerPanel({
 
       {(plannerMode === 'interactive' || plannerMode === 'recovery') && (
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
-        <Card className="rounded-2xl border-slate-700/50 bg-slate-900/80 p-5">
-          <div className="mb-5 pb-4 border-b border-slate-700/50 flex items-center gap-2 text-sm font-semibold text-amber-300">
-            <Lightbulb className="h-4 w-4" />
+        <Card className="rounded-2xl border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-5">
+          <div className="mb-5 pb-4 border-b border-[color:var(--oc-border-soft)] flex items-center gap-2 text-sm font-semibold text-slate-200">
+            <Lightbulb className="h-4 w-4 text-primary-300" />
             {plannerMode === 'recovery' ? 'Replan Recovery' : 'Interactive Planning'}
           </div>
           {plannerMode === 'interactive' ? (
@@ -815,7 +815,7 @@ export function ProjectPlannerPanel({
                 className={`rounded-xl border px-4 py-3 text-left transition-colors ${
                   sourceBrain === 'local'
                     ? 'border-primary-500 bg-primary-500/10 text-white'
-                    : 'border-slate-700 bg-slate-900/70 text-slate-300'
+                    : 'border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] text-slate-300'
                 }`}
               >
                 <div className="font-medium">Local brain</div>
@@ -826,8 +826,8 @@ export function ProjectPlannerPanel({
                 onClick={() => setSourceBrain('cloud')}
                 className={`rounded-xl border px-4 py-3 text-left transition-colors ${
                   sourceBrain === 'cloud'
-                    ? 'border-sky-500 bg-sky-500/10 text-white'
-                    : 'border-slate-700 bg-slate-900/70 text-slate-300'
+                    ? 'border-primary-500 bg-primary-500/10 text-white'
+                    : 'border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] text-slate-300'
                 }`}
               >
                 <div className="font-medium">Cloud brain</div>
@@ -844,12 +844,12 @@ export function ProjectPlannerPanel({
             </Button>
           </div>
           ) : (
-            <div className="rounded-xl border border-slate-700/60 bg-slate-900/40 p-4 text-sm text-slate-300">
+            <div className="rounded-xl border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-4 text-sm text-slate-300">
               Continue Project Architect conversations started from failed sessions. When the plan is agreed, review the task preview and commit it to the project, or move the conversation into Markdown mode.
             </div>
           )}
 
-          <div className="mt-8 pt-6 border-t border-slate-700/50">
+          <div className="mt-8 pt-6 border-t border-[color:var(--oc-border-soft)]">
             <div className="mb-3 flex items-center justify-between">
               <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">
                 {plannerMode === 'recovery' ? 'Recovery Sessions' : 'Planning Sessions'}
@@ -859,7 +859,7 @@ export function ProjectPlannerPanel({
             {loadingSessions ? (
               <div className="text-sm text-slate-500">Loading sessions...</div>
             ) : visiblePlanningSessions.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-slate-700/60 bg-slate-900/30 px-4 py-8 text-sm text-slate-500">
+              <div className="rounded-xl border border-dashed border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-4 py-8 text-sm text-slate-500">
                 {plannerMode === 'recovery' ? 'No replan recovery sessions yet.' : 'No planning sessions yet.'}
               </div>
             ) : (
@@ -870,7 +870,7 @@ export function ProjectPlannerPanel({
                     className={`w-full rounded-xl border p-4 text-left transition-colors ${
                       activeSessionId === session.id
                         ? 'border-primary-500/70 bg-primary-500/10'
-                        : 'border-slate-700/60 bg-slate-900/30 hover:border-slate-600 hover:bg-slate-900/60'
+                        : 'border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] hover:border-[color:var(--oc-border)] hover:bg-[color:var(--oc-surface-deep)]'
                     }`}
                   >
                     <div className="flex items-start justify-between gap-3">
@@ -924,9 +924,9 @@ export function ProjectPlannerPanel({
         </Card>
 
         <div className="space-y-6">
-          <Card className="rounded-2xl border-slate-700/50 bg-slate-800/40 p-6">
+          <Card className="rounded-2xl border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-6">
             {!activeSession ? (
-              <div className="rounded-xl border border-dashed border-slate-700/60 bg-slate-900/30 px-6 py-16 text-center text-sm text-slate-500">
+              <div className="rounded-xl border border-dashed border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-6 py-16 text-center text-sm text-slate-500">
                 {plannerMode === 'recovery'
                   ? 'Select a replan recovery session from the sidebar.'
                   : 'Select a planning session or start a new one to begin the interactive flow.'}
@@ -935,8 +935,8 @@ export function ProjectPlannerPanel({
               <div className="space-y-5">
                 <div className="flex flex-wrap items-start justify-between gap-4">
                   <div>
-                    <div className="mb-2 flex items-center gap-2 text-sm font-medium text-amber-300">
-                      <Sparkles className="h-4 w-4" />
+                    <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-300">
+                      <Sparkles className="h-4 w-4 text-primary-300" />
                       Session-first planning
                     </div>
                     <h2 className="text-2xl font-semibold text-white">{activeDisplayTitle}</h2>
@@ -977,7 +977,7 @@ export function ProjectPlannerPanel({
 
                 <div className="grid gap-6 xl:grid-cols-[minmax(0,0.95fr)_minmax(380px,1.05fr)]">
                   <div className="space-y-4">
-                    <div className="rounded-xl border border-slate-700/60 bg-slate-900/40 p-4">
+                    <div className="rounded-xl border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-4">
                       <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-white">
                         <MessageSquare className="h-4 w-4 text-primary-400" />
                         Conversation
@@ -988,8 +988,8 @@ export function ProjectPlannerPanel({
                             key={message.id}
                             className={`rounded-xl px-4 py-3 ${
                               message.role === 'assistant'
-                                ? 'bg-slate-800 text-slate-100'
-                                : 'bg-primary-500/10 text-primary-50'
+                                ? 'border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] text-slate-100'
+                                : 'border border-primary-500/25 bg-primary-500/10 text-slate-100'
                             }`}
                           >
                             <div className="mb-2 flex items-center gap-2 text-xs uppercase tracking-wide text-slate-400">
@@ -1030,7 +1030,7 @@ export function ProjectPlannerPanel({
                     )}
 
                     {activeSession.status === 'active' && (
-                      <div className="rounded-xl border border-sky-500/30 bg-sky-500/10 p-4 text-sm text-sky-100">
+                      <div className="rounded-xl border border-primary-500/30 bg-primary-500/10 p-4 text-sm text-slate-200">
                         The planner is generating markdown and task preview directly from your prompt.
                       </div>
                     )}
@@ -1059,7 +1059,7 @@ export function ProjectPlannerPanel({
                     )}
 
                     {activeSession.status === 'cancelled' && (
-                      <div className="rounded-xl border border-slate-700 bg-slate-900/60 p-4">
+                      <div className="rounded-xl border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-4">
                         <div className="text-sm text-slate-300">
                           This planning conversation was cancelled. You can start a fresh session from the sidebar or reuse the conversation as source material for the legacy markdown planner.
                         </div>
@@ -1077,9 +1077,9 @@ export function ProjectPlannerPanel({
 
                   <div className="space-y-4">
                     {activeSession.artifacts.length > 0 && (
-                    <div className="rounded-xl border border-slate-700/60 bg-slate-900/40 p-4">
+                    <div className="rounded-xl border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-4">
                       <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-white">
-                        <FileText className="h-4 w-4 text-sky-400" />
+                        <FileText className="h-4 w-4 text-primary-300" />
                         Planning Artifacts
                       </div>
                       <div className="mb-3 flex flex-wrap gap-2">
@@ -1091,7 +1091,7 @@ export function ProjectPlannerPanel({
                             className={`rounded-lg border px-3 py-1.5 text-xs transition-colors ${
                               selectedArtifact === artifact.artifact_type
                                 ? 'border-primary-500 bg-primary-500/10 text-white'
-                                : 'border-slate-700 bg-slate-800 text-slate-300'
+                                : 'border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] text-slate-300'
                             }`}
                           >
                             {artifactLabels[artifact.artifact_type] || artifact.filename}
@@ -1119,7 +1119,7 @@ export function ProjectPlannerPanel({
                     )}
 
                     {sessionDraftTasks.length > 0 && (
-                    <div className="rounded-xl border border-slate-700/60 bg-slate-900/40 p-4">
+                    <div className="rounded-xl border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-4">
                       <div className="mb-4 flex items-center justify-between">
                         <div className="flex items-center gap-2 text-sm font-semibold text-white">
                           <CheckSquare className="h-4 w-4 text-emerald-400" />
@@ -1159,8 +1159,8 @@ export function ProjectPlannerPanel({
       )}
 
       {plannerMode === 'markdown' && (
-          <Card className="rounded-2xl border-slate-700/50 bg-slate-800/40 p-6">
-            <div className="mb-6 pb-4 border-b border-slate-700/50 flex items-center justify-between gap-4">
+          <Card className="rounded-2xl border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-6">
+            <div className="mb-6 pb-4 border-b border-[color:var(--oc-border-soft)] flex items-center justify-between gap-4">
               <div>
                 <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-200">
                   <PencilLine className="h-4 w-4 text-slate-400" />
@@ -1201,7 +1201,7 @@ export function ProjectPlannerPanel({
                     {manualCommitting ? 'Committing...' : 'Commit Manual Tasks'}
                   </Button>
                 </div>
-                <div className="rounded-xl border border-slate-700/60 bg-slate-950/50 p-3">
+                <div className="rounded-xl border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-3">
                   <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
                     Raw markdown output
                   </div>
@@ -1220,7 +1220,7 @@ export function ProjectPlannerPanel({
                   Saved Plans
                 </div>
                 {plans.length === 0 ? (
-                  <div className="rounded-xl border border-dashed border-slate-700/60 bg-slate-900/30 px-4 py-10 text-center text-sm text-slate-500">
+                  <div className="rounded-xl border border-dashed border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-4 py-10 text-center text-sm text-slate-500">
                     Saved manual plans will appear here.
                   </div>
                 ) : (
@@ -1230,7 +1230,7 @@ export function ProjectPlannerPanel({
                       className={`rounded-xl border p-4 transition-colors ${
                         activeLegacyPlan?.id === plan.id
                           ? 'border-primary-500/70 bg-primary-500/10'
-                          : 'border-slate-700/60 bg-slate-900/30 hover:border-slate-600 hover:bg-slate-900/60'
+                          : 'border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] hover:border-[color:var(--oc-border)] hover:bg-[color:var(--oc-surface-deep)]'
                       }`}
                     >
                       <button

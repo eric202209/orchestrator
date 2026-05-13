@@ -204,7 +204,7 @@ const renderMarkdownSummary = (markdown: string) => {
     const content = codeLines.join('\n');
     codeLines = [];
     blocks.push(
-      <pre key={`code-${blocks.length}`} className="overflow-x-auto rounded-md bg-slate-950/70 p-3 text-xs text-slate-300">
+      <pre key={`code-${blocks.length}`} className="overflow-x-auto rounded-md bg-[color:var(--oc-surface-deep)] p-3 text-xs text-slate-300">
         {content}
       </pre>
     );
@@ -303,7 +303,7 @@ export function SessionHeader({
               href={project.github_url}
               target="_blank"
               rel="noopener noreferrer"
-              className="ml-2 text-sky-400 hover:text-sky-300"
+              className="ml-2 text-primary-300 hover:text-primary-300"
             >
               <ExternalLink className="inline h-4 w-4" />
             </a>
@@ -373,16 +373,16 @@ export function SessionStats({
 }: SessionStatsProps) {
   return (
     <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-      <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
+      <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
         <p className="mb-1.5 text-xs text-slate-400">Tasks</p>
         <p className="text-sm font-medium text-white">{tasksCount}</p>
       </div>
-      <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
+      <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
         <p className="mb-1.5 text-xs text-slate-400">Duration</p>
         <p className="text-sm font-medium text-white">{formatRunDuration(session)}</p>
         <p className="mt-0.5 text-xs capitalize text-slate-400">{session.execution_mode} mode</p>
       </div>
-      <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
+      <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
         <p className="mb-1.5 text-xs text-slate-400">Started</p>
         <p className="text-sm font-medium text-white font-mono">
           {session.started_at ? formatDateTime(session.started_at) : 'N/A'}
@@ -406,14 +406,14 @@ export function SessionTabs({
   tasksCount,
 }: SessionTabsProps) {
   return (
-    <div className="border-b border-slate-700">
+    <div className="border-b border-[color:var(--oc-border-soft)]">
       <nav className="flex gap-0">
         <button
           onClick={() => onChange('timeline')}
           className={cn(
             'flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors',
             activeTab === 'timeline'
-              ? 'border-sky-500 text-white'
+              ? 'border-primary-500 text-white'
               : 'border-transparent text-slate-500 hover:text-slate-300'
           )}
         >
@@ -425,18 +425,18 @@ export function SessionTabs({
           className={cn(
             'px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors',
             activeTab === 'tasks'
-              ? 'border-sky-500 text-white'
+              ? 'border-primary-500 text-white'
               : 'border-transparent text-slate-500 hover:text-slate-300'
           )}
         >
-          Tasks {tasksCount > 0 && <span className="ml-1 text-xs text-slate-600">({tasksCount})</span>}
+          Tasks {tasksCount > 0 && <span className="ml-1 text-xs text-slate-500">({tasksCount})</span>}
         </button>
         <button
           onClick={() => onChange('logs')}
           className={cn(
             'flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors',
             activeTab === 'logs'
-              ? 'border-sky-500 text-white'
+              ? 'border-primary-500 text-white'
               : 'border-transparent text-slate-500 hover:text-slate-300'
           )}
         >
@@ -448,7 +448,7 @@ export function SessionTabs({
           className={cn(
             'flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors',
             activeTab === 'settings'
-              ? 'border-sky-500 text-white'
+              ? 'border-primary-500 text-white'
               : 'border-transparent text-slate-500 hover:text-slate-300'
           )}
         >
@@ -504,7 +504,7 @@ export function SessionLogsPanel({
       <TerminalViewer
         logs={displayLogs}
         autoScroll={true}
-        className="h-[500px] bg-slate-900"
+        className="h-[500px] bg-[color:var(--oc-shell)]"
       />
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-sm">
@@ -522,14 +522,14 @@ export function SessionLogsPanel({
           <select
             value={logVerbosity}
             onChange={(e) => onLogVerbosityChange(e.target.value as 'clean' | 'verbose')}
-            className="rounded-md border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs text-slate-300 transition-colors hover:border-slate-600 focus:outline-none"
+            className="rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] px-2.5 py-1.5 text-xs text-slate-300 transition-colors hover:border-[color:var(--oc-border)] focus:outline-none"
           >
             <option value="clean">Clean</option>
             <option value="verbose">Verbose</option>
           </select>
           <button
             onClick={handleRefreshLogs}
-            className="flex items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs text-slate-300 transition-colors hover:border-slate-600 hover:text-white"
+            className="flex items-center gap-1.5 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] px-2.5 py-1.5 text-xs text-slate-300 transition-colors hover:border-[color:var(--oc-border)] hover:text-white"
           >
             <RefreshCw className="h-3.5 w-3.5" />
             Refresh
@@ -541,7 +541,7 @@ export function SessionLogsPanel({
                 e.target.value as 'newest' | 'oldest' | 'success' | 'errors' | 'all'
               )
             }
-            className="rounded-md border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs text-slate-300 transition-colors hover:border-slate-600 focus:outline-none"
+            className="rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] px-2.5 py-1.5 text-xs text-slate-300 transition-colors hover:border-[color:var(--oc-border)] focus:outline-none"
           >
             <option value="newest">Newest first</option>
             <option value="oldest">Oldest first</option>
@@ -573,7 +573,7 @@ export function SessionDiagnosticsPanel({
   );
 
   return (
-    <details className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
+    <details className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-4">
       <summary className="cursor-pointer text-sm font-medium text-slate-300 hover:text-white">
         Diagnostics
       </summary>
@@ -584,7 +584,7 @@ export function SessionDiagnosticsPanel({
             'rounded-lg border p-4',
             staleDispatch
               ? 'border-amber-800/60 bg-amber-950/20'
-              : 'border-slate-700 bg-slate-800'
+              : 'border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)]'
           )}
           >
           <div className="mb-3 flex items-center justify-between">
@@ -643,7 +643,7 @@ export function SessionDiagnosticsPanel({
           )}
           </div>
 
-          <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
+          <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
           <div className="mb-3 flex items-center justify-between">
             <h3 className="text-sm font-medium text-slate-300">Health Score</h3>
             {latestHealth ? (
@@ -672,7 +672,7 @@ export function SessionDiagnosticsPanel({
               {healthEvents.slice(-5).reverse().map((event) => (
                 <div
                   key={`${event.timestamp}-${event.score}`}
-                  className="flex items-center justify-between rounded-md border border-slate-700 px-3 py-2 text-sm"
+                  className="flex items-center justify-between rounded-md border border-[color:var(--oc-border-soft)] px-3 py-2 text-sm"
                 >
                   <div>
                     <p className="font-medium text-slate-200">{event.score}/100</p>
@@ -698,7 +698,7 @@ export function SessionDiagnosticsPanel({
           )}
           </div>
 
-          <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
+          <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
           <div className="mb-3 flex items-center justify-between">
             <h3 className="text-sm font-medium text-slate-300">Latest State Diff</h3>
             <span className="text-xs text-slate-400">
@@ -760,7 +760,7 @@ export function SessionDiagnosticsPanel({
         </div>
       )}
 
-      <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
+      <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
         <div className="mb-3 flex items-center justify-between">
           <h3 className="text-sm font-medium text-slate-300">Replay Investigation</h3>
           <span className="text-xs text-slate-400">
@@ -836,7 +836,7 @@ export function SessionDiagnosticsPanel({
                 {replayInvestigation.drift_findings.slice(0, 3).map((finding, idx) => (
                   <p
                     key={`${String(finding.type || 'finding')}-${idx}`}
-                    className="rounded-md border border-slate-700 px-2 py-1 text-xs text-slate-300"
+                    className="rounded-md border border-[color:var(--oc-border-soft)] px-2 py-1 text-xs text-slate-300"
                   >
                     {String(finding.type || 'finding')}: {String(finding.summary || '')}
                   </p>
@@ -848,19 +848,19 @@ export function SessionDiagnosticsPanel({
       </div>
 
       {visibleMatches.length > 0 && (
-        <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
+        <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
           <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-sm font-medium text-slate-300">Similar Failed Sessions</h3>
+            <h3 className="text-sm font-medium text-slate-300">Similar Failed Runs</h3>
             <span className="text-xs text-slate-400">{visibleMatches.length} matches</span>
           </div>
           <div className="space-y-2">
             {visibleMatches.slice(0, 3).map((match) => (
-              <div key={match.session_id} className="rounded-md border border-slate-700 p-3">
+              <div key={match.session_id} className="rounded-md border border-[color:var(--oc-border-soft)] p-3">
                 <div className="flex items-center justify-between gap-3">
                   <p className="text-sm font-medium text-slate-200">
                     #{match.session_id} {match.session_name}
                   </p>
-                  <span className="text-xs text-sky-400">
+                  <span className="text-xs text-primary-300">
                     {(match.similarity_score * 100).toFixed(0)}% similar
                   </span>
                 </div>
@@ -894,9 +894,9 @@ export function SessionTimelinePanel({
     <div className="min-w-0 space-y-4 overflow-x-hidden">
       {(offTrackMoment || repairGenealogy.length > 0) && (
         <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
-          <div className="min-w-0 overflow-hidden rounded-lg border border-amber-500/45 border-l-4 border-l-amber-400 bg-slate-800 p-4 shadow-sm shadow-black/20">
+          <div className="min-w-0 overflow-hidden rounded-lg border border-amber-500/45 border-l-4 border-l-amber-400 bg-[color:var(--oc-surface)] p-4 shadow-sm shadow-black/20">
             <div className="mb-3 flex items-center justify-between gap-3">
-              <h3 className="text-sm font-semibold text-slate-100">Off-Track Moment</h3>
+              <h3 className="text-sm font-semibold text-slate-100">Where It Went Off Track</h3>
               {offTrackMoment && (
                 <span className="rounded-sm border border-amber-400/50 bg-amber-400/15 px-1.5 py-0.5 text-xs uppercase text-amber-200">
                   {offTrackMoment.trigger.replace(/_/g, ' ')}
@@ -905,7 +905,7 @@ export function SessionTimelinePanel({
             </div>
             {!offTrackMoment ? (
               <p className="text-sm text-slate-400">
-                No off-track moment detected from health, divergence, or repair acceptance signals.
+                No off-track point detected from health, divergence, or repair acceptance signals.
               </p>
             ) : (
               <div className="space-y-2">
@@ -929,7 +929,7 @@ export function SessionTimelinePanel({
             )}
           </div>
 
-          <div className="min-w-0 overflow-hidden rounded-lg border border-orange-500/40 border-l-4 border-l-orange-400 bg-slate-800 p-4 shadow-sm shadow-black/20">
+          <div className="min-w-0 overflow-hidden rounded-lg border border-orange-500/40 border-l-4 border-l-orange-400 bg-[color:var(--oc-surface)] p-4 shadow-sm shadow-black/20">
             <div className="mb-3 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-slate-100">Repair History</h3>
               <span className="text-xs text-slate-400">{repairGenealogy.length} events</span>
@@ -948,14 +948,15 @@ export function SessionTimelinePanel({
                     <span
                       className={cn(
                         'absolute left-0 top-3 h-3 w-3 rounded-full border',
-                        node.status === 'original' && 'border-slate-500 bg-slate-700',
+                        node.status === 'original' &&
+                          'border-slate-500 bg-[color:var(--oc-surface-raised)]',
                         node.status === 'repair' && 'border-orange-400 bg-orange-500/40',
                         node.status === 'accepted' && 'border-emerald-400 bg-emerald-500/40',
                         node.status === 'rejected' && 'border-red-400 bg-red-500/40',
                         node.status === 'abandoned' && 'border-amber-400 bg-amber-500/40'
                       )}
                     />
-                    <div className="min-w-0 overflow-hidden rounded-md border border-slate-700 bg-slate-900/80 p-3">
+                    <div className="min-w-0 overflow-hidden rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-3">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="flex flex-wrap items-center gap-2">
                           <span
@@ -988,7 +989,7 @@ export function SessionTimelinePanel({
                           <summary className="cursor-pointer text-xs text-slate-500 hover:text-slate-300">
                             Raw event details
                           </summary>
-                          <pre className="mt-2 max-h-36 overflow-auto rounded bg-slate-950 p-2 text-xs text-slate-400">
+                          <pre className="mt-2 max-h-36 overflow-auto rounded bg-[color:var(--oc-surface-deep)] p-2 text-xs text-slate-400">
                             {JSON.stringify(node.details, null, 2)}
                           </pre>
                         </details>
@@ -1002,7 +1003,7 @@ export function SessionTimelinePanel({
         </div>
       )}
 
-      <div className="min-w-0 overflow-hidden rounded-lg border border-slate-600 bg-slate-800 p-4">
+      <div className="min-w-0 overflow-hidden rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-surface)] p-4">
         <div className="mb-3 flex items-center justify-between">
           <h3 className="text-sm font-semibold text-slate-200">Decision Timeline</h3>
           <span className="text-xs text-slate-400">{decisionEvents.length} events</span>
@@ -1021,7 +1022,7 @@ export function SessionTimelinePanel({
                 const diagnosticReasons = getDiagnosticReasons(event.details);
 
                 return (
-                  <div key={event.id} className="min-w-0 overflow-hidden rounded-md border border-slate-700 p-3">
+                  <div key={event.id} className="min-w-0 overflow-hidden rounded-md border border-[color:var(--oc-border-soft)] p-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex flex-wrap items-center gap-2">
                         <span
@@ -1031,12 +1032,12 @@ export function SessionTimelinePanel({
                             event.severity === 'warning' && 'text-amber-400',
                             event.severity !== 'error' &&
                               event.severity !== 'warning' &&
-                              'text-sky-400'
+                              'text-primary-300'
                           )}
                         >
                           {event.title}
                         </span>
-                        <span className="rounded-sm border border-slate-700 px-1.5 py-0.5 text-xs uppercase text-slate-400">
+                        <span className="rounded-sm border border-[color:var(--oc-border-soft)] px-1.5 py-0.5 text-xs uppercase text-slate-400">
                           {event.phase}
                         </span>
                         {event.task_id !== null && event.task_id !== undefined && (
@@ -1092,7 +1093,7 @@ export function SessionTimelinePanel({
         </div>
       </div>
 
-      <div className="min-w-0 overflow-hidden rounded-lg border border-slate-600 bg-slate-800 p-4">
+      <div className="min-w-0 overflow-hidden rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-surface)] p-4">
         <div className="mb-3 flex items-center justify-between">
           <h3 className="text-sm font-semibold text-slate-200">Causal Spans</h3>
           <span className="text-xs text-slate-400">{timelineSpans.length} spans</span>
@@ -1104,14 +1105,14 @@ export function SessionTimelinePanel({
         ) : (
           <div className="max-h-56 space-y-2 overflow-y-auto">
             {timelineSpans.slice().reverse().map((span) => (
-              <div key={span.id} className="min-w-0 overflow-hidden rounded-md border border-slate-700 p-3">
+              <div key={span.id} className="min-w-0 overflow-hidden rounded-md border border-[color:var(--oc-border-soft)] p-3">
                 <div className="flex items-center justify-between gap-3">
                   <div className="flex items-center gap-2">
                     <span
                       className={cn(
                         'text-xs font-medium uppercase',
                         span.lane === 'reasoning' && 'text-violet-400',
-                        span.lane === 'tool' && 'text-sky-400',
+                        span.lane === 'tool' && 'text-primary-300',
                         span.lane === 'workspace' && 'text-emerald-400',
                         span.lane === 'validation' && 'text-lime-400',
                         span.lane === 'system' && 'text-cyan-400'
@@ -1141,7 +1142,7 @@ export function SessionTimelinePanel({
         )}
       </div>
 
-      <div className="min-w-0 overflow-hidden rounded-lg border border-slate-600 bg-slate-800 p-4">
+      <div className="min-w-0 overflow-hidden rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-surface)] p-4">
         <div className="mb-3 flex items-center justify-between">
           <h3 className="text-sm font-semibold text-slate-200">Execution Timeline</h3>
           <span className="text-xs text-slate-400">{timelineEvents.length} events</span>
@@ -1156,7 +1157,7 @@ export function SessionTimelinePanel({
               .slice()
               .reverse()
               .map((event) => (
-                <div key={event.id} className="min-w-0 overflow-hidden rounded-md border border-slate-700 p-2">
+                <div key={event.id} className="min-w-0 overflow-hidden rounded-md border border-[color:var(--oc-border-soft)] p-2">
                   <div className="flex items-center justify-between">
                     <span
                       className={cn(
@@ -1170,7 +1171,7 @@ export function SessionTimelinePanel({
                         event.type === 'checkpoint' && 'text-emerald-400',
                         event.type === 'validation' && 'text-lime-400',
                         event.type === 'repair' && 'text-orange-400',
-                        event.type === 'task' && 'text-sky-400',
+                        event.type === 'task' && 'text-primary-300',
                         event.type === 'status' && 'text-cyan-400',
                         event.type === 'info' && 'text-slate-300'
                       )}
@@ -1210,7 +1211,7 @@ export function SessionTasksPanel({
 }: SessionTasksPanelProps) {
   return (
     <div className="space-y-4">
-      <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
+      <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
         <p className="text-sm font-medium text-slate-200">Workflow session tasks</p>
         <p className="mt-1 text-sm text-slate-400">
           These tasks and rerun attempts belong to this workflow session. Running a task again adds a new attempt here instead of creating a separate task session.
@@ -1225,7 +1226,7 @@ export function SessionTasksPanel({
           {onRefreshTasks && (
             <button
               onClick={onRefreshTasks}
-              className="rounded-lg bg-blue-600 px-3 py-1.5 text-sm text-white transition-colors hover:bg-blue-700"
+              className="rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] px-3 py-1.5 text-sm text-slate-950 transition-colors hover:bg-[color:var(--oc-action-hover)]"
             >
               Refresh Task View
             </button>
@@ -1247,7 +1248,7 @@ export function SessionTasksPanel({
         tasks.map((task) => (
           <div
             key={task.id}
-            className="rounded-xl border border-slate-600 bg-slate-800 p-4 transition-colors hover:border-slate-600"
+            className="rounded-xl border border-[color:var(--oc-border)] bg-[color:var(--oc-surface)] p-4 transition-colors hover:border-[color:var(--oc-border)]"
           >
             <div className="mb-2 flex items-start justify-between">
               <div>
@@ -1332,7 +1333,7 @@ export function SessionSettingsPanel({
 }: SessionSettingsPanelProps) {
   return (
     <div className="space-y-4">
-      <div className="rounded-xl border border-slate-600 bg-slate-800 p-4">
+      <div className="rounded-xl border border-[color:var(--oc-border)] bg-[color:var(--oc-surface)] p-4">
         <p className="mb-2 text-sm text-slate-400">Execution Mode</p>
         <div className="flex items-center gap-2">
           <button
@@ -1340,8 +1341,8 @@ export function SessionSettingsPanel({
             className={cn(
               'rounded-lg px-3 py-2 text-sm transition-colors',
               session.execution_mode === 'automatic'
-                ? 'bg-sky-600 text-white'
-                : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                ? 'border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white'
+                : 'border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] text-slate-300 hover:border-[color:var(--oc-border)] hover:text-white'
             )}
           >
             Automatic
@@ -1351,8 +1352,8 @@ export function SessionSettingsPanel({
             className={cn(
               'rounded-lg px-3 py-2 text-sm transition-colors',
               session.execution_mode === 'manual'
-                ? 'bg-sky-600 text-white'
-                : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                ? 'border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] text-white'
+                : 'border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] text-slate-300 hover:border-[color:var(--oc-border)] hover:text-white'
             )}
           >
             Manual
@@ -1360,14 +1361,14 @@ export function SessionSettingsPanel({
           {onRefreshTasks && (
             <button
               onClick={onRefreshTasks}
-              className="ml-auto rounded-lg bg-slate-700 px-3 py-2 text-sm text-white transition-colors hover:bg-slate-600"
+              className="ml-auto rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-sm text-slate-300 transition-colors hover:border-[color:var(--oc-border)] hover:text-white"
             >
               Refresh Tasks
             </button>
           )}
         </div>
       </div>
-      <div className="rounded-xl border border-slate-600 bg-slate-800 p-4">
+      <div className="rounded-xl border border-[color:var(--oc-border)] bg-[color:var(--oc-surface)] p-4">
         <p className="mb-3 text-sm text-slate-400">Session Metadata</p>
         <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-5">
           <div>
@@ -1392,7 +1393,7 @@ export function SessionSettingsPanel({
           </div>
         </div>
       </div>
-      <div className="rounded-xl border border-slate-600 bg-slate-800 p-4">
+      <div className="rounded-xl border border-[color:var(--oc-border)] bg-[color:var(--oc-surface)] p-4">
         <div className="mb-3 flex items-center justify-between">
           <p className="text-sm text-slate-400">Checkpoint Inspector</p>
           <span className="text-xs text-slate-400">{checkpoints.length} stored</span>
@@ -1404,7 +1405,7 @@ export function SessionSettingsPanel({
             {checkpoints.map((checkpoint) => (
               <div
                 key={checkpoint.name}
-                className="rounded-lg border border-slate-600 bg-slate-700/60 p-3"
+                className="rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-surface-raised)] p-3"
               >
                 <div className="flex items-center justify-between gap-3">
                   <div>
@@ -1448,7 +1449,7 @@ export function SessionSettingsPanel({
                   <div className="flex gap-2">
                     <button
                       onClick={() => onInspectCheckpoint?.(checkpoint.name)}
-                      className="rounded-lg bg-slate-700 px-3 py-1.5 text-xs text-white transition-colors hover:bg-slate-600"
+                      className="rounded-lg rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-1.5 text-xs text-slate-300 transition-colors hover:border-[color:var(--oc-border)] hover:text-white"
                     >
                       Inspect
                     </button>
@@ -1463,7 +1464,7 @@ export function SessionSettingsPanel({
                       className={cn(
                         'rounded-lg px-3 py-1.5 text-xs text-white transition-colors',
                         checkpoint.resumable === false
-                          ? 'cursor-not-allowed bg-slate-700/60 text-slate-400'
+                          ? 'cursor-not-allowed bg-[color:var(--oc-surface-raised)] text-slate-400'
                           : 'bg-emerald-700 hover:bg-emerald-600'
                       )}
                     >
@@ -1501,26 +1502,26 @@ export function SessionSettingsPanel({
               Plan steps {checkpointInspection.summary.plan_step_count} • Completed {checkpointInspection.summary.completed_step_count} • Repairs {checkpointInspection.summary.completion_repair_attempts}
             </p>
             {checkpointInspection.reasoning_artifact ? (
-              <div className="mt-3 rounded-lg border border-sky-800/60 bg-sky-950/20 p-3">
-                <p className="text-xs font-medium uppercase tracking-wide text-sky-300">
+              <div className="mt-3 rounded-lg border border-primary-700/60 bg-primary-500/10 p-3">
+                <p className="text-xs font-medium uppercase tracking-wide text-primary-300">
                   Reasoning Artifact
                 </p>
-                <p className="mt-1 text-sm text-sky-100">
+                <p className="mt-1 text-sm text-primary-100">
                   {checkpointInspection.reasoning_artifact.intent}
                 </p>
-                <p className="mt-2 text-xs text-sky-200/90">
+                <p className="mt-2 text-xs text-primary-200/90">
                   Workspace facts:{' '}
                   {checkpointInspection.reasoning_artifact.workspace_facts
                     .slice(0, 3)
                     .join(' • ')}
                 </p>
-                <p className="mt-1 text-xs text-sky-200/90">
+                <p className="mt-1 text-xs text-primary-200/90">
                   Planned actions:{' '}
                   {checkpointInspection.reasoning_artifact.planned_actions
                     .slice(0, 3)
                     .join(' • ')}
                 </p>
-                <p className="mt-1 text-xs text-sky-200/90">
+                <p className="mt-1 text-xs text-primary-200/90">
                   Verification:{' '}
                   {checkpointInspection.reasoning_artifact.verification_plan
                     .slice(0, 2)
@@ -1572,7 +1573,7 @@ export function SessionSettingsPanel({
               </p>
             ) : null}
             {checkpointInspection.latest_validation && (
-              <pre className="mt-3 overflow-x-auto rounded-lg bg-slate-950/80 p-3 text-xs text-slate-300">
+              <pre className="mt-3 overflow-x-auto rounded-lg bg-[color:var(--oc-surface-deep)] p-3 text-xs text-slate-300">
                 {JSON.stringify(checkpointInspection.latest_validation, null, 2)}
               </pre>
             )}
@@ -1656,7 +1657,7 @@ export function HumanInterventionPanel({
                 </div>
               </div>
               <div className="flex justify-end">
-                <div className="max-w-[78%] rounded-2xl rounded-br-md border border-slate-700 bg-slate-800/90 px-4 py-3 text-sm text-slate-200">
+                <div className="max-w-[78%] rounded-2xl rounded-br-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] px-4 py-3 text-sm text-slate-200">
                   <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
                     You
                   </p>
@@ -1671,7 +1672,7 @@ export function HumanInterventionPanel({
           )}
 
           {isHumanInitiated && (
-            <div className="mb-3 rounded-md border border-slate-700 bg-slate-900/60 p-3">
+            <div className="mb-3 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-3">
               {aiResponse ? (
                 <>
                   <p className="mb-1 text-xs font-medium text-emerald-400">AI Response</p>
@@ -1691,7 +1692,7 @@ export function HumanInterventionPanel({
               <summary className="cursor-pointer text-xs text-slate-400 hover:text-slate-300">
                 Context snapshot
               </summary>
-              <pre className="mt-2 overflow-x-auto rounded bg-slate-950/80 p-3 text-xs text-slate-300">
+              <pre className="mt-2 overflow-x-auto rounded bg-[color:var(--oc-surface-deep)] p-3 text-xs text-slate-300">
                 {intervention.context_snapshot}
               </pre>
             </details>
@@ -1712,7 +1713,7 @@ export function HumanInterventionPanel({
                   onChange={(e) =>
                     setDenyReason((prev) => ({ ...prev, [intervention.id]: e.target.value }))
                   }
-                  className="flex-1 rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-amber-500 focus:outline-none"
+                  className="flex-1 rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-surface)] px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-amber-500 focus:outline-none"
                 />
                 <button
                   disabled={submitting[intervention.id]}
@@ -1758,7 +1759,7 @@ export function HumanInterventionPanel({
                 onChange={(e) =>
                   setReplyText((prev) => ({ ...prev, [intervention.id]: e.target.value }))
                 }
-                className="w-full resize-none rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-amber-500 focus:outline-none"
+                className="w-full resize-none rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-surface)] px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-amber-500 focus:outline-none"
               />
               <button
                 disabled={
@@ -1797,7 +1798,7 @@ export function KnowledgeUsagePanel({ phases }: KnowledgeUsagePanelProps) {
   if (phaseKeys.length === 0) return null;
 
   return (
-    <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
+    <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
       <h3 className="mb-3 text-sm font-semibold text-slate-200">Knowledge References Used</h3>
       <div className="space-y-4">
         {phaseKeys.map((phase) => (
@@ -1809,7 +1810,7 @@ export function KnowledgeUsagePanel({ phases }: KnowledgeUsagePanelProps) {
               {phases[phase].map((entry, i) => (
                 <div
                   key={`${entry.knowledge_item_id}-${entry.retrieval_reason}-${entry.used_in_prompt}-${i}`}
-                  className="rounded-md border border-slate-700 px-3 py-2"
+                  className="rounded-md border border-[color:var(--oc-border-soft)] px-3 py-2"
                 >
                   <div className="flex items-center justify-between gap-3">
                     <p className="text-sm font-medium text-slate-200">{entry.title}</p>
@@ -1867,7 +1868,7 @@ export function FailureSummaryPanel({
 
   if (loading) {
     return (
-      <div className="rounded-lg border border-orange-500/40 border-l-4 border-l-orange-400 bg-slate-800 p-4 shadow-sm shadow-black/20">
+      <div className="rounded-lg border border-orange-500/40 border-l-4 border-l-orange-400 bg-[color:var(--oc-surface)] p-4 shadow-sm shadow-black/20">
         <p className="flex items-center gap-2 text-sm text-slate-200">
           <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-orange-300 border-t-transparent" />
           Generating failure summary…
@@ -1890,14 +1891,14 @@ export function FailureSummaryPanel({
 
   return (
     <div className="space-y-4">
-      <div className="rounded-lg border border-orange-500/40 border-l-4 border-l-orange-400 bg-slate-800 p-4 shadow-sm shadow-black/20">
+      <div className="rounded-lg border border-orange-500/40 border-l-4 border-l-orange-400 bg-[color:var(--oc-surface)] p-4 shadow-sm shadow-black/20">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="mb-1 flex flex-wrap items-center gap-2">
               <AlertTriangle className="h-5 w-5 text-orange-300" />
               <span className="font-semibold text-slate-100">Recovery needed</span>
               {hasPriorReplan && (
-                <span className="rounded bg-sky-800/50 px-2 py-0.5 text-xs text-sky-300">
+                <span className="rounded bg-primary-800/50 px-2 py-0.5 text-xs text-primary-300">
                   Replan {replanStatus ? replanStatus.replace(/_/g, ' ') : 'started'}
                 </span>
               )}
@@ -1910,19 +1911,19 @@ export function FailureSummaryPanel({
           <button
             type="button"
             onClick={() => setDetailsOpen((value) => !value)}
-            className="flex items-center gap-1.5 rounded-md border border-slate-600 bg-slate-900/40 px-3 py-1.5 text-xs text-slate-200 transition-colors hover:border-orange-400/60 hover:text-white"
+            className="flex items-center gap-1.5 rounded-md border border-[color:var(--oc-border)] bg-[color:var(--oc-surface-deep)] px-3 py-1.5 text-xs text-slate-200 transition-colors hover:border-orange-400/60 hover:text-white"
           >
             {detailsOpen ? 'Hide details' : 'Show details'}
             <ChevronDown className={cn('h-3.5 w-3.5 transition-transform', detailsOpen && 'rotate-180')} />
           </button>
         </div>
         {detailsOpen && (
-          <div className="mt-4 space-y-3 rounded border border-slate-700 bg-slate-900/80 p-3">
+          <div className="mt-4 space-y-3 rounded border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-3">
             {renderMarkdownSummary(summary.summary)}
           </div>
         )}
         {detailsOpen && summary.diagnostics && (
-          <div className="mt-3 rounded-md border border-red-500/35 border-l-4 border-l-red-400 bg-slate-900/80 p-3">
+          <div className="mt-3 rounded-md border border-red-500/35 border-l-4 border-l-red-400 bg-[color:var(--oc-surface-deep)] p-3">
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs font-medium uppercase text-red-200">
                 Failure diagnostics
@@ -1969,14 +1970,14 @@ export function FailureSummaryPanel({
       </div>
 
       {summary.operator_feedback && (
-        <div className="rounded-lg border border-slate-700 bg-slate-800/40 p-4">
+        <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
           <p className="mb-1 text-xs font-medium text-slate-400">Saved Operator Feedback</p>
           <p className="whitespace-pre-wrap text-sm text-slate-200">{summary.operator_feedback}</p>
         </div>
       )}
 
       {canStartReplan && (
-        <div className="rounded-lg border border-slate-700 bg-slate-800/30 p-4 space-y-3">
+        <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4 space-y-3">
           <p className="text-sm font-medium text-slate-300">Recovery guidance</p>
           <p className="text-xs text-slate-400">
             Add high-level direction before replanning. If you type guidance here and
@@ -1991,7 +1992,7 @@ export function FailureSummaryPanel({
             value={feedback}
             onChange={(e) => setFeedback(e.target.value)}
             placeholder="e.g. Focus on fixing the database migration — the schema change was wrong."
-            className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none resize-none"
+            className="w-full rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-shell)] px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-primary-500 focus:outline-none resize-none"
           />
           <div className="flex items-center gap-3">
             {feedback.trim() && (
@@ -2006,7 +2007,7 @@ export function FailureSummaryPanel({
                     setFeedbackSubmitting(false);
                   }
                 }}
-                className="rounded-lg border border-slate-600 px-4 py-2 text-sm text-slate-300 transition-colors hover:border-slate-500 hover:text-white disabled:opacity-50"
+                className="rounded-lg border border-[color:var(--oc-border)] px-4 py-2 text-sm text-slate-300 transition-colors hover:border-[color:var(--oc-border)] hover:text-white disabled:opacity-50"
               >
                 {feedbackSubmitting ? 'Saving…' : 'Save Feedback'}
               </button>
@@ -2025,7 +2026,7 @@ export function FailureSummaryPanel({
                   setReplanning(false);
                 }
               }}
-              className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-4 py-2 text-sm text-white transition-colors hover:bg-sky-500 disabled:opacity-50"
+              className="flex items-center gap-1.5 rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] px-4 py-2 text-sm text-slate-950 transition-colors hover:bg-[color:var(--oc-action-hover)] disabled:opacity-50"
             >
               {replanning
                 ? 'Starting replan…'
@@ -2040,7 +2041,7 @@ export function FailureSummaryPanel({
       )}
 
       {replanStillOwnsFlow && (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-sky-900/50 bg-sky-950/20 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-primary-700/50 bg-primary-500/10 p-3">
           <p className="text-xs text-slate-300">
             Replan started as planning session #{summary.replan_planning_session_id}.
             Review and commit the revised plan in Project Architect.
@@ -2049,7 +2050,7 @@ export function FailureSummaryPanel({
             <button
               type="button"
               onClick={onOpenProjectArchitect}
-              className="rounded-md bg-sky-700 px-3 py-1.5 text-xs text-white transition-colors hover:bg-sky-600"
+              className="rounded-md border border-[color:var(--oc-border)] bg-[color:var(--oc-action)] px-3 py-1.5 text-xs text-slate-950 transition-colors hover:bg-[color:var(--oc-action-hover)]"
             >
               Open Project Architect
             </button>
