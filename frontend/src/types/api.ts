@@ -35,6 +35,34 @@ export interface Task {
   task_subfolder?: string | null;
 }
 
+export interface TaskExecutionChangeSet {
+  schema: string;
+  project_id: number;
+  task_id: number;
+  task_execution_id: number;
+  snapshot_key: string;
+  snapshot_path: string;
+  snapshot_exists: boolean;
+  target_path: string;
+  status?: string | null;
+  captured_at: string;
+  added_files: string[];
+  modified_files: string[];
+  deleted_files: string[];
+  added_count: number;
+  modified_count: number;
+  deleted_count: number;
+  changed_count: number;
+  warning_flags: string[];
+}
+
+export interface TaskExecutionChangeSetResponse {
+  task_id: number;
+  task_execution_id: number | null;
+  change_set: TaskExecutionChangeSet;
+  recorded_at: string | null;
+}
+
 export type TaskStatus = 'pending' | 'running' | 'failed' | 'done' | 'cancelled';
 export type ExecutionProfile =
   | 'full_lifecycle'

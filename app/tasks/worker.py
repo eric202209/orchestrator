@@ -58,6 +58,7 @@ from app.services.orchestration.persistence import (
 from app.services.orchestration.execution.runtime import (
     get_state_manager_path as _get_state_manager_path,
     snapshot_workspace_before_run as _snapshot_workspace_before_run,
+    workspace_snapshot_key as _workspace_snapshot_key,
     write_project_state_snapshot as _write_project_state_snapshot,
 )
 from app.services.error_handler import error_handler
@@ -557,6 +558,7 @@ def execute_orchestration_task(
                 project,
                 task_id,
                 orchestration_state.project_dir,
+                task_execution_id=task_execution_id,
                 preserve_project_root_rules=runs_in_canonical_baseline,
             )
             if workspace_snapshot_result is not None:
@@ -580,6 +582,7 @@ def execute_orchestration_task(
                 project=project,
                 session_id=session_id,
                 task_id=task_id,
+                task_execution_id=task_execution_id,
                 orchestration_state=orchestration_state,
                 policy_profile_name=active_policy.name,
                 runs_in_canonical_baseline=runs_in_canonical_baseline,
@@ -1377,6 +1380,19 @@ def execute_orchestration_task(
 
     finally:
         try:
+            if project and task and task_execution_id and orchestration_state:
+                task_service_for_change_set = TaskService(db)
+                task_service_for_change_set.persist_task_execution_change_set(
+                    project,
+                    task,
+                    session_id=session_id,
+                    task_execution_id=task_execution_id,
+                    snapshot_key=_workspace_snapshot_key(task_id, task_execution_id),
+                    target_dir=Path(orchestration_state.project_dir),
+                    preserve_project_root_rules=runs_in_canonical_baseline,
+                    status=getattr(getattr(task, "status", None), "value", None),
+                    commit=False,
+                )
             _sync_task_execution_from_task_state(
                 db,
                 task_execution_id,

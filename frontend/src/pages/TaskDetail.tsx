@@ -10,9 +10,12 @@ import {
   X, 
   Calendar,
   AlertCircle,
-  FileJson
+  FileJson,
+  FileWarning,
+  RotateCcw
 } from 'lucide-react';
 import { StatusBadge, LoadingSpinner, Button, TextArea, Alert } from '@/components/ui';
+import type { TaskExecutionChangeSetResponse } from '@/types/api';
 
 function TaskDetail() {
   const { projectId, taskId } = useParams<{ projectId: string; taskId: string }>();
@@ -28,6 +31,8 @@ function TaskDetail() {
   const [requestChangesNote, setRequestChangesNote] = useState('');
   const [requestChangesRerun, setRequestChangesRerun] = useState(true);
   const [requestChangesSubmitting, setRequestChangesSubmitting] = useState(false);
+  const [changeSet, setChangeSet] = useState<TaskExecutionChangeSetResponse | null>(null);
+  const [changeSetRejecting, setChangeSetRejecting] = useState(false);
   const [editForm, setEditForm] = useState({
     title: '',
     description: '',
@@ -37,8 +42,15 @@ function TaskDetail() {
 
   const fetchTask = useCallback(async () => {
     try {
+      setChangeSet(null);
       const response = await tasksAPI.getById(Number(taskId));
       setTask(response.data);
+      try {
+        const changeSetResponse = await tasksAPI.getChangeSet(Number(taskId));
+        setChangeSet(changeSetResponse.data);
+      } catch {
+        setChangeSet(null);
+      }
       if (response.data?.project_id) {
         try {
           const projectResponse = await projectsAPI.getById(response.data.project_id);
@@ -183,6 +195,26 @@ function TaskDetail() {
     }
   };
 
+  const handleRejectChangeSet = async () => {
+    if (!task || !changeSet?.task_execution_id) return;
+    const note = window.prompt('Reason for rejecting this candidate change set:', 'needs review');
+    if (note === null) return;
+    try {
+      setSaveError(null);
+      setChangeSetRejecting(true);
+      await tasksAPI.rejectChangeSet(task.id, {
+        task_execution_id: changeSet.task_execution_id,
+        note: note.trim() || 'operator_rejected_change_set',
+      });
+      await fetchTask();
+    } catch (error) {
+      console.error('Failed to reject change set:', error);
+      setSaveError('Failed to reject and restore the change set');
+    } finally {
+      setChangeSetRejecting(false);
+    }
+  };
+
   const isArchivedPromotedWorkspace = (targetTask: Task) =>
     targetTask.workspace_status === 'promoted' &&
     (targetTask.task_subfolder || '').startsWith('.openclaw/promoted-workspace-archive/');
@@ -205,6 +237,23 @@ function TaskDetail() {
     }
   }, [editForm.steps]);
   const promotedWorkspace = task?.workspace_status === 'promoted';
+  const latestChangeSet = changeSet?.change_set || null;
+  const renderChangeSetFiles = (label: string, files: string[]) => {
+    if (!files.length) return null;
+    return (
+      <div>
+        <h4 className="text-xs font-medium uppercase tracking-wide text-slate-400">{label}</h4>
+        <ul className="mt-1 max-h-28 overflow-y-auto rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-2 text-xs text-slate-300">
+          {files.slice(0, 20).map((file) => (
+            <li key={`${label}-${file}`} className="truncate font-mono">{file}</li>
+          ))}
+          {files.length > 20 && (
+            <li className="pt-1 text-slate-500">+{files.length - 20} more</li>
+          )}
+        </ul>
+      </div>
+    );
+  };
 
   if (loading) {
     return (
@@ -494,6 +543,54 @@ function TaskDetail() {
                 )}
               </div>
             </div>
+
+            {latestChangeSet && (
+              <div className="rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-surface-raised)] p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h3 className="flex items-center gap-2 text-sm font-medium text-slate-200">
+                      <FileWarning className="h-4 w-4 text-amber-300" />
+                      Workspace Change Set
+                    </h3>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Execution {latestChangeSet.task_execution_id} · {latestChangeSet.changed_count} changed file{latestChangeSet.changed_count === 1 ? '' : 's'}
+                    </p>
+                  </div>
+                  {latestChangeSet.changed_count > 0 && task.workspace_status !== 'promoted' && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleRejectChangeSet}
+                      disabled={changeSetRejecting}
+                      className="gap-2 border-red-500/40 text-red-200 hover:bg-red-500/10"
+                    >
+                      <RotateCcw className="h-4 w-4" />
+                      {changeSetRejecting ? 'Restoring...' : 'Reject & Restore'}
+                    </Button>
+                  )}
+                </div>
+                {latestChangeSet.warning_flags.length > 0 && (
+                  <div className="mt-3 flex flex-wrap gap-1.5">
+                    {latestChangeSet.warning_flags.map((flag) => (
+                      <span
+                        key={flag}
+                        className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-200"
+                      >
+                        {flag.replace(/_/g, ' ')}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <div className="mt-4 grid gap-3 md:grid-cols-3">
+                  {renderChangeSetFiles('Added', latestChangeSet.added_files)}
+                  {renderChangeSetFiles('Modified', latestChangeSet.modified_files)}
+                  {renderChangeSetFiles('Deleted', latestChangeSet.deleted_files)}
+                </div>
+                {latestChangeSet.changed_count === 0 && (
+                  <p className="mt-3 text-sm text-slate-400">No file changes were recorded for this execution.</p>
+                )}
+              </div>
+            )}
 
             {task.steps && (
               <div>

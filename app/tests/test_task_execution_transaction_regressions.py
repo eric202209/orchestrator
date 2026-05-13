@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.models import (
+    LogEntry,
     Project,
     Session as SessionModel,
     SessionTask,
@@ -10,6 +13,7 @@ from app.models import (
     TaskExecution,
     TaskStatus,
 )
+from app.services.task_service import TASK_CHANGE_SET_LOG_MESSAGE
 
 
 class _FakeAsyncResult:
@@ -385,6 +389,91 @@ def test_task_retry_explicit_new_session_preserves_legacy_isolated_session_creat
         .one()
     )
     assert new_session.name == "Retry isolated session"
+
+
+def test_task_retry_with_requested_changes_injects_operator_note_and_change_set(
+    authenticated_client, db_session, monkeypatch
+):
+    project = Project(name="Requested Changes Repair Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task = Task(
+        project_id=project.id,
+        title="Repair requested",
+        description="original task prompt",
+        status=TaskStatus.DONE,
+        workspace_status="changes_requested",
+        promotion_note="Tighten the README and remove the extra file.",
+        task_subfolder="task-repair-requested",
+    )
+    session = SessionModel(
+        project_id=project.id,
+        name="Previous run",
+        status="stopped",
+        is_active=False,
+    )
+    db_session.add_all([task, session])
+    db_session.commit()
+    db_session.refresh(task)
+    db_session.refresh(session)
+
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.DONE,
+    )
+    db_session.add(execution)
+    db_session.commit()
+    db_session.refresh(execution)
+    db_session.add(
+        LogEntry(
+            session_id=session.id,
+            task_id=task.id,
+            task_execution_id=execution.id,
+            level="INFO",
+            message=TASK_CHANGE_SET_LOG_MESSAGE,
+            log_metadata=json.dumps(
+                {
+                    "schema": "openclaw.task_execution_change_set.v1",
+                    "task_id": task.id,
+                    "task_execution_id": execution.id,
+                    "added_count": 1,
+                    "modified_count": 1,
+                    "deleted_count": 1,
+                    "changed_count": 3,
+                    "added_files": ["extra.md"],
+                    "modified_files": ["README.md"],
+                    "deleted_files": ["old.md"],
+                    "warning_flags": ["deleted_files"],
+                }
+            ),
+        )
+    )
+    db_session.commit()
+
+    captured_kwargs = {}
+    _stub_retry_dispatch(monkeypatch, captured_kwargs)
+    monkeypatch.setattr(
+        "app.services.task_service.TaskService.archive_task_workspace_for_repair_rerun",
+        lambda *a, **kw: {"archived": False, "reason": "test"},
+    )
+
+    response = authenticated_client.post(
+        f"/api/v1/tasks/{task.id}/retry",
+        json={"execution_scope": "new_session", "create_new_session": True},
+    )
+
+    assert response.status_code == 200
+    prompt = captured_kwargs["prompt"]
+    assert "Operator requested changes" in prompt
+    assert "Tighten the README" in prompt
+    assert "added=1, modified=1, deleted=1" in prompt
+    assert "README.md" in prompt
+    assert "extra.md" in prompt
+    assert "old.md" in prompt
 
 
 @pytest.mark.asyncio

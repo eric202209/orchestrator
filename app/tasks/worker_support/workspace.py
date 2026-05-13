@@ -21,6 +21,7 @@ def _restore_workspace_snapshot_if_needed(
     project: Any,
     session_id: int,
     task_id: int,
+    task_execution_id: Optional[int],
     orchestration_state: Any,
     policy_profile_name: str,
     runs_in_canonical_baseline: bool,
@@ -72,6 +73,7 @@ def _restore_workspace_snapshot_if_needed(
         project,
         task_id,
         orchestration_state.project_dir,
+        task_execution_id=task_execution_id,
         preserve_project_root_rules=runs_in_canonical_baseline,
     )
     if restore_result and restore_result.get("restored"):

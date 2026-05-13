@@ -55,6 +55,22 @@ function ProjectDetail() {
       issues: string[];
     };
     promoted_tasks: Array<{ id: number; title: string; promoted_at?: string | null }>;
+    pending_change_sets: Array<{
+      task_id: number;
+      title: string;
+      workspace_status?: string | null;
+      task_execution_id?: number | null;
+      change_set: {
+        changed_count: number;
+        added_count: number;
+        modified_count: number;
+        deleted_count: number;
+        added_files: string[];
+        modified_files: string[];
+        deleted_files: string[];
+        warning_flags: string[];
+      };
+    }>;
     ready_task_ids: number[];
   } | null>(null);
   const initialTab = (['sessions', 'tasks', 'planner'] as const).includes(
@@ -196,6 +212,11 @@ function ProjectDetail() {
         0
       )
     : 0;
+  const pendingChangeSets = workspaceOverview?.pending_change_sets || [];
+  const pendingChangeSetFileCount = pendingChangeSets.reduce(
+    (total, item) => total + (item.change_set?.changed_count || 0),
+    0
+  );
   const extractArchivePath = (task: Task) => {
     const match = (task.promotion_note || '').match(
       /Archived (?:retained|previous) workspace(?: for repair rerun)? at (.+?)(?:\n|$)/
@@ -957,6 +978,39 @@ function ProjectDetail() {
                       {workspaceOverview.audit.issues.length > 0 && (
                         <p className="mt-2 text-xs text-slate-500">{workspaceOverview.audit.issues[0]}</p>
                       )}
+                    </div>
+                  )}
+                  {pendingChangeSets.length > 0 && (
+                    <div className="mt-3 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-xs font-medium uppercase tracking-wide text-amber-200">
+                          Pending change sets
+                        </p>
+                        <span className="text-xs text-amber-200/80">
+                          {pendingChangeSetFileCount} changed file{pendingChangeSetFileCount === 1 ? '' : 's'}
+                        </span>
+                      </div>
+                      <div className="mt-2 grid gap-2 lg:grid-cols-2">
+                        {pendingChangeSets.slice(0, 4).map((item) => (
+                          <Link
+                            key={`${item.task_id}-${item.task_execution_id || 'latest'}`}
+                            to={`/projects/${project.id}/tasks/${item.task_id}`}
+                            className="rounded-md border border-amber-500/20 bg-[color:var(--oc-surface-deep)] px-3 py-2 transition-colors hover:border-amber-500/40"
+                          >
+                            <div className="flex items-center justify-between gap-3">
+                              <span className="truncate text-xs font-medium text-slate-200">
+                                {item.title}
+                              </span>
+                              <span className="shrink-0 text-xs text-amber-200">
+                                {item.change_set.changed_count}
+                              </span>
+                            </div>
+                            <p className="mt-1 text-xs text-slate-500">
+                              +{item.change_set.added_count} / ~{item.change_set.modified_count} / -{item.change_set.deleted_count}
+                            </p>
+                          </Link>
+                        ))}
+                      </div>
                     </div>
                   )}
                 </div>

@@ -14,6 +14,7 @@ import type {
   User,
   SortedLogsResponse,
   TaskSortedLogsResponse,
+  TaskExecutionChangeSetResponse,
   ProjectLogsResponse,
   WorkspaceInfo,
   SessionFilters,
@@ -206,6 +207,23 @@ export const projectsAPI = {
         task_subfolder?: string | null;
         promoted_at?: string | null;
       }>;
+      pending_change_sets: Array<{
+        task_id: number;
+        title: string;
+        workspace_status?: string | null;
+        task_execution_id?: number | null;
+        recorded_at?: string | null;
+        change_set: {
+          changed_count: number;
+          added_count: number;
+          modified_count: number;
+          deleted_count: number;
+          added_files: string[];
+          modified_files: string[];
+          deleted_files: string[];
+          warning_flags: string[];
+        };
+      }>;
       ready_task_ids: number[];
     }>(`/projects/${projectId}/workspace-overview`),
   rebuildBaseline: (projectId: number) =>
@@ -374,6 +392,10 @@ export const tasksAPI = {
     apiClient.post<Task>(`/tasks/${id}/promote`, { note }),
   requestWorkspaceChanges: (id: number, note: string) =>
     apiClient.post<Task>(`/tasks/${id}/request-changes`, { note }),
+  getChangeSet: (id: number) =>
+    apiClient.get<TaskExecutionChangeSetResponse>(`/tasks/${id}/change-set`),
+  rejectChangeSet: (id: number, data?: { task_execution_id?: number; note?: string }) =>
+    apiClient.post(`/tasks/${id}/change-set/reject`, data || {}),
 
   start: (id: number) => apiClient.post(`/tasks/${id}/start`),
 

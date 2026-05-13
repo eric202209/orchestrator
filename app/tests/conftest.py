@@ -100,8 +100,17 @@ def reset_runtime_flags():
     original_keypair_flag = settings.ALLOW_TEST_KEYPAIR_ENDPOINT
     original_rate_limit_window = settings.AUTH_RATE_LIMIT_WINDOW_SECONDS
     original_rate_limit_attempts = settings.AUTH_RATE_LIMIT_MAX_ATTEMPTS
+    original_langfuse_enabled = settings.LANGFUSE_ENABLED
+    original_langfuse_public_key = settings.LANGFUSE_PUBLIC_KEY
+    original_langfuse_secret_key = settings.LANGFUSE_SECRET_KEY
 
     settings.INLINE_PLANNING = True
+    settings.LANGFUSE_ENABLED = False
+    settings.LANGFUSE_PUBLIC_KEY = ""
+    settings.LANGFUSE_SECRET_KEY = ""
+    from app.services.observability import reset_for_tests
+
+    reset_for_tests()
     clear_auth_rate_limits()
 
     try:
@@ -111,6 +120,10 @@ def reset_runtime_flags():
         settings.ALLOW_TEST_KEYPAIR_ENDPOINT = original_keypair_flag
         settings.AUTH_RATE_LIMIT_WINDOW_SECONDS = original_rate_limit_window
         settings.AUTH_RATE_LIMIT_MAX_ATTEMPTS = original_rate_limit_attempts
+        settings.LANGFUSE_ENABLED = original_langfuse_enabled
+        settings.LANGFUSE_PUBLIC_KEY = original_langfuse_public_key
+        settings.LANGFUSE_SECRET_KEY = original_langfuse_secret_key
+        reset_for_tests()
         clear_auth_rate_limits()
 
 

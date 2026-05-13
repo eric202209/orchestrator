@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
-from app.models import Project, Session as SessionModel, Task, TaskStatus
-from app.services.task_service import TaskService
+from app.models import (
+    LogEntry,
+    Project,
+    Session as SessionModel,
+    Task,
+    TaskExecution,
+    TaskStatus,
+)
+from app.services.orchestration.execution.runtime import workspace_snapshot_key
+from app.services.task_service import TASK_CHANGE_SET_LOG_MESSAGE, TaskService
 
 
 def test_rebuild_project_baseline_uses_only_promoted_workspaces(
@@ -110,6 +119,268 @@ def test_project_gitignore_guard_preserves_existing_rules_and_is_idempotent(
     assert contents.startswith("dist/\n.env\n")
     assert contents.count("# BEGIN OpenClaw workspace guard") == 1
     assert contents.count(".openclaw/") == 1
+
+
+def test_task_execution_change_set_captures_added_modified_and_deleted_files(
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "change-set-capture"
+    project_root.mkdir(parents=True)
+    (project_root / "README.md").write_text("before\n", encoding="utf-8")
+    (project_root / "old.txt").write_text("remove me\n", encoding="utf-8")
+
+    project = Project(
+        name="change-set-capture",
+        workspace_path=str(project_root),
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task = Task(
+        project_id=project.id,
+        title="Capture change set",
+        description="Mutate canonical root",
+        status=TaskStatus.DONE,
+        workspace_status="ready",
+        task_subfolder="task-capture-change-set",
+    )
+    session = SessionModel(project_id=project.id, name="capture-session")
+    db_session.add_all([task, session])
+    db_session.commit()
+    db_session.refresh(task)
+    db_session.refresh(session)
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.DONE,
+    )
+    db_session.add(execution)
+    db_session.commit()
+    db_session.refresh(execution)
+
+    task_service = TaskService(db_session)
+    snapshot_key = workspace_snapshot_key(task.id, execution.id)
+    task_service.create_workspace_snapshot(
+        project,
+        project_root,
+        snapshot_key=snapshot_key,
+        preserve_project_root_rules=True,
+    )
+
+    (project_root / "README.md").write_text("after\n", encoding="utf-8")
+    (project_root / "old.txt").unlink()
+    (project_root / "package.json").write_text('{"scripts": {}}\n', encoding="utf-8")
+    (project_root / ".openclaw" / "runtime").mkdir(parents=True)
+    (project_root / ".openclaw" / "runtime" / "ignored.txt").write_text(
+        "ignored\n", encoding="utf-8"
+    )
+
+    change_set = task_service.persist_task_execution_change_set(
+        project,
+        task,
+        session_id=session.id,
+        task_execution_id=execution.id,
+        snapshot_key=snapshot_key,
+        target_dir=project_root,
+        status=TaskStatus.DONE.value,
+    )
+
+    assert change_set["added_files"] == ["package.json"]
+    assert change_set["modified_files"] == ["README.md"]
+    assert change_set["deleted_files"] == ["old.txt"]
+    assert change_set["changed_count"] == 3
+    assert "deleted_files" in change_set["warning_flags"]
+    assert "dependency_files_changed" in change_set["warning_flags"]
+    assert all(".openclaw" not in path for path in change_set["added_files"])
+
+    log_entry = (
+        db_session.query(LogEntry)
+        .filter(
+            LogEntry.task_execution_id == execution.id,
+            LogEntry.message == TASK_CHANGE_SET_LOG_MESSAGE,
+        )
+        .one()
+    )
+    assert '"changed_count": 3' in log_entry.log_metadata
+
+
+def test_reject_task_execution_change_set_archives_candidate_and_restores_snapshot(
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "change-set-reject"
+    project_root.mkdir(parents=True)
+    (project_root / "README.md").write_text("accepted\n", encoding="utf-8")
+    (project_root / "keep.txt").write_text("keep\n", encoding="utf-8")
+
+    project = Project(
+        name="change-set-reject",
+        workspace_path=str(project_root),
+    )
+    task = Task(
+        project_id=1,
+        title="Reject change set",
+        description="Reject canonical changes",
+        status=TaskStatus.DONE,
+        workspace_status="ready",
+        task_subfolder="task-reject-change-set",
+    )
+    session = SessionModel(project_id=1, name="reject-session")
+    db_session.add(project)
+    db_session.flush()
+    task.project_id = project.id
+    session.project_id = project.id
+    db_session.add_all([task, session])
+    db_session.commit()
+    db_session.refresh(project)
+    db_session.refresh(task)
+    db_session.refresh(session)
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.DONE,
+    )
+    db_session.add(execution)
+    db_session.commit()
+    db_session.refresh(execution)
+
+    task_service = TaskService(db_session)
+    task_service.ensure_project_gitignore_guard(project)
+    snapshot_key = workspace_snapshot_key(task.id, execution.id)
+    task_service.create_workspace_snapshot(
+        project,
+        project_root,
+        snapshot_key=snapshot_key,
+        preserve_project_root_rules=True,
+    )
+
+    (project_root / "README.md").write_text("candidate\n", encoding="utf-8")
+    (project_root / "keep.txt").unlink()
+    (project_root / "new.txt").write_text("candidate file\n", encoding="utf-8")
+    task_service.persist_task_execution_change_set(
+        project,
+        task,
+        session_id=session.id,
+        task_execution_id=execution.id,
+        snapshot_key=snapshot_key,
+        target_dir=project_root,
+    )
+
+    result = task_service.reject_task_execution_change_set(
+        project,
+        task,
+        task_execution_id=execution.id,
+        snapshot_key=snapshot_key,
+    )
+
+    assert result["rejected"] is True
+    assert result["restore_result"]["restored"] is True
+    assert (project_root / "README.md").read_text(encoding="utf-8") == "accepted\n"
+    assert (project_root / "keep.txt").read_text(encoding="utf-8") == "keep\n"
+    assert not (project_root / "new.txt").exists()
+    assert ".openclaw/" in (project_root / ".gitignore").read_text(encoding="utf-8")
+
+    archive_dir = Path(result["archive_path"])
+    assert (archive_dir / "README.md").read_text(encoding="utf-8") == "candidate\n"
+    assert (archive_dir / "new.txt").read_text(encoding="utf-8") == "candidate file\n"
+    assert (archive_dir / "manifest.json").exists()
+    db_session.refresh(task)
+    assert task.workspace_status == "changes_requested"
+    assert "Rejected task execution" in task.promotion_note
+
+
+def test_change_set_endpoints_show_and_reject_recorded_candidate(
+    authenticated_client,
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "change-set-endpoints"
+    project_root.mkdir(parents=True)
+    (project_root / "README.md").write_text("accepted\n", encoding="utf-8")
+    project = Project(
+        name="change-set-endpoints",
+        workspace_path=str(project_root),
+    )
+    task = Task(
+        project_id=1,
+        title="Endpoint change set",
+        description="Review candidate",
+        status=TaskStatus.DONE,
+        workspace_status="ready",
+        task_subfolder="task-endpoint-change-set",
+    )
+    session = SessionModel(project_id=1, name="endpoint-session")
+    db_session.add(project)
+    db_session.flush()
+    task.project_id = project.id
+    session.project_id = project.id
+    db_session.add_all([task, session])
+    db_session.commit()
+    db_session.refresh(project)
+    db_session.refresh(task)
+    db_session.refresh(session)
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.DONE,
+    )
+    db_session.add(execution)
+    db_session.commit()
+    db_session.refresh(execution)
+
+    task_service = TaskService(db_session)
+    snapshot_key = workspace_snapshot_key(task.id, execution.id)
+    task_service.create_workspace_snapshot(
+        project,
+        project_root,
+        snapshot_key=snapshot_key,
+        preserve_project_root_rules=True,
+    )
+    (project_root / "README.md").write_text("candidate\n", encoding="utf-8")
+    (project_root / "notes.md").write_text("new\n", encoding="utf-8")
+    task_service.persist_task_execution_change_set(
+        project,
+        task,
+        session_id=session.id,
+        task_execution_id=execution.id,
+        snapshot_key=snapshot_key,
+        target_dir=project_root,
+    )
+
+    show_response = authenticated_client.get(f"/api/v1/tasks/{task.id}/change-set")
+
+    assert show_response.status_code == 200
+    body = show_response.json()
+    assert body["task_execution_id"] == execution.id
+    assert body["change_set"]["added_files"] == ["notes.md"]
+    assert body["change_set"]["modified_files"] == ["README.md"]
+
+    overview_response = authenticated_client.get(
+        f"/api/v1/projects/{project.id}/workspace-overview"
+    )
+
+    assert overview_response.status_code == 200
+    pending_change_sets = overview_response.json()["pending_change_sets"]
+    assert pending_change_sets[0]["task_id"] == task.id
+    assert pending_change_sets[0]["change_set"]["changed_count"] == 2
+
+    reject_response = authenticated_client.post(
+        f"/api/v1/tasks/{task.id}/change-set/reject",
+        json={"task_execution_id": execution.id, "note": "needs review"},
+    )
+
+    assert reject_response.status_code == 200
+    reject_body = reject_response.json()
+    assert reject_body["rejected"] is True
+    assert (project_root / "README.md").read_text(encoding="utf-8") == "accepted\n"
+    assert not (project_root / "notes.md").exists()
+    db_session.refresh(task)
+    assert task.workspace_status == "changes_requested"
 
 
 def test_rebuild_project_baseline_preserves_project_gitignore_guard(
@@ -236,6 +507,41 @@ def test_manual_promote_endpoint_archives_visible_task_workspace(
     db_session.add(task)
     db_session.commit()
     db_session.refresh(task)
+    session = SessionModel(project_id=project.id, name="manual-promote-session")
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.DONE,
+    )
+    db_session.add(execution)
+    db_session.commit()
+    db_session.refresh(execution)
+    db_session.add(
+        LogEntry(
+            session_id=session.id,
+            task_id=task.id,
+            task_execution_id=execution.id,
+            level="INFO",
+            message=TASK_CHANGE_SET_LOG_MESSAGE,
+            log_metadata=json.dumps(
+                {
+                    "schema": "openclaw.task_execution_change_set.v1",
+                    "task_id": task.id,
+                    "task_execution_id": execution.id,
+                    "changed_count": 1,
+                    "added_files": ["README.md"],
+                    "modified_files": [],
+                    "deleted_files": [],
+                    "warning_flags": [],
+                }
+            ),
+        )
+    )
+    db_session.commit()
 
     response = authenticated_client.post(
         f"/api/v1/tasks/{task.id}/promote",
@@ -251,6 +557,19 @@ def test_manual_promote_endpoint_archives_visible_task_workspace(
     assert (project_root / task.task_subfolder / "README.md").read_text(
         encoding="utf-8"
     ) == "manual"
+    promotion_log = (
+        db_session.query(LogEntry)
+        .filter(LogEntry.task_id == task.id)
+        .filter(LogEntry.message.like("Workspace promoted into project baseline%"))
+        .one()
+    )
+    promotion_metadata = json.loads(promotion_log.log_metadata)
+    assert (
+        promotion_metadata["baseline_result"]["accepted_change_set"][
+            "task_execution_id"
+        ]
+        == execution.id
+    )
 
 
 def test_workspace_shape_audit_distinguishes_baseline_from_retained_sandboxes(

@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
-from app.models import Project, Task, TaskStatus
+from app.models import LogEntry, Project, Task, TaskStatus
 from app.services.workspace.project_isolation_service import (
     _slugify_workspace_name,
     resolve_project_workspace_path,
@@ -39,6 +39,10 @@ TASK_REPORT_RE = re.compile(r"^task_report_\d+\.md$", re.IGNORECASE)
 LEGACY_BASELINE_DIR_NAME = ".project-baseline"
 AUTO_SNAPSHOT_ROOT = ".openclaw/auto-snapshots"
 PROMOTED_WORKSPACE_ARCHIVE_ROOT = ".openclaw/promoted-workspace-archive"
+REJECTED_CHANGE_ARCHIVE_ROOT = ".openclaw/rejected-change-archive"
+TASK_CHANGE_SET_LOG_MESSAGE = (
+    "[WORKSPACE_CHANGE_SET] Task execution change set captured"
+)
 WORKSPACE_AUDIT_SCAFFOLD_NAMES = {
     ".openclaw",
     "__pycache__",
@@ -48,6 +52,28 @@ WORKSPACE_AUDIT_SCAFFOLD_NAMES = {
     "requirements.txt",
     "pyproject.toml",
     "tests",
+}
+DEPENDENCY_FILE_NAMES = {
+    "package.json",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "requirements.txt",
+    "pyproject.toml",
+    "poetry.lock",
+    "Pipfile",
+    "Pipfile.lock",
+}
+CONFIG_FILE_NAMES = {
+    ".env",
+    ".env.example",
+    "alembic.ini",
+    "tsconfig.json",
+    "vite.config.js",
+    "vite.config.ts",
+    "pytest.ini",
+    "ruff.toml",
+    "mypy.ini",
 }
 
 
@@ -157,6 +183,36 @@ class TaskService:
                 continue
             files.append(path)
         return files
+
+    def _tracked_workspace_file_map(
+        self,
+        root: Path,
+        *,
+        project: Optional[Project] = None,
+        preserve_project_root_rules: bool = False,
+    ) -> dict[str, Path]:
+        if not root.exists():
+            return {}
+
+        reserved_names = (
+            self._reserved_project_names(project)
+            if project is not None and preserve_project_root_rules
+            else set()
+        )
+        tracked: dict[str, Path] = {}
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(root)
+            if preserve_project_root_rules and relative.parts:
+                if relative.parts[0] in reserved_names:
+                    continue
+            if any(part in HYDRATION_EXCLUDED_NAMES for part in relative.parts):
+                continue
+            if TASK_REPORT_RE.match(path.name):
+                continue
+            tracked[relative.as_posix()] = path
+        return tracked
 
     def _file_digest(self, path: Path) -> str:
         digest = hashlib.sha256()
@@ -515,6 +571,283 @@ class TaskService:
             "snapshot_path": str(snapshot_dir),
             "target_path": str(target_dir),
             "files_restored": files_restored,
+        }
+
+    def _change_set_warning_flags(
+        self,
+        *,
+        added_files: list[str],
+        modified_files: list[str],
+        deleted_files: list[str],
+    ) -> list[str]:
+        changed_files = added_files + modified_files + deleted_files
+        flags: list[str] = []
+        if deleted_files:
+            flags.append("deleted_files")
+        if len(changed_files) > 10:
+            flags.append("more_than_10_changed_files")
+        if any(Path(path).name in DEPENDENCY_FILE_NAMES for path in changed_files):
+            flags.append("dependency_files_changed")
+        if any(
+            Path(path).name in CONFIG_FILE_NAMES or Path(path).name.startswith(".env.")
+            for path in changed_files
+        ):
+            flags.append("config_files_changed")
+        scaffold_names = {"README.md", "readme.md", "package.json", "tests"}
+        if any(
+            Path(path).parts and Path(path).parts[0] in scaffold_names
+            for path in changed_files
+        ):
+            flags.append("scaffold_or_test_surface_changed")
+        return sorted(set(flags))
+
+    def build_task_execution_change_set(
+        self,
+        project: Project,
+        task: Task,
+        *,
+        task_execution_id: int,
+        snapshot_key: str,
+        target_dir: Optional[Path] = None,
+        preserve_project_root_rules: bool = True,
+        status: Optional[str] = None,
+    ) -> dict[str, Any]:
+        project_root = self.get_project_root(project).resolve()
+        snapshot_dir = (project_root / AUTO_SNAPSHOT_ROOT / snapshot_key).resolve()
+        target_root = (target_dir or project_root).resolve()
+
+        before = self._tracked_workspace_file_map(
+            snapshot_dir,
+            project=project,
+            preserve_project_root_rules=False,
+        )
+        after = self._tracked_workspace_file_map(
+            target_root,
+            project=project,
+            preserve_project_root_rules=preserve_project_root_rules,
+        )
+
+        before_paths = set(before)
+        after_paths = set(after)
+        added_files = sorted(after_paths - before_paths)
+        deleted_files = sorted(before_paths - after_paths)
+        modified_files = sorted(
+            relative
+            for relative in before_paths & after_paths
+            if self._file_digest(before[relative]) != self._file_digest(after[relative])
+        )
+
+        return {
+            "schema": "openclaw.task_execution_change_set.v1",
+            "project_id": project.id,
+            "task_id": task.id,
+            "task_execution_id": task_execution_id,
+            "snapshot_key": snapshot_key,
+            "snapshot_path": str(snapshot_dir),
+            "snapshot_exists": snapshot_dir.exists(),
+            "target_path": str(target_root),
+            "status": status,
+            "captured_at": datetime.now(UTC).isoformat(),
+            "added_files": added_files,
+            "modified_files": modified_files,
+            "deleted_files": deleted_files,
+            "added_count": len(added_files),
+            "modified_count": len(modified_files),
+            "deleted_count": len(deleted_files),
+            "changed_count": len(added_files)
+            + len(modified_files)
+            + len(deleted_files),
+            "warning_flags": self._change_set_warning_flags(
+                added_files=added_files,
+                modified_files=modified_files,
+                deleted_files=deleted_files,
+            ),
+        }
+
+    def persist_task_execution_change_set(
+        self,
+        project: Project,
+        task: Task,
+        *,
+        session_id: Optional[int],
+        task_execution_id: int,
+        snapshot_key: str,
+        target_dir: Optional[Path] = None,
+        preserve_project_root_rules: bool = True,
+        status: Optional[str] = None,
+        commit: bool = True,
+    ) -> dict[str, Any]:
+        change_set = self.build_task_execution_change_set(
+            project,
+            task,
+            task_execution_id=task_execution_id,
+            snapshot_key=snapshot_key,
+            target_dir=target_dir,
+            preserve_project_root_rules=preserve_project_root_rules,
+            status=status,
+        )
+        existing = (
+            self.db.query(LogEntry)
+            .filter(
+                LogEntry.task_execution_id == task_execution_id,
+                LogEntry.message == TASK_CHANGE_SET_LOG_MESSAGE,
+            )
+            .order_by(LogEntry.id.desc())
+            .first()
+        )
+        if existing:
+            existing.level = "INFO"
+            existing.session_id = session_id
+            existing.task_id = task.id
+            existing.log_metadata = json.dumps(change_set)
+        else:
+            self.db.add(
+                LogEntry(
+                    session_id=session_id,
+                    task_id=task.id,
+                    task_execution_id=task_execution_id,
+                    level="INFO",
+                    message=TASK_CHANGE_SET_LOG_MESSAGE,
+                    log_metadata=json.dumps(change_set),
+                )
+            )
+        if commit:
+            self.db.commit()
+        return change_set
+
+    def get_task_execution_change_set(
+        self,
+        *,
+        task_execution_id: int,
+    ) -> Optional[dict[str, Any]]:
+        entry = (
+            self.db.query(LogEntry)
+            .filter(
+                LogEntry.task_execution_id == task_execution_id,
+                LogEntry.message == TASK_CHANGE_SET_LOG_MESSAGE,
+            )
+            .order_by(LogEntry.id.desc())
+            .first()
+        )
+        if not entry or not entry.log_metadata:
+            return None
+        try:
+            payload = json.loads(entry.log_metadata)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def get_latest_task_change_set_for_task(
+        self,
+        task_id: int,
+    ) -> Optional[dict[str, Any]]:
+        entry = (
+            self.db.query(LogEntry)
+            .filter(
+                LogEntry.task_id == task_id,
+                LogEntry.message == TASK_CHANGE_SET_LOG_MESSAGE,
+            )
+            .order_by(LogEntry.created_at.desc(), LogEntry.id.desc())
+            .first()
+        )
+        if not entry or not entry.log_metadata:
+            return None
+        try:
+            payload = json.loads(entry.log_metadata)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return {
+            "task_execution_id": entry.task_execution_id,
+            "recorded_at": entry.created_at.isoformat() if entry.created_at else None,
+            "change_set": payload,
+        }
+
+    def reject_task_execution_change_set(
+        self,
+        project: Project,
+        task: Task,
+        *,
+        task_execution_id: int,
+        snapshot_key: str,
+        reason: str = "operator_rejected_change_set",
+    ) -> dict[str, Any]:
+        project_root = self.get_project_root(project).resolve()
+        change_set = self.get_task_execution_change_set(
+            task_execution_id=task_execution_id
+        ) or self.build_task_execution_change_set(
+            project,
+            task,
+            task_execution_id=task_execution_id,
+            snapshot_key=snapshot_key,
+            target_dir=project_root,
+            preserve_project_root_rules=True,
+            status=getattr(getattr(task, "status", None), "value", None),
+        )
+        archived_at = datetime.now(UTC)
+        archive_dir = (
+            project_root
+            / REJECTED_CHANGE_ARCHIVE_ROOT
+            / archived_at.strftime("%Y%m%d-%H%M%S")
+            / f"task-{task.id}-execution-{task_execution_id}"
+        ).resolve()
+        archive_dir.mkdir(parents=True, exist_ok=True)
+
+        copied_files = 0
+        for relative in sorted(
+            set(change_set.get("added_files", []))
+            | set(change_set.get("modified_files", []))
+        ):
+            source = (project_root / relative).resolve()
+            if not source.exists() or not source.is_file():
+                continue
+            destination = archive_dir / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            copied_files += 1
+
+        manifest = {
+            "schema": "openclaw.rejected_change_set_archive.v1",
+            "reason": reason,
+            "archived_at": archived_at.isoformat(),
+            "copied_files": copied_files,
+            "change_set": change_set,
+        }
+        manifest_path = archive_dir / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        manifest_path.chmod(0o666)
+
+        restore_result = self.restore_workspace_snapshot(
+            project,
+            project_root,
+            snapshot_key=snapshot_key,
+            preserve_project_root_rules=True,
+        )
+        self.ensure_project_gitignore_guard(project)
+
+        task.workspace_status = "changes_requested"
+        task.promoted_at = None
+        task.updated_at = archived_at
+        existing_note = (getattr(task, "promotion_note", None) or "").strip()
+        reject_note = (
+            f"Rejected task execution {task_execution_id}; "
+            f"archived candidate changes at {archive_dir}"
+        )
+        task.promotion_note = (
+            f"{existing_note}\n{reject_note}" if existing_note else reject_note
+        )
+        self.db.commit()
+        self.db.refresh(task)
+        return {
+            "rejected": True,
+            "reason": reason,
+            "archive_path": str(archive_dir),
+            "manifest_path": str(manifest_path),
+            "copied_files": copied_files,
+            "restore_result": restore_result,
+            "workspace_status": task.workspace_status,
+            "change_set": change_set,
         }
 
     def infer_workspace_status(self, task: Task) -> str:

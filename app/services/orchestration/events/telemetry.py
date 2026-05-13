@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Dict, Optional
 
 
@@ -17,7 +17,7 @@ def record_phase_event(
     """Persist a compact phase event into orchestration state."""
 
     payload = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "phase": phase,
         "status": status,
         "message": message,

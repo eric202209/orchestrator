@@ -21,12 +21,16 @@ from app.services.error_handler import EnhancedErrorHandler
 from app.services.log_utils import sort_logs
 from app.services.name_formatter import humanize_display_name
 from app.services.orchestration.events.event_types import EventType
+from app.services.orchestration.execution.runtime import workspace_snapshot_key
 from app.services.orchestration.persistence import append_orchestration_event
 from app.services.orchestration.context_assembly import render_adapted_runtime_prompt
 from app.services.authz import project_access_filter
 from app.services.session.session_runtime_service import ensure_task_workspace
-from app.services.task_execution_service import create_task_execution
-from app.services.task_service import TaskService
+from app.services.task_execution_service import (
+    create_task_execution,
+    executions_for_task,
+)
+from app.services.task_service import TASK_CHANGE_SET_LOG_MESSAGE, TaskService
 from app.services.workspace.system_settings import (
     get_effective_agent_backend,
     get_effective_agent_model_family,
@@ -58,6 +62,11 @@ class TaskRetryRequest(BaseModel):
     session_id: Optional[int] = None
     execution_scope: Optional[str] = None
     create_new_session: bool = False
+
+
+class TaskChangeSetRejectRequest(BaseModel):
+    task_execution_id: Optional[int] = None
+    note: Optional[str] = None
 
 
 router = APIRouter()
@@ -106,6 +115,58 @@ def _get_active_task_session(db: Session, task_id: int) -> Optional[int]:
         .first()
     )
     return active_session.session_id if active_session else None
+
+
+def _build_request_changes_repair_prompt(
+    *,
+    task: Task,
+    base_prompt: str,
+    change_set: Optional[dict],
+) -> str:
+    note = (getattr(task, "promotion_note", None) or "").strip()
+    if not note:
+        return base_prompt
+
+    sections = [
+        base_prompt.strip(),
+        "",
+        "Operator requested changes before this task can be accepted.",
+        f"Request changes note: {note}",
+    ]
+    payload = (change_set or {}).get("change_set") or {}
+    if payload:
+        sections.append("")
+        sections.append("Latest deterministic workspace change set:")
+        sections.append(
+            "- counts: "
+            f"added={int(payload.get('added_count') or 0)}, "
+            f"modified={int(payload.get('modified_count') or 0)}, "
+            f"deleted={int(payload.get('deleted_count') or 0)}"
+        )
+        warning_flags = payload.get("warning_flags") or []
+        if warning_flags:
+            sections.append(
+                "- warning flags: " + ", ".join(map(str, warning_flags[:8]))
+            )
+        for label, key in (
+            ("added", "added_files"),
+            ("modified", "modified_files"),
+            ("deleted", "deleted_files"),
+        ):
+            files = [str(item) for item in payload.get(key, [])[:12]]
+            if files:
+                sections.append(f"- {label} files: " + ", ".join(files))
+    sections.extend(
+        [
+            "",
+            "Repair instructions:",
+            "- Address the operator note directly.",
+            "- Preserve accepted existing project files unless the note requires a change.",
+            "- Do not recreate unrelated scaffolding or parallel task folders.",
+            "- Verify the repaired result before finishing.",
+        ]
+    )
+    return "\n".join(sections).strip()
 
 
 def _queue_task_retry(
@@ -270,6 +331,14 @@ def _queue_task_retry(
         TaskStatus.FAILED,
         TaskStatus.CANCELLED,
     )
+    latest_change_set = None
+    if getattr(task, "workspace_status", None) == "changes_requested":
+        latest_change_set = TaskService(db).get_latest_task_change_set_for_task(task.id)
+        prompt = _build_request_changes_repair_prompt(
+            task=task,
+            base_prompt=prompt,
+            change_set=latest_change_set,
+        )
     _prepare_task_for_fresh_execution(task, clear_saved_plan=should_clear_saved_plan)
     repair_archive_result = None
     if (
@@ -329,6 +398,8 @@ def _queue_task_retry(
                     "legacy_isolated_session": explicit_new_session,
                     "cleared_saved_plan": should_clear_saved_plan,
                     "repair_archive_result": repair_archive_result,
+                    "request_changes_repair_context": bool(latest_change_set)
+                    or bool(getattr(task, "promotion_note", None)),
                 }
             ),
         )
@@ -741,6 +812,88 @@ def get_task(
     return task_dict
 
 
+@router.get("/tasks/{task_id}/change-set")
+def get_latest_task_change_set(task_id: int, db: Session = Depends(get_db)):
+    """Return the latest deterministic workspace change set for a task."""
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    entry = (
+        db.query(LogEntry)
+        .filter(
+            LogEntry.task_id == task_id,
+            LogEntry.message == TASK_CHANGE_SET_LOG_MESSAGE,
+        )
+        .order_by(LogEntry.created_at.desc(), LogEntry.id.desc())
+        .first()
+    )
+    if not entry:
+        raise HTTPException(status_code=404, detail="No change set recorded for task")
+    try:
+        change_set = json.loads(entry.log_metadata or "{}")
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Recorded change set is invalid")
+    return {
+        "task_id": task_id,
+        "task_execution_id": entry.task_execution_id,
+        "change_set": change_set,
+        "recorded_at": entry.created_at.isoformat() if entry.created_at else None,
+    }
+
+
+@router.post("/tasks/{task_id}/change-set/reject")
+def reject_latest_task_change_set(
+    task_id: int,
+    payload: Optional[TaskChangeSetRejectRequest] = None,
+    db: Session = Depends(get_db),
+):
+    """Archive candidate files and restore the pre-run snapshot for a task execution."""
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    project = db.query(Project).filter(Project.id == task.project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    payload = payload or TaskChangeSetRejectRequest()
+    task_execution_id = payload.task_execution_id
+    if task_execution_id is None:
+        entry = (
+            db.query(LogEntry)
+            .filter(
+                LogEntry.task_id == task_id,
+                LogEntry.message == TASK_CHANGE_SET_LOG_MESSAGE,
+            )
+            .order_by(LogEntry.created_at.desc(), LogEntry.id.desc())
+            .first()
+        )
+        task_execution_id = entry.task_execution_id if entry else None
+    if task_execution_id is None:
+        latest_execution = executions_for_task(db, task_id)[-1:]
+        task_execution_id = latest_execution[0].id if latest_execution else None
+    if task_execution_id is None:
+        raise HTTPException(status_code=404, detail="No task execution found")
+
+    change_set = TaskService(db).get_task_execution_change_set(
+        task_execution_id=task_execution_id
+    )
+    snapshot_key = (
+        str(change_set.get("snapshot_key"))
+        if change_set and change_set.get("snapshot_key")
+        else workspace_snapshot_key(task_id, task_execution_id)
+    )
+    result = TaskService(db).reject_task_execution_change_set(
+        project,
+        task,
+        task_execution_id=task_execution_id,
+        snapshot_key=snapshot_key,
+        reason=(payload.note or "operator_rejected_change_set").strip()
+        or "operator_rejected_change_set",
+    )
+    return result
+
+
 @router.get("/projects/{project_id}/workspace-overview")
 def get_project_workspace_overview(project_id: int, db: Session = Depends(get_db)):
     """Summarize task workspace promotion state for a project."""
@@ -773,6 +926,24 @@ def get_project_workspace_overview(project_id: int, db: Session = Depends(get_db
         for task in tasks
         if getattr(task, "workspace_status", None) == "promoted"
     ]
+    pending_change_sets = []
+    for task in tasks:
+        latest_change_set = task_service.get_latest_task_change_set_for_task(task.id)
+        if not latest_change_set:
+            continue
+        change_set_payload = latest_change_set.get("change_set") or {}
+        if int(change_set_payload.get("changed_count") or 0) <= 0:
+            continue
+        pending_change_sets.append(
+            {
+                "task_id": task.id,
+                "title": task.title,
+                "workspace_status": getattr(task, "workspace_status", None),
+                "task_execution_id": latest_change_set.get("task_execution_id"),
+                "recorded_at": latest_change_set.get("recorded_at"),
+                "change_set": change_set_payload,
+            }
+        )
 
     return {
         "project_id": project_id,
@@ -781,6 +952,7 @@ def get_project_workspace_overview(project_id: int, db: Session = Depends(get_db
         "baseline": baseline,
         "audit": audit,
         "promoted_tasks": promoted_tasks,
+        "pending_change_sets": pending_change_sets,
         "ready_task_ids": [
             task.id
             for task in tasks
@@ -838,6 +1010,9 @@ def promote_task_workspace(
     task.updated_at = datetime.now(UTC)
     task_service = TaskService(db)
     baseline_result = task_service.promote_task_into_baseline(project, task)
+    accepted_change_set = task_service.get_latest_task_change_set_for_task(task.id)
+    if accepted_change_set:
+        baseline_result["accepted_change_set"] = accepted_change_set
     promoted_workspace_archive_result = task_service.archive_promoted_task_workspace(
         project, task, reason="manual_promotion"
     )

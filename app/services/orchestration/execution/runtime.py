@@ -114,7 +114,11 @@ def write_project_state_snapshot(
     state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def workspace_snapshot_key(task_id: int) -> str:
+def workspace_snapshot_key(
+    task_id: int, task_execution_id: Optional[int] = None
+) -> str:
+    if task_execution_id is not None:
+        return f"task-{task_id}-execution-{task_execution_id}-pre-run"
     return f"task-{task_id}-pre-run"
 
 
@@ -124,6 +128,7 @@ def snapshot_workspace_before_run(
     task_id: int,
     target_dir: Path,
     *,
+    task_execution_id: Optional[int] = None,
     preserve_project_root_rules: bool,
 ) -> Optional[Dict[str, Any]]:
     if not project:
@@ -131,7 +136,7 @@ def snapshot_workspace_before_run(
     return task_service.create_workspace_snapshot(
         project,
         target_dir,
-        snapshot_key=workspace_snapshot_key(task_id),
+        snapshot_key=workspace_snapshot_key(task_id, task_execution_id),
         preserve_project_root_rules=preserve_project_root_rules,
     )
 
@@ -142,6 +147,7 @@ def restore_workspace_after_abort(
     task_id: int,
     target_dir: Path,
     *,
+    task_execution_id: Optional[int] = None,
     preserve_project_root_rules: bool,
 ) -> Optional[Dict[str, Any]]:
     if not project:
@@ -149,7 +155,7 @@ def restore_workspace_after_abort(
     return task_service.restore_workspace_snapshot(
         project,
         target_dir,
-        snapshot_key=workspace_snapshot_key(task_id),
+        snapshot_key=workspace_snapshot_key(task_id, task_execution_id),
         preserve_project_root_rules=preserve_project_root_rules,
     )
 
