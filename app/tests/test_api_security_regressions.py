@@ -53,11 +53,8 @@ def test_settings_exposes_backend_metadata_without_secrets(authenticated_client)
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["system"]["agent_backend"] == settings.ORCHESTRATOR_AGENT_BACKEND
-    assert (
-        payload["system"]["agent_model_family"]
-        == settings.ORCHESTRATOR_AGENT_MODEL_FAMILY
-    )
+    assert payload["system"]["agent_backend"] == settings.AGENT_BACKEND
+    assert payload["system"]["agent_model_family"] == settings.AGENT_MODEL
     assert payload["system"]["backend_capabilities"]["supports_planning"] is True
     assert "api_key" not in payload["system"]["backend_capabilities"]
 

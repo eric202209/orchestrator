@@ -433,7 +433,7 @@ async def execute_task_with_orchestration(
             "mode": "orchestration",
             "output": summary_result.get("output", "Task completed"),
             "backend": self.backend_descriptor.name,
-            "model_family": settings.ORCHESTRATOR_AGENT_MODEL_FAMILY,
+            "model_family": settings.AGENT_MODEL,
             "orchestration_state": {
                 "status": orchestration_state.status.value,
                 "plan_length": len(orchestration_state.plan),

@@ -81,7 +81,7 @@ async def get_current_active_user(
 def _configured_admin_emails() -> set[str]:
     return {
         email.strip().lower()
-        for email in (settings.ORCHESTRATOR_ADMIN_EMAILS or "").split(",")
+        for email in (settings.ADMIN_EMAILS or "").split(",")
         if email.strip()
     }
 

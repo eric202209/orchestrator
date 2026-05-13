@@ -96,18 +96,18 @@ def pytest_collection_modifyitems(config, items):
 
 @pytest.fixture(autouse=True)
 def reset_runtime_flags():
-    original_force_inline = settings.ORCHESTRATOR_FORCE_INLINE_PLANNING
+    original_force_inline = settings.INLINE_PLANNING
     original_keypair_flag = settings.ALLOW_TEST_KEYPAIR_ENDPOINT
     original_rate_limit_window = settings.AUTH_RATE_LIMIT_WINDOW_SECONDS
     original_rate_limit_attempts = settings.AUTH_RATE_LIMIT_MAX_ATTEMPTS
 
-    settings.ORCHESTRATOR_FORCE_INLINE_PLANNING = True
+    settings.INLINE_PLANNING = True
     clear_auth_rate_limits()
 
     try:
         yield
     finally:
-        settings.ORCHESTRATOR_FORCE_INLINE_PLANNING = original_force_inline
+        settings.INLINE_PLANNING = original_force_inline
         settings.ALLOW_TEST_KEYPAIR_ENDPOINT = original_keypair_flag
         settings.AUTH_RATE_LIMIT_WINDOW_SECONDS = original_rate_limit_window
         settings.AUTH_RATE_LIMIT_MAX_ATTEMPTS = original_rate_limit_attempts

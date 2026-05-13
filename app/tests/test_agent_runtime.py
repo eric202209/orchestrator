@@ -13,6 +13,9 @@ from app.services.agents.openclaw_service import (
     OpenClawSessionError,
     OpenClawSessionService,
 )
+from app.services.agents.providers.docker_openclaw_adapter import (
+    DockerOpenClawSessionService,
+)
 from app.services.workspace.system_settings import AGENT_BACKEND_KEY, set_setting_value
 
 
@@ -20,11 +23,11 @@ def test_create_agent_runtime_uses_configured_local_backend(db_session):
     runtime = create_agent_runtime(db_session, session_id=None)
 
     assert isinstance(runtime, OpenClawSessionService)
-    assert runtime.backend_descriptor.name == settings.ORCHESTRATOR_AGENT_BACKEND
+    assert runtime.backend_descriptor.name == settings.AGENT_BACKEND
 
 
 def test_create_agent_runtime_rejects_unknown_backend(db_session, monkeypatch):
-    monkeypatch.setattr(settings, "ORCHESTRATOR_AGENT_BACKEND", "unknown_backend")
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "unknown_backend")
 
     try:
         create_agent_runtime(db_session, session_id=None)
@@ -36,14 +39,21 @@ def test_create_agent_runtime_rejects_unknown_backend(db_session, monkeypatch):
 
 
 def test_create_agent_runtime_supports_openai_backend(db_session, monkeypatch):
-    monkeypatch.setattr(settings, "ORCHESTRATOR_AGENT_BACKEND", "openai_responses_api")
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "openai_responses_api")
     runtime = create_agent_runtime(db_session, session_id=None)
     assert isinstance(runtime, OpenAIResponsesRuntime)
     assert runtime.backend_descriptor.name == "openai_responses_api"
 
 
+def test_create_agent_runtime_supports_docker_openclaw_backend(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "docker_openclaw")
+    runtime = create_agent_runtime(db_session, session_id=None)
+    assert isinstance(runtime, DockerOpenClawSessionService)
+    assert runtime.backend_descriptor.name == "docker_openclaw"
+
+
 def test_create_agent_runtime_uses_db_backend_override(db_session, monkeypatch):
-    monkeypatch.setattr(settings, "ORCHESTRATOR_AGENT_BACKEND", "unknown_backend")
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "unknown_backend")
     set_setting_value(db_session, AGENT_BACKEND_KEY, "local_openclaw")
 
     runtime = create_agent_runtime(db_session, session_id=None)
@@ -99,9 +109,33 @@ def test_openclaw_stderr_noise_filter_hides_json_telemetry_lines():
 
 def test_provider_registry_exposes_runtime_factory():
     assert get_runtime_factory("local_openclaw") is not None
+    assert get_runtime_factory("docker_openclaw") is not None
     assert get_runtime_factory("remote_openclaw_gateway") is not None
     assert get_runtime_factory("openai_responses_api") is not None
     assert get_runtime_factory("unknown_backend") is None
+
+
+def test_docker_openclaw_wraps_command_with_workspace_mount(
+    db_session, tmp_path, monkeypatch
+):
+    project_dir = tmp_path / "project" / "task-1"
+    project_dir.mkdir(parents=True)
+    monkeypatch.setattr(settings, "OPENCLAW_DOCKER_IMAGE", "openclaw:test")
+    monkeypatch.setattr(settings, "OPENCLAW_DOCKER_COMMAND", "openclaw --test")
+
+    runtime = DockerOpenClawSessionService(db_session, session_id=None)
+    wrapped = runtime._wrap_command_for_docker(
+        ["openclaw", "--test", "agent"],
+        str(project_dir),
+    )
+
+    assert wrapped[:4] == ["docker", "run", "--rm", "--network"]
+    assert "openclaw:test" in wrapped
+    assert "openclaw" in wrapped
+    assert "agent" in wrapped
+    mount_index = wrapped.index("--mount") + 1
+    assert f"source={project_dir.resolve()}" in wrapped[mount_index]
+    assert "target=/workspace" in wrapped[mount_index]
 
 
 def test_permission_request_emits_waiting_for_input_event(
@@ -195,9 +229,9 @@ def test_permission_request_emits_waiting_for_input_event(
 
 
 def test_invoke_runtime_prompt_supports_openai_backend(db_session, monkeypatch):
-    monkeypatch.setattr(settings, "ORCHESTRATOR_AGENT_BACKEND", "openai_responses_api")
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "openai_responses_api")
     monkeypatch.setattr(settings, "OPENAI_API_KEY", "test-key")
-    monkeypatch.setattr(settings, "ORCHESTRATOR_AGENT_MODEL_FAMILY", "gpt-5")
+    monkeypatch.setattr(settings, "AGENT_MODEL", "gpt-5")
 
     class _FakeResponse:
         status_code = 200

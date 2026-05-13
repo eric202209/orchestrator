@@ -38,12 +38,12 @@ from app.services.observability import (
 def _langfuse_disabled():
     """Ensure Langfuse is disabled for every test in this module."""
     # Persist original values
-    orig_enabled = settings.ORCHESTRATOR_LANGFUSE_ENABLED
+    orig_enabled = settings.LANGFUSE_ENABLED
     orig_public_key = settings.LANGFUSE_PUBLIC_KEY
     orig_secret_key = settings.LANGFUSE_SECRET_KEY
 
     # Force-disable
-    settings.ORCHESTRATOR_LANGFUSE_ENABLED = False
+    settings.LANGFUSE_ENABLED = False
     settings.LANGFUSE_PUBLIC_KEY = ""
     settings.LANGFUSE_SECRET_KEY = ""
     reset_for_tests()
@@ -51,7 +51,7 @@ def _langfuse_disabled():
     yield
 
     # Restore
-    settings.ORCHESTRATOR_LANGFUSE_ENABLED = orig_enabled
+    settings.LANGFUSE_ENABLED = orig_enabled
     settings.LANGFUSE_PUBLIC_KEY = orig_public_key
     settings.LANGFUSE_SECRET_KEY = orig_secret_key
     reset_for_tests()
@@ -106,8 +106,8 @@ def test_service_observation_noop(_langfuse_disabled):
 
 
 def test_service_sdk_import_error_safe(_langfuse_disabled, monkeypatch):
-    """Even when ORCHESTRATOR_LANGFUSE_ENABLED is True but SDK missing, safe."""
-    settings.ORCHESTRATOR_LANGFUSE_ENABLED = True
+    """Even when LANGFUSE_ENABLED is True but SDK missing, safe."""
+    settings.LANGFUSE_ENABLED = True
     settings.LANGFUSE_PUBLIC_KEY = "pk-test"
     settings.LANGFUSE_SECRET_KEY = "sk-test"
 

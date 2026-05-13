@@ -116,7 +116,7 @@ class ObservabilityService:
     def is_enabled() -> bool:
         """Return True when tracing is enabled and minimally configured."""
         return bool(
-            settings.ORCHESTRATOR_LANGFUSE_ENABLED
+            settings.LANGFUSE_ENABLED
             and str(settings.LANGFUSE_PUBLIC_KEY or "").strip()
             and str(settings.LANGFUSE_SECRET_KEY or "").strip()
         )

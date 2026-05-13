@@ -1,9 +1,10 @@
 """Task service - Business logic for tasks"""
 
+import hashlib
 import json
 import re
 import shutil
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -27,6 +28,16 @@ HYDRATION_EXCLUDED_NAMES = {
 TASK_REPORT_RE = re.compile(r"^task_report_\d+\.md$", re.IGNORECASE)
 LEGACY_BASELINE_DIR_NAME = ".project-baseline"
 AUTO_SNAPSHOT_ROOT = ".openclaw/auto-snapshots"
+WORKSPACE_AUDIT_SCAFFOLD_NAMES = {
+    ".openclaw",
+    "__pycache__",
+    "package.json",
+    "README.md",
+    "readme.md",
+    "requirements.txt",
+    "pyproject.toml",
+    "tests",
+}
 
 
 class TaskService:
@@ -74,6 +85,60 @@ class TaskService:
                 return nested_candidate.resolve()
             return explicit_path
         return resolve_project_workspace_path(project.workspace_path, project.name)
+
+    def _tracked_workspace_files(self, root: Path) -> list[Path]:
+        if not root.exists():
+            return []
+        files: list[Path] = []
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(root)
+            if any(part in HYDRATION_EXCLUDED_NAMES for part in relative.parts):
+                continue
+            if TASK_REPORT_RE.match(path.name):
+                continue
+            files.append(path)
+        return files
+
+    def _file_digest(self, path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _diff_task_workspace_against_baseline(
+        self,
+        *,
+        project_root: Path,
+        workspace_dir: Path,
+    ) -> dict[str, Any]:
+        added: list[str] = []
+        modified: list[str] = []
+        unchanged_count = 0
+
+        for workspace_file in self._tracked_workspace_files(workspace_dir):
+            relative = workspace_file.relative_to(workspace_dir)
+            baseline_file = project_root / relative
+            relative_text = str(relative)
+            if not baseline_file.exists() or not baseline_file.is_file():
+                if len(added) < 20:
+                    added.append(relative_text)
+                continue
+            if self._file_digest(workspace_file) == self._file_digest(baseline_file):
+                unchanged_count += 1
+                continue
+            if len(modified) < 20:
+                modified.append(relative_text)
+
+        return {
+            "added_count": len(added),
+            "modified_count": len(modified),
+            "unchanged_count": unchanged_count,
+            "added_files": added,
+            "modified_files": modified,
+        }
 
     def analyze_workspace_consistency(
         self,
@@ -879,10 +944,7 @@ class TaskService:
             task
             for task in self.get_project_tasks(project.id)
             if getattr(task, "task_subfolder", None)
-            and (
-                getattr(task, "workspace_status", None) == "promoted"
-                or task.status == TaskStatus.DONE
-            )
+            and getattr(task, "workspace_status", None) == "promoted"
         ]
 
         applied_tasks = []
@@ -988,6 +1050,293 @@ class TaskService:
             ),
             "file_count": file_count,
             "promoted_task_count": promoted_task_count,
+        }
+
+    def audit_project_workspace_shape(self, project: Project) -> dict:
+        """Summarize accepted baseline state separately from retained task sandboxes."""
+        project_root = self.get_project_root(project).resolve()
+        tasks = self.get_project_tasks(project.id)
+        task_subfolders = {
+            task.task_subfolder
+            for task in tasks
+            if getattr(task, "task_subfolder", None)
+        }
+        baseline = self.get_project_baseline_overview(project)
+        baseline_consistency = self.analyze_workspace_consistency(
+            project_root,
+            ignored_top_level_dirs=set(task_subfolders)
+            | set(HYDRATION_EXCLUDED_NAMES)
+            | {LEGACY_BASELINE_DIR_NAME},
+        )
+
+        retained_workspaces: list[dict[str, Any]] = []
+        scaffold_counts: dict[str, int] = {}
+        transient_names: set[str] = set()
+        unpromoted_done_count = 0
+
+        for task in tasks:
+            task_subfolder = getattr(task, "task_subfolder", None)
+            if not task_subfolder:
+                continue
+            workspace_dir = (project_root / task_subfolder).resolve()
+            workspace_exists = workspace_dir.exists()
+            workspace_status = getattr(task, "workspace_status", None) or "unknown"
+            is_unpromoted_done = (
+                getattr(task, "status", None) == TaskStatus.DONE
+                and workspace_status != "promoted"
+            )
+            if is_unpromoted_done:
+                unpromoted_done_count += 1
+
+            top_level_artifacts: list[str] = []
+            non_transient_file_count = 0
+            if workspace_exists:
+                for child in workspace_dir.iterdir():
+                    if child.name in WORKSPACE_AUDIT_SCAFFOLD_NAMES:
+                        top_level_artifacts.append(child.name)
+                        scaffold_counts[child.name] = (
+                            scaffold_counts.get(child.name, 0) + 1
+                        )
+                    if child.name in HYDRATION_EXCLUDED_NAMES:
+                        transient_names.add(child.name)
+
+                for path in workspace_dir.rglob("*"):
+                    if not path.is_file():
+                        continue
+                    relative = path.relative_to(workspace_dir)
+                    if any(part in HYDRATION_EXCLUDED_NAMES for part in relative.parts):
+                        transient_names.update(
+                            part
+                            for part in relative.parts
+                            if part in HYDRATION_EXCLUDED_NAMES
+                        )
+                        continue
+                    if TASK_REPORT_RE.match(path.name):
+                        continue
+                    non_transient_file_count += 1
+
+            retained_workspaces.append(
+                {
+                    "task_id": task.id,
+                    "title": task.title,
+                    "workspace_status": workspace_status,
+                    "task_status": getattr(task.status, "value", str(task.status)),
+                    "task_subfolder": task_subfolder,
+                    "path": str(workspace_dir),
+                    "exists": workspace_exists,
+                    "unpromoted_done": is_unpromoted_done,
+                    "top_level_artifacts": sorted(set(top_level_artifacts)),
+                    "non_transient_file_count": non_transient_file_count,
+                    "baseline_diff": (
+                        self._diff_task_workspace_against_baseline(
+                            project_root=project_root,
+                            workspace_dir=workspace_dir,
+                        )
+                        if workspace_exists
+                        else {
+                            "added_count": 0,
+                            "modified_count": 0,
+                            "unchanged_count": 0,
+                            "added_files": [],
+                            "modified_files": [],
+                        }
+                    ),
+                }
+            )
+
+        duplicated_scaffold_artifacts = {
+            name: count for name, count in sorted(scaffold_counts.items()) if count > 1
+        }
+        issues: list[str] = []
+        if unpromoted_done_count:
+            issues.append(
+                f"{unpromoted_done_count} completed task workspace(s) are "
+                "retained but not promoted"
+            )
+        if duplicated_scaffold_artifacts:
+            artifacts = ", ".join(
+                f"{name} x{count}"
+                for name, count in list(duplicated_scaffold_artifacts.items())[:6]
+            )
+            issues.append(
+                f"Repeated scaffold artifacts across task workspaces: {artifacts}"
+            )
+        if baseline_consistency.get("issues"):
+            issues.extend(baseline_consistency.get("issues", [])[:4])
+
+        return {
+            "project_root": str(project_root),
+            "baseline": baseline,
+            "baseline_consistency": baseline_consistency,
+            "retained_task_workspace_count": len(retained_workspaces),
+            "unpromoted_done_workspace_count": unpromoted_done_count,
+            "retained_task_workspaces": retained_workspaces,
+            "duplicated_scaffold_artifacts": duplicated_scaffold_artifacts,
+            "transient_artifact_names": sorted(transient_names),
+            "issues": issues,
+        }
+
+    def cleanup_retained_task_workspaces(
+        self,
+        project: Project,
+        *,
+        dry_run: bool = True,
+        include_ready: bool = False,
+        include_changes_requested: bool = False,
+        include_blocked: bool = True,
+    ) -> dict:
+        """Archive eligible disposable task workspace folders without touching baseline."""
+        project_root = self.get_project_root(project).resolve()
+        archived_at = datetime.now(UTC)
+        archive_root = (
+            project_root
+            / ".openclaw"
+            / "retained-workspace-archive"
+            / archived_at.strftime("%Y%m%d-%H%M%S")
+        )
+        eligible_statuses: set[str] = set()
+        if include_ready:
+            eligible_statuses.add("ready")
+        if include_changes_requested:
+            eligible_statuses.add("changes_requested")
+        if include_blocked:
+            eligible_statuses.add("blocked")
+
+        candidates: list[dict[str, Any]] = []
+        deleted: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+
+        for task in self.get_project_tasks(project.id):
+            task_subfolder = getattr(task, "task_subfolder", None)
+            workspace_status = getattr(task, "workspace_status", None) or "unknown"
+            task_status = getattr(task, "status", None)
+            if not task_subfolder:
+                continue
+            workspace_dir = (project_root / task_subfolder).resolve()
+            record = {
+                "task_id": task.id,
+                "title": task.title,
+                "workspace_status": workspace_status,
+                "task_status": getattr(task_status, "value", str(task_status)),
+                "task_subfolder": task_subfolder,
+                "path": str(workspace_dir),
+                "exists": workspace_dir.exists(),
+            }
+            archive_dir = (
+                archive_root / f"task-{task.id}-{workspace_dir.name}"
+            ).resolve()
+            record["archive_path"] = str(archive_dir)
+            if workspace_status == "promoted":
+                skipped.append({**record, "reason": "promoted_workspace"})
+                continue
+            if task_status == TaskStatus.RUNNING:
+                skipped.append({**record, "reason": "running_task"})
+                continue
+            if workspace_status not in eligible_statuses:
+                skipped.append({**record, "reason": "status_not_selected"})
+                continue
+            if not workspace_dir.exists():
+                skipped.append({**record, "reason": "workspace_missing"})
+                continue
+            if workspace_dir.parent != project_root:
+                skipped.append({**record, "reason": "not_direct_project_child"})
+                continue
+            if (
+                workspace_dir.name in HYDRATION_EXCLUDED_NAMES
+                or workspace_dir.name == LEGACY_BASELINE_DIR_NAME
+            ):
+                skipped.append({**record, "reason": "reserved_workspace_name"})
+                continue
+            candidates.append(record)
+            if not dry_run:
+                archive_dir.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(workspace_dir), str(archive_dir))
+                task.task_subfolder = None
+                task.workspace_status = "not_created"
+                task.promoted_at = None
+                task.promotion_note = f"Archived retained workspace at {archive_dir}"
+                task.updated_at = archived_at
+                deleted.append(record)
+
+        if not dry_run and deleted:
+            self.db.commit()
+
+        return {
+            "project_id": project.id,
+            "project_root": str(project_root),
+            "dry_run": dry_run,
+            "archive_root": str(archive_root),
+            "selected_statuses": sorted(eligible_statuses),
+            "candidate_count": len(candidates),
+            "deleted_count": len(deleted),
+            "candidates": candidates,
+            "deleted": deleted,
+            "skipped": skipped,
+        }
+
+    def archive_task_workspace_for_repair_rerun(
+        self,
+        project: Project,
+        task: Task,
+        *,
+        reason: str = "changes_requested_repair_rerun",
+    ) -> dict[str, Any]:
+        """Archive the current task workspace so a repair rerun gets a fresh folder."""
+        project_root = self.get_project_root(project).resolve()
+        task_subfolder = getattr(task, "task_subfolder", None)
+        if not task_subfolder:
+            return {"archived": False, "reason": "task_has_no_workspace"}
+
+        workspace_dir = (project_root / task_subfolder).resolve()
+        if not workspace_dir.exists():
+            task.task_subfolder = None
+            task.workspace_status = "not_created"
+            return {
+                "archived": False,
+                "reason": "workspace_missing",
+                "path": str(workspace_dir),
+            }
+        if workspace_dir.parent != project_root:
+            return {
+                "archived": False,
+                "reason": "not_direct_project_child",
+                "path": str(workspace_dir),
+            }
+        if (
+            workspace_dir.name in HYDRATION_EXCLUDED_NAMES
+            or workspace_dir.name == LEGACY_BASELINE_DIR_NAME
+        ):
+            return {
+                "archived": False,
+                "reason": "reserved_workspace_name",
+                "path": str(workspace_dir),
+            }
+
+        archived_at = datetime.now(UTC)
+        archive_dir = (
+            project_root
+            / ".openclaw"
+            / "requested-changes-archive"
+            / archived_at.strftime("%Y%m%d-%H%M%S")
+            / f"task-{task.id}-{workspace_dir.name}"
+        ).resolve()
+        archive_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(workspace_dir), str(archive_dir))
+
+        existing_note = (getattr(task, "promotion_note", None) or "").strip()
+        archive_note = f"Archived previous workspace for repair rerun at {archive_dir}"
+        task.task_subfolder = None
+        task.workspace_status = "not_created"
+        task.promoted_at = None
+        task.promotion_note = (
+            f"{existing_note}\n{archive_note}" if existing_note else archive_note
+        )
+        task.updated_at = archived_at
+        return {
+            "archived": True,
+            "reason": reason,
+            "path": str(workspace_dir),
+            "archive_path": str(archive_dir),
         }
 
     def validate_project_baseline(

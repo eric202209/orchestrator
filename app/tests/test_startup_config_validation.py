@@ -12,7 +12,7 @@ def _call_validate(
     from app import config as config_module
 
     monkeypatch.setattr(config_module.settings, "SECRET_KEY", secret_key)
-    monkeypatch.setattr(config_module.settings, "ORCHESTRATOR_AGENT_BACKEND", backend)
+    monkeypatch.setattr(config_module.settings, "AGENT_BACKEND", backend)
     config_module.validate_runtime_secrets()
 
 
@@ -38,9 +38,7 @@ def test_validate_passes_with_valid_secret_and_default_backend(monkeypatch):
     )
 
     monkeypatch.setattr(config_module.settings, "SECRET_KEY", "strong-unique-key")
-    monkeypatch.setattr(
-        config_module.settings, "ORCHESTRATOR_AGENT_BACKEND", "local_openclaw"
-    )
+    monkeypatch.setattr(config_module.settings, "AGENT_BACKEND", "local_openclaw")
 
     config_module.validate_runtime_secrets()
 
@@ -61,6 +59,40 @@ def test_settings_anchors_relative_sqlite_database_to_project_root():
     assert settings.DATABASE_URL == f"sqlite:///{BASE_DIR / 'orchestrator.db'}"
 
 
+def test_settings_accepts_short_runtime_config_names():
+    from app.config import Settings
+
+    settings = Settings(
+        AGENT_BACKEND="docker_openclaw",
+        AGENT_MODEL="local-docker",
+        PLANNING_REPAIR_ENABLED=False,
+        LANGFUSE_ENABLED=True,
+    )
+
+    assert settings.AGENT_BACKEND == "docker_openclaw"
+    assert settings.AGENT_MODEL == "local-docker"
+    assert settings.PLANNING_REPAIR_ENABLED is False
+    assert settings.LANGFUSE_ENABLED is True
+
+
+def test_settings_keeps_legacy_orchestrator_env_aliases():
+    from app.config import Settings
+
+    settings = Settings(
+        ORCHESTRATOR_AGENT_BACKEND="openai_responses_api",
+        ORCHESTRATOR_AGENT_MODEL_FAMILY="gpt-5",
+        ORCHESTRATOR_PLANNING_REPAIR_DIRECT_ENABLED=False,
+        ORCHESTRATOR_LANGFUSE_ENABLED=True,
+        ORCHESTRATOR_FORCE_INLINE_PLANNING=True,
+    )
+
+    assert settings.AGENT_BACKEND == "openai_responses_api"
+    assert settings.AGENT_MODEL == "gpt-5"
+    assert settings.PLANNING_REPAIR_ENABLED is False
+    assert settings.LANGFUSE_ENABLED is True
+    assert settings.INLINE_PLANNING is True
+
+
 def test_validate_raises_on_default_secret_key(monkeypatch):
     with pytest.raises(RuntimeError, match="SECRET_KEY"):
         _call_validate(monkeypatch, secret_key="your-secret-key-change-in-production")
@@ -72,7 +104,7 @@ def test_validate_raises_on_empty_secret_key(monkeypatch):
 
 
 def test_validate_raises_on_unknown_backend(monkeypatch):
-    with pytest.raises(RuntimeError, match="ORCHESTRATOR_AGENT_BACKEND"):
+    with pytest.raises(RuntimeError, match="AGENT_BACKEND"):
         _call_validate(monkeypatch, backend="nonexistent_backend")
 
 
@@ -80,9 +112,7 @@ def test_validate_raises_when_openai_backend_lacks_api_key(monkeypatch):
     from app import config as config_module
 
     monkeypatch.setattr(config_module.settings, "SECRET_KEY", "strong-unique-key")
-    monkeypatch.setattr(
-        config_module.settings, "ORCHESTRATOR_AGENT_BACKEND", "openai_responses_api"
-    )
+    monkeypatch.setattr(config_module.settings, "AGENT_BACKEND", "openai_responses_api")
     monkeypatch.setattr(config_module.settings, "OPENAI_API_KEY", "")
 
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
@@ -93,9 +123,7 @@ def test_validate_passes_when_openai_backend_has_api_key(monkeypatch):
     from app import config as config_module
 
     monkeypatch.setattr(config_module.settings, "SECRET_KEY", "strong-unique-key")
-    monkeypatch.setattr(
-        config_module.settings, "ORCHESTRATOR_AGENT_BACKEND", "openai_responses_api"
-    )
+    monkeypatch.setattr(config_module.settings, "AGENT_BACKEND", "openai_responses_api")
     monkeypatch.setattr(config_module.settings, "OPENAI_API_KEY", "sk-test-key-abc123")
 
     config_module.validate_runtime_secrets()
@@ -105,9 +133,7 @@ def test_validate_raises_when_openai_backend_has_whitespace_only_api_key(monkeyp
     from app import config as config_module
 
     monkeypatch.setattr(config_module.settings, "SECRET_KEY", "strong-unique-key")
-    monkeypatch.setattr(
-        config_module.settings, "ORCHESTRATOR_AGENT_BACKEND", "openai_responses_api"
-    )
+    monkeypatch.setattr(config_module.settings, "AGENT_BACKEND", "openai_responses_api")
     monkeypatch.setattr(config_module.settings, "OPENAI_API_KEY", "   ")
 
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):

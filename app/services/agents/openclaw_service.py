@@ -190,7 +190,7 @@ class OpenClawSessionService:
         self._task_session_id: Optional[str] = None
         self.process: Optional[subprocess.Popen] = None
         self.backend_descriptor: BackendDescriptor = get_backend_descriptor(
-            get_effective_agent_backend(settings.ORCHESTRATOR_AGENT_BACKEND, db=db)
+            get_effective_agent_backend(settings.AGENT_BACKEND, db=db)
         )
         # Initialize checkpoint service
         from app.services.workspace.checkpoint_service import CheckpointService
@@ -201,7 +201,7 @@ class OpenClawSessionService:
         """Return normalized backend metadata for logs, APIs, and orchestration."""
 
         model_family = get_effective_agent_model_family(
-            settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=self.db
+            settings.AGENT_MODEL, db=self.db
         )
         adaptation_profile = resolve_adaptation_profile(
             backend=self.backend_descriptor.name,
@@ -219,7 +219,7 @@ class OpenClawSessionService:
 
     def describe_interface(self) -> AgentInterfaceDescriptor:
         model_family = get_effective_agent_model_family(
-            settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=self.db
+            settings.AGENT_MODEL, db=self.db
         )
         profile = resolve_adaptation_profile(
             backend=self.backend_descriptor.name,
@@ -854,9 +854,7 @@ class OpenClawSessionService:
                 "reuse_task_session": reuse_task_session,
                 "demo_mode": self.use_demo_mode,
             },
-            model=get_effective_agent_model_family(
-                settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=self.db
-            ),
+            model=get_effective_agent_model_family(settings.AGENT_MODEL, db=self.db),
         ) as observation:
             try:
                 # OPTIMIZATION: Track start time
@@ -950,9 +948,7 @@ class OpenClawSessionService:
                     )
 
                 result.setdefault("backend", self.backend_descriptor.name)
-                result.setdefault(
-                    "model_family", settings.ORCHESTRATOR_AGENT_MODEL_FAMILY
-                )
+                result.setdefault("model_family", settings.AGENT_MODEL)
                 result.setdefault(
                     "backend_capabilities",
                     self.backend_descriptor.capabilities.to_dict(),

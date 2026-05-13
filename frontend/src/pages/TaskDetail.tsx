@@ -118,6 +118,9 @@ function TaskDetail() {
     if (!note) return;
     try {
       await tasksAPI.requestWorkspaceChanges(task.id, note);
+      if (window.confirm('Queue a new isolated repair run for this task now?')) {
+        await tasksAPI.retry(task.id, { execution_scope: 'new_session', create_new_session: true });
+      }
       await fetchTask();
     } catch (error) {
       console.error('Failed to request workspace changes:', error);
@@ -157,6 +160,7 @@ function TaskDetail() {
       };
     }
   }, [editForm.steps]);
+  const promotedWorkspace = task?.workspace_status === 'promoted';
 
   if (loading) {
     return (
@@ -337,12 +341,15 @@ function TaskDetail() {
                 <label className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-100">
                   <input
                     type="checkbox"
-                    checked={allowCurrentStepEdit}
+                    checked={allowCurrentStepEdit && !promotedWorkspace}
+                    disabled={promotedWorkspace}
                     onChange={(event) => setAllowCurrentStepEdit(event.target.checked)}
-                    className="mt-0.5 h-4 w-4 rounded border-amber-500 bg-[color:var(--oc-surface-deep)]"
+                    className="mt-0.5 h-4 w-4 rounded border-amber-500 bg-[color:var(--oc-surface-deep)] disabled:cursor-not-allowed disabled:opacity-50"
                   />
                   <span>
-                    I understand lowering this step may re-run earlier work and can overwrite or duplicate project files.
+                    {promotedWorkspace
+                      ? 'Promoted task workspaces cannot lower the current step. Request changes or rerun in a new isolated session.'
+                      : 'I understand lowering this step may re-run earlier work and can overwrite or duplicate project files.'}
                   </span>
                 </label>
                 <div>
@@ -352,7 +359,7 @@ function TaskDetail() {
                   <input
                     type="number"
                     min={0}
-                    disabled={!allowCurrentStepEdit}
+                    disabled={!allowCurrentStepEdit || promotedWorkspace}
                     value={editForm.current_step}
                     onChange={(e) =>
                       setEditForm({ ...editForm, current_step: parseInt(e.target.value) || 0 })

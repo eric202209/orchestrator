@@ -751,7 +751,7 @@ def _run_evaluator(
         if "VERDICT: NEEDS_REVIEW" in eval_output.upper():
             verdict = "NEEDS_REVIEW"
         judge_verdict = None
-        if settings.ORCHESTRATOR_ENABLE_JUDGE_AGENT:
+        if settings.JUDGE_AGENT_ENABLED:
             judge_prompt = (
                 "You are a control-plane judge. Review whether the finished task still "
                 "matches the accepted reasoning artifact.\n\n"
@@ -794,7 +794,7 @@ def _run_evaluator(
             details={
                 "verdict": verdict,
                 "judge_verdict": judge_verdict,
-                "judge_enabled": bool(settings.ORCHESTRATOR_ENABLE_JUDGE_AGENT),
+                "judge_enabled": bool(settings.JUDGE_AGENT_ENABLED),
                 "reasoning_artifact_used": bool(reasoning_artifact),
                 "reasoning_intent": reasoning_artifact.get("intent"),
                 "output": eval_output[:800],

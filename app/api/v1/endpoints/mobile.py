@@ -281,7 +281,7 @@ def _mask_secret(secret: str | None) -> str | None:
 
 
 def _derive_mobile_base_url(request: Request) -> str:
-    configured = (settings.ORCHESTRATOR_MOBILE_BASE_URL or "").strip().rstrip("/")
+    configured = (settings.MOBILE_BASE_URL or "").strip().rstrip("/")
     if configured:
         if configured.endswith("/api/v1"):
             return f"{configured}/mobile"

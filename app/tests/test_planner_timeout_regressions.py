@@ -521,22 +521,22 @@ def test_planning_repair_uses_direct_no_thinking_chat_path(monkeypatch):
     monkeypatch.setattr(planner_module.httpx, "AsyncClient", Client)
     monkeypatch.setattr(
         planner_module.settings,
-        "ORCHESTRATOR_PLANNING_REPAIR_DIRECT_ENABLED",
+        "PLANNING_REPAIR_ENABLED",
         True,
     )
     monkeypatch.setattr(
         planner_module.settings,
-        "ORCHESTRATOR_PLANNING_REPAIR_DIRECT_BASE_URL",
+        "PLANNING_REPAIR_BASE_URL",
         "http://localhost:8000/v1",
     )
     monkeypatch.setattr(
         planner_module.settings,
-        "ORCHESTRATOR_PLANNING_REPAIR_DIRECT_MODEL",
+        "PLANNING_REPAIR_MODEL",
         "qwen-local",
     )
     monkeypatch.setattr(
         planner_module.settings,
-        "ORCHESTRATOR_PLANNING_REPAIR_DIRECT_DISABLE_THINKING",
+        "PLANNING_REPAIR_DISABLE_THINKING",
         True,
     )
 
@@ -590,7 +590,7 @@ def test_planning_repair_falls_back_to_openclaw_when_direct_fails(monkeypatch):
     monkeypatch.setattr(planner_module.httpx, "AsyncClient", Client)
     monkeypatch.setattr(
         planner_module.settings,
-        "ORCHESTRATOR_PLANNING_REPAIR_DIRECT_ENABLED",
+        "PLANNING_REPAIR_ENABLED",
         True,
     )
 
@@ -4031,6 +4031,33 @@ def test_targeted_second_repair_reason_centralizes_validator_eligibility():
     assert reason.semantic_violation_code == "missing_verification_command"
     assert reason.cap_attribute == "post_repair_validation_second_repair_used"
     assert "implementation-heavy step" in reason.rejection_text
+
+
+def test_targeted_second_repair_reason_handles_missing_runnable_commands():
+    retry_state = _PlanningRetryState()
+    retry_state.repair_prompt_used = True
+    verdict = type(
+        "Verdict",
+        (),
+        {
+            "reasons": ["Plan contains steps without runnable commands (steps: [3])"],
+            "details": {
+                "missing_commands_steps": [3],
+            },
+        },
+    )()
+
+    reason = _get_targeted_second_repair_reason(
+        retry_state=retry_state,
+        plan_verdict=verdict,
+    )
+
+    assert reason is not None
+    assert reason.issue_key == "missing_commands_steps"
+    assert reason.event_reason == "post_repair_missing_commands_second_pass"
+    assert reason.semantic_violation_code == "missing_runnable_command"
+    assert reason.cap_attribute == "post_repair_validation_second_repair_used"
+    assert "runnable command" in reason.rejection_text
 
 
 def test_targeted_second_repair_reason_does_not_add_brittle_eligibility():

@@ -163,6 +163,34 @@ def _check_local_openclaw_health(descriptor: BackendDescriptor) -> BackendHealth
     )
 
 
+def _check_docker_openclaw_health(descriptor: BackendDescriptor) -> BackendHealth:
+    warnings: List[str] = []
+    errors: List[str] = []
+
+    if not shutil.which("docker"):
+        errors.append("Docker executable was not found in PATH.")
+
+    if not (settings.OPENCLAW_DOCKER_IMAGE or "").strip():
+        errors.append("OPENCLAW_DOCKER_IMAGE is not configured.")
+
+    docker_command = (settings.OPENCLAW_DOCKER_COMMAND or "").strip()
+    if not docker_command:
+        errors.append("OPENCLAW_DOCKER_COMMAND is not configured.")
+    else:
+        try:
+            shlex.split(docker_command)
+        except ValueError as exc:
+            errors.append(f"OPENCLAW_DOCKER_COMMAND could not be parsed: {exc}")
+
+    return BackendHealth(
+        available=not errors,
+        ready=not errors,
+        status="ready" if not errors else "degraded",
+        errors=errors,
+        warnings=warnings,
+    )
+
+
 def _check_planned_backend_health(descriptor: BackendDescriptor) -> BackendHealth:
     return BackendHealth(
         available=False,
@@ -292,6 +320,41 @@ _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
             ),
         ),
         health_check=_check_planned_backend_health,
+    ),
+    "docker_openclaw": _BackendRegistration(
+        descriptor=_base_descriptor(
+            name="docker_openclaw",
+            display_name="Docker OpenClaw",
+            implementation="app.services.agents.providers.docker_openclaw_adapter.create_runtime",
+            default_model_family="local",
+            implemented=True,
+            capabilities=BackendCapabilities(
+                supports_planning=True,
+                supports_step_execution=True,
+                supports_debug_repair=True,
+                supports_streaming=True,
+                supports_checkpoint_resume=True,
+                supports_tool_execution=True,
+                supports_json_mode=False,
+                mcp_capable=False,
+                max_context_tokens=128000,
+                reliability_tier="isolated",
+                latency_tier="container",
+            ),
+            config=BackendConfigMetadata(
+                auth_mode="local_docker",
+                transport_mode="docker_cli",
+                required_env_vars=["OPENCLAW_DOCKER_IMAGE"],
+                supported_prompt_format="rendered_text_sections",
+                prompt_dialect="openclaw_text_sections",
+                tool_call_shape="native_cli_tools",
+                streaming_mode="docker_subprocess_jsonl",
+                adaptation_profiles=["openclaw_default", "qwen_compact_json"],
+                preferred_retry_strategy="compact_then_repair",
+                context_window_policy="compress_then_retry",
+            ),
+        ),
+        health_check=_check_docker_openclaw_health,
     ),
     "openai_responses_api": _BackendRegistration(
         descriptor=_base_descriptor(

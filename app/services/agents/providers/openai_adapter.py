@@ -89,9 +89,7 @@ class OpenAIResponsesRuntime:
 
         base_url = settings.OPENAI_BASE_URL.rstrip("/")
         model_name = (
-            get_effective_agent_model_family(
-                settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=self.db
-            ).strip()
+            get_effective_agent_model_family(settings.AGENT_MODEL, db=self.db).strip()
             or self.backend_descriptor.default_model_family
         )
 
@@ -228,7 +226,7 @@ class OpenAIResponsesRuntime:
 
     def get_backend_metadata(self) -> dict[str, Any]:
         model_family = get_effective_agent_model_family(
-            settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=self.db
+            settings.AGENT_MODEL, db=self.db
         )
         adaptation_profile = resolve_adaptation_profile(
             backend=self.backend_descriptor.name,
@@ -246,7 +244,7 @@ class OpenAIResponsesRuntime:
 
     def describe_interface(self) -> AgentInterfaceDescriptor:
         model_family = get_effective_agent_model_family(
-            settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=self.db
+            settings.AGENT_MODEL, db=self.db
         )
         profile = resolve_adaptation_profile(
             backend=self.backend_descriptor.name,

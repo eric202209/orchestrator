@@ -26,9 +26,7 @@ def create_agent_runtime(
 ) -> AgentRuntime:
     """Instantiate the configured backend runtime for a session/task pair."""
 
-    backend_name = get_effective_agent_backend(
-        settings.ORCHESTRATOR_AGENT_BACKEND, db=db
-    ).strip()
+    backend_name = get_effective_agent_backend(settings.AGENT_BACKEND, db=db).strip()
     descriptor = require_backend_descriptor(backend_name)
     runtime_factory = get_runtime_factory(descriptor.name)
     if runtime_factory is not None:

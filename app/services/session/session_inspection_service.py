@@ -828,12 +828,8 @@ def inspect_session_checkpoint_payload(
         or orchestration_state.get("runtime_metadata")
         or {}
     )
-    current_backend = get_effective_agent_backend(
-        settings.ORCHESTRATOR_AGENT_BACKEND, db=db
-    )
-    current_model_family = get_effective_agent_model_family(
-        settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=db
-    )
+    current_backend = get_effective_agent_backend(settings.AGENT_BACKEND, db=db)
+    current_model_family = get_effective_agent_model_family(settings.AGENT_MODEL, db=db)
     current_policy = get_effective_policy_profile(db=db)
     current_adaptation = get_effective_adaptation_profile(db=db)
     validation_verdicts = {
@@ -927,8 +923,8 @@ def get_session_trace_export_payload(db: Session, session_id: int) -> Dict[str, 
             "schema_version": 1,
             "session_id": session_id,
             "task_id": None,
-            "exporter_backend": settings.ORCHESTRATOR_TRACE_EXPORTER_BACKEND,
-            "langfuse_handoff_ready": bool(settings.ORCHESTRATOR_LANGFUSE_ENABLED),
+            "exporter_backend": settings.TRACE_EXPORTER_BACKEND,
+            "langfuse_handoff_ready": bool(settings.LANGFUSE_ENABLED),
             "span_count": 0,
             "snapshot_count": 0,
             "spans": [],
@@ -938,8 +934,8 @@ def get_session_trace_export_payload(db: Session, session_id: int) -> Dict[str, 
         task_id=root["task_id"],
         events=events,
         snapshots=snapshots,
-        exporter_backend=settings.ORCHESTRATOR_TRACE_EXPORTER_BACKEND,
-        include_langfuse_handoff=bool(settings.ORCHESTRATOR_LANGFUSE_ENABLED),
+        exporter_backend=settings.TRACE_EXPORTER_BACKEND,
+        include_langfuse_handoff=bool(settings.LANGFUSE_ENABLED),
     )
 
 

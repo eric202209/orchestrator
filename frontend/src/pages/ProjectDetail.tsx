@@ -36,6 +36,22 @@ function ProjectDetail() {
       file_count: number;
       promoted_task_count: number;
     };
+    audit?: {
+      retained_task_workspace_count: number;
+      unpromoted_done_workspace_count: number;
+      retained_task_workspaces: Array<{
+        task_id: number;
+        title: string;
+        task_subfolder: string;
+        baseline_diff: {
+          added_count: number;
+          modified_count: number;
+        };
+      }>;
+      duplicated_scaffold_artifacts: Record<string, number>;
+      transient_artifact_names: string[];
+      issues: string[];
+    };
     promoted_tasks: Array<{ id: number; title: string; promoted_at?: string | null }>;
     ready_task_ids: number[];
   } | null>(null);
@@ -63,6 +79,7 @@ function ProjectDetail() {
   const [projectRulesDraft, setProjectRulesDraft] = useState('');
   const [savingProjectMeta, setSavingProjectMeta] = useState(false);
   const [rebuildingBaseline, setRebuildingBaseline] = useState(false);
+  const [cleaningWorkspaces, setCleaningWorkspaces] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -160,6 +177,16 @@ function ProjectDetail() {
         { key: 'blocked', label: 'Blocked', value: workspaceOverview.counts.blocked || 0, className: 'text-red-300' },
       ].filter((item) => item.value > 0)
     : [];
+  const duplicatedScaffoldItems = workspaceOverview?.audit
+    ? Object.entries(workspaceOverview.audit.duplicated_scaffold_artifacts || {})
+    : [];
+  const pendingWorkspaceChangeCount = workspaceOverview?.audit
+    ? workspaceOverview.audit.retained_task_workspaces.reduce(
+        (total, item) =>
+          total + item.baseline_diff.added_count + item.baseline_diff.modified_count,
+        0
+      )
+    : 0;
 
   const handlePromoteTask = async (task: Task) => {
     const note = window.prompt('Optional promotion note for this task workspace:', task.promotion_note || '');
@@ -180,6 +207,9 @@ function ProjectDetail() {
     if (!note) return;
     try {
       const response = await tasksAPI.requestWorkspaceChanges(task.id, note);
+      if (window.confirm('Queue a new isolated repair run for this task now?')) {
+        await tasksAPI.retry(task.id, { execution_scope: 'new_session', create_new_session: true });
+      }
       setTasks((current) => current.map((item) => (item.id === task.id ? response.data : item)));
       const workspaceResponse = await projectsAPI.getWorkspaceOverview(Number(id));
       setWorkspaceOverview(workspaceResponse.data || null);
@@ -208,6 +238,35 @@ function ProjectDetail() {
       alert('Failed to rebuild the project baseline. Please try again.');
     } finally {
       setRebuildingBaseline(false);
+    }
+  };
+
+  const handleCleanupWorkspaces = async () => {
+    if (!id) return;
+    setCleaningWorkspaces(true);
+    try {
+      const preview = await projectsAPI.cleanupWorkspaces(Number(id));
+      const candidateCount = preview.data.candidate_count || 0;
+      if (candidateCount === 0) {
+        alert('No blocked retained task workspaces are eligible for cleanup.');
+        return;
+      }
+      if (!window.confirm(`Archive ${candidateCount} blocked retained task workspace folder(s)? Promoted and running workspaces will be preserved.`)) {
+        return;
+      }
+      const result = await projectsAPI.cleanupWorkspaces(Number(id), { dry_run: false });
+      const [tasksRes, workspaceRes] = await Promise.all([
+        tasksAPI.getByProject(Number(id)),
+        projectsAPI.getWorkspaceOverview(Number(id)),
+      ]);
+      setTasks(tasksRes.data);
+      setWorkspaceOverview(workspaceRes.data);
+      alert(`Archived ${result.data.deleted_count} retained workspace folder(s).`);
+    } catch (error) {
+      console.error('Failed to clean up retained workspaces:', error);
+      alert('Failed to clean up retained workspaces. Please try again.');
+    } finally {
+      setCleaningWorkspaces(false);
     }
   };
 
@@ -788,6 +847,13 @@ function ProjectDetail() {
                     >
                       {rebuildingBaseline ? 'Rebuilding...' : 'Rebuild Baseline'}
                     </button>
+                    <button
+                      onClick={handleCleanupWorkspaces}
+                      disabled={cleaningWorkspaces}
+                      className="rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-1.5 text-xs text-slate-300 transition-colors hover:border-[color:var(--oc-border)] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {cleaningWorkspaces ? 'Checking...' : 'Archive Blocked Workspaces'}
+                    </button>
                   </div>
                   {workspaceCountItems.length > 0 && (
                     <div className="flex flex-wrap gap-3">
@@ -797,6 +863,26 @@ function ProjectDetail() {
                           <p className={`mt-1 text-lg font-semibold ${item.className}`}>{item.value}</p>
                         </div>
                       ))}
+                    </div>
+                  )}
+                  {workspaceOverview.audit && (
+                    <div className="mt-3 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2">
+                      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-400">
+                        <span>Retained task workspaces: {workspaceOverview.audit.retained_task_workspace_count}</span>
+                        <span>Unpromoted completed: {workspaceOverview.audit.unpromoted_done_workspace_count}</span>
+                        <span>Pending file diffs: {pendingWorkspaceChangeCount}</span>
+                        {workspaceOverview.audit.transient_artifact_names.length > 0 && (
+                          <span>Transient: {workspaceOverview.audit.transient_artifact_names.slice(0, 4).join(', ')}</span>
+                        )}
+                      </div>
+                      {duplicatedScaffoldItems.length > 0 && (
+                        <p className="mt-2 text-xs text-amber-300">
+                          Repeated scaffold artifacts: {duplicatedScaffoldItems.slice(0, 4).map(([name, count]) => `${name} x${count}`).join(', ')}
+                        </p>
+                      )}
+                      {workspaceOverview.audit.issues.length > 0 && (
+                        <p className="mt-2 text-xs text-slate-500">{workspaceOverview.audit.issues[0]}</p>
+                      )}
                     </div>
                   )}
                 </div>

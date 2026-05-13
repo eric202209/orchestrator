@@ -144,12 +144,8 @@ def _count_automatic_recovery_attempts(
 
 def _runtime_selection_details(db: Session) -> Dict[str, Optional[str]]:
     return {
-        "backend": get_effective_agent_backend(
-            settings.ORCHESTRATOR_AGENT_BACKEND, db=db
-        ),
-        "model_family": get_effective_agent_model_family(
-            settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=db
-        ),
+        "backend": get_effective_agent_backend(settings.AGENT_BACKEND, db=db),
+        "model_family": get_effective_agent_model_family(settings.AGENT_MODEL, db=db),
     }
 
 

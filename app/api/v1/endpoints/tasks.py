@@ -271,6 +271,19 @@ def _queue_task_retry(
         TaskStatus.CANCELLED,
     )
     _prepare_task_for_fresh_execution(task, clear_saved_plan=should_clear_saved_plan)
+    repair_archive_result = None
+    if (
+        explicit_new_session
+        and getattr(task, "workspace_status", None) == "changes_requested"
+    ):
+        project = db.query(Project).filter(Project.id == task.project_id).first()
+        if project:
+            repair_archive_result = TaskService(
+                db
+            ).archive_task_workspace_for_repair_rerun(
+                project,
+                task,
+            )
     task_workspace = ensure_task_workspace(db, selected_session, task.id)
 
     queued_event = append_orchestration_event(
@@ -283,11 +296,9 @@ def _queue_task_retry(
             "celery_task_id": None,
             "task_execution_id": task_execution.id,
             "project_dir": task_workspace["workspace_path"],
-            "backend": get_effective_agent_backend(
-                settings.ORCHESTRATOR_AGENT_BACKEND, db=db
-            ),
+            "backend": get_effective_agent_backend(settings.AGENT_BACKEND, db=db),
             "model_family": get_effective_agent_model_family(
-                settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=db
+                settings.AGENT_MODEL, db=db
             ),
         },
     )
@@ -317,6 +328,7 @@ def _queue_task_retry(
                     "isolated_session": explicit_new_session,
                     "legacy_isolated_session": explicit_new_session,
                     "cleared_saved_plan": should_clear_saved_plan,
+                    "repair_archive_result": repair_archive_result,
                 }
             ),
         )
@@ -398,6 +410,7 @@ def _queue_task_retry(
             "isolated_session" if explicit_new_session else "workflow_session"
         ),
         "isolated_session": explicit_new_session,
+        "repair_archive_result": repair_archive_result,
         "message": f"Task '{task.title}' restarted successfully",
     }
 
@@ -738,6 +751,7 @@ def get_project_workspace_overview(project_id: int, db: Session = Depends(get_db
     task_service = TaskService(db)
     tasks = task_service.get_project_tasks(project_id)
     baseline = task_service.get_project_baseline_overview(project)
+    audit = task_service.audit_project_workspace_shape(project)
     counts: Dict[str, int] = {}
     for task in tasks:
         key = getattr(task, "workspace_status", None) or "not_created"
@@ -765,6 +779,7 @@ def get_project_workspace_overview(project_id: int, db: Session = Depends(get_db
         "project_name": project.name,
         "counts": counts,
         "baseline": baseline,
+        "audit": audit,
         "promoted_tasks": promoted_tasks,
         "ready_task_ids": [
             task.id
@@ -820,7 +835,7 @@ def promote_task_workspace(
     task.workspace_status = "promoted"
     task.promoted_at = datetime.utcnow()
     task.promotion_note = (payload.note or "").strip() or None
-    task.updated_at = datetime.utcnow()
+    task.updated_at = datetime.now(UTC)
     baseline_result = TaskService(db).promote_task_into_baseline(project, task)
     db.commit()
     db.refresh(task)
@@ -861,7 +876,7 @@ def request_task_workspace_changes(
     task.workspace_status = "changes_requested"
     task.promoted_at = None
     task.promotion_note = note
-    task.updated_at = datetime.utcnow()
+    task.updated_at = datetime.now(UTC)
     db.commit()
     db.refresh(task)
     return task
@@ -902,12 +917,32 @@ def update_task(
             detail=f"Unsupported fields: {unsupported_fields}",
         )
 
+    if "current_step" in update_data and update_data["current_step"] is not None:
+        requested_step = int(update_data["current_step"])
+        if requested_step < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="current_step must be zero or greater",
+            )
+        existing_step = int(task.current_step or 0)
+        if (
+            requested_step < existing_step
+            and getattr(task, "workspace_status", None) == "promoted"
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Cannot lower current_step on a promoted task workspace. "
+                    "Request changes or rerun in a new isolated session instead."
+                ),
+            )
+
     for field, value in update_data.items():
         if field in {"description", "steps"} and value == "":
             value = None
         setattr(task, field, value)
 
-    task.updated_at = datetime.utcnow()
+    task.updated_at = datetime.now(UTC)
 
     db.commit()
     db.refresh(task)

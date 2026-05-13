@@ -41,12 +41,8 @@ def _get_latest_session_task_link(
 
 def _runtime_selection_details(db: Session) -> Dict[str, Optional[str]]:
     return {
-        "backend": get_effective_agent_backend(
-            settings.ORCHESTRATOR_AGENT_BACKEND, db=db
-        ),
-        "model_family": get_effective_agent_model_family(
-            settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=db
-        ),
+        "backend": get_effective_agent_backend(settings.AGENT_BACKEND, db=db),
+        "model_family": get_effective_agent_model_family(settings.AGENT_MODEL, db=db),
     }
 
 

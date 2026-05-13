@@ -424,7 +424,7 @@ class PlanningSessionService:
 
     @staticmethod
     def _should_process_inline() -> bool:
-        return settings.ORCHESTRATOR_FORCE_INLINE_PLANNING
+        return settings.INLINE_PLANNING
 
     def _advance_or_finalize(self, session: PlanningSession, project: Project) -> None:
         # Skip Q&A entirely for sessions that carry full context (e.g. replan).

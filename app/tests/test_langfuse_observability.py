@@ -46,7 +46,7 @@ def test_build_text_trace_payload_truncates_large_values():
 
 
 def test_langfuse_helpers_noop_when_disabled(monkeypatch):
-    monkeypatch.setattr(settings, "ORCHESTRATOR_LANGFUSE_ENABLED", False)
+    monkeypatch.setattr(settings, "LANGFUSE_ENABLED", False)
     monkeypatch.setattr(settings, "LANGFUSE_PUBLIC_KEY", "")
     monkeypatch.setattr(settings, "LANGFUSE_SECRET_KEY", "")
     reset_langfuse_client_for_tests()
@@ -88,7 +88,7 @@ def test_langfuse_helpers_emit_when_sdk_available(monkeypatch):
         def flush(self):
             captured["flushed"] = True
 
-    monkeypatch.setattr(settings, "ORCHESTRATOR_LANGFUSE_ENABLED", True)
+    monkeypatch.setattr(settings, "LANGFUSE_ENABLED", True)
     monkeypatch.setattr(settings, "LANGFUSE_PUBLIC_KEY", "pk-test")
     monkeypatch.setattr(settings, "LANGFUSE_SECRET_KEY", "sk-test")
     monkeypatch.setattr(settings, "LANGFUSE_BASE_URL", "http://localhost:3001")
@@ -136,7 +136,7 @@ def test_langfuse_helpers_emit_when_sdk_available(monkeypatch):
 
 
 def test_observability_service_noop_when_disabled(monkeypatch):
-    monkeypatch.setattr(settings, "ORCHESTRATOR_LANGFUSE_ENABLED", False)
+    monkeypatch.setattr(settings, "LANGFUSE_ENABLED", False)
     monkeypatch.setattr(settings, "LANGFUSE_PUBLIC_KEY", "")
     monkeypatch.setattr(settings, "LANGFUSE_SECRET_KEY", "")
 
@@ -173,7 +173,7 @@ def test_observability_service_emits_when_configured(monkeypatch):
         def flush(self):
             captured["flushed"] = True
 
-    monkeypatch.setattr(settings, "ORCHESTRATOR_LANGFUSE_ENABLED", True)
+    monkeypatch.setattr(settings, "LANGFUSE_ENABLED", True)
     monkeypatch.setattr(settings, "LANGFUSE_PUBLIC_KEY", "pk")
     monkeypatch.setattr(settings, "LANGFUSE_SECRET_KEY", "sk")
     monkeypatch.setattr(settings, "LANGFUSE_BASE_URL", "")
@@ -197,7 +197,7 @@ def test_observability_service_emits_when_configured(monkeypatch):
 
 def test_observability_service_sdk_not_installed(monkeypatch):
     """When SDK is missing, service falls back to no-op mode."""
-    monkeypatch.setattr(settings, "ORCHESTRATOR_LANGFUSE_ENABLED", True)
+    monkeypatch.setattr(settings, "LANGFUSE_ENABLED", True)
     monkeypatch.setattr(settings, "LANGFUSE_PUBLIC_KEY", "pk")
     monkeypatch.setattr(settings, "LANGFUSE_SECRET_KEY", "sk")
 
@@ -266,6 +266,6 @@ def test_build_text_trace_payload_edge_cases():
 
 def test_is_tracing_enabled_false_by_default(monkeypatch):
     """LANGFUSE_ENABLED defaults to False and tracing is off."""
-    monkeypatch.setattr(settings, "ORCHESTRATOR_LANGFUSE_ENABLED", False)
+    monkeypatch.setattr(settings, "LANGFUSE_ENABLED", False)
     reset_for_tests()
     assert not is_tracing_enabled()

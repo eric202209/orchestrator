@@ -1,12 +1,33 @@
 """Configuration settings"""
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import field_validator
-from typing import List
+from pydantic import model_validator, field_validator
+from typing import Any, List
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DATABASE_URL = f"sqlite:///{BASE_DIR}/orchestrator.db"
+
+LEGACY_ENV_ALIASES = {
+    "ORCHESTRATOR_AGENT_BACKEND": "AGENT_BACKEND",
+    "ORCHESTRATOR_AGENT_MODEL_FAMILY": "AGENT_MODEL",
+    "ORCHESTRATOR_PLANNING_REPAIR_DIRECT_ENABLED": "PLANNING_REPAIR_ENABLED",
+    "ORCHESTRATOR_PLANNING_REPAIR_DIRECT_BASE_URL": "PLANNING_REPAIR_BASE_URL",
+    "ORCHESTRATOR_PLANNING_REPAIR_DIRECT_MODEL": "PLANNING_REPAIR_MODEL",
+    "ORCHESTRATOR_PLANNING_REPAIR_DIRECT_API_KEY": "PLANNING_REPAIR_API_KEY",
+    "ORCHESTRATOR_PLANNING_REPAIR_DIRECT_DISABLE_THINKING": (
+        "PLANNING_REPAIR_DISABLE_THINKING"
+    ),
+    "ORCHESTRATOR_PLANNING_REPAIR_DIRECT_TIMEOUT_SECONDS": (
+        "PLANNING_REPAIR_TIMEOUT_SECONDS"
+    ),
+    "ORCHESTRATOR_ENABLE_JUDGE_AGENT": "JUDGE_AGENT_ENABLED",
+    "ORCHESTRATOR_TRACE_EXPORTER_BACKEND": "TRACE_EXPORTER_BACKEND",
+    "ORCHESTRATOR_LANGFUSE_ENABLED": "LANGFUSE_ENABLED",
+    "ORCHESTRATOR_ADMIN_EMAILS": "ADMIN_EMAILS",
+    "ORCHESTRATOR_MOBILE_BASE_URL": "MOBILE_BASE_URL",
+    "ORCHESTRATOR_FORCE_INLINE_PLANNING": "INLINE_PLANNING",
+}
 
 
 class Settings(BaseSettings):
@@ -15,7 +36,20 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         case_sensitive=True,
+        populate_by_name=True,
+        extra="ignore",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_legacy_env_aliases(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        for legacy_name, current_name in LEGACY_ENV_ALIASES.items():
+            if current_name not in normalized and legacy_name in normalized:
+                normalized[current_name] = normalized[legacy_name]
+        return normalized
 
     # Project
     PROJECT_NAME: str = "AI Dev Agent Orchestrator"
@@ -88,33 +122,36 @@ class Settings(BaseSettings):
     OPENCLAW_API_KEY: str = ""
     OPENCLAW_CLI_PATH: str = ""
     OPENCLAW_CLI_ARGS: str = ""
+    OPENCLAW_DOCKER_IMAGE: str = "openclaw:latest"
+    OPENCLAW_DOCKER_COMMAND: str = "openclaw"
+    OPENCLAW_DOCKER_NETWORK: str = "none"
     OPENAI_API_KEY: str = ""
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
     MOBILE_GATEWAY_API_KEY: str = ""
-    ORCHESTRATOR_AGENT_BACKEND: str = "local_openclaw"
-    ORCHESTRATOR_AGENT_MODEL_FAMILY: str = "local"
-    ORCHESTRATOR_PLANNING_REPAIR_DIRECT_ENABLED: bool = True
-    ORCHESTRATOR_PLANNING_REPAIR_DIRECT_BASE_URL: str = "http://ai-gateway:8000/v1"
-    ORCHESTRATOR_PLANNING_REPAIR_DIRECT_MODEL: str = "qwen-local"
-    ORCHESTRATOR_PLANNING_REPAIR_DIRECT_API_KEY: str = ""
-    ORCHESTRATOR_PLANNING_REPAIR_DIRECT_DISABLE_THINKING: bool = True
-    ORCHESTRATOR_PLANNING_REPAIR_DIRECT_TIMEOUT_SECONDS: int = 90
-    ORCHESTRATOR_ENABLE_JUDGE_AGENT: bool = False
-    ORCHESTRATOR_TRACE_EXPORTER_BACKEND: str = "local_json"
-    ORCHESTRATOR_LANGFUSE_ENABLED: bool = False
+    AGENT_BACKEND: str = "local_openclaw"
+    AGENT_MODEL: str = "local"
+    PLANNING_REPAIR_ENABLED: bool = True
+    PLANNING_REPAIR_BASE_URL: str = "http://ai-gateway:8000/v1"
+    PLANNING_REPAIR_MODEL: str = "qwen-local"
+    PLANNING_REPAIR_API_KEY: str = ""
+    PLANNING_REPAIR_DISABLE_THINKING: bool = True
+    PLANNING_REPAIR_TIMEOUT_SECONDS: int = 90
+    JUDGE_AGENT_ENABLED: bool = False
+    TRACE_EXPORTER_BACKEND: str = "local_json"
+    LANGFUSE_ENABLED: bool = False
     LANGFUSE_PUBLIC_KEY: str = ""
     LANGFUSE_SECRET_KEY: str = ""
     LANGFUSE_BASE_URL: str = ""
     LANGFUSE_ENVIRONMENT: str = "development"
-    ORCHESTRATOR_ADMIN_EMAILS: str = ""
+    ADMIN_EMAILS: str = ""
 
     # Mobile app configuration
-    ORCHESTRATOR_MOBILE_BASE_URL: str = "http://localhost:8080/api/v1"
+    MOBILE_BASE_URL: str = "http://localhost:8080/api/v1"
 
     # Demo mode flag - set to True for testing, False for real execution
     DEMO_MODE: bool = False  # Disabled (real execution enabled)
     ALLOW_TEST_KEYPAIR_ENDPOINT: bool = False
-    ORCHESTRATOR_FORCE_INLINE_PLANNING: bool = False
+    INLINE_PLANNING: bool = False
 
     # Celery Task Queue
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
@@ -162,7 +199,7 @@ def validate_runtime_secrets() -> None:
     try:
         from app.services.agents.agent_backends import require_backend_descriptor
 
-        descriptor = require_backend_descriptor(settings.ORCHESTRATOR_AGENT_BACKEND)
+        descriptor = require_backend_descriptor(settings.AGENT_BACKEND)
         missing = [
             var
             for var in descriptor.config.required_env_vars
@@ -181,11 +218,11 @@ def validate_runtime_secrets() -> None:
         logger.info(
             "Active backend: %s | model family: %s",
             descriptor.name,
-            settings.ORCHESTRATOR_AGENT_MODEL_FAMILY,
+            settings.AGENT_MODEL,
         )
     except RuntimeError:
         raise
     except Exception as exc:  # UnsupportedAgentBackendError or import error
         raise RuntimeError(
-            f"Invalid ORCHESTRATOR_AGENT_BACKEND '{settings.ORCHESTRATOR_AGENT_BACKEND}': {exc}"
+            f"Invalid AGENT_BACKEND '{settings.AGENT_BACKEND}': {exc}"
         ) from exc

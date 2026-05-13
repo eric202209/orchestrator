@@ -57,7 +57,7 @@ def _mask_secret(secret: str | None) -> str | None:
 
 
 def _derive_mobile_base_url(request: Request) -> str:
-    configured = (settings.ORCHESTRATOR_MOBILE_BASE_URL or "").strip().rstrip("/")
+    configured = (settings.MOBILE_BASE_URL or "").strip().rstrip("/")
     if configured:
         if configured.endswith("/api/v1/mobile"):
             return configured
@@ -99,11 +99,9 @@ def get_app_settings(
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
-    effective_backend_name = get_effective_agent_backend(
-        settings.ORCHESTRATOR_AGENT_BACKEND, db=db
-    )
+    effective_backend_name = get_effective_agent_backend(settings.AGENT_BACKEND, db=db)
     effective_model_family = get_effective_agent_model_family(
-        settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=db
+        settings.AGENT_MODEL, db=db
     )
     effective_adaptation_profile = get_effective_adaptation_profile(db=db)
     effective_policy_profile = get_effective_policy_profile(db=db)
@@ -220,9 +218,7 @@ def update_system_settings(
             }
 
     if payload.agent_backend is not None:
-        previous_backend = get_effective_agent_backend(
-            settings.ORCHESTRATOR_AGENT_BACKEND, db=db
-        )
+        previous_backend = get_effective_agent_backend(settings.AGENT_BACKEND, db=db)
         try:
             backend = get_backend_descriptor(payload.agent_backend)
         except UnsupportedAgentBackendError as exc:
@@ -257,7 +253,7 @@ def update_system_settings(
 
         if payload.agent_model_family is None:
             previous_model_family = get_effective_agent_model_family(
-                settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=db
+                settings.AGENT_MODEL, db=db
             )
             set_setting_value(
                 db,
@@ -291,12 +287,9 @@ def update_system_settings(
 
     if payload.agent_model_family is not None:
         previous_model_family = get_effective_agent_model_family(
-            settings.ORCHESTRATOR_AGENT_MODEL_FAMILY, db=db
+            settings.AGENT_MODEL, db=db
         )
-        next_model_family = (
-            payload.agent_model_family.strip()
-            or settings.ORCHESTRATOR_AGENT_MODEL_FAMILY
-        )
+        next_model_family = payload.agent_model_family.strip() or settings.AGENT_MODEL
         set_setting_value(
             db,
             AGENT_MODEL_FAMILY_KEY,
@@ -315,7 +308,7 @@ def update_system_settings(
         effective_backend_name = (
             payload.agent_backend
             if payload.agent_backend is not None
-            else get_effective_agent_backend(settings.ORCHESTRATOR_AGENT_BACKEND, db=db)
+            else get_effective_agent_backend(settings.AGENT_BACKEND, db=db)
         )
         try:
             backend = get_backend_descriptor(effective_backend_name)

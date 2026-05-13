@@ -74,8 +74,8 @@ async def lifespan(app: FastAPI):
     logger.info("Version: %s | Port: %s", settings.VERSION, settings.PORT)
     logger.info(
         "Backend: %s | Model family: %s",
-        settings.ORCHESTRATOR_AGENT_BACKEND,
-        settings.ORCHESTRATOR_AGENT_MODEL_FAMILY,
+        settings.AGENT_BACKEND,
+        settings.AGENT_MODEL,
     )
     logger.info("Celery broker: %s", _redact_broker_url(settings.CELERY_BROKER_URL))
     logger.info("=" * 50)

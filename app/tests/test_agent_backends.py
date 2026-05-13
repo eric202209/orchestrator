@@ -30,7 +30,14 @@ def test_supported_backends_contains_registered_future_metadata():
     names = [descriptor.name for descriptor in descriptors]
 
     assert "local_openclaw" in names
+    assert "docker_openclaw" in names
     assert "openai_responses_api" in names
+    docker_backend = next(
+        descriptor for descriptor in descriptors if descriptor.name == "docker_openclaw"
+    )
+    assert docker_backend.implemented is True
+    assert docker_backend.config.transport_mode == "docker_cli"
+    assert docker_backend.health.status in {"ready", "degraded"}
     backend = next(
         descriptor
         for descriptor in descriptors

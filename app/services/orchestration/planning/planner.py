@@ -414,11 +414,11 @@ class PlannerService:
     def _should_try_direct_no_thinking_planning(
         runtime_service: Any, prompt_chars: int
     ) -> bool:
-        if not settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_ENABLED:
+        if not settings.PLANNING_REPAIR_ENABLED:
             return False
-        if not settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_BASE_URL.strip():
+        if not settings.PLANNING_REPAIR_BASE_URL.strip():
             return False
-        if not settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_MODEL.strip():
+        if not settings.PLANNING_REPAIR_MODEL.strip():
             return False
         if prompt_chars > DIRECT_PLANNING_PROMPT_CHAR_CAP:
             _logger.info(
@@ -451,10 +451,10 @@ class PlannerService:
 
         import httpx
 
-        base_url = settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_BASE_URL.rstrip("/")
-        model = settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_MODEL
-        api_key = settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_API_KEY
-        direct_timeout = settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_TIMEOUT_SECONDS
+        base_url = settings.PLANNING_REPAIR_BASE_URL.rstrip("/")
+        model = settings.PLANNING_REPAIR_MODEL
+        api_key = settings.PLANNING_REPAIR_API_KEY
+        direct_timeout = settings.PLANNING_REPAIR_TIMEOUT_SECONDS
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": planning_prompt}],
@@ -1386,16 +1386,13 @@ Return only a JSON array matching this shape. No markdown. No prose.
 
     @staticmethod
     def _should_try_direct_no_thinking_repair(runtime_service: Any) -> bool:
-        if not settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_ENABLED:
-            _logger.info(
-                "[REPAIR_DIRECT] skip: "
-                "ORCHESTRATOR_PLANNING_REPAIR_DIRECT_ENABLED=false"
-            )
+        if not settings.PLANNING_REPAIR_ENABLED:
+            _logger.info("[REPAIR_DIRECT] skip: " "PLANNING_REPAIR_ENABLED=false")
             return False
-        if not settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_BASE_URL.strip():
+        if not settings.PLANNING_REPAIR_BASE_URL.strip():
             _logger.info("[REPAIR_DIRECT] skip: base_url empty")
             return False
-        if not settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_MODEL.strip():
+        if not settings.PLANNING_REPAIR_MODEL.strip():
             _logger.info("[REPAIR_DIRECT] skip: model empty")
             return False
         backend_metadata = {}
@@ -1426,8 +1423,8 @@ Return only a JSON array matching this shape. No markdown. No prose.
         if not PlannerService._should_try_direct_no_thinking_repair(runtime_service):
             return None
 
-        base_url = settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_BASE_URL.rstrip("/")
-        model = settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_MODEL.strip()
+        base_url = settings.PLANNING_REPAIR_BASE_URL.rstrip("/")
+        model = settings.PLANNING_REPAIR_MODEL.strip()
         payload: Dict[str, Any] = {
             "model": model,
             "messages": [{"role": "user", "content": repair_prompt}],
@@ -1435,12 +1432,12 @@ Return only a JSON array matching this shape. No markdown. No prose.
             "max_tokens": 2048,
             "stream": False,
         }
-        if settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_DISABLE_THINKING:
+        if settings.PLANNING_REPAIR_DISABLE_THINKING:
             payload["enable_thinking"] = False
             payload["chat_template_kwargs"] = {"enable_thinking": False}
 
         headers = {"Content-Type": "application/json"}
-        api_key = settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_API_KEY.strip()
+        api_key = settings.PLANNING_REPAIR_API_KEY.strip()
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
@@ -1449,7 +1446,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
             1,
             min(
                 repair_timeout,
-                settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_TIMEOUT_SECONDS,
+                settings.PLANNING_REPAIR_TIMEOUT_SECONDS,
             ),
         )
         _logger.info(
@@ -1499,9 +1496,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
             "model_family": model,
             "diagnostics": {
                 "planning_repair_direct": True,
-                "disable_thinking": (
-                    settings.ORCHESTRATOR_PLANNING_REPAIR_DIRECT_DISABLE_THINKING
-                ),
+                "disable_thinking": (settings.PLANNING_REPAIR_DISABLE_THINKING),
                 "duration_seconds": round(duration_seconds, 3),
                 "timeout_seconds": direct_timeout,
             },

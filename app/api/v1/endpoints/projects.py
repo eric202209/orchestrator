@@ -1,6 +1,7 @@
 """Projects API endpoints"""
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 from sqlalchemy import false, or_
 from sqlalchemy.orm import Session
 from typing import List
@@ -33,6 +34,13 @@ from app.dependencies import get_current_active_user
 from app.services.authz import get_project_for_user, project_access_filter
 
 router = APIRouter()
+
+
+class WorkspaceCleanupRequest(BaseModel):
+    dry_run: bool = True
+    include_ready: bool = False
+    include_changes_requested: bool = False
+    include_blocked: bool = True
 
 
 @router.post(
@@ -188,6 +196,30 @@ def rebuild_project_baseline(
     project = get_project_for_user(db, project_id, current_user)
 
     result = TaskService(db).rebuild_project_baseline(project)
+    return {
+        "project_id": project.id,
+        "project_name": project.name,
+        **result,
+    }
+
+
+@router.post("/projects/{project_id}/workspace-cleanup")
+def cleanup_project_task_workspaces(
+    project_id: int,
+    payload: WorkspaceCleanupRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Preview or delete retained disposable task workspace folders."""
+    project = get_project_for_user(db, project_id, current_user)
+
+    result = TaskService(db).cleanup_retained_task_workspaces(
+        project,
+        dry_run=payload.dry_run,
+        include_ready=payload.include_ready,
+        include_changes_requested=payload.include_changes_requested,
+        include_blocked=payload.include_blocked,
+    )
     return {
         "project_id": project.id,
         "project_name": project.name,

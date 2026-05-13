@@ -178,6 +178,26 @@ export const projectsAPI = {
         file_count: number;
         promoted_task_count: number;
       };
+      audit: {
+        project_root: string;
+        retained_task_workspace_count: number;
+        unpromoted_done_workspace_count: number;
+        retained_task_workspaces: Array<{
+          task_id: number;
+          title: string;
+          task_subfolder: string;
+          baseline_diff: {
+            added_count: number;
+            modified_count: number;
+            unchanged_count: number;
+            added_files: string[];
+            modified_files: string[];
+          };
+        }>;
+        duplicated_scaffold_artifacts: Record<string, number>;
+        transient_artifact_names: string[];
+        issues: string[];
+      };
       promoted_tasks: Array<{
         id: number;
         title: string;
@@ -197,6 +217,25 @@ export const projectsAPI = {
       files_copied: number;
       applied_tasks: Array<{ task_id: number; title: string; files_copied: number }>;
     }>(`/projects/${projectId}/baseline/rebuild`),
+  cleanupWorkspaces: (
+    projectId: number,
+    options?: {
+      dry_run?: boolean;
+      include_ready?: boolean;
+      include_changes_requested?: boolean;
+      include_blocked?: boolean;
+    }
+  ) =>
+    apiClient.post<{
+      project_id: number;
+      project_name: string;
+      dry_run: boolean;
+      archive_root: string;
+      candidate_count: number;
+      deleted_count: number;
+      candidates: Array<{ task_id: number; title: string; task_subfolder: string; archive_path: string }>;
+      deleted: Array<{ task_id: number; title: string; task_subfolder: string; archive_path: string }>;
+    }>(`/projects/${projectId}/workspace-cleanup`, options || {}),
 
   // Get logs for a project (filters by project_id, not session_id)
   getLogs: (

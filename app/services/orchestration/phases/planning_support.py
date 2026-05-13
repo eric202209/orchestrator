@@ -269,6 +269,17 @@ def _build_repair_rejection_reasons(
             "command that proves behavior for each implementation-heavy step."
         )
 
+    missing_commands_steps = _normalized_step_numbers(
+        details.get("missing_commands_steps") or []
+    )
+    if missing_commands_steps:
+        targeted_reasons.append(
+            "missing_commands_steps: steps "
+            f"{missing_commands_steps} have no runnable command or file op; "
+            "add a bounded shell command such as node -e, python -m, npm run, "
+            "pytest, or an ops write_file/replace_in_file operation."
+        )
+
     truncated_subcodes = details.get("truncated_multistep_subcodes") or []
     if truncated_subcodes:
         original_step_count = details.get("truncated_multistep_original_step_count")
@@ -403,6 +414,40 @@ def _post_repair_missing_verification_steps(plan_verdict: Any) -> list[int]:
         for reason in getattr(plan_verdict, "reasons", []) or []
     ]
     if reasons and any("missing verification" not in reason for reason in reasons):
+        return []
+
+    return missing_steps
+
+
+def _post_repair_missing_command_steps(plan_verdict: Any) -> list[int]:
+    details = getattr(plan_verdict, "details", None) or {}
+    missing_steps = _normalized_step_numbers(
+        details.get("missing_commands_steps") or []
+    )
+    if not missing_steps:
+        return []
+
+    blocking_detail_keys = (
+        "missing_verification_steps",
+        "weak_verification_steps",
+        "brittle_command_subcodes",
+        "placeholder_only_implementation",
+        "non_runnable_steps",
+        "background_process_steps",
+        "nested_workspace_steps",
+        "nested_project_root_steps",
+        "malformed_shell_quoting_steps",
+        "workflow_phase_violations",
+        "stack_conflict",
+    )
+    if any(details.get(key) for key in blocking_detail_keys):
+        return []
+
+    reasons = [
+        str(reason or "").lower()
+        for reason in getattr(plan_verdict, "reasons", []) or []
+    ]
+    if reasons and any("without runnable commands" not in reason for reason in reasons):
         return []
 
     return missing_steps
@@ -674,6 +719,20 @@ _SECOND_REPAIR_VALIDATOR_POLICIES: dict[str, _SecondRepairPolicy] = {
             "each implementation-heavy step"
         ),
     ),
+    "missing_commands_steps": _SecondRepairPolicy(
+        issue_key="missing_commands_steps",
+        issue_label="missing runnable commands",
+        retry_reason="post_repair_missing_commands_steps",
+        event_reason="post_repair_missing_commands_second_pass",
+        semantic_violation_code="missing_runnable_command",
+        cap_attribute="post_repair_validation_second_repair_used",
+        rejection_template=(
+            "missing_commands_steps: steps {steps} still have no runnable command "
+            "or file op after repair; add a bounded command such as node -e, "
+            "python -m, npm run, pytest, or an ops write_file/replace_in_file "
+            "operation"
+        ),
+    ),
 }
 
 _SECOND_REPAIR_WORKSPACE_POLICIES: dict[str, _SecondRepairPolicy] = {
@@ -746,6 +805,17 @@ def _get_targeted_second_repair_reason(
             retry_state,
             policy,
             missing_verification_steps,
+        )
+
+    missing_command_steps = (
+        _post_repair_missing_command_steps(plan_verdict) if plan_verdict else []
+    )
+    if missing_command_steps:
+        policy = _SECOND_REPAIR_VALIDATOR_POLICIES["missing_commands_steps"]
+        return _second_repair_reason_from_policy(
+            retry_state,
+            policy,
+            missing_command_steps,
         )
 
     return None
