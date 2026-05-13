@@ -1747,7 +1747,7 @@ def execute_step_loop(
                     pass
                 continue
 
-            if fix_type in {"code_fix", "command_fix"}:
+            if fix_type in {"code_fix", "command_fix", "ops_fix"}:
                 debug_files_changed = debug_result.get("files_changed")
                 debug_changed_files = (
                     debug_files_changed if isinstance(debug_files_changed, list) else []
@@ -1839,6 +1839,10 @@ def execute_step_loop(
                     }
                 )
                 step_updated = False
+                if fix_type == "ops_fix" and isinstance(debug_data.get("ops"), list):
+                    step["ops"] = debug_data.get("ops", [])
+                    step["commands"] = []
+                    step_updated = True
                 if fix_type == "command_fix" and debug_data.get("fix"):
                     if not is_runnable_shell_command_fix(str(debug_data.get("fix"))):
                         logger.warning(

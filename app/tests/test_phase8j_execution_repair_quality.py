@@ -14,6 +14,7 @@ from app.services.orchestration.debug_feedback import (
     build_bounded_debug_repair_prompt,
     normalize_bounded_debug_repair_payload,
 )
+from app.services.prompt_templates import PromptTemplates
 
 # --- typed command-fix validation ---
 
@@ -178,6 +179,24 @@ def test_debug_repair_prompt_rejects_prose_commands_and_heredoc_rewrites():
 
     assert "runnable shell strings, not prose instructions" in prompt
     assert "Do not use heredoc rewrites" in prompt
+
+
+def test_debugging_prompt_names_typed_structured_op_repair():
+    prompt = PromptTemplates.build_debugging_prompt(
+        step_description="Update package.json",
+        error_message="replace_in_file old text not found in package.json",
+        command_output="",
+        verification_output="",
+        attempt_number=1,
+        max_attempts=3,
+        project_name="demo",
+        workspace_root="/workspace",
+        project_dir="/workspace/demo",
+    )
+
+    assert '"replace_op"' in prompt
+    assert '"replacement_ops"' in prompt
+    assert "stale `replace_in_file old text not found`" in prompt
 
 
 def test_stub_expected_files_allows_empty_gitkeep_sentinel(tmp_path):

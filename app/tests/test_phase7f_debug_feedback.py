@@ -541,6 +541,80 @@ def test_non_actionable_code_fix_for_structured_ops_is_rejected(db_session, tmp_
     assert "not actionable" in ctx.task.error_message
 
 
+def test_typed_ops_fix_replaces_failed_structured_ops_before_retry(
+    db_session, tmp_path
+):
+    runtime = _FakeRuntime(
+        [
+            {
+                "output": json.dumps(
+                    {
+                        "fix_type": "replace_op",
+                        "analysis": "Rewrite package.json because exact replacement is stale.",
+                        "replacement_ops": [
+                            {
+                                "op": "write_file",
+                                "path": "package.json",
+                                "content": '{"name":"demo","version":"1.1.0","scripts":{"test":"echo test ok"}}\n',
+                            }
+                        ],
+                        "verification": "node -e \"const p=require('./package.json'); if(p.version !== '1.1.0') process.exit(1)\"",
+                        "expected_files": ["package.json"],
+                    }
+                )
+            },
+            {
+                "status": "success",
+                "output": "write_file package.json",
+                "files_changed": ["package.json"],
+            },
+        ]
+    )
+    ctx, _execution = _make_run_context(
+        db_session,
+        tmp_path,
+        runtime=runtime,
+        step_overrides={
+            "description": "Update package.json",
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "package.json",
+                    "old": '"version": "1.0.0"',
+                    "new": '"version": "1.1.0"',
+                }
+            ],
+            "commands": [],
+            "expected_files": ["package.json"],
+        },
+    )
+    (ctx.orchestration_state.project_dir / "package.json").write_text(
+        '{"name":"demo","version":"1.1.0"}\n',
+        encoding="utf-8",
+    )
+
+    result = execute_step_loop(
+        ctx=ctx,
+        extract_structured_text=_extract_structured_text,
+        normalize_step=_normalize_step,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: [],
+        workspace_violation_error_cls=RuntimeError,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        record_live_log_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "completed"
+    repaired_step = ctx.orchestration_state.plan[0]
+    assert repaired_step["commands"] == []
+    assert repaired_step["ops"] == [
+        {
+            "op": "write_file",
+            "path": "package.json",
+            "content": '{"name":"demo","version":"1.1.0","scripts":{"test":"echo test ok"}}\n',
+        }
+    ]
+
+
 def test_phase7g_diff_repair_prompt_is_used_when_capsule_available(
     db_session, tmp_path
 ):

@@ -17,7 +17,9 @@ from app.services.orchestration.context_assembly import render_adapted_runtime_p
 from app.services.orchestration.types import FailureEnvelope
 from app.services.orchestration.file_ops_contract import (
     operation_has_file_op_path,
+    normalize_file_op_shape,
     render_supported_file_ops,
+    validate_file_op_shape,
 )
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 
@@ -394,29 +396,47 @@ def coerce_debug_step_result(
     extract_structured_text: Callable[[Any], str],
 ) -> tuple[bool, Optional[Dict[str, Any]], str]:
     """Recover a structured debug result when the model returned prose."""
-    output_text = extract_structured_text((raw_result or {}).get("output", ""))
-    success, parsed_data, strategy_info = error_handler.attempt_json_parsing(
-        output_text, context="debug"
-    )
+    raw_output = (raw_result or {}).get("output", "")
+    raw_output_text = str(raw_output or "")
+    raw_stripped_output = raw_output_text.strip()
+    if raw_stripped_output.startswith(("{", "[")):
+        try:
+            raw_parsed_data = json.loads(raw_stripped_output)
+            if isinstance(raw_parsed_data, dict):
+                return (
+                    True,
+                    _finalize_debug_payload(raw_parsed_data),
+                    "Parsed full debug JSON",
+                )
+        except ValueError:
+            pass
+
+    fenced_payload = _extract_fenced_debug_json(raw_output_text)
+    if isinstance(fenced_payload, dict):
+        return True, _finalize_debug_payload(fenced_payload), "Parsed fenced debug JSON"
+
+    output_text = extract_structured_text(raw_output)
+    fenced_payload = _extract_fenced_debug_json(output_text)
+    if isinstance(fenced_payload, dict):
+        return True, _finalize_debug_payload(fenced_payload), "Parsed fenced debug JSON"
+
+    stripped_output = output_text.strip()
+    success = False
+    parsed_data: Any = None
+    strategy_info = ""
+    if stripped_output.startswith(("{", "[")):
+        try:
+            parsed_data = json.loads(stripped_output)
+            success = True
+            strategy_info = "Parsed full debug JSON"
+        except ValueError:
+            success = False
+    if not success:
+        success, parsed_data, strategy_info = error_handler.attempt_json_parsing(
+            output_text, context="debug"
+        )
     if success and isinstance(parsed_data, dict):
-        if parsed_data.get("fix_type") == "command_fix":
-            parsed_data = dict(parsed_data)
-            fix_command = normalize_runnable_shell_command_fix(
-                str(parsed_data.get("fix") or "")
-            )
-            if is_runnable_shell_command_fix(fix_command):
-                parsed_data["fix"] = fix_command
-            else:
-                parsed_data["fix_type"] = "code_fix"
-        elif parsed_data.get("fix_type") == "code_fix":
-            fix_command = normalize_runnable_shell_command_fix(
-                str(parsed_data.get("fix") or "")
-            )
-            if is_runnable_shell_command_fix(fix_command):
-                parsed_data = dict(parsed_data)
-                parsed_data["fix_type"] = "command_fix"
-                parsed_data["fix"] = fix_command
-        return True, parsed_data, strategy_info
+        return True, _finalize_debug_payload(parsed_data), strategy_info
 
     inferred = _infer_debug_payload_from_text(
         output_text,
@@ -427,6 +447,73 @@ def coerce_debug_step_result(
         return True, inferred, "Inferred structured debug payload from prose"
 
     return False, None, strategy_info
+
+
+def _finalize_debug_payload(parsed_data: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(parsed_data)
+    replacement_ops = _normalize_debug_replacement_ops(payload)
+    if replacement_ops:
+        payload["fix_type"] = "ops_fix"
+        payload["ops"] = replacement_ops
+        return payload
+    if payload.get("fix_type") == "command_fix":
+        fix_command = normalize_runnable_shell_command_fix(
+            str(payload.get("fix") or "")
+        )
+        if is_runnable_shell_command_fix(fix_command):
+            payload["fix"] = fix_command
+        else:
+            payload["fix_type"] = "code_fix"
+    elif payload.get("fix_type") == "code_fix":
+        fix_command = normalize_runnable_shell_command_fix(
+            str(payload.get("fix") or "")
+        )
+        if is_runnable_shell_command_fix(fix_command):
+            payload["fix_type"] = "command_fix"
+            payload["fix"] = fix_command
+    return payload
+
+
+def _extract_fenced_debug_json(text: str) -> Optional[Dict[str, Any]]:
+    for match in re.finditer(
+        r"```(?:json)?\s*(\{.*?\})\s*```",
+        str(text or ""),
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        try:
+            parsed = json.loads(match.group(1))
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _normalize_debug_replacement_ops(
+    parsed_data: Dict[str, Any]
+) -> list[Dict[str, Any]]:
+    raw_ops = None
+    if isinstance(parsed_data.get("ops"), list):
+        raw_ops = parsed_data.get("ops")
+    elif isinstance(parsed_data.get("replacement_ops"), list):
+        raw_ops = parsed_data.get("replacement_ops")
+    elif isinstance(parsed_data.get("replacement_op"), dict):
+        raw_ops = [parsed_data.get("replacement_op")]
+    elif isinstance(parsed_data.get("op"), dict):
+        raw_ops = [parsed_data.get("op")]
+
+    if not raw_ops:
+        return []
+
+    normalized_ops: list[Dict[str, Any]] = []
+    for operation in raw_ops:
+        if not isinstance(operation, dict):
+            return []
+        normalized = normalize_file_op_shape(operation)
+        if not validate_file_op_shape(normalized):
+            return []
+        normalized_ops.append(normalized)
+    return normalized_ops
 
 
 def _infer_debug_payload_from_text(

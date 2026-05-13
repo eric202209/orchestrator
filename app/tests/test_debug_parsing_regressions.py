@@ -60,7 +60,12 @@ def test_debug_parser_still_accepts_json_payloads():
     assert success is True
     assert debug_data["fix_type"] == "command_fix"
     assert debug_data["fix"] == "rg --files . | head -50"
-    assert strategy in {"", "Found JSON in text", "Extracted from mixed content"}
+    assert strategy in {
+        "",
+        "Found JSON in text",
+        "Extracted from mixed content",
+        "Parsed full debug JSON",
+    }
 
 
 def test_debug_parser_demotes_json_command_fix_with_non_runnable_fix():
@@ -101,6 +106,62 @@ def test_debug_parser_promotes_json_code_fix_with_runnable_fix():
     assert success is True
     assert debug_data["fix_type"] == "command_fix"
     assert debug_data["fix"] == 'cd /tmp/project && node -e "console.log(1)"'
+
+
+def test_debug_parser_accepts_typed_structured_op_repair():
+    raw_result = {
+        "output": (
+            '{"fix_type":"replace_op","analysis":"Use a complete file rewrite",'
+            '"replacement_ops":[{"op":"write_file","path":"package.json",'
+            '"content":"{\\"version\\":\\"1.1.0\\"}\\n"}],'
+            '"confidence":"HIGH"}'
+        )
+    }
+
+    success, debug_data, _ = coerce_debug_step_result(
+        raw_result,
+        error_message="replace_in_file old text not found in package.json",
+        step={"ops": [{"op": "replace_in_file", "path": "package.json"}]},
+        extract_structured_text=extract_structured_text,
+    )
+
+    assert success is True
+    assert debug_data["fix_type"] == "ops_fix"
+    assert debug_data["ops"] == [
+        {
+            "op": "write_file",
+            "path": "package.json",
+            "content": '{"version":"1.1.0"}\n',
+        }
+    ]
+
+
+def test_debug_parser_accepts_fenced_typed_structured_op_repair():
+    raw_result = {
+        "output": (
+            "The replace op is stale.\n\n```json\n"
+            "{\n"
+            '  "fix_type": "replace_op",\n'
+            '  "analysis": "Rewrite the small JSON file.",\n'
+            '  "replacement_ops": [\n'
+            '    {"op": "write_file", "path": "package.json", "content": "{\\n  \\"version\\": \\"1.1.0\\"\\n}\\n"}\n'
+            "  ],\n"
+            '  "confidence": "HIGH"\n'
+            "}\n```"
+        )
+    }
+
+    success, debug_data, strategy = coerce_debug_step_result(
+        raw_result,
+        error_message="replace_in_file old text not found in package.json",
+        step={"ops": [{"op": "replace_in_file", "path": "package.json"}]},
+        extract_structured_text=extract_structured_text,
+    )
+
+    assert success is True
+    assert strategy in {"Parsed fenced debug JSON", "Parsed full debug JSON"}
+    assert debug_data["fix_type"] == "ops_fix"
+    assert debug_data["ops"][0]["op"] == "write_file"
 
 
 def test_plan_revision_prompt_serializes_original_plan():

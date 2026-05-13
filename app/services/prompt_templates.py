@@ -466,6 +466,8 @@ Return only a JSON array matching this shape. No markdown. No prose.
 7. If the failure mentions `raw_params` or shows a file path resolved under the wrong workspace root, fix that first by using the full absolute file-tool path inside `{project_dir}`
 8. If the failure is `read failed: ENOENT` for a guessed source path, do not guess another path blindly; first enumerate the actual workspace files with `rg --files .` or `find . -maxdepth 4 -type f`, then read only confirmed files
 9. Never assume a step description corresponds to a markdown file on disk; strings like `step-03-test-config-and-scripts.md` are guessed paths unless the workspace listing proves they exist
+10. If a structured `ops` item failed, prefer `replace_op` with `replacement_ops` using supported file operations instead of a prose `code_fix`
+11. For stale `replace_in_file old text not found`, prefer a `write_file` replacement op for the complete small file or a corrected `replace_in_file` op; do not retry the same stale op
 
 **CRITICAL — Do NOT write any files to disk during this debugging phase.**
 Do NOT create `debug_report.json`, `analysis.json`, `notes.md`, or any other file.
@@ -473,9 +475,12 @@ Return your analysis ONLY as JSON text in your response. The orchestrator reads 
 
 **Output (JSON in response text only):**
 {{
-  "fix_type": "code_fix" | "command_fix" | "revise_plan",
+  "fix_type": "code_fix" | "command_fix" | "replace_op" | "revise_plan",
   "analysis": "...",
   "fix": "...",
+  "replacement_ops": [
+    {{"op": "write_file", "path": "relative/path", "content": "complete file content"}}
+  ],
   "confidence": "HIGH" | "MEDIUM" | "LOW",
   "expected_files": ["optional", "replacement", "list"],
   "verification": "optional replacement verification command"
