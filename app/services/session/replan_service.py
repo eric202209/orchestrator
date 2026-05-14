@@ -120,10 +120,10 @@ def _build_fallback_summary(db: DBSession, session_id: int) -> str:
     return "\n".join(parts)[:_SUMMARY_CHAR_LIMIT]
 
 
-def _latest_failed_task_execution(
+def _latest_summary_task_execution(
     db: DBSession, session_id: int
 ) -> TaskExecution | None:
-    return (
+    failed_execution = (
         db.query(TaskExecution)
         .filter(
             TaskExecution.session_id == session_id,
@@ -131,6 +131,19 @@ def _latest_failed_task_execution(
         )
         .order_by(
             TaskExecution.completed_at.desc().nullslast(), TaskExecution.id.desc()
+        )
+        .first()
+    )
+    if failed_execution:
+        return failed_execution
+
+    return (
+        db.query(TaskExecution)
+        .filter(TaskExecution.session_id == session_id)
+        .order_by(
+            TaskExecution.completed_at.desc().nullslast(),
+            TaskExecution.started_at.desc().nullslast(),
+            TaskExecution.id.desc(),
         )
         .first()
     )
@@ -185,7 +198,7 @@ def _generate_summary_via_llm(db: DBSession, session_id: int) -> Optional[str]:
             f"## Error Logs\n{log_block}"
         )
 
-        task_execution = _latest_failed_task_execution(db, session_id)
+        task_execution = _latest_summary_task_execution(db, session_id)
         result = invoke_runtime_prompt(
             db,
             prompt,

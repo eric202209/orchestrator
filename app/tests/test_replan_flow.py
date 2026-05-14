@@ -28,6 +28,7 @@ from app.models import (
     SessionTask,
 )
 from app.services.session.replan_service import (
+    _generate_summary_via_llm,
     get_or_generate_failure_summary,
     store_operator_feedback,
     trigger_replan,
@@ -138,6 +139,42 @@ class TestGetOrGenerateFailureSummary:
         with pytest.raises(HTTPException) as exc_info:
             get_or_generate_failure_summary(db_session, 99999)
         assert exc_info.value.status_code == 404
+
+    def test_llm_summary_uses_latest_execution_when_no_failed_execution(
+        self,
+        db_session: Session,
+        stopped_session: SessionModel,
+        failed_task: Task,
+        monkeypatch,
+    ):
+        execution = TaskExecution(
+            session_id=stopped_session.id,
+            task_id=failed_task.id,
+            attempt_number=1,
+            status=TaskStatus.DONE,
+        )
+        db_session.add(execution)
+        db_session.commit()
+
+        observed: dict[str, int | None] = {}
+
+        def fake_invoke_runtime_prompt(db, prompt, **kwargs):
+            observed["task_id"] = kwargs["task_id"]
+            observed["task_execution_id"] = kwargs["task_execution_id"]
+            return {"output": "Generated failure summary with scoped diagnostics."}
+
+        monkeypatch.setattr(
+            "app.services.agents.agent_runtime.invoke_runtime_prompt",
+            fake_invoke_runtime_prompt,
+        )
+
+        summary = _generate_summary_via_llm(db_session, stopped_session.id)
+
+        assert summary == "Generated failure summary with scoped diagnostics."
+        assert observed == {
+            "task_id": failed_task.id,
+            "task_execution_id": execution.id,
+        }
 
 
 class TestStoreOperatorFeedback:
