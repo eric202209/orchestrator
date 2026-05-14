@@ -164,6 +164,62 @@ def get_task_report_path(project_root: Path, task: Task) -> Optional[Path]:
     return project_root / f"task_report_{task.id}.md"
 
 
+def _coerce_int_set(values: Any) -> set[int]:
+    result: set[int] = set()
+    if not isinstance(values, list):
+        return result
+    for value in values:
+        try:
+            result.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _state_manager_unsynced_prior_summary(
+    state_data: dict[str, Any],
+    current_task: Task,
+    prior_tasks: list[Task],
+) -> Optional[str]:
+    """Return a blocking summary only when unsynced state involves dependencies.
+
+    Older project state-manager files can remain `unsynced` because a previous
+    attempt of the same task failed. That is legacy/unknown retry state, not
+    proof that prior canonical project work is unsafe to verify.
+    """
+
+    if state_data.get("status") != "unsynced":
+        return None
+
+    prior_task_ids = {task.id for task in prior_tasks}
+    failed_prior_ids = (
+        _coerce_int_set(state_data.get("failed_or_cancelled_task_ids")) & prior_task_ids
+    )
+
+    inconsistent_prior = []
+    raw_inconsistent = state_data.get("inconsistent_completed_tasks")
+    if isinstance(raw_inconsistent, list):
+        for item in raw_inconsistent:
+            if not isinstance(item, dict):
+                continue
+            try:
+                task_id = int(item.get("task_id"))
+            except (TypeError, ValueError):
+                continue
+            if task_id in prior_task_ids:
+                inconsistent_prior.append(item)
+
+    if failed_prior_ids:
+        return "prior failed/cancelled tasks: " + ", ".join(
+            str(task_id) for task_id in sorted(failed_prior_ids)[:5]
+        )
+    if inconsistent_prior:
+        return "prior inconsistent completed tasks: " + ", ".join(
+            str(item.get("task_id")) for item in inconsistent_prior[:5]
+        )
+    return None
+
+
 def run_virtual_merge_gate(
     db: Any,
     project: Optional[Project],
@@ -214,10 +270,16 @@ def run_virtual_merge_gate(
     if state_path.exists():
         try:
             state_data = json.loads(state_path.read_text(encoding="utf-8"))
-            if state_data.get("status") == "unsynced":
+            unsynced_summary = _state_manager_unsynced_prior_summary(
+                state_data,
+                current_task,
+                prior_tasks,
+            )
+            if unsynced_summary:
                 return (
                     "Virtual merge gate failed: project state manager is UNSYNCED. "
-                    "Resolve earlier task inconsistencies before verify/refine."
+                    "Resolve earlier task inconsistencies before verify/refine "
+                    f"({unsynced_summary})."
                 )
         except Exception:
             return "Virtual merge gate failed: state manager file is unreadable"

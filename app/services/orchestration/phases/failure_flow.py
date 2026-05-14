@@ -17,6 +17,7 @@ from app.services.orchestration.persistence import (
 )
 from app.services.orchestration.run_state import mark_task_attempt_failed
 from app.services.orchestration.types import OrchestrationRunContext
+from app.services.workspace.project_mutation_lock import ProjectMutationLockError
 from app.services.prompt_templates import OrchestrationStatus
 
 
@@ -27,6 +28,33 @@ def _task_execution_id_from_context(ctx: Optional[Any]) -> Optional[int]:
     if isinstance(task_execution_id, bool) or not isinstance(task_execution_id, int):
         return None
     return task_execution_id
+
+
+def _task_execution_for_context(
+    db: Any,
+    ctx: Optional[Any],
+) -> Optional[TaskExecution]:
+    task_execution_id = _task_execution_id_from_context(ctx)
+    if task_execution_id is None:
+        return None
+    return db.query(TaskExecution).filter(TaskExecution.id == task_execution_id).first()
+
+
+def _session_has_other_active_execution(
+    db: Any,
+    *,
+    session_id: Optional[int],
+    current_task_execution_id: Optional[int],
+) -> bool:
+    if session_id is None:
+        return False
+    query = db.query(TaskExecution).filter(
+        TaskExecution.session_id == session_id,
+        TaskExecution.status.in_([TaskStatus.PENDING, TaskStatus.RUNNING]),
+    )
+    if current_task_execution_id is not None:
+        query = query.filter(TaskExecution.id != current_task_execution_id)
+    return query.first() is not None
 
 
 def handle_task_failure(
@@ -66,8 +94,12 @@ def handle_task_failure(
     is_planning_lock_wait_timeout = runtime_diagnostics.get(
         "timeout_boundary"
     ) == "planning_lock_wait" or "OpenClaw planning lock wait timed out" in str(exc)
+    is_project_mutation_lock_conflict = isinstance(exc, ProjectMutationLockError)
     has_retry_capacity = (
-        should_retry and retry_count < max_retries and not is_planning_lock_wait_timeout
+        should_retry
+        and retry_count < max_retries
+        and not is_planning_lock_wait_timeout
+        and not is_project_mutation_lock_conflict
     )
     is_timeout = (
         "time limit" in str(exc).lower()
@@ -107,9 +139,12 @@ def handle_task_failure(
     if not session_task_link:
         session_task_link = get_latest_session_task_link_fn(db, session_id, task_id)
     completed_at = datetime.now(UTC)
+    task_execution = _task_execution_for_context(db, ctx)
+    task_execution_id = task_execution.id if task_execution else None
     mark_task_attempt_failed(
         task=task,
         session_task_link=session_task_link,
+        task_execution=task_execution,
         error_message=str(exc),
         completed_at=completed_at,
         workspace_status=("blocked" if task and task.task_subfolder else "not_created"),
@@ -131,10 +166,20 @@ def handle_task_failure(
         else f"Task {task_id} failed: {str(exc)}"
     )
 
+    other_active_execution = _session_has_other_active_execution(
+        db,
+        session_id=session_id,
+        current_task_execution_id=task_execution_id,
+    )
     if session:
-        session.status = "paused"
-        session.is_active = False
-        set_session_alert(session, "error", alert_message[:2000])
+        if other_active_execution:
+            session.status = "running"
+            session.is_active = True
+            set_session_alert(session, "warning", alert_message[:2000])
+        else:
+            session.status = "paused"
+            session.is_active = False
+            set_session_alert(session, "error", alert_message[:2000])
 
     if is_timeout and task:
         task.error_message += " (Task timed out after 5 minutes)"
@@ -150,9 +195,11 @@ def handle_task_failure(
                 status="error",
                 message=f"[ORCHESTRATION] Task {task_id} failed: {exc}",
                 details={
-                    "retryable": should_retry,
+                    "retryable": has_retry_capacity,
+                    "error_handler_retryable": should_retry,
                     "is_timeout": is_timeout,
                     "planning_lock_wait_timeout": is_planning_lock_wait_timeout,
+                    "project_mutation_lock_conflict": is_project_mutation_lock_conflict,
                 },
             )
             save_orchestration_checkpoint_fn(
@@ -295,20 +342,6 @@ def handle_task_failure(
             "[ORCHESTRATION] Skipped workspace restore for task %s because the failure was a completion/baseline validation issue",
             task_id,
         )
-
-    task_execution_id = _task_execution_id_from_context(ctx)
-    if task_execution_id:
-        task_execution = (
-            db.query(TaskExecution)
-            .filter(TaskExecution.id == task_execution_id)
-            .first()
-        )
-        if task_execution:
-            mark_task_attempt_failed(
-                task=None,
-                task_execution=task_execution,
-                completed_at=datetime.now(UTC),
-            )
 
     db.commit()
     write_project_state_snapshot_fn(db, project, task, session_id)

@@ -10,6 +10,7 @@ from app.services.orchestration.phases.planning_flow import (
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.planning.planner_service import PlannerService
 from app.services.session.session_runtime_service import build_task_execution_prompt
+from app.services.workspace.project_mutation_lock import ProjectMutationLockError
 
 
 class _FakeSelfTask:
@@ -346,6 +347,118 @@ def test_planning_lock_wait_timeout_terminalizes_execution_without_retry(db_sess
     assert session.is_active is False
     assert task_execution.status == TaskStatus.FAILED
     assert task_execution.completed_at is not None
+
+
+def test_project_mutation_lock_conflict_terminalizes_without_pausing_active_session(
+    db_session, tmp_path
+):
+    project = Project(name="Project Mutation Lock Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    session = SessionModel(
+        project_id=project.id,
+        name="Project Mutation Lock Session",
+        status="running",
+        execution_mode="manual",
+        is_active=True,
+    )
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+
+    current_task = Task(
+        project_id=project.id,
+        title="Task blocked by project writer",
+        description="Attempt canonical-root write",
+        status=TaskStatus.RUNNING,
+        task_subfolder="task-blocked",
+    )
+    other_task = Task(
+        project_id=project.id,
+        title="Task holding project writer",
+        description="Already writing canonical root",
+        status=TaskStatus.RUNNING,
+        task_subfolder="task-active",
+    )
+    db_session.add_all([current_task, other_task])
+    db_session.commit()
+    db_session.refresh(current_task)
+    db_session.refresh(other_task)
+
+    current_execution = TaskExecution(
+        session_id=session.id,
+        task_id=current_task.id,
+        attempt_number=1,
+        status=TaskStatus.PENDING,
+    )
+    other_execution = TaskExecution(
+        session_id=session.id,
+        task_id=other_task.id,
+        attempt_number=1,
+        status=TaskStatus.RUNNING,
+    )
+    db_session.add_all([current_execution, other_execution])
+    db_session.commit()
+    db_session.refresh(current_execution)
+    db_session.refresh(other_execution)
+
+    ctx = OrchestrationRunContext(
+        db=db_session,
+        session=session,
+        project=project,
+        task=current_task,
+        session_task_link=None,
+        session_id=session.id,
+        task_id=current_task.id,
+        prompt=current_task.description,
+        timeout_seconds=300,
+        execution_profile="full_lifecycle",
+        validation_profile="implementation",
+        runs_in_canonical_baseline=True,
+        orchestration_state=None,
+        runtime_service=None,
+        task_service=None,
+        logger=logging.getLogger(__name__),
+        emit_live=lambda *_args, **_kwargs: None,
+        error_handler=type(
+            "StubErrorHandler",
+            (),
+            {"should_retry": staticmethod(lambda _exc, _context: True)},
+        )(),
+        task_execution_id=current_execution.id,
+        restore_workspace_snapshot_if_needed=None,
+    )
+
+    try:
+        handle_task_failure(
+            self_task=_UnexpectedRetrySelfTask(),
+            ctx=ctx,
+            exc=ProjectMutationLockError(
+                project_id=project.id,
+                operation="execute_canonical_root_task",
+                lock_path=tmp_path / "project.lock",
+            ),
+            get_latest_session_task_link_fn=lambda *_args, **_kwargs: None,
+            write_project_state_snapshot_fn=lambda *_args, **_kwargs: None,
+            save_orchestration_checkpoint_fn=lambda *_args, **_kwargs: None,
+            record_live_log_fn=lambda *_args, **_kwargs: None,
+        )
+    except ProjectMutationLockError:
+        pass
+
+    db_session.refresh(current_task)
+    db_session.refresh(current_execution)
+    db_session.refresh(other_execution)
+    db_session.refresh(session)
+
+    assert current_task.status == TaskStatus.FAILED
+    assert current_execution.status == TaskStatus.FAILED
+    assert current_execution.completed_at is not None
+    assert other_execution.status == TaskStatus.RUNNING
+    assert session.status == "running"
+    assert session.is_active is True
 
 
 def test_initial_planning_timeout_terminalizes_task_execution(db_session, monkeypatch):
