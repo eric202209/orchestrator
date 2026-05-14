@@ -116,6 +116,29 @@ const getStepDetailEntries = (
     .filter((entry) => entry.codes.length > 0);
 };
 
+const humanizeSeconds = (totalSeconds: number): string => {
+  if (totalSeconds >= 86400) return `${(totalSeconds / 86400).toFixed(1)} days`;
+  if (totalSeconds >= 3600) {
+    const h = Math.floor(totalSeconds / 3600);
+    const m = Math.floor((totalSeconds % 3600) / 60);
+    return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  }
+  if (totalSeconds >= 60) {
+    const m = Math.floor(totalSeconds / 60);
+    const s = Math.floor(totalSeconds % 60);
+    return s > 0 ? `${m}m ${s}s` : `${m}m`;
+  }
+  return `${Math.round(totalSeconds)}s`;
+};
+
+const humanizeAlertMessage = (message: string): string =>
+  message.replace(/\b(\d+(?:\.\d+)?)s\b/g, (_, n: string) => humanizeSeconds(Number(n)));
+
+const splitReasonIntoBullets = (reason: string): string[] => {
+  const parts = reason.split(/,\s+(?=[A-Z])/);
+  return parts.length >= 2 ? parts.map((p) => p.trim()).filter(Boolean) : [];
+};
+
 const getDiagnosticBadges = (
   diagnostics?: FailureDiagnostics | Record<string, unknown> | null
 ): string[] => {
@@ -588,7 +611,7 @@ export function SessionConnectionNotice({
       {session.last_alert_message && (
         <div className="rounded-lg border border-amber-700/50 bg-amber-900/20 p-4">
           <p className="text-sm text-amber-300">
-            Alert{session.last_alert_at ? ` • ${new Date(session.last_alert_at).toLocaleString()}` : ''}: {session.last_alert_message}
+            Alert{session.last_alert_at ? ` • ${new Date(session.last_alert_at).toLocaleString()}` : ''}: {humanizeAlertMessage(session.last_alert_message)}
           </p>
         </div>
       )}
@@ -623,6 +646,14 @@ export function SessionStats({
         <p className="text-sm font-medium text-white font-mono">
           {session.started_at ? formatDateTime(session.started_at) : 'N/A'}
         </p>
+        {session.stopped_at && (
+          <>
+            <p className="mt-2 mb-1 text-xs text-slate-400">Stopped</p>
+            <p className="text-sm font-medium text-slate-300 font-mono">
+              {formatDateTime(session.stopped_at)}
+            </p>
+          </>
+        )}
       </div>
     </div>
   );
@@ -1126,6 +1157,7 @@ export function SessionTimelinePanel({
   offTrackMoment = null,
   repairGenealogy = [],
 }: SessionTimelinePanelProps) {
+  const [showAllDecision, setShowAllDecision] = useState(false);
   const getTimelineImportance = (event: TimelineEvent): TimelineEventImportance => {
     if (event.importance) return event.importance;
     const text = `${event.title} ${event.detail}`.toLowerCase();
@@ -1248,7 +1280,21 @@ export function SessionTimelinePanel({
                     </span>
                   )}
                 </div>
-                <p className="break-words text-sm text-slate-100">{offTrackMoment.reason}</p>
+                {(() => {
+                  const bullets = splitReasonIntoBullets(offTrackMoment.reason);
+                  return bullets.length >= 2 ? (
+                    <ul className="space-y-1.5 text-sm text-slate-100">
+                      {bullets.map((b, i) => (
+                        <li key={i} className="flex gap-2">
+                          <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" />
+                          <span>{b}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="break-words text-sm text-slate-100">{offTrackMoment.reason}</p>
+                  );
+                })()}
                 <p className="break-words text-xs text-slate-400">
                   {offTrackMoment.event_type}
                   {offTrackMoment.event_id ? ` • ${offTrackMoment.event_id}` : ''}
@@ -1336,129 +1382,142 @@ export function SessionTimelinePanel({
           <h3 className="text-sm font-semibold text-white">Decision Timeline</h3>
           <span className="text-xs text-slate-400">{decisionEvents.length} events</span>
         </div>
-        <div className="max-h-72 space-y-2 overflow-y-auto text-sm">
-          {decisionEvents.length === 0 ? (
-            <p className="text-slate-500">
-              No decision timeline events yet.
-            </p>
-          ) : (
-            decisionEvents
-              .slice()
-              .reverse()
-              .map((event) => {
-                const diagnosticBadges = getDiagnosticBadges(event.details);
-                const diagnosticReasons = getDiagnosticReasons(event.details);
-                const operatorEvidence = getDecisionEventEvidence(event);
+        {(() => {
+          const allDecision = decisionEvents.slice().reverse();
+          const visibleDecision = showAllDecision ? allDecision : allDecision.slice(0, 6);
+          return (
+            <div className="space-y-2 text-sm">
+              {allDecision.length === 0 ? (
+                <p className="text-slate-500">No decision timeline events yet.</p>
+              ) : (
+                <>
+                  {visibleDecision.map((event) => {
+                    const diagnosticBadges = getDiagnosticBadges(event.details);
+                    const diagnosticReasons = getDiagnosticReasons(event.details);
+                    const operatorEvidence = getDecisionEventEvidence(event);
 
-                return (
-                  <div key={event.id} className="min-w-0 overflow-hidden rounded-md border border-[color:var(--oc-border-soft)] p-3">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span
-                          className={cn(
-                            'text-xs font-medium uppercase',
-                            event.severity === 'error' && 'text-red-400',
-                            event.severity === 'warning' && 'text-amber-400',
-                            event.severity !== 'error' &&
-                              event.severity !== 'warning' &&
-                              'text-primary-300'
-                          )}
-                        >
-                          {event.title}
-                        </span>
-                        <span className="rounded-sm border border-[color:var(--oc-border-soft)] px-1.5 py-0.5 text-xs uppercase text-slate-400">
-                          {event.phase}
-                        </span>
-                        {event.task_id !== null && event.task_id !== undefined && (
-                          <span className="text-xs text-slate-500">
-                            Task {event.task_id}
+                    return (
+                      <div key={event.id} className="min-w-0 overflow-hidden rounded-md border border-[color:var(--oc-border-soft)] p-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span
+                              className={cn(
+                                'text-xs font-medium uppercase',
+                                event.severity === 'error' && 'text-red-400',
+                                event.severity === 'warning' && 'text-amber-400',
+                                event.severity !== 'error' &&
+                                  event.severity !== 'warning' &&
+                                  'text-primary-300'
+                              )}
+                            >
+                              {event.title}
+                            </span>
+                            <span className="rounded-sm border border-[color:var(--oc-border-soft)] px-1.5 py-0.5 text-xs uppercase text-slate-400">
+                              {event.phase}
+                            </span>
+                            {event.task_id !== null && event.task_id !== undefined && (
+                              <span className="text-xs text-slate-500">
+                                Task {event.task_id}
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-xs text-slate-400">
+                            {formatDateTime(event.timestamp)}
                           </span>
+                        </div>
+                        <p className="mt-1 break-words text-slate-200">{event.summary}</p>
+                        {operatorEvidence && (
+                          <div className="mt-2 grid gap-2 rounded-md border border-orange-400/25 bg-orange-400/10 p-2 text-xs sm:grid-cols-2">
+                            <p className="break-words text-slate-300">
+                              <span className="text-slate-500">Boundary:</span>{' '}
+                              <span className="font-medium text-slate-100">{operatorEvidence.boundary}</span>
+                            </p>
+                            <p className="break-words text-slate-300">
+                              <span className="text-slate-500">Outcome:</span>{' '}
+                              <span className="font-medium text-slate-100">{operatorEvidence.outcome}</span>
+                            </p>
+                            {operatorEvidence.operation && (
+                              <p className="break-words font-mono text-slate-200">
+                                {operatorEvidence.operation}
+                              </p>
+                            )}
+                            {operatorEvidence.targetPath && (
+                              <p className="break-words font-mono text-slate-200">
+                                {operatorEvidence.targetPath}
+                              </p>
+                            )}
+                            <p className="break-words text-orange-200 sm:col-span-2">
+                              {operatorEvidence.nextAction}
+                            </p>
+                            {operatorEvidence.operations.length > 0 && (
+                              <div className="flex flex-wrap gap-1.5 sm:col-span-2">
+                                {operatorEvidence.operations.map((operation, index) => (
+                                  <span
+                                    key={`${operation.op}-${operation.path || 'no-path'}-${index}`}
+                                    className="rounded-sm border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-1.5 py-0.5 font-mono text-xs text-slate-200"
+                                  >
+                                    {operation.op}
+                                    {operation.path ? ` ${operation.path}` : ''}
+                                    {operation.outcome ? ` (${humanizeEvidenceValue(operation.outcome)})` : ''}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
                         )}
-                      </div>
-                      <span className="text-xs text-slate-400">
-                        {formatDateTime(event.timestamp)}
-                      </span>
-                    </div>
-                    <p className="mt-1 break-words text-slate-200">{event.summary}</p>
-                    {operatorEvidence && (
-                      <div className="mt-2 grid gap-2 rounded-md border border-orange-400/25 bg-orange-400/10 p-2 text-xs sm:grid-cols-2">
-                        <p className="break-words text-slate-300">
-                          <span className="text-slate-500">Boundary:</span>{' '}
-                          <span className="font-medium text-slate-100">{operatorEvidence.boundary}</span>
-                        </p>
-                        <p className="break-words text-slate-300">
-                          <span className="text-slate-500">Outcome:</span>{' '}
-                          <span className="font-medium text-slate-100">{operatorEvidence.outcome}</span>
-                        </p>
-                        {operatorEvidence.operation && (
-                          <p className="break-words font-mono text-slate-200">
-                            {operatorEvidence.operation}
-                          </p>
-                        )}
-                        {operatorEvidence.targetPath && (
-                          <p className="break-words font-mono text-slate-200">
-                            {operatorEvidence.targetPath}
-                          </p>
-                        )}
-                        <p className="break-words text-orange-200 sm:col-span-2">
-                          {operatorEvidence.nextAction}
-                        </p>
-                        {operatorEvidence.operations.length > 0 && (
-                          <div className="flex flex-wrap gap-1.5 sm:col-span-2">
-                            {operatorEvidence.operations.map((operation, index) => (
+                        {diagnosticBadges.length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {diagnosticBadges.map((badge) => (
                               <span
-                                key={`${operation.op}-${operation.path || 'no-path'}-${index}`}
-                                className="rounded-sm border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-1.5 py-0.5 font-mono text-xs text-slate-200"
+                                key={badge}
+                                className="rounded-sm border border-red-600/60 bg-red-950/40 px-1.5 py-0.5 text-xs text-red-300"
                               >
-                                {operation.op}
-                                {operation.path ? ` ${operation.path}` : ''}
-                                {operation.outcome ? ` (${humanizeEvidenceValue(operation.outcome)})` : ''}
+                                {badge}
                               </span>
                             ))}
                           </div>
                         )}
-                      </div>
-                    )}
-                    {diagnosticBadges.length > 0 && (
-                      <div className="mt-2 flex flex-wrap gap-1.5">
-                        {diagnosticBadges.map((badge) => (
-                          <span
-                            key={badge}
-                            className="rounded-sm border border-red-600/60 bg-red-950/40 px-1.5 py-0.5 text-xs text-red-300"
-                          >
-                            {badge}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                    {diagnosticReasons.length > 0 && (
-                      <div className="mt-2 space-y-1">
-                        {diagnosticReasons.map((reason) => (
-                          <p key={reason} className="break-words text-xs text-slate-400">
-                            {reason}
-                          </p>
-                        ))}
-                      </div>
-                    )}
-                    {(event.knowledge_usage_ids.length > 0 || event.intervention_id) && (
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        {event.knowledge_usage_ids.length > 0 && (
-                          <span className="rounded-sm border border-violet-900/70 bg-violet-950/30 px-1.5 py-0.5 text-xs text-violet-300">
-                            Knowledge phase context
-                          </span>
+                        {diagnosticReasons.length > 0 && (
+                          <div className="mt-2 space-y-1">
+                            {diagnosticReasons.map((reason) => (
+                              <p key={reason} className="break-words text-xs text-slate-400">
+                                {reason}
+                              </p>
+                            ))}
+                          </div>
                         )}
-                        {event.intervention_id && (
-                          <span className="rounded-sm border border-amber-900/70 bg-amber-950/30 px-1.5 py-0.5 text-xs text-amber-300">
-                            Intervention #{event.intervention_id}
-                          </span>
+                        {(event.knowledge_usage_ids.length > 0 || event.intervention_id) && (
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {event.knowledge_usage_ids.length > 0 && (
+                              <span className="rounded-sm border border-violet-900/70 bg-violet-950/30 px-1.5 py-0.5 text-xs text-violet-300">
+                                Knowledge phase context
+                              </span>
+                            )}
+                            {event.intervention_id && (
+                              <span className="rounded-sm border border-amber-900/70 bg-amber-950/30 px-1.5 py-0.5 text-xs text-amber-300">
+                                Intervention #{event.intervention_id}
+                              </span>
+                            )}
+                          </div>
                         )}
                       </div>
-                    )}
-                  </div>
-                );
-              })
-          )}
-        </div>
+                    );
+                  })}
+                  {allDecision.length > 6 && (
+                    <button
+                      onClick={() => setShowAllDecision((v) => !v)}
+                      className="w-full rounded-md border border-[color:var(--oc-border-soft)] py-2 text-xs text-slate-400 transition-colors hover:border-[color:var(--oc-border)] hover:text-slate-200"
+                    >
+                      {showAllDecision
+                        ? 'Show fewer'
+                        : `Show all ${allDecision.length} events`}
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          );
+        })()}
       </div>
 
       <div className="min-w-0 overflow-hidden rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-surface)] p-4">
@@ -1492,11 +1551,11 @@ export function SessionTimelinePanel({
                 </div>
               </div>
 
-              <div>
-                <div className="mb-2 flex items-center justify-between">
-                  <h4 className="text-xs font-semibold uppercase text-slate-300">Work Details</h4>
+              <details className="group">
+                <summary className="mb-2 flex cursor-pointer list-none items-center justify-between">
+                  <h4 className="text-xs font-semibold uppercase text-slate-400 group-open:text-slate-300">Work Details</h4>
                   <span className="text-xs text-slate-500">{secondaryTimelineEvents.length}</span>
-                </div>
+                </summary>
                 <div className="max-h-64 space-y-2 overflow-y-auto">
                   {secondaryTimelineEvents.length === 0 ? (
                     <p className="text-xs text-slate-500">No secondary work details yet.</p>
@@ -1506,7 +1565,7 @@ export function SessionTimelinePanel({
                     )
                   )}
                 </div>
-              </div>
+              </details>
             </>
           )}
         </div>
@@ -1554,7 +1613,7 @@ export function SessionTimelinePanel({
                   </div>
                   <p className="mt-2 break-words text-sm font-medium text-slate-200">{span.title}</p>
                   <p className="mt-1 break-words text-sm text-slate-300">{span.summary}</p>
-                  <p className="mt-1 text-xs text-slate-400">{span.event_count} linked events</p>
+                  <p className="mt-1 text-xs text-slate-400">{span.event_count} linked event{span.event_count === 1 ? '' : 's'}</p>
                 </div>
               ))}
             </div>

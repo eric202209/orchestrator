@@ -31,6 +31,7 @@ function ProjectsList() {
   const [updatingProject, setUpdatingProject] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [reviewCounts, setReviewCounts] = useState<Record<number, number>>({});
+  const [taskCounts, setTaskCounts] = useState<Record<number, number>>({});
 
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -87,11 +88,14 @@ function ProjectsList() {
       ]);
       setProjects(projectsResponse.data);
       const counts: Record<number, number> = {};
+      const tCounts: Record<number, number> = {};
       (tasksResponse.data || []).forEach((task) => {
+        tCounts[task.project_id] = (tCounts[task.project_id] || 0) + 1;
         if (!taskNeedsReview(task)) return;
         counts[task.project_id] = (counts[task.project_id] || 0) + 1;
       });
       setReviewCounts(counts);
+      setTaskCounts(tCounts);
     } catch (error) {
       console.error('Failed to fetch projects:', error);
     } finally {
@@ -337,11 +341,24 @@ function ProjectsList() {
                     {project.name}
                   </h3>
                 )}
+                {project.description && (
+                  <p className="text-xs text-slate-500 mb-2 line-clamp-2 leading-relaxed">
+                    {project.description}
+                  </p>
+                )}
                 <div className="flex items-center justify-between text-xs text-slate-500">
-                  <span className="flex items-center gap-1">
-                    <FileText className="h-3 w-3" />
-                    {project.branch}
-                  </span>
+                  <div className="flex items-center gap-2.5">
+                    <span className="flex items-center gap-1">
+                      <GitBranch className="h-3 w-3" />
+                      {project.branch}
+                    </span>
+                    {(taskCounts[project.id] || 0) > 0 && (
+                      <span className="flex items-center gap-1">
+                        <FileText className="h-3 w-3" />
+                        {taskCounts[project.id]} task{taskCounts[project.id] !== 1 ? 's' : ''}
+                      </span>
+                    )}
+                  </div>
                   <span>{formatDistanceToNow(new Date(project.created_at), { addSuffix: true })}</span>
                 </div>
                 {reviewCounts[project.id] > 0 && (

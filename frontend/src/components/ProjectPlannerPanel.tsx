@@ -808,31 +808,36 @@ export function ProjectPlannerPanel({
                 placeholder="Describe the feature, constraints, and what a good plan should optimize for."
               />
             </div>
-            <div className="grid gap-3">
-              <button
-                type="button"
-                onClick={() => setSourceBrain('local')}
-                className={`rounded-xl border px-4 py-3 text-left transition-colors ${
-                  sourceBrain === 'local'
-                    ? 'border-primary-500 bg-primary-500/10 text-white'
-                    : 'border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] text-slate-300'
-                }`}
-              >
-                <div className="font-medium">Local brain</div>
-                <div className="mt-1 text-xs text-slate-400">Repo-aware planning with OpenClaw</div>
-              </button>
-              <button
-                type="button"
-                onClick={() => setSourceBrain('cloud')}
-                className={`rounded-xl border px-4 py-3 text-left transition-colors ${
-                  sourceBrain === 'cloud'
-                    ? 'border-primary-500 bg-primary-500/10 text-white'
-                    : 'border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] text-slate-300'
-                }`}
-              >
-                <div className="font-medium">Cloud brain</div>
-                <div className="mt-1 text-xs text-slate-400">Keep this for architecture-heavy prompts</div>
-              </button>
+            <div>
+              <label className="mb-2 block text-xs font-semibold uppercase tracking-wider text-slate-400">
+                Planning source
+              </label>
+              <div className="flex gap-1 rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-1">
+                <button
+                  type="button"
+                  onClick={() => setSourceBrain('local')}
+                  className={`flex-1 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+                    sourceBrain === 'local'
+                      ? 'bg-primary-500/20 text-white'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                  title="Repo-aware planning with OpenClaw"
+                >
+                  Local
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSourceBrain('cloud')}
+                  className={`flex-1 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+                    sourceBrain === 'cloud'
+                      ? 'bg-primary-500/20 text-white'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                  title="Architecture-heavy prompts"
+                >
+                  Cloud
+                </button>
+              </div>
             </div>
             <Button
               onClick={handleStartSession}

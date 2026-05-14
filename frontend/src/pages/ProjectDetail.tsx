@@ -222,6 +222,22 @@ function ProjectDetail() {
     (total, item) => total + (item.change_set?.changed_count || 0),
     0
   );
+  const getTaskIconColors = (status: string) => {
+    switch (status) {
+      case 'done': return 'text-emerald-400 bg-emerald-400/10';
+      case 'running': return 'text-blue-400 bg-blue-400/10';
+      case 'failed': return 'text-red-400 bg-red-400/10';
+      case 'cancelled': return 'text-slate-500 bg-slate-500/10';
+      default: return 'text-slate-400 bg-slate-400/10';
+    }
+  };
+
+  const truncateSubfolder = (subfolder: string) => {
+    const segments = subfolder.split('/');
+    const last = segments[segments.length - 1];
+    return last.length > 32 ? `${last.slice(0, 29)}…` : last;
+  };
+
   const extractArchivePath = (task: Task) => {
     const match = (task.promotion_note || '').match(
       /Archived (?:retained|previous) workspace(?: for repair rerun)? at (.+?)(?:\n|$)/
@@ -1090,20 +1106,22 @@ function ProjectDetail() {
                         <p className="mt-0.5 text-xs text-slate-500">{workspaceOverview.baseline.path}</p>
                       )}
                     </div>
-                    <button
-                      onClick={handleRebuildBaseline}
-                      disabled={rebuildingBaseline || (workspaceOverview.baseline.promoted_task_count || 0) === 0}
-                      className="rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-1.5 text-xs text-slate-300 transition-colors hover:border-[color:var(--oc-border)] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      {rebuildingBaseline ? 'Rebuilding...' : 'Rebuild Baseline'}
-                    </button>
-                    <button
-                      onClick={handleCleanupWorkspaces}
-                      disabled={cleaningWorkspaces}
-                      className="rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-1.5 text-xs text-slate-300 transition-colors hover:border-[color:var(--oc-border)] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      {cleaningWorkspaces ? 'Checking...' : 'Archive Blocked Workspaces'}
-                    </button>
+                    <div className="flex gap-2 shrink-0">
+                      <button
+                        onClick={handleRebuildBaseline}
+                        disabled={rebuildingBaseline || (workspaceOverview.baseline.promoted_task_count || 0) === 0}
+                        className="rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-1.5 text-xs text-slate-300 transition-colors hover:border-[color:var(--oc-border)] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {rebuildingBaseline ? 'Rebuilding…' : 'Rebuild Baseline'}
+                      </button>
+                      <button
+                        onClick={handleCleanupWorkspaces}
+                        disabled={cleaningWorkspaces}
+                        className="rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-1.5 text-xs text-slate-300 transition-colors hover:border-[color:var(--oc-border)] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {cleaningWorkspaces ? 'Checking…' : 'Archive Blocked'}
+                      </button>
+                    </div>
                   </div>
                   {workspaceCountItems.length > 0 && (
                     <div className="flex flex-wrap gap-3">
@@ -1117,17 +1135,23 @@ function ProjectDetail() {
                   )}
                   {workspaceOverview.audit && (
                     <div className="mt-3 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2">
-                      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-400">
-                        <span>Retained task workspaces: {workspaceOverview.audit.retained_task_workspace_count}</span>
-                        <span>Unpromoted completed: {workspaceOverview.audit.unpromoted_done_workspace_count}</span>
-                        <span>Pending file diffs: {pendingWorkspaceChangeCount}</span>
-                        {workspaceOverview.audit.transient_artifact_names.length > 0 && (
-                          <span>Transient: {workspaceOverview.audit.transient_artifact_names.slice(0, 4).join(', ')}</span>
-                        )}
+                      <div className="grid grid-cols-3 gap-3 text-xs">
+                        <div>
+                          <p className="text-slate-500 uppercase tracking-wide text-[10px]">Retained</p>
+                          <p className="mt-0.5 font-medium text-slate-300">{workspaceOverview.audit.retained_task_workspace_count}</p>
+                        </div>
+                        <div>
+                          <p className="text-slate-500 uppercase tracking-wide text-[10px]">Unpromoted</p>
+                          <p className="mt-0.5 font-medium text-slate-300">{workspaceOverview.audit.unpromoted_done_workspace_count}</p>
+                        </div>
+                        <div>
+                          <p className="text-slate-500 uppercase tracking-wide text-[10px]">Pending diffs</p>
+                          <p className={`mt-0.5 font-medium ${pendingWorkspaceChangeCount > 0 ? 'text-amber-300' : 'text-slate-300'}`}>{pendingWorkspaceChangeCount}</p>
+                        </div>
                       </div>
                       {duplicatedScaffoldItems.length > 0 && (
                         <p className="mt-2 text-xs text-amber-300">
-                          Repeated scaffold artifacts: {duplicatedScaffoldItems.slice(0, 4).map(([name, count]) => `${name} x${count}`).join(', ')}
+                          Repeated: {duplicatedScaffoldItems.slice(0, 4).map(([name, count]) => `${name} ×${count}`).join(', ')}
                         </p>
                       )}
                       {workspaceOverview.audit.issues.length > 0 && (
@@ -1177,7 +1201,7 @@ function ProjectDetail() {
                   <div key={task.id} className="px-4 py-4 hover:bg-[color:var(--oc-surface-raised)] transition-colors">
                     <div className="flex items-start justify-between gap-4">
                       <div className="flex items-start gap-3 flex-1 min-w-0">
-                        <div className="p-1.5 rounded-md text-blue-400 bg-blue-400/10 mt-0.5 shrink-0">
+                        <div className={`p-1.5 rounded-md mt-0.5 shrink-0 ${getTaskIconColors(task.status)}`}>
                           <Activity className="h-4 w-4" />
                         </div>
                         <div className="flex-1 min-w-0">
@@ -1190,8 +1214,11 @@ function ProjectDetail() {
                               {formatWorkspaceStatus(task.workspace_status)}
                             </span>
                             {task.task_subfolder && !isArchivedPromotedWorkspace(task) && (
-                              <span className="rounded-full border border-[color:var(--oc-border)] px-2.5 py-0.5 text-xs text-slate-400">
-                                {task.task_subfolder}
+                              <span
+                                className="rounded-full border border-[color:var(--oc-border)] px-2.5 py-0.5 text-xs text-slate-400"
+                                title={task.task_subfolder}
+                              >
+                                {truncateSubfolder(task.task_subfolder)}
                               </span>
                             )}
                           </div>
