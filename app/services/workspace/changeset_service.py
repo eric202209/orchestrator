@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -12,23 +11,15 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session
 
 from app.models import LogEntry, Project, Task, TaskExecutionChangeSet
-from app.services.workspace.project_isolation_service import (
-    _slugify_workspace_name,
-    resolve_project_workspace_path,
+from app.services.workspace.workspace_paths import (
+    AUTO_SNAPSHOT_ROOT,
+    HYDRATION_EXCLUDED_NAMES,
+    LEGACY_BASELINE_DIR_NAME,
+    TASK_REPORT_RE,
+    is_hydration_excluded_path,
+    resolve_project_root,
 )
 
-HYDRATION_EXCLUDED_NAMES = {
-    ".openclaw",
-    ".venv",
-    "__pycache__",
-    "node_modules",
-    ".pytest_cache",
-    "site-packages",
-    "venv",
-}
-TASK_REPORT_RE = re.compile(r"^task_report_\d+\.md$", re.IGNORECASE)
-LEGACY_BASELINE_DIR_NAME = ".project-baseline"
-AUTO_SNAPSHOT_ROOT = ".openclaw/auto-snapshots"
 TASK_CHANGE_SET_LOG_MESSAGE = (
     "[WORKSPACE_CHANGE_SET] Task execution change set captured"
 )
@@ -63,21 +54,7 @@ class ChangesetService:
         self.db = db
 
     def get_project_root(self, project: Project) -> Path:
-        raw_workspace_path = str(project.workspace_path or "").strip()
-        if raw_workspace_path.startswith("/"):
-            explicit_path = Path(raw_workspace_path).expanduser().resolve()
-            project_slug = _slugify_workspace_name(project.name or "")
-            if explicit_path.name == project_slug:
-                return explicit_path
-            nested_candidate = explicit_path / project_slug
-            if nested_candidate.exists():
-                return nested_candidate.resolve()
-            return explicit_path
-        return resolve_project_workspace_path(
-            project.workspace_path,
-            project.name,
-            db=self.db,
-        )
+        return resolve_project_root(project, self.db)
 
     def _reserved_project_names(self, project: Project) -> set[str]:
         reserved = {
@@ -111,7 +88,7 @@ class ChangesetService:
             if preserve_project_root_rules and relative.parts:
                 if relative.parts[0] in reserved_names:
                     continue
-            if any(part in HYDRATION_EXCLUDED_NAMES for part in relative.parts):
+            if is_hydration_excluded_path(relative):
                 continue
             if TASK_REPORT_RE.match(path.name):
                 continue

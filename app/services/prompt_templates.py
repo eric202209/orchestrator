@@ -86,7 +86,7 @@ class OrchestrationState:
 
     session_id: str
     task_description: str
-    project_name: str = ""  # e.g. "TalentBridge" (slug, no spaces)
+    project_name: str = ""  # project slug, no spaces
     project_context: str = ""
     task_id: Optional[int] = None  # For generating task subfolder
     plan: List[Dict[str, Any]] = field(default_factory=list)
@@ -318,7 +318,7 @@ Do not implement anything.
 8. Keep `commands` for shell tasks such as installs, builds, tests, inspection, and verification. Never use heredoc syntax. Use `ops` for file bodies and deterministic file mutations.
 9. Include exactly one final meaningful verification/build step such as `npm run build`, `pytest`, or `python -m pytest`.
 10. Verification must use `node -e`, `npm run build`, `python -m`, or a project test command; no `test -f`, `grep -q`, or `echo`.
-11. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. If scaffold is used, use `ops` to overwrite only needed JSX body/CSS files.
+11. If a scaffold command is genuinely required, run it in the current workspace and use `ops` for any follow-up source edits.
 
 **Execution Profile Rules:**
 {execution_profile_rules}
@@ -346,12 +346,12 @@ Do not implement anything.
     "step_number": 2,
     "description": "Create the smallest required implementation files",
     "ops": [
-      {{"op": "write_file", "path": "src/App.tsx", "content": "export default function App() {{ return <main>Board Game Cafe</main>; }}\\n"}}
+      {{"op": "write_file", "path": "README.md", "content": "# Project Notes\\n\\nInitial implementation notes.\\n"}}
     ],
     "commands": [],
-    "verification": "node -e \\"const fs=require('fs'); if(!fs.readFileSync('src/App.tsx','utf8').includes('Board Game Cafe')) process.exit(1)\\"",
-    "rollback": "rm -f src/App.tsx",
-    "expected_files": ["src/App.tsx"]
+    "verification": "node -e \\"const fs=require('fs'); if(!fs.readFileSync('README.md','utf8').includes('Project Notes')) process.exit(1)\\"",
+    "rollback": "rm -f README.md",
+    "expected_files": ["README.md"]
   }},
   {{
     "step_number": 3,

@@ -80,6 +80,85 @@ def test_validate_plan_rejects_write_file_ops_outside_workspace(tmp_path):
     )
 
 
+def test_validate_plan_requires_replace_in_file_target_to_exist(tmp_path):
+    (tmp_path / "index.html").write_text("<main>Microsite</main>", encoding="utf-8")
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Patch stale React files",
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "src/App.jsx",
+                    "old": "Board Game Cafe",
+                    "new": "Board Game Cafe - Updated",
+                }
+            ],
+            "commands": [],
+            "verification": "node -e \"console.log('checked')\"",
+            "rollback": None,
+            "expected_files": ["src/App.jsx"],
+        }
+    ]
+
+    result = ValidatorService.validate_plan(
+        plan,
+        output_text="[]",
+        task_prompt="Update the existing static page",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert result.repairable
+    assert result.details["missing_replace_in_file_targets"] == {1: ["src/App.jsx"]}
+
+
+def test_validate_plan_allows_replace_target_created_by_prior_step(tmp_path):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create file",
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/App.jsx",
+                    "content": "export default function App(){return null}\\n",
+                }
+            ],
+            "commands": [],
+            "verification": "node -e \"console.log('created')\"",
+            "rollback": None,
+            "expected_files": ["src/App.jsx"],
+        },
+        {
+            "step_number": 2,
+            "description": "Patch file",
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "src/App.jsx",
+                    "old": "null",
+                    "new": "'ok'",
+                }
+            ],
+            "commands": [],
+            "verification": "node -e \"console.log('patched')\"",
+            "rollback": None,
+            "expected_files": ["src/App.jsx"],
+        },
+    ]
+
+    result = ValidatorService.validate_plan(
+        plan,
+        output_text="[]",
+        task_prompt="Create a React file",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert "missing_replace_in_file_targets" not in result.details
+
+
 def test_normalize_step_normalizes_write_file_ops_and_rejects_escape(tmp_path):
     normalized = normalize_step(_ops_only_step("./src/main.ts"), tmp_path, None, 1)
 

@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 from app.models import Project, Task, TaskStatus
-from app.services.orchestration.workflow_profiles import WORKFLOW_PROFILES
+from app.services.orchestration.workflow_profiles import (
+    WORKFLOW_PROFILES,
+    get_implementation_intent_markers,
+    get_workflow_markers,
+)
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
@@ -69,20 +73,7 @@ def should_force_review_execution_profile(
     if any(marker in combined for marker in review_markers):
         return True
 
-    implementation_markers = (
-        "set up",
-        "setup",
-        "build",
-        "create",
-        "implement",
-        "frontend",
-        "backend",
-        "fastapi",
-        "node.js",
-        "react",
-        "vite",
-        "clean architecture",
-    )
+    implementation_markers = get_implementation_intent_markers()
     if any(marker in combined for marker in implementation_markers):
         return False
     return False
@@ -101,36 +92,16 @@ def get_workflow_profile(
         return "debug_only"
 
     combined = " ".join([title or "", description or ""]).lower()
+    marker_groups = get_workflow_markers("fullstack_scaffold")
+    frontend_markers = tuple(marker_groups.get("frontend") or [])
+    backend_markers = tuple(marker_groups.get("backend") or [])
+    scaffold_markers = tuple(marker_groups.get("scaffold") or [])
     has_frontend = any(
-        marker in combined
-        for marker in ("frontend", "react", "vite", "next.js", "nextjs")
-    ) and not _contains_negated_stack_marker(
-        combined, ("frontend", "front end", "react", "vite", "next.js", "nextjs")
-    )
+        marker in combined for marker in frontend_markers
+    ) and not _contains_negated_stack_marker(combined, frontend_markers)
     has_backend = any(
-        marker in combined
-        for marker in (
-            "backend",
-            "fastapi",
-            "django",
-            "flask",
-            "express",
-            "node.js",
-            "api",
-        )
-    ) and not _contains_negated_stack_marker(
-        combined,
-        ("backend", "fastapi", "django", "flask", "express", "node.js", "api"),
-    )
-    scaffold_markers = (
-        "set up",
-        "setup",
-        "scaffold",
-        "bootstrap",
-        "create",
-        "build",
-        "clean architecture",
-    )
+        marker in combined for marker in backend_markers
+    ) and not _contains_negated_stack_marker(combined, backend_markers)
     if any(marker in combined for marker in scaffold_markers):
         if has_frontend and has_backend:
             return "fullstack_scaffold"

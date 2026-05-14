@@ -31,6 +31,16 @@ from .system_settings import (
     get_setting_value_runtime,
     set_setting_value,
 )
+from .workspace_paths import (
+    AUTO_SNAPSHOT_ROOT,
+    HYDRATION_EXCLUDED_NAMES,
+    LEGACY_BASELINE_DIR_NAME,
+    PROMOTED_WORKSPACE_ARCHIVE_ROOT,
+    REJECTED_CHANGE_ARCHIVE_ROOT,
+    REQUESTED_CHANGES_ARCHIVE_ROOT,
+    RETAINED_WORKSPACE_ARCHIVE_ROOT,
+    resolve_project_root,
+)
 
 __all__ = [
     "CheckpointError",
@@ -41,6 +51,14 @@ __all__ = [
     "ProjectIsolationService",
     "normalize_project_workspace_path",
     "resolve_project_workspace_path",
+    "AUTO_SNAPSHOT_ROOT",
+    "HYDRATION_EXCLUDED_NAMES",
+    "LEGACY_BASELINE_DIR_NAME",
+    "PROMOTED_WORKSPACE_ARCHIVE_ROOT",
+    "REJECTED_CHANGE_ARCHIVE_ROOT",
+    "REQUESTED_CHANGES_ARCHIVE_ROOT",
+    "RETAINED_WORKSPACE_ARCHIVE_ROOT",
+    "resolve_project_root",
     "ADAPTATION_PROFILE_KEY",
     "AGENT_BACKEND_KEY",
     "AGENT_MODEL_FAMILY_KEY",

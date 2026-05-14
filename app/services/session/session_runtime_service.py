@@ -581,8 +581,8 @@ def maybe_queue_next_automatic_task(
         .join(SessionTask, SessionTask.task_id == Task.id)
         .filter(
             SessionTask.session_id == session.id,
-            SessionTask.status.in_([TaskStatus.PENDING, TaskStatus.RUNNING]),
-            Task.status.in_([TaskStatus.PENDING, TaskStatus.RUNNING]),
+            SessionTask.status == TaskStatus.RUNNING,
+            Task.status == TaskStatus.RUNNING,
         )
         .first()
     )

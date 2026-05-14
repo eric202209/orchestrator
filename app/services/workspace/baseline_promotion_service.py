@@ -12,33 +12,19 @@ from sqlalchemy.orm import Session
 
 from app.models import Project, Task, TaskStatus
 from app.services.workspace.canonical_mutation_service import CanonicalMutationService
-from app.services.workspace.project_isolation_service import (
-    _slugify_workspace_name,
-    resolve_project_workspace_path,
+from app.services.workspace.workspace_paths import (
+    HYDRATION_EXCLUDED_NAMES,
+    LEGACY_BASELINE_DIR_NAME,
+    PROJECT_GITIGNORE_GUARD_END,
+    PROJECT_GITIGNORE_GUARD_LINES,
+    PROJECT_GITIGNORE_GUARD_START,
+    PROMOTED_WORKSPACE_ARCHIVE_ROOT,
+    REQUESTED_CHANGES_ARCHIVE_ROOT,
+    RETAINED_WORKSPACE_ARCHIVE_ROOT,
+    TASK_REPORT_RE,
+    is_hydration_excluded_path,
+    resolve_project_root,
 )
-
-HYDRATION_EXCLUDED_NAMES = {
-    ".openclaw",
-    ".venv",
-    "__pycache__",
-    "node_modules",
-    ".pytest_cache",
-    "site-packages",
-    "venv",
-}
-PROJECT_GITIGNORE_GUARD_START = "# BEGIN OpenClaw workspace guard"
-PROJECT_GITIGNORE_GUARD_END = "# END OpenClaw workspace guard"
-PROJECT_GITIGNORE_GUARD_LINES = [
-    ".openclaw/",
-    "__pycache__/",
-    "node_modules/",
-    ".venv/",
-    "venv/",
-    ".pytest_cache/",
-]
-TASK_REPORT_RE = re.compile(r"^task_report_\d+\.md$", re.IGNORECASE)
-LEGACY_BASELINE_DIR_NAME = ".project-baseline"
-PROMOTED_WORKSPACE_ARCHIVE_ROOT = ".openclaw/promoted-workspace-archive"
 
 
 class BaselinePromotionService:
@@ -54,21 +40,7 @@ class BaselinePromotionService:
         self.canonical_mutations = canonical_mutations or CanonicalMutationService()
 
     def get_project_root(self, project: Project) -> Path:
-        raw_workspace_path = str(project.workspace_path or "").strip()
-        if raw_workspace_path.startswith("/"):
-            explicit_path = Path(raw_workspace_path).expanduser().resolve()
-            project_slug = _slugify_workspace_name(project.name or "")
-            if explicit_path.name == project_slug:
-                return explicit_path
-            nested_candidate = explicit_path / project_slug
-            if nested_candidate.exists():
-                return nested_candidate.resolve()
-            return explicit_path
-        return resolve_project_workspace_path(
-            project.workspace_path,
-            project.name,
-            db=self.db,
-        )
+        return resolve_project_root(project, self.db)
 
     def get_project_tasks(self, project_id: int) -> list[Task]:
         return (
@@ -169,7 +141,7 @@ class BaselinePromotionService:
                     or first_part == LEGACY_BASELINE_DIR_NAME
                 ):
                     continue
-            if any(part in HYDRATION_EXCLUDED_NAMES for part in relative.parts):
+            if is_hydration_excluded_path(relative):
                 continue
             if TASK_REPORT_RE.match(source_path.name):
                 continue
@@ -394,8 +366,7 @@ class BaselinePromotionService:
         archived_at = datetime.now(UTC)
         archive_root = (
             project_root
-            / ".openclaw"
-            / "retained-workspace-archive"
+            / RETAINED_WORKSPACE_ARCHIVE_ROOT
             / archived_at.strftime("%Y%m%d-%H%M%S")
         )
         eligible_statuses: set[str] = set()
@@ -637,8 +608,7 @@ class BaselinePromotionService:
         archived_at = datetime.now(UTC)
         archive_dir = (
             project_root
-            / ".openclaw"
-            / "requested-changes-archive"
+            / REQUESTED_CHANGES_ARCHIVE_ROOT
             / archived_at.strftime("%Y%m%d-%H%M%S")
             / f"task-{task.id}-{workspace_dir.name}"
         ).resolve()
@@ -693,8 +663,8 @@ class BaselinePromotionService:
         project_root = project_root or self.get_project_root(project).resolve()
         archive_dir = Path(archive_path).expanduser().resolve()
         allowed_roots = [
-            (project_root / ".openclaw" / "retained-workspace-archive").resolve(),
-            (project_root / ".openclaw" / "requested-changes-archive").resolve(),
+            (project_root / RETAINED_WORKSPACE_ARCHIVE_ROOT).resolve(),
+            (project_root / REQUESTED_CHANGES_ARCHIVE_ROOT).resolve(),
         ]
         if not any(
             archive_dir == root or archive_dir.is_relative_to(root)

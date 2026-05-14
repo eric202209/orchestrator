@@ -923,7 +923,7 @@ def test_final_verification_7f_gate_repairs_when_classifier_misses(
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
     )
 
-    assert result["status"] == "completed"
+    assert result["status"] == "completed", result
     assert repair_calls
     assert repair_calls[0].details["completion_repair_source"] == (
         "final_completion_verification"
@@ -989,6 +989,65 @@ def test_auto_completion_stamps_change_set_metadata_on_trivial_publish(
     assert payload["workspace_review_policy"] == "hold_nontrivial"
     assert payload["accepted_change_set"]["task_execution_id"] == execution.id
     assert payload["accepted_change_set"]["change_set"]["added_files"] == ["src/app.py"]
+
+
+def test_auto_completion_flushes_done_state_before_next_task_lookup(
+    db_session, tmp_path, monkeypatch
+):
+    ctx, execution, project_root, workspace_dir = _seed_legacy_finalize_ctx(
+        db_session, tmp_path
+    )
+    del execution, project_root, workspace_dir
+    ctx.session.execution_mode = "automatic"
+    ctx.task.plan_position = 1
+    next_task = Task(
+        project_id=ctx.project.id,
+        title="Next automatic task",
+        status=TaskStatus.PENDING,
+        plan_position=2,
+    )
+    db_session.add(next_task)
+    db_session.commit()
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.ValidatorService.validate_task_completion",
+        lambda **kwargs: ValidationVerdict(
+            stage="task_completion",
+            status="accepted",
+            profile="implementation",
+            reasons=[],
+            details={},
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow._detect_completion_verification_command",
+        lambda project_dir: (None, None),
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.ValidatorService.validate_baseline_publish",
+        lambda **kwargs: ValidationVerdict(
+            stage="baseline_publish",
+            status="accepted",
+            profile="implementation",
+            reasons=[],
+            details={},
+        ),
+    )
+
+    result = finalize_successful_task(
+        ctx=ctx,
+        get_next_pending_project_task_fn=lambda db, project_id: TaskService(
+            db
+        ).get_next_pending_task(project_id),
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
+    )
+
+    db_session.refresh(ctx.session)
+    db_session.refresh(ctx.task)
+    assert result["status"] == "completed", result
+    assert ctx.task.status == TaskStatus.DONE
+    assert ctx.session.status == "running"
 
 
 def test_auto_completion_holds_nontrivial_change_set_for_manual_review(

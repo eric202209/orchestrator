@@ -130,7 +130,7 @@ _NOISY_OPENCLAW_STDERR_PATTERNS = (
 class OpenClawSessionError(AgentRuntimeError):
     """Custom exception for OpenClaw session errors"""
 
-    pass
+    runtime_diagnostics: Dict[str, Any] | None = None
 
 
 class OpenClawNoOutputTimeoutError(OpenClawSessionError):
@@ -986,7 +986,11 @@ class OpenClawSessionService:
                     output={"status": "failed", "reason": "exception"},
                 )
 
-                raise OpenClawSessionError(error_msg)
+                wrapped_error = OpenClawSessionError(error_msg)
+                diagnostics = getattr(e, "runtime_diagnostics", None)
+                if isinstance(diagnostics, dict):
+                    wrapped_error.runtime_diagnostics = diagnostics
+                raise wrapped_error
 
     @staticmethod
     def _is_context_overflow_result(result: Optional[Dict[str, Any]]) -> bool:
@@ -1296,7 +1300,26 @@ class OpenClawSessionService:
                         "[OPENCLAW] Failed to terminate timed out process cleanly: %s",
                         exc,
                     )
-                raise OpenClawSessionError(f"Task timed out after {timeout_seconds}s")
+                stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
+                stderr_text = "\n".join(filter(None, stderr_chunks)).strip()
+                timeout_error = OpenClawSessionError(
+                    f"Task timed out after {timeout_seconds}s"
+                )
+                timeout_error.runtime_diagnostics = {
+                    "timeout_seconds": timeout_seconds,
+                    "timeout_with_cleanup_seconds": timeout_seconds + 30,
+                    "duration_seconds": round(time.monotonic() - started_at, 3),
+                    "stdout_chars": len(stdout_text),
+                    "stderr_chars": len(stderr_text),
+                    "stdout_lines": len([line for line in stdout_chunks if line]),
+                    "stderr_lines": len([line for line in stderr_chunks if line]),
+                    **self._channel_metadata(stdout_text, stderr_text),
+                    "timed_out": True,
+                    "cancelled": False,
+                    "return_code": return_code,
+                    "timeout_boundary": timeout_boundary,
+                }
+                raise timeout_error
             except asyncio.CancelledError:
                 cancelled = True
                 timeout_boundary = "caller_cancelled"

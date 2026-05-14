@@ -14,7 +14,14 @@ from app.models import (
 )
 from app.services.orchestration.execution.runtime import workspace_snapshot_key
 from app.services.task_service import TASK_CHANGE_SET_LOG_MESSAGE, TaskService
+from app.services.workspace.baseline_promotion_service import BaselinePromotionService
+from app.services.workspace.changeset_service import ChangesetService
 from app.services.workspace.project_mutation_lock import project_mutation_lock
+from app.services.workspace.workspace_paths import (
+    AUTO_SNAPSHOT_ROOT,
+    resolve_project_root,
+)
+from app.services.workspace.workspace_snapshot_service import WorkspaceSnapshotService
 
 
 def test_rebuild_project_baseline_uses_only_promoted_workspaces(
@@ -121,6 +128,35 @@ def test_project_gitignore_guard_preserves_existing_rules_and_is_idempotent(
     assert contents.startswith("dist/\n.env\n")
     assert contents.count("# BEGIN OpenClaw workspace guard") == 1
     assert contents.count(".openclaw/") == 1
+
+
+def test_workspace_services_share_project_root_contract(db_session, tmp_path: Path):
+    project_root = tmp_path / "shared-root-contract"
+    project_root.mkdir(parents=True)
+    project = Project(
+        name="shared-root-contract",
+        workspace_path=str(tmp_path),
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    expected_root = project_root.resolve()
+
+    assert resolve_project_root(project, db_session) == expected_root
+    assert TaskService(db_session).get_project_root(project) == expected_root
+    assert ChangesetService(db_session).get_project_root(project) == expected_root
+    assert (
+        WorkspaceSnapshotService(db_session).get_project_root(project) == expected_root
+    )
+    assert (
+        BaselinePromotionService(db_session).get_project_root(project) == expected_root
+    )
+    assert (
+        (expected_root / AUTO_SNAPSHOT_ROOT)
+        .as_posix()
+        .endswith(".openclaw/auto-snapshots")
+    )
 
 
 def test_task_execution_change_set_captures_added_modified_and_deleted_files(

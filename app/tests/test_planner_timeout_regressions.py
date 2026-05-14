@@ -276,8 +276,8 @@ def test_initial_planning_prompt_contains_valid_json_contract_example():
         in prompt
     )
     assert "no `test -f`, `grep -q`, or `echo`" in prompt
-    assert "Prefer scaffold: `npm create vite@latest . -- --template react`" in prompt
-    assert "If scaffold is used, use `ops`" in prompt
+    assert "If a scaffold command is genuinely required" in prompt
+    assert "use `ops` for any follow-up source edits" in prompt
     assert "Never use heredoc syntax" in prompt
     assert "Optional `ops` may contain these operations" in prompt
     assert "append_file, delete_file, mkdir, replace_in_file, write_file" in prompt
@@ -475,94 +475,6 @@ def test_minimal_prompt_retry_skips_ultra_when_planner_has_no_model_output(
     )
     assert failure_event["output_channel_used"] == "none"
     assert failure_event["stderr_contains_model_content"] is False
-
-
-def test_deterministic_static_asset_plan_builds_microsite_ops(tmp_path):
-    from app.services.orchestration.execution.executor import ExecutorService
-
-    (tmp_path / "index.html").write_text(
-        "<!doctype html>\n<html><body><main><h1>Microsite</h1></main></body></html>\n",
-        encoding="utf-8",
-    )
-
-    plan = PlannerService.build_deterministic_static_asset_plan(
-        "Create `images/tulip-card.svg`. Add small gallery or feature card in `index.html`. Reference new asset in page.",
-        tmp_path,
-    )
-
-    assert plan is not None
-    assert ValidatorService.validate_plan_schema(plan)["valid"] is True
-    assert plan[0]["ops"] == [
-        {
-            "op": "write_file",
-            "path": "images/tulip-card.svg",
-            "content": plan[0]["ops"][0]["content"],
-        }
-    ]
-    assert "<svg" in plan[0]["ops"][0]["content"]
-    assert plan[1]["ops"][0]["path"] == "index.html"
-    assert 'src="images/tulip-card.svg"' in plan[1]["ops"][0]["content"]
-    assert plan[0]["commands"] == []
-    assert plan[1]["commands"] == []
-    first_result = ExecutorService.execute_file_ops(tmp_path, plan[0]["ops"])
-    second_result = ExecutorService.execute_file_ops(tmp_path, plan[1]["ops"])
-    assert first_result["success"] is True
-    assert second_result["success"] is True
-    assert (tmp_path / "images" / "tulip-card.svg").exists()
-    assert 'src="images/tulip-card.svg"' in (tmp_path / "index.html").read_text(
-        encoding="utf-8"
-    )
-
-
-def test_minimal_prompt_retry_uses_deterministic_static_asset_fallback(
-    tmp_path, monkeypatch
-):
-    (tmp_path / "index.html").write_text(
-        "<!doctype html>\n<html><body><main><h1>Microsite</h1></main></body></html>\n",
-        encoding="utf-8",
-    )
-    events = []
-    calls = []
-
-    async def timeout_without_model_output(cls, runtime_service, prompt, **kwargs):
-        raise AssertionError("model planning should be bypassed")
-
-    monkeypatch.setattr(
-        PlannerService,
-        "_execute_task_with_planning_lock",
-        classmethod(timeout_without_model_output),
-    )
-
-    result = PlannerService.retry_with_minimal_prompt(
-        runtime_service=object(),
-        task_description="Create `images/tulip-card.svg`. Add small gallery or feature card in `index.html`. Reference new asset in page.",
-        project_dir=tmp_path,
-        timeout_seconds=300,
-        logger=logging.getLogger("test.deterministic_static_asset_fallback"),
-        emit_live=lambda level, message, metadata=None: events.append(
-            (level, message, metadata or {})
-        ),
-        reason="dense_planning_context",
-        workflow_profile="default",
-    )
-
-    plan = json.loads(result["output"])
-    assert calls == []
-    assert result["planning_backend"] == "deterministic_static_asset_plan"
-    assert result["deterministic_planning_fallback"] is True
-    assert ValidatorService.validate_plan_schema(plan)["valid"] is True
-    assert plan[0]["ops"][0]["path"] == "images/tulip-card.svg"
-    assert 'src="images/tulip-card.svg"' in plan[1]["ops"][0]["content"]
-    assert not any(
-        metadata.get("strategy") == "ultra_minimal_prompt" for _, _, metadata in events
-    )
-    fallback_event = next(
-        metadata
-        for _, _, metadata in events
-        if metadata.get("strategy") == "deterministic_static_asset_plan"
-    )
-    assert fallback_event["reason"] == "simple_static_asset_task"
-    assert fallback_event["fallback_step_count"] == 2
 
 
 def test_openclaw_session_lock_is_classified_distinctly():
@@ -1072,8 +984,8 @@ def test_minimal_planning_prompt_requires_real_content_and_strong_verification()
         in prompt
     )
     assert "no `test -f`, `grep -q`, or `echo`" in prompt
-    assert "Prefer scaffold: `npm create vite@latest . -- --template react`" in prompt
-    assert "If scaffold is used, use `ops`" in prompt
+    assert "If a scaffold command is genuinely required" in prompt
+    assert "use `ops` for any follow-up source edits" in prompt
     assert (
         "Each step must include these required keys, optional ops, and no other keys: step_number, description, commands, verification, rollback, expected_files"
         in prompt
@@ -2013,9 +1925,8 @@ def test_planning_repair_prompt_bans_external_helpers_and_heredoc():
     assert "absolute helper scripts" in prompt
     assert "no `test -f`, `grep -q`, `echo`, or `cd /... &&`" in prompt
     assert "{{ return <main>Ready</main>; }}" not in prompt
-    assert "npm create vite@latest . -- --template react" in prompt
-    assert "it creates src/App.jsx and src/App.css" in prompt
-    assert "Use ops to overwrite only needed JSX body/CSS files" in prompt
+    assert "If a scaffold command is genuinely required" in prompt
+    assert "use ops to edit only the files needed for the task" in prompt
     assert "Use `ops` for file writes" in prompt
     assert "fallback limits" in prompt
     assert "write_file" in prompt

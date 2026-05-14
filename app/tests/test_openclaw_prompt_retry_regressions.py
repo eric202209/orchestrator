@@ -4,7 +4,10 @@ import asyncio
 
 from app.models import Project, Session as SessionModel, Task, TaskStatus
 from app.config import settings
-from app.services.agents.openclaw_service import OpenClawSessionService
+from app.services.agents.openclaw_service import (
+    OpenClawSessionError,
+    OpenClawSessionService,
+)
 
 
 def _seed_service_models(db_session):
@@ -90,3 +93,39 @@ def test_execute_task_retries_context_overflow_with_compact_prompt(
     assert len(seen_prompts) == 2
     assert len(seen_prompts[1]) < len(seen_prompts[0])
     assert "[Content truncated for performance]" in seen_prompts[1]
+
+
+def test_execute_task_preserves_timeout_runtime_diagnostics(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "local_openclaw")
+    session, task = _seed_service_models(db_session)
+    service = OpenClawSessionService(
+        db_session, session.id, task.id, use_demo_mode=False
+    )
+
+    async def fake_execute_task_with_streaming(*args, **kwargs):
+        exc = OpenClawSessionError("Task timed out after 90s")
+        exc.runtime_diagnostics = {
+            "timed_out": True,
+            "stdout_chars": 0,
+            "stderr_contains_model_content": False,
+            "output_channel_used": "none",
+        }
+        raise exc
+
+    monkeypatch.setattr(
+        service, "execute_task_with_streaming", fake_execute_task_with_streaming
+    )
+    monkeypatch.setattr(service, "_log_entry", lambda *args, **kwargs: None)
+
+    try:
+        asyncio.run(service.execute_task("Return a plan", timeout_seconds=90))
+    except OpenClawSessionError as exc:
+        assert exc.runtime_diagnostics == {
+            "timed_out": True,
+            "stdout_chars": 0,
+            "stderr_contains_model_content": False,
+            "output_channel_used": "none",
+        }
+        return
+
+    raise AssertionError("Expected timeout error")

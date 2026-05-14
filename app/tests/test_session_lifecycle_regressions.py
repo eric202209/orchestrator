@@ -28,6 +28,7 @@ from app.services.session.session_lifecycle_service import (
     start_session_lifecycle,
     stop_session_lifecycle,
 )
+from app.services.session import session_runtime_service
 from app.services.workspace.checkpoint_service import CheckpointError
 from fastapi import HTTPException
 
@@ -217,6 +218,66 @@ def test_reconcile_keeps_running_session_with_running_execution(db_session):
     assert reconciled == []
     assert session.status == "running"
     assert session.is_active is True
+
+
+def test_maybe_queue_next_automatic_task_ignores_pending_links(db_session, monkeypatch):
+    project = _make_project(db_session)
+    session = _make_session(
+        db_session,
+        project,
+        status="running",
+        is_active=True,
+        execution_mode="automatic",
+    )
+    first_task = Task(
+        project_id=project.id,
+        title="Done ordered task",
+        status=TaskStatus.DONE,
+        plan_position=1,
+    )
+    next_task = Task(
+        project_id=project.id,
+        title="Next ordered task",
+        status=TaskStatus.PENDING,
+        plan_position=2,
+    )
+    db_session.add_all([first_task, next_task])
+    db_session.flush()
+    db_session.add_all(
+        [
+            SessionTask(
+                session_id=session.id,
+                task_id=first_task.id,
+                status=TaskStatus.DONE,
+            ),
+            SessionTask(
+                session_id=session.id,
+                task_id=next_task.id,
+                status=TaskStatus.PENDING,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    queued: list[int] = []
+
+    def fake_queue_task_for_session(*, db, session, task_id, timeout_seconds):
+        queued.append(task_id)
+        return {"task_id": task_id}
+
+    monkeypatch.setattr(
+        session_runtime_service,
+        "queue_task_for_session",
+        fake_queue_task_for_session,
+    )
+
+    result = session_runtime_service.maybe_queue_next_automatic_task(
+        db_session,
+        session,
+    )
+
+    assert result == {"task_id": next_task.id}
+    assert queued == [next_task.id]
 
 
 def test_start_already_paused_session_returns_400(db_session):

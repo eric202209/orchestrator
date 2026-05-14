@@ -18,8 +18,16 @@ from ..types import (
 
 from .persistence import persist_validation_result as _persist_validation_result
 from app.services.orchestration.file_ops_contract import (
+    normalize_file_op_shape,
     operation_has_file_op_path,
     validate_file_op_shape,
+)
+from app.services.orchestration.workflow_profiles import (
+    get_implementation_intent_markers,
+    get_multi_stack_pair_markers,
+    get_mutation_build_intent_markers,
+    get_workflow_markers,
+    get_workflow_phases,
 )
 from .placeholder_policy import path_allows_placeholder_fixture_content
 from .workspace_checks import (
@@ -37,14 +45,6 @@ from .workspace_guard import (
     normalize_path_reference,
 )
 
-WORKFLOW_PHASE_ORDER = {
-    "fullstack_scaffold": [
-        "create_frontend_skeleton",
-        "create_backend_skeleton",
-        "wire_api_config",
-        "verify_dev_startup",
-    ]
-}
 MAX_INITIAL_PLAN_STEPS = 4
 MAX_PLANNING_COMMAND_CHARS = 900
 PLAN_STRUCTURAL_PLACEHOLDER_MARKER_PATTERN = re.compile(
@@ -229,6 +229,44 @@ class ValidatorService:
                     break
         return sorted(set(invalid_steps))
 
+    @staticmethod
+    def _plan_replace_ops_missing_targets(
+        plan: List[Dict[str, Any]], project_dir: Path
+    ) -> Dict[int, List[str]]:
+        known_paths = {
+            str(path.relative_to(project_dir))
+            for path in project_dir.rglob("*")
+            if path.is_file()
+        }
+        missing_by_step: Dict[int, List[str]] = {}
+
+        for index, step in enumerate(plan, start=1):
+            step_number = int(step.get("step_number", index))
+            for raw_operation in step.get("ops", []) or []:
+                if not isinstance(raw_operation, dict):
+                    continue
+                operation = normalize_file_op_shape(raw_operation)
+                op_name = str(operation.get("op") or "")
+                raw_path = str(operation.get("path") or "")
+                if not raw_path.strip():
+                    continue
+                try:
+                    relative_path = normalize_path_reference(raw_path, project_dir)
+                except TaskWorkspaceViolationError:
+                    continue
+                if relative_path == ".":
+                    continue
+                if op_name == "replace_in_file" and relative_path not in known_paths:
+                    missing_by_step.setdefault(step_number, []).append(relative_path)
+                elif op_name in {"write_file", "append_file"}:
+                    known_paths.add(relative_path)
+                elif op_name == "delete_file":
+                    known_paths.discard(relative_path)
+
+        return {
+            step: sorted(set(paths)) for step, paths in missing_by_step.items() if paths
+        }
+
     @classmethod
     def validate_reasoning_artifact(
         cls,
@@ -335,22 +373,7 @@ class ValidatorService:
             task_prompt, title=title, description=description
         ):
             return "mutation"
-        implementation_markers = (
-            "set up",
-            "setup",
-            "build",
-            "create",
-            "implement",
-            "frontend",
-            "backend",
-            "react",
-            "vite",
-            "node",
-            "node.js",
-            "fastapi",
-            "flask",
-            "django",
-        )
+        implementation_markers = get_implementation_intent_markers()
         if any(marker in combined for marker in implementation_markers):
             return "implementation"
 
@@ -516,20 +539,7 @@ class ValidatorService:
             "replace",
             "version",
         }
-        build_terms = {
-            "add feature",
-            "build",
-            "create app",
-            "create application",
-            "frontend",
-            "implement app",
-            "react app",
-            "scaffold",
-            "source implementation",
-            "update the api",
-            "update the app",
-            "update the react",
-        }
+        build_terms = set(get_mutation_build_intent_markers())
         has_mutation_term = any(term in text for term in mutation_terms)
         has_build_term = any(term in build_detection_text for term in build_terms)
         return has_mutation_term and not has_build_term
@@ -772,15 +782,7 @@ class ValidatorService:
         description: Optional[str] = None,
     ) -> bool:
         combined = " ".join([task_prompt or "", title or "", description or ""]).lower()
-        explicit_pairs = (
-            ("python", "javascript"),
-            ("python", "node"),
-            ("python", "typescript"),
-            ("django", "react"),
-            ("flask", "react"),
-            ("fastapi", "react"),
-            ("backend", "frontend"),
-        )
+        explicit_pairs = get_multi_stack_pair_markers()
         if any(
             left in combined and right in combined for left, right in explicit_pairs
         ):
@@ -1537,77 +1539,31 @@ class ValidatorService:
             + [str(command or "") for command in step.get("commands", []) or []]
             + [str(path or "") for path in step.get("expected_files", []) or []]
         ).lower()
-        has_frontend_markers = any(
-            marker in text
-            for marker in (
-                "frontend",
-                "react",
-                "vite",
-                "src/main.tsx",
-                "src/app.tsx",
-                "package.json",
-                "tsconfig.json",
-                "npm install",
-            )
-        )
-        has_backend_markers = any(
-            marker in text
-            for marker in (
-                "fastapi",
-                "app/main.py",
-                "app/config.py",
-                "requirements.txt",
-                "pip install",
-                "pytest",
-                "backend",
-                ".venv/bin/python",
-            )
-        )
+        marker_groups = get_workflow_markers(workflow_profile)
+        frontend_markers = marker_groups.get("frontend") or []
+        backend_markers = marker_groups.get("backend") or []
+        wire_api_config_markers = marker_groups.get("wire_api_config") or []
+        verify_dev_startup_markers = marker_groups.get("verify_dev_startup") or []
+        frontend_exclusions = marker_groups.get("frontend_skeleton_exclusions") or []
+        backend_exclusions = marker_groups.get("backend_skeleton_exclusions") or []
 
-        if any(
-            marker in text
-            for marker in (
-                "wire api config",
-                "proxy",
-                "cors",
-                "vite.config",
-                "api/client",
-                "localhost:8080",
-                "localhost:3000",
-                ".env",
-                "api config",
-            )
-        ):
+        has_frontend_markers = any(marker in text for marker in frontend_markers)
+        has_backend_markers = any(marker in text for marker in backend_markers)
+
+        if any(marker in text for marker in wire_api_config_markers):
             return "wire_api_config"
 
         if has_frontend_markers and not any(
-            marker in text
-            for marker in ("eslint", "vitest", "smoke check", "dev-ready")
+            marker in text for marker in frontend_exclusions
         ):
             return "create_frontend_skeleton"
 
         if has_backend_markers and not any(
-            marker in text
-            for marker in ("smoke check", "dev-ready", "health", "routes", "cors")
+            marker in text for marker in backend_exclusions
         ):
             return "create_backend_skeleton"
 
-        if any(
-            marker in text
-            for marker in (
-                "dev-ready",
-                "smoke check",
-                "health",
-                "routes",
-                "lint",
-                "vitest",
-                "eslint",
-                "type-check",
-                "tsc --noemit",
-                "build",
-                "verify_dev_startup",
-            )
-        ):
+        if any(marker in text for marker in verify_dev_startup_markers):
             return "verify_dev_startup"
 
         if has_frontend_markers:
@@ -1623,7 +1579,7 @@ class ValidatorService:
         plan: List[Dict[str, Any]],
         workflow_profile: Optional[str],
     ) -> Dict[str, Any]:
-        phase_order = WORKFLOW_PHASE_ORDER.get(workflow_profile or "")
+        phase_order = get_workflow_phases(workflow_profile or "")
         if not phase_order:
             return {}
 
@@ -1693,6 +1649,18 @@ class ValidatorService:
                     f"(steps: {invalid_ops_path_steps[:5]})"
                 )
                 details["invalid_ops_path_steps"] = invalid_ops_path_steps
+
+            missing_replace_targets = cls._plan_replace_ops_missing_targets(
+                plan, Path(project_dir)
+            )
+            if missing_replace_targets:
+                bad_steps = sorted(missing_replace_targets.keys())
+                repairable.append(
+                    "`replace_in_file` operations must target files that already "
+                    "exist in the current workspace or were created by an earlier "
+                    f"plan step (steps: {bad_steps[:5]})"
+                )
+                details["missing_replace_in_file_targets"] = missing_replace_targets
 
         command_budget = cls._plan_command_budget_diagnostics(plan, output_text)
         details["step_count"] = command_budget["step_count"]

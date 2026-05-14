@@ -189,10 +189,10 @@ def test_celery_retry_leaves_task_pending_so_claim_can_succeed(db_session):
 
     task = Task(
         project_id=project.id,
-        title="Add seasonal facts section",
-        description="Add a seasonal facts section to existing page",
+        title="Add existing page content section",
+        description="Add a content section to the existing page",
         status=TaskStatus.RUNNING,
-        task_subfolder="task-add-seasonal-facts-section",
+        task_subfolder="task-add-existing-page-content-section",
     )
     db_session.add(task)
     db_session.commit()

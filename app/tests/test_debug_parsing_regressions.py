@@ -333,15 +333,15 @@ def test_extract_structured_text_recovers_visible_text_from_partial_fragment():
 
 def test_extract_plan_steps_from_summary_text_recovers_markdown_table_plan():
     text = """
-Plan written -> `vault/projects/garden-story-microsite/plan.json`
+Plan written -> `vault/projects/static-page/plan.json`
 
 **5-step plan:**
 
 | # | Step | Files |
 |---|------|-------|
 | 1 | Create `css/` + `images/` dirs | — |
-| 2 | Generate `images/flower-bg.svg` (decorative botanical SVG) | `images/flower-bg.svg` |
-| 3 | Write `css/style.css` (SVG bg, centered overlay, CTA styles) | `css/style.css` |
+| 2 | Generate `images/page-art.svg` (decorative SVG) | `images/page-art.svg` |
+| 3 | Write `css/style.css` (asset bg, centered overlay, CTA styles) | `css/style.css` |
 | 4 | Write `index.html` (title + intro + CTA section) | `index.html` |
 | 5 | Verify all files exist, non-empty, cross-references intact | — |
 """
@@ -351,5 +351,5 @@ Plan written -> `vault/projects/garden-story-microsite/plan.json`
     assert plan is not None
     assert len(plan) == 5
     assert plan[0]["commands"] == ["mkdir -p css/ images/"]
-    assert plan[1]["commands"][0].startswith("write images/flower-bg.svg:")
+    assert plan[1]["commands"][0].startswith("write images/page-art.svg:")
     assert plan[3]["expected_files"] == ["index.html"]

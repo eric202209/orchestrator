@@ -101,12 +101,12 @@ PLANNING_VALID_MINIMAL_JSON_EXAMPLE = """[
     "step_number": 2,
     "description": "Create the smallest required implementation files",
     "ops": [
-      {"op": "write_file", "path": "src/App.tsx", "content": "export default function App() { return <main>Board Game Cafe</main>; }\\n"}
+      {"op": "write_file", "path": "README.md", "content": "# Project Notes\\n\\nInitial implementation notes.\\n"}
     ],
     "commands": [],
-    "verification": "node -e \\"const fs=require('fs'); if(!fs.readFileSync('src/App.tsx','utf8').includes('Board Game Cafe')) process.exit(1)\\"",
-    "rollback": "rm -f src/App.tsx",
-    "expected_files": ["src/App.tsx"]
+    "verification": "node -e \\"const fs=require('fs'); if(!fs.readFileSync('README.md','utf8').includes('Project Notes')) process.exit(1)\\"",
+    "rollback": "rm -f README.md",
+    "expected_files": ["README.md"]
   },
   {
     "step_number": 3,
@@ -458,135 +458,6 @@ class PlannerService:
             and stderr_has_model_content is False
             and output_channel in {"", "none"}
         )
-
-    @staticmethod
-    def _extract_requested_svg_path(task_description: str) -> Optional[str]:
-        candidates = re.findall(
-            r"(?:`|['\"])?([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.svg)(?:`|['\"])?",
-            task_description or "",
-        )
-        for candidate in candidates:
-            normalized = candidate.strip().strip("/\\")
-            if not normalized or normalized.startswith("../") or "/../" in normalized:
-                continue
-            if normalized.lower().endswith(".svg"):
-                return normalized
-        return None
-
-    @staticmethod
-    def build_deterministic_static_asset_plan(
-        task_description: str,
-        project_dir: Path,
-    ) -> Optional[List[Dict[str, Any]]]:
-        """
-        Build a model-free plan for a narrow class of static microsite edits.
-
-        This fallback is intentionally conservative. It handles the recurring
-        failure mode where the planner backend times out before producing any
-        model output for a simple request to add one SVG asset and reference it
-        from index.html.
-        """
-
-        lowered = str(task_description or "").lower()
-        if "index.html" not in lowered or ".svg" not in lowered:
-            return None
-        if not any(
-            marker in lowered
-            for marker in ("image", "asset", "gallery", "feature card", "card")
-        ):
-            return None
-
-        svg_path = PlannerService._extract_requested_svg_path(task_description)
-        if not svg_path:
-            return None
-
-        index_path = project_dir / "index.html"
-        try:
-            index_html = index_path.read_text(encoding="utf-8")
-        except OSError:
-            return None
-        if not index_html.strip() or len(index_html) > 60000:
-            return None
-
-        svg_ref = svg_path.replace("\\", "/")
-        title_match = re.search(r"([A-Za-z0-9][A-Za-z0-9 _-]*?)\.svg", svg_ref)
-        asset_label = "Featured asset"
-        if title_match:
-            asset_label = (
-                title_match.group(1).replace("-", " ").replace("_", " ").strip().title()
-            )
-        if svg_ref in index_html:
-            updated_index_html = index_html
-        else:
-            feature_block = f"""
-  <section class="asset-feature" aria-label="{asset_label}">
-    <figure>
-      <img src="{svg_ref}" alt="{asset_label}" loading="lazy">
-      <figcaption>{asset_label}</figcaption>
-    </figure>
-  </section>
-"""
-            if "</body>" in index_html:
-                updated_index_html = index_html.replace(
-                    "</body>", feature_block + "</body>", 1
-                )
-            elif "</main>" in index_html:
-                updated_index_html = index_html.replace(
-                    "</main>", feature_block + "</main>", 1
-                )
-            else:
-                return None
-
-        svg_title = asset_label.replace("&", "and")
-        svg_content = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 420" role="img" aria-labelledby="title desc">
-  <title id="title">{svg_title}</title>
-  <desc id="desc">Decorative tulip illustration for a microsite feature card.</desc>
-  <rect width="640" height="420" rx="28" fill="#f7faf7"/>
-  <rect x="38" y="38" width="564" height="344" rx="24" fill="#ffffff" stroke="#d7e2d5" stroke-width="4"/>
-  <path d="M320 306 C322 250 330 204 356 152" fill="none" stroke="#386641" stroke-width="14" stroke-linecap="round"/>
-  <path d="M323 264 C278 236 238 232 198 258 C244 282 286 286 323 264Z" fill="#78a55a"/>
-  <path d="M334 230 C376 205 418 205 458 232 C416 258 372 260 334 230Z" fill="#8fbc6d"/>
-  <path d="M326 153 C290 112 284 72 314 48 C338 74 348 112 326 153Z" fill="#e85d75"/>
-  <path d="M326 153 C345 105 382 82 420 96 C409 136 374 164 326 153Z" fill="#d94864"/>
-  <path d="M326 153 C300 104 254 88 220 106 C238 145 277 166 326 153Z" fill="#f2849e"/>
-  <circle cx="138" cy="112" r="12" fill="#f2cc8f"/>
-  <circle cx="508" cy="304" r="16" fill="#a3b18a"/>
-  <path d="M172 334 H468" stroke="#d7e2d5" stroke-width="10" stroke-linecap="round"/>
-</svg>
-"""
-
-        return [
-            {
-                "step_number": 1,
-                "description": f"Create the requested SVG asset at {svg_ref}",
-                "ops": [
-                    {
-                        "op": "write_file",
-                        "path": svg_ref,
-                        "content": svg_content,
-                    }
-                ],
-                "commands": [],
-                "verification": f"test -s {svg_ref}",
-                "rollback": f"rm -f {svg_ref}",
-                "expected_files": [svg_ref],
-            },
-            {
-                "step_number": 2,
-                "description": "Update index.html to reference the new visual asset",
-                "ops": [
-                    {
-                        "op": "write_file",
-                        "path": "index.html",
-                        "content": updated_index_html,
-                    }
-                ],
-                "commands": [],
-                "verification": f"grep -F {json.dumps(svg_ref)} index.html",
-                "rollback": None,
-                "expected_files": ["index.html"],
-            },
-        ]
 
     @staticmethod
     def _monotonic() -> float:
@@ -1366,7 +1237,7 @@ Rules:
 25. For implementation steps that list expected_files, at least one command or file-mutating `ops` entry must materially write or edit file contents; do not use touch-only or placeholder-only steps
 26. Verification must use `node -e`, `npm run build`, `python -m`, or a project test command; no `test -f`, `grep -q`, or `echo`. For implementation-heavy steps, verification must prove behavior or content.
 27. Prefer an inspect -> edit -> verify sequence grounded in the current workspace
-28. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. If scaffold is used, use `ops` to overwrite only needed JSX body/CSS files.
+28. If a scaffold command is genuinely required, run it in the current workspace and use `ops` for any follow-up source edits.
 
 Invalid outputs:
 - Markdown fences around JSON
@@ -1430,7 +1301,7 @@ Requirements:
 16. Commands must be runnable shell, not pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
 17. Do not create or cd into a nested project folder; run directly from {display_project_dir}
 18. Include exactly one final meaningful verification/build step
-19. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. If scaffold is used, use `ops` write_file or replace_in_file to update only needed JSX body/CSS files.
+19. If a scaffold command is genuinely required, run it in the current workspace and use `ops` for any follow-up source edits.
 
 Invalid outputs:
 - Markdown fences around JSON
@@ -1803,7 +1674,7 @@ Rules:
 10. expected_files steps must write real content; no separate mkdir/touch-only scaffold step for normal files.
 11. Verification must use `node -e`, `npm run build`, or `python -m`; no `test -f`, `grep -q`, `echo`, or `cd /... &&`.
 12. No /root/write_file.py, /tmp helpers, absolute helper scripts, outside files.
-13. Prefer scaffold: `npm create vite@latest . -- --template react`; it creates src/App.jsx and src/App.css. Use ops to overwrite only needed JSX body/CSS files.
+13. If a scaffold command is genuinely required, run it in the current workspace and use ops to edit only the files needed for the task.
 17. Each step is a separate complete JSON object in the array. Never merge content from multiple steps into one step.
 """
         return PlannerService.apply_prompt_profile(prompt, prompt_profile)
@@ -1940,33 +1811,6 @@ Rules:
                     **minimal_prompt_diagnostics,
                 },
             )
-        deterministic_plan = cls.build_deterministic_static_asset_plan(
-            task_description,
-            project_dir,
-        )
-        if deterministic_plan:
-            emit_live(
-                "INFO",
-                "[ORCHESTRATION] Deterministic static asset planner generated an ops-only plan",
-                metadata={
-                    "phase": "planning",
-                    "reason": "simple_static_asset_task",
-                    "strategy": "deterministic_static_asset_plan",
-                    "fallback_step_count": len(deterministic_plan),
-                    **minimal_prompt_diagnostics,
-                },
-            )
-            return {
-                "status": "completed",
-                "output": json.dumps(deterministic_plan, ensure_ascii=True),
-                "planning_backend": "deterministic_static_asset_plan",
-                "deterministic_planning_fallback": True,
-                "diagnostics": {
-                    "fallback": "deterministic_static_asset_plan",
-                    "fallback_reason": "simple_static_asset_task",
-                    "fallback_step_count": len(deterministic_plan),
-                },
-            }
         emit_live(
             "INFO",
             (
@@ -2003,43 +1847,6 @@ Rules:
             if cls._is_no_model_output_planning_timeout(exc):
                 diagnostics = cls._get_runtime_diagnostics(exc)
                 diagnostics["planning_failure_class"] = "planner_no_model_output"
-                deterministic_plan = cls.build_deterministic_static_asset_plan(
-                    task_description,
-                    project_dir,
-                )
-                if deterministic_plan:
-                    emit_live(
-                        "WARN",
-                        (
-                            "[ORCHESTRATION] Planning backend timed out without "
-                            "model output; using deterministic static asset fallback"
-                        ),
-                        metadata={
-                            "phase": "planning",
-                            "reason": "planner_no_model_output",
-                            "strategy": "deterministic_static_asset_plan",
-                            "timeout_seconds": diagnostics.get("timeout_seconds"),
-                            "duration_seconds": diagnostics.get("duration_seconds"),
-                            "output_channel_used": diagnostics.get(
-                                "output_channel_used"
-                            ),
-                            "stderr_contains_model_content": diagnostics.get(
-                                "stderr_contains_model_content"
-                            ),
-                            "fallback_step_count": len(deterministic_plan),
-                        },
-                    )
-                    return {
-                        "status": "completed",
-                        "output": json.dumps(deterministic_plan, ensure_ascii=True),
-                        "planning_backend": "deterministic_static_asset_plan",
-                        "deterministic_planning_fallback": True,
-                        "diagnostics": {
-                            "planning_failure_class": "planner_no_model_output",
-                            "fallback": "deterministic_static_asset_plan",
-                            "fallback_step_count": len(deterministic_plan),
-                        },
-                    }
                 emit_live(
                     "ERROR",
                     (

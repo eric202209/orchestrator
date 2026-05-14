@@ -1656,6 +1656,7 @@ def finalize_successful_task(
     )
 
     clear_session_alert(session)
+    db.flush()
 
     next_task = None
     blocked_pending_task = None
