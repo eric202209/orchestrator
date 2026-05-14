@@ -22,6 +22,8 @@ from app.models import (
 from app.services.agents.agent_runtime import create_agent_runtime
 from app.services.agents.interfaces import AgentRuntimeError
 from app.services.model_adaptation import get_adaptation_profile
+from app.services.orchestration.run_state import mark_task_attempt_pending
+from app.services.orchestration.session_state import mark_session_paused
 from app.services.orchestration.policy import get_policy_profile
 from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.log_utils import deduplicate_logs
@@ -600,20 +602,15 @@ def _prepare_session_for_replay(db: Session, session: SessionModel) -> None:
     )
     seen_task_ids: set[int] = set()
     for link in running_links:
-        link.status = TaskStatus.PENDING
-        link.completed_at = None
+        mark_task_attempt_pending(task=None, session_task_link=link)
         if link.task_id in seen_task_ids:
             continue
         seen_task_ids.add(link.task_id)
         task = db.query(Task).filter(Task.id == link.task_id).first()
         if task and task.status == TaskStatus.RUNNING:
-            task.status = TaskStatus.PENDING
-            task.completed_at = None
-            task.error_message = None
+            mark_task_attempt_pending(task=task, error_message=None)
 
-    session.status = "paused"
-    session.is_active = True
-    session.paused_at = datetime.now(UTC)
+    mark_session_paused(session, paused_at=datetime.now(UTC), is_active=True)
     db.add(
         LogEntry(
             session_id=session.id,

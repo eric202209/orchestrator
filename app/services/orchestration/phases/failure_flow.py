@@ -13,28 +13,26 @@ from app.services.orchestration.persistence import (
     append_orchestration_event,
     record_live_log,
     save_orchestration_checkpoint,
-    set_session_alert,
 )
-from app.services.orchestration.run_state import mark_task_attempt_failed
+from app.services.orchestration.run_state import (
+    mark_task_attempt_failed,
+    mark_task_attempt_pending,
+    task_execution_id_from_context,
+)
+from app.services.orchestration.session_state import (
+    mark_session_paused,
+    mark_session_running,
+)
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.workspace.project_mutation_lock import ProjectMutationLockError
 from app.services.prompt_templates import OrchestrationStatus
-
-
-def _task_execution_id_from_context(ctx: Optional[Any]) -> Optional[int]:
-    if ctx is None:
-        return None
-    task_execution_id = getattr(ctx, "task_execution_id", None)
-    if isinstance(task_execution_id, bool) or not isinstance(task_execution_id, int):
-        return None
-    return task_execution_id
 
 
 def _task_execution_for_context(
     db: Any,
     ctx: Optional[Any],
 ) -> Optional[TaskExecution]:
-    task_execution_id = _task_execution_id_from_context(ctx)
+    task_execution_id = task_execution_id_from_context(ctx)
     if task_execution_id is None:
         return None
     return db.query(TaskExecution).filter(TaskExecution.id == task_execution_id).first()
@@ -173,13 +171,13 @@ def handle_task_failure(
     )
     if session:
         if other_active_execution:
-            session.status = "running"
-            session.is_active = True
-            set_session_alert(session, "warning", alert_message[:2000])
+            mark_session_running(
+                session, alert_level="warning", alert_message=alert_message[:2000]
+            )
         else:
-            session.status = "paused"
-            session.is_active = False
-            set_session_alert(session, "error", alert_message[:2000])
+            mark_session_paused(
+                session, alert_level="error", alert_message=alert_message[:2000]
+            )
 
     if is_timeout and task:
         task.error_message += " (Task timed out after 5 minutes)"
@@ -236,18 +234,15 @@ def handle_task_failure(
     )
 
     if not knowledge_halted and has_retry_capacity and session and task:
-        task.status = TaskStatus.PENDING
-        task.completed_at = None
-        task.workspace_status = "in_progress" if task.task_subfolder else "not_created"
-        if session_task_link:
-            session_task_link.status = TaskStatus.PENDING
-            session_task_link.completed_at = None
-        session.status = "running"
-        session.is_active = True
-        set_session_alert(
+        mark_task_attempt_pending(
+            task=task,
+            session_task_link=session_task_link,
+            workspace_status=("in_progress" if task.task_subfolder else "not_created"),
+        )
+        mark_session_running(
             session,
-            "warning",
-            (
+            alert_level="warning",
+            alert_message=(
                 f"Retrying task {task_id} automatically after failure "
                 f"({retry_count + 1}/{max_retries + 1})"
             )[:2000],
@@ -260,24 +255,22 @@ def handle_task_failure(
             "Automatic recovery queued for failed ordered task. "
             "The next run will inspect the real workspace first and fix the underlying issue."
         )
-        task.status = TaskStatus.PENDING
-        task.started_at = None
-        task.completed_at = None
-        task.current_step = 0
-        task.steps = None
-        task.workspace_status = "changes_requested"
-        task.error_message = (
+        recovery_error_message = (
             f"{str(exc)}\n\n"
             "Automatic recovery requested: inspect the real workspace and repair the bug "
             "instead of repeating the previous assumptions."
         )[:4000]
-        if session_task_link:
-            session_task_link.status = TaskStatus.PENDING
-            session_task_link.started_at = None
-            session_task_link.completed_at = None
-        session.status = "running"
-        session.is_active = True
-        set_session_alert(session, "warning", recovery_message[:2000])
+        mark_task_attempt_pending(
+            task=task,
+            session_task_link=session_task_link,
+            reset_started_at=True,
+            reset_steps=True,
+            workspace_status="changes_requested",
+            error_message=recovery_error_message,
+        )
+        mark_session_running(
+            session, alert_level="warning", alert_message=recovery_message[:2000]
+        )
         db.commit()
         try:
             queue_task_for_session_fn(db=db, session=session, task_id=task.id)
@@ -310,12 +303,10 @@ def handle_task_failure(
                 completed_at=datetime.now(UTC),
                 workspace_status=("blocked" if task.task_subfolder else "not_created"),
             )
-            session.status = "paused"
-            session.is_active = False
-            set_session_alert(
+            mark_session_paused(
                 session,
-                "error",
-                (
+                alert_level="error",
+                alert_message=(
                     f"{alert_message}. Automatic recovery could not be queued: "
                     f"{str(recovery_queue_error)}"
                 )[:2000],
@@ -455,7 +446,7 @@ def _apply_knowledge_halt(
                 )
             )
             task_execution = None
-            task_execution_id = _task_execution_id_from_context(ctx)
+            task_execution_id = task_execution_id_from_context(ctx)
             if task_execution_id:
                 task_execution = (
                     db.query(TaskExecution)

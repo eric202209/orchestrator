@@ -11,6 +11,7 @@ from app.models import (
     SessionTask,
     Task,
     TaskExecution,
+    TaskExecutionChangeSet,
     TaskStatus,
 )
 from app.services.task_service import TASK_CHANGE_SET_LOG_MESSAGE
@@ -428,6 +429,20 @@ def test_task_retry_with_requested_changes_injects_operator_note_and_change_set(
     db_session.add(execution)
     db_session.commit()
     db_session.refresh(execution)
+    db_session.add(
+        TaskExecutionChangeSet(
+            project_id=project.id,
+            task_id=task.id,
+            session_id=session.id,
+            task_execution_id=execution.id,
+            base_snapshot_key="requested-changes-snapshot",
+            added_files=["extra.md"],
+            modified_files=["README.md"],
+            deleted_files=["old.md"],
+            warning_flags=["deleted_files"],
+            disposition="captured",
+        )
+    )
     db_session.add(
         LogEntry(
             session_id=session.id,

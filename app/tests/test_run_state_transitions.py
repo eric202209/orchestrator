@@ -14,9 +14,11 @@ from app.services.orchestration.run_state import (
     mark_task_attempt_cancelled,
     mark_task_attempt_done,
     mark_task_attempt_failed,
+    mark_task_attempt_pending,
     mark_task_attempt_running,
     read_run_state_snapshot,
     reset_active_attempts_for_session_stop,
+    task_execution_id_from_context,
 )
 
 
@@ -84,6 +86,49 @@ def test_mark_task_attempt_running_updates_task_link_and_execution(db_session):
     assert link.completed_at is None
     assert execution.status == TaskStatus.RUNNING
     assert execution.started_at == started_at
+    assert execution.completed_at is None
+
+
+def test_mark_task_attempt_pending_resets_task_link_and_execution(db_session):
+    task, link, execution = _make_task_attempt(db_session)
+    started_at = datetime(2026, 5, 14, 1, 2, 3, tzinfo=UTC)
+    completed_at = datetime(2026, 5, 14, 2, 3, 4, tzinfo=UTC)
+    task.status = TaskStatus.FAILED
+    task.started_at = started_at
+    task.completed_at = completed_at
+    task.current_step = 4
+    task.steps = [{"step": "old"}]
+    task.workspace_status = "blocked"
+    task.error_message = "old error"
+    link.status = TaskStatus.FAILED
+    link.started_at = started_at
+    link.completed_at = completed_at
+    execution.status = TaskStatus.FAILED
+    execution.started_at = started_at
+    execution.completed_at = completed_at
+
+    mark_task_attempt_pending(
+        task=task,
+        session_task_link=link,
+        task_execution=execution,
+        reset_started_at=True,
+        reset_steps=True,
+        workspace_status="changes_requested",
+        error_message="retry with repair context",
+    )
+
+    assert task.status == TaskStatus.PENDING
+    assert task.started_at is None
+    assert task.completed_at is None
+    assert task.current_step == 0
+    assert task.steps is None
+    assert task.workspace_status == "changes_requested"
+    assert task.error_message == "retry with repair context"
+    assert link.status == TaskStatus.PENDING
+    assert link.started_at is None
+    assert link.completed_at is None
+    assert execution.status == TaskStatus.PENDING
+    assert execution.started_at is None
     assert execution.completed_at is None
 
 
@@ -167,6 +212,17 @@ def test_reset_active_attempts_cancels_pending_and_running_executions(db_session
     assert link.completed_at is None
     assert execution.status == TaskStatus.CANCELLED
     assert execution.completed_at is not None
+
+
+def test_task_execution_id_from_context_rejects_bool_and_non_int():
+    class Context:
+        def __init__(self, task_execution_id):
+            self.task_execution_id = task_execution_id
+
+    assert task_execution_id_from_context(Context(42)) == 42
+    assert task_execution_id_from_context(Context(True)) is None
+    assert task_execution_id_from_context(Context("42")) is None
+    assert task_execution_id_from_context(None) is None
 
 
 def test_read_run_state_snapshot_flags_stopped_session_active_execution(db_session):

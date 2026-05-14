@@ -17,6 +17,13 @@ from app.services.orchestration.persistence import append_orchestration_event
 from app.services.orchestration.task_rules import (
     should_execute_in_canonical_project_root,
 )
+from app.services.orchestration.run_state import mark_task_attempt_pending
+from app.services.orchestration.session_state import (
+    clear_session_alert,
+    mark_session_paused,
+    mark_session_running,
+    mark_session_stopped,
+)
 from app.config import settings
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
@@ -98,13 +105,12 @@ def prepare_task_for_fresh_execution(
     task: Task, clear_saved_plan: bool = False
 ) -> None:
     """Reset task execution state before a fresh manual/automatic rerun."""
-    task.status = TaskStatus.PENDING
-    task.started_at = None
-    task.completed_at = None
-    task.error_message = None
-    task.current_step = 0
-    if clear_saved_plan:
-        task.steps = None
+    mark_task_attempt_pending(
+        task=task,
+        reset_started_at=True,
+        reset_steps=clear_saved_plan,
+        error_message=None,
+    )
 
 
 def _task_failure_requires_operator_review(task: Task) -> bool:
@@ -362,9 +368,11 @@ def queue_task_for_session(
         )
         db.add(session_task_link)
     else:
-        session_task_link.status = TaskStatus.PENDING
-        session_task_link.started_at = None
-        session_task_link.completed_at = None
+        mark_task_attempt_pending(
+            task=None,
+            session_task_link=session_task_link,
+            reset_started_at=True,
+        )
     task_execution = create_task_execution(
         db,
         session_id=session.id,
@@ -380,11 +388,8 @@ def queue_task_for_session(
     task_prompt = build_task_execution_prompt(task)
     prepare_task_for_fresh_execution(task, clear_saved_plan=should_clear_saved_plan)
 
-    session.status = "running"
-    session.is_active = True
-    if not session.started_at:
-        session.started_at = datetime.now(UTC)
-    set_session_alert(db, session, None, None)
+    mark_session_running(session, started_at=session.started_at or datetime.now(UTC))
+    clear_session_alert(session)
 
     event_project_dir = Path(task_workspace["workspace_path"])
     if task_workspace.get("task_subfolder"):
@@ -477,11 +482,10 @@ def reopen_failed_ordered_task_if_needed(
         return None
 
     if _task_failure_requires_operator_review(retryable_task):
-        set_session_alert(
-            db,
+        mark_session_paused(
             session,
-            "warning",
-            (
+            alert_level="warning",
+            alert_message=(
                 "Automatic execution paused because the next failed task needs "
                 f"operator review before retry: #{getattr(retryable_task, 'plan_position', None)} "
                 f"{retryable_task.title}"
@@ -497,11 +501,10 @@ def reopen_failed_ordered_task_if_needed(
         prior_recovery_attempts >= MAX_AUTOMATIC_TASK_RECOVERY_ATTEMPTS
         and not ignore_recovery_budget
     ):
-        set_session_alert(
-            db,
+        mark_session_paused(
             session,
-            "warning",
-            (
+            alert_level="warning",
+            alert_message=(
                 "Automatic execution paused because the next failed task has "
                 "already been retried automatically once and still needs a real fix: "
                 f"#{getattr(retryable_task, 'plan_position', None)} {retryable_task.title}"
@@ -522,13 +525,6 @@ def reopen_failed_ordered_task_if_needed(
         db.commit()
         return None
 
-    retryable_task.status = TaskStatus.PENDING
-    retryable_task.error_message = None
-    retryable_task.started_at = None
-    retryable_task.completed_at = None
-    retryable_task.current_step = 0
-    retryable_task.steps = None
-
     session_link = (
         db.query(SessionTask)
         .filter(
@@ -538,10 +534,13 @@ def reopen_failed_ordered_task_if_needed(
         .order_by(SessionTask.id.desc())
         .first()
     )
-    if session_link:
-        session_link.status = TaskStatus.PENDING
-        session_link.started_at = None
-        session_link.completed_at = None
+    mark_task_attempt_pending(
+        task=retryable_task,
+        session_task_link=session_link,
+        reset_started_at=True,
+        reset_steps=True,
+        error_message=None,
+    )
 
     db.add(
         LogEntry(
@@ -612,26 +611,23 @@ def maybe_queue_next_automatic_task(
             .first()
         )
         if pending_blocked_task:
-            session.status = "paused"
-            session.is_active = False
+            mark_session_paused(session)
             blocked_by = task_service.get_blocking_prior_tasks(pending_blocked_task)
             if blocked_by:
                 blocking_summary = ", ".join(
                     f"#{item.plan_position} {item.title} ({item.status.value})"
                     for item in blocked_by[:3]
                 )
-                set_session_alert(
-                    db,
+                mark_session_paused(
                     session,
-                    "warning",
-                    (
+                    alert_level="warning",
+                    alert_message=(
                         "Automatic execution is paused because an earlier ordered task "
                         f"is incomplete: {blocking_summary}"
                     )[:2000],
                 )
         else:
-            session.status = "stopped"
-            session.is_active = False
+            mark_session_stopped(session)
         db.commit()
         return None
 

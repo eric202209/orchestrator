@@ -690,6 +690,20 @@ def test_manual_promote_endpoint_requires_execution_id_for_recorded_change_set(
     db_session.commit()
     db_session.refresh(execution)
     db_session.add(
+        TaskExecutionChangeSet(
+            project_id=project.id,
+            task_id=task.id,
+            session_id=session.id,
+            task_execution_id=execution.id,
+            base_snapshot_key="manual-promote-snapshot",
+            added_files=["README.md"],
+            modified_files=[],
+            deleted_files=[],
+            warning_flags=[],
+            disposition="captured",
+        )
+    )
+    db_session.add(
         LogEntry(
             session_id=session.id,
             task_id=task.id,
@@ -837,6 +851,20 @@ def test_manual_promote_endpoint_rejects_stale_task_execution_id(
         (first_execution, "old.md"),
         (latest_execution, "latest.md"),
     ):
+        db_session.add(
+            TaskExecutionChangeSet(
+                project_id=project.id,
+                task_id=task.id,
+                session_id=session.id,
+                task_execution_id=execution.id,
+                base_snapshot_key=f"manual-promote-{filename}",
+                added_files=[filename],
+                modified_files=[],
+                deleted_files=[],
+                warning_flags=[],
+                disposition="captured",
+            )
+        )
         db_session.add(
             LogEntry(
                 session_id=session.id,

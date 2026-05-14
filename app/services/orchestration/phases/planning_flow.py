@@ -21,7 +21,6 @@ from app.services.orchestration.persistence import (
     append_orchestration_event,
     maybe_emit_divergence_detected,
     record_validation_verdict,
-    set_session_alert,
     write_orchestration_state_snapshot,
 )
 from app.services.orchestration.planning.planner import (
@@ -31,6 +30,7 @@ from app.services.orchestration.planning.planner import (
 )
 from app.services.orchestration.policy import clamp_planning_timeout
 from app.services.orchestration.run_state import mark_task_attempt_failed
+from app.services.orchestration.session_state import mark_session_paused
 from app.services.orchestration.task_rules import get_workflow_profile
 from app.services.orchestration.workflow_profiles import get_workflow_phases
 from app.services.orchestration.types import OrchestrationRunContext
@@ -87,10 +87,12 @@ def _finalize_planning_terminal_failure(
         completed_at=completed_at,
     )
     if ctx.session:
-        ctx.session.status = "paused"
-        ctx.session.is_active = False
-        ctx.session.paused_at = completed_at
-        set_session_alert(ctx.session, "error", failure_reason[:2000])
+        mark_session_paused(
+            ctx.session,
+            alert_level="error",
+            alert_message=failure_reason[:2000],
+            paused_at=completed_at,
+        )
     ctx.db.commit()
     if generate_failure_summary:
         try:

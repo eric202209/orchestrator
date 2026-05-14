@@ -37,6 +37,41 @@ def mark_task_attempt_running(
     return started_at
 
 
+def mark_task_attempt_pending(
+    *,
+    task: Task | None,
+    session_task_link: SessionTask | None = None,
+    task_execution: TaskExecution | None = None,
+    reset_started_at: bool = False,
+    reset_steps: bool = False,
+    workspace_status: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    """Reset a task attempt so it can be picked up by a later run."""
+
+    if task:
+        task.status = TaskStatus.PENDING
+        if reset_started_at:
+            task.started_at = None
+        task.completed_at = None
+        task.current_step = 0
+        if reset_steps:
+            task.steps = None
+        if workspace_status is not None:
+            task.workspace_status = workspace_status
+        task.error_message = error_message
+    if session_task_link:
+        session_task_link.status = TaskStatus.PENDING
+        if reset_started_at:
+            session_task_link.started_at = None
+        session_task_link.completed_at = None
+    if task_execution:
+        task_execution.status = TaskStatus.PENDING
+        if reset_started_at:
+            task_execution.started_at = None
+        task_execution.completed_at = None
+
+
 def mark_task_attempt_failed(
     *,
     task: Task | None,

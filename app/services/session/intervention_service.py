@@ -30,6 +30,12 @@ from app.models import (
     Task,
     TaskStatus,
 )
+from app.services.orchestration.run_state import mark_task_attempt_pending
+from app.services.orchestration.session_state import (
+    mark_session_awaiting_input,
+    mark_session_paused,
+    mark_session_running,
+)
 from .session_lookup import get_session_or_404
 
 logger = logging.getLogger(__name__)
@@ -192,8 +198,7 @@ def create_intervention_request(
     )
     db.add(req)
 
-    session.status = "awaiting_input"
-    session.is_active = True
+    mark_session_awaiting_input(session)
     db.commit()
     db.refresh(req)
 
@@ -423,14 +428,12 @@ def _dispatch_resume(
             .order_by(SessionTask.id.desc())
             .first()
         )
-        if session_task_link:
-            session_task_link.status = TaskStatus.PENDING
-            session_task_link.started_at = None
-            session_task_link.completed_at = None
-        task.status = TaskStatus.PENDING
-        task.started_at = None
-        task.completed_at = None
-        task.error_message = None
+        mark_task_attempt_pending(
+            task=task,
+            session_task_link=session_task_link,
+            reset_started_at=True,
+            error_message=None,
+        )
         from app.services.task_execution_service import create_task_execution
 
         task_execution = create_task_execution(
@@ -448,8 +451,7 @@ def _dispatch_resume(
             expected_session_instance_id=session.instance_id,
             task_execution_id=task_execution.id,
         )
-        session.status = "running"
-        session.is_active = True
+        mark_session_running(session)
         db.commit()
         logger.info(
             "Auto-resumed session %s from checkpoint %s after operator reply",
@@ -491,8 +493,7 @@ def submit_intervention_reply(
 
     session = db.query(SessionModel).filter(SessionModel.id == req.session_id).first()
     if session and session.status == "awaiting_input":
-        session.status = "paused"
-        session.paused_at = now
+        mark_session_paused(session, paused_at=now)
         db.commit()
 
     _emit_intervention_event(
@@ -558,8 +559,7 @@ def approve_intervention(
 
     session = db.query(SessionModel).filter(SessionModel.id == req.session_id).first()
     if session and session.status == "awaiting_input":
-        session.status = "paused"
-        session.paused_at = now
+        mark_session_paused(session, paused_at=now)
         db.commit()
 
     _emit_intervention_event(
@@ -623,8 +623,7 @@ def deny_intervention(
 
     session = db.query(SessionModel).filter(SessionModel.id == req.session_id).first()
     if session and session.status == "awaiting_input":
-        session.status = "paused"
-        session.paused_at = now
+        mark_session_paused(session, paused_at=now)
         db.commit()
 
     _emit_intervention_event(

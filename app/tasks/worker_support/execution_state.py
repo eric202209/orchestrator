@@ -6,6 +6,13 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.models import SessionTask, Task, TaskExecution, TaskStatus
+from app.services.orchestration.run_state import (
+    mark_task_attempt_cancelled,
+    mark_task_attempt_done,
+    mark_task_attempt_failed,
+    mark_task_attempt_pending,
+    mark_task_attempt_running,
+)
 from app.services.task_execution_service import get_task_execution
 
 
@@ -20,11 +27,38 @@ def _sync_task_execution_state(
     task_execution = get_task_execution(db, task_execution_id)
     if not task_execution:
         return
-    task_execution.status = status
-    if started_at is not None:
-        task_execution.started_at = started_at
-    if completed_at is not None:
-        task_execution.completed_at = completed_at
+    if status == TaskStatus.RUNNING:
+        mark_task_attempt_running(
+            task=None,
+            task_execution=task_execution,
+            started_at=started_at,
+        )
+    elif status == TaskStatus.FAILED:
+        mark_task_attempt_failed(
+            task=None,
+            task_execution=task_execution,
+            completed_at=completed_at,
+        )
+    elif status == TaskStatus.CANCELLED:
+        mark_task_attempt_cancelled(
+            task=None,
+            task_execution=task_execution,
+            completed_at=completed_at,
+        )
+    elif status == TaskStatus.DONE:
+        mark_task_attempt_done(
+            task=None,
+            task_execution=task_execution,
+            completed_at=completed_at,
+        )
+    elif status == TaskStatus.PENDING:
+        mark_task_attempt_pending(
+            task=None,
+            task_execution=task_execution,
+            reset_started_at=started_at is None,
+        )
+        if started_at is not None:
+            task_execution.started_at = started_at
     db.commit()
 
 
@@ -50,9 +84,7 @@ def _clear_orphaned_running_state_without_active_execution(
 
     task = db.query(Task).filter(Task.id == task_id).first()
     if task and task.status == TaskStatus.RUNNING:
-        task.status = TaskStatus.PENDING
-        task.started_at = None
-        task.completed_at = None
+        mark_task_attempt_pending(task=task, reset_started_at=True)
 
     running_links = (
         db.query(SessionTask)
@@ -64,9 +96,11 @@ def _clear_orphaned_running_state_without_active_execution(
         .all()
     )
     for link in running_links:
-        link.status = TaskStatus.PENDING
-        link.started_at = None
-        link.completed_at = None
+        mark_task_attempt_pending(
+            task=None,
+            session_task_link=link,
+            reset_started_at=True,
+        )
 
     db.commit()
 
@@ -99,17 +133,45 @@ def _sync_task_execution_from_task_state(
         and current_status not in terminal_statuses
     ):
         return
-    task_execution.status = current_status
-    if getattr(session_task_link, "started_at", None) or getattr(
+    started_at = getattr(session_task_link, "started_at", None) or getattr(
         task, "started_at", None
-    ):
-        task_execution.started_at = getattr(
-            session_task_link, "started_at", None
-        ) or getattr(task, "started_at", None)
+    )
     if current_status in {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED}:
-        task_execution.completed_at = (
+        completed_at = (
             getattr(session_task_link, "completed_at", None)
             or getattr(task, "completed_at", None)
             or datetime.now(timezone.utc)
         )
+        if current_status == TaskStatus.DONE:
+            mark_task_attempt_done(
+                task=None,
+                task_execution=task_execution,
+                completed_at=completed_at,
+            )
+        elif current_status == TaskStatus.FAILED:
+            mark_task_attempt_failed(
+                task=None,
+                task_execution=task_execution,
+                completed_at=completed_at,
+            )
+        else:
+            mark_task_attempt_cancelled(
+                task=None,
+                task_execution=task_execution,
+                completed_at=completed_at,
+            )
+    elif current_status == TaskStatus.RUNNING:
+        mark_task_attempt_running(
+            task=None,
+            task_execution=task_execution,
+            started_at=started_at,
+        )
+    elif current_status == TaskStatus.PENDING:
+        mark_task_attempt_pending(
+            task=None,
+            task_execution=task_execution,
+            reset_started_at=started_at is None,
+        )
+        if started_at is not None:
+            task_execution.started_at = started_at
     db.commit()

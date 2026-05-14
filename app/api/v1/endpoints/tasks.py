@@ -24,6 +24,16 @@ from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.execution.runtime import workspace_snapshot_key
 from app.services.orchestration.persistence import append_orchestration_event
 from app.services.orchestration.context_assembly import render_adapted_runtime_prompt
+from app.services.orchestration.run_state import (
+    mark_task_attempt_done,
+    mark_task_attempt_failed,
+    mark_task_attempt_pending,
+    mark_task_attempt_running,
+)
+from app.services.orchestration.session_state import (
+    mark_session_running,
+    mark_session_stopped,
+)
 from app.services.authz import project_access_filter
 from app.services.session.session_runtime_service import ensure_task_workspace
 from app.services.task_execution_service import (
@@ -91,13 +101,12 @@ def _prepare_task_for_fresh_execution(
     task: Task, clear_saved_plan: bool = False
 ) -> None:
     """Reset task execution state before a fresh run."""
-    task.status = TaskStatus.PENDING
-    task.error_message = None
-    task.started_at = None
-    task.completed_at = None
-    task.current_step = 0
-    if clear_saved_plan:
-        task.steps = None
+    mark_task_attempt_pending(
+        task=task,
+        reset_started_at=True,
+        reset_steps=clear_saved_plan,
+        error_message=None,
+    )
 
 
 def _get_active_task_session(db: Session, task_id: int) -> Optional[int]:
@@ -341,9 +350,11 @@ def _queue_task_retry(
         )
         db.add(session_task)
     else:
-        session_task.status = TaskStatus.PENDING
-        session_task.started_at = None
-        session_task.completed_at = None
+        mark_task_attempt_pending(
+            task=None,
+            session_task_link=session_task,
+            reset_started_at=True,
+        )
 
     task_execution = create_task_execution(
         db,
@@ -397,9 +408,10 @@ def _queue_task_retry(
         },
     )
 
-    selected_session.status = "running"
-    selected_session.is_active = True
-    selected_session.started_at = selected_session.started_at or datetime.now(UTC)
+    mark_session_running(
+        selected_session,
+        started_at=selected_session.started_at or datetime.now(UTC),
+    )
 
     db.add(
         LogEntry(
@@ -452,13 +464,14 @@ def _queue_task_retry(
             queued_event_id=(queued_event or {}).get("event_id"),
         )
     except Exception:
-        selected_session.status = "stopped"
-        selected_session.is_active = False
-        selected_session.stopped_at = datetime.now(UTC)
-        task.status = TaskStatus.FAILED
-        task.error_message = "Failed to dispatch task to worker"
-        task_execution.status = TaskStatus.FAILED
-        task_execution.completed_at = datetime.now(UTC)
+        mark_session_stopped(selected_session, stopped_at=datetime.now(UTC))
+        mark_task_attempt_failed(
+            task=task,
+            session_task_link=session_task,
+            task_execution=task_execution,
+            error_message="Failed to dispatch task to worker",
+            completed_at=datetime.now(UTC),
+        )
         db.add(
             LogEntry(
                 session_id=selected_session.id,
@@ -707,11 +720,13 @@ async def execute_task_with_runtime(
             db.rollback()
             raise
 
-        new_session.status = "running"
-        new_session.is_active = True
-        new_session.started_at = datetime.now(UTC)
-        task_execution.status = TaskStatus.RUNNING
-        task_execution.started_at = new_session.started_at
+        mark_session_running(new_session, started_at=datetime.now(UTC))
+        mark_task_attempt_running(
+            task=task,
+            session_task_link=session_task,
+            task_execution=task_execution,
+            started_at=new_session.started_at,
+        )
         db.commit()
         db.refresh(new_session)
 
@@ -746,16 +761,21 @@ async def execute_task_with_runtime(
             timeout_seconds=actual_timeout,
         )
 
-        # Update task status
         if result["status"] == "completed":
-            task.status = TaskStatus.DONE
-            task.error_message = None
-            task_execution.status = TaskStatus.DONE
+            mark_task_attempt_done(
+                task=task,
+                session_task_link=session_task,
+                task_execution=task_execution,
+                completed_at=datetime.now(UTC),
+            )
         else:
-            task.status = TaskStatus.FAILED
-            task.error_message = result.get("error", "Unknown error")
-            task_execution.status = TaskStatus.FAILED
-        task_execution.completed_at = datetime.now(UTC)
+            mark_task_attempt_failed(
+                task=task,
+                session_task_link=session_task,
+                task_execution=task_execution,
+                error_message=result.get("error", "Unknown error"),
+                completed_at=datetime.now(UTC),
+            )
 
         db.commit()
         db.refresh(task)
@@ -776,12 +796,17 @@ async def execute_task_with_runtime(
         )
 
         if task:
-            task.status = TaskStatus.FAILED
-            task.error_message = f"{error_msg}\nRecommended action: {recovery_plan.get('recommended_action', 'manual_intervention')}"
             task_execution = locals().get("task_execution")
-            if task_execution:
-                task_execution.status = TaskStatus.FAILED
-                task_execution.completed_at = datetime.now(UTC)
+            mark_task_attempt_failed(
+                task=task,
+                session_task_link=locals().get("session_task"),
+                task_execution=task_execution,
+                error_message=(
+                    f"{error_msg}\nRecommended action: "
+                    f"{recovery_plan.get('recommended_action', 'manual_intervention')}"
+                ),
+                completed_at=datetime.now(UTC),
+            )
             db.commit()
         raise HTTPException(status_code=500, detail=error_msg)
 

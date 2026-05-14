@@ -24,6 +24,10 @@ from app.services.orchestration.run_state import (
     mark_task_attempt_failed,
     mark_task_attempt_running,
 )
+from app.services.orchestration.session_state import (
+    mark_session_running,
+    mark_session_stopped,
+)
 from app.services.session.session_runtime_service import ensure_task_workspace
 from app.services.task_execution_service import create_task_execution
 from app.services.tool_tracking_service import ToolTrackingService
@@ -158,8 +162,7 @@ async def execute_task_payload(
                 started_at=datetime.now(timezone.utc),
             )
             if session.status not in ("running", "paused"):
-                session.status = "running"
-                session.is_active = True
+                mark_session_running(session)
             db.add(
                 LogEntry(
                     session_id=session_id,
@@ -257,9 +260,7 @@ async def execute_task_payload(
                 completed_at=datetime.now(timezone.utc),
             )
 
-        session.is_active = False
-        session.status = "stopped"
-        session.stopped_at = datetime.now(timezone.utc)
+        mark_session_stopped(session, stopped_at=datetime.now(timezone.utc))
 
         traceback_text = traceback.format_exc()
         logger.error(

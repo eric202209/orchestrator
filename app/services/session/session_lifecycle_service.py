@@ -35,7 +35,16 @@ from app.services.session.session_runtime_service import (
 from app.services.orchestration.task_rules import (
     should_execute_in_canonical_project_root,
 )
-from app.services.orchestration.run_state import reset_active_attempts_for_session_stop
+from app.services.orchestration.run_state import (
+    mark_task_attempt_pending,
+    reset_active_attempts_for_session_stop,
+)
+from app.services.orchestration.session_state import (
+    clear_session_alert,
+    mark_session_paused,
+    mark_session_running,
+    mark_session_stopped,
+)
 from app.services.task_service import TaskService
 from app.services.task_execution_service import create_task_execution
 
@@ -192,18 +201,16 @@ def _stop_running_session_for_recovery(
     alert_message: str,
     recovery_log_message: str,
 ) -> bool:
-    session_task.status = TaskStatus.PENDING
-    session_task.started_at = None
-    session_task.completed_at = None
-    task.status = TaskStatus.PENDING
-    task.started_at = None
-    task.completed_at = None
-    task.error_message = task_error_message
-    task.current_step = 0
-    session.status = "stopped"
-    session.is_active = False
-    session.stopped_at = datetime.now(timezone.utc)
-    set_session_alert(db, session, "warn", alert_message)
+    mark_task_attempt_pending(
+        task=task,
+        session_task_link=session_task,
+        reset_started_at=True,
+        error_message=task_error_message,
+    )
+    mark_session_stopped(session, stopped_at=datetime.now(timezone.utc))
+    session.last_alert_level = "warn"
+    session.last_alert_message = alert_message
+    session.last_alert_at = datetime.now(timezone.utc)
     db.add(
         LogEntry(
             session_id=session.id,
@@ -395,13 +402,23 @@ def reconcile_terminal_running_sessions(
         else:
             continue
 
-        session.status = next_status
-        session.is_active = False
         if next_status == "paused":
-            session.paused_at = session.paused_at or datetime.now(timezone.utc)
+            mark_session_paused(
+                session,
+                alert_level=alert_level,
+                alert_message=alert_message,
+                paused_at=session.paused_at or datetime.now(timezone.utc),
+            )
         else:
-            session.stopped_at = session.stopped_at or datetime.now(timezone.utc)
-        set_session_alert(db, session, alert_level, alert_message)
+            mark_session_stopped(
+                session,
+                stopped_at=session.stopped_at or datetime.now(timezone.utc),
+            )
+            session.last_alert_level = alert_level
+            session.last_alert_message = alert_message
+            session.last_alert_at = (
+                datetime.now(timezone.utc) if alert_message else None
+            )
         db.add(
             LogEntry(
                 session_id=session.id,
@@ -453,14 +470,17 @@ def _ensure_session_task_ready_for_resume(
         )
         db.add(session_task_link)
     else:
-        session_task_link.status = TaskStatus.PENDING
-        session_task_link.started_at = None
-        session_task_link.completed_at = None
+        mark_task_attempt_pending(
+            task=None,
+            session_task_link=session_task_link,
+            reset_started_at=True,
+        )
 
-    task.status = TaskStatus.PENDING
-    task.started_at = None
-    task.completed_at = None
-    task.error_message = None
+    mark_task_attempt_pending(
+        task=task,
+        reset_started_at=True,
+        error_message=None,
+    )
     return session_task_link
 
 
@@ -796,8 +816,7 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
             "Session %s is stuck in pending state with is_active=True. Resetting...",
             session_id,
         )
-        session.is_active = False
-        session.status = "stopped"
+        mark_session_stopped(session)
         db.commit()
 
     if session.status == "active":
@@ -805,8 +824,7 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
             "Session %s has 'active' status. Treating as stopped and resetting...",
             session_id,
         )
-        session.is_active = False
-        session.status = "stopped"
+        mark_session_stopped(session)
         db.commit()
 
     try:
@@ -824,7 +842,7 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
         )
         session_key = await runtime.create_session(task_description)
 
-        set_session_alert(db, session, None, None)
+        clear_session_alert(session)
 
         if session.project_id:
             task_service = TaskService(db)
@@ -866,14 +884,12 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                 if other_active_link:
                     continue
 
-                task.status = TaskStatus.PENDING
-                task.error_message = None
-                task.started_at = None
-                task.completed_at = None
-                task.current_step = 0
-                link.status = TaskStatus.PENDING
-                link.started_at = None
-                link.completed_at = None
+                mark_task_attempt_pending(
+                    task=task,
+                    session_task_link=link,
+                    reset_started_at=True,
+                    error_message=None,
+                )
                 stale_running_tasks.append(task)
 
             if stale_running_tasks:
@@ -908,8 +924,7 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                         )
                     )
                 else:
-                    session.status = "stopped"
-                    session.is_active = False
+                    mark_session_stopped(session)
                     db.add(
                         LogEntry(
                             session_id=session_id,
@@ -926,8 +941,7 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                     session_instance_id=session_instance_id,
                     allow_checkpoint_resume=not recovered_orphaned_run,
                 )
-                session.status = "running"
-                session.is_active = True
+                mark_session_running(session)
                 db.add(
                     LogEntry(
                         session_id=session_id,
@@ -983,11 +997,9 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
 
         session.started_at = datetime.now(timezone.utc)
         if session.execution_mode == "manual":
-            session.is_active = True
-            session.status = "running"
+            mark_session_running(session)
         elif session.status != "stopped":
-            session.is_active = True
-            session.status = "running"
+            mark_session_running(session)
         db.commit()
 
         db.add(
@@ -1086,9 +1098,7 @@ async def stop_session_lifecycle(
         if not force:
             await runtime.stop_session()
 
-        session.is_active = False
-        session.stopped_at = datetime.now(timezone.utc)
-        session.status = "stopped"
+        mark_session_stopped(session, stopped_at=datetime.now(timezone.utc))
         _running_link = (
             db.query(SessionTask)
             .filter(
@@ -1211,9 +1221,11 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
             )
             await runtime.pause_session()
 
-        session.is_active = True
-        session.status = "paused"
-        session.paused_at = datetime.now(timezone.utc)
+        mark_session_paused(
+            session,
+            paused_at=datetime.now(timezone.utc),
+            is_active=True,
+        )
         reset_count = _reset_running_session_tasks(
             db,
             session_id=session_id,
@@ -1470,8 +1482,7 @@ async def resume_session_lifecycle(
             dispatch_mode = "fresh_requeue"
             task_execution_id = queued.get("task_execution_id")
 
-        session.status = "running"
-        session.is_active = True
+        mark_session_running(session)
         session.resumed_at = resumed_at
         db.commit()
 

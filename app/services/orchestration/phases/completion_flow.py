@@ -42,7 +42,6 @@ from app.services.orchestration.persistence import (
     attach_failure_envelope,
     record_validation_verdict,
     save_orchestration_checkpoint,
-    set_session_alert,
 )
 from app.services.orchestration.policy import (
     SUMMARY_TIMEOUT_SECONDS,
@@ -50,6 +49,13 @@ from app.services.orchestration.policy import (
 from app.services.orchestration.run_state import (
     mark_task_attempt_done,
     mark_task_attempt_failed,
+    mark_task_attempt_pending,
+)
+from app.services.orchestration.session_state import (
+    clear_session_alert,
+    mark_session_paused,
+    mark_session_running,
+    mark_session_stopped,
 )
 from app.services.orchestration.types import (
     FailureEnvelope,
@@ -650,10 +656,10 @@ def _attempt_completion_repair(
     orchestration_state.record_failure(step_record)
     task.error_message = assessment.error_message[:2000]
     if session:
-        set_session_alert(
+        mark_session_paused(
             session,
-            "error",
-            f"Completion repair failed: {assessment.error_message[:1800]}",
+            alert_level="error",
+            alert_message=f"Completion repair failed: {assessment.error_message[:1800]}",
         )
     save_orchestration_checkpoint_fn(
         db, ctx.session_id, ctx.task_id, ctx.prompt, orchestration_state
@@ -1015,9 +1021,11 @@ def finalize_successful_task(
             )
             task.current_step = len(orchestration_state.plan)
             if session:
-                session.status = "paused"
-                session.is_active = False
-                set_session_alert(session, "error", completion_error[:2000])
+                mark_session_paused(
+                    session,
+                    alert_level="error",
+                    alert_message=completion_error[:2000],
+                )
             db.commit()
             emit_live(
                 "ERROR",
@@ -1113,9 +1121,9 @@ def finalize_successful_task(
         )
         task.current_step = len(orchestration_state.plan)
         if session:
-            session.status = "paused"
-            session.is_active = False
-            set_session_alert(session, "error", completion_error[:2000])
+            mark_session_paused(
+                session, alert_level="error", alert_message=completion_error[:2000]
+            )
         db.commit()
         emit_live(
             "ERROR",
@@ -1210,9 +1218,11 @@ def finalize_successful_task(
                     )
                     task.current_step = len(orchestration_state.plan)
                     if session:
-                        session.status = "paused"
-                        session.is_active = False
-                        set_session_alert(session, "error", completion_error[:2000])
+                        mark_session_paused(
+                            session,
+                            alert_level="error",
+                            alert_message=completion_error[:2000],
+                        )
                     db.commit()
                     emit_live(
                         "ERROR",
@@ -1370,9 +1380,11 @@ def finalize_successful_task(
                     orchestration_state.status = OrchestrationStatus.ABORTED
                     orchestration_state.abort_reason = verification_error
                     if session:
-                        session.status = "paused"
-                        session.is_active = False
-                        set_session_alert(session, "error", task.error_message[:2000])
+                        mark_session_paused(
+                            session,
+                            alert_level="error",
+                            alert_message=task.error_message[:2000],
+                        )
                     db.commit()
                     emit_live(
                         "ERROR",
@@ -1560,9 +1572,11 @@ def finalize_successful_task(
                 )
                 task.current_step = len(orchestration_state.plan)
                 if session:
-                    session.status = "paused"
-                    session.is_active = False
-                    set_session_alert(session, "error", baseline_error[:2000])
+                    mark_session_paused(
+                        session,
+                        alert_level="error",
+                        alert_message=baseline_error[:2000],
+                    )
                 db.commit()
                 emit_live(
                     "ERROR",
@@ -1641,7 +1655,7 @@ def finalize_successful_task(
         logger=logger,
     )
 
-    set_session_alert(session, None, None)
+    clear_session_alert(session)
 
     next_task = None
     blocked_pending_task = None
@@ -1669,11 +1683,9 @@ def finalize_successful_task(
 
     if session:
         if next_task:
-            session.status = "running"
-            session.is_active = True
+            mark_session_running(session)
         elif blocked_pending_task:
-            session.status = "paused"
-            session.is_active = False
+            mark_session_paused(session)
             blockers = type(task_service)(db).get_blocking_prior_tasks(
                 blocked_pending_task
             )
@@ -1682,17 +1694,16 @@ def finalize_successful_task(
                     f"#{item.plan_position} {item.title} ({item.status.value})"
                     for item in blockers[:3]
                 )
-                set_session_alert(
+                mark_session_paused(
                     session,
-                    "warning",
-                    (
+                    alert_level="warning",
+                    alert_message=(
                         "Automatic execution is paused because an earlier ordered task "
                         f"is incomplete: {blocking_summary}"
                     )[:2000],
                 )
         else:
-            session.status = "stopped"
-            session.is_active = False
+            mark_session_stopped(session)
 
     db.commit()
     write_project_state_snapshot_fn(db, project, task, session_id)
@@ -1752,15 +1763,17 @@ def finalize_successful_task(
             )
             db.add(next_session_task_link)
         else:
-            next_session_task_link.status = TaskStatus.PENDING
-            next_session_task_link.started_at = None
-            next_session_task_link.completed_at = None
+            mark_task_attempt_pending(
+                task=None,
+                session_task_link=next_session_task_link,
+                reset_started_at=True,
+            )
 
-        next_task.status = TaskStatus.PENDING
-        next_task.started_at = None
-        next_task.completed_at = None
-        next_task.error_message = None
-        next_task.current_step = 0
+        mark_task_attempt_pending(
+            task=next_task,
+            reset_started_at=True,
+            error_message=None,
+        )
         from app.services.task_execution_service import create_task_execution
 
         next_task_execution = create_task_execution(

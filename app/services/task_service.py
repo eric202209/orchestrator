@@ -15,7 +15,7 @@ from app.services.workspace.project_isolation_service import (
     _slugify_workspace_name,
     resolve_project_workspace_path,
 )
-from app.services.workspace.project_mutation_lock import project_mutation_lock
+from app.services.workspace.canonical_mutation_service import CanonicalMutationService
 
 HYDRATION_EXCLUDED_NAMES = {
     ".openclaw",
@@ -83,6 +83,7 @@ class TaskService:
 
     def __init__(self, db: Session):
         self.db = db
+        self.canonical_mutations = CanonicalMutationService()
 
     def get_task(self, task_id: int):
         """Get a task by ID"""
@@ -501,8 +502,32 @@ class TaskService:
         snapshot_key: str,
         preserve_project_root_rules: bool = False,
     ) -> dict:
-        target_dir = target_dir.resolve()
         project_root = self.get_project_root(project).resolve()
+        return self.canonical_mutations.run_locked(
+            project,
+            project_root=project_root,
+            operation="restore_workspace_snapshot",
+            owner=f"snapshot:{snapshot_key}",
+            fn=lambda: self._restore_workspace_snapshot_unlocked(
+                project,
+                target_dir,
+                snapshot_key=snapshot_key,
+                preserve_project_root_rules=preserve_project_root_rules,
+                project_root=project_root,
+            ),
+        )
+
+    def _restore_workspace_snapshot_unlocked(
+        self,
+        project: Project,
+        target_dir: Path,
+        *,
+        snapshot_key: str,
+        preserve_project_root_rules: bool = False,
+        project_root: Path | None = None,
+    ) -> dict:
+        target_dir = target_dir.resolve()
+        project_root = project_root or self.get_project_root(project).resolve()
         snapshot_dir = (project_root / AUTO_SNAPSHOT_ROOT / snapshot_key).resolve()
 
         if not snapshot_dir.exists():
@@ -900,23 +925,7 @@ class TaskService:
         )
         if record:
             return self._change_set_record_payload(record)
-
-        entry = (
-            self.db.query(LogEntry)
-            .filter(
-                LogEntry.task_execution_id == task_execution_id,
-                LogEntry.message == TASK_CHANGE_SET_LOG_MESSAGE,
-            )
-            .order_by(LogEntry.id.desc())
-            .first()
-        )
-        if not entry or not entry.log_metadata:
-            return None
-        try:
-            payload = json.loads(entry.log_metadata)
-        except json.JSONDecodeError:
-            return None
-        return payload if isinstance(payload, dict) else None
+        return None
 
     def get_latest_task_change_set_for_task(
         self,
@@ -941,29 +950,7 @@ class TaskService:
                 "change_set": self._change_set_record_payload(record),
                 "review_decision": record.review_decision,
             }
-
-        entry = (
-            self.db.query(LogEntry)
-            .filter(
-                LogEntry.task_id == task_id,
-                LogEntry.message == TASK_CHANGE_SET_LOG_MESSAGE,
-            )
-            .order_by(LogEntry.created_at.desc(), LogEntry.id.desc())
-            .first()
-        )
-        if not entry or not entry.log_metadata:
-            return None
-        try:
-            payload = json.loads(entry.log_metadata)
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(payload, dict):
-            return None
-        return {
-            "task_execution_id": entry.task_execution_id,
-            "recorded_at": entry.created_at.isoformat() if entry.created_at else None,
-            "change_set": payload,
-        }
+        return None
 
     def reject_task_execution_change_set(
         self,
@@ -975,20 +962,20 @@ class TaskService:
         reason: str = "operator_rejected_change_set",
     ) -> dict[str, Any]:
         project_root = self.get_project_root(project).resolve()
-        with project_mutation_lock(
-            project_id=project.id,
+        return self.canonical_mutations.run_locked(
+            project,
             project_root=project_root,
             operation="reject_change_set",
             owner=f"task:{task.id}:execution:{task_execution_id}",
-        ):
-            return self._reject_task_execution_change_set_unlocked(
+            fn=lambda: self._reject_task_execution_change_set_unlocked(
                 project,
                 task,
                 task_execution_id=task_execution_id,
                 snapshot_key=snapshot_key,
                 reason=reason,
                 project_root=project_root,
-            )
+            ),
+        )
 
     def _reject_task_execution_change_set_unlocked(
         self,
@@ -1044,11 +1031,12 @@ class TaskService:
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         manifest_path.chmod(0o666)
 
-        restore_result = self.restore_workspace_snapshot(
+        restore_result = self._restore_workspace_snapshot_unlocked(
             project,
             project_root,
             snapshot_key=snapshot_key,
             preserve_project_root_rules=True,
+            project_root=project_root,
         )
         self.ensure_project_gitignore_guard(project)
         disposition_record = self.mark_task_execution_change_set_disposition(
@@ -1512,13 +1500,13 @@ class TaskService:
 
     def promote_task_into_baseline(self, project: Project, task: Task) -> dict:
         project_root = self.get_project_root(project)
-        with project_mutation_lock(
-            project_id=project.id,
+        return self.canonical_mutations.run_locked(
+            project,
             project_root=project_root,
             operation="promote_task",
             owner=f"task:{task.id}",
-        ):
-            return self._promote_task_into_baseline_unlocked(project, task)
+            fn=lambda: self._promote_task_into_baseline_unlocked(project, task),
+        )
 
     def _promote_task_into_baseline_unlocked(
         self, project: Project, task: Task
@@ -1582,13 +1570,13 @@ class TaskService:
 
     def rebuild_project_baseline(self, project: Project) -> dict:
         project_root = self.get_project_root(project)
-        with project_mutation_lock(
-            project_id=project.id,
+        return self.canonical_mutations.run_locked(
+            project,
             project_root=project_root,
             operation="rebuild_baseline",
             owner=f"project:{project.id}",
-        ):
-            return self._rebuild_project_baseline_unlocked(project)
+            fn=lambda: self._rebuild_project_baseline_unlocked(project),
+        )
 
     def _rebuild_project_baseline_unlocked(self, project: Project) -> dict:
         baseline_dir = self.get_project_baseline_dir(project)
@@ -1846,8 +1834,43 @@ class TaskService:
         include_changes_requested: bool = False,
         include_blocked: bool = True,
     ) -> dict:
-        """Archive eligible disposable task workspace folders without touching baseline."""
         project_root = self.get_project_root(project).resolve()
+        if dry_run:
+            return self._cleanup_retained_task_workspaces_unlocked(
+                project,
+                dry_run=dry_run,
+                include_ready=include_ready,
+                include_changes_requested=include_changes_requested,
+                include_blocked=include_blocked,
+                project_root=project_root,
+            )
+        return self.canonical_mutations.run_locked(
+            project,
+            project_root=project_root,
+            operation="cleanup_retained_workspaces",
+            owner=f"project:{project.id}",
+            fn=lambda: self._cleanup_retained_task_workspaces_unlocked(
+                project,
+                dry_run=dry_run,
+                include_ready=include_ready,
+                include_changes_requested=include_changes_requested,
+                include_blocked=include_blocked,
+                project_root=project_root,
+            ),
+        )
+
+    def _cleanup_retained_task_workspaces_unlocked(
+        self,
+        project: Project,
+        *,
+        dry_run: bool = True,
+        include_ready: bool = False,
+        include_changes_requested: bool = False,
+        include_blocked: bool = True,
+        project_root: Path | None = None,
+    ) -> dict:
+        """Archive eligible disposable task workspace folders without touching baseline."""
+        project_root = project_root or self.get_project_root(project).resolve()
         archived_at = datetime.now(UTC)
         archive_root = (
             project_root
@@ -1942,8 +1965,30 @@ class TaskService:
         *,
         reason: str = "auto_published_to_baseline",
     ) -> dict[str, Any]:
-        """Move an accepted task workspace out of the visible project root."""
         project_root = self.get_project_root(project).resolve()
+        return self.canonical_mutations.run_locked(
+            project,
+            project_root=project_root,
+            operation="archive_promoted_workspace",
+            owner=f"task:{task.id}",
+            fn=lambda: self._archive_promoted_task_workspace_unlocked(
+                project,
+                task,
+                reason=reason,
+                project_root=project_root,
+            ),
+        )
+
+    def _archive_promoted_task_workspace_unlocked(
+        self,
+        project: Project,
+        task: Task,
+        *,
+        reason: str = "auto_published_to_baseline",
+        project_root: Path | None = None,
+    ) -> dict[str, Any]:
+        """Move an accepted task workspace out of the visible project root."""
+        project_root = project_root or self.get_project_root(project).resolve()
         task_subfolder = getattr(task, "task_subfolder", None)
         if not task_subfolder:
             return {"archived": False, "reason": "task_has_no_workspace"}
@@ -2018,8 +2063,30 @@ class TaskService:
         *,
         reason: str = "changes_requested_repair_rerun",
     ) -> dict[str, Any]:
-        """Archive the current task workspace so a repair rerun gets a fresh folder."""
         project_root = self.get_project_root(project).resolve()
+        return self.canonical_mutations.run_locked(
+            project,
+            project_root=project_root,
+            operation="archive_repair_workspace",
+            owner=f"task:{task.id}",
+            fn=lambda: self._archive_task_workspace_for_repair_rerun_unlocked(
+                project,
+                task,
+                reason=reason,
+                project_root=project_root,
+            ),
+        )
+
+    def _archive_task_workspace_for_repair_rerun_unlocked(
+        self,
+        project: Project,
+        task: Task,
+        *,
+        reason: str = "changes_requested_repair_rerun",
+        project_root: Path | None = None,
+    ) -> dict[str, Any]:
+        """Archive the current task workspace so a repair rerun gets a fresh folder."""
+        project_root = project_root or self.get_project_root(project).resolve()
         task_subfolder = getattr(task, "task_subfolder", None)
         if not task_subfolder:
             return {"archived": False, "reason": "task_has_no_workspace"}
@@ -2083,8 +2150,30 @@ class TaskService:
         *,
         archive_path: str,
     ) -> dict[str, Any]:
-        """Restore one archived task workspace back under the project root."""
         project_root = self.get_project_root(project).resolve()
+        return self.canonical_mutations.run_locked(
+            project,
+            project_root=project_root,
+            operation="restore_archived_workspace",
+            owner=f"task:{task.id}",
+            fn=lambda: self._restore_archived_task_workspace_unlocked(
+                project,
+                task,
+                archive_path=archive_path,
+                project_root=project_root,
+            ),
+        )
+
+    def _restore_archived_task_workspace_unlocked(
+        self,
+        project: Project,
+        task: Task,
+        *,
+        archive_path: str,
+        project_root: Path | None = None,
+    ) -> dict[str, Any]:
+        """Restore one archived task workspace back under the project root."""
+        project_root = project_root or self.get_project_root(project).resolve()
         archive_dir = Path(archive_path).expanduser().resolve()
         allowed_roots = [
             (project_root / ".openclaw" / "retained-workspace-archive").resolve(),

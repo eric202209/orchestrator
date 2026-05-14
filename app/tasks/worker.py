@@ -54,7 +54,6 @@ from app.services.orchestration.persistence import (
     record_live_log as _record_live_log,
     record_validation_verdict as _record_validation_verdict,
     save_orchestration_checkpoint as _save_orchestration_checkpoint,
-    set_session_alert as _set_session_alert,
 )
 from app.services.orchestration.execution.runtime import (
     get_state_manager_path as _get_state_manager_path,
@@ -91,6 +90,10 @@ from app.services.orchestration.run_state import (
     mark_task_attempt_cancelled,
     mark_task_attempt_failed,
     mark_task_attempt_running,
+)
+from app.services.orchestration.session_state import (
+    mark_session_paused,
+    mark_session_running,
 )
 from app.services.workspace.project_mutation_lock import project_mutation_lock
 from app.services.observability import (
@@ -771,9 +774,11 @@ def execute_orchestration_task(
                     completed_at=datetime.now(timezone.utc),
                     workspace_status="blocked",
                 )
-                session.status = "paused"
-                session.is_active = False
-                _set_session_alert(session, "error", contract_error[:2000])
+                mark_session_paused(
+                    session,
+                    alert_level="error",
+                    alert_message=contract_error[:2000],
+                )
                 db.commit()
                 contract_details = {
                     **workspace_contract,
@@ -815,9 +820,11 @@ def execute_orchestration_task(
                 task_execution=task_execution,
                 started_at=task.started_at or datetime.now(timezone.utc),
             )
-            session.status = "running"
-            session.is_active = True
-            _set_session_alert(session, "warn", error_message[:2000])
+            mark_session_running(
+                session,
+                alert_level="warn",
+                alert_message=error_message[:2000],
+            )
             db.commit()
 
         if resume_checkpoint_name:
@@ -1140,9 +1147,11 @@ def execute_orchestration_task(
                 error_message=gate_error,
                 completed_at=datetime.now(timezone.utc),
             )
-            session.status = "paused"
-            session.is_active = False
-            _set_session_alert(session, "error", gate_error[:2000])
+            mark_session_paused(
+                session,
+                alert_level="error",
+                alert_message=gate_error[:2000],
+            )
             db.commit()
             restore_workspace_snapshot_if_needed("virtual merge gate failure")
             _write_project_state_snapshot(db, project, task, session_id)

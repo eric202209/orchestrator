@@ -11,6 +11,10 @@ from app.services.orchestration import (
     build_task_report_payload as _build_task_report_payload,
     render_task_report as _render_task_report,
 )
+from app.services.orchestration.run_state import (
+    mark_task_attempt_done,
+    mark_task_attempt_running,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,14 +76,12 @@ def scheduled_task_execution(self, task_id: int, scheduled_time: str, prompt: st
         db = get_db_session()
         task = db.query(Task).filter(Task.id == task_id).first()
         if task:
-            task.status = TaskStatus.RUNNING
-            task.started_at = dt.utcnow()
+            mark_task_attempt_running(task=task, started_at=dt.now(timezone.utc))
             db.commit()
 
         # TODO: Implement actual scheduled execution
         if task:
-            task.status = TaskStatus.DONE
-            task.completed_at = dt.utcnow()
+            mark_task_attempt_done(task=task, completed_at=dt.now(timezone.utc))
             db.commit()
 
         db.close()

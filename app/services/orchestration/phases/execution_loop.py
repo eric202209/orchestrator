@@ -59,9 +59,9 @@ from app.services.orchestration.persistence import (
     read_orchestration_events,
     record_validation_verdict,
     save_orchestration_checkpoint,
-    set_session_alert,
     write_orchestration_state_snapshot,
 )
+from app.services.orchestration.session_state import mark_session_paused
 from app.services.orchestration.types import (
     FailureEnvelope,
     OrchestrationRunContext,
@@ -161,9 +161,9 @@ def execute_step_loop(
             completed_at=datetime.now(timezone.utc),
         )
         if session:
-            session.status = "paused"
-            session.is_active = False
-            set_session_alert(session, "error", error_message[:2000])
+            mark_session_paused(
+                session, alert_level="error", alert_message=error_message[:2000]
+            )
         db.commit()
         restore_workspace_snapshot_if_needed("reasoning artifact gate failed")
         write_project_state_snapshot_fn(db, project, task, session_id)
@@ -327,9 +327,11 @@ def execute_step_loop(
                     error_message=manual_gate_message,
                     completed_at=datetime.now(timezone.utc),
                 )
-                session.status = "paused"
-                session.is_active = False
-                set_session_alert(session, "error", manual_gate_message)
+                mark_session_paused(
+                    session,
+                    alert_level="error",
+                    alert_message=manual_gate_message,
+                )
                 db.commit()
                 restore_workspace_snapshot_if_needed("manual review gate")
                 write_project_state_snapshot_fn(db, project, task, session_id)
@@ -1023,7 +1025,11 @@ def execute_step_loop(
                 )
             except Exception:
                 pass
-            set_session_alert(session, "error", manual_gate_message)
+            mark_session_paused(
+                session,
+                alert_level="error",
+                alert_message=manual_gate_message,
+            )
             restore_workspace_snapshot_if_needed("repeated tool/path failures")
             write_project_state_snapshot_fn(db, project, task, session_id)
             return {"status": "failed", "reason": "manual_review_required"}
