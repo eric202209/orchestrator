@@ -1478,17 +1478,211 @@ class ValidatorService:
         if not project_dir or not project_dir.exists():
             return []
 
+        project_root = Path(project_dir)
+        known_paths = {
+            str(path.relative_to(project_root))
+            for path in project_root.rglob("*")
+            if path.is_file()
+        }
         missing: List[str] = []
         seen: set[str] = set()
-        for path_text in ValidatorService._core_expected_files(plan):
-            candidate = (project_dir / path_text).resolve()
-            if candidate.exists():
-                continue
-            if path_text in seen:
-                continue
-            seen.add(path_text)
-            missing.append(path_text)
+        for step in plan:
+            for raw_operation in step.get("ops", []) or []:
+                if not isinstance(raw_operation, dict):
+                    continue
+                operation = normalize_file_op_shape(raw_operation)
+                op_name = str(operation.get("op") or "")
+                raw_path = str(operation.get("path") or "")
+                if not raw_path.strip():
+                    continue
+                try:
+                    relative_path = normalize_path_reference(raw_path, project_root)
+                except TaskWorkspaceViolationError:
+                    continue
+                if relative_path == ".":
+                    continue
+                if op_name in {"write_file", "append_file"}:
+                    known_paths.add(relative_path)
+                elif op_name == "delete_file":
+                    known_paths.discard(relative_path)
+
+            step_source_paths = ValidatorService._core_expected_files([step])
+            for command in step.get("commands", []) or []:
+                step_source_paths.extend(
+                    ValidatorService._command_source_read_targets(str(command or ""))
+                )
+            verification = str(step.get("verification") or "")
+            if verification:
+                step_source_paths.extend(
+                    ValidatorService._command_source_read_targets(verification)
+                )
+
+            for path_text in step_source_paths:
+                try:
+                    relative_path = normalize_path_reference(path_text, project_root)
+                except TaskWorkspaceViolationError:
+                    relative_path = path_text
+                if relative_path in known_paths:
+                    continue
+                candidate = (project_root / relative_path).resolve()
+                if candidate.exists():
+                    known_paths.add(relative_path)
+                    continue
+                if relative_path in seen:
+                    continue
+                seen.add(relative_path)
+                missing.append(relative_path)
         return missing
+
+    @staticmethod
+    def _verification_plan_creates_new_source_assets(
+        plan: List[Dict[str, Any]], project_dir: Optional[Path]
+    ) -> List[str]:
+        """Return app/source assets a verification plan tries to create from scratch."""
+
+        if not project_dir or not project_dir.exists():
+            return []
+
+        blocked_extensions = {
+            ".css",
+            ".html",
+            ".jsx",
+            ".py",
+            ".scss",
+            ".svg",
+            ".ts",
+            ".tsx",
+        }
+        project_root = Path(project_dir)
+        created: List[str] = []
+        seen: set[str] = set()
+        for step in plan:
+            for raw_operation in step.get("ops", []) or []:
+                if not isinstance(raw_operation, dict):
+                    continue
+                operation = normalize_file_op_shape(raw_operation)
+                op_name = str(operation.get("op") or "")
+                if op_name not in {"write_file", "append_file"}:
+                    continue
+                raw_path = str(operation.get("path") or "")
+                if not raw_path.strip():
+                    continue
+                try:
+                    relative_path = normalize_path_reference(raw_path, project_root)
+                except TaskWorkspaceViolationError:
+                    continue
+                path = Path(relative_path)
+                if path.suffix.lower() not in blocked_extensions:
+                    continue
+                if path.name.lower().startswith(("verify", "check")):
+                    continue
+                if path.parts and path.parts[0] in {"test", "tests", "spec"}:
+                    continue
+                if (project_root / relative_path).exists():
+                    continue
+                if relative_path not in seen:
+                    seen.add(relative_path)
+                    created.append(relative_path)
+        return created
+
+    @staticmethod
+    def _verification_plan_mutates_app_source_assets(
+        plan: List[Dict[str, Any]], project_dir: Optional[Path]
+    ) -> List[str]:
+        """Return app/source assets mutated by a verification-only plan."""
+
+        if not project_dir or not project_dir.exists():
+            return []
+
+        blocked_extensions = {
+            ".css",
+            ".html",
+            ".jsx",
+            ".py",
+            ".scss",
+            ".svg",
+            ".ts",
+            ".tsx",
+        }
+        project_root = Path(project_dir)
+        mutated: List[str] = []
+        seen: set[str] = set()
+        for step in plan:
+            for raw_operation in step.get("ops", []) or []:
+                if not isinstance(raw_operation, dict):
+                    continue
+                operation = normalize_file_op_shape(raw_operation)
+                op_name = str(operation.get("op") or "")
+                if op_name not in {"write_file", "append_file", "replace_in_file"}:
+                    continue
+                raw_path = str(operation.get("path") or "")
+                if not raw_path.strip():
+                    continue
+                try:
+                    relative_path = normalize_path_reference(raw_path, project_root)
+                except TaskWorkspaceViolationError:
+                    continue
+                path = Path(relative_path)
+                if path.suffix.lower() not in blocked_extensions:
+                    continue
+                if path.name.lower().startswith(("verify", "check")):
+                    continue
+                if path.parts and path.parts[0] in {"test", "tests", "spec"}:
+                    continue
+                if relative_path not in seen:
+                    seen.add(relative_path)
+                    mutated.append(relative_path)
+        return mutated
+
+    @staticmethod
+    def _command_source_read_targets(command: str) -> List[str]:
+        """Extract likely source-file reads from shell or inline Node commands."""
+
+        raw = str(command or "")
+        targets: List[str] = []
+
+        for match in re.finditer(
+            r"\b(?:readFileSync|existsSync|statSync|lstatSync)\(\s*['\"]([^'\"]+)['\"]",
+            raw,
+        ):
+            targets.append(match.group(1))
+
+        try:
+            tokens = shlex.split(raw, posix=True)
+        except ValueError:
+            tokens = raw.split()
+
+        if tokens:
+            command_name = Path(tokens[0]).name
+            if command_name in {"cat", "head", "tail", "less"}:
+                for token in tokens[1:]:
+                    if token in {"|", "||", "&&", ";"}:
+                        break
+                    if token.startswith("-") or token.startswith((">", "2>")):
+                        continue
+                    targets.append(token)
+            elif command_name in {"node", "python", "python3"} and len(tokens) > 1:
+                script = tokens[1]
+                if script not in {"-e", "-c"}:
+                    targets.append(script)
+
+        filtered: List[str] = []
+        seen: set[str] = set()
+        for target in targets:
+            path_text = str(target or "").strip()
+            if (
+                not path_text
+                or path_text in {".", ".."}
+                or path_text.startswith(("-", "$", "http://", "https://"))
+                or any(char in path_text for char in "*?[]{}")
+            ):
+                continue
+            if Path(path_text).suffix.lower() not in SOURCE_EXTENSIONS:
+                continue
+            if path_text not in seen:
+                seen.add(path_text)
+                filtered.append(path_text)
+        return filtered
 
     @staticmethod
     def _plan_contains_duplicated_path_roots(
@@ -1841,6 +2035,18 @@ class ValidatorService:
                 )
                 details["placeholder_only_implementation"] = True
         elif profile == "verification":
+            mutated_source_assets = cls._verification_plan_mutates_app_source_assets(
+                plan, project_dir
+            )
+            if mutated_source_assets:
+                repairable.append(
+                    "Verification/review plan mutates app source assets instead "
+                    "of only verifying the current workspace "
+                    f"(files: {mutated_source_assets[:5]})"
+                )
+                details["verification_profile_mutated_source_assets"] = (
+                    mutated_source_assets[:20]
+                )
             missing_workspace_files = cls._verification_plan_missing_workspace_files(
                 plan, project_dir
             )
@@ -1852,6 +2058,18 @@ class ValidatorService:
                 details["missing_workspace_expected_files"] = missing_workspace_files[
                     :20
                 ]
+            created_source_assets = cls._verification_plan_creates_new_source_assets(
+                plan, project_dir
+            )
+            if created_source_assets:
+                repairable.append(
+                    "Verification/review plan creates new app source assets instead "
+                    "of verifying the current workspace "
+                    f"(files: {created_source_assets[:5]})"
+                )
+                details["verification_profile_created_source_assets"] = (
+                    created_source_assets[:20]
+                )
 
         if cls._plan_contains_stack_conflict(plan, task_prompt):
             repairable.append(
@@ -1870,6 +2088,8 @@ class ValidatorService:
             semantic_violation_codes.append("weak_verification")
         if details.get("malformed_shell_quoting_steps"):
             semantic_violation_codes.append("malformed_shell_quoting")
+        if details.get("verification_profile_mutated_source_assets"):
+            semantic_violation_codes.append("verification_mutates_source_assets")
         if semantic_violation_codes:
             details["semantic_violation_codes"] = semantic_violation_codes
 

@@ -208,6 +208,7 @@ def test_reset_active_attempts_cancels_pending_and_running_executions(db_session
     assert reset_count == 1
     assert task.status == TaskStatus.PENDING
     assert task.completed_at is None
+    assert task.workspace_status == "isolated"
     assert link.status == TaskStatus.PENDING
     assert link.completed_at is None
     assert execution.status == TaskStatus.CANCELLED

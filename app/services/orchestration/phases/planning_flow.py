@@ -1202,6 +1202,11 @@ def execute_planning_phase(
                         "format_guide",
                         "debug_case",
                     ],
+                    query="Plan validation failed: "
+                    + "; ".join(plan_verdict.reasons[:3]),
+                    failure_signature=(
+                        plan_verdict.reasons[0] if plan_verdict.reasons else None
+                    ),
                 )
                 if validation_knowledge_ctx:
                     _log_knowledge_usage(
@@ -1276,6 +1281,24 @@ def execute_planning_phase(
                         "in steps %s; starting one targeted second repair pass",
                         second_repair_reason.step_numbers,
                     )
+                    validation_knowledge_ctx = _retrieve_knowledge(
+                        ctx,
+                        trigger_phase="validation",
+                        knowledge_types=[
+                            "failure_memory",
+                            "format_guide",
+                            "debug_case",
+                        ],
+                        query="Plan validation failed after repair: "
+                        + "; ".join(plan_verdict.reasons[:3]),
+                        failure_signature=(
+                            plan_verdict.reasons[0] if plan_verdict.reasons else None
+                        ),
+                    )
+                    if validation_knowledge_ctx:
+                        _log_knowledge_usage(
+                            ctx, validation_knowledge_ctx, used_in_prompt=True
+                        )
                     retry_state.last_repair_reason = second_repair_reason.event_reason
                     planning_result = __repair_planning_output(
                         ctx=ctx,
@@ -1285,6 +1308,14 @@ def execute_planning_phase(
                         + "; ".join(issue_fragments),
                         rejection_reasons=issue_fragments,
                         prompt_profile=prompt_profile,
+                        knowledge_context=(
+                            validation_knowledge_ctx
+                            if (
+                                validation_knowledge_ctx
+                                and validation_knowledge_ctx.retrieved_items
+                            )
+                            else None
+                        ),
                     )
                     setattr(
                         retry_state,
@@ -1858,6 +1889,8 @@ def _retrieve_knowledge(
     ctx: OrchestrationRunContext,
     trigger_phase: str,
     knowledge_types: list[str],
+    query: str | None = None,
+    failure_signature: str | None = None,
 ) -> KnowledgeContext | None:
     """Retrieve knowledge context; returns None on any error so failures don't break the flow."""
     try:
@@ -1870,9 +1903,10 @@ def _retrieve_knowledge(
             embedding_model=settings.OPENAI_EMBEDDING_MODEL,
         )
         knowledge_ctx = svc.retrieve(
-            query=ctx.prompt or "",
+            query=query or ctx.prompt or "",
             trigger_phase=trigger_phase,
             knowledge_types=knowledge_types,
+            failure_signature=failure_signature,
             db=ctx.db,
         )
         ctx.logger.info(

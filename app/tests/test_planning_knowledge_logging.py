@@ -34,7 +34,10 @@ from app.schemas.knowledge import (
     KnowledgeType,
     RecommendedAction,
 )
-from app.services.orchestration.phases.planning_flow import execute_planning_phase
+from app.services.orchestration.phases.planning_flow import (
+    _retrieve_knowledge,
+    execute_planning_phase,
+)
 from app.services.orchestration.types import OrchestrationRunContext
 
 
@@ -155,6 +158,44 @@ def _build_ctx(db, session, task, link, item) -> OrchestrationRunContext:
         logger=logging.getLogger("test.planning_knowledge_logging"),
         emit_live=lambda *a, **kw: None,
         error_handler=MagicMock(),
+    )
+
+
+def test_validation_knowledge_retrieval_uses_failure_reason_query(mem_db):
+    ctx = MagicMock()
+    ctx.prompt = "Upgrade landing page verification commands"
+    ctx.db = mem_db
+    ctx.logger = logging.getLogger("test.validation_knowledge_retrieval")
+    expected_ctx = KnowledgeContext(
+        retrieved_items=[],
+        query="Plan validation failed: missing workspace files",
+        trigger_phase="validation",
+        retrieval_reason="sqlite_fallback_qdrant_or_embedding_unavailable",
+        confidence=0.0,
+        matched_failure_memory=False,
+        recommended_action=RecommendedAction.none,
+    )
+
+    with patch(
+        "app.services.knowledge.knowledge_service.KnowledgeService"
+    ) as service_cls:
+        service_cls.return_value.retrieve.return_value = expected_ctx
+
+        result = _retrieve_knowledge(
+            ctx,
+            trigger_phase="validation",
+            knowledge_types=["failure_memory", "format_guide", "debug_case"],
+            query="Plan validation failed: missing workspace files",
+            failure_signature="missing workspace files",
+        )
+
+    assert result is expected_ctx
+    service_cls.return_value.retrieve.assert_called_once_with(
+        query="Plan validation failed: missing workspace files",
+        trigger_phase="validation",
+        knowledge_types=["failure_memory", "format_guide", "debug_case"],
+        failure_signature="missing workspace files",
+        db=mem_db,
     )
 
 

@@ -64,6 +64,172 @@ def test_validate_plan_allows_empty_commands_when_write_file_ops_present(tmp_pat
     assert "missing_commands_steps" not in result.details
 
 
+def test_verification_plan_allows_expected_file_created_by_write_op(tmp_path):
+    (tmp_path / "index.html").write_text(
+        '<link rel="stylesheet" href="css/style.css">', encoding="utf-8"
+    )
+    (tmp_path / "css").mkdir()
+    (tmp_path / "css" / "style.css").write_text("body {}", encoding="utf-8")
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create content-aware verification script",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "verify.js",
+                    "content": (
+                        "const fs=require('fs');"
+                        "if(!fs.existsSync('index.html')) process.exit(1);"
+                    ),
+                }
+            ],
+            "verification": "node verify.js",
+            "rollback": "rm -f verify.js",
+            "expected_files": ["verify.js"],
+        }
+    ]
+
+    result = ValidatorService.validate_plan(
+        plan,
+        output_text="[]",
+        task_prompt="Improve static site verification commands",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert result.accepted
+    assert "missing_workspace_expected_files" not in result.details
+
+
+def test_verification_plan_rejects_missing_source_reads_in_commands(tmp_path):
+    (tmp_path / "index.html").write_text(
+        '<link rel="stylesheet" href="css/style.css">', encoding="utf-8"
+    )
+    (tmp_path / "css").mkdir()
+    (tmp_path / "css" / "style.css").write_text("body {}", encoding="utf-8")
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Verify static site assets",
+            "commands": [
+                "cat styles.css 2>/dev/null || echo missing",
+                (
+                    "node -e \"const fs=require('fs');"
+                    "fs.readFileSync('styles.css','utf8')\""
+                ),
+            ],
+            "verification": (
+                "node -e \"const fs=require('fs');"
+                "fs.readFileSync('styles.css','utf8')\""
+            ),
+            "rollback": None,
+            "expected_files": [],
+        }
+    ]
+
+    result = ValidatorService.validate_plan(
+        plan,
+        output_text="[]",
+        task_prompt="Improve static site verification commands",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert result.repairable
+    assert result.details["missing_workspace_expected_files"] == ["styles.css"]
+
+
+def test_verification_plan_rejects_new_app_assets_created_to_satisfy_checks(tmp_path):
+    (tmp_path / "index.html").write_text(
+        '<link rel="stylesheet" href="css/style.css">', encoding="utf-8"
+    )
+    (tmp_path / "css").mkdir()
+    (tmp_path / "css" / "style.css").write_text("body {}", encoding="utf-8")
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create a conventional stylesheet for verification",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "styles.css",
+                    "content": "body { background: white; }",
+                }
+            ],
+            "verification": (
+                "node -e \"const fs=require('fs');"
+                "fs.readFileSync('styles.css','utf8')\""
+            ),
+            "rollback": "rm -f styles.css",
+            "expected_files": ["styles.css"],
+        }
+    ]
+
+    result = ValidatorService.validate_plan(
+        plan,
+        output_text="[]",
+        task_prompt="Improve static site verification commands",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert result.repairable
+    assert result.details["verification_profile_created_source_assets"] == [
+        "styles.css"
+    ]
+
+
+def test_verification_plan_rejects_mutating_existing_app_assets(tmp_path):
+    (tmp_path / "index.html").write_text(
+        '<link rel="stylesheet" href="css/style.css">', encoding="utf-8"
+    )
+    (tmp_path / "css").mkdir()
+    (tmp_path / "css" / "style.css").write_text("body {}", encoding="utf-8")
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Rewrite app assets before checking them",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "index.html",
+                    "content": "<!doctype html><link rel='stylesheet' href='css/style.css'>",
+                },
+                {
+                    "op": "replace_in_file",
+                    "path": "css/style.css",
+                    "old": "body {}",
+                    "new": "body { background: white; }",
+                },
+            ],
+            "verification": (
+                "node -e \"const fs=require('fs');"
+                "fs.readFileSync('css/style.css','utf8')\""
+            ),
+            "rollback": None,
+            "expected_files": ["index.html", "css/style.css"],
+        }
+    ]
+
+    result = ValidatorService.validate_plan(
+        plan,
+        output_text="[]",
+        task_prompt="Upgrade landing page verification commands",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert result.repairable
+    assert result.details["verification_profile_mutated_source_assets"] == [
+        "index.html",
+        "css/style.css",
+    ]
+
+
 def test_validate_plan_rejects_write_file_ops_outside_workspace(tmp_path):
     result = ValidatorService.validate_plan(
         [_ops_only_step("../outside.ts")],

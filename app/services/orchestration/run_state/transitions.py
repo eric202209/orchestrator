@@ -9,6 +9,23 @@ from sqlalchemy.orm import Session
 from app.models import SessionTask, Task, TaskExecution, TaskStatus
 
 
+def _workspace_status_for_attempt_status(
+    task: Task,
+    status: TaskStatus,
+) -> str:
+    if not task.task_subfolder:
+        return "not_created"
+    if status == TaskStatus.RUNNING:
+        return "in_progress"
+    if status == TaskStatus.DONE:
+        return "ready"
+    if status in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
+        return "blocked"
+    if status == TaskStatus.PENDING:
+        return "isolated"
+    return task.workspace_status or "isolated"
+
+
 def mark_task_attempt_running(
     *,
     task: Task | None,
@@ -25,7 +42,9 @@ def mark_task_attempt_running(
         task.completed_at = None
         task.error_message = None
         task.current_step = 0
-        task.workspace_status = "in_progress" if task.task_subfolder else "not_created"
+        task.workspace_status = _workspace_status_for_attempt_status(
+            task, TaskStatus.RUNNING
+        )
     if session_task_link:
         session_task_link.status = TaskStatus.RUNNING
         session_task_link.started_at = started_at
@@ -192,6 +211,9 @@ def reset_active_attempts_for_session_stop(
             task.status = next_status
             task.completed_at = None
             task.error_message = None
+            task.workspace_status = _workspace_status_for_attempt_status(
+                task, next_status
+            )
 
     for task_id in execution_task_ids - seen_task_ids:
         task = db.query(Task).filter(Task.id == task_id).first()
@@ -199,6 +221,9 @@ def reset_active_attempts_for_session_stop(
             task.status = next_status
             task.completed_at = None
             task.error_message = None
+            task.workspace_status = _workspace_status_for_attempt_status(
+                task, next_status
+            )
         latest_link = (
             db.query(SessionTask)
             .filter(

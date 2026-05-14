@@ -108,12 +108,26 @@ class KnowledgeService:
         db: Session = None,
     ) -> KnowledgeContext:
         if not self._has_indexed_points():
-            return self._sqlite_fallback(trigger_phase, knowledge_types, top_k, db)
+            return self._sqlite_fallback(
+                trigger_phase,
+                knowledge_types,
+                top_k,
+                db,
+                query=query,
+                failure_signature=failure_signature,
+            )
 
         try:
             vector = self._embed(query)
         except Exception:
-            return self._sqlite_fallback(trigger_phase, knowledge_types, top_k, db)
+            return self._sqlite_fallback(
+                trigger_phase,
+                knowledge_types,
+                top_k,
+                db,
+                query=query,
+                failure_signature=failure_signature,
+            )
 
         try:
             hits = self._search(
@@ -125,7 +139,14 @@ class KnowledgeService:
                 top_k=top_k,
             )
         except Exception:
-            return self._sqlite_fallback(trigger_phase, knowledge_types, top_k, db)
+            return self._sqlite_fallback(
+                trigger_phase,
+                knowledge_types,
+                top_k,
+                db,
+                query=query,
+                failure_signature=failure_signature,
+            )
 
         if not hits:
             return self._build_context([], query, trigger_phase, "no_results")
@@ -224,7 +245,7 @@ class KnowledgeService:
                 else 0
             )
             type_rank = _TYPE_RANK.get(item.knowledge_type, 99)
-            return (-item.priority, -exact_match, type_rank, -score)
+            return (-exact_match, type_rank, -score, -item.priority)
 
         scored = sorted(scored, key=sort_key)
         # Apply item cap
@@ -257,10 +278,12 @@ class KnowledgeService:
         knowledge_types: list[str],
         top_k: int,
         db: Session,
+        query: Optional[str] = None,
+        failure_signature: Optional[str] = None,
     ) -> KnowledgeContext:
         reason = "sqlite_fallback_qdrant_or_embedding_unavailable"
         if db is None:
-            return self._build_context([], None, trigger_phase, reason)
+            return self._build_context([], query, trigger_phase, reason)
         rows = (
             db.query(KnowledgeItem)
             .filter(
@@ -277,10 +300,50 @@ class KnowledgeService:
             for r in rows
             if r.applies_to
             and any(phase in r.applies_to for phase in applies_to_candidates)
-        ][:top_k]
-        scored = [(item, 0.3) for item in filtered]
-        scored = self._apply_budget(scored, None)
-        return self._build_context(scored, None, trigger_phase, reason)
+        ]
+        scored = [
+            (item, self._sqlite_fallback_score(item, query, failure_signature))
+            for item in filtered
+        ]
+        scored = self._apply_budget(scored, failure_signature)[:top_k]
+        return self._build_context(scored, query, trigger_phase, reason)
+
+    def _sqlite_fallback_score(
+        self,
+        item: KnowledgeItem,
+        query: Optional[str],
+        failure_signature: Optional[str],
+    ) -> float:
+        score = 0.3
+        item_signature = (item.failure_signature or "").strip().lower()
+        normalized_failure = (failure_signature or "").strip().lower()
+        normalized_query = (query or "").strip().lower()
+
+        if item_signature:
+            if normalized_failure and (
+                item_signature in normalized_failure
+                or normalized_failure in item_signature
+            ):
+                return 1.0
+            if normalized_query and item_signature in normalized_query:
+                score = max(score, 0.95)
+
+        haystack_parts = [
+            item.title or "",
+            item.content or "",
+            item.failure_signature or "",
+            " ".join(str(tag) for tag in (item.tags or [])),
+        ]
+        haystack = " ".join(haystack_parts).lower()
+        query_terms = {
+            term.strip(".,:;()[]'\"")
+            for term in normalized_query.split()
+            if len(term.strip(".,:;()[]'\"")) >= 4
+        }
+        if query_terms:
+            overlap = sum(1 for term in query_terms if term in haystack)
+            score = max(score, min(0.9, 0.35 + (overlap * 0.05)))
+        return score
 
     def _embed(self, text: str) -> list[float]:
         response = self._openai.embeddings.create(

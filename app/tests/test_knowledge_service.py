@@ -48,6 +48,8 @@ def _make_item(
     content: str = "Some content.",
     knowledge_type: str = KnowledgeType.format_guide,
     applies_to: list | None = None,
+    tags: list | None = None,
+    failure_signature: str | None = None,
     priority: int = 0,
 ) -> KnowledgeItem:
     import hashlib
@@ -57,7 +59,8 @@ def _make_item(
         content=content,
         knowledge_type=knowledge_type,
         applies_to=applies_to or ["planning"],
-        tags=[],
+        tags=tags or [],
+        failure_signature=failure_signature,
         priority=priority,
         checksum=hashlib.sha256(content.encode()).hexdigest(),
     )
@@ -128,6 +131,86 @@ def test_validation_retrieval_can_use_failure_memory_from_sqlite_fallback(svc, d
     assert any(ref.id == item.id for ref in ctx.retrieved_items)
     assert ctx.trigger_phase == "validation"
     assert ctx.matched_failure_memory is True
+
+
+def test_sqlite_fallback_ranks_exact_failure_memory_before_generic_guides(svc, db):
+    signature = (
+        "Verification/review plan references source files that do not exist in the "
+        "current workspace"
+    )
+    _make_item(
+        db,
+        title="Shell-Safe Command Format Guide",
+        content="Use shell-safe commands and avoid unsupported command syntax.",
+        applies_to=["planning", "validation"],
+        knowledge_type=KnowledgeType.format_guide,
+        priority=50,
+    )
+    _make_item(
+        db,
+        title="OpenAI 401 Missing Embedding Key",
+        content="Embedding calls can fail when the API key is missing or invalid.",
+        applies_to=["failure", "validation"],
+        knowledge_type=KnowledgeType.failure_memory,
+        failure_signature="OpenAI 401",
+        priority=40,
+    )
+    specific = _make_item(
+        db,
+        title="Static Verification Missing Workspace Files",
+        content=(
+            "When validating a static site, inspect the current workspace before "
+            "referencing or creating conventional asset paths like styles.css."
+        ),
+        applies_to=["planning", "validation", "failure"],
+        knowledge_type=KnowledgeType.failure_memory,
+        failure_signature=signature,
+        priority=5,
+    )
+
+    with patch.object(svc, "_has_indexed_points", return_value=False):
+        ctx = svc.retrieve(
+            query=(
+                "Plan validation failed after repair: Verification/review plan "
+                "references source files that do not exist in the current workspace "
+                "(files: ['styles.css'])"
+            ),
+            trigger_phase="validation",
+            knowledge_types=[
+                KnowledgeType.failure_memory,
+                KnowledgeType.format_guide,
+                KnowledgeType.debug_case,
+            ],
+            failure_signature=signature,
+            db=db,
+        )
+
+    assert ctx.retrieved_items[0].id == specific.id
+    assert ctx.retrieved_items[0].confidence == 1.0
+    assert ctx.query is not None
+    assert ctx.retrieval_reason == "sqlite_fallback_qdrant_or_embedding_unavailable"
+
+
+def test_sqlite_fallback_tolerates_legacy_non_string_tags(svc, db):
+    item = _make_item(
+        db,
+        title="Legacy Tags Failure Memory",
+        content="Legacy rows may contain non-string tag values.",
+        applies_to=["failure"],
+        knowledge_type=KnowledgeType.failure_memory,
+        tags=["legacy", 120],
+        priority=5,
+    )
+
+    with patch.object(svc, "_has_indexed_points", return_value=False):
+        ctx = svc.retrieve(
+            query="legacy tags failure",
+            trigger_phase="failure",
+            knowledge_types=[KnowledgeType.failure_memory],
+            db=db,
+        )
+
+    assert any(ref.id == item.id for ref in ctx.retrieved_items)
 
 
 def test_max_items_budget_enforced(svc, db):
