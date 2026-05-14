@@ -5,15 +5,22 @@ from app.services.session import auth_service as session_auth_service
 from app.services.session import session_stream_service
 
 
-def test_session_token_requires_active_session() -> None:
+def test_session_token_rehydrates_active_session_after_restart() -> None:
+    session_auth._session_store.clear()
+    session_auth._revoked_session_ids.clear()
+
     token = session_auth.generate_session_token(user_id=123, email="user@example.com")
     payload = session_auth.verify_session_token(token, require_active=False)
 
     assert payload is not None
     session_id = payload["sid"]
 
-    assert session_auth.verify_session_token(token) is None
+    rehydrated_payload = session_auth.verify_session_token(token)
+    assert rehydrated_payload is not None
+    assert rehydrated_payload["sid"] == session_id
+    assert session_auth.is_session_active(session_id) is True
 
+    session_auth._session_store.clear()
     session_auth.store_session(session_id, user_id=123, email="user@example.com")
     active_payload = session_auth.verify_session_token(token)
     assert active_payload is not None

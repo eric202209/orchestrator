@@ -19,6 +19,11 @@ from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
 from app.services.prompt_templates import OrchestrationState
+from app.services.orchestration.run_state import (
+    mark_task_attempt_done,
+    mark_task_attempt_failed,
+    mark_task_attempt_running,
+)
 from app.services.session.session_runtime_service import ensure_task_workspace
 from app.services.task_execution_service import create_task_execution
 from app.services.tool_tracking_service import ToolTrackingService
@@ -100,6 +105,7 @@ async def execute_task_payload(
         raise HTTPException(status_code=404, detail="Session not found")
 
     selected_task = None
+    session_task_link = None
     task_workspace = None
     task_execution = None
 
@@ -130,25 +136,27 @@ async def execute_task_payload(
                 )
                 .first()
             )
-            if not existing_link:
-                db.add(
-                    SessionTask(
-                        session_id=session_id,
-                        task_id=selected_task.id,
-                        status=TaskStatus.RUNNING,
-                        started_at=datetime.utcnow(),
-                    )
+            if existing_link:
+                session_task_link = existing_link
+            else:
+                session_task_link = SessionTask(
+                    session_id=session_id,
+                    task_id=selected_task.id,
                 )
+                db.add(session_task_link)
             task_execution = create_task_execution(
                 db,
                 session_id=session_id,
                 task_id=selected_task.id,
-                status=TaskStatus.RUNNING,
-                started_at=datetime.utcnow(),
+                status=TaskStatus.PENDING,
             )
 
-            selected_task.status = TaskStatus.RUNNING
-            selected_task.started_at = datetime.utcnow()
+            mark_task_attempt_running(
+                task=selected_task,
+                session_task_link=session_task_link,
+                task_execution=task_execution,
+                started_at=datetime.now(timezone.utc),
+            )
             if session.status not in ("running", "paused"):
                 session.status = "running"
                 session.is_active = True
@@ -216,8 +224,12 @@ async def execute_task_payload(
             prompt, timeout_seconds, orchestration_state=orchestration_state
         )
         if task_execution:
-            task_execution.status = TaskStatus.DONE
-            task_execution.completed_at = datetime.utcnow()
+            mark_task_attempt_done(
+                task=selected_task,
+                session_task_link=session_task_link,
+                task_execution=task_execution,
+                completed_at=datetime.now(timezone.utc),
+            )
             db.commit()
 
         return {
@@ -237,12 +249,13 @@ async def execute_task_payload(
         raise
     except Exception as exc:
         if selected_task:
-            selected_task.status = TaskStatus.FAILED
-            selected_task.error_message = str(exc)
-            selected_task.completed_at = datetime.utcnow()
-        if task_execution:
-            task_execution.status = TaskStatus.FAILED
-            task_execution.completed_at = datetime.utcnow()
+            mark_task_attempt_failed(
+                task=selected_task,
+                session_task_link=session_task_link,
+                task_execution=task_execution,
+                error_message=str(exc),
+                completed_at=datetime.now(timezone.utc),
+            )
 
         session.is_active = False
         session.status = "stopped"

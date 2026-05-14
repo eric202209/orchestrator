@@ -35,6 +35,7 @@ from app.services.session.session_runtime_service import (
 from app.services.orchestration.task_rules import (
     should_execute_in_canonical_project_root,
 )
+from app.services.orchestration.run_state import reset_active_attempts_for_session_stop
 from app.services.task_service import TaskService
 from app.services.task_execution_service import create_task_execution
 
@@ -58,69 +59,13 @@ def _reset_running_session_tasks(
     session_id: int,
     next_status: TaskStatus = TaskStatus.PENDING,
 ) -> int:
-    """Normalize tasks/links after pause/stop so resume does not inherit RUNNING state."""
+    """Compatibility wrapper for the run-state transition module."""
 
-    now = datetime.now(timezone.utc)
-    running_executions = (
-        db.query(TaskExecution)
-        .filter(
-            TaskExecution.session_id == session_id,
-            TaskExecution.status == TaskStatus.RUNNING,
-        )
-        .all()
+    return reset_active_attempts_for_session_stop(
+        db,
+        session_id=session_id,
+        next_status=next_status,
     )
-    execution_task_ids = {execution.task_id for execution in running_executions}
-    for execution in running_executions:
-        execution.status = TaskStatus.CANCELLED
-        execution.completed_at = execution.completed_at or now
-
-    running_links = (
-        db.query(SessionTask)
-        .filter(
-            SessionTask.session_id == session_id,
-            SessionTask.status == TaskStatus.RUNNING,
-        )
-        .all()
-    )
-    updated = 0
-    seen_task_ids: set[int] = set()
-
-    for link in running_links:
-        link.status = next_status
-        link.completed_at = None
-        updated += 1
-        if link.task_id in seen_task_ids:
-            continue
-        seen_task_ids.add(link.task_id)
-        task = db.query(Task).filter(Task.id == link.task_id).first()
-        if not task:
-            continue
-        if task.status == TaskStatus.RUNNING:
-            task.status = next_status
-            task.completed_at = None
-            task.error_message = None
-
-    for task_id in execution_task_ids - seen_task_ids:
-        task = db.query(Task).filter(Task.id == task_id).first()
-        if task and task.status == TaskStatus.RUNNING:
-            task.status = next_status
-            task.completed_at = None
-            task.error_message = None
-        latest_link = (
-            db.query(SessionTask)
-            .filter(
-                SessionTask.session_id == session_id,
-                SessionTask.task_id == task_id,
-            )
-            .order_by(SessionTask.id.desc())
-            .first()
-        )
-        if latest_link and latest_link.status == TaskStatus.RUNNING:
-            latest_link.status = next_status
-            latest_link.completed_at = None
-            updated += 1
-
-    return updated
 
 
 def _recover_orphaned_running_session_if_needed(

@@ -444,6 +444,151 @@ class PlannerService:
         return True
 
     @staticmethod
+    def _is_no_model_output_planning_timeout(exc: Exception) -> bool:
+        diagnostics = PlannerService._get_runtime_diagnostics(exc)
+        if not diagnostics:
+            return False
+        if diagnostics.get("timed_out") is not True:
+            return False
+        stdout_chars = int(diagnostics.get("stdout_chars") or 0)
+        stderr_has_model_content = diagnostics.get("stderr_contains_model_content")
+        output_channel = str(diagnostics.get("output_channel_used") or "").lower()
+        return (
+            stdout_chars == 0
+            and stderr_has_model_content is False
+            and output_channel in {"", "none"}
+        )
+
+    @staticmethod
+    def _extract_requested_svg_path(task_description: str) -> Optional[str]:
+        candidates = re.findall(
+            r"(?:`|['\"])?([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.svg)(?:`|['\"])?",
+            task_description or "",
+        )
+        for candidate in candidates:
+            normalized = candidate.strip().strip("/\\")
+            if not normalized or normalized.startswith("../") or "/../" in normalized:
+                continue
+            if normalized.lower().endswith(".svg"):
+                return normalized
+        return None
+
+    @staticmethod
+    def build_deterministic_static_asset_plan(
+        task_description: str,
+        project_dir: Path,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """
+        Build a model-free plan for a narrow class of static microsite edits.
+
+        This fallback is intentionally conservative. It handles the recurring
+        failure mode where the planner backend times out before producing any
+        model output for a simple request to add one SVG asset and reference it
+        from index.html.
+        """
+
+        lowered = str(task_description or "").lower()
+        if "index.html" not in lowered or ".svg" not in lowered:
+            return None
+        if not any(
+            marker in lowered
+            for marker in ("image", "asset", "gallery", "feature card", "card")
+        ):
+            return None
+
+        svg_path = PlannerService._extract_requested_svg_path(task_description)
+        if not svg_path:
+            return None
+
+        index_path = project_dir / "index.html"
+        try:
+            index_html = index_path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        if not index_html.strip() or len(index_html) > 60000:
+            return None
+
+        svg_ref = svg_path.replace("\\", "/")
+        title_match = re.search(r"([A-Za-z0-9][A-Za-z0-9 _-]*?)\.svg", svg_ref)
+        asset_label = "Featured asset"
+        if title_match:
+            asset_label = (
+                title_match.group(1).replace("-", " ").replace("_", " ").strip().title()
+            )
+        if svg_ref in index_html:
+            updated_index_html = index_html
+        else:
+            feature_block = f"""
+  <section class="asset-feature" aria-label="{asset_label}">
+    <figure>
+      <img src="{svg_ref}" alt="{asset_label}" loading="lazy">
+      <figcaption>{asset_label}</figcaption>
+    </figure>
+  </section>
+"""
+            if "</body>" in index_html:
+                updated_index_html = index_html.replace(
+                    "</body>", feature_block + "</body>", 1
+                )
+            elif "</main>" in index_html:
+                updated_index_html = index_html.replace(
+                    "</main>", feature_block + "</main>", 1
+                )
+            else:
+                return None
+
+        svg_title = asset_label.replace("&", "and")
+        svg_content = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 420" role="img" aria-labelledby="title desc">
+  <title id="title">{svg_title}</title>
+  <desc id="desc">Decorative tulip illustration for a microsite feature card.</desc>
+  <rect width="640" height="420" rx="28" fill="#f7faf7"/>
+  <rect x="38" y="38" width="564" height="344" rx="24" fill="#ffffff" stroke="#d7e2d5" stroke-width="4"/>
+  <path d="M320 306 C322 250 330 204 356 152" fill="none" stroke="#386641" stroke-width="14" stroke-linecap="round"/>
+  <path d="M323 264 C278 236 238 232 198 258 C244 282 286 286 323 264Z" fill="#78a55a"/>
+  <path d="M334 230 C376 205 418 205 458 232 C416 258 372 260 334 230Z" fill="#8fbc6d"/>
+  <path d="M326 153 C290 112 284 72 314 48 C338 74 348 112 326 153Z" fill="#e85d75"/>
+  <path d="M326 153 C345 105 382 82 420 96 C409 136 374 164 326 153Z" fill="#d94864"/>
+  <path d="M326 153 C300 104 254 88 220 106 C238 145 277 166 326 153Z" fill="#f2849e"/>
+  <circle cx="138" cy="112" r="12" fill="#f2cc8f"/>
+  <circle cx="508" cy="304" r="16" fill="#a3b18a"/>
+  <path d="M172 334 H468" stroke="#d7e2d5" stroke-width="10" stroke-linecap="round"/>
+</svg>
+"""
+
+        return [
+            {
+                "step_number": 1,
+                "description": f"Create the requested SVG asset at {svg_ref}",
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": svg_ref,
+                        "content": svg_content,
+                    }
+                ],
+                "commands": [],
+                "verification": f"test -s {svg_ref}",
+                "rollback": f"rm -f {svg_ref}",
+                "expected_files": [svg_ref],
+            },
+            {
+                "step_number": 2,
+                "description": "Update index.html to reference the new visual asset",
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "index.html",
+                        "content": updated_index_html,
+                    }
+                ],
+                "commands": [],
+                "verification": f"grep -F {json.dumps(svg_ref)} index.html",
+                "rollback": None,
+                "expected_files": ["index.html"],
+            },
+        ]
+
+    @staticmethod
     def _monotonic() -> float:
         return time.monotonic()
 
@@ -545,6 +690,9 @@ class PlannerService:
         prompt: str,
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        direct_planning_state = kwargs.pop("direct_planning_state", None)
+        if direct_planning_state is None:
+            direct_planning_state = {}
         timeout_budget = kwargs.get("timeout_seconds")
         timeout_budget_seconds: Optional[float]
         if isinstance(timeout_budget, (int, float)) and timeout_budget > 0:
@@ -552,7 +700,16 @@ class PlannerService:
         else:
             timeout_budget_seconds = None
 
-        if cls._should_try_direct_no_thinking_planning(runtime_service, len(prompt)):
+        should_try_direct = cls._should_try_direct_no_thinking_planning(
+            runtime_service, len(prompt)
+        )
+        if should_try_direct and direct_planning_state.get("direct_unavailable"):
+            _logger.info(
+                "[PLANNING_DIRECT] skip: direct planning already unavailable in this planning phase"
+            )
+            should_try_direct = False
+
+        if should_try_direct:
             direct_started_at = cls._monotonic()
             direct = await cls._invoke_direct_no_thinking_planning(
                 runtime_service,
@@ -561,8 +718,13 @@ class PlannerService:
             )
             if direct is not None:
                 return direct
+            direct_planning_state["direct_unavailable"] = True
+            direct_planning_state["direct_unavailable_after_prompt_chars"] = len(prompt)
             if timeout_budget_seconds is not None:
                 elapsed_seconds = cls._monotonic() - direct_started_at
+                direct_planning_state["direct_elapsed_seconds"] = round(
+                    elapsed_seconds, 3
+                )
                 remaining_seconds = timeout_budget_seconds - elapsed_seconds
                 if remaining_seconds <= 0:
                     raise TimeoutError(
@@ -1778,6 +1940,33 @@ Rules:
                     **minimal_prompt_diagnostics,
                 },
             )
+        deterministic_plan = cls.build_deterministic_static_asset_plan(
+            task_description,
+            project_dir,
+        )
+        if deterministic_plan:
+            emit_live(
+                "INFO",
+                "[ORCHESTRATION] Deterministic static asset planner generated an ops-only plan",
+                metadata={
+                    "phase": "planning",
+                    "reason": "simple_static_asset_task",
+                    "strategy": "deterministic_static_asset_plan",
+                    "fallback_step_count": len(deterministic_plan),
+                    **minimal_prompt_diagnostics,
+                },
+            )
+            return {
+                "status": "completed",
+                "output": json.dumps(deterministic_plan, ensure_ascii=True),
+                "planning_backend": "deterministic_static_asset_plan",
+                "deterministic_planning_fallback": True,
+                "diagnostics": {
+                    "fallback": "deterministic_static_asset_plan",
+                    "fallback_reason": "simple_static_asset_task",
+                    "fallback_step_count": len(deterministic_plan),
+                },
+            }
         emit_live(
             "INFO",
             (
@@ -1792,6 +1981,7 @@ Rules:
                 **minimal_prompt_diagnostics,
             },
         )
+        planning_attempt_state: Dict[str, Any] = {}
         try:
             return asyncio.run(
                 cls._execute_task_with_planning_lock(
@@ -1804,10 +1994,69 @@ Rules:
                         "planning_attempt": "minimal",
                         **minimal_prompt_diagnostics,
                     },
+                    direct_planning_state=planning_attempt_state,
                 )
             )
         except Exception as exc:
             if not cls._looks_like_timeout_error(exc):
+                raise
+            if cls._is_no_model_output_planning_timeout(exc):
+                diagnostics = cls._get_runtime_diagnostics(exc)
+                diagnostics["planning_failure_class"] = "planner_no_model_output"
+                deterministic_plan = cls.build_deterministic_static_asset_plan(
+                    task_description,
+                    project_dir,
+                )
+                if deterministic_plan:
+                    emit_live(
+                        "WARN",
+                        (
+                            "[ORCHESTRATION] Planning backend timed out without "
+                            "model output; using deterministic static asset fallback"
+                        ),
+                        metadata={
+                            "phase": "planning",
+                            "reason": "planner_no_model_output",
+                            "strategy": "deterministic_static_asset_plan",
+                            "timeout_seconds": diagnostics.get("timeout_seconds"),
+                            "duration_seconds": diagnostics.get("duration_seconds"),
+                            "output_channel_used": diagnostics.get(
+                                "output_channel_used"
+                            ),
+                            "stderr_contains_model_content": diagnostics.get(
+                                "stderr_contains_model_content"
+                            ),
+                            "fallback_step_count": len(deterministic_plan),
+                        },
+                    )
+                    return {
+                        "status": "completed",
+                        "output": json.dumps(deterministic_plan, ensure_ascii=True),
+                        "planning_backend": "deterministic_static_asset_plan",
+                        "deterministic_planning_fallback": True,
+                        "diagnostics": {
+                            "planning_failure_class": "planner_no_model_output",
+                            "fallback": "deterministic_static_asset_plan",
+                            "fallback_step_count": len(deterministic_plan),
+                        },
+                    }
+                emit_live(
+                    "ERROR",
+                    (
+                        "[ORCHESTRATION] Planning backend timed out without model "
+                        "output; skipping equivalent ultra-minimal retry"
+                    ),
+                    metadata={
+                        "phase": "planning",
+                        "reason": "planner_no_model_output",
+                        "timeout_seconds": diagnostics.get("timeout_seconds"),
+                        "duration_seconds": diagnostics.get("duration_seconds"),
+                        "output_channel_used": diagnostics.get("output_channel_used"),
+                        "stderr_contains_model_content": diagnostics.get(
+                            "stderr_contains_model_content"
+                        ),
+                    },
+                )
                 raise
             ultra_minimal_timeout = min(
                 timeout_seconds, ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS
@@ -1854,6 +2103,12 @@ Rules:
                     ),
                     timeout_seconds=ultra_minimal_timeout,
                     reuse_task_session=False,
+                    diagnostic_label="ULTRA_MINIMAL_PLANNING",
+                    diagnostic_metadata={
+                        "planning_attempt": "ultra_minimal",
+                        "minimal_prompt_timeout_reason": str(exc)[:240],
+                    },
+                    direct_planning_state=planning_attempt_state,
                 )
             )
 

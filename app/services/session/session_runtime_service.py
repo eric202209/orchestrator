@@ -405,6 +405,7 @@ def queue_task_for_session(
             **_runtime_selection_details(db),
         },
     )
+    db.commit()
 
     result = execute_orchestration_task.delay(
         session_id=session.id,

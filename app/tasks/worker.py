@@ -18,6 +18,7 @@ from app.models import (
     Session as SessionModel,
     SessionTask,
     Task,
+    TaskExecution,
     TaskStatus,
     Project,
 )
@@ -85,6 +86,11 @@ from app.services.orchestration.policy import (
 from app.services.workspace.system_settings import get_effective_policy_profile
 from app.services.orchestration.validation.workspace_guard import (
     verify_workspace_contract,
+)
+from app.services.orchestration.run_state import (
+    mark_task_attempt_cancelled,
+    mark_task_attempt_failed,
+    mark_task_attempt_running,
 )
 from app.services.observability import (
     build_text_trace_payload,
@@ -274,12 +280,19 @@ def execute_orchestration_task(
             resume_checkpoint_name=resume_checkpoint_name,
         )
         if stale_dispatch_reason:
-            _sync_task_execution_state(
-                db,
-                task_execution_id,
-                status=TaskStatus.CANCELLED,
+            task_execution = (
+                db.query(TaskExecution)
+                .filter(TaskExecution.id == task_execution_id)
+                .first()
+                if task_execution_id
+                else None
+            )
+            mark_task_attempt_cancelled(
+                task=None,
+                task_execution=task_execution,
                 completed_at=datetime.now(timezone.utc),
             )
+            db.commit()
             return _emit_dispatch_rejected(
                 reason=stale_dispatch_reason,
                 log_message=f"[ORCHESTRATION] Rejected stale queued dispatch before claim: {stale_dispatch_reason}",
@@ -322,12 +335,19 @@ def execute_orchestration_task(
                 break
             time.sleep(0.2)
         if not claim_ok:
-            _sync_task_execution_state(
-                db,
-                task_execution_id,
-                status=TaskStatus.CANCELLED,
+            task_execution = (
+                db.query(TaskExecution)
+                .filter(TaskExecution.id == task_execution_id)
+                .first()
+                if task_execution_id
+                else None
+            )
+            mark_task_attempt_cancelled(
+                task=None,
+                task_execution=task_execution,
                 completed_at=datetime.now(timezone.utc),
             )
+            db.commit()
             return _emit_dispatch_rejected(
                 reason=claim_reason,
                 log_message=f"[ORCHESTRATION] Rejected stale or duplicate task dispatch: {claim_reason}",
@@ -605,8 +625,23 @@ def execute_orchestration_task(
                     task_id,
                     time_since_start,
                 )
-                task.status = TaskStatus.FAILED
-                task.error_message = f"Task already running for {time_since_start}, possible duplicate execution"
+                task_execution = (
+                    db.query(TaskExecution)
+                    .filter(TaskExecution.id == task_execution_id)
+                    .first()
+                    if task_execution_id
+                    else None
+                )
+                mark_task_attempt_failed(
+                    task=task,
+                    session_task_link=session_task_link,
+                    task_execution=task_execution,
+                    error_message=(
+                        f"Task already running for {time_since_start}, "
+                        "possible duplicate execution"
+                    ),
+                    completed_at=datetime.now(timezone.utc),
+                )
                 db.commit()
                 raise Exception("Task timeout - already running too long")
         elif task.started_at and is_resume_execution:
@@ -616,25 +651,21 @@ def execute_orchestration_task(
                 resume_checkpoint_name,
             )
 
-        # Update task status
-        task.status = TaskStatus.RUNNING
-        task.started_at = (
-            claim_started_at or task.started_at or datetime.now(timezone.utc)
-        )
-        task.completed_at = None
-        task.error_message = None
-        task.current_step = 0
-        task.workspace_status = "in_progress" if task.task_subfolder else "not_created"
         session_task_link = _get_latest_session_task_link(db, session_id, task_id)
-        if session_task_link:
-            session_task_link.status = TaskStatus.RUNNING
-            session_task_link.started_at = claim_started_at or task.started_at
-            session_task_link.completed_at = None
-        _sync_task_execution_state(
-            db,
-            task_execution_id,
-            status=TaskStatus.RUNNING,
-            started_at=claim_started_at or task.started_at,
+        task_execution = (
+            db.query(TaskExecution)
+            .filter(TaskExecution.id == task_execution_id)
+            .first()
+            if task_execution_id
+            else None
+        )
+        mark_task_attempt_running(
+            task=task,
+            session_task_link=session_task_link,
+            task_execution=task_execution,
+            started_at=(
+                claim_started_at or task.started_at or datetime.now(timezone.utc)
+            ),
         )
         db.commit()
         _write_project_state_snapshot(db, project, task, session_id)
@@ -721,13 +752,14 @@ def execute_orchestration_task(
                 contract_error = "Workspace contract failed before execution: " + str(
                     workspace_contract.get("reason") or "unknown mismatch"
                 )
-                task.status = TaskStatus.FAILED
-                task.completed_at = datetime.now(timezone.utc)
-                task.error_message = contract_error
-                task.workspace_status = "blocked"
-                if session_task_link:
-                    session_task_link.status = TaskStatus.FAILED
-                    session_task_link.completed_at = task.completed_at
+                mark_task_attempt_failed(
+                    task=task,
+                    session_task_link=session_task_link,
+                    task_execution=task_execution,
+                    error_message=contract_error,
+                    completed_at=datetime.now(timezone.utc),
+                    workspace_status="blocked",
+                )
                 session.status = "paused"
                 session.is_active = False
                 _set_session_alert(session, "error", contract_error[:2000])
@@ -766,11 +798,12 @@ def execute_orchestration_task(
             orchestration_state.abort_reason = ""
             task.steps = None
             task.current_step = 0
-            task.error_message = None
-            if session_task_link:
-                session_task_link.status = TaskStatus.RUNNING
-                session_task_link.started_at = task.started_at
-                session_task_link.completed_at = None
+            mark_task_attempt_running(
+                task=task,
+                session_task_link=session_task_link,
+                task_execution=task_execution,
+                started_at=task.started_at or datetime.now(timezone.utc),
+            )
             session.status = "running"
             session.is_active = True
             _set_session_alert(session, "warn", error_message[:2000])
@@ -1082,11 +1115,20 @@ def execute_orchestration_task(
         if gate_error:
             orchestration_state.status = OrchestrationStatus.ABORTED
             orchestration_state.abort_reason = gate_error
-            task.status = TaskStatus.FAILED
-            task.error_message = gate_error
-            if session_task_link:
-                session_task_link.status = TaskStatus.FAILED
-                session_task_link.completed_at = datetime.now(timezone.utc)
+            task_execution = (
+                db.query(TaskExecution)
+                .filter(TaskExecution.id == task_execution_id)
+                .first()
+                if task_execution_id
+                else None
+            )
+            mark_task_attempt_failed(
+                task=task,
+                session_task_link=session_task_link,
+                task_execution=task_execution,
+                error_message=gate_error,
+                completed_at=datetime.now(timezone.utc),
+            )
             session.status = "paused"
             session.is_active = False
             _set_session_alert(session, "error", gate_error[:2000])

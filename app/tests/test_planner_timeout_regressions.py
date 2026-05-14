@@ -360,7 +360,14 @@ def test_planning_repair_still_rejects_prose_output(tmp_path):
         )
 
 
-def test_minimal_prompt_retry_emits_prompt_size_diagnostics(tmp_path):
+def test_minimal_prompt_retry_emits_prompt_size_diagnostics(tmp_path, monkeypatch):
+    from app.services.orchestration.planning import planner as planner_module
+
+    monkeypatch.setattr(
+        planner_module,
+        "OPENCLAW_PLANNING_LOCK_PATH",
+        tmp_path / "planning.lock",
+    )
     events = []
     captured = {}
 
@@ -413,6 +420,149 @@ def test_minimal_prompt_retry_emits_prompt_size_diagnostics(tmp_path):
         captured["kwargs"]["diagnostic_metadata"]["minimal_prompt_estimated_tokens"]
         == retry_metadata["minimal_prompt_estimated_tokens"]
     )
+
+
+def test_minimal_prompt_retry_skips_ultra_when_planner_has_no_model_output(
+    tmp_path, monkeypatch
+):
+    events = []
+    calls = []
+
+    async def timeout_without_model_output(cls, runtime_service, prompt, **kwargs):
+        calls.append({"prompt": prompt, "kwargs": kwargs})
+        exc = TimeoutError("Task execution failed: Task timed out after 209s")
+        exc.runtime_diagnostics = {
+            "timed_out": True,
+            "timeout_seconds": 209,
+            "duration_seconds": 239.5,
+            "stdout_chars": 0,
+            "stderr_chars": 78,
+            "output_channel_used": "none",
+            "stderr_contains_model_content": False,
+            "stderr_contains_only_logs": True,
+        }
+        raise exc
+
+    monkeypatch.setattr(
+        PlannerService,
+        "_execute_task_with_planning_lock",
+        classmethod(timeout_without_model_output),
+    )
+
+    with pytest.raises(TimeoutError):
+        PlannerService.retry_with_minimal_prompt(
+            runtime_service=object(),
+            task_description="Create an SVG and add it to index.html",
+            project_dir=tmp_path,
+            timeout_seconds=300,
+            logger=logging.getLogger("test.no_model_output_planning_timeout"),
+            emit_live=lambda level, message, metadata=None: events.append(
+                (level, message, metadata or {})
+            ),
+            reason="dense_planning_context",
+            workflow_profile="default",
+        )
+
+    assert len(calls) == 1
+    assert calls[0]["kwargs"]["diagnostic_label"] == "MINIMAL_PLANNING"
+    assert not any(
+        metadata.get("strategy") == "ultra_minimal_prompt" for _, _, metadata in events
+    )
+    failure_event = next(
+        metadata
+        for level, _, metadata in events
+        if level == "ERROR" and metadata.get("reason") == "planner_no_model_output"
+    )
+    assert failure_event["output_channel_used"] == "none"
+    assert failure_event["stderr_contains_model_content"] is False
+
+
+def test_deterministic_static_asset_plan_builds_microsite_ops(tmp_path):
+    from app.services.orchestration.execution.executor import ExecutorService
+
+    (tmp_path / "index.html").write_text(
+        "<!doctype html>\n<html><body><main><h1>Microsite</h1></main></body></html>\n",
+        encoding="utf-8",
+    )
+
+    plan = PlannerService.build_deterministic_static_asset_plan(
+        "Create `images/tulip-card.svg`. Add small gallery or feature card in `index.html`. Reference new asset in page.",
+        tmp_path,
+    )
+
+    assert plan is not None
+    assert ValidatorService.validate_plan_schema(plan)["valid"] is True
+    assert plan[0]["ops"] == [
+        {
+            "op": "write_file",
+            "path": "images/tulip-card.svg",
+            "content": plan[0]["ops"][0]["content"],
+        }
+    ]
+    assert "<svg" in plan[0]["ops"][0]["content"]
+    assert plan[1]["ops"][0]["path"] == "index.html"
+    assert 'src="images/tulip-card.svg"' in plan[1]["ops"][0]["content"]
+    assert plan[0]["commands"] == []
+    assert plan[1]["commands"] == []
+    first_result = ExecutorService.execute_file_ops(tmp_path, plan[0]["ops"])
+    second_result = ExecutorService.execute_file_ops(tmp_path, plan[1]["ops"])
+    assert first_result["success"] is True
+    assert second_result["success"] is True
+    assert (tmp_path / "images" / "tulip-card.svg").exists()
+    assert 'src="images/tulip-card.svg"' in (tmp_path / "index.html").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_minimal_prompt_retry_uses_deterministic_static_asset_fallback(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "index.html").write_text(
+        "<!doctype html>\n<html><body><main><h1>Microsite</h1></main></body></html>\n",
+        encoding="utf-8",
+    )
+    events = []
+    calls = []
+
+    async def timeout_without_model_output(cls, runtime_service, prompt, **kwargs):
+        raise AssertionError("model planning should be bypassed")
+
+    monkeypatch.setattr(
+        PlannerService,
+        "_execute_task_with_planning_lock",
+        classmethod(timeout_without_model_output),
+    )
+
+    result = PlannerService.retry_with_minimal_prompt(
+        runtime_service=object(),
+        task_description="Create `images/tulip-card.svg`. Add small gallery or feature card in `index.html`. Reference new asset in page.",
+        project_dir=tmp_path,
+        timeout_seconds=300,
+        logger=logging.getLogger("test.deterministic_static_asset_fallback"),
+        emit_live=lambda level, message, metadata=None: events.append(
+            (level, message, metadata or {})
+        ),
+        reason="dense_planning_context",
+        workflow_profile="default",
+    )
+
+    plan = json.loads(result["output"])
+    assert calls == []
+    assert result["planning_backend"] == "deterministic_static_asset_plan"
+    assert result["deterministic_planning_fallback"] is True
+    assert ValidatorService.validate_plan_schema(plan)["valid"] is True
+    assert plan[0]["ops"][0]["path"] == "images/tulip-card.svg"
+    assert 'src="images/tulip-card.svg"' in plan[1]["ops"][0]["content"]
+    assert not any(
+        metadata.get("strategy") == "ultra_minimal_prompt" for _, _, metadata in events
+    )
+    fallback_event = next(
+        metadata
+        for _, _, metadata in events
+        if metadata.get("strategy") == "deterministic_static_asset_plan"
+    )
+    assert fallback_event["reason"] == "simple_static_asset_task"
+    assert fallback_event["fallback_step_count"] == 2
 
 
 def test_openclaw_session_lock_is_classified_distinctly():
@@ -527,6 +677,52 @@ def test_direct_planning_fallback_shares_openclaw_timeout_budget(monkeypatch):
     assert captured["direct_timeout_budget_seconds"] == 300
     assert captured["fallback_prompt"] == "plan this"
     assert captured["fallback_kwargs"]["timeout_seconds"] == 210
+
+
+def test_planning_lock_skips_direct_after_phase_unavailable(monkeypatch):
+    from app.services.orchestration.planning import planner as planner_module
+
+    captured = {}
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {"backend": "local_openclaw"}
+
+        async def execute_task(self, prompt, **kwargs):
+            captured["prompt"] = prompt
+            captured["kwargs"] = kwargs
+            return {"status": "completed", "output": "[]"}
+
+    async def direct_should_not_run(*args, **kwargs):
+        raise AssertionError("direct planning should be skipped")
+
+    monkeypatch.setattr(
+        PlannerService,
+        "_invoke_direct_no_thinking_planning",
+        direct_should_not_run,
+    )
+    monkeypatch.setattr(planner_module.settings, "PLANNING_REPAIR_ENABLED", True)
+    monkeypatch.setattr(
+        planner_module.settings,
+        "PLANNING_REPAIR_BASE_URL",
+        "http://localhost:8000/v1",
+    )
+    monkeypatch.setattr(planner_module.settings, "PLANNING_REPAIR_MODEL", "qwen-local")
+
+    result = asyncio.run(
+        PlannerService._execute_task_with_planning_lock(
+            Runtime(),
+            "plan this",
+            timeout_seconds=300,
+            reuse_task_session=False,
+            direct_planning_state={"direct_unavailable": True},
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert captured["prompt"] == "plan this"
+    assert captured["kwargs"]["timeout_seconds"] == 300
+    assert "direct_planning_state" not in captured["kwargs"]
 
 
 def test_planning_repair_uses_direct_no_thinking_chat_path(monkeypatch):

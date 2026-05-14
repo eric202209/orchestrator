@@ -3,7 +3,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.models import Project, Session as SessionModel, SessionTask, Task, TaskStatus
+from app.models import (
+    Project,
+    Session as SessionModel,
+    SessionTask,
+    Task,
+    TaskExecution,
+    TaskStatus,
+)
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.persistence import read_orchestration_events
 from app.services.orchestration.validation.workspace_guard import (
@@ -20,9 +27,10 @@ from app.tasks.worker import _should_reject_stale_dispatch_claim
 
 
 def test_queue_task_for_session_emits_queued_event_and_keeps_task_pending(
-    db_session, monkeypatch, tmp_path
+    db_session, db_session_factory, monkeypatch, tmp_path
 ):
     captured_delay_kwargs = {}
+    committed_state_during_delay = {}
 
     class _FakeDelayResult:
         id = "celery-queued-1"
@@ -31,6 +39,31 @@ def test_queue_task_for_session_emits_queued_event_and_keeps_task_pending(
         @staticmethod
         def delay(**kwargs):
             captured_delay_kwargs.update(kwargs)
+            worker_db = db_session_factory()
+            try:
+                worker_session = (
+                    worker_db.query(SessionModel)
+                    .filter(SessionModel.id == kwargs["session_id"])
+                    .one()
+                )
+                worker_task = (
+                    worker_db.query(Task).filter(Task.id == kwargs["task_id"]).one()
+                )
+                worker_execution = (
+                    worker_db.query(TaskExecution)
+                    .filter(TaskExecution.id == kwargs["task_execution_id"])
+                    .one()
+                )
+                committed_state_during_delay.update(
+                    {
+                        "session_status": worker_session.status,
+                        "session_is_active": worker_session.is_active,
+                        "task_status": worker_task.status,
+                        "execution_status": worker_execution.status,
+                    }
+                )
+            finally:
+                worker_db.close()
             return _FakeDelayResult()
 
     monkeypatch.setattr(
@@ -82,6 +115,12 @@ def test_queue_task_for_session_emits_queued_event_and_keeps_task_pending(
     assert session_task is not None
     assert session_task.status == TaskStatus.PENDING
     assert session_task.started_at is None
+    assert committed_state_during_delay == {
+        "session_status": "running",
+        "session_is_active": True,
+        "task_status": TaskStatus.PENDING,
+        "execution_status": TaskStatus.PENDING,
+    }
 
     workspace_root = resolve_project_workspace_path(
         project.workspace_path, project.name

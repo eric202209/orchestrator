@@ -85,6 +85,12 @@ def test_openclaw_stderr_noise_filter_hides_json_telemetry_lines():
     )
     assert (
         OpenClawSessionService._should_emit_stderr_line(
+            "\x1b[35m[agents]\x1b[39m \x1b[36msynced openai-codex credentials from external cli\x1b[39m"
+        )
+        is False
+    )
+    assert (
+        OpenClawSessionService._should_emit_stderr_line(
             "[OPENCLAW] embedded run failover decision: runId=abc"
         )
         is True

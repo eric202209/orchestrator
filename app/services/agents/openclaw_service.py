@@ -119,6 +119,11 @@ _NOISY_OPENCLAW_STDERR_PATTERNS = (
     re.compile(r'^"name":\s*"[^"]+",?$'),
     re.compile(r'^"entries":\s*\[$'),
     re.compile(r'^"skills":\s*{$'),
+    re.compile(
+        r"^(?:\x1b\[[0-9;]*m)*\[agents\](?:\x1b\[[0-9;]*m)*\s+"
+        r"(?:\x1b\[[0-9;]*m)*synced openai-codex credentials from external cli"
+        r"(?:\x1b\[[0-9;]*m)*$"
+    ),
 )
 
 

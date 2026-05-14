@@ -7,7 +7,7 @@ from pathlib import Path
 from datetime import UTC, datetime
 from typing import Any, Callable, Dict, Optional
 
-from app.models import LogEntry, SessionTask, Task, TaskStatus
+from app.models import LogEntry, SessionTask, Task, TaskExecution, TaskStatus
 from app.config import settings
 from app.services.error_handler import error_handler
 from app.services.orchestration.events.event_types import EventType
@@ -46,6 +46,10 @@ from app.services.orchestration.persistence import (
 )
 from app.services.orchestration.policy import (
     SUMMARY_TIMEOUT_SECONDS,
+)
+from app.services.orchestration.run_state import (
+    mark_task_attempt_done,
+    mark_task_attempt_failed,
 )
 from app.services.orchestration.types import (
     FailureEnvelope,
@@ -994,14 +998,22 @@ def finalize_successful_task(
             )
             orchestration_state.status = OrchestrationStatus.ABORTED
             orchestration_state.abort_reason = completion_error
-            task.status = TaskStatus.FAILED
-            task.completed_at = datetime.now(UTC)
-            task.error_message = completion_error
+            task_execution = (
+                db.query(TaskExecution)
+                .filter(TaskExecution.id == ctx.task_execution_id)
+                .first()
+                if ctx.task_execution_id
+                else None
+            )
+            mark_task_attempt_failed(
+                task=task,
+                session_task_link=session_task_link,
+                task_execution=task_execution,
+                error_message=completion_error,
+                completed_at=datetime.now(UTC),
+                workspace_status="blocked",
+            )
             task.current_step = len(orchestration_state.plan)
-            task.workspace_status = "blocked"
-            if session_task_link:
-                session_task_link.status = TaskStatus.FAILED
-                session_task_link.completed_at = task.completed_at
             if session:
                 session.status = "paused"
                 session.is_active = False
@@ -1084,14 +1096,22 @@ def finalize_successful_task(
         )
         orchestration_state.status = OrchestrationStatus.ABORTED
         orchestration_state.abort_reason = completion_error
-        task.status = TaskStatus.FAILED
-        task.completed_at = datetime.now(UTC)
-        task.error_message = completion_error
+        task_execution = (
+            db.query(TaskExecution)
+            .filter(TaskExecution.id == ctx.task_execution_id)
+            .first()
+            if ctx.task_execution_id
+            else None
+        )
+        mark_task_attempt_failed(
+            task=task,
+            session_task_link=session_task_link,
+            task_execution=task_execution,
+            error_message=completion_error,
+            completed_at=datetime.now(UTC),
+            workspace_status="blocked",
+        )
         task.current_step = len(orchestration_state.plan)
-        task.workspace_status = "blocked"
-        if session_task_link:
-            session_task_link.status = TaskStatus.FAILED
-            session_task_link.completed_at = task.completed_at
         if session:
             session.status = "paused"
             session.is_active = False
@@ -1173,14 +1193,22 @@ def finalize_successful_task(
                     )
                     orchestration_state.status = OrchestrationStatus.ABORTED
                     orchestration_state.abort_reason = completion_error
-                    task.status = TaskStatus.FAILED
-                    task.completed_at = datetime.now(UTC)
-                    task.error_message = completion_error
+                    task_execution = (
+                        db.query(TaskExecution)
+                        .filter(TaskExecution.id == ctx.task_execution_id)
+                        .first()
+                        if ctx.task_execution_id
+                        else None
+                    )
+                    mark_task_attempt_failed(
+                        task=task,
+                        session_task_link=session_task_link,
+                        task_execution=task_execution,
+                        error_message=completion_error,
+                        completed_at=datetime.now(UTC),
+                        workspace_status="blocked",
+                    )
                     task.current_step = len(orchestration_state.plan)
-                    task.workspace_status = "blocked"
-                    if session_task_link:
-                        session_task_link.status = TaskStatus.FAILED
-                        session_task_link.completed_at = task.completed_at
                     if session:
                         session.status = "paused"
                         session.is_active = False
@@ -1318,20 +1346,29 @@ def finalize_successful_task(
                         )
 
                 if not completion_verification.get("success", False):
-                    task.status = TaskStatus.FAILED
-                    task.completed_at = datetime.now(UTC)
-                    task.error_message = (
+                    verification_error_message = (
                         verification_error
                         + ": "
                         + str(completion_verification.get("output") or "")[:1500]
                     )
+                    task_execution = (
+                        db.query(TaskExecution)
+                        .filter(TaskExecution.id == ctx.task_execution_id)
+                        .first()
+                        if ctx.task_execution_id
+                        else None
+                    )
+                    mark_task_attempt_failed(
+                        task=task,
+                        session_task_link=session_task_link,
+                        task_execution=task_execution,
+                        error_message=verification_error_message,
+                        completed_at=datetime.now(UTC),
+                        workspace_status="blocked",
+                    )
                     task.current_step = len(orchestration_state.plan)
-                    task.workspace_status = "blocked"
                     orchestration_state.status = OrchestrationStatus.ABORTED
                     orchestration_state.abort_reason = verification_error
-                    if session_task_link:
-                        session_task_link.status = TaskStatus.FAILED
-                        session_task_link.completed_at = task.completed_at
                     if session:
                         session.status = "paused"
                         session.is_active = False
@@ -1505,14 +1542,22 @@ def finalize_successful_task(
                 )
                 orchestration_state.status = OrchestrationStatus.ABORTED
                 orchestration_state.abort_reason = baseline_error
-                task.status = TaskStatus.FAILED
-                task.completed_at = datetime.now(UTC)
-                task.error_message = baseline_error
+                task_execution = (
+                    db.query(TaskExecution)
+                    .filter(TaskExecution.id == ctx.task_execution_id)
+                    .first()
+                    if ctx.task_execution_id
+                    else None
+                )
+                mark_task_attempt_failed(
+                    task=task,
+                    session_task_link=session_task_link,
+                    task_execution=task_execution,
+                    error_message=baseline_error,
+                    completed_at=datetime.now(UTC),
+                    workspace_status="blocked",
+                )
                 task.current_step = len(orchestration_state.plan)
-                task.workspace_status = "blocked"
-                if session_task_link:
-                    session_task_link.status = TaskStatus.FAILED
-                    session_task_link.completed_at = task.completed_at
                 if session:
                     session.status = "paused"
                     session.is_active = False
@@ -1545,9 +1590,19 @@ def finalize_successful_task(
             logger=logger,
         )
 
-    task.status = TaskStatus.DONE
-    task.completed_at = datetime.now(UTC)
-    task.error_message = None
+    task_execution = (
+        db.query(TaskExecution)
+        .filter(TaskExecution.id == ctx.task_execution_id)
+        .first()
+        if ctx.task_execution_id
+        else None
+    )
+    completed_at = mark_task_attempt_done(
+        task=task,
+        session_task_link=session_task_link,
+        task_execution=task_execution,
+        completed_at=datetime.now(UTC),
+    )
     task.summary = summary_result.get("output", "")[:2000]
     task.current_step = len(orchestration_state.plan)
     promoted_workspace_archive_result = None
@@ -1565,9 +1620,7 @@ def finalize_successful_task(
         )
     else:
         task.workspace_status = "ready" if task.task_subfolder else "not_created"
-    if session_task_link:
-        session_task_link.status = TaskStatus.DONE
-        session_task_link.completed_at = task.completed_at
+    task.completed_at = completed_at
     append_orchestration_event(
         project_dir=orchestration_state.project_dir,
         session_id=session_id,

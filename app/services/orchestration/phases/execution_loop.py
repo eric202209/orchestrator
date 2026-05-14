@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from app.models import TaskStatus
+from app.models import TaskExecution, TaskStatus
 from app.services.orchestration.context_assembly import (
     DebugPromptInputs,
     assemble_debugging_prompt,
@@ -47,6 +47,10 @@ from app.services.orchestration.policy import (
     DEBUG_TIMEOUT_SECONDS,
     MAX_STEP_ATTEMPTS,
 )
+from app.services.orchestration.run_state import (
+    mark_task_attempt_cancelled,
+    mark_task_attempt_failed,
+)
 from app.services.orchestration.persistence import (
     append_orchestration_event,
     attach_failure_envelope,
@@ -75,6 +79,14 @@ from app.services.orchestration.validation.workspace_guard import (
 )
 from app.services.orchestration.hitl_sentinel import parse as _parse_hitl_sentinel
 from app.services.prompt_templates import OrchestrationStatus, StepResult
+
+
+def _get_task_execution(
+    db: Any, task_execution_id: Optional[int]
+) -> Optional[TaskExecution]:
+    if task_execution_id is None:
+        return None
+    return db.query(TaskExecution).filter(TaskExecution.id == task_execution_id).first()
 
 
 def execute_step_loop(
@@ -137,18 +149,21 @@ def execute_step_loop(
             orchestration_state,
             reasoning_verdict,
         )
-        task.status = TaskStatus.FAILED
-        task.error_message = (
+        error_message = (
             "Execution blocked before step 1 because the reasoning artifact is invalid: "
             + "; ".join(reasoning_verdict.reasons[:4])
         )
-        if session_task_link:
-            session_task_link.status = TaskStatus.FAILED
-            session_task_link.completed_at = datetime.now(timezone.utc)
+        mark_task_attempt_failed(
+            task=task,
+            session_task_link=session_task_link,
+            task_execution=_get_task_execution(db, ctx.task_execution_id),
+            error_message=error_message,
+            completed_at=datetime.now(timezone.utc),
+        )
         if session:
             session.status = "paused"
             session.is_active = False
-            set_session_alert(session, "error", task.error_message[:2000])
+            set_session_alert(session, "error", error_message[:2000])
         db.commit()
         restore_workspace_snapshot_if_needed("reasoning artifact gate failed")
         write_project_state_snapshot_fn(db, project, task, session_id)
@@ -210,11 +225,19 @@ def execute_step_loop(
             save_orchestration_checkpoint(
                 db, session_id, task_id, prompt, orchestration_state
             )
-            task.status = TaskStatus.CANCELLED
-            task.completed_at = datetime.now(timezone.utc)
-            if session_task_link:
-                session_task_link.status = TaskStatus.CANCELLED
-                session_task_link.completed_at = task.completed_at
+            task_execution = (
+                db.query(TaskExecution)
+                .filter(TaskExecution.id == ctx.task_execution_id)
+                .first()
+                if ctx.task_execution_id
+                else None
+            )
+            mark_task_attempt_cancelled(
+                task=task,
+                session_task_link=session_task_link,
+                task_execution=task_execution,
+                completed_at=datetime.now(timezone.utc),
+            )
             db.commit()
             restore_workspace_snapshot_if_needed(f"session {session.status}")
             write_project_state_snapshot_fn(db, project, task, session_id)
@@ -297,11 +320,13 @@ def execute_step_loop(
                 )
                 orchestration_state.status = OrchestrationStatus.ABORTED
                 orchestration_state.abort_reason = manual_gate_message
-                task.status = TaskStatus.FAILED
-                task.error_message = manual_gate_message
-                if session_task_link:
-                    session_task_link.status = TaskStatus.FAILED
-                    session_task_link.completed_at = datetime.now(timezone.utc)
+                mark_task_attempt_failed(
+                    task=task,
+                    session_task_link=session_task_link,
+                    task_execution=_get_task_execution(db, ctx.task_execution_id),
+                    error_message=manual_gate_message,
+                    completed_at=datetime.now(timezone.utc),
+                )
                 session.status = "paused"
                 session.is_active = False
                 set_session_alert(session, "error", manual_gate_message)
@@ -967,11 +992,13 @@ def execute_step_loop(
             )
             orchestration_state.status = OrchestrationStatus.ABORTED
             orchestration_state.abort_reason = manual_gate_message
-            task.status = TaskStatus.FAILED
-            task.error_message = manual_gate_message
-            if session_task_link:
-                session_task_link.status = TaskStatus.FAILED
-                session_task_link.completed_at = datetime.now(timezone.utc)
+            mark_task_attempt_failed(
+                task=task,
+                session_task_link=session_task_link,
+                task_execution=_get_task_execution(db, ctx.task_execution_id),
+                error_message=manual_gate_message,
+                completed_at=datetime.now(timezone.utc),
+            )
             db.commit()
             try:
                 phase_finished_event = append_orchestration_event(
@@ -1100,14 +1127,17 @@ def execute_step_loop(
             orchestration_state.abort_reason = (
                 f"Step {step_index + 1} failed after {current_attempt} attempts"
             )
-            task.status = TaskStatus.FAILED
-            task.error_message = (
+            error_message = (
                 f"Step failed after {current_attempt} attempts: "
                 f"{step_record.error_message[:500]}"
             )
-            if session_task_link:
-                session_task_link.status = TaskStatus.FAILED
-                session_task_link.completed_at = datetime.now(timezone.utc)
+            mark_task_attempt_failed(
+                task=task,
+                session_task_link=session_task_link,
+                task_execution=_get_task_execution(db, ctx.task_execution_id),
+                error_message=error_message,
+                completed_at=datetime.now(timezone.utc),
+            )
             db.commit()
             try:
                 phase_finished_event = append_orchestration_event(
@@ -1204,13 +1234,13 @@ def execute_step_loop(
                 pass
             orchestration_state.status = OrchestrationStatus.ABORTED
             orchestration_state.abort_reason = terminal_message
-            task.status = TaskStatus.FAILED
-            task.error_message = (
-                terminal_message + f": {step_record.error_message[:500]}"
+            mark_task_attempt_failed(
+                task=task,
+                session_task_link=session_task_link,
+                task_execution=_get_task_execution(db, task_execution_id),
+                error_message=terminal_message + f": {step_record.error_message[:500]}",
+                completed_at=datetime.now(timezone.utc),
             )
-            if session_task_link:
-                session_task_link.status = TaskStatus.FAILED
-                session_task_link.completed_at = datetime.now(timezone.utc)
             db.commit()
             restore_workspace_snapshot_if_needed("debug repair budget exhausted")
             write_project_state_snapshot_fn(db, project, task, session_id)
@@ -1531,11 +1561,13 @@ def execute_step_loop(
                 )
                 orchestration_state.status = OrchestrationStatus.ABORTED
                 orchestration_state.abort_reason = f"Plan revision cap ({max_plan_revisions}) reached after step {step_index + 1}"
-                task.status = TaskStatus.FAILED
-                task.error_message = orchestration_state.abort_reason
-                if session_task_link:
-                    session_task_link.status = TaskStatus.FAILED
-                    session_task_link.completed_at = datetime.now(timezone.utc)
+                mark_task_attempt_failed(
+                    task=task,
+                    session_task_link=session_task_link,
+                    task_execution=_get_task_execution(db, task_execution_id),
+                    error_message=orchestration_state.abort_reason,
+                    completed_at=datetime.now(timezone.utc),
+                )
                 db.commit()
                 restore_workspace_snapshot_if_needed("max step attempts reached")
                 write_project_state_snapshot_fn(db, project, task, session_id)
@@ -1644,8 +1676,13 @@ def execute_step_loop(
                     )
                     orchestration_state.status = OrchestrationStatus.ABORTED
                     orchestration_state.abort_reason = revised_plan_error
-                    task.status = TaskStatus.FAILED
-                    task.error_message = revised_plan_error
+                    mark_task_attempt_failed(
+                        task=task,
+                        session_task_link=session_task_link,
+                        task_execution=_get_task_execution(db, task_execution_id),
+                        error_message=revised_plan_error,
+                        completed_at=datetime.now(timezone.utc),
+                    )
                     emit_live(
                         "ERROR",
                         "[ORCHESTRATION] Revised plan failed validation",
@@ -1784,11 +1821,13 @@ def execute_step_loop(
                     orchestration_state.abort_reason = (
                         "Debug repair was not actionable for structured file operations"
                     )
-                    task.status = TaskStatus.FAILED
-                    task.error_message = orchestration_state.abort_reason
-                    if session_task_link:
-                        session_task_link.status = TaskStatus.FAILED
-                        session_task_link.completed_at = datetime.now(timezone.utc)
+                    mark_task_attempt_failed(
+                        task=task,
+                        session_task_link=session_task_link,
+                        task_execution=_get_task_execution(db, task_execution_id),
+                        error_message=orchestration_state.abort_reason,
+                        completed_at=datetime.now(timezone.utc),
+                    )
                     db.commit()
                     try:
                         phase_finished_event = append_orchestration_event(
@@ -1910,8 +1949,13 @@ def execute_step_loop(
         except TaskOperationContractViolation as exc:
             orchestration_state.status = OrchestrationStatus.ABORTED
             orchestration_state.abort_reason = f"Operation contract violation: {exc}"
-            task.status = TaskStatus.FAILED
-            task.error_message = str(exc)
+            mark_task_attempt_failed(
+                task=task,
+                session_task_link=session_task_link,
+                task_execution=_get_task_execution(db, task_execution_id),
+                error_message=str(exc),
+                completed_at=datetime.now(timezone.utc),
+            )
             db.commit()
             try:
                 phase_finished_event = append_orchestration_event(
@@ -1941,8 +1985,13 @@ def execute_step_loop(
         except workspace_violation_error_cls as exc:
             orchestration_state.status = OrchestrationStatus.ABORTED
             orchestration_state.abort_reason = f"Workspace isolation violation: {exc}"
-            task.status = TaskStatus.FAILED
-            task.error_message = str(exc)
+            mark_task_attempt_failed(
+                task=task,
+                session_task_link=session_task_link,
+                task_execution=_get_task_execution(db, task_execution_id),
+                error_message=str(exc),
+                completed_at=datetime.now(timezone.utc),
+            )
             db.commit()
             try:
                 phase_finished_event = append_orchestration_event(
@@ -1973,11 +2022,13 @@ def execute_step_loop(
             logger.error("[ORCHESTRATION] Debug parsing failed: %s", exc)
             orchestration_state.status = OrchestrationStatus.ABORTED
             orchestration_state.abort_reason = f"Debug parse failed: {exc}"
-            task.status = TaskStatus.FAILED
-            task.error_message = str(exc)
-            if session_task_link:
-                session_task_link.status = TaskStatus.FAILED
-                session_task_link.completed_at = datetime.now(timezone.utc)
+            mark_task_attempt_failed(
+                task=task,
+                session_task_link=session_task_link,
+                task_execution=_get_task_execution(db, task_execution_id),
+                error_message=str(exc),
+                completed_at=datetime.now(timezone.utc),
+            )
             db.commit()
             try:
                 phase_finished_event = append_orchestration_event(

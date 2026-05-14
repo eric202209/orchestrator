@@ -30,6 +30,7 @@ from app.services.orchestration.planning.planner import (
     PlanningRepairOutputContractViolation,
 )
 from app.services.orchestration.policy import clamp_planning_timeout
+from app.services.orchestration.run_state import mark_task_attempt_failed
 from app.services.orchestration.task_rules import get_workflow_profile
 from app.services.orchestration.workflow_profiles import get_workflow_phases
 from app.services.orchestration.types import OrchestrationRunContext
@@ -71,27 +72,25 @@ def _finalize_planning_terminal_failure(
     generate_failure_summary: bool = False,
 ) -> bool:
     completed_at = datetime.now(UTC)
-    if ctx.task:
-        ctx.task.status = TaskStatus.FAILED
-        ctx.task.error_message = failure_reason
-        ctx.task.completed_at = completed_at
-    if ctx.session_task_link:
-        ctx.session_task_link.status = TaskStatus.FAILED
-        ctx.session_task_link.completed_at = completed_at
-    if ctx.session:
-        ctx.session.status = "paused"
-        ctx.session.is_active = False
-        ctx.session.paused_at = completed_at
-        set_session_alert(ctx.session, "error", failure_reason[:2000])
+    task_execution = None
     if ctx.task_execution_id:
         task_execution = (
             ctx.db.query(TaskExecution)
             .filter(TaskExecution.id == ctx.task_execution_id)
             .first()
         )
-        if task_execution:
-            task_execution.status = TaskStatus.FAILED
-            task_execution.completed_at = task_execution.completed_at or completed_at
+    mark_task_attempt_failed(
+        task=ctx.task,
+        session_task_link=ctx.session_task_link,
+        task_execution=task_execution,
+        error_message=failure_reason,
+        completed_at=completed_at,
+    )
+    if ctx.session:
+        ctx.session.status = "paused"
+        ctx.session.is_active = False
+        ctx.session.paused_at = completed_at
+        set_session_alert(ctx.session, "error", failure_reason[:2000])
     ctx.db.commit()
     if generate_failure_summary:
         try:

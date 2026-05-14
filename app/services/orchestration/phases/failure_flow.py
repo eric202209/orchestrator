@@ -15,6 +15,7 @@ from app.services.orchestration.persistence import (
     save_orchestration_checkpoint,
     set_session_alert,
 )
+from app.services.orchestration.run_state import mark_task_attempt_failed
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.prompt_templates import OrchestrationStatus
 
@@ -82,12 +83,6 @@ def handle_task_failure(
         and getattr(task, "workspace_status", None) != "changes_requested"
     )
 
-    if task:
-        task.status = TaskStatus.FAILED
-        task.error_message = str(exc)
-        task.completed_at = datetime.now(UTC)
-        task.workspace_status = "blocked" if task.task_subfolder else "not_created"
-
     if orchestration_state and session_id and task_id:
         try:
             append_orchestration_event(
@@ -102,9 +97,14 @@ def handle_task_failure(
 
     if not session_task_link:
         session_task_link = get_latest_session_task_link_fn(db, session_id, task_id)
-    if session_task_link and task:
-        session_task_link.status = TaskStatus.FAILED
-        session_task_link.completed_at = task.completed_at
+    completed_at = datetime.now(UTC)
+    mark_task_attempt_failed(
+        task=task,
+        session_task_link=session_task_link,
+        error_message=str(exc),
+        completed_at=completed_at,
+        workspace_status=("blocked" if task and task.task_subfolder else "not_created"),
+    )
 
     error_str = str(exc).lower()
     if "json" in error_str or "parse" in error_str:
@@ -247,8 +247,13 @@ def handle_task_failure(
                 task_id,
                 recovery_queue_error,
             )
-            task.status = TaskStatus.FAILED
-            task.workspace_status = "blocked" if task.task_subfolder else "not_created"
+            mark_task_attempt_failed(
+                task=task,
+                session_task_link=session_task_link,
+                error_message=str(recovery_queue_error),
+                completed_at=datetime.now(UTC),
+                workspace_status=("blocked" if task.task_subfolder else "not_created"),
+            )
             session.status = "paused"
             session.is_active = False
             set_session_alert(
@@ -290,9 +295,10 @@ def handle_task_failure(
             .first()
         )
         if task_execution:
-            task_execution.status = TaskStatus.FAILED
-            task_execution.completed_at = task_execution.completed_at or datetime.now(
-                UTC
+            mark_task_attempt_failed(
+                task=None,
+                task_execution=task_execution,
+                completed_at=datetime.now(UTC),
             )
 
     db.commit()
@@ -406,7 +412,21 @@ def _apply_knowledge_halt(
                     prompt=prompt_body,
                 )
             )
-            task.status = TaskStatus.FAILED
+            task_execution = None
+            task_execution_id = getattr(ctx, "task_execution_id", None)
+            if task_execution_id:
+                task_execution = (
+                    db.query(TaskExecution)
+                    .filter(TaskExecution.id == task_execution_id)
+                    .first()
+                )
+            mark_task_attempt_failed(
+                task=task,
+                session_task_link=getattr(ctx, "session_task_link", None),
+                task_execution=task_execution,
+                error_message=prompt_body,
+                completed_at=datetime.now(UTC),
+            )
             db.commit()
             logger.warning(
                 "[KNOWLEDGE] Halt: matched failure memory '%s' at retry_count=%d; "

@@ -61,11 +61,17 @@ def verify_session_token(token: str, *, require_active: bool = True) -> Optional
             return None
         session_id = payload.get("sid")
         if require_active:
-            if not session_id or not is_session_active(session_id):
+            if not session_id or session_id in _revoked_session_ids:
                 return None
             session_info = _session_store.get(session_id)
             if session_info:
                 session_info["last_accessed"] = datetime.now(timezone.utc)
+            else:
+                store_session(
+                    session_id,
+                    user_id=int(payload.get("uid") or 0),
+                    email=str(payload.get("sub") or ""),
+                )
         return payload
     except Exception:
         return None
@@ -104,10 +110,12 @@ def verify_ws_ticket(token: str) -> Optional[dict]:
 # ── Server-side session store (in-memory, backed by token sid) ──
 
 _session_store: dict[str, dict] = {}
+_revoked_session_ids: set[str] = set()
 
 
 def store_session(session_id: str, user_id: int, email: str) -> None:
     """Store a session record in the in-memory registry."""
+    _revoked_session_ids.discard(session_id)
     _session_store[session_id] = {
         "user_id": user_id,
         "email": email,
@@ -119,6 +127,7 @@ def store_session(session_id: str, user_id: int, email: str) -> None:
 def invalidate_session(session_id: str) -> None:
     """Remove a session from the in-memory registry."""
     _session_store.pop(session_id, None)
+    _revoked_session_ids.add(session_id)
 
 
 def is_session_active(session_id: str) -> bool:
