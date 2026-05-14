@@ -22,6 +22,7 @@ from app.services.log_utils import sort_logs
 from app.services.name_formatter import humanize_display_name
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.execution.runtime import workspace_snapshot_key
+from app.services.orchestration.review_policy import build_operator_override_metadata
 from app.services.orchestration.state.persistence import append_orchestration_event
 from app.services.orchestration.context.assembly import render_adapted_runtime_prompt
 from app.services.orchestration.run_state import (
@@ -125,6 +126,16 @@ def _get_active_task_session(db: Session, task_id: int) -> Optional[int]:
         .first()
     )
     return active_session.session_id if active_session else None
+
+
+def _operator_identifier(current_user) -> Optional[str]:
+    if not current_user:
+        return None
+    email = (getattr(current_user, "email", None) or "").strip()
+    if email:
+        return email
+    user_id = getattr(current_user, "id", None)
+    return f"user:{user_id}" if user_id is not None else None
 
 
 def _build_request_changes_repair_prompt(
@@ -897,6 +908,7 @@ def reject_latest_task_change_set(
     task_id: int,
     payload: Optional[TaskChangeSetRejectRequest] = None,
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
 ):
     """Archive candidate files and restore the pre-run snapshot for a task execution."""
     task = db.query(Task).filter(Task.id == task_id).first()
@@ -946,6 +958,7 @@ def reject_latest_task_change_set(
             snapshot_key=snapshot_key,
             reason=(payload.note or "operator_rejected_change_set").strip()
             or "operator_rejected_change_set",
+            operator=_operator_identifier(current_user),
         )
     except ProjectMutationLockError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -1053,6 +1066,7 @@ def promote_task_workspace(
     task_id: int,
     payload: TaskPromotionRequest,
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
 ):
     """Mark a task workspace as reviewed and promoted into the project baseline."""
     task = db.query(Task).filter(Task.id == task_id).first()
@@ -1131,10 +1145,18 @@ def promote_task_workspace(
             disposition="promoted",
             reason=(payload.note or "operator_promoted_change_set").strip()
             or "operator_promoted_change_set",
-            metadata={
-                "files_copied": baseline_result.get("files_copied"),
-                "baseline_path": baseline_result.get("baseline_path"),
-            },
+            metadata=build_operator_override_metadata(
+                action="promote",
+                reason=(payload.note or "operator_promoted_change_set").strip()
+                or "operator_promoted_change_set",
+                task_execution_id=payload.task_execution_id,
+                change_set=accepted_change_set,
+                operator=_operator_identifier(current_user),
+                extra={
+                    "files_copied": baseline_result.get("files_copied"),
+                    "baseline_path": baseline_result.get("baseline_path"),
+                },
+            ),
             commit=False,
         )
         if disposition_record:

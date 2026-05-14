@@ -10,6 +10,7 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session
 
 from app.models import LogEntry, Project, Task, TaskExecutionChangeSet, TaskStatus
+from app.services.orchestration.review_policy import build_operator_override_metadata
 from app.services.workspace.canonical_mutation_service import CanonicalMutationService
 from app.services.workspace.baseline_promotion_service import BaselinePromotionService
 from app.services.workspace.changeset_service import ChangesetService
@@ -348,10 +349,14 @@ class TaskService:
         change_set: Optional[dict[str, Any]],
         *,
         workspace_review_policy: str,
+        workflow_profile: Optional[str] = None,
+        evaluator_evidence: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         return self.changesets.change_set_review_decision(
             change_set,
             workspace_review_policy=workspace_review_policy,
+            workflow_profile=workflow_profile,
+            evaluator_evidence=evaluator_evidence,
         )
 
     def build_task_execution_change_set(
@@ -405,6 +410,8 @@ class TaskService:
         status: Optional[str] = None,
         workspace_review_policy: Optional[str] = None,
         review_decision: Optional[dict[str, Any]] = None,
+        workflow_profile: Optional[str] = None,
+        evaluator_evidence: Optional[dict[str, Any]] = None,
         commit: bool = True,
     ) -> dict[str, Any]:
         return self.changesets.persist_task_execution_change_set(
@@ -418,6 +425,8 @@ class TaskService:
             status=status,
             workspace_review_policy=workspace_review_policy,
             review_decision=review_decision,
+            workflow_profile=workflow_profile,
+            evaluator_evidence=evaluator_evidence,
             commit=commit,
         )
 
@@ -444,6 +453,7 @@ class TaskService:
         task_execution_id: int,
         snapshot_key: str,
         reason: str = "operator_rejected_change_set",
+        operator: Optional[str] = None,
     ) -> dict[str, Any]:
         project_root = self.get_project_root(project).resolve()
         return self.canonical_mutations.run_locked(
@@ -457,6 +467,7 @@ class TaskService:
                 task_execution_id=task_execution_id,
                 snapshot_key=snapshot_key,
                 reason=reason,
+                operator=operator,
                 project_root=project_root,
             ),
         )
@@ -469,6 +480,7 @@ class TaskService:
         task_execution_id: int,
         snapshot_key: str,
         reason: str,
+        operator: Optional[str],
         project_root: Path,
     ) -> dict[str, Any]:
         change_set = self.get_task_execution_change_set(
@@ -527,12 +539,19 @@ class TaskService:
             task_execution_id=task_execution_id,
             disposition="rejected",
             reason=reason,
-            metadata={
-                "archive_path": str(archive_dir),
-                "manifest_path": str(manifest_path),
-                "copied_files": copied_files,
-                "restore_result": restore_result,
-            },
+            metadata=build_operator_override_metadata(
+                action="reject",
+                reason=reason,
+                task_execution_id=task_execution_id,
+                change_set=change_set,
+                operator=operator,
+                extra={
+                    "archive_path": str(archive_dir),
+                    "manifest_path": str(manifest_path),
+                    "copied_files": copied_files,
+                    "restore_result": restore_result,
+                },
+            ),
             commit=False,
         )
 

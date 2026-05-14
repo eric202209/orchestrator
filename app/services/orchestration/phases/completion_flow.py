@@ -48,6 +48,7 @@ from app.services.orchestration.state.persistence import (
 from app.services.orchestration.policy import (
     SUMMARY_TIMEOUT_SECONDS,
 )
+from app.services.orchestration.review_policy import decide_change_set_review
 from app.services.orchestration.run_state import (
     mark_task_attempt_done,
     mark_task_attempt_failed,
@@ -1440,6 +1441,7 @@ def finalize_successful_task(
             preserve_project_root_rules=runs_in_canonical_baseline,
             status=TaskStatus.DONE.value,
             workspace_review_policy=workspace_review_policy,
+            workflow_profile=getattr(ctx, "workflow_profile", None),
             commit=False,
         )
 
@@ -1448,25 +1450,14 @@ def finalize_successful_task(
         review_decision = task_service.change_set_review_decision(
             task_change_set,
             workspace_review_policy=workspace_review_policy,
+            workflow_profile=getattr(ctx, "workflow_profile", None),
         )
     else:
-        held_for_review = workspace_review_policy == "hold_all" or (
-            workspace_review_policy == "hold_nontrivial"
-            and bool(nontrivial_change_flags)
+        review_decision = decide_change_set_review(
+            task_change_set,
+            workspace_review_policy=workspace_review_policy,
+            workflow_profile=getattr(ctx, "workflow_profile", None),
         )
-        review_decision = {
-            "workspace_review_policy": workspace_review_policy,
-            "held_for_review": held_for_review,
-            "reason": (
-                "hold_all_review_required"
-                if workspace_review_policy == "hold_all"
-                else (
-                    "nontrivial_change_set_review_required" if held_for_review else None
-                )
-            ),
-            "changed_count": int((task_change_set or {}).get("changed_count") or 0),
-            "warning_flags": nontrivial_change_flags,
-        }
     should_hold_for_review = bool(review_decision["held_for_review"])
     baseline_publish_result = None
     baseline_publish_validation = None

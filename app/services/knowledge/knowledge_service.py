@@ -342,7 +342,8 @@ class KnowledgeService:
         }
         if query_terms:
             overlap = sum(1 for term in query_terms if term in haystack)
-            score = max(score, min(0.9, 0.35 + (overlap * 0.05)))
+            if overlap > 0:
+                score = max(score, min(0.9, 0.35 + (overlap * 0.05)))
         return score
 
     def _embed(self, text: str) -> list[float]:

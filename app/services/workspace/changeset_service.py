@@ -11,6 +11,7 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session
 
 from app.models import LogEntry, Project, Task, TaskExecutionChangeSet
+from app.services.orchestration.review_policy import decide_change_set_review
 from app.services.workspace.workspace_paths import (
     AUTO_SNAPSHOT_ROOT,
     HYDRATION_EXCLUDED_NAMES,
@@ -135,27 +136,15 @@ class ChangesetService:
         change_set: Optional[dict[str, Any]],
         *,
         workspace_review_policy: str,
+        workflow_profile: Optional[str] = None,
+        evaluator_evidence: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
-        payload = change_set or {}
-        warning_flags = list(payload.get("warning_flags") or [])
-        changed_count = int(payload.get("changed_count") or 0)
-        held_for_review = workspace_review_policy == "hold_all" or (
-            workspace_review_policy == "hold_nontrivial" and bool(warning_flags)
+        return decide_change_set_review(
+            change_set,
+            workspace_review_policy=workspace_review_policy,
+            workflow_profile=workflow_profile,
+            evaluator_evidence=evaluator_evidence,
         )
-        reason = None
-        if held_for_review:
-            reason = (
-                "hold_all_review_required"
-                if workspace_review_policy == "hold_all"
-                else "nontrivial_change_set_review_required"
-            )
-        return {
-            "workspace_review_policy": workspace_review_policy,
-            "held_for_review": held_for_review,
-            "reason": reason,
-            "changed_count": changed_count,
-            "warning_flags": warning_flags,
-        }
 
     def build_task_execution_change_set(
         self,
@@ -277,6 +266,8 @@ class ChangesetService:
         session_id: Optional[int],
         workspace_review_policy: Optional[str] = None,
         review_decision: Optional[dict[str, Any]] = None,
+        workflow_profile: Optional[str] = None,
+        evaluator_evidence: Optional[dict[str, Any]] = None,
     ) -> TaskExecutionChangeSet:
         task_execution_id = int(change_set["task_execution_id"])
         record = (
@@ -318,6 +309,8 @@ class ChangesetService:
             review_decision = self.change_set_review_decision(
                 change_set,
                 workspace_review_policy=workspace_review_policy,
+                workflow_profile=workflow_profile,
+                evaluator_evidence=evaluator_evidence,
             )
         record.review_decision = review_decision
         record.review_reason = (
@@ -364,6 +357,8 @@ class ChangesetService:
         status: Optional[str] = None,
         workspace_review_policy: Optional[str] = None,
         review_decision: Optional[dict[str, Any]] = None,
+        workflow_profile: Optional[str] = None,
+        evaluator_evidence: Optional[dict[str, Any]] = None,
         commit: bool = True,
     ) -> dict[str, Any]:
         change_set = self.build_task_execution_change_set(
@@ -380,6 +375,8 @@ class ChangesetService:
             session_id=session_id,
             workspace_review_policy=workspace_review_policy,
             review_decision=review_decision,
+            workflow_profile=workflow_profile,
+            evaluator_evidence=evaluator_evidence,
         )
         existing = (
             self.db.query(LogEntry)

@@ -224,6 +224,12 @@ def test_task_execution_change_set_captures_added_modified_and_deleted_files(
         snapshot_key=snapshot_key,
         target_dir=project_root,
         status=TaskStatus.DONE.value,
+        workflow_profile="docs_static",
+        evaluator_evidence={
+            "verdict": "NEEDS_REVIEW",
+            "confidence": 0.42,
+            "ignored": "not persisted",
+        },
     )
 
     assert change_set["added_files"] == ["package.json"]
@@ -248,6 +254,12 @@ def test_task_execution_change_set_captures_added_modified_and_deleted_files(
     assert durable_change_set.deleted_files == ["old.txt"]
     assert durable_change_set.review_decision["held_for_review"] is True
     assert durable_change_set.review_reason == "nontrivial_change_set_review_required"
+    assert durable_change_set.review_decision["workflow_profile"] == "docs_static"
+    assert durable_change_set.review_decision["evaluator_influence"] == "shadow"
+    assert durable_change_set.review_decision["evaluator_evidence"] == {
+        "confidence": 0.42,
+        "verdict": "NEEDS_REVIEW",
+    }
     assert durable_change_set.disposition == "captured"
 
     read_back = task_service.get_task_execution_change_set(
@@ -464,6 +476,12 @@ def test_change_set_endpoints_show_and_reject_recorded_candidate(
     assert reject_body["rejected"] is True
     assert reject_body["change_set_disposition"]["disposition"] == "rejected"
     assert reject_body["change_set_disposition"]["disposition_reason"] == "needs review"
+    disposition_metadata = reject_body["change_set_disposition"]["disposition_metadata"]
+    assert disposition_metadata["action"] == "reject"
+    assert disposition_metadata["operator"] == "regression@example.com"
+    assert disposition_metadata["override_reason"] == "needs review"
+    assert disposition_metadata["task_execution_id"] == execution.id
+    assert disposition_metadata["previous_review_decision"]["outcome"]
     assert (project_root / "README.md").read_text(encoding="utf-8") == "accepted\n"
     assert not (project_root / "notes.md").exists()
     db_session.refresh(task)
@@ -682,6 +700,24 @@ def test_manual_promote_endpoint_archives_visible_task_workspace(
     assert (
         promotion_metadata["baseline_result"]["accepted_change_set"]["disposition"]
         == "promoted"
+    )
+    disposition_metadata = promotion_metadata["baseline_result"]["accepted_change_set"][
+        "disposition_metadata"
+    ]
+    assert disposition_metadata["action"] == "promote"
+    assert disposition_metadata["operator"] == "regression@example.com"
+    assert disposition_metadata["override_reason"] == "accepted"
+    assert disposition_metadata["task_execution_id"] == execution.id
+    assert disposition_metadata["previous_review_decision"]["outcome"]
+
+    change_set_response = authenticated_client.get(
+        f"/api/v1/tasks/{task.id}/change-set"
+    )
+    assert change_set_response.status_code == 200
+    change_set_body = change_set_response.json()
+    assert change_set_body["change_set"]["disposition"] == "promoted"
+    assert change_set_body["change_set"]["disposition_metadata"]["action"] == (
+        "promote"
     )
 
 
