@@ -20,6 +20,15 @@ from app.services.orchestration.types import OrchestrationRunContext
 from app.services.prompt_templates import OrchestrationStatus
 
 
+def _task_execution_id_from_context(ctx: Optional[Any]) -> Optional[int]:
+    if ctx is None:
+        return None
+    task_execution_id = getattr(ctx, "task_execution_id", None)
+    if isinstance(task_execution_id, bool) or not isinstance(task_execution_id, int):
+        return None
+    return task_execution_id
+
+
 def handle_task_failure(
     *,
     self_task: Any,
@@ -287,7 +296,7 @@ def handle_task_failure(
             task_id,
         )
 
-    task_execution_id = getattr(ctx, "task_execution_id", None) if ctx else None
+    task_execution_id = _task_execution_id_from_context(ctx)
     if task_execution_id:
         task_execution = (
             db.query(TaskExecution)
@@ -413,7 +422,7 @@ def _apply_knowledge_halt(
                 )
             )
             task_execution = None
-            task_execution_id = getattr(ctx, "task_execution_id", None)
+            task_execution_id = _task_execution_id_from_context(ctx)
             if task_execution_id:
                 task_execution = (
                     db.query(TaskExecution)
