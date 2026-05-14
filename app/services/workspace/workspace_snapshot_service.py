@@ -1,0 +1,232 @@
+"""Workspace snapshot capture and restore ownership service."""
+
+from __future__ import annotations
+
+import shutil
+from pathlib import Path
+from typing import Any
+
+from sqlalchemy.orm import Session
+
+from app.models import Project, Task
+from app.services.workspace.canonical_mutation_service import CanonicalMutationService
+from app.services.workspace.project_isolation_service import (
+    _slugify_workspace_name,
+    resolve_project_workspace_path,
+)
+
+HYDRATION_EXCLUDED_NAMES = {
+    ".openclaw",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    ".pytest_cache",
+    "site-packages",
+    "venv",
+}
+LEGACY_BASELINE_DIR_NAME = ".project-baseline"
+AUTO_SNAPSHOT_ROOT = ".openclaw/auto-snapshots"
+
+
+class WorkspaceSnapshotService:
+    """Own snapshot key paths, capture, and restore operations."""
+
+    def __init__(
+        self,
+        db: Session,
+        *,
+        canonical_mutations: CanonicalMutationService | None = None,
+    ):
+        self.db = db
+        self.canonical_mutations = canonical_mutations or CanonicalMutationService()
+
+    def get_project_root(self, project: Project) -> Path:
+        raw_workspace_path = str(project.workspace_path or "").strip()
+        if raw_workspace_path.startswith("/"):
+            explicit_path = Path(raw_workspace_path).expanduser().resolve()
+            project_slug = _slugify_workspace_name(project.name or "")
+            if explicit_path.name == project_slug:
+                return explicit_path
+            nested_candidate = explicit_path / project_slug
+            if nested_candidate.exists():
+                return nested_candidate.resolve()
+            return explicit_path
+        return resolve_project_workspace_path(
+            project.workspace_path,
+            project.name,
+            db=self.db,
+        )
+
+    def reserved_project_names(self, project: Project) -> set[str]:
+        task_subfolders = {
+            task.task_subfolder
+            for task in self.db.query(Task).filter(Task.project_id == project.id).all()
+            if getattr(task, "task_subfolder", None)
+        }
+        reserved = set(HYDRATION_EXCLUDED_NAMES)
+        reserved.add(LEGACY_BASELINE_DIR_NAME)
+        reserved.update(task_subfolders)
+        return reserved
+
+    def create_workspace_snapshot(
+        self,
+        project: Project,
+        source_dir: Path,
+        *,
+        snapshot_key: str,
+        preserve_project_root_rules: bool = False,
+    ) -> dict[str, Any]:
+        source_dir = source_dir.resolve()
+        project_root = self.get_project_root(project).resolve()
+        snapshot_dir = (project_root / AUTO_SNAPSHOT_ROOT / snapshot_key).resolve()
+
+        if snapshot_dir.exists():
+            shutil.rmtree(snapshot_dir)
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+        if not source_dir.exists():
+            return {
+                "snapshot_path": str(snapshot_dir),
+                "source_path": str(source_dir),
+                "files_copied": 0,
+                "source_exists": False,
+                "preserve_project_root_rules": preserve_project_root_rules,
+            }
+
+        files_copied = 0
+        reserved_names = (
+            self.reserved_project_names(project)
+            if preserve_project_root_rules
+            else set()
+        )
+        for source_path in source_dir.rglob("*"):
+            if source_path.is_dir():
+                continue
+            relative = source_path.relative_to(source_dir)
+            if preserve_project_root_rules and relative.parts:
+                first_part = relative.parts[0]
+                if first_part in reserved_names:
+                    continue
+            if any(part in HYDRATION_EXCLUDED_NAMES for part in relative.parts):
+                continue
+            destination = snapshot_dir / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, destination)
+            files_copied += 1
+
+        return {
+            "snapshot_path": str(snapshot_dir),
+            "source_path": str(source_dir),
+            "files_copied": files_copied,
+            "source_exists": True,
+            "preserve_project_root_rules": preserve_project_root_rules,
+        }
+
+    def restore_workspace_snapshot(
+        self,
+        project: Project,
+        target_dir: Path,
+        *,
+        snapshot_key: str,
+        preserve_project_root_rules: bool = False,
+    ) -> dict[str, Any]:
+        project_root = self.get_project_root(project).resolve()
+        return self.canonical_mutations.run_locked(
+            project,
+            project_root=project_root,
+            operation="restore_workspace_snapshot",
+            owner=f"snapshot:{snapshot_key}",
+            fn=lambda: self.restore_workspace_snapshot_unlocked(
+                project,
+                target_dir,
+                snapshot_key=snapshot_key,
+                preserve_project_root_rules=preserve_project_root_rules,
+                project_root=project_root,
+            ),
+        )
+
+    def restore_workspace_snapshot_unlocked(
+        self,
+        project: Project,
+        target_dir: Path,
+        *,
+        snapshot_key: str,
+        preserve_project_root_rules: bool = False,
+        project_root: Path | None = None,
+    ) -> dict[str, Any]:
+        target_dir = target_dir.resolve()
+        project_root = project_root or self.get_project_root(project).resolve()
+        snapshot_dir = (project_root / AUTO_SNAPSHOT_ROOT / snapshot_key).resolve()
+
+        if not snapshot_dir.exists():
+            return {
+                "restored": False,
+                "reason": "snapshot_missing",
+                "snapshot_path": str(snapshot_dir),
+                "target_path": str(target_dir),
+                "files_restored": 0,
+            }
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_files = [
+            path
+            for path in snapshot_dir.rglob("*")
+            if path.is_file()
+            and not any(
+                part in HYDRATION_EXCLUDED_NAMES
+                for part in path.relative_to(snapshot_dir).parts
+            )
+        ]
+        current_workspace_files = [
+            path
+            for path in target_dir.rglob("*")
+            if path.is_file()
+            and not any(
+                part in HYDRATION_EXCLUDED_NAMES
+                for part in path.relative_to(target_dir).parts
+            )
+        ]
+        if not snapshot_files and current_workspace_files:
+            return {
+                "restored": False,
+                "reason": "empty_snapshot_preserved_existing_workspace",
+                "snapshot_path": str(snapshot_dir),
+                "target_path": str(target_dir),
+                "files_restored": 0,
+                "current_workspace_files": len(current_workspace_files),
+            }
+        reserved_names = (
+            self.reserved_project_names(project)
+            if preserve_project_root_rules
+            else set()
+        )
+
+        for child in list(target_dir.iterdir()):
+            if preserve_project_root_rules and child.name in reserved_names:
+                continue
+            if child.name in HYDRATION_EXCLUDED_NAMES:
+                continue
+            if (
+                preserve_project_root_rules
+                and child.name == AUTO_SNAPSHOT_ROOT.split("/")[-1]
+            ):
+                continue
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink(missing_ok=True)
+
+        files_restored = 0
+        for snapshot_path in snapshot_files:
+            relative = snapshot_path.relative_to(snapshot_dir)
+            destination = target_dir / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(snapshot_path, destination)
+            files_restored += 1
+
+        return {
+            "restored": True,
+            "snapshot_path": str(snapshot_dir),
+            "target_path": str(target_dir),
+            "files_restored": files_restored,
+        }
