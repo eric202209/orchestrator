@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.services.orchestration.evidence_capsule import (
+from app.services.orchestration.diagnostics.evidence_capsule import (
     WorkspaceEvidenceCapsule,
     _commands_for_failure_class,
     _extract_module_name,
@@ -123,7 +123,7 @@ def test_capsule_not_empty_when_has_results():
 
 def test_collect_graceful_on_subprocess_failure(tmp_path):
     with patch(
-        "app.services.orchestration.evidence_capsule._run_cmd",
+        "app.services.orchestration.diagnostics.evidence_capsule._run_cmd",
         return_value="",
     ):
         capsule = collect_workspace_evidence("module_not_found", tmp_path)
@@ -134,7 +134,7 @@ def test_collect_graceful_on_subprocess_failure(tmp_path):
 
 def test_collect_records_commands_run(tmp_path):
     with patch(
-        "app.services.orchestration.evidence_capsule._run_cmd",
+        "app.services.orchestration.diagnostics.evidence_capsule._run_cmd",
         return_value="",
     ):
         capsule = collect_workspace_evidence("pytest_failure", tmp_path)
@@ -145,7 +145,7 @@ def test_collect_budget_enforcement(tmp_path):
     long_output = "x" * 400
 
     with patch(
-        "app.services.orchestration.evidence_capsule._run_cmd",
+        "app.services.orchestration.diagnostics.evidence_capsule._run_cmd",
         return_value=long_output,
     ):
         capsule = collect_workspace_evidence("module_not_found", tmp_path)
@@ -157,7 +157,7 @@ def test_collect_per_command_truncation(tmp_path):
     long_output = "y" * 400
 
     with patch(
-        "app.services.orchestration.evidence_capsule._run_cmd",
+        "app.services.orchestration.diagnostics.evidence_capsule._run_cmd",
         return_value=long_output,
     ):
         capsule = collect_workspace_evidence("pytest_failure", tmp_path)
@@ -169,7 +169,7 @@ def test_collect_per_command_truncation(tmp_path):
 
 def test_collect_empty_capsule_on_all_failures(tmp_path):
     with patch(
-        "app.services.orchestration.evidence_capsule.subprocess.run",
+        "app.services.orchestration.diagnostics.evidence_capsule.subprocess.run",
         side_effect=subprocess.TimeoutExpired(cmd="find", timeout=5),
     ):
         capsule = collect_workspace_evidence("syntax_error", tmp_path)
@@ -247,7 +247,7 @@ def test_render_skips_empty_command_results():
 
 
 def test_build_bounded_debug_repair_prompt_includes_evidence():
-    from app.services.orchestration.debug_feedback import (
+    from app.services.orchestration.diagnostics.debug_feedback import (
         DebugFeedbackEnvelope,
         build_bounded_debug_repair_prompt,
     )
@@ -271,7 +271,7 @@ def test_build_bounded_debug_repair_prompt_includes_evidence():
 
 
 def test_build_bounded_debug_repair_prompt_no_evidence_section_when_none():
-    from app.services.orchestration.debug_feedback import (
+    from app.services.orchestration.diagnostics.debug_feedback import (
         DebugFeedbackEnvelope,
         build_bounded_debug_repair_prompt,
     )
@@ -289,7 +289,7 @@ def test_build_bounded_debug_repair_prompt_no_evidence_section_when_none():
 
 
 def test_build_bounded_completion_repair_prompt_includes_evidence():
-    from app.services.orchestration.completion_repair_capsule import (
+    from app.services.orchestration.phases.completion_repair_capsule import (
         CompletionRepairCapsule,
         build_bounded_completion_repair_prompt,
     )

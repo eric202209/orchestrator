@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from app.services.orchestration.context_assembly import (
+from app.services.orchestration.context.assembly import (
     collect_workspace_inventory_paths,
 )
 from app.services.orchestration.policy import COMPLETION_VERIFICATION_TIMEOUT_SECONDS

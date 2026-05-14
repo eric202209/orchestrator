@@ -5,7 +5,7 @@ from typing import Any, Dict
 
 from app.services.orchestration import ValidatorService
 from app.services.orchestration.events.event_types import EventType
-from app.services.orchestration.persistence import (
+from app.services.orchestration.state.persistence import (
     append_orchestration_event as _append_orchestration_event,
     restore_step_result as _restore_step_result,
 )

@@ -4,7 +4,7 @@ import json
 
 from app.services.model_adaptation.renderers import render_qwen_compact_json_prompt
 from app.services.model_adaptation.schemas import PromptEnvelope
-from app.services.orchestration.context_assembly import render_adapted_runtime_prompt
+from app.services.orchestration.context.assembly import render_adapted_runtime_prompt
 from app.services.orchestration.validation.parsing import (
     _find_json_substring,
     extract_structured_text,

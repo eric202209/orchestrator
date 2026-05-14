@@ -17,7 +17,7 @@ from ..types import (
 )
 
 from .persistence import persist_validation_result as _persist_validation_result
-from app.services.orchestration.file_ops_contract import (
+from app.services.orchestration.operations.file_ops_contract import (
     normalize_file_op_shape,
     operation_has_file_op_path,
     validate_file_op_shape,

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.services.orchestration.events.event_types import EventType
-from app.services.orchestration.replay import (
+from app.services.orchestration.reporting.replay import (
     COMPATIBILITY_VERSION,
     REDUCER_VERSION,
 )

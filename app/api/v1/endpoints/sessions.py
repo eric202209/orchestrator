@@ -83,11 +83,11 @@ from app.services import (
 )
 from app.services.name_formatter import humanize_display_name
 from app.services.auth_rate_limit import enforce_api_rate_limit
-from app.services.orchestration.decision_timeline import (
+from app.services.orchestration.reporting.decision_timeline import (
     DEFAULT_TIMELINE_LIMIT,
     get_session_decision_timeline_payload,
 )
-from app.services.orchestration.replay import reconstruct_execution_state
+from app.services.orchestration.reporting.replay import reconstruct_execution_state
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )

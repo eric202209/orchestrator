@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models import Session as SessionModel, SessionTask, Task, TaskStatus
 from app.services.orchestration.events.event_types import EventType
-from app.services.orchestration.persistence import (
+from app.services.orchestration.state.persistence import (
     append_orchestration_event as _append_orchestration_event,
     find_latest_orchestration_event as _find_latest_orchestration_event,
     read_orchestration_events as _read_orchestration_events,

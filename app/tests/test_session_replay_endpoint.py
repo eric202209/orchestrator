@@ -16,7 +16,10 @@ from app.models import (
     TaskStatus,
 )
 from app.services.orchestration.events.event_types import EventType
-from app.services.orchestration.replay import COMPATIBILITY_VERSION, REDUCER_VERSION
+from app.services.orchestration.reporting.replay import (
+    COMPATIBILITY_VERSION,
+    REDUCER_VERSION,
+)
 
 
 def _make_replay_project(db, *, workspace_path: str):

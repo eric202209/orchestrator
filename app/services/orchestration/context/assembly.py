@@ -14,7 +14,9 @@ from typing_extensions import Protocol, runtime_checkable
 from app.services.model_adaptation import render_prompt_for_profile
 from app.services.model_adaptation.schemas import PromptEnvelope
 from app.models import LogEntry
-from app.services.orchestration.hitl_sentinel import render as render_hitl_sentinel
+from app.services.orchestration.context.hitl_sentinel import (
+    render as render_hitl_sentinel,
+)
 from app.services.orchestration.workflow_profiles import get_workflow_phases
 from app.services.prompt_templates import PromptTemplates, StepResult
 from app.services.workspace.path_display import render_workspace_path_for_prompt

@@ -8,7 +8,7 @@ from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.execution.runtime import (
     restore_workspace_after_abort as _restore_workspace_after_abort,
 )
-from app.services.orchestration.persistence import (
+from app.services.orchestration.state.persistence import (
     append_orchestration_event as _append_orchestration_event,
 )
 

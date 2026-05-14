@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import UTC, datetime
 from enum import Enum
-from app.services.orchestration.file_ops_contract import (
+from app.services.orchestration.operations.file_ops_contract import (
     render_supported_file_ops,
 )
 from app.services.workspace.system_settings import get_effective_workspace_root

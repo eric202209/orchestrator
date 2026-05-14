@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from app.services.orchestration.debug_feedback import DebugFeedbackEnvelope
+from app.services.orchestration.diagnostics.debug_feedback import DebugFeedbackEnvelope
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 
 DIFF_LINE_LIMIT = 120
@@ -168,7 +168,9 @@ def build_bounded_diff_repair_prompt(
     workspace = render_workspace_path_for_prompt(Path(capsule.workspace_path or "."))
     evidence_section = ""
     if evidence_capsule is not None:
-        from app.services.orchestration.evidence_capsule import render_evidence_section
+        from app.services.orchestration.diagnostics.evidence_capsule import (
+            render_evidence_section,
+        )
 
         rendered = render_evidence_section(evidence_capsule)
         if rendered:

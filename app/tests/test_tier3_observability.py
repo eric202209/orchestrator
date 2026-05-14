@@ -14,7 +14,7 @@ from app.services.orchestration.events.event_types import (
     is_known_event_type,
 )
 from app.services.orchestration.events.observability import build_trace_export
-from app.services.orchestration.persistence import (
+from app.services.orchestration.state.persistence import (
     _apply_counterfactual_overrides_to_checkpoint,
     append_orchestration_event,
     read_session_fingerprint_index,

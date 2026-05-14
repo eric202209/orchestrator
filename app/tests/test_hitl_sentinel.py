@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.services.orchestration.hitl_sentinel import parse, render
+from app.services.orchestration.context.hitl_sentinel import parse, render
 
 
 class TestRender:

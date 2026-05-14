@@ -23,12 +23,14 @@ from app.services.agents.agent_runtime import create_agent_runtime
 from app.services.agents.interfaces import AgentRuntimeError
 from app.services.model_adaptation import get_adaptation_profile
 from app.services.orchestration.run_state import mark_task_attempt_pending
-from app.services.orchestration.session_state import mark_session_paused
+from app.services.orchestration.state.session_state import mark_session_paused
 from app.services.orchestration.policy import get_policy_profile
 from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.log_utils import deduplicate_logs
-from app.services.orchestration.persistence import diff_orchestration_state_snapshots
-from app.services.orchestration.persistence import (
+from app.services.orchestration.state.persistence import (
+    diff_orchestration_state_snapshots,
+)
+from app.services.orchestration.state.persistence import (
     append_orchestration_event,
     read_orchestration_events,
     read_orchestration_state_snapshots,
@@ -40,7 +42,7 @@ from app.services.orchestration.events.observability import (
     build_mobile_interruption_cards,
     build_trace_export,
 )
-from app.services.orchestration.persistence import (
+from app.services.orchestration.state.persistence import (
     read_session_fingerprint_index,
     write_session_fingerprint_index,
     _apply_counterfactual_overrides_to_checkpoint,
@@ -1082,7 +1084,7 @@ async def replay_session_checkpoint_counterfactual_payload(
     from pathlib import Path as _Path
     from app.services.session.session_lifecycle_service import resume_session_lifecycle
     from app.services.orchestration.events.event_types import EventType
-    from app.services.orchestration.persistence import append_orchestration_event
+    from app.services.orchestration.state.persistence import append_orchestration_event
 
     overrides = overrides or {}
     session = get_inspectable_session_or_404(db, session_id)

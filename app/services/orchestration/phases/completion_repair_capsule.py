@@ -168,7 +168,9 @@ def build_bounded_completion_repair_prompt(
 
     evidence_section = ""
     if evidence_capsule is not None:
-        from app.services.orchestration.evidence_capsule import render_evidence_section
+        from app.services.orchestration.diagnostics.evidence_capsule import (
+            render_evidence_section,
+        )
 
         rendered = render_evidence_section(evidence_capsule)
         if rendered:

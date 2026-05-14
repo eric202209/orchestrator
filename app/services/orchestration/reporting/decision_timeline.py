@@ -31,8 +31,8 @@ from app.services.workspace.project_isolation_service import (
 )
 from app.services.task_service import TASK_CHANGE_SET_LOG_MESSAGE
 
-from .events.event_types import EventType
-from .persistence import read_orchestration_events
+from ..events.event_types import EventType
+from ..state.persistence import read_orchestration_events
 
 KNOWN_PHASES = ("planning", "validation", "execution", "failure", "completion")
 DEFAULT_TIMELINE_LIMIT = 300

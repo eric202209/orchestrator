@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.services.orchestration.context_assembly import (
+from app.services.orchestration.context.assembly import (
     DebugPromptInputs,
     OrchestrationContext,
 )

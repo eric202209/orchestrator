@@ -24,7 +24,7 @@ from ..policy import (
     ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS,
 )
 from app.config import settings
-from app.services.orchestration.file_ops_contract import (
+from app.services.orchestration.operations.file_ops_contract import (
     operation_has_file_op_path,
     render_supported_file_ops,
 )

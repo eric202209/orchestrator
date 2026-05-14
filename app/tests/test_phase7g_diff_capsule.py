@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from app.services.orchestration.debug_feedback import build_debug_feedback_envelope
-from app.services.orchestration.diff_capsule import (
+from app.services.orchestration.diagnostics.debug_feedback import (
+    build_debug_feedback_envelope,
+)
+from app.services.orchestration.diagnostics.diff_capsule import (
     DIFF_LINE_LIMIT,
     build_bounded_diff_repair_prompt,
     build_diff_capsule,

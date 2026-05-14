@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.models import LogEntry, Project, Session as SessionModel, Task
 from app.config import settings
 from app.services.orchestration.events.event_types import EventType
-from app.services.orchestration.persistence import (
+from app.services.orchestration.state.persistence import (
     append_orchestration_event,
     find_latest_orchestration_event,
     maybe_emit_divergence_detected,

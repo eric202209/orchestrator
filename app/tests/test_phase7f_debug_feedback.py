@@ -15,19 +15,19 @@ from app.models import (
     TaskStatus,
 )
 from app.services.error_handler import error_handler
-from app.services.orchestration.debug_feedback import (
+from app.services.orchestration.diagnostics.debug_feedback import (
     build_bounded_debug_repair_prompt,
     build_debug_feedback_envelope,
     classify_debug_failure,
     normalize_bounded_debug_repair_payload,
     persist_debug_feedback_envelope,
 )
-from app.services.orchestration.decision_timeline import (
+from app.services.orchestration.reporting.decision_timeline import (
     get_session_decision_timeline_payload,
 )
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.phases.execution_loop import execute_step_loop
-from app.services.orchestration.persistence import read_orchestration_events
+from app.services.orchestration.state.persistence import read_orchestration_events
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.prompt_templates import OrchestrationState
 

@@ -8,7 +8,7 @@ from app.schemas.knowledge import (
     KnowledgeType,
     RecommendedAction,
 )
-from app.services.orchestration.context_assembly import _render_knowledge_block
+from app.services.orchestration.context.assembly import _render_knowledge_block
 
 
 def _make_ctx(items: list[KnowledgeItemRef]) -> KnowledgeContext:

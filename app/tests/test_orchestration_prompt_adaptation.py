@@ -4,7 +4,7 @@ import json
 from types import SimpleNamespace
 
 from app.models import SystemSetting
-from app.services.orchestration.context_assembly import (
+from app.services.orchestration.context.assembly import (
     DebugPromptInputs,
     assemble_debugging_prompt,
     assemble_execution_prompt,
@@ -64,7 +64,7 @@ def test_assemble_execution_prompt_uses_active_adaptation_profile(
     }
 
     monkeypatch.setattr(
-        "app.services.orchestration.context_assembly.get_effective_adaptation_profile",
+        "app.services.orchestration.context.assembly.get_effective_adaptation_profile",
         lambda db=None: "openai_responses_default",
     )
 
@@ -114,7 +114,7 @@ def test_assemble_task_summary_prompt_uses_active_adaptation_profile(
     ctx = _build_ctx(tmp_path)
 
     monkeypatch.setattr(
-        "app.services.orchestration.context_assembly.get_effective_adaptation_profile",
+        "app.services.orchestration.context.assembly.get_effective_adaptation_profile",
         lambda db=None: "openai_responses_default",
     )
 

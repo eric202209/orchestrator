@@ -39,7 +39,7 @@ from app.services.orchestration.run_state import (
     mark_task_attempt_pending,
     reset_active_attempts_for_session_stop,
 )
-from app.services.orchestration.session_state import (
+from app.services.orchestration.state.session_state import (
     clear_session_alert,
     mark_session_paused,
     mark_session_running,

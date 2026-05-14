@@ -4,7 +4,7 @@ import copy
 
 import pytest
 
-from app.services.orchestration.policy_simulation import (
+from app.services.orchestration.reporting.policy_simulation import (
     MAX_POLICY_EVIDENCE_EVENTS,
     MAX_POLICY_FINDINGS,
     MAX_POLICY_REASON_CODES,
@@ -15,7 +15,7 @@ from app.services.orchestration.policy_simulation import (
     compare_policy_simulations,
     simulate_policy_from_replay,
 )
-from app.services.orchestration.replay import (
+from app.services.orchestration.reporting.replay import (
     COMPATIBILITY_VERSION,
     REDUCER_VERSION,
     reconstruct_execution_state,

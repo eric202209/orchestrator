@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from app.models import Project, Session as SessionModel, Task, TaskStatus
-from app.services.orchestration.persistence import (
+from app.services.orchestration.state.persistence import (
     _write_json_payload_atomic,
     append_orchestration_event,
     diff_orchestration_state_snapshots,
@@ -62,7 +62,9 @@ def test_atomic_json_write_normalizes_ownership_to_parent(monkeypatch, tmp_path)
     def fake_chown(path, uid, gid):
         chown_calls.append((str(path), uid, gid))
 
-    monkeypatch.setattr("app.services.orchestration.persistence.os.chown", fake_chown)
+    monkeypatch.setattr(
+        "app.services.orchestration.state.persistence.os.chown", fake_chown
+    )
 
     _write_json_payload_atomic(target, {"ok": True})
 
@@ -82,7 +84,9 @@ def test_event_journal_writes_normalize_log_and_lock_ownership(monkeypatch, tmp_
     def fake_chown(path, uid, gid):
         chown_calls.append((str(path), uid, gid))
 
-    monkeypatch.setattr("app.services.orchestration.persistence.os.chown", fake_chown)
+    monkeypatch.setattr(
+        "app.services.orchestration.state.persistence.os.chown", fake_chown
+    )
 
     append_orchestration_event(
         project_dir=project_dir,

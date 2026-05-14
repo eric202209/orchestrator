@@ -5,13 +5,15 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
-from app.services.orchestration.policy_simulation import (
+from app.services.orchestration.reporting.policy_simulation import (
     MAX_POLICY_EVIDENCE_EVENTS,
     MAX_POLICY_EVIDENCE_GAPS,
     MAX_POLICY_FINDINGS,
     MAX_POLICY_REASON_CODES,
 )
-from app.services.orchestration.replay import AUTHORITATIVE_RECONSTRUCTED_FIELDS
+from app.services.orchestration.reporting.replay import (
+    AUTHORITATIVE_RECONSTRUCTED_FIELDS,
+)
 
 GOLDEN_ROOT = Path(__file__).parent / "golden"
 

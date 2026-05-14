@@ -12,7 +12,7 @@ from app.models import (
     TaskStatus,
 )
 from app.services.orchestration.events.event_types import EventType
-from app.services.orchestration.persistence import read_orchestration_events
+from app.services.orchestration.state.persistence import read_orchestration_events
 from app.services.orchestration.validation.workspace_guard import (
     verify_workspace_contract,
 )
@@ -134,7 +134,7 @@ def test_queue_task_for_session_emits_queued_event_and_keeps_task_pending(
 def test_worker_uses_provided_queued_event_id_for_exact_lookup(tmp_path):
     project_dir = tmp_path / "dispatch"
     project_dir.mkdir()
-    from app.services.orchestration.persistence import append_orchestration_event
+    from app.services.orchestration.state.persistence import append_orchestration_event
 
     old_event = append_orchestration_event(
         project_dir=project_dir,
@@ -166,7 +166,7 @@ def test_worker_uses_provided_queued_event_id_for_exact_lookup(tmp_path):
 def test_worker_falls_back_to_latest_queued_event_without_event_id(tmp_path):
     project_dir = tmp_path / "dispatch"
     project_dir.mkdir()
-    from app.services.orchestration.persistence import append_orchestration_event
+    from app.services.orchestration.state.persistence import append_orchestration_event
 
     append_orchestration_event(
         project_dir=project_dir,
@@ -256,7 +256,7 @@ def test_worker_rejects_stale_dispatch_that_already_progressed(tmp_path):
 
     queue_event = {"event_id": "queued-1", "timestamp": "2026-04-29T14:59:02+00:00"}
     verify_project_dir = project_dir
-    from app.services.orchestration.persistence import append_orchestration_event
+    from app.services.orchestration.state.persistence import append_orchestration_event
 
     append_orchestration_event(
         project_dir=verify_project_dir,
@@ -280,7 +280,7 @@ def test_worker_rejects_stale_dispatch_that_already_progressed(tmp_path):
 def test_worker_does_not_reject_fresh_specific_queued_event(tmp_path):
     project_dir = tmp_path / "skillsync"
     project_dir.mkdir()
-    from app.services.orchestration.persistence import append_orchestration_event
+    from app.services.orchestration.state.persistence import append_orchestration_event
 
     fresh_event = append_orchestration_event(
         project_dir=project_dir,

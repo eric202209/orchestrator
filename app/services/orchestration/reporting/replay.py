@@ -14,8 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from .events.event_types import EventType, is_known_event_type
-from .persistence import (
+from ..events.event_types import EventType, is_known_event_type
+from ..state.persistence import (
     _compute_workspace_hash,
     _orchestration_event_log_path,
     _orchestration_state_snapshot_log_path,

@@ -22,15 +22,15 @@ from app.services.log_utils import sort_logs
 from app.services.name_formatter import humanize_display_name
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.execution.runtime import workspace_snapshot_key
-from app.services.orchestration.persistence import append_orchestration_event
-from app.services.orchestration.context_assembly import render_adapted_runtime_prompt
+from app.services.orchestration.state.persistence import append_orchestration_event
+from app.services.orchestration.context.assembly import render_adapted_runtime_prompt
 from app.services.orchestration.run_state import (
     mark_task_attempt_done,
     mark_task_attempt_failed,
     mark_task_attempt_pending,
     mark_task_attempt_running,
 )
-from app.services.orchestration.session_state import (
+from app.services.orchestration.state.session_state import (
     mark_session_running,
     mark_session_stopped,
 )

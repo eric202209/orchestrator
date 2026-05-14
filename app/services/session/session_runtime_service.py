@@ -13,12 +13,12 @@ from sqlalchemy.orm import Session
 
 from app.models import LogEntry, Session as SessionModel, SessionTask, Task, TaskStatus
 from app.services.orchestration.events.event_types import EventType
-from app.services.orchestration.persistence import append_orchestration_event
+from app.services.orchestration.state.persistence import append_orchestration_event
 from app.services.orchestration.task_rules import (
     should_execute_in_canonical_project_root,
 )
 from app.services.orchestration.run_state import mark_task_attempt_pending
-from app.services.orchestration.session_state import (
+from app.services.orchestration.state.session_state import (
     clear_session_alert,
     mark_session_paused,
     mark_session_running,

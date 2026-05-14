@@ -11,13 +11,13 @@ from celery.exceptions import SoftTimeLimitExceeded
 
 from app.models import TaskExecution, TaskStatus
 from app.schemas.knowledge import KnowledgeContext
-from app.services.orchestration.context_assembly import (
+from app.services.orchestration.context.assembly import (
     assemble_planning_prompt,
     compress_orchestration_context,
 )
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.events.telemetry import emit_phase_event
-from app.services.orchestration.persistence import (
+from app.services.orchestration.state.persistence import (
     append_orchestration_event,
     maybe_emit_divergence_detected,
     record_validation_verdict,
@@ -30,7 +30,7 @@ from app.services.orchestration.planning.planner import (
 )
 from app.services.orchestration.policy import clamp_planning_timeout
 from app.services.orchestration.run_state import mark_task_attempt_failed
-from app.services.orchestration.session_state import mark_session_paused
+from app.services.orchestration.state.session_state import mark_session_paused
 from app.services.orchestration.task_rules import get_workflow_profile
 from app.services.orchestration.workflow_profiles import get_workflow_phases
 from app.services.orchestration.types import OrchestrationRunContext

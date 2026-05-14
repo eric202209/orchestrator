@@ -10,9 +10,9 @@ import shlex
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from app.services.orchestration.persistence import record_live_log
+from app.services.orchestration.state.persistence import record_live_log
 
-from app.services.orchestration.file_ops_contract import (
+from app.services.orchestration.operations.file_ops_contract import (
     CONTENT_FILE_OPS,
     SUPPORTED_FILE_OPS,
     expected_file_op_keys,

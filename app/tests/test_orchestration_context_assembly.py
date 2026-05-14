@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from app.services.orchestration.context_assembly import (
+from app.services.orchestration.context.assembly import (
     DebugPromptInputs,
     assemble_completion_repair_inputs,
     assemble_debugging_prompt,

@@ -9,7 +9,7 @@ from app.services.orchestration.execution.step_support import (
     normalize_runnable_shell_command_fix,
 )
 from app.services.orchestration.execution.execution_flow import stub_expected_files
-from app.services.orchestration.debug_feedback import (
+from app.services.orchestration.diagnostics.debug_feedback import (
     DebugFeedbackEnvelope,
     build_bounded_debug_repair_prompt,
     normalize_bounded_debug_repair_payload,

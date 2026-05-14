@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.services.orchestration.file_ops_contract import (
+from app.services.orchestration.operations.file_ops_contract import (
     normalize_file_op_shape,
     validate_file_op_shape,
 )

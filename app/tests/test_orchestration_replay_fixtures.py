@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.services.orchestration.replay import (
+from app.services.orchestration.reporting.replay import (
     COMPATIBILITY_VERSION,
     REDUCER_VERSION,
     reconstruct_execution_state,

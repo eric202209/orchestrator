@@ -24,7 +24,7 @@ from app.services.orchestration.run_state import (
     mark_task_attempt_failed,
     mark_task_attempt_running,
 )
-from app.services.orchestration.session_state import (
+from app.services.orchestration.state.session_state import (
     mark_session_running,
     mark_session_stopped,
 )

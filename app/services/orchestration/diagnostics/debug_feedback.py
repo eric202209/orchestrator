@@ -20,7 +20,7 @@ from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.execution.step_support import (
     is_runnable_shell_command_fix,
 )
-from app.services.orchestration.persistence import append_orchestration_event
+from app.services.orchestration.state.persistence import append_orchestration_event
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 
 ELIGIBLE_DEBUG_FAILURE_CLASSES = frozenset(
@@ -295,7 +295,9 @@ def build_bounded_debug_repair_prompt(
     }
     evidence_section = ""
     if evidence_capsule is not None:
-        from app.services.orchestration.evidence_capsule import render_evidence_section
+        from app.services.orchestration.diagnostics.evidence_capsule import (
+            render_evidence_section,
+        )
 
         rendered = render_evidence_section(evidence_capsule)
         if rendered:

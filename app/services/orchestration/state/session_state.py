@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from app.services.orchestration.persistence import set_session_alert
+from app.services.orchestration.state.persistence import set_session_alert
 
 
 def mark_session_running(

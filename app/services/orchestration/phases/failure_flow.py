@@ -9,7 +9,7 @@ from app.models import InterventionRequest, LogEntry, TaskExecution, TaskStatus
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.events.telemetry import record_phase_event
 from app.services.orchestration.execution.runtime import write_project_state_snapshot
-from app.services.orchestration.persistence import (
+from app.services.orchestration.state.persistence import (
     append_orchestration_event,
     record_live_log,
     save_orchestration_checkpoint,
@@ -19,7 +19,7 @@ from app.services.orchestration.run_state import (
     mark_task_attempt_pending,
     task_execution_id_from_context,
 )
-from app.services.orchestration.session_state import (
+from app.services.orchestration.state.session_state import (
     mark_session_paused,
     mark_session_running,
 )

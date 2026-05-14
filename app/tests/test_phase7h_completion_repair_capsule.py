@@ -11,13 +11,13 @@ from app.models import (
     TaskExecution,
     TaskStatus,
 )
-from app.services.orchestration.completion_repair_capsule import (
+from app.services.orchestration.phases.completion_repair_capsule import (
     MAX_RELEVANT_FILES,
     build_bounded_completion_repair_prompt,
     build_completion_repair_capsule,
 )
 from app.services.orchestration.events.event_types import EventType
-from app.services.orchestration.persistence import read_orchestration_events
+from app.services.orchestration.state.persistence import read_orchestration_events
 from app.services.orchestration.phases.completion_flow import (
     _attempt_completion_repair,
     _extract_completion_repair_json_text,

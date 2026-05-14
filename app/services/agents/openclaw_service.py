@@ -46,7 +46,7 @@ from app.services.orchestration.task_rules import (
     should_execute_in_canonical_project_root,
 )
 from app.services.orchestration.events.event_types import EventType
-from app.services.orchestration.persistence import append_orchestration_event
+from app.services.orchestration.state.persistence import append_orchestration_event
 from app.services.observability import (
     build_text_trace_payload,
     start_langfuse_observation,

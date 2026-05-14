@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict
 
-from app.services.orchestration.context_assembly import compress_orchestration_context
+from app.services.orchestration.context.assembly import compress_orchestration_context
 from app.services.orchestration.planning.planner import (
     PlannerService,
     PlanningRepairNoOutputTimeout,

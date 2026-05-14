@@ -11,7 +11,7 @@ from app.services.orchestration.events.event_types import (
     EventType,
     is_known_event_type,
 )
-from app.services.orchestration.persistence import (
+from app.services.orchestration.state.persistence import (
     append_orchestration_event,
     read_orchestration_events,
 )

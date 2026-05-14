@@ -5,7 +5,7 @@ Internal cross-module calls inside the package should usually import directly
 from the concrete module they need.
 """
 
-from .context_assembly import (
+from .context.assembly import (
     DebugPromptInputs,
     OrchestrationContext,
     assemble_completion_repair_inputs,
@@ -47,7 +47,7 @@ from .phases import (
     finalize_successful_task,
     handle_task_failure,
 )
-from .persistence import (
+from .state.persistence import (
     CheckpointContext,
     CheckpointData,
     append_orchestration_event,
@@ -67,13 +67,13 @@ from .persistence import (
 )
 from .planning import PlannerService
 from .reporting import build_task_report_payload, render_task_report
-from .replay import (
+from .reporting.replay import (
     COMPATIBILITY_VERSION,
     REDUCER_VERSION,
     reconstruct_execution_state,
     reduce_replay_events,
 )
-from .policy_simulation import (
+from .reporting.policy_simulation import (
     SIMULATION_VERSION,
     compare_policy_simulations,
     simulate_policy_from_replay,

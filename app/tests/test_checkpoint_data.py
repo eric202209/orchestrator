@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from app.services.orchestration.persistence import CheckpointContext, CheckpointData
+from app.services.orchestration.state.persistence import (
+    CheckpointContext,
+    CheckpointData,
+)
 
 
 class TestCheckpointContext:

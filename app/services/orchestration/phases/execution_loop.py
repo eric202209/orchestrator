@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from app.models import TaskExecution, TaskStatus
-from app.services.orchestration.context_assembly import (
+from app.services.orchestration.context.assembly import (
     DebugPromptInputs,
     assemble_debugging_prompt,
     assemble_execution_prompt,
@@ -18,18 +18,20 @@ from app.services.orchestration.context_assembly import (
 )
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.events.telemetry import emit_phase_event
-from app.services.orchestration.debug_feedback import (
+from app.services.orchestration.diagnostics.debug_feedback import (
     build_bounded_debug_repair_prompt,
     build_debug_feedback_envelope,
     normalize_bounded_debug_repair_payload,
     persist_debug_feedback_envelope,
 )
-from app.services.orchestration.diff_capsule import (
+from app.services.orchestration.diagnostics.diff_capsule import (
     build_bounded_diff_repair_prompt,
     build_diff_capsule,
     snapshot_file_contents,
 )
-from app.services.orchestration.evidence_capsule import collect_workspace_evidence
+from app.services.orchestration.diagnostics.evidence_capsule import (
+    collect_workspace_evidence,
+)
 from app.services.orchestration.execution import ExecutorService
 from app.services.orchestration.execution.execution_flow import (
     assess_step_execution,
@@ -51,7 +53,7 @@ from app.services.orchestration.run_state import (
     mark_task_attempt_cancelled,
     mark_task_attempt_failed,
 )
-from app.services.orchestration.persistence import (
+from app.services.orchestration.state.persistence import (
     append_orchestration_event,
     attach_failure_envelope,
     emit_intent_outcome_mismatch,
@@ -61,7 +63,7 @@ from app.services.orchestration.persistence import (
     save_orchestration_checkpoint,
     write_orchestration_state_snapshot,
 )
-from app.services.orchestration.session_state import mark_session_paused
+from app.services.orchestration.state.session_state import mark_session_paused
 from app.services.orchestration.types import (
     FailureEnvelope,
     OrchestrationRunContext,
@@ -77,7 +79,9 @@ from app.services.orchestration.validation.workspace_guard import (
     detect_scope_violations,
     summarize_step_changes,
 )
-from app.services.orchestration.hitl_sentinel import parse as _parse_hitl_sentinel
+from app.services.orchestration.context.hitl_sentinel import (
+    parse as _parse_hitl_sentinel,
+)
 from app.services.prompt_templates import OrchestrationStatus, StepResult
 
 

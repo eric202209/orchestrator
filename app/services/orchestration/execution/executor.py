@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from app.models import LogEntry
-from app.services.orchestration.file_ops_contract import (
+from app.services.orchestration.operations.file_ops_contract import (
     CONTENT_FILE_OPS,
     SUPPORTED_FILE_OPS,
 )

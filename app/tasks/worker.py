@@ -49,7 +49,7 @@ from app.services.orchestration import (
     should_force_review_execution_profile as _should_force_review_execution_profile,
 )
 from app.services.orchestration.events.event_types import EventType
-from app.services.orchestration.persistence import (
+from app.services.orchestration.state.persistence import (
     append_orchestration_event as _append_orchestration_event,
     record_live_log as _record_live_log,
     record_validation_verdict as _record_validation_verdict,
@@ -91,7 +91,7 @@ from app.services.orchestration.run_state import (
     mark_task_attempt_failed,
     mark_task_attempt_running,
 )
-from app.services.orchestration.session_state import (
+from app.services.orchestration.state.session_state import (
     mark_session_paused,
     mark_session_running,
 )

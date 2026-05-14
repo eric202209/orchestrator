@@ -13,9 +13,9 @@ from typing import Any, Callable, Dict, Optional
 from sqlalchemy.orm import Session
 
 from app.services.error_handler import error_handler
-from app.services.orchestration.context_assembly import render_adapted_runtime_prompt
+from app.services.orchestration.context.assembly import render_adapted_runtime_prompt
 from app.services.orchestration.types import FailureEnvelope
-from app.services.orchestration.file_ops_contract import (
+from app.services.orchestration.operations.file_ops_contract import (
     operation_has_file_op_path,
     render_supported_file_ops,
 )

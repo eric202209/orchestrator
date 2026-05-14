@@ -9,7 +9,7 @@ from app.services.orchestration.execution.step_support import (
 )
 from app.services.orchestration.planning.planner import PlannerService
 from app.services.orchestration.validation.validator import ValidatorService
-from app.services.orchestration.file_ops_contract import (
+from app.services.orchestration.operations.file_ops_contract import (
     normalize_replace_in_file_aliases,
     operation_has_file_op_path,
     validate_file_op_shape,

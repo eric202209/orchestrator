@@ -11,8 +11,8 @@ import hashlib
 import json
 from typing import Any, Dict, Iterable, List
 
-from .events.event_types import EventType
-from .policy import MAX_STEP_ATTEMPTS, get_policy_profile
+from ..events.event_types import EventType
+from ..policy import MAX_STEP_ATTEMPTS, get_policy_profile
 from .replay import COMPATIBILITY_VERSION, REDUCER_VERSION, TRANSITION_EVENT_TYPES
 
 SIMULATION_VERSION = "phase5a-sim-v1"

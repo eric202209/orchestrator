@@ -12,16 +12,18 @@ from app.config import settings
 from app.services.error_handler import error_handler
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.events.telemetry import emit_phase_event
-from app.services.orchestration.debug_feedback import (
+from app.services.orchestration.diagnostics.debug_feedback import (
     build_debug_feedback_envelope,
     persist_debug_feedback_envelope,
 )
-from app.services.orchestration.evidence_capsule import collect_workspace_evidence
-from app.services.orchestration.completion_repair_capsule import (
+from app.services.orchestration.diagnostics.evidence_capsule import (
+    collect_workspace_evidence,
+)
+from app.services.orchestration.phases.completion_repair_capsule import (
     build_bounded_completion_repair_prompt,
     build_completion_repair_capsule,
 )
-from app.services.orchestration.context_assembly import (
+from app.services.orchestration.context.assembly import (
     assemble_execution_prompt,
     assemble_task_summary_prompt,
     render_adapted_runtime_prompt,
@@ -37,7 +39,7 @@ from app.services.orchestration.execution.runtime import (
 from app.services.orchestration.execution.step_support import (
     coerce_execution_step_result,
 )
-from app.services.orchestration.persistence import (
+from app.services.orchestration.state.persistence import (
     append_orchestration_event,
     attach_failure_envelope,
     record_validation_verdict,
@@ -51,7 +53,7 @@ from app.services.orchestration.run_state import (
     mark_task_attempt_failed,
     mark_task_attempt_pending,
 )
-from app.services.orchestration.session_state import (
+from app.services.orchestration.state.session_state import (
     clear_session_alert,
     mark_session_paused,
     mark_session_running,

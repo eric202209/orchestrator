@@ -31,7 +31,7 @@ from app.models import (
     TaskStatus,
 )
 from app.services.orchestration.run_state import mark_task_attempt_pending
-from app.services.orchestration.session_state import (
+from app.services.orchestration.state.session_state import (
     mark_session_awaiting_input,
     mark_session_paused,
     mark_session_running,
@@ -70,7 +70,7 @@ def _emit_intervention_event(
     details: Dict[str, Any],
     session_instance_id: Optional[str] = None,
 ) -> None:
-    from app.services.orchestration.persistence import append_orchestration_event
+    from app.services.orchestration.state.persistence import append_orchestration_event
     from app.services.workspace.project_isolation_service import (
         resolve_project_workspace_path,
     )
@@ -163,7 +163,7 @@ def create_intervention_request(
 
     checkpoint_name: Optional[str] = None
     try:
-        from app.services.orchestration.persistence import CheckpointData
+        from app.services.orchestration.state.persistence import CheckpointData
 
         checkpoint_service = CheckpointService(db)
         raw = checkpoint_service.load_checkpoint(session_id)
@@ -260,7 +260,7 @@ def _append_guidance_to_checkpoint(
     checkpoint_prefix: str,
 ) -> Optional[str]:
     """Append guidance to the latest checkpoint without changing session status."""
-    from app.services.orchestration.persistence import CheckpointData
+    from app.services.orchestration.state.persistence import CheckpointData
     from app.services.workspace.checkpoint_service import CheckpointService
 
     try:

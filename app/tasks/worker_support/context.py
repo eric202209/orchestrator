@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 from sqlalchemy.orm import Session
 
 from app.models import Task
-from app.services.orchestration.context_assembly import (
+from app.services.orchestration.context.assembly import (
     collect_workspace_inventory_paths,
     sanitize_progress_notes_for_workspace,
 )

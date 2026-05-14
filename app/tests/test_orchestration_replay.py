@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 
 from app.services.orchestration.events.event_types import EventType
-from app.services.orchestration.persistence import append_orchestration_event
-from app.services.orchestration.replay import (
+from app.services.orchestration.state.persistence import append_orchestration_event
+from app.services.orchestration.reporting.replay import (
     REDUCER_VERSION,
     reconstruct_execution_state,
 )
@@ -186,7 +186,7 @@ def test_replay_reducer_does_not_observe_workspace_unless_requested(
         raise AssertionError("workspace comparison should not run")
 
     monkeypatch.setattr(
-        "app.services.orchestration.replay._compute_workspace_hash",
+        "app.services.orchestration.reporting.replay._compute_workspace_hash",
         fail_workspace_hash,
     )
 
