@@ -4,7 +4,7 @@ from app.models import Project, Session as SessionModel, SessionTask, Task, Task
 
 
 def test_project_tasks_include_latest_session_id(authenticated_client, db_session):
-    project = Project(name="Tasks API", workspace_path="/tmp/tasks_api")
+    project = Project(name="Tasks API", workspace_path="/tmp/tasks_api", user_id=1)
     db_session.add(project)
     db_session.commit()
     db_session.refresh(project)

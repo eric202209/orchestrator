@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "AI Dev Agent Orchestrator"
     VERSION: str = "0.1.0"
     API_V1_STR: str = "/api/v1"
+    ENVIRONMENT: str = "development"
 
     # Server
     HOST: str = "0.0.0.0"
@@ -106,7 +107,7 @@ class Settings(BaseSettings):
         return database_url
 
     # Auth
-    SECRET_KEY: str = "your-secret-key-change-in-production"
+    SECRET_KEY: str
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15  # 15-minute access token (short-lived)
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7  # 7-day refresh token
     SESSION_COOKIE_NAME: str = "orchestrator_session"
@@ -116,6 +117,7 @@ class Settings(BaseSettings):
     AUTH_RATE_LIMIT_MAX_ATTEMPTS: int = 5
     API_RATE_LIMIT_WINDOW_SECONDS: int = 60
     API_RATE_LIMIT_MAX_ATTEMPTS: int = 20
+    ALLOW_TEST_ENDPOINTS: bool = False
 
     # OpenClaw integration
     # Default to the local OpenClaw gateway, not the LLM-only port.
@@ -204,13 +206,9 @@ def validate_runtime_secrets() -> None:
 
     logger = logging.getLogger(__name__)
 
-    insecure_secret = not settings.SECRET_KEY or (
-        settings.SECRET_KEY == "your-secret-key-change-in-production"
-    )
-    if insecure_secret:
+    if not settings.SECRET_KEY:
         raise RuntimeError(
-            "SECRET_KEY is unset or still using the default value; "
-            "configure a unique SECRET_KEY before starting the API"
+            "SECRET_KEY is unset; configure a unique SECRET_KEY before starting the API"
         )
 
     # Validate the configured backend is registered and its required env vars are set.

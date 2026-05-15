@@ -25,4 +25,4 @@ celery_app.conf.update(
 )
 
 # Ensure tasks are registered when workers start with `-A app.celery_app worker`.
-celery_app.autodiscover_tasks(["app.tasks"], force=True)
+celery_app.autodiscover_tasks(["app.tasks"])

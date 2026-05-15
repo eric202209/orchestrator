@@ -288,6 +288,8 @@ class UserCreate(BaseModel):
     def validate_password_length(cls, value: str) -> str:
         if len(value) < 8:
             raise ValueError("Password must be at least 8 characters")
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("Password must be 72 bytes or fewer")
         return value
 
 
@@ -352,6 +354,8 @@ class PasswordChangeRequest(BaseModel):
     def validate_new_password_length(cls, value: str) -> str:
         if len(value) < 8:
             raise ValueError("New password must be at least 8 characters")
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("New password must be 72 bytes or fewer")
         return value
 
 

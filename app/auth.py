@@ -1,6 +1,7 @@
 """Authentication utilities - JWT and Ed25519"""
 
 from datetime import datetime, timedelta, timezone
+import logging
 from typing import Any, Optional
 from jose import JWTError, jwt
 import bcrypt
@@ -12,19 +13,29 @@ from app.config import settings
 
 # JWT settings
 ALGORITHM = "HS256"
+logger = logging.getLogger(__name__)
+
+
+def _password_bytes(password: str) -> bytes:
+    password_bytes = password.encode("utf-8")
+    if len(password_bytes) > 72:
+        raise ValueError("Password must be 72 bytes or fewer after UTF-8 encoding")
+    return password_bytes
 
 
 # Password hashing using bcrypt directly (avoids passlib bugs)
 def get_password_hash(password: str) -> str:
     """Generate password hash using bcrypt."""
-    # bcrypt has 72-byte limit, truncate if needed
-    password_bytes = password.encode("utf-8")[:72]
+    password_bytes = _password_bytes(password)
     return bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a plaintext password against a hash."""
-    password_bytes = plain_password.encode("utf-8")[:72]
+    try:
+        password_bytes = _password_bytes(plain_password)
+    except ValueError:
+        return False
     hashed_bytes = hashed_password.encode("utf-8")
     return bcrypt.checkpw(password_bytes, hashed_bytes)
 
@@ -87,16 +98,20 @@ def verify_ed25519_signature(message: bytes, signature: str, public_key: str) ->
         True if signature is valid, False otherwise
     """
     try:
-        # Convert base64 strings to bytes
-        signature_bytes = nacl.encoding.Base64.decode(signature)
-        public_key_bytes = nacl.encoding.Base64.decode(public_key)
+        try:
+            signature_bytes = nacl.encoding.Base64.decode(signature)
+            public_key_bytes = nacl.encoding.Base64.decode(public_key)
+        except (ValueError, TypeError) as exc:
+            if isinstance(exc, TypeError):
+                logger.warning("Invalid Ed25519 signature input type: %s", exc)
+            return False
 
         # Create verifiable key and verify
         verifiable_key = nacl.signing.VerifiableKey(public_key_bytes)
         verifiable_key.verify(message, signature_bytes)
 
         return True
-    except (VerifyError, ValueError, TypeError):
+    except (VerifyError, ValueError):
         return False
 
 

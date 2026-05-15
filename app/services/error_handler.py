@@ -165,7 +165,7 @@ class EnhancedErrorHandler:
                     logger.debug(f"[JSON-PARSE] Strategy 6 fixed failed: {e}")
 
         # All strategies failed
-        error_msg = f"Failed to parse {context} after {self.max_retries} attempts"
+        error_msg = f"Failed to parse {context} after {self.retry_count + 1} attempts"
         logger.error(f"[JSON-PARSE] All strategies failed. Last attempt: {text[:200]}")
         return False, None, error_msg
 

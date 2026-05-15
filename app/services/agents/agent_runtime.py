@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
@@ -15,6 +16,8 @@ from app.services.agents.agent_backends import (
 from app.services.agents.interfaces import AgentRuntime
 from app.services.agents.providers import get_runtime_factory
 from app.services.workspace.system_settings import get_effective_agent_backend
+
+logger = logging.getLogger(__name__)
 
 
 def create_agent_runtime(
@@ -58,14 +61,24 @@ def invoke_runtime_prompt(
     runtime = create_agent_runtime(db, session_id, task_id)
     if task_execution_id is not None and hasattr(runtime, "task_execution_id"):
         runtime.task_execution_id = task_execution_id
-    return asyncio.run(
-        runtime.invoke_prompt(
-            prompt,
-            timeout_seconds=timeout_seconds,
-            source_brain=source_brain,
-            session_prefix=session_prefix,
+    try:
+        return asyncio.run(
+            runtime.invoke_prompt(
+                prompt,
+                timeout_seconds=timeout_seconds,
+                source_brain=source_brain,
+                session_prefix=session_prefix,
+            )
         )
-    )
+    except Exception:
+        logger.exception(
+            "Runtime prompt invocation failed for session_id=%s task_id=%s "
+            "task_execution_id=%s",
+            session_id,
+            task_id,
+            task_execution_id,
+        )
+        raise
 
 
 def runtime_reports_context_overflow(

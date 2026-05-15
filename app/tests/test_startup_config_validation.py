@@ -64,6 +64,7 @@ def test_settings_accepts_short_runtime_config_names():
 
     settings = Settings(
         _env_file=None,
+        SECRET_KEY="strong-unique-key",
         AGENT_BACKEND="local_openclaw",
         AGENT_MODEL="local",
         PLANNING_REPAIR_ENABLED=False,
@@ -83,6 +84,7 @@ def test_settings_keeps_legacy_orchestrator_env_aliases():
 
     settings = Settings(
         _env_file=None,
+        SECRET_KEY="strong-unique-key",
         ORCHESTRATOR_AGENT_BACKEND="openai_responses_api",
         ORCHESTRATOR_AGENT_MODEL_FAMILY="gpt-5",
         ORCHESTRATOR_PLANNING_REPAIR_DIRECT_ENABLED=False,
@@ -105,12 +107,20 @@ def test_settings_rejects_unknown_workspace_review_policy():
     from app.config import Settings
 
     with pytest.raises(ValidationError, match="WORKSPACE_REVIEW_POLICY"):
-        Settings(_env_file=None, WORKSPACE_REVIEW_POLICY="always_merge")
+        Settings(
+            _env_file=None,
+            SECRET_KEY="strong-unique-key",
+            WORKSPACE_REVIEW_POLICY="always_merge",
+        )
 
 
-def test_validate_raises_on_default_secret_key(monkeypatch):
-    with pytest.raises(RuntimeError, match="SECRET_KEY"):
-        _call_validate(monkeypatch, secret_key="your-secret-key-change-in-production")
+def test_settings_requires_secret_key():
+    from pydantic import ValidationError
+
+    from app.config import Settings
+
+    with pytest.raises(ValidationError, match="SECRET_KEY"):
+        Settings(_env_file=None)
 
 
 def test_validate_raises_on_empty_secret_key(monkeypatch):

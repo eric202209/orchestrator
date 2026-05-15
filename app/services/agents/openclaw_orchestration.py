@@ -302,8 +302,12 @@ async def execute_task_with_orchestration(
                                 first_payload = payloads[0]
                                 if isinstance(first_payload, dict):
                                     output_text = first_payload.get("text", output_text)
-                    except json.JSONDecodeError:
-                        pass
+                    except json.JSONDecodeError as exc:
+                        self._log_entry(
+                            "DEBUG",
+                            "[PLANNING] Output was not a payload envelope; "
+                            f"using raw output: {exc}",
+                        )
 
                 # Strip Markdown code fences if present
                 if isinstance(output_text, str):
@@ -544,18 +548,6 @@ async def _execute_step_with_retry(
                 )
                 raise
 
-        except Exception as e:
-            # Handle garbled errors without retrying
-            orchestration_state.record_failure(
-                StepResult(
-                    step_number=step_index + 1,
-                    status="failed",
-                    error_message=str(e)[:500],
-                    attempt=attempt + 1,
-                )
-            )
-            self._log_entry("ERROR", f"[STEP] Step {step_index + 1} error: {str(e)}")
-
     # All retries failed - return final failure result
     return StepResult(
         step_number=step_index + 1,
@@ -646,7 +638,11 @@ async def _revise_plan(
                 "INFO", f"[PLAN_REVISION] Revised to {len(revised_plan)} steps"
             )
             return revised_plan
-    except json.JSONDecodeError:
-        pass
+    except json.JSONDecodeError as exc:
+        self._log_entry(
+            "WARN",
+            "[PLAN_REVISION] Failed to parse revised plan JSON; keeping original plan: "
+            f"{exc}",
+        )
 
     return orchestration_state.plan

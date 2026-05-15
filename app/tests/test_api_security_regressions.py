@@ -17,8 +17,14 @@ from app.services.auth_rate_limit import clear_auth_rate_limits, enforce_auth_ra
 from app.dependencies import get_current_active_user, get_current_user
 
 
+def _request(client, method: str, path: str, json_body=None):
+    if method == "get":
+        return client.get(path)
+    return getattr(client, method)(path, json=json_body)
+
+
 def test_session_create_starts_pending_and_inactive(authenticated_client, db_session):
-    project = Project(name="Session Security Project")
+    project = Project(name="Session Security Project", user_id=1)
     db_session.add(project)
     db_session.commit()
     db_session.refresh(project)
@@ -80,7 +86,7 @@ def test_settings_system_update_requires_admin_in_multi_user_deployments(
 
 
 def test_task_update_rejects_unsupported_fields(authenticated_client, db_session):
-    project = Project(name="Task Security Project")
+    project = Project(name="Task Security Project", user_id=1)
     db_session.add(project)
     db_session.commit()
     db_session.refresh(project)
@@ -123,6 +129,48 @@ def test_task_routes_require_authentication(api_client, db_session):
     assert response.status_code == 401
 
 
+@pytest.mark.parametrize(
+    ("method", "path_suffix", "json_body"),
+    [
+        ("get", "change-set", None),
+        ("post", "retry", None),
+        (
+            "post",
+            "check-overwrites",
+            {"project_id": None, "task_subfolder": "task", "planned_files": []},
+        ),
+        ("post", "create-backup", None),
+        ("get", "workspace-info", None),
+    ],
+)
+def test_sensitive_task_subroutes_require_authentication(
+    api_client, db_session, method, path_suffix, json_body
+):
+    project = Project(name="Anonymous Task Subroute Project")
+    db_session.add(project)
+    db_session.flush()
+    task = Task(
+        project_id=project.id,
+        title="Protected Subroute Task",
+        status=TaskStatus.PENDING,
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    body = json_body
+    if body and body.get("project_id") is None:
+        body = {**body, "project_id": project.id}
+
+    response = _request(
+        api_client,
+        method,
+        f"/api/v1/tasks/{task.id}/{path_suffix}",
+        body,
+    )
+
+    assert response.status_code == 401
+
+
 def test_session_routes_require_authentication(api_client, db_session):
     project = Project(name="Anonymous Session Project")
     db_session.add(project)
@@ -157,7 +205,7 @@ def test_inactive_user_bearer_token_is_rejected(api_client, db_session):
     assert response.status_code == 401
 
 
-def test_project_routes_are_visible_to_authenticated_users(api_app, db_session):
+def test_project_routes_are_scoped_to_the_authenticated_user(api_app, db_session):
     user_one = User(
         id=101,
         email="owner-one@example.com",
@@ -190,15 +238,13 @@ def test_project_routes_are_visible_to_authenticated_users(api_app, db_session):
         other_response = client.get(f"/api/v1/projects/{other_project.id}")
 
     assert list_response.status_code == 200
-    assert [project["id"] for project in list_response.json()] == [
-        own_project.id,
-        other_project.id,
-    ]
-    assert other_response.status_code == 200
-    assert other_response.json()["id"] == other_project.id
+    assert [project["id"] for project in list_response.json()] == [own_project.id]
+    assert other_response.status_code == 404
 
 
-def test_legacy_ownerless_projects_visible_to_authenticated_users(api_app, db_session):
+def test_legacy_ownerless_projects_are_not_visible_to_authenticated_users(
+    api_app, db_session
+):
     first_user = User(
         id=101,
         email="primary-local@example.com",
@@ -238,20 +284,45 @@ def test_legacy_ownerless_projects_visible_to_authenticated_users(api_app, db_se
         legacy_detail_response = client.get(f"/api/v1/projects/{legacy_project.id}")
 
     assert first_response.status_code == 200
-    assert [project["id"] for project in first_response.json()] == [
-        legacy_project.id,
-        later_project.id,
-    ]
+    assert [project["id"] for project in first_response.json()] == []
     assert later_response.status_code == 200
-    assert [project["id"] for project in later_response.json()] == [
-        legacy_project.id,
-        later_project.id,
-    ]
-    assert legacy_detail_response.status_code == 200
-    assert legacy_detail_response.json()["id"] == legacy_project.id
+    assert [project["id"] for project in later_response.json()] == [later_project.id]
+    assert legacy_detail_response.status_code == 404
 
 
-def test_session_routes_are_visible_to_authenticated_users(api_app, db_session):
+def test_legacy_ownerless_projects_are_visible_in_single_user_deployments(
+    api_app, db_session
+):
+    only_user = User(
+        id=101,
+        email="single-local@example.com",
+        hashed_password="not-used",
+        is_active=True,
+    )
+    legacy_project = Project(name="Legacy Ownerless Microsite", user_id=None)
+    db_session.add_all([only_user, legacy_project])
+    db_session.commit()
+    db_session.refresh(legacy_project)
+
+    def override_current_user():
+        return only_user
+
+    api_app.dependency_overrides[get_current_user] = override_current_user
+    api_app.dependency_overrides[get_current_active_user] = override_current_user
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(api_app) as client:
+        list_response = client.get("/api/v1/projects")
+        detail_response = client.get(f"/api/v1/projects/{legacy_project.id}")
+
+    assert list_response.status_code == 200
+    assert [project["id"] for project in list_response.json()] == [legacy_project.id]
+    assert detail_response.status_code == 200
+    assert detail_response.json()["id"] == legacy_project.id
+
+
+def test_session_routes_are_scoped_to_the_authenticated_user(api_app, db_session):
     user_one = User(
         id=301,
         email="session-owner@example.com",
@@ -288,15 +359,11 @@ def test_session_routes_are_visible_to_authenticated_users(api_app, db_session):
         other_response = client.get(f"/api/v1/sessions/{other_session.id}")
 
     assert list_response.status_code == 200
-    assert {session["id"] for session in list_response.json()} == {
-        own_session.id,
-        other_session.id,
-    }
-    assert other_response.status_code == 200
-    assert other_response.json()["id"] == other_session.id
+    assert {session["id"] for session in list_response.json()} == {own_session.id}
+    assert other_response.status_code == 404
 
 
-def test_global_task_list_is_visible_to_authenticated_users(api_app, db_session):
+def test_global_task_list_is_scoped_to_the_authenticated_user(api_app, db_session):
     user_one = User(
         id=311,
         email="task-owner@example.com",
@@ -340,13 +407,122 @@ def test_global_task_list_is_visible_to_authenticated_users(api_app, db_session)
         list_response = client.get("/api/v1/tasks")
 
     assert list_response.status_code == 200
-    assert [task["id"] for task in list_response.json()] == [
-        own_task.id,
-        other_task.id,
-    ]
+    assert [task["id"] for task in list_response.json()] == [own_task.id]
 
 
-def test_planning_session_routes_are_visible_to_authenticated_users(
+def test_project_task_routes_are_scoped_to_the_authenticated_user(api_app, db_session):
+    user_one = User(
+        id=321,
+        email="project-task-owner@example.com",
+        hashed_password="not-used",
+        is_active=True,
+    )
+    user_two = User(
+        id=322,
+        email="project-task-other@example.com",
+        hashed_password="not-used",
+        is_active=True,
+    )
+    own_project = Project(name="Owned Task Project", user_id=user_one.id)
+    other_project = Project(name="Other Task Project", user_id=user_two.id)
+    db_session.add_all([user_one, user_two, own_project, other_project])
+    db_session.flush()
+    db_session.add(
+        Task(
+            project_id=other_project.id,
+            title="Other Project Task",
+            status=TaskStatus.PENDING,
+        )
+    )
+    db_session.commit()
+
+    def override_current_user():
+        return user_one
+
+    api_app.dependency_overrides[get_current_user] = override_current_user
+    api_app.dependency_overrides[get_current_active_user] = override_current_user
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(api_app) as client:
+        list_response = client.get(f"/api/v1/projects/{other_project.id}/tasks")
+        create_response = client.post(
+            "/api/v1/tasks",
+            json={
+                "project_id": other_project.id,
+                "title": "Should Not Create",
+                "description": "cross project",
+            },
+        )
+
+    assert list_response.status_code == 404
+    assert create_response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("method", "path_suffix", "json_body"),
+    [
+        ("get", "change-set", None),
+        ("post", "retry", None),
+        (
+            "post",
+            "check-overwrites",
+            {"project_id": None, "task_subfolder": "task", "planned_files": []},
+        ),
+        ("post", "create-backup", None),
+        ("get", "workspace-info", None),
+    ],
+)
+def test_sensitive_task_subroutes_are_scoped_to_the_authenticated_user(
+    api_app, db_session, method, path_suffix, json_body
+):
+    user_one = User(
+        id=331,
+        email="task-subroute-owner@example.com",
+        hashed_password="not-used",
+        is_active=True,
+    )
+    user_two = User(
+        id=332,
+        email="task-subroute-other@example.com",
+        hashed_password="not-used",
+        is_active=True,
+    )
+    other_project = Project(name="Other Subroute Project", user_id=user_two.id)
+    db_session.add_all([user_one, user_two, other_project])
+    db_session.flush()
+    other_task = Task(
+        project_id=other_project.id,
+        title="Other Subroute Task",
+        status=TaskStatus.FAILED,
+    )
+    db_session.add(other_task)
+    db_session.commit()
+
+    def override_current_user():
+        return user_one
+
+    api_app.dependency_overrides[get_current_user] = override_current_user
+    api_app.dependency_overrides[get_current_active_user] = override_current_user
+
+    body = json_body
+    if body and body.get("project_id") is None:
+        body = {**body, "project_id": other_project.id}
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(api_app) as client:
+        response = _request(
+            client,
+            method,
+            f"/api/v1/tasks/{other_task.id}/{path_suffix}",
+            body,
+        )
+
+    assert response.status_code == 404
+
+
+def test_planning_session_routes_are_scoped_to_the_authenticated_user(
     api_app, db_session
 ):
     user_one = User(
@@ -393,12 +569,8 @@ def test_planning_session_routes_are_visible_to_authenticated_users(
         other_response = client.get(f"/api/v1/planning/sessions/{other_session.id}")
 
     assert list_response.status_code == 200
-    assert {session["id"] for session in list_response.json()} == {
-        own_session.id,
-        other_session.id,
-    }
-    assert other_response.status_code == 200
-    assert other_response.json()["id"] == other_session.id
+    assert {session["id"] for session in list_response.json()} == {own_session.id}
+    assert other_response.status_code == 404
 
 
 def test_tool_track_requires_authentication(api_client, db_session):

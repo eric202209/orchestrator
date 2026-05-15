@@ -1,6 +1,6 @@
 """Authentication Pydantic schemas"""
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional, List
 from datetime import datetime
 
@@ -23,6 +23,13 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str
     name: Optional[str] = None
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_bytes(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("Password must be 72 bytes or fewer")
+        return value
 
 
 class UserResponse(BaseModel):

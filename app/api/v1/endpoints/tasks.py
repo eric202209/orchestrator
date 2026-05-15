@@ -138,6 +138,22 @@ def _operator_identifier(current_user) -> Optional[str]:
     return f"user:{user_id}" if user_id is not None else None
 
 
+def _get_task_for_user(db: Session, task_id: int, current_user) -> Task:
+    task = (
+        db.query(Task)
+        .join(Project, Project.id == Task.project_id)
+        .filter(
+            Task.id == task_id,
+            Project.deleted_at.is_(None),
+            project_access_filter(db, current_user),
+        )
+        .first()
+    )
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
+
+
 def _build_request_changes_repair_prompt(
     *,
     task: Task,
@@ -574,8 +590,16 @@ def create_task(
     current_user=Depends(get_current_active_user),
 ):
     """Create a new task"""
-    # Verify project exists
-    project = db.query(Project).filter(Project.id == task.project_id).first()
+    # Verify project exists and belongs to the current user.
+    project = (
+        db.query(Project)
+        .filter(
+            Project.id == task.project_id,
+            Project.deleted_at.is_(None),
+            project_access_filter(db, current_user),
+        )
+        .first()
+    )
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -597,8 +621,16 @@ def get_project_tasks(
     current_user=Depends(get_current_active_user),
 ):
     """Get all tasks for a project"""
-    # Verify project exists
-    project = db.query(Project).filter(Project.id == project_id).first()
+    # Verify project exists and belongs to the current user.
+    project = (
+        db.query(Project)
+        .filter(
+            Project.id == project_id,
+            Project.deleted_at.is_(None),
+            project_access_filter(db, current_user),
+        )
+        .first()
+    )
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -647,9 +679,7 @@ async def execute_task_with_runtime(
     Returns:
         Execution result with logs
     """
-    task = db.query(Task).filter(Task.id == task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    task = _get_task_for_user(db, task_id, current_user)
 
     # Get prompt from request body or use task description
     try:
@@ -834,9 +864,7 @@ def get_task(
 ):
     """Get a task by ID"""
     task_service = TaskService(db)
-    task = task_service.get_task(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    task = _get_task_for_user(db, task_id, current_user)
 
     # Prefer the most recent task/session relationship so Task Detail reflects
     # the latest execution context instead of an arbitrary historical row.
@@ -874,11 +902,13 @@ def get_task(
 
 
 @router.get("/tasks/{task_id}/change-set")
-def get_latest_task_change_set(task_id: int, db: Session = Depends(get_db)):
+def get_latest_task_change_set(
+    task_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
     """Return the latest deterministic workspace change set for a task."""
-    task = db.query(Task).filter(Task.id == task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    _get_task_for_user(db, task_id, current_user)
 
     task_service = TaskService(db)
     latest_change_set = task_service.get_latest_task_change_set_for_task(task_id)
@@ -911,10 +941,16 @@ def reject_latest_task_change_set(
     current_user=Depends(get_current_active_user),
 ):
     """Archive candidate files and restore the pre-run snapshot for a task execution."""
-    task = db.query(Task).filter(Task.id == task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    project = db.query(Project).filter(Project.id == task.project_id).first()
+    task = _get_task_for_user(db, task_id, current_user)
+    project = (
+        db.query(Project)
+        .filter(
+            Project.id == task.project_id,
+            Project.deleted_at.is_(None),
+            project_access_filter(db, current_user),
+        )
+        .first()
+    )
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -966,9 +1002,21 @@ def reject_latest_task_change_set(
 
 
 @router.get("/projects/{project_id}/workspace-overview")
-def get_project_workspace_overview(project_id: int, db: Session = Depends(get_db)):
+def get_project_workspace_overview(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
     """Summarize task workspace promotion state for a project."""
-    project = db.query(Project).filter(Project.id == project_id).first()
+    project = (
+        db.query(Project)
+        .filter(
+            Project.id == project_id,
+            Project.deleted_at.is_(None),
+            project_access_filter(db, current_user),
+        )
+        .first()
+    )
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -1048,11 +1096,10 @@ def retry_task(
     task_id: int,
     retry_request: Optional[TaskRetryRequest] = None,
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
 ):
     """Queue a fresh execution for a failed or timed-out task."""
-    task = db.query(Task).filter(Task.id == task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    task = _get_task_for_user(db, task_id, current_user)
 
     if task.status == TaskStatus.RUNNING:
         raise HTTPException(
@@ -1072,9 +1119,7 @@ def accept_task_workspace(
     current_user=Depends(get_current_active_user),
 ):
     """Accept a reviewed task workspace into the project baseline."""
-    task = db.query(Task).filter(Task.id == task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    task = _get_task_for_user(db, task_id, current_user)
     if task.status != TaskStatus.DONE:
         raise HTTPException(
             status_code=409, detail="Only completed tasks can be accepted"
@@ -1200,11 +1245,10 @@ def request_task_workspace_changes(
     task_id: int,
     payload: TaskPromotionRequest,
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
 ):
     """Mark a completed task workspace as needing follow-up before promotion."""
-    task = db.query(Task).filter(Task.id == task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    task = _get_task_for_user(db, task_id, current_user)
     if not task.task_subfolder:
         raise HTTPException(
             status_code=409, detail="Task has no workspace folder to review"
@@ -1233,9 +1277,7 @@ def update_task(
     current_user=Depends(get_current_active_user),
 ):
     """Update a task"""
-    task = db.query(Task).filter(Task.id == task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    task = _get_task_for_user(db, task_id, current_user)
 
     update_data = task_update.model_dump(exclude_unset=True)
     if not update_data:
@@ -1301,9 +1343,7 @@ def delete_task(
     """Delete a task"""
     from app.models import TaskCheckpoint
 
-    task = db.query(Task).filter(Task.id == task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    task = _get_task_for_user(db, task_id, current_user)
 
     db.query(LogEntry).filter(LogEntry.task_id == task_id).delete(
         synchronize_session=False
@@ -1342,9 +1382,7 @@ def get_sorted_task_logs(
     Returns:
         Sorted list of log entries
     """
-    task = db.query(Task).filter(Task.id == task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    task = _get_task_for_user(db, task_id, current_user)
 
     logs_entries = db.query(LogEntry).filter(LogEntry.task_id == task_id).all()
 
@@ -1386,7 +1424,10 @@ def get_sorted_task_logs(
 
 @router.post("/tasks/{task_id}/check-overwrites")
 async def check_task_overwrites(
-    task_id: int, request: OverwriteCheckRequest, db: Session = Depends(get_db)
+    task_id: int,
+    request: OverwriteCheckRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
 ):
     """
     Check for potential overwrites before executing a task
@@ -1399,10 +1440,13 @@ async def check_task_overwrites(
     Returns:
         Overwrite protection result with safety status and warnings
     """
-    # Verify task exists
-    task = db.query(Task).filter(Task.id == task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    # Verify task exists and belongs to the current user.
+    task = _get_task_for_user(db, task_id, current_user)
+    if task.project_id != request.project_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Overwrite check project_id must match the task project",
+        )
 
     try:
         from app.services.workspace.overwrite_protection_service import (
@@ -1435,7 +1479,11 @@ async def check_task_overwrites(
 
 
 @router.post("/tasks/{task_id}/create-backup")
-async def create_task_backup(task_id: int, db: Session = Depends(get_db)):
+async def create_task_backup(
+    task_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
     """
     Create a backup of existing workspace before proceeding
 
@@ -1446,10 +1494,8 @@ async def create_task_backup(task_id: int, db: Session = Depends(get_db)):
     Returns:
         Backup result with path and file count
     """
-    # Verify task exists
-    task = db.query(Task).filter(Task.id == task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    # Verify task exists and belongs to the current user.
+    task = _get_task_for_user(db, task_id, current_user)
 
     try:
         from app.services.workspace.overwrite_protection_service import (
@@ -1470,7 +1516,11 @@ async def create_task_backup(task_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/tasks/{task_id}/workspace-info")
-async def get_workspace_info(task_id: int, db: Session = Depends(get_db)):
+async def get_workspace_info(
+    task_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
     """
     Get workspace information for a task
 
@@ -1481,10 +1531,8 @@ async def get_workspace_info(task_id: int, db: Session = Depends(get_db)):
     Returns:
         Workspace details including file count and last modified date
     """
-    # Verify task exists
-    task = db.query(Task).filter(Task.id == task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    # Verify task exists and belongs to the current user.
+    task = _get_task_for_user(db, task_id, current_user)
 
     try:
         from app.services.workspace.overwrite_protection_service import (

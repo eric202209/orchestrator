@@ -65,7 +65,10 @@ def get_user_by_api_key(api_key: str, db: Session) -> Optional[User]:
 
     # Update last_used timestamp
     api_key_record.last_used = datetime.now(timezone.utc)
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
 
     return db.query(User).filter(User.id == api_key_record.user_id).first()
 
@@ -431,19 +434,26 @@ def unpair_device(
 
 
 @router.post("/verify", response_model=VerifySignatureResponse)
-def verify_signature(request: VerifySignatureRequest, db: Session = Depends(get_db)):
+def verify_signature(
+    request: Request,
+    payload: VerifySignatureRequest,
+):
     """
     Verify an Ed25519 signature for testing/debugging.
-
-    This endpoint doesn't require authentication and is useful for
-    testing device authentication flows.
     """
+    enforce_auth_rate_limit(request, "verify_signature")
+    if not settings.ALLOW_TEST_ENDPOINTS:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Not found",
+        )
+
     try:
-        message_bytes = request.message.encode("utf-8")
+        message_bytes = payload.message.encode("utf-8")
         is_valid = verify_ed25519_signature(
             message=message_bytes,
-            signature=request.signature,
-            public_key=request.public_key,
+            signature=payload.signature,
+            public_key=payload.public_key,
         )
 
         return VerifySignatureResponse(
@@ -492,7 +502,7 @@ def session_login(
         httponly=True,
         samesite="lax",
         max_age=settings.SESSION_COOKIE_MAX_AGE,
-        secure=False,
+        secure=settings.ENVIRONMENT == "production",
     )
     return user
 
