@@ -9,6 +9,7 @@ from app.schemas.knowledge import (
     RecommendedAction,
 )
 from app.services.orchestration.context.assembly import _render_knowledge_block
+from app.services.orchestration.planning.planner import PlannerService
 
 
 def _make_ctx(items: list[KnowledgeItemRef]) -> KnowledgeContext:
@@ -70,3 +71,25 @@ def test_content_per_item_is_at_most_800_chars():
     lines = block.splitlines()
     content_lines = [ln for ln in lines if ln.startswith("x")]
     assert all(len(ln) <= 800 for ln in content_lines)
+
+
+def test_minimal_planning_prompt_includes_knowledge_references(tmp_path):
+    ctx = _make_ctx(
+        [
+            _make_ref(
+                title="Workspace Reuse Guide",
+                content="Inspect existing files before creating a nested project.",
+            )
+        ]
+    )
+
+    prompt = PlannerService.build_minimal_planning_prompt(
+        "Update the existing app",
+        tmp_path,
+        workspace_has_existing_files=True,
+        knowledge_context=ctx,
+    )
+
+    assert "KNOWLEDGE REFERENCES" in prompt
+    assert "Workspace Reuse Guide" in prompt
+    assert "Inspect existing files before creating a nested project." in prompt

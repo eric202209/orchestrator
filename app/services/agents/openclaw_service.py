@@ -83,6 +83,16 @@ from app.services.agents.openclaw_orchestration import (
 
 logger = logging.getLogger(__name__)
 
+OPENCLAW_CLI_LOCK_RETRY_ATTEMPTS = int(
+    os.environ.get("ORCHESTRATOR_OPENCLAW_CLI_LOCK_RETRY_ATTEMPTS", "4")
+)
+OPENCLAW_CLI_LOCK_RETRY_BASE_SECONDS = float(
+    os.environ.get("ORCHESTRATOR_OPENCLAW_CLI_LOCK_RETRY_BASE_SECONDS", "0.75")
+)
+OPENCLAW_CLI_LOCK_MARKERS = (
+    "session file locked",
+    "sessions.json.lock",
+)
 
 _NOISY_OPENCLAW_STDERR_PATTERNS = (
     re.compile(r"^[\[\]{}],?$"),
@@ -167,6 +177,11 @@ class OpenClawSessionService:
 
     MAX_PROMPT_LENGTH = 50000  # Leave room for model overhead
     STREAM_READ_LIMIT = 262144  # Allow large JSON/log lines from newer OpenClaw builds
+
+    @staticmethod
+    def _is_openclaw_cli_lock_contention(stdout_text: str, stderr_text: str) -> bool:
+        combined = f"{stdout_text}\n{stderr_text}".lower()
+        return any(marker in combined for marker in OPENCLAW_CLI_LOCK_MARKERS)
 
     def __init__(
         self,
@@ -1211,17 +1226,11 @@ class OpenClawSessionService:
             timed_out = False
             cancelled = False
             timeout_boundary: Optional[str] = None
-
-            process = await asyncio.create_subprocess_exec(
-                *full_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                limit=self.STREAM_READ_LIMIT,
-                cwd=execution_cwd,
-            )
+            process: Optional[asyncio.subprocess.Process] = None
 
             stdout_chunks: List[str] = []
             stderr_chunks: List[str] = []
+            cli_lock_diagnostics: Dict[str, Any] = {}
 
             async def stream_output(
                 stream,
@@ -1264,37 +1273,97 @@ class OpenClawSessionService:
                                 await log_callback(level, line_text)
 
             try:
-                await asyncio.wait_for(
-                    asyncio.gather(
-                        # OpenClaw emits its final machine-readable JSON on stdout.
-                        # Buffer it for parsing, but don't flood Live Logs with raw JSON lines.
-                        stream_output(
-                            process.stdout,
-                            "INFO",
-                            stdout_chunks,
-                            emit_live_logs=False,
-                        ),
-                        # Keep stderr visible because it contains actionable warnings/errors.
-                        stream_output(
-                            process.stderr,
-                            "WARN",
-                            stderr_chunks,
-                            emit_live_logs=True,
-                        ),
-                    ),
-                    timeout=timeout_seconds + 30,
-                )
+                max_lock_retry_attempts = max(1, OPENCLAW_CLI_LOCK_RETRY_ATTEMPTS)
+                for cli_attempt in range(1, max_lock_retry_attempts + 1):
+                    process = None
+                    stdout_chunks.clear()
+                    stderr_chunks.clear()
+                    return_code = None
+                    process = await asyncio.create_subprocess_exec(
+                        *full_cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        limit=self.STREAM_READ_LIMIT,
+                        cwd=execution_cwd,
+                    )
 
-                return_code = await asyncio.wait_for(
-                    process.wait(), timeout=timeout_seconds + 30
-                )
+                    await asyncio.wait_for(
+                        asyncio.gather(
+                            # OpenClaw emits its final machine-readable JSON on stdout.
+                            # Buffer it for parsing, but don't flood Live Logs with raw JSON lines.
+                            stream_output(
+                                process.stdout,
+                                "INFO",
+                                stdout_chunks,
+                                emit_live_logs=False,
+                            ),
+                            # Keep stderr visible because it contains actionable warnings/errors.
+                            stream_output(
+                                process.stderr,
+                                "WARN",
+                                stderr_chunks,
+                                emit_live_logs=True,
+                            ),
+                        ),
+                        timeout=timeout_seconds + 30,
+                    )
+
+                    return_code = await asyncio.wait_for(
+                        process.wait(), timeout=timeout_seconds + 30
+                    )
+                    stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
+                    stderr_text = "\n".join(filter(None, stderr_chunks)).strip()
+                    if (
+                        return_code != 0
+                        and cli_attempt < max_lock_retry_attempts
+                        and self._is_openclaw_cli_lock_contention(
+                            stdout_text, stderr_text
+                        )
+                    ):
+                        retry_delay = min(
+                            10.0, OPENCLAW_CLI_LOCK_RETRY_BASE_SECONDS * cli_attempt
+                        )
+                        cli_lock_diagnostics = {
+                            "openclaw_cli_lock_retry_attempt": cli_attempt,
+                            "openclaw_cli_lock_retry_attempts": cli_attempt,
+                            "openclaw_cli_lock_retry_max_attempts": (
+                                max_lock_retry_attempts
+                            ),
+                            "openclaw_cli_lock_retry_delay_seconds": round(
+                                retry_delay, 3
+                            ),
+                        }
+                        self._log_entry(
+                            "WARN",
+                            (
+                                "[OPENCLAW] Local session file was locked; "
+                                f"retrying CLI call in {retry_delay:.2f}s "
+                                f"(attempt {cli_attempt + 1}/{max_lock_retry_attempts})"
+                            ),
+                            metadata=json.dumps(
+                                {
+                                    "event_type": "openclaw_cli_lock_retry",
+                                    **cli_lock_diagnostics,
+                                }
+                            ),
+                            commit=True,
+                        )
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    if cli_attempt > 1:
+                        cli_lock_diagnostics = {
+                            **cli_lock_diagnostics,
+                            "openclaw_cli_lock_retry_attempts": cli_attempt - 1,
+                        }
+                    break
             except asyncio.TimeoutError:
                 timed_out = True
                 timeout_boundary = "planning_wait_for"
                 try:
-                    process.kill()
-                    await process.wait()
-                    return_code = process.returncode
+                    if process is not None:
+                        process.kill()
+                        await process.wait()
+                        return_code = process.returncode
                 except Exception as exc:
                     logger.debug(
                         "[OPENCLAW] Failed to terminate timed out process cleanly: %s",
@@ -1314,6 +1383,7 @@ class OpenClawSessionService:
                     "stdout_lines": len([line for line in stdout_chunks if line]),
                     "stderr_lines": len([line for line in stderr_chunks if line]),
                     **self._channel_metadata(stdout_text, stderr_text),
+                    **cli_lock_diagnostics,
                     "timed_out": True,
                     "cancelled": False,
                     "return_code": return_code,
@@ -1324,9 +1394,10 @@ class OpenClawSessionService:
                 cancelled = True
                 timeout_boundary = "caller_cancelled"
                 try:
-                    process.kill()
-                    await process.wait()
-                    return_code = process.returncode
+                    if process is not None:
+                        process.kill()
+                        await process.wait()
+                        return_code = process.returncode
                 except Exception as exc:
                     logger.debug(
                         "[OPENCLAW] Failed to terminate cancelled process cleanly: %s",
@@ -1366,6 +1437,7 @@ class OpenClawSessionService:
                         "stdout_lines": len([line for line in stdout_chunks if line]),
                         "stderr_lines": len([line for line in stderr_chunks if line]),
                         **channel_metadata,
+                        **cli_lock_diagnostics,
                         "output_token_estimate": self._estimate_token_count(
                             f"{stdout_text}\n{stderr_text}".strip()
                         ),

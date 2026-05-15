@@ -1071,6 +1071,7 @@ class PlannerService:
         workflow_profile: str = "default",
         workflow_phases: Optional[List[str]] = None,
         workspace_has_existing_files: bool = False,
+        knowledge_context: Any = None,
     ) -> str:
         concise_task = " ".join((task_description or "").split())[:1200]
         display_project_dir = render_workspace_path_for_prompt(project_dir)
@@ -1082,12 +1083,15 @@ class PlannerService:
         ops_contract = _render_ops_first_contract()
         shell_fallback_limits = _render_shell_fallback_limits()
         python_verification_contract = _render_python_verification_contract()
+        knowledge_block = _render_knowledge_block(knowledge_context)
         prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 Do not implement anything.
 
 Task:
 {concise_task}
+
+{knowledge_block}
 
 Workflow:
 {workflow_guidance or "No explicit workflow phases. Use the smallest valid sequential plan."}
@@ -1545,6 +1549,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
         workflow_profile: str = "default",
         workflow_phases: Optional[List[str]] = None,
         workspace_has_existing_files: bool = False,
+        knowledge_context: Any = None,
     ) -> Dict[str, Any]:
         minimal_first = reason == "dense_planning_context"
         logger.warning(
@@ -1573,6 +1578,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
             workflow_profile=workflow_profile,
             workflow_phases=workflow_phases,
             workspace_has_existing_files=workspace_has_existing_files,
+            knowledge_context=knowledge_context,
         )
         minimal_prompt_chars = len(minimal_prompt)
         minimal_prompt_estimated_tokens = _estimate_prompt_tokens(minimal_prompt)

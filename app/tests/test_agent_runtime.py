@@ -103,6 +103,23 @@ def test_openclaw_stderr_noise_filter_hides_json_telemetry_lines():
     )
 
 
+def test_openclaw_cli_lock_contention_detector_matches_session_lock_error():
+    assert (
+        OpenClawSessionService._is_openclaw_cli_lock_contention(
+            "",
+            "Error: session file locked at /root/.openclaw/agents/main/sessions/sessions.json.lock",
+        )
+        is True
+    )
+    assert (
+        OpenClawSessionService._is_openclaw_cli_lock_contention(
+            "normal output",
+            "ordinary warning",
+        )
+        is False
+    )
+
+
 def test_provider_registry_exposes_runtime_factory():
     assert get_runtime_factory("local_openclaw") is not None
     assert get_runtime_factory("remote_openclaw_gateway") is not None

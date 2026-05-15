@@ -36,6 +36,7 @@ from app.services.orchestration.task_rules import (
     should_execute_in_canonical_project_root,
 )
 from app.services.orchestration.run_state import (
+    mark_task_attempt_cancelled,
     mark_task_attempt_pending,
     reset_active_attempts_for_session_stop,
 )
@@ -201,6 +202,26 @@ def _stop_running_session_for_recovery(
     alert_message: str,
     recovery_log_message: str,
 ) -> bool:
+    running_execution = (
+        db.query(TaskExecution)
+        .filter(
+            TaskExecution.session_id == session.id,
+            TaskExecution.task_id == task.id,
+            TaskExecution.status.in_([TaskStatus.PENDING, TaskStatus.RUNNING]),
+        )
+        .order_by(
+            TaskExecution.started_at.desc().nullslast(),
+            TaskExecution.created_at.desc().nullslast(),
+            TaskExecution.id.desc(),
+        )
+        .first()
+    )
+    if running_execution is not None:
+        mark_task_attempt_cancelled(
+            task=None,
+            session_task_link=None,
+            task_execution=running_execution,
+        )
     mark_task_attempt_pending(
         task=task,
         session_task_link=session_task,
@@ -241,17 +262,19 @@ def recover_stale_running_sessions(
     db: Session,
     *,
     stale_after_seconds: int = _STALE_RUNNING_SESSION_SWEEP_SECONDS,
+    session_ids: list[int] | None = None,
 ) -> list[dict[str, Any]]:
     now = datetime.now(UTC).replace(tzinfo=None)
-    running_sessions = (
-        db.query(SessionModel)
-        .filter(
-            SessionModel.status == "running",
-            SessionModel.is_active.is_(True),
-            SessionModel.deleted_at.is_(None),
-        )
-        .all()
+    running_sessions = db.query(SessionModel).filter(
+        SessionModel.status == "running",
+        SessionModel.is_active.is_(True),
+        SessionModel.deleted_at.is_(None),
     )
+    if session_ids is not None:
+        if not session_ids:
+            return []
+        running_sessions = running_sessions.filter(SessionModel.id.in_(session_ids))
+    running_sessions = running_sessions.all()
     recovered_sessions: list[dict[str, Any]] = []
 
     for session in running_sessions:
@@ -265,6 +288,48 @@ def recover_stale_running_sessions(
             .first()
         )
         if not latest_link:
+            last_progress_at = next(
+                (
+                    candidate
+                    for candidate in (
+                        session.updated_at,
+                        session.started_at,
+                        session.created_at,
+                    )
+                    if candidate is not None
+                ),
+                None,
+            )
+            if last_progress_at is None:
+                continue
+            age_seconds = (
+                now - _coerce_naive_utc_datetime(last_progress_at)
+            ).total_seconds()
+            if age_seconds < stale_after_seconds:
+                continue
+            mark_session_stopped(session, stopped_at=datetime.now(timezone.utc))
+            session.last_alert_level = "warn"
+            session.last_alert_message = (
+                "Recovered stale running session that had no active task."
+            )
+            session.last_alert_at = datetime.now(timezone.utc)
+            db.add(
+                LogEntry(
+                    session_id=session.id,
+                    session_instance_id=session.instance_id,
+                    level="WARN",
+                    message="Recovered stale running session with no active task.",
+                )
+            )
+            recovered_sessions.append(
+                {
+                    "session_id": session.id,
+                    "task_id": None,
+                    "stop_reason": "running_session_without_active_task",
+                    "knowledge_recorded": False,
+                }
+            )
+            db.commit()
             continue
 
         task = db.query(Task).filter(Task.id == latest_link.task_id).first()

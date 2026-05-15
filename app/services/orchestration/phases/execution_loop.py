@@ -36,6 +36,7 @@ from app.services.orchestration.execution import ExecutorService
 from app.services.orchestration.execution.execution_flow import (
     assess_step_execution,
     determine_step_timeout,
+    execute_verification_command,
     repeated_tool_path_failure_decision,
 )
 from app.services.orchestration.execution.step_support import (
@@ -100,6 +101,114 @@ def _verification_can_replace_stale_commands(step: dict[str, Any]) -> bool:
     if isinstance(step.get("ops"), list) and step.get("ops"):
         return False
     return True
+
+
+def _is_read_only_inspection_command(command: str) -> bool:
+    normalized = " ".join(str(command or "").strip().split())
+    if not normalized:
+        return False
+    allowed_prefixes = (
+        "ls",
+        "find .",
+        "rg --files",
+        "cat ",
+        "pwd",
+        "true",
+    )
+    if not normalized.startswith(allowed_prefixes):
+        return False
+    blocked_tokens = (" >", ">>", "&&", ";", "||", "$(", "`")
+    if any(token in normalized for token in blocked_tokens):
+        return False
+    if normalized.startswith("find .") and "| head" in normalized:
+        return True
+    return "|" not in normalized
+
+
+def _is_simple_verification_command(command: str) -> bool:
+    normalized = " ".join(str(command or "").strip().split())
+    if not normalized:
+        return False
+    allowed_prefixes = (
+        "node -e ",
+        "python -c ",
+        "python3 -c ",
+        "python -m py_compile ",
+        "python3 -m py_compile ",
+        "npm run build",
+        "pytest",
+        "python -m pytest",
+        "python3 -m pytest",
+    )
+    if not normalized.startswith(allowed_prefixes):
+        return False
+    return not any(
+        token in normalized for token in (" >", ">>", ";", "&&", "||", "$(", "`")
+    )
+
+
+def _execute_read_only_inspection_step(
+    *,
+    project_dir: Path,
+    commands: list[Any],
+) -> dict[str, Any] | None:
+    if not commands or not all(
+        _is_read_only_inspection_command(str(c)) for c in commands
+    ):
+        return None
+
+    outputs: list[str] = []
+    for command in commands:
+        result = execute_verification_command(
+            project_dir=project_dir,
+            command=str(command),
+            timeout_seconds=30,
+        )
+        if not result.get("success"):
+            return {
+                "status": "failed",
+                "output": result.get("output", ""),
+                "error": result.get("output", "read-only inspection command failed"),
+                "files_changed": [],
+            }
+        command_output = str(result.get("output") or "").strip()
+        if command_output:
+            outputs.append(f"$ {command}\n{command_output}")
+    return {
+        "status": "completed",
+        "output": "\n\n".join(outputs),
+        "verification_output": "",
+        "files_changed": [],
+    }
+
+
+def _execute_simple_verification_step(
+    *,
+    project_dir: Path,
+    commands: list[Any],
+    verification_command: Any,
+) -> dict[str, Any] | None:
+    normalized_commands = [str(command or "").strip() for command in commands or []]
+    verification = str(verification_command or "").strip()
+    if len(normalized_commands) != 1 or not verification:
+        return None
+    if normalized_commands[0] != verification:
+        return None
+    if not _is_simple_verification_command(verification):
+        return None
+
+    result = execute_verification_command(
+        project_dir=project_dir,
+        command=verification,
+        timeout_seconds=120,
+    )
+    return {
+        "status": "completed" if result.get("success") else "failed",
+        "output": result.get("output", ""),
+        "verification_output": result.get("output", ""),
+        "error": "" if result.get("success") else result.get("output", ""),
+        "files_changed": [],
+    }
 
 
 def execute_step_loop(
@@ -437,44 +546,59 @@ def execute_step_loop(
         step_started_at = datetime.now(timezone.utc)
         if ops_result.get("success", False):
             if any(str(command or "").strip() for command in (step_commands or [])):
-                execution_prompt = assemble_execution_prompt(ctx, step)
-                step_timeout_seconds = determine_step_timeout(
-                    timeout_seconds=timeout_seconds,
-                    total_steps=len(orchestration_state.plan),
-                    execution_profile=execution_profile,
-                    step_description=step_description,
-                    task_prompt=prompt,
+                local_inspection_result = _execute_read_only_inspection_step(
+                    project_dir=orchestration_state.project_dir,
+                    commands=step_commands,
                 )
-                step_result = asyncio.run(
-                    runtime_service.execute_task(
-                        execution_prompt,
-                        timeout_seconds=step_timeout_seconds,
+                if local_inspection_result is not None:
+                    step_result = local_inspection_result
+                else:
+                    local_verification_result = _execute_simple_verification_step(
+                        project_dir=orchestration_state.project_dir,
+                        commands=step_commands,
+                        verification_command=verification_command,
                     )
-                )
-                if runtime_service.reports_context_overflow(step_result):
-                    logger.warning(
-                        "[ORCHESTRATION] Execution prompt exceeded context window at step %s; "
-                        "retrying with compact prompt",
-                        step_index + 1,
-                    )
-                    emit_live(
-                        "WARN",
-                        f"[ORCHESTRATION] Step {step_index + 1} execution prompt exceeded context window; retrying compact",
-                        metadata={
-                            "phase": "executing",
-                            "step_index": step_index + 1,
-                            "compact_retry": True,
-                        },
-                    )
-                    compact_execution_prompt = assemble_execution_prompt(
-                        ctx, step, compact=True
-                    )
-                    step_result = asyncio.run(
-                        runtime_service.execute_task(
-                            compact_execution_prompt,
-                            timeout_seconds=step_timeout_seconds,
+                    if local_verification_result is not None:
+                        step_result = local_verification_result
+                    else:
+                        execution_prompt = assemble_execution_prompt(ctx, step)
+                        step_timeout_seconds = determine_step_timeout(
+                            timeout_seconds=timeout_seconds,
+                            total_steps=len(orchestration_state.plan),
+                            execution_profile=execution_profile,
+                            step_description=step_description,
+                            task_prompt=prompt,
                         )
-                    )
+                        step_result = asyncio.run(
+                            runtime_service.execute_task(
+                                execution_prompt,
+                                timeout_seconds=step_timeout_seconds,
+                            )
+                        )
+                        if runtime_service.reports_context_overflow(step_result):
+                            logger.warning(
+                                "[ORCHESTRATION] Execution prompt exceeded context window at step %s; "
+                                "retrying with compact prompt",
+                                step_index + 1,
+                            )
+                            emit_live(
+                                "WARN",
+                                f"[ORCHESTRATION] Step {step_index + 1} execution prompt exceeded context window; retrying compact",
+                                metadata={
+                                    "phase": "executing",
+                                    "step_index": step_index + 1,
+                                    "compact_retry": True,
+                                },
+                            )
+                            compact_execution_prompt = assemble_execution_prompt(
+                                ctx, step, compact=True
+                            )
+                            step_result = asyncio.run(
+                                runtime_service.execute_task(
+                                    compact_execution_prompt,
+                                    timeout_seconds=step_timeout_seconds,
+                                )
+                            )
             else:
                 step_result = {
                     "status": "completed",

@@ -645,6 +645,7 @@ class _PlanningRetryState:
         self.post_repair_validation_second_repair_used = False
         self.post_repair_malformed_shell_second_repair_used = False
         self.last_repair_reason = ""
+        self.last_multistep_plan_step_count = 0
 
     @property
     def circuit_open(self) -> bool:

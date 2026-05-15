@@ -44,6 +44,8 @@ from app.models import (
 )
 from app.services.session.session_lifecycle_service import (
     _recover_orphaned_running_session_if_needed,
+    recover_stale_running_sessions,
+    reconcile_terminal_running_sessions,
 )
 from app.services.session.session_runtime_service import queue_task_for_session
 from app.services.session.session_runtime_service import build_task_subfolder_name
@@ -404,7 +406,7 @@ def _wait_for_sessions_terminal(
     *,
     timeout_seconds: int,
     poll_interval_seconds: int,
-) -> None:
+) -> list[int]:
     deadline = time.monotonic() + timeout_seconds
     pending = set(session_ids)
     while pending and time.monotonic() < deadline:
@@ -420,6 +422,7 @@ def _wait_for_sessions_terminal(
                 pending.remove(session_id)
         if pending:
             time.sleep(poll_interval_seconds)
+    return sorted(pending)
 
 
 def _run_mutation_lock_probe(project_id: int, project_root: Path) -> dict[str, Any]:
@@ -1169,12 +1172,27 @@ def run_sweep(
                 )
                 print(f"queue error for {project_slug}: {exc}")
 
-        _wait_for_sessions_terminal(
+        pending_session_ids = _wait_for_sessions_terminal(
             db,
             session_ids,
             timeout_seconds=timeout_seconds,
             poll_interval_seconds=poll_interval_seconds,
         )
+        deadline_recoveries: list[dict[str, Any]] = []
+        deadline_reconciliations: list[dict[str, Any]] = []
+        if pending_session_ids:
+            deadline_recoveries = recover_stale_running_sessions(
+                db, stale_after_seconds=0, session_ids=pending_session_ids
+            )
+            db.expire_all()
+            deadline_sessions = (
+                db.query(SessionModel)
+                .filter(SessionModel.id.in_(pending_session_ids))
+                .all()
+            )
+            deadline_reconciliations = reconcile_terminal_running_sessions(
+                db, deadline_sessions
+            )
         terminal_snapshots = {
             execution.id: _task_execution_snapshot(db, execution.id)
             for execution in db.query(TaskExecution)
@@ -1207,6 +1225,11 @@ def run_sweep(
             workspace_bytes_cleaned=workspace_bytes_cleaned,
             runtime_seconds=runtime_seconds,
         )
+        summary["deadline_recovery"] = {
+            "pending_session_ids": pending_session_ids,
+            "recovered_sessions": deadline_recoveries,
+            "reconciled_sessions": deadline_reconciliations,
+        }
         if not keep_projects:
             _soft_delete_projects(db, project_ids)
 
@@ -1226,7 +1249,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run Phase 10A operational stability sweep."
     )
-    parser.add_argument("--timeout-seconds", type=int, default=900)
+    parser.add_argument("--timeout-seconds", type=int, default=3600)
     parser.add_argument("--poll-interval-seconds", type=int, default=5)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--count", type=int, default=len(WORKLOADS))

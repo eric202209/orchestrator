@@ -316,6 +316,11 @@ def execute_planning_phase(
             workspace_has_existing_files=getattr(
                 ctx, "workspace_has_existing_files", False
             ),
+            knowledge_context=(
+                planning_knowledge_ctx
+                if planning_knowledge_ctx and planning_knowledge_ctx.retrieved_items
+                else None
+            ),
         )
     else:
         planning_result = asyncio.run(
@@ -421,6 +426,11 @@ def execute_planning_phase(
             workflow_phases=getattr(ctx, "workflow_phases", []),
             workspace_has_existing_files=getattr(
                 ctx, "workspace_has_existing_files", False
+            ),
+            knowledge_context=(
+                planning_knowledge_ctx
+                if planning_knowledge_ctx and planning_knowledge_ctx.retrieved_items
+                else None
             ),
         )
         used_minimal_planning_prompt = True
@@ -545,6 +555,7 @@ def execute_planning_phase(
                     planning_timeout_seconds=planning_timeout_seconds,
                     reason=f"json_parse_failed: {output_text[:240]}",
                     prompt_profile=prompt_profile,
+                    knowledge_context=planning_knowledge_ctx,
                 )
                 retry_state.minimal_prompt_used = True
                 retry_state.consecutive_failures += 1
@@ -656,6 +667,7 @@ def execute_planning_phase(
                     planning_timeout_seconds=planning_timeout_seconds,
                     reason=f"unexpected_plan_shape: {str(plan_data)[:240]}",
                     prompt_profile=prompt_profile,
+                    knowledge_context=planning_knowledge_ctx,
                 )
                 retry_state.minimal_prompt_used = True
                 retry_state.consecutive_failures += 1
@@ -691,6 +703,54 @@ def execute_planning_phase(
                     malformed_output=output_text,
                     reason="unexpected_plan_shape_after_minimal",
                     prompt_profile=prompt_profile,
+                )
+                retry_state.repair_prompt_used = True
+                retry_state.consecutive_failures += 1
+                continue
+
+            repair_shrank_multistep_plan = False
+            single_step_full_lifecycle_plan = False
+            if isinstance(extracted_plan, list):
+                if len(extracted_plan) > 1:
+                    retry_state.last_multistep_plan_step_count = max(
+                        retry_state.last_multistep_plan_step_count,
+                        len(extracted_plan),
+                    )
+                elif (
+                    len(extracted_plan) == 1
+                    and retry_state.repair_prompt_used
+                    and retry_state.last_multistep_plan_step_count > 1
+                ):
+                    repair_shrank_multistep_plan = True
+                elif (
+                    len(extracted_plan) == 1
+                    and ctx.execution_profile == "full_lifecycle"
+                    and bool(getattr(ctx, "workspace_has_existing_files", False))
+                ):
+                    single_step_full_lifecycle_plan = True
+
+            if single_step_full_lifecycle_plan and not retry_state.repair_prompt_used:
+                contract_violations = [
+                    "Full-lifecycle planning must return separate inspect, implementation, and verification steps"
+                ]
+                _emit_planning_diagnostics_contract_violation(
+                    ctx,
+                    reason="single_step_full_lifecycle_plan",
+                    contract_violations=contract_violations,
+                    output_text=output_text,
+                    strategy_info="single_step_full_lifecycle_plan",
+                )
+                retry_state.last_repair_reason = "single_step_full_lifecycle_plan"
+                planning_result = __repair_planning_output(
+                    ctx=ctx,
+                    planning_timeout_seconds=planning_timeout_seconds,
+                    malformed_output=output_text,
+                    reason="single_step_full_lifecycle_plan",
+                    rejection_reasons=[
+                        "Return 3 or 4 separate step objects: inspect current workspace, implement the requested change, and verify behavior/content. Do not merge the full task into one step."
+                    ],
+                    prompt_profile=prompt_profile,
+                    knowledge_context=planning_knowledge_ctx,
                 )
                 retry_state.repair_prompt_used = True
                 retry_state.consecutive_failures += 1
@@ -770,6 +830,7 @@ def execute_planning_phase(
                         planning_timeout_seconds=planning_timeout_seconds,
                         reason="truncated_multistep_plan_detected",
                         prompt_profile=prompt_profile,
+                        knowledge_context=planning_knowledge_ctx,
                     )
                     retry_state.minimal_prompt_used = True
                     retry_state.consecutive_failures += 1
@@ -812,49 +873,82 @@ def execute_planning_phase(
                 retry_state.consecutive_failures += 1
                 continue
 
-            if looks_like_truncated_multistep_plan(output_text, extracted_plan):
+            if (
+                looks_like_truncated_multistep_plan(output_text, extracted_plan)
+                or repair_shrank_multistep_plan
+                or (single_step_full_lifecycle_plan and retry_state.repair_prompt_used)
+            ):
                 truncated_diagnostics = _truncated_multistep_collapse_diagnostics(
                     output_text=output_text,
                     extracted_plan=extracted_plan,
                     repair_stage="after_first_repair",
                 )
+                if repair_shrank_multistep_plan:
+                    truncated_diagnostics["truncated_multistep_original_step_count"] = (
+                        retry_state.last_multistep_plan_step_count
+                    )
+                    truncated_diagnostics["truncated_multistep_subcodes"] = list(
+                        dict.fromkeys(
+                            list(
+                                truncated_diagnostics.get(
+                                    "truncated_multistep_subcodes"
+                                )
+                                or []
+                            )
+                            + [
+                                "repair_shrank_previously_valid_multistep_plan",
+                                (
+                                    "original_steps_detected_"
+                                    f"{retry_state.last_multistep_plan_step_count}"
+                                ),
+                            ]
+                        )
+                    )
+                failure_type = (
+                    "single_step_full_lifecycle_plan_after_repair"
+                    if (
+                        single_step_full_lifecycle_plan
+                        and retry_state.repair_prompt_used
+                    )
+                    else "truncated_multistep_plan_after_retry"
+                )
                 ctx.orchestration_state.status = OrchestrationStatus.ABORTED
                 ctx.orchestration_state.abort_reason = (
-                    "Planning output collapsed a multi-step plan into a single step"
+                    "Planning output collapsed into a single-step plan"
                 )
                 emit_phase_event(
                     ctx.orchestration_state,
                     ctx.emit_live,
                     level="ERROR",
                     phase="planning",
-                    message="[ORCHESTRATION] Planning output was truncated into a single-step plan",
-                    details={"reason": "truncated_multistep_plan_after_retry"},
+                    message="[ORCHESTRATION] Planning output was still a single-step plan after repair",
+                    details={"reason": failure_type},
                 )
                 _emit_planning_diagnostics_contract_violation(
                     ctx,
-                    reason="truncated_multistep_plan_after_retry",
+                    reason=failure_type,
                     contract_violations=[
-                        "truncated multi-step plan collapsed into a single step"
+                        "full-lifecycle planning returned a single-step plan after repair"
                     ],
                     contract_diagnostics=truncated_diagnostics,
                     output_text=output_text,
-                    strategy_info="truncated_multistep_plan_after_retry",
+                    strategy_info=failure_type,
                 )
                 _finalize_planning_terminal_failure(
                     ctx=ctx,
-                    failure_type="truncated_multistep_plan_after_retry",
+                    failure_type=failure_type,
                     failure_reason=(
-                        "Planning output collapsed a multi-step plan into a single "
-                        "step after retry. The run was stopped to avoid a false success."
+                        "Planning output was still a single-step plan after repair. "
+                        "The run was stopped to avoid a false success."
                     ),
                 )
                 if ctx.restore_workspace_snapshot_if_needed:
                     ctx.restore_workspace_snapshot_if_needed(
-                        "truncated multi-step plan"
+                        "single-step full-lifecycle plan"
                     )
                 return {
                     "status": "failed",
-                    "reason": "truncated_multistep_plan_after_retry",
+                    "reason": failure_type,
                 }
 
             if extracted_plan is None:
@@ -1768,6 +1862,7 @@ def __retry_with_minimal_prompt(
     planning_timeout_seconds: int,
     reason: str,
     prompt_profile: str = "default",
+    knowledge_context: KnowledgeContext | None = None,
 ) -> Dict[str, Any]:
     return PlannerService.retry_with_minimal_prompt(
         runtime_service=ctx.runtime_service,
@@ -1782,6 +1877,11 @@ def __retry_with_minimal_prompt(
         workflow_phases=getattr(ctx, "workflow_phases", []),
         workspace_has_existing_files=getattr(
             ctx, "workspace_has_existing_files", False
+        ),
+        knowledge_context=(
+            knowledge_context
+            if knowledge_context and knowledge_context.retrieved_items
+            else None
         ),
     )
 

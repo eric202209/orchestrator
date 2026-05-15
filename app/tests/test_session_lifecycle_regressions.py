@@ -23,6 +23,7 @@ from app.models import (
 )
 from app.services.session.session_lifecycle_service import (
     pause_session_lifecycle,
+    recover_stale_running_sessions,
     reconcile_terminal_running_sessions,
     resume_session_lifecycle,
     start_session_lifecycle,
@@ -218,6 +219,76 @@ def test_reconcile_keeps_running_session_with_running_execution(db_session):
     assert reconciled == []
     assert session.status == "running"
     assert session.is_active is True
+
+
+def test_recover_stale_running_session_cancels_active_execution(
+    db_session, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service._record_failure_knowledge_for_recovery",
+        lambda *args, **kwargs: False,
+    )
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="running", is_active=True)
+    task = _make_task(db_session, project, status=TaskStatus.RUNNING)
+    link = SessionTask(
+        session_id=session.id,
+        task_id=task.id,
+        status=TaskStatus.RUNNING,
+        started_at=datetime(2026, 1, 1, 0, 0, 0),
+    )
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.RUNNING,
+        started_at=datetime(2026, 1, 1, 0, 0, 0),
+    )
+    db_session.add_all([link, execution])
+    db_session.commit()
+
+    recovered = recover_stale_running_sessions(db_session, stale_after_seconds=0)
+
+    db_session.refresh(session)
+    db_session.refresh(task)
+    db_session.refresh(link)
+    db_session.refresh(execution)
+    assert recovered == [
+        {
+            "session_id": session.id,
+            "task_id": task.id,
+            "stop_reason": "hard_time_limit_or_worker_killed",
+            "knowledge_recorded": False,
+        }
+    ]
+    assert session.status == "stopped"
+    assert session.is_active is False
+    assert task.status == TaskStatus.PENDING
+    assert link.status == TaskStatus.PENDING
+    assert execution.status == TaskStatus.CANCELLED
+    assert execution.completed_at is not None
+
+
+def test_recover_stale_running_session_stops_shell_without_active_task(db_session):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="running", is_active=True)
+    session.started_at = datetime(2026, 1, 1, 0, 0, 0)
+    db_session.commit()
+
+    recovered = recover_stale_running_sessions(db_session, stale_after_seconds=0)
+
+    db_session.refresh(session)
+    assert recovered == [
+        {
+            "session_id": session.id,
+            "task_id": None,
+            "stop_reason": "running_session_without_active_task",
+            "knowledge_recorded": False,
+        }
+    ]
+    assert session.status == "stopped"
+    assert session.is_active is False
+    assert session.last_alert_level == "warn"
 
 
 def test_maybe_queue_next_automatic_task_ignores_pending_links(db_session, monkeypatch):
