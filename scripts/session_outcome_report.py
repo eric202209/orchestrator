@@ -339,6 +339,128 @@ def _outcome_rates(
     return rates, counts
 
 
+def _rate(numerator: int, denominator: int) -> float:
+    return round(numerator / denominator, 4) if denominator else 0.0
+
+
+def _task_outcome_rates(conn: sqlite3.Connection, *, limit: int) -> dict[str, Any]:
+    tasks = _rows(
+        conn,
+        """
+        select t.id, t.status
+        from tasks t
+        join projects p on p.id = t.project_id
+        where p.deleted_at is null
+        order by t.id desc
+        limit ?
+        """,
+        (limit,),
+    )
+    task_ids = [int(row["id"]) for row in tasks]
+    if task_ids:
+        placeholders = ",".join("?" * len(task_ids))
+        executions = _rows(
+            conn,
+            f"""
+            select id, task_id, attempt_number, status
+            from task_executions
+            where task_id in ({placeholders})
+            order by task_id, attempt_number, id
+            """,
+            tuple(task_ids),
+        )
+    else:
+        executions = []
+
+    executions_by_task: dict[int, list[dict[str, Any]]] = {}
+    for row in executions:
+        executions_by_task.setdefault(int(row["task_id"]), []).append(row)
+
+    counts = {
+        "first_pass_success": 0,
+        "recovered_success": 0,
+        "final_done": 0,
+        "final_failed": 0,
+        "in_progress": 0,
+    }
+    evidence: list[dict[str, Any]] = []
+    done_statuses = {"done", "completed", "success", "succeeded"}
+    failed_statuses = {"failed", "cancelled"}
+
+    for task in tasks:
+        task_id = int(task["id"])
+        task_status = _status(task.get("status"))
+        attempts = executions_by_task.get(task_id, [])
+        attempt_statuses = [_status(row.get("status")) for row in attempts]
+        done_attempts = sum(1 for status in attempt_statuses if status in done_statuses)
+        failed_attempts = sum(
+            1 for status in attempt_statuses if status in failed_statuses
+        )
+
+        first_pass = (
+            task_status == "done"
+            and len(attempts) == 1
+            and done_attempts == 1
+            and int(attempts[0].get("attempt_number") or 1) == 1
+            and failed_attempts == 0
+        )
+        recovered = (
+            task_status == "done"
+            and done_attempts > 0
+            and not first_pass
+            and (len(attempts) > 1 or failed_attempts > 0)
+        )
+
+        if task_status == "done":
+            counts["final_done"] += 1
+        elif task_status in failed_statuses:
+            counts["final_failed"] += 1
+        elif task_status in {"pending", "running", "active"}:
+            counts["in_progress"] += 1
+        if first_pass:
+            counts["first_pass_success"] += 1
+        if recovered:
+            counts["recovered_success"] += 1
+
+        evidence.append(
+            {
+                "task_id": task_id,
+                "final_status": task_status or "unknown",
+                "attempt_count": len(attempts),
+                "failed_attempt_count": failed_attempts,
+                "first_pass_success": first_pass,
+                "recovered_success": recovered,
+            }
+        )
+
+    total = len(tasks)
+    execution_attempts_done = sum(
+        1 for row in executions if _status(row.get("status")) in done_statuses
+    )
+    rates = {
+        f"{key}_rate": _rate(value, total)
+        for key, value in counts.items()
+        if key != "final_done"
+    }
+    rates["final_success_rate"] = _rate(counts["final_done"], total)
+    rates["attempt_success_rate"] = _rate(execution_attempts_done, len(executions))
+
+    return {
+        "total": total,
+        "counts": counts,
+        "rates": rates,
+        "execution_attempts": len(executions),
+        "execution_attempts_done": execution_attempts_done,
+        "first_pass_task_ids": [
+            row["task_id"] for row in evidence if row["first_pass_success"]
+        ],
+        "recovered_task_ids": [
+            row["task_id"] for row in evidence if row["recovered_success"]
+        ],
+        "task_evidence": evidence,
+    }
+
+
 def _operator_review_count(conn: sqlite3.Connection) -> int:
     try:
         row = _one(
@@ -399,11 +521,7 @@ def build_report(
 
     rates, oc_counts = _outcome_rates(session_reports)
 
-    repair_counts = [
-        1
-        for row in session_reports
-        if row["repair_used"]
-    ]
+    repair_counts = [1 for row in session_reports if row["repair_used"]]
     replan_counts: list[float] = []  # replan_count not tracked per-session yet
 
     return {
@@ -438,9 +556,11 @@ def build_report(
             "runtime_logs_missing_task_execution_id": runtime_missing,
             "outcome_rates": rates,
             "outcome_counts": oc_counts,
-            "avg_repair_count": round(len(repair_counts) / len(session_reports), 4)
-            if session_reports
-            else 0.0,
+            "avg_repair_count": (
+                round(len(repair_counts) / len(session_reports), 4)
+                if session_reports
+                else 0.0
+            ),
             "avg_replan_count": 0.0,
             "operator_review_count": _operator_review_count(conn),
         },

@@ -22,6 +22,10 @@ celery_app.conf.update(
     result_serializer="json",
     timezone="UTC",
     enable_utc=True,
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
+    task_acks_on_failure_or_timeout=True,
+    worker_prefetch_multiplier=1,
 )
 
 # Ensure tasks are registered when workers start with `-A app.celery_app worker`.

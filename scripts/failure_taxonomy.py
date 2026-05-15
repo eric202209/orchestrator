@@ -15,6 +15,9 @@ TERMINAL_REASON_PRIORITY = (
     "planning_invalid_commands_after_repair",
     "planning_context_overflow",
     "planning_openclaw_lock_contention",
+    "project_mutation_lock_conflict",
+    "openclaw_timeout",
+    "debug_parse_error",
     "planning_timeout",
     "repair_output_contract_violation",
     "planning_repair_no_output_timeout",
@@ -33,6 +36,8 @@ KNOWN_TERMINAL_REASONS = {
     "planning_invalid_commands_after_repair",
     "planning_context_overflow",
     "planning_openclaw_lock_contention",
+    "project_mutation_lock_conflict",
+    "openclaw_timeout",
     "malformed_planning_output_repair_timeout",
     "planning_json_error",
     "planning_parse_error",
@@ -60,6 +65,7 @@ KNOWN_TERMINAL_REASONS = {
     "missing_dependency",
     "syntax_error",
     "runtime_assertion_failure",
+    "debug_parse_error",
     # System / lifecycle failures
     "baseline_publish_validation_failed",
     "agent_requested_human_intervention",
@@ -191,6 +197,38 @@ def _has_repair_evidence(metadata_rows: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _int_value(value: Any, default: int = 0) -> int:
+    try:
+        return int(value if value is not None else default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _latest_task_executions(
+    task_executions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    latest_by_task: dict[Any, dict[str, Any]] = {}
+    for index, row in enumerate(task_executions):
+        task_key = row.get("task_id")
+        if task_key is None:
+            task_key = ("row", index)
+        current = latest_by_task.get(task_key)
+        if current is None:
+            latest_by_task[task_key] = row
+            continue
+        row_order = (
+            _int_value(row.get("attempt_number"), 1),
+            _int_value(row.get("id")),
+        )
+        current_order = (
+            _int_value(current.get("attempt_number"), 1),
+            _int_value(current.get("id")),
+        )
+        if row_order >= current_order:
+            latest_by_task[task_key] = row
+    return list(latest_by_task.values())
+
+
 def outcome_class(
     session_row: dict[str, Any],
     task_executions: list[dict[str, Any]],
@@ -216,9 +254,7 @@ def outcome_class(
         if started:
             try:
                 if isinstance(started, str):
-                    started_dt = datetime.fromisoformat(
-                        started.replace("Z", "+00:00")
-                    )
+                    started_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
                     if started_dt.tzinfo is None:
                         started_dt = started_dt.replace(tzinfo=UTC)
                 else:
@@ -230,23 +266,27 @@ def outcome_class(
                 pass
         return "in_progress"
 
-    # Task executions still in running/pending after session stopped = stuck
+    final_task_executions = _latest_task_executions(task_executions)
+
+    # Task executions still in running/pending after session stopped = stuck.
+    # Retries can leave older failed executions behind, so only the latest
+    # execution per task determines whether that task is still active.
     active_executions = [
         r
-        for r in task_executions
+        for r in final_task_executions
         if status_key(r.get("status")) in ("running", "pending", "active")
     ]
     if active_executions:
         return "stuck_or_manual_db_cleanup"
 
     # Sessions in this system end as "stopped" even on success — treat as done
-    # when session is stopped/terminal AND all executions reached a done status.
-    all_executions_done = bool(task_executions) and all(
-        status_key(r.get("status")) in DONE_STATUSES
-        for r in task_executions
+    # when session is stopped/terminal AND the latest execution for every task
+    # reached a done status.
+    all_tasks_done = bool(final_task_executions) and all(
+        status_key(r.get("status")) in DONE_STATUSES for r in final_task_executions
     )
     is_done = session_status in DONE_STATUSES or (
-        session_status in TERMINAL_SESSION_STATUSES and all_executions_done
+        session_status in TERMINAL_SESSION_STATUSES and all_tasks_done
     )
 
     if is_done:
@@ -254,8 +294,12 @@ def outcome_class(
             (int(row.get("attempt_number") or 1) for row in task_executions),
             default=1,
         )
+        had_failed_attempt = any(
+            status_key(row.get("status")) in FAILED_EXECUTION_STATUSES
+            for row in task_executions
+        )
         repair_used = _has_repair_evidence(metadata_rows)
-        if max_attempt == 1 and not repair_used:
+        if max_attempt == 1 and not repair_used and not had_failed_attempt:
             return "first_pass_success"
         return "recovered_success"
 

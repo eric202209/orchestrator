@@ -134,6 +134,9 @@ from app.tasks.worker_support.worker_helpers import (
     default_retry_delay=60,
     time_limit=ORCHESTRATION_TASK_TIME_LIMIT_SECONDS,
     soft_time_limit=ORCHESTRATION_TASK_SOFT_TIME_LIMIT_SECONDS,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    acks_on_failure_or_timeout=True,
     queue="celery",
 )
 def execute_orchestration_task(
@@ -1282,6 +1285,14 @@ def execute_orchestration_task(
                     ),
                 )
             if planning_phase_result.get("status") != "completed":
+                mark_session_paused(
+                    session,
+                    alert_level="error",
+                    alert_message=str(
+                        planning_phase_result.get("reason") or "planning_failed"
+                    )[:2000],
+                )
+                db.commit()
                 update_langfuse_observation(
                     trace_observation,
                     output=planning_phase_result,
@@ -1378,6 +1389,15 @@ def execute_orchestration_task(
             level="ERROR" if step_loop_result.get("status") == "failed" else None,
             status_message=str(step_loop_result.get("reason") or "")[:500] or None,
         )
+        if step_loop_result.get("status") == "failed":
+            mark_session_paused(
+                session,
+                alert_level="error",
+                alert_message=str(step_loop_result.get("reason") or "task_failed")[
+                    :2000
+                ],
+            )
+            db.commit()
         return step_loop_result
 
     except Exception as exc:

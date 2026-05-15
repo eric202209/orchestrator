@@ -79,6 +79,7 @@ class KnowledgeService:
         else:
             self._client = QdrantClient(url=qdrant_url)
         self._collection = collection_name
+        self._qdrant_available = True
 
         provider = _resolve_provider()
         if provider == "ollama":
@@ -101,7 +102,10 @@ class KnowledgeService:
         self._embedding_dim = (
             embedding_dim if embedding_dim > 0 else _resolve_dim(provider)
         )
-        self._ensure_collection()
+        try:
+            self._ensure_collection()
+        except Exception:
+            self._qdrant_available = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -253,6 +257,8 @@ class KnowledgeService:
         return result.points
 
     def _has_indexed_points(self) -> bool:
+        if not self._qdrant_available:
+            return False
         try:
             return (
                 int(self._client.count(collection_name=self._collection).count or 0) > 0

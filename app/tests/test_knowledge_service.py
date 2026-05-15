@@ -252,6 +252,25 @@ def test_qdrant_unavailable_returns_sqlite_fallback(svc, db):
     assert ctx.confidence == 0.3
 
 
+def test_qdrant_unavailable_during_startup_still_returns_sqlite_fallback(db):
+    _make_item(db, title="Startup Fallback", knowledge_type=KnowledgeType.format_guide)
+
+    with patch.object(
+        KnowledgeService, "_ensure_collection", side_effect=Exception("Qdrant down")
+    ):
+        svc = KnowledgeService(qdrant_url="http://127.0.0.1:1")
+
+    ctx = svc.retrieve(
+        query="format guide",
+        trigger_phase="planning",
+        knowledge_types=[KnowledgeType.format_guide],
+        db=db,
+    )
+
+    assert any(ref.title == "Startup Fallback" for ref in ctx.retrieved_items)
+    assert ctx.retrieval_reason == "sqlite_fallback_qdrant_or_embedding_unavailable"
+
+
 def test_embedding_failure_returns_sqlite_fallback(svc, db):
     _make_item(db, title="Fallback Embed", knowledge_type=KnowledgeType.format_guide)
     with patch.object(svc, "_embed", side_effect=Exception("OpenAI down")):

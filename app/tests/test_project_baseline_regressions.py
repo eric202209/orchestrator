@@ -874,6 +874,77 @@ def test_manual_promote_rejects_active_project_mutation_lock(
     assert task_dir.exists()
 
 
+def test_manual_promote_rejects_when_later_project_task_is_running(
+    authenticated_client,
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "manual-promote-running-task"
+    project_root.mkdir(parents=True)
+    project = Project(
+        name="manual-promote-running-task",
+        workspace_path=str(project_root),
+    )
+    db_session.add(project)
+    db_session.flush()
+
+    task_dir = project_root / "task-ready"
+    task_dir.mkdir()
+    (task_dir / "README.md").write_text("ready", encoding="utf-8")
+    done_task = Task(
+        project_id=project.id,
+        title="Ready task",
+        description="Accepted manually",
+        status=TaskStatus.DONE,
+        workspace_status="ready",
+        task_subfolder="task-ready",
+        plan_position=1,
+    )
+    running_task = Task(
+        project_id=project.id,
+        title="Active follow-up",
+        description="Still running",
+        status=TaskStatus.RUNNING,
+        workspace_status="in_progress",
+        task_subfolder="task-running",
+        plan_position=2,
+    )
+    session = SessionModel(project_id=project.id, name="manual-promote-running-task")
+    db_session.add_all([done_task, running_task, session])
+    db_session.commit()
+    db_session.refresh(done_task)
+    db_session.refresh(session)
+
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=done_task.id,
+        attempt_number=1,
+        status=TaskStatus.DONE,
+    )
+    db_session.add(execution)
+    db_session.commit()
+    db_session.refresh(execution)
+    TaskService(db_session).persist_task_execution_change_set(
+        project,
+        done_task,
+        session_id=session.id,
+        task_execution_id=execution.id,
+        snapshot_key=workspace_snapshot_key(done_task.id, execution.id),
+        target_dir=task_dir,
+    )
+
+    response = authenticated_client.post(
+        f"/api/v1/tasks/{done_task.id}/accept",
+        json={"note": "accepted", "task_execution_id": execution.id},
+    )
+
+    assert response.status_code == 409
+    assert "another task in the same project is running" in response.json()["detail"]
+    db_session.refresh(done_task)
+    assert done_task.workspace_status == "ready"
+    assert task_dir.exists()
+
+
 def test_manual_promote_endpoint_rejects_stale_task_execution_id(
     authenticated_client,
     db_session,

@@ -156,8 +156,8 @@ def get_outcome_rates(
             _outcome_rates,
             _operator_review_count,
             _rows,
-            _one,
             _session_report,
+            _task_outcome_rates,
         )
     except ImportError as exc:
         return {"error": f"scripts not importable: {exc}"}
@@ -187,6 +187,7 @@ def get_outcome_rates(
             _session_report(conn, session=s, check_timeline=False) for s in sessions
         ]
         rates, oc_counts = _outcome_rates(session_reports)
+        task_outcomes = _task_outcome_rates(conn, limit=limit)
         op_review = _operator_review_count(conn)
         conn.close()
     except Exception as exc:
@@ -209,6 +210,8 @@ def get_outcome_rates(
         "sessions_analyzed": len(session_reports),
         "outcome_rates": rates,
         "outcome_counts": oc_counts,
+        "classified_sessions": sum(oc_counts.values()),
+        "task_outcomes": task_outcomes,
         "operator_review_count": op_review,
         "gate_pass": gate_pass,
         "stuck_sessions": stuck_sessions,

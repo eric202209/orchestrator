@@ -910,8 +910,18 @@ export const adminAPI = {
     apiClient.get<{
       computed_at: string;
       sessions_analyzed: number;
+      classified_sessions?: number;
       outcome_rates: Record<string, number>;
       outcome_counts: Record<string, number>;
+      task_outcomes?: {
+        total: number;
+        counts: Record<string, number>;
+        rates: Record<string, number>;
+        execution_attempts: number;
+        execution_attempts_done: number;
+        first_pass_task_ids: number[];
+        recovered_task_ids: number[];
+      };
       operator_review_count: number;
       gate_pass: boolean;
       stuck_sessions: Array<{ session_id: number; status: string; terminal_class: string }>;

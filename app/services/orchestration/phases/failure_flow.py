@@ -104,6 +104,15 @@ def handle_task_failure(
         or "timeout" in str(exc).lower()
         or "timed out" in str(exc).lower()
     )
+    diagnostic_reason = None
+    if is_project_mutation_lock_conflict:
+        diagnostic_reason = "project_mutation_lock_conflict"
+    elif is_planning_lock_wait_timeout:
+        diagnostic_reason = "planning_openclaw_lock_contention"
+    elif is_timeout:
+        diagnostic_reason = "openclaw_timeout"
+    elif "parse" in str(exc).lower():
+        diagnostic_reason = "debug_parse_error"
     non_restoring_failure_markers = (
         "completion validation failed",
         "baseline publish validation failed",
@@ -198,6 +207,7 @@ def handle_task_failure(
                     "is_timeout": is_timeout,
                     "planning_lock_wait_timeout": is_planning_lock_wait_timeout,
                     "project_mutation_lock_conflict": is_project_mutation_lock_conflict,
+                    "reason": diagnostic_reason,
                 },
             )
             save_orchestration_checkpoint_fn(
@@ -350,6 +360,7 @@ def handle_task_failure(
                         "alarm": True,
                         "execution_mode": session.execution_mode,
                         "task_id": task_id,
+                        "reason": diagnostic_reason,
                     }
                 ),
             )

@@ -237,6 +237,12 @@ def test_worker_soft_time_limit_allows_planning_retries_and_execution_headroom()
     assert execute_orchestration_task.time_limit == 3600
 
 
+def test_worker_task_requeues_orchestration_on_worker_loss():
+    assert execute_orchestration_task.acks_late is True
+    assert execute_orchestration_task.reject_on_worker_lost is True
+    assert execute_orchestration_task.acks_on_failure_or_timeout is True
+
+
 def test_qwen_local_prompt_profile_enforces_array_only_output():
     profile = PlannerService.select_prompt_profile("local_openclaw", "qwen-local")
     prompt = PlannerService.build_minimal_planning_prompt(

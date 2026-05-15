@@ -224,6 +224,7 @@ function ProjectDetail() {
     (total, item) => total + (item.change_set?.changed_count || 0),
     0
   );
+  const activeProjectTask = tasks.find((task) => task.status === 'running') || null;
   const getTaskIconColors = (status: string) => {
     switch (status) {
       case 'done': return 'text-emerald-400 bg-emerald-400/10';
@@ -256,6 +257,10 @@ function ProjectDetail() {
       ?.baseline_diff || null;
 
   const openAcceptTask = (task: Task, taskExecutionId?: number | null) => {
+    if (activeProjectTask && activeProjectTask.id !== task.id) {
+      alert(`Wait for the active task to finish before accepting workspaces: ${activeProjectTask.title}`);
+      return;
+    }
     const pendingChangeSet = pendingChangeSets.find((item) => item.task_id === task.id);
     setAcceptTask(task);
     setAcceptTaskExecutionId(taskExecutionId || pendingChangeSet?.task_execution_id || null);
@@ -282,7 +287,8 @@ function ProjectDetail() {
       setAcceptTaskExecutionId(null);
     } catch (error) {
       console.error('Failed to accept task workspace:', error);
-      alert('Failed to accept task workspace. Please try again.');
+      const detail = (error as any)?.response?.data?.detail;
+      alert(detail || 'Failed to accept task workspace. Please try again.');
     } finally {
       setAcceptingWorkspace(false);
     }
@@ -885,10 +891,16 @@ function ProjectDetail() {
             <div className="grid gap-3">
               {pendingChangeSets.map((item) => {
                 const reviewTask = tasks.find((task) => task.id === item.task_id) || null;
-                const canAccept = Boolean(
+                const canShowAccept = Boolean(
                   reviewTask?.status === 'done' &&
                     reviewTask?.task_subfolder &&
                     reviewTask?.workspace_status !== 'promoted'
+                );
+                const acceptBlockedByActiveTask = Boolean(
+                  canShowAccept &&
+                    activeProjectTask &&
+                    reviewTask &&
+                    activeProjectTask.id !== reviewTask.id
                 );
                 const canRequestChanges = Boolean(
                   reviewTask?.task_subfolder && reviewTask?.workspace_status !== 'promoted'
@@ -946,13 +958,15 @@ function ProjectDetail() {
                     >
                       Open task review
                     </Link>
-                    {canAccept && reviewTask && (
+                    {canShowAccept && reviewTask && (
                       <button
                         type="button"
                         onClick={() => openAcceptTask(reviewTask, item.task_execution_id)}
-                        className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs text-emerald-200 transition-colors hover:bg-emerald-500/15"
+                        disabled={acceptBlockedByActiveTask}
+                        title={acceptBlockedByActiveTask ? `Wait for active task to finish: ${activeProjectTask?.title}` : undefined}
+                        className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs text-emerald-200 transition-colors hover:bg-emerald-500/15 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-800/60 disabled:text-slate-500"
                       >
-                        Accept
+                        {acceptBlockedByActiveTask ? 'Accept after active task' : 'Accept'}
                       </button>
                     )}
                     {canRequestChanges && reviewTask && (
@@ -1264,9 +1278,12 @@ function ProjectDetail() {
                             {task.status === 'done' && task.task_subfolder && task.workspace_status !== 'promoted' && (
                               <button
                                 onClick={() => openAcceptTask(task)}
+                                disabled={Boolean(activeProjectTask && activeProjectTask.id !== task.id)}
                                 className="w-full rounded-md px-2.5 py-2 text-left text-xs text-emerald-300 transition-colors hover:bg-emerald-950/40"
                               >
-                                Accept workspace
+                                {activeProjectTask && activeProjectTask.id !== task.id
+                                  ? 'Accept after active task finishes'
+                                  : 'Accept workspace'}
                               </button>
                             )}
                             {task.task_subfolder && task.workspace_status !== 'promoted' && (
@@ -1316,6 +1333,9 @@ function ProjectDetail() {
             <h3 className="text-sm font-semibold text-white">Accept Workspace</h3>
             {(() => {
               const diff = getTaskWorkspaceDiff(acceptTask);
+              const acceptBlockedByActiveTask = Boolean(
+                activeProjectTask && activeProjectTask.id !== acceptTask.id
+              );
               const changedFiles = [
                 ...(diff?.added_files || []).map((path) => ({ path, type: 'Added' })),
                 ...(diff?.modified_files || []).map((path) => ({ path, type: 'Modified' })),
@@ -1350,6 +1370,11 @@ function ProjectDetail() {
                       </div>
                     )}
                   </div>
+                  {acceptBlockedByActiveTask && (
+                    <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-100">
+                      Wait for the active task to finish before accepting this workspace: {activeProjectTask?.title}
+                    </div>
+                  )}
                   <div>
                     <label className="mb-1.5 block text-xs font-medium text-slate-300">
                       Acceptance note
@@ -1377,7 +1402,7 @@ function ProjectDetail() {
                     <button
                       type="button"
                       onClick={submitAcceptTask}
-                      disabled={acceptingWorkspace}
+                      disabled={acceptingWorkspace || acceptBlockedByActiveTask}
                       className="flex-1 rounded-md border border-emerald-500/30 bg-emerald-500/15 px-3 py-2 text-sm text-emerald-200 transition-colors hover:bg-emerald-500/20 disabled:opacity-50"
                     >
                       {acceptingWorkspace ? 'Accepting...' : 'Accept Workspace'}

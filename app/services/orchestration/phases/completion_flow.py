@@ -113,6 +113,86 @@ _VISIBLE_TEXT_KEYS = {
 }
 
 
+def _deterministic_task_summary(orchestration_state: Any) -> str:
+    changed_files = list(
+        dict.fromkeys(
+            path
+            for result in (getattr(orchestration_state, "execution_results", []) or [])
+            for path in (getattr(result, "files_changed", []) or [])
+            if str(path).strip()
+        )
+    )
+    completed_steps = sum(
+        1
+        for result in (getattr(orchestration_state, "execution_results", []) or [])
+        if getattr(result, "status", "") == "completed"
+    )
+    total_steps = len(getattr(orchestration_state, "plan", []) or [])
+    file_summary = ", ".join(changed_files[:10]) if changed_files else "none recorded"
+    return (
+        "Task completed with verified execution evidence. "
+        f"Completed steps: {completed_steps}/{total_steps}. "
+        f"Changed files: {file_summary}."
+    )
+
+
+def _generate_task_summary_with_fallback(
+    *,
+    ctx: OrchestrationRunContext,
+    summary_prompt: str,
+) -> Dict[str, Any]:
+    if os.getenv("ORCHESTRATOR_GENERATE_LLM_TASK_SUMMARY", "").lower() not in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return {
+            "status": "completed",
+            "output": _deterministic_task_summary(ctx.orchestration_state),
+            "fallback": True,
+            "source": "deterministic",
+        }
+
+    try:
+        summary_result = asyncio.run(
+            ctx.runtime_service.execute_task(
+                summary_prompt, timeout_seconds=SUMMARY_TIMEOUT_SECONDS
+            )
+        )
+    except Exception as exc:
+        fallback_summary = _deterministic_task_summary(ctx.orchestration_state)
+        ctx.emit_live(
+            "WARN",
+            "[ORCHESTRATION] Task summary generation failed; using deterministic completion summary",
+            metadata={
+                "phase": "task_summary",
+                "reason": "summary_generation_failed",
+                "error": str(exc)[:500],
+                "timeout_seconds": SUMMARY_TIMEOUT_SECONDS,
+            },
+        )
+        return {
+            "status": "completed",
+            "output": fallback_summary,
+            "fallback": True,
+            "error": str(exc)[:500],
+        }
+
+    if not isinstance(summary_result, dict):
+        return {
+            "status": "completed",
+            "output": _deterministic_task_summary(ctx.orchestration_state),
+            "fallback": True,
+            "error": "summary_result_not_dict",
+        }
+    if not str(summary_result.get("output") or "").strip():
+        summary_result = dict(summary_result)
+        summary_result["output"] = _deterministic_task_summary(ctx.orchestration_state)
+        summary_result["fallback"] = True
+        summary_result.setdefault("status", "completed")
+    return summary_result
+
+
 def _extract_completion_repair_json_text(value: Any) -> str:
     """Preserve direct repair JSON while still unwrapping OpenClaw payloads."""
 
@@ -923,10 +1003,9 @@ def finalize_successful_task(
     )
 
     summary_prompt = assemble_task_summary_prompt(ctx)
-    summary_result = asyncio.run(
-        runtime_service.execute_task(
-            summary_prompt, timeout_seconds=SUMMARY_TIMEOUT_SECONDS
-        )
+    summary_result = _generate_task_summary_with_fallback(
+        ctx=ctx,
+        summary_prompt=summary_prompt,
     )
     reported_changed_files = list(
         dict.fromkeys(

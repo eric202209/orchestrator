@@ -38,6 +38,14 @@ class _FakeRuntime:
         return {"backend": "fake", "model_family": "test"}
 
 
+class _FailingSummaryRuntime:
+    async def execute_task(self, prompt, timeout_seconds=None):
+        raise TimeoutError("summary timed out")
+
+    def get_backend_metadata(self):
+        return {"backend": "fake", "model_family": "test"}
+
+
 class _FakeTaskService:
     def analyze_workspace_consistency(self, project_dir):
         return {}
@@ -932,6 +940,40 @@ def test_final_verification_7f_gate_repairs_when_classifier_misses(
     assert repair_calls[0].details["failure_class"] == "import_error"
     assert ctx.orchestration_state.debug_repair_task_execution_ids == []
     assert ctx.task.status == TaskStatus.DONE
+
+
+def test_finalize_uses_deterministic_summary_when_runtime_summary_times_out(
+    db_session, tmp_path, monkeypatch
+):
+    ctx, execution = _seed_finalize_ctx(db_session, tmp_path)
+    ctx.runtime_service = _FailingSummaryRuntime()
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.ValidatorService.validate_task_completion",
+        lambda **kwargs: ValidationVerdict(
+            stage="task_completion",
+            status="accepted",
+            profile="implementation",
+            reasons=[],
+            details={"expected_core_files": ["calc_smoke.py"]},
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow._detect_completion_verification_command",
+        lambda project_dir: (None, None),
+    )
+
+    result = finalize_successful_task(
+        ctx=ctx,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "completed", result
+    assert ctx.task.status == TaskStatus.DONE
+    assert "Task completed with verified execution evidence" in ctx.task.summary
+    db_session.refresh(execution)
+    assert execution.status == TaskStatus.DONE
 
 
 def test_auto_completion_stamps_change_set_metadata_on_trivial_publish(

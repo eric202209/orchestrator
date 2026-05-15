@@ -136,6 +136,18 @@ def test_outcome_class_recovered_success_via_attempt_number():
     assert result == "recovered_success"
 
 
+def test_outcome_class_recovered_success_when_retry_succeeds_same_task():
+    result = outcome_class(
+        _done_session("stopped"),
+        [
+            {"id": 1, "task_id": 10, "attempt_number": 1, "status": "failed"},
+            {"id": 2, "task_id": 10, "attempt_number": 2, "status": "done"},
+        ],
+        [],
+    )
+    assert result == "recovered_success"
+
+
 def test_outcome_class_recovered_success_via_repair_metadata():
     repair_row = {"log_metadata": json.dumps({"repair_attempts": 1})}
     result = outcome_class(
@@ -153,6 +165,17 @@ def test_outcome_class_failed_but_actionable_known_reason():
         [_execution(status="failed")],
         [_reason_row(reason)],
     )
+    assert result == "failed_but_actionable"
+
+
+def test_outcome_class_failed_but_actionable_project_mutation_lock():
+    result = outcome_class(
+        {"status": "paused", "started_at": "2026-01-01T00:00:00+00:00"},
+        [_execution(status="failed")],
+        [_reason_row("project_mutation_lock_conflict")],
+    )
+
+    assert "project_mutation_lock_conflict" in KNOWN_TERMINAL_REASONS
     assert result == "failed_but_actionable"
 
 

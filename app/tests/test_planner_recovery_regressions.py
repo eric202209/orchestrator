@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import logging
 
-from app.models import Project, Session as SessionModel, Task, TaskExecution, TaskStatus
+from app.models import (
+    LogEntry,
+    Project,
+    Session as SessionModel,
+    Task,
+    TaskExecution,
+    TaskStatus,
+)
 from app.services.orchestration.phases.failure_flow import handle_task_failure
 from app.services.orchestration.phases.planning_flow import (
     _finalize_planning_timeout_failure,
@@ -459,6 +466,14 @@ def test_project_mutation_lock_conflict_terminalizes_without_pausing_active_sess
     assert other_execution.status == TaskStatus.RUNNING
     assert session.status == "running"
     assert session.is_active is True
+    terminal_log = (
+        db_session.query(LogEntry)
+        .filter(LogEntry.session_id == session.id, LogEntry.level == "ERROR")
+        .order_by(LogEntry.id.desc())
+        .first()
+    )
+    assert terminal_log is not None
+    assert "project_mutation_lock_conflict" in (terminal_log.log_metadata or "")
 
 
 def test_initial_planning_timeout_terminalizes_task_execution(db_session, monkeypatch):

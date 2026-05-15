@@ -230,6 +230,24 @@ def _validate_task_execution_for_change_set(
     return task_execution
 
 
+def _active_project_task_conflict(db: Session, task: Task) -> Task | None:
+    """Return a different running task in the same project, if one exists."""
+    return (
+        db.query(Task)
+        .filter(
+            Task.project_id == task.project_id,
+            Task.id != task.id,
+            Task.status == TaskStatus.RUNNING,
+        )
+        .order_by(
+            Task.plan_position.asc().nullslast(),
+            Task.started_at.desc().nullslast(),
+            Task.id.desc(),
+        )
+        .first()
+    )
+
+
 def _queue_task_retry(
     db: Session,
     task: Task,
@@ -1139,6 +1157,17 @@ def accept_task_workspace(
         raise HTTPException(
             status_code=400,
             detail="task_execution_id is required to accept a recorded change set",
+        )
+
+    active_task = _active_project_task_conflict(db, task)
+    if active_task:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Cannot accept this workspace while another task in the same project "
+                f"is running: #{active_task.plan_position or active_task.id} "
+                f"{active_task.title}. Wait for the active task to finish, then accept."
+            ),
         )
 
     accepted_change_set = None
