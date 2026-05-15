@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 DONE_STATUSES = {"completed", "done", "success", "succeeded"}
@@ -23,21 +24,45 @@ TERMINAL_REASON_PRIORITY = (
 )
 
 KNOWN_TERMINAL_REASONS = {
+    # Planning failures
     "planning_validation_failed_after_repair",
     "planning_repair_prompt_too_large",
-    "workspace_isolation_violation",
-    "repair_output_contract_violation",
     "planning_repair_no_output_timeout",
     "planning_repair_timeout",
     "planning_timeout",
+    "planning_invalid_commands_after_repair",
+    "planning_context_overflow",
+    "planning_openclaw_lock_contention",
+    "malformed_planning_output_repair_timeout",
+    "planning_json_error",
+    "planning_parse_error",
+    "plan_revision_cap_reached",
+    "planning_circuit_breaker_opened",
+    "revised_plan_validation_failed",
+    "truncated_multistep_plan_after_retry",
+    # Execution / repair failures
+    "repair_output_contract_violation",
+    "workspace_isolation_violation",
+    "op_contract_violation",
+    "debug_repair_budget_exhausted",
+    "repair_attempt_limit_reached",
+    "max_attempts_reached",
+    "repeated_tool_path_failure",
     "reasoning_artifact_validation_failed",
+    # Completion / verification failures
     "completion_validation_failed",
+    "completion_repair_failed",
+    "repeat_completion_failure_signature",
+    # Code-level failures
     "pytest_failure",
     "module_not_found",
     "import_error",
     "missing_dependency",
     "syntax_error",
     "runtime_assertion_failure",
+    # System / lifecycle failures
+    "baseline_publish_validation_failed",
+    "agent_requested_human_intervention",
 }
 
 REPORT_TERMINAL_REASONS = set(TERMINAL_REASON_PRIORITY) | KNOWN_TERMINAL_REASONS
@@ -148,3 +173,105 @@ def _first_text(value: Any) -> str | None:
     if isinstance(value, str):
         return value
     return None
+
+
+STUCK_TIMEOUT_SECONDS = 3600  # sessions active beyond this with no terminal are stuck
+
+
+def _has_repair_evidence(metadata_rows: list[dict[str, Any]]) -> bool:
+    for row in metadata_rows:
+        meta = parse_log_metadata(row.get("log_metadata"))
+        if (
+            int(meta.get("repair_attempts") or 0) > 0
+            or meta.get("retry") == "repair_prompt"
+            or meta.get("attempt") == "repair"
+            or "repair" in str(meta.get("strategy") or "").lower()
+        ):
+            return True
+    return False
+
+
+def outcome_class(
+    session_row: dict[str, Any],
+    task_executions: list[dict[str, Any]],
+    metadata_rows: list[dict[str, Any]],
+    *,
+    failure_summary_generated: bool = False,
+    stuck_timeout_seconds: int = STUCK_TIMEOUT_SECONDS,
+) -> str:
+    """
+    Classify a session into one of four production-readiness outcome classes:
+
+    - "first_pass_success"       — DONE on attempt 1, no repair
+    - "recovered_success"        — DONE after repair or retry
+    - "failed_but_actionable"    — FAILED with known reason; operator has next step
+    - "stuck_or_manual_db_cleanup" — requires manual intervention
+    - "in_progress"              — session is still active (not yet classified)
+    """
+    session_status = status_key(session_row.get("status"))
+
+    # Still active — check if elapsed time indicates stuck
+    if session_status in ("running", "pending", "active"):
+        started = session_row.get("started_at")
+        if started:
+            try:
+                if isinstance(started, str):
+                    started_dt = datetime.fromisoformat(
+                        started.replace("Z", "+00:00")
+                    )
+                    if started_dt.tzinfo is None:
+                        started_dt = started_dt.replace(tzinfo=UTC)
+                else:
+                    started_dt = started
+                elapsed = (datetime.now(UTC) - started_dt).total_seconds()
+                if elapsed > stuck_timeout_seconds:
+                    return "stuck_or_manual_db_cleanup"
+            except Exception:
+                pass
+        return "in_progress"
+
+    # Task executions still in running/pending after session stopped = stuck
+    active_executions = [
+        r
+        for r in task_executions
+        if status_key(r.get("status")) in ("running", "pending", "active")
+    ]
+    if active_executions:
+        return "stuck_or_manual_db_cleanup"
+
+    # Sessions in this system end as "stopped" even on success — treat as done
+    # when session is stopped/terminal AND all executions reached a done status.
+    all_executions_done = bool(task_executions) and all(
+        status_key(r.get("status")) in DONE_STATUSES
+        for r in task_executions
+    )
+    is_done = session_status in DONE_STATUSES or (
+        session_status in TERMINAL_SESSION_STATUSES and all_executions_done
+    )
+
+    if is_done:
+        max_attempt = max(
+            (int(row.get("attempt_number") or 1) for row in task_executions),
+            default=1,
+        )
+        repair_used = _has_repair_evidence(metadata_rows)
+        if max_attempt == 1 and not repair_used:
+            return "first_pass_success"
+        return "recovered_success"
+
+    # Terminal failure — classify as actionable or stuck
+    terminal_reason = latest_terminal_reason(metadata_rows)
+    if terminal_reason and terminal_reason in KNOWN_TERMINAL_REASONS:
+        return "failed_but_actionable"
+
+    # Any diagnostic reason (not necessarily a known terminal reason) is actionable
+    for row in metadata_rows:
+        meta = parse_log_metadata(row.get("log_metadata"))
+        reason = str(meta.get("reason") or "").strip()
+        if reason:
+            return "failed_but_actionable"
+
+    if failure_summary_generated:
+        return "failed_but_actionable"
+
+    return "stuck_or_manual_db_cleanup"

@@ -905,5 +905,18 @@ export const sessionsAPI = {
   },
 };
 
+export const adminAPI = {
+  getOutcomeRates: (limit = 50) =>
+    apiClient.get<{
+      computed_at: string;
+      sessions_analyzed: number;
+      outcome_rates: Record<string, number>;
+      outcome_counts: Record<string, number>;
+      operator_review_count: number;
+      gate_pass: boolean;
+      stuck_sessions: Array<{ session_id: number; status: string; terminal_class: string }>;
+    }>(`/admin/outcome-rates?limit=${limit}`),
+};
+
 export const api = apiClient;
 export default apiClient;

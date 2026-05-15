@@ -21,6 +21,7 @@ from scripts.failure_taxonomy import (  # noqa: E402
     TERMINAL_REASON_PRIORITY,
     TERMINAL_SESSION_STATUSES,
     latest_terminal_reason,
+    outcome_class as classify_outcome,
     parse_log_metadata,
     status_key,
     terminal_class as classify_terminal_class,
@@ -280,6 +281,13 @@ def _session_report(
         enabled=check_timeline and is_terminal,
     )
 
+    oc = classify_outcome(
+        session,
+        task_executions,
+        metadata_rows,
+        failure_summary_generated=bool(failure_summary),
+    )
+
     return {
         "session_id": session_id,
         "session_name": session.get("name"),
@@ -290,6 +298,7 @@ def _session_report(
         "started_at": session.get("started_at"),
         "stopped_at": session.get("stopped_at"),
         "terminal_class": terminal,
+        "outcome_class": oc,
         "repair_used": bool(evidence["repair_used"]),
         "second_repair_used": bool(evidence["second_repair_used"]),
         "avg_planning_duration_seconds": _mean_or_none(evidence["planning_durations"]),
@@ -307,6 +316,43 @@ def _session_report(
         "failed_task_execution_count": failed_execution_count,
         "terminal": is_terminal,
     }
+
+
+def _outcome_rates(
+    session_reports: list[dict[str, Any]],
+) -> tuple[dict[str, float], dict[str, int]]:
+    counts: dict[str, int] = {
+        "first_pass_success": 0,
+        "recovered_success": 0,
+        "failed_but_actionable": 0,
+        "stuck_or_manual_db_cleanup": 0,
+    }
+    for row in session_reports:
+        oc = row.get("outcome_class", "")
+        if oc in counts:
+            counts[oc] += 1
+
+    classified = sum(counts.values())
+    rates: dict[str, float] = {}
+    for key, count in counts.items():
+        rates[f"{key}_rate"] = round(count / classified, 4) if classified else 0.0
+    return rates, counts
+
+
+def _operator_review_count(conn: sqlite3.Connection) -> int:
+    try:
+        row = _one(
+            conn,
+            """
+            select count(*) as cnt
+            from task_execution_change_sets
+            where disposition is not null
+              and disposition != 'auto_promote'
+            """,
+        )
+        return int((row or {}).get("cnt") or 0)
+    except Exception:
+        return 0
 
 
 def build_report(
@@ -351,6 +397,15 @@ def build_report(
         and row["decision_timeline"]["has_terminal_event"] is False
     ]
 
+    rates, oc_counts = _outcome_rates(session_reports)
+
+    repair_counts = [
+        1
+        for row in session_reports
+        if row["repair_used"]
+    ]
+    replan_counts: list[float] = []  # replan_count not tracked per-session yet
+
     return {
         "limit": limit,
         "sessions_analyzed": len(session_reports),
@@ -381,6 +436,13 @@ def build_report(
             "missing_decision_timeline_terminal_event": len(missing_timeline),
             "runtime_logs_total": runtime_total,
             "runtime_logs_missing_task_execution_id": runtime_missing,
+            "outcome_rates": rates,
+            "outcome_counts": oc_counts,
+            "avg_repair_count": round(len(repair_counts) / len(session_reports), 4)
+            if session_reports
+            else 0.0,
+            "avg_replan_count": 0.0,
+            "operator_review_count": _operator_review_count(conn),
         },
         "sessions": session_reports,
     }
@@ -412,6 +474,23 @@ def _print_text(report: dict[str, Any]) -> None:
         f"missing_task_execution_id={summary['runtime_logs_missing_task_execution_id']}"
     )
     print()
+    print("Outcome Rates:")
+    rates = summary.get("outcome_rates", {})
+    counts = summary.get("outcome_counts", {})
+    for key in (
+        "first_pass_success",
+        "recovered_success",
+        "failed_but_actionable",
+        "stuck_or_manual_db_cleanup",
+    ):
+        rate = rates.get(f"{key}_rate", 0.0)
+        count = counts.get(key, 0)
+        print(f"- {key}: {count} ({rate:.1%})")
+    print(
+        f"operator_review_count={summary.get('operator_review_count', 0)} "
+        f"avg_repair_count={summary.get('avg_repair_count', 0.0)}"
+    )
+    print()
     print("Terminal Classes:")
     for terminal_class, count in summary["terminal_counts"].items():
         print(f"- {terminal_class}: {count}")
@@ -426,6 +505,7 @@ def _print_text(report: dict[str, Any]) -> None:
             timeline_value = "not_checked"
         print(
             f"- session={row['session_id']} status={row['status']} "
+            f"outcome={row.get('outcome_class', '?')} "
             f"terminal={row['terminal_class']} repair={row['repair_used']} "
             f"second_repair={row['second_repair_used']} "
             f"failure_summary={row['failure_summary_explains']} "

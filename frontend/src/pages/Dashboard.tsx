@@ -1,17 +1,18 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { projectsAPI, authAPI, tasksAPI } from '../api/client';
+import { projectsAPI, authAPI, tasksAPI, adminAPI } from '../api/client';
 import type { Project, User, Task } from '../types/api';
-import { 
-  GitBranch, 
-  LogOut, 
-  Activity, 
+import {
+  GitBranch,
+  LogOut,
+  Activity,
   CheckCircle2,
   FileText,
   Search,
   Terminal,
   Trash2,
-  ExternalLink
+  ExternalLink,
+  ShieldCheck
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { StatusBadge, EmptyState, Skeleton } from '../components/ui';
@@ -28,6 +29,13 @@ function Dashboard() {
   const [creatingProject, setCreatingProject] = useState(false);
   const [isAuthChecked, setIsAuthChecked] = useState(false);
   const [projectSearchQuery, setProjectSearchQuery] = useState('');
+  const [outcomeRates, setOutcomeRates] = useState<{
+    gate_pass: boolean;
+    sessions_analyzed: number;
+    outcome_rates: Record<string, number>;
+    outcome_counts: Record<string, number>;
+    operator_review_count: number;
+  } | null>(null);
 
   const checkAuth = useCallback(async () => {
     try {
@@ -53,10 +61,20 @@ function Dashboard() {
   useEffect(() => {
     if (isAuthChecked && user) {
       fetchProjects();
+      fetchOutcomeRates();
     } else if (isAuthChecked && !user) {
       setLoading(false);
     }
   }, [isAuthChecked, user]);
+
+  const fetchOutcomeRates = async () => {
+    try {
+      const response = await adminAPI.getOutcomeRates(50);
+      setOutcomeRates(response.data);
+    } catch {
+      // non-critical — silently ignore
+    }
+  };
 
   const fetchProjects = async () => {
     try {
@@ -283,6 +301,66 @@ function Dashboard() {
         {/* Content */}
         {activeTab === 'overview' && (
           <div className="space-y-4">
+            {/* System Health panel */}
+            {outcomeRates && (
+              <div className="bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)]">
+                <div className="px-5 py-3 border-b border-[color:var(--oc-border-soft)] flex items-center justify-between">
+                  <h2 className="text-sm font-medium text-white flex items-center gap-2">
+                    <ShieldCheck className="h-4 w-4 text-slate-400" />
+                    System Health
+                  </h2>
+                  <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                    outcomeRates.gate_pass
+                      ? 'bg-emerald-900/40 text-emerald-400'
+                      : 'bg-red-900/40 text-red-400'
+                  }`}>
+                    {outcomeRates.gate_pass ? 'Gate: PASS' : 'Gate: FAIL'}
+                  </span>
+                </div>
+                <div className="px-5 py-4">
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    {[
+                      {
+                        label: 'First-Pass',
+                        key: 'first_pass_success',
+                        color: 'text-emerald-400',
+                      },
+                      {
+                        label: 'Recovered',
+                        key: 'recovered_success',
+                        color: 'text-sky-400',
+                      },
+                      {
+                        label: 'Actionable',
+                        key: 'failed_but_actionable',
+                        color: 'text-amber-400',
+                      },
+                      {
+                        label: 'Stuck',
+                        key: 'stuck_or_manual_db_cleanup',
+                        color: 'text-red-400',
+                      },
+                    ].map(({ label, key, color }) => {
+                      const rate = outcomeRates.outcome_rates[`${key}_rate`] ?? 0;
+                      const count = outcomeRates.outcome_counts[key] ?? 0;
+                      return (
+                        <div key={key} className="flex flex-col gap-0.5">
+                          <p className="text-[10px] font-medium uppercase tracking-wider text-slate-400">{label}</p>
+                          <p className={`text-xl font-semibold ${color}`}>
+                            {(rate * 100).toFixed(0)}%
+                          </p>
+                          <p className="text-xs text-slate-500">{count} sessions</p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <p className="text-[10px] text-slate-500 mt-3">
+                    {outcomeRates.sessions_analyzed} sessions analyzed · {outcomeRates.operator_review_count} operator reviews
+                  </p>
+                </div>
+              </div>
+            )}
+
             <div className="bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)]">
               <div className="px-5 py-3 border-b border-[color:var(--oc-border-soft)]">
                 <h2 className="text-sm font-medium text-white">Recent Activity</h2>

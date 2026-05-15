@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.dependencies import get_current_active_user, get_db
 from app.models import LogEntry, Session as SessionModel
 from app.services.agents.agent_backends import list_supported_backends
@@ -126,6 +129,90 @@ def _get_recent_audit_events(db: Session, limit: int = 20) -> List[Dict[str, Any
             }
         )
     return events
+
+
+@router.get("/outcome-rates", tags=["admin"])
+def get_outcome_rates(
+    limit: int = 50,
+    current_user=Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """
+    Compute the four Phase 9N production-readiness outcome rates from DB state.
+
+    Returns outcome_rates and outcome_counts for the most recent `limit` sessions.
+    `stuck_or_manual_db_cleanup_rate = 0` is the production-readiness gate.
+    """
+    import sys
+
+    from pathlib import Path as _Path
+
+    repo_root = _Path(__file__).resolve().parents[5]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+    try:
+        from scripts.session_outcome_report import (
+            _outcome_rates,
+            _operator_review_count,
+            _rows,
+            _one,
+            _session_report,
+        )
+    except ImportError as exc:
+        return {"error": f"scripts not importable: {exc}"}
+
+    db_url = str(settings.DATABASE_URL)
+    db_path = db_url.replace("sqlite:///", "").replace("sqlite://", "")
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+
+        sessions = _rows(
+            conn,
+            """
+            select s.id, s.project_id, s.name, s.status, s.is_active,
+                   s.created_at, s.started_at, s.stopped_at,
+                   p.name as project_name, p.workspace_path
+            from sessions s
+            left join projects p on p.id = s.project_id
+            where s.deleted_at is null
+            order by s.id desc
+            limit ?
+            """,
+            (limit,),
+        )
+        session_reports = [
+            _session_report(conn, session=s, check_timeline=False) for s in sessions
+        ]
+        rates, oc_counts = _outcome_rates(session_reports)
+        op_review = _operator_review_count(conn)
+        conn.close()
+    except Exception as exc:
+        return {"error": str(exc), "outcome_rates": {}, "outcome_counts": {}}
+
+    stuck_count = oc_counts.get("stuck_or_manual_db_cleanup", 0)
+    gate_pass = stuck_count == 0
+    stuck_sessions = [
+        {
+            "session_id": r["session_id"],
+            "status": r["status"],
+            "terminal_class": r["terminal_class"],
+        }
+        for r in session_reports
+        if r.get("outcome_class") == "stuck_or_manual_db_cleanup"
+    ]
+
+    return {
+        "computed_at": datetime.now(UTC).isoformat(),
+        "sessions_analyzed": len(session_reports),
+        "outcome_rates": rates,
+        "outcome_counts": oc_counts,
+        "operator_review_count": op_review,
+        "gate_pass": gate_pass,
+        "stuck_sessions": stuck_sessions,
+    }
 
 
 @router.get("/diagnostics", tags=["admin"])
