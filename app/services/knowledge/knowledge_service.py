@@ -77,7 +77,7 @@ class KnowledgeService:
         if qdrant_url == ":memory:":
             self._client = QdrantClient(":memory:")
         else:
-            self._client = QdrantClient(url=qdrant_url)
+            self._client = QdrantClient(url=qdrant_url, check_compatibility=False)
         self._collection = collection_name
         self._qdrant_available = True
 

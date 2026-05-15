@@ -287,7 +287,9 @@ function ProjectDetail() {
       setAcceptTaskExecutionId(null);
     } catch (error) {
       console.error('Failed to accept task workspace:', error);
-      const detail = (error as any)?.response?.data?.detail;
+      const detail = (
+        error as { response?: { data?: { detail?: string } } }
+      )?.response?.data?.detail;
       alert(detail || 'Failed to accept task workspace. Please try again.');
     } finally {
       setAcceptingWorkspace(false);
