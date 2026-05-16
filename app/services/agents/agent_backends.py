@@ -194,6 +194,28 @@ def _check_openai_backend_health(descriptor: BackendDescriptor) -> BackendHealth
     )
 
 
+def _check_direct_ollama_health(descriptor: BackendDescriptor) -> BackendHealth:
+    errors: List[str] = []
+    # Config-only check — does not verify Ollama is reachable or model is pulled.
+    warnings: List[str] = [
+        "Ollama reachability and model availability are not verified at startup; "
+        "confirm 'ollama ps' shows the model before running tasks."
+    ]
+
+    if not (settings.OLLAMA_BASE_URL or "").strip():
+        errors.append("OLLAMA_BASE_URL is not configured.")
+    if not (settings.OLLAMA_AGENT_MODEL or "").strip():
+        errors.append("OLLAMA_AGENT_MODEL is not configured.")
+
+    return BackendHealth(
+        available=not errors,
+        ready=not errors,
+        status="ready" if not errors else "degraded",
+        errors=errors,
+        warnings=warnings,
+    )
+
+
 def _base_descriptor(
     *,
     name: str,
@@ -330,6 +352,41 @@ _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
             ),
         ),
         health_check=_check_openai_backend_health,
+    ),
+    "direct_ollama": _BackendRegistration(
+        descriptor=_base_descriptor(
+            name="direct_ollama",
+            display_name="Direct Ollama",
+            implementation="app.services.agents.providers.ollama_adapter.create_runtime",
+            default_model_family="qwen3:8b-q4_K_M",
+            implemented=True,
+            capabilities=BackendCapabilities(
+                supports_planning=True,
+                supports_step_execution=False,
+                supports_debug_repair=False,
+                supports_streaming=False,
+                supports_checkpoint_resume=False,
+                supports_tool_execution=False,
+                supports_json_mode=False,
+                mcp_capable=False,
+                max_context_tokens=8192,
+                reliability_tier="local",
+                latency_tier="local",
+            ),
+            config=BackendConfigMetadata(
+                auth_mode="none",
+                transport_mode="local_http",
+                required_env_vars=[],
+                supported_prompt_format="plain_text",
+                prompt_dialect="ollama_chat",
+                tool_call_shape="none",
+                streaming_mode="none",
+                adaptation_profiles=["ollama_default"],
+                preferred_retry_strategy="schema_first",
+                context_window_policy="truncate_context",
+            ),
+        ),
+        health_check=_check_direct_ollama_health,
     ),
 }
 
