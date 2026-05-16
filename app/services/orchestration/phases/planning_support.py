@@ -453,6 +453,39 @@ def _post_repair_missing_command_steps(plan_verdict: Any) -> list[int]:
     return missing_steps
 
 
+def _post_repair_brittle_command_steps(plan_verdict: Any) -> list[int] | None:
+    """Return step numbers eligible for brittle second repair, or None if blocked.
+
+    Returns None when no brittle subcodes exist or other major issues are present
+    (None = don't second-repair). Returns a list (possibly []) when brittle
+    commands are the only remaining issue ([] = plan-level subcode, no step map).
+    """
+
+    details = getattr(plan_verdict, "details", None) or {}
+    brittle_subcodes = details.get("brittle_command_subcodes") or []
+    if not brittle_subcodes:
+        return None
+
+    # Don't second-repair for brittle commands when other major issues exist;
+    # those need to be fixed first and the model must not be given conflicting instructions.
+    blocking_detail_keys = (
+        "missing_commands_steps",
+        "missing_verification_steps",
+        "placeholder_only_implementation",
+        "non_runnable_steps",
+        "background_process_steps",
+        "nested_workspace_steps",
+        "nested_project_root_steps",
+        "workflow_phase_violations",
+        "stack_conflict",
+    )
+    if any(details.get(key) for key in blocking_detail_keys):
+        return None
+
+    step_details = details.get("brittle_command_step_details") or {}
+    return _normalized_step_numbers(step_details)
+
+
 def _compress_project_context_for_planning(
     orchestration_state: Any,
     *,
@@ -734,6 +767,20 @@ _SECOND_REPAIR_VALIDATOR_POLICIES: dict[str, _SecondRepairPolicy] = {
             "operation"
         ),
     ),
+    "brittle_commands": _SecondRepairPolicy(
+        issue_key="brittle_commands",
+        issue_label="brittle heredoc or oversized commands",
+        retry_reason="post_repair_brittle_commands",
+        event_reason="post_repair_brittle_commands_second_pass",
+        semantic_violation_code="brittle_heredoc_command",
+        cap_attribute="post_repair_validation_second_repair_used",
+        rejection_template=(
+            "brittle_commands: steps {steps} still contain heredoc or oversized "
+            "commands after repair; replace ALL file content writes with structured "
+            'ops: [{{"op":"write_file","path":"...","content":"..."}}] — '
+            "no cat heredoc, no printf multiline, no python -c with nested quotes"
+        ),
+    ),
 }
 
 _SECOND_REPAIR_WORKSPACE_POLICIES: dict[str, _SecondRepairPolicy] = {
@@ -817,6 +864,20 @@ def _get_targeted_second_repair_reason(
             retry_state,
             policy,
             missing_command_steps,
+        )
+
+    brittle_steps = (
+        _post_repair_brittle_command_steps(plan_verdict) if plan_verdict else None
+    )
+    if brittle_steps is not None:
+        # None = blocked (other issues exist or no brittle subcodes).
+        # [] = plan-level brittle subcode with no per-step map; still trigger repair.
+        # [1, 2] = specific steps with brittle commands.
+        policy = _SECOND_REPAIR_VALIDATOR_POLICIES["brittle_commands"]
+        return _second_repair_reason_from_policy(
+            retry_state,
+            policy,
+            brittle_steps,
         )
 
     return None

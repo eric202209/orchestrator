@@ -435,19 +435,17 @@ def execute_planning_phase(
     MINIMAL_PROMPT_TOKEN_THRESHOLD = 8000
     if planning_prompt_tokens > MINIMAL_PROMPT_TOKEN_THRESHOLD:
         start_with_minimal_planning_prompt = True
-        # Context compression: if mid-execution state exists, replace the full
-        # project_context with a compact snapshot so the planner can recover
-        # without blowing the context window again.
-        if getattr(ctx.orchestration_state, "debug_attempts", None) or getattr(
-            ctx.orchestration_state, "completed_steps", None
-        ):
-            _compressed = compress_orchestration_context(ctx.orchestration_state)
-            if _compressed:
-                ctx.orchestration_state.project_context = _compressed
-                ctx.logger.info(
-                    "[ORCHESTRATION] Context compressed for dense replanning (%d chars)",
-                    len(_compressed),
-                )
+        # Always compress project_context when the prompt is dense.
+        # Later tasks in a session accumulate workspace files that inflate the
+        # project_context even when no debug/completed steps exist, causing
+        # dense_planning_context failures for beta-python and gamma-docs tasks.
+        _compressed = _compress_project_context_for_planning(ctx.orchestration_state)
+        if _compressed:
+            ctx.orchestration_state.project_context = _compressed
+            ctx.logger.info(
+                "[ORCHESTRATION] Context compressed for dense planning (%d chars)",
+                len(_compressed),
+            )
     used_minimal_planning_prompt = start_with_minimal_planning_prompt
 
     if start_with_minimal_planning_prompt:
@@ -893,31 +891,59 @@ def execute_planning_phase(
                     single_step_full_lifecycle_plan = True
 
             if single_step_full_lifecycle_plan and not retry_state.repair_prompt_used:
-                contract_violations = [
-                    "Full-lifecycle planning must return separate inspect, implementation, and verification steps"
-                ]
-                _emit_planning_diagnostics_contract_violation(
-                    ctx,
-                    reason="single_step_full_lifecycle_plan",
-                    contract_violations=contract_violations,
-                    output_text=output_text,
-                    strategy_info="single_step_full_lifecycle_plan",
+                # Attempt deterministic lifecycle expansion before consuming a repair
+                # token. When the original single-step plan already has ops or clear
+                # artifact commands (manifest.json, config files, etc.), splitting
+                # into inspect/implement/verify deterministically prevents repair from
+                # drifting into unrelated solution.py implementations.
+                normalized_plan = _split_repaired_single_step_full_lifecycle_plan(
+                    extracted_plan
                 )
-                retry_state.last_repair_reason = "single_step_full_lifecycle_plan"
-                planning_result = __repair_planning_output(
-                    ctx=ctx,
-                    planning_timeout_seconds=planning_timeout_seconds,
-                    malformed_output=output_text,
-                    reason="single_step_full_lifecycle_plan",
-                    rejection_reasons=[
-                        "Return 3 or 4 separate step objects: inspect current workspace, implement the requested change, and verify behavior/content. Do not merge the full task into one step."
-                    ],
-                    prompt_profile=prompt_profile,
-                    knowledge_context=planning_knowledge_ctx,
-                )
-                retry_state.repair_prompt_used = True
-                retry_state.consecutive_failures += 1
-                continue
+                if normalized_plan:
+                    emit_phase_event(
+                        ctx.orchestration_state,
+                        ctx.emit_live,
+                        level="INFO",
+                        phase="planning",
+                        message=(
+                            "[ORCHESTRATION] Normalized original single-step artifact "
+                            "plan into deterministic lifecycle steps (skipping repair)"
+                        ),
+                        details={
+                            "reason": "single_step_artifact_plan_normalized",
+                            "step_count": len(normalized_plan),
+                        },
+                    )
+                    extracted_plan = normalized_plan
+                    output_text = json.dumps(normalized_plan)
+                    single_step_full_lifecycle_plan = False
+                    # Fall through to validation without consuming a repair attempt
+                else:
+                    contract_violations = [
+                        "Full-lifecycle planning must return separate inspect, implementation, and verification steps"
+                    ]
+                    _emit_planning_diagnostics_contract_violation(
+                        ctx,
+                        reason="single_step_full_lifecycle_plan",
+                        contract_violations=contract_violations,
+                        output_text=output_text,
+                        strategy_info="single_step_full_lifecycle_plan",
+                    )
+                    retry_state.last_repair_reason = "single_step_full_lifecycle_plan"
+                    planning_result = __repair_planning_output(
+                        ctx=ctx,
+                        planning_timeout_seconds=planning_timeout_seconds,
+                        malformed_output=output_text,
+                        reason="single_step_full_lifecycle_plan",
+                        rejection_reasons=[
+                            "Return 3 or 4 separate step objects: inspect current workspace, implement the requested change, and verify behavior/content. Do not merge the full task into one step."
+                        ],
+                        prompt_profile=prompt_profile,
+                        knowledge_context=planning_knowledge_ctx,
+                    )
+                    retry_state.repair_prompt_used = True
+                    retry_state.consecutive_failures += 1
+                    continue
 
             if (
                 looks_like_truncated_multistep_plan(output_text, extracted_plan)

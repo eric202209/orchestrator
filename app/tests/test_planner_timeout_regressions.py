@@ -4273,7 +4273,7 @@ def test_targeted_second_repair_reason_handles_missing_runnable_commands():
     assert "runnable command" in reason.rejection_text
 
 
-def test_targeted_second_repair_reason_does_not_add_brittle_eligibility():
+def test_targeted_second_repair_reason_adds_brittle_eligibility_when_only_issue():
     retry_state = _PlanningRetryState()
     retry_state.repair_prompt_used = True
     verdict = type(
@@ -4283,18 +4283,50 @@ def test_targeted_second_repair_reason_does_not_add_brittle_eligibility():
             "reasons": ["Plan contains brittle heredoc-heavy or malformed commands"],
             "details": {
                 "brittle_command_subcodes": ["oversized_command_length"],
+                "brittle_command_step_details": {1: ["oversized_command_length"]},
                 "semantic_violation_codes": ["brittle_command"],
             },
         },
     )()
 
-    assert (
-        _get_targeted_second_repair_reason(
-            retry_state=retry_state,
-            plan_verdict=verdict,
-        )
-        is None
+    reason = _get_targeted_second_repair_reason(
+        retry_state=retry_state,
+        plan_verdict=verdict,
     )
+    assert reason is not None
+    assert reason.issue_key == "brittle_commands"
+    assert reason.event_reason == "post_repair_brittle_commands_second_pass"
+    assert "write_file" in reason.rejection_text
+
+
+def test_targeted_second_repair_reason_brittle_blocked_when_other_issues_exist():
+    retry_state = _PlanningRetryState()
+    retry_state.repair_prompt_used = True
+    verdict = type(
+        "Verdict",
+        (),
+        {
+            "reasons": [
+                "Plan contains brittle heredoc-heavy or malformed commands",
+                "Plan contains steps without runnable commands (steps: [2])",
+            ],
+            "details": {
+                "brittle_command_subcodes": ["oversized_command_length"],
+                "missing_commands_steps": [2],
+                "semantic_violation_codes": ["brittle_command"],
+            },
+        },
+    )()
+
+    # When other blocking issues exist alongside brittle commands, brittle
+    # second repair should not fire (missing_commands_steps takes priority).
+    reason = _get_targeted_second_repair_reason(
+        retry_state=retry_state,
+        plan_verdict=verdict,
+    )
+    # missing_commands_steps is a blocking key for brittle, but brittle_command_subcodes
+    # is also a blocking key for missing_commands_steps — neither fires; returns None.
+    assert reason is None
 
 
 def test_targeted_second_repair_reason_centralizes_malformed_shell_eligibility():
