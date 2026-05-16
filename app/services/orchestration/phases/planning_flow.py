@@ -107,6 +107,7 @@ def _strengthen_weak_expected_file_verifications(
             for path in (updated.get("expected_files") or [])
             if str(path or "").strip()
         ]
+        grep_target = None
         if expected_files and PlannerService._verification_is_weak(
             updated.get("verification")
         ):
@@ -118,12 +119,10 @@ def _strengthen_weak_expected_file_verifications(
                     grep_target[0],
                     grep_target[1],
                 )
-            else:
-                updated["verification"] = _node_exists_verification_command(
-                    expected_files
-                )
-        if expected_files and _commands_are_weak_expected_file_verification(
-            updated.get("commands")
+        if (
+            expected_files
+            and _commands_are_weak_expected_file_verification(updated.get("commands"))
+            and grep_target
         ):
             updated["commands"] = [str(updated.get("verification") or "").strip()]
         strengthened.append(updated)
