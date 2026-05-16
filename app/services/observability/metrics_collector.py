@@ -25,6 +25,14 @@ from app.services.workspace.workspace_paths import (
     REJECTED_CHANGE_ARCHIVE_ROOT,
     RETAINED_WORKSPACE_ARCHIVE_ROOT,
 )
+from app.services.orchestration.security_policy.retention_policy import (
+    SNAPSHOT_MAX_AGE_DAYS,
+    SNAPSHOT_MAX_COUNT,
+)
+from app.services.orchestration.security_policy.workspace_quota import (
+    WORKSPACE_QUOTA_MAX_BYTES,
+    check_workspace_size,
+)
 
 # Import terminal reason set so failure_class_distribution filters to real
 # terminal failures only — not repair attempts, warnings, or diagnostics.
@@ -381,6 +389,23 @@ class MetricsCollector:
         return [{"reason": r, "count": c} for r, c in sorted_items[:20]]
 
     # ------------------------------------------------------------------
+    # Security events (Phase 10D shadow audit)
+    # ------------------------------------------------------------------
+
+    def security_events_count(self, days: int = 7) -> int:
+        """Count security audit events logged with [SECURITY] prefix."""
+        cutoff = self._cutoff(days)
+        return (
+            self.db.query(func.count(LogEntry.id))
+            .filter(
+                LogEntry.message.contains("[SECURITY]"),
+                LogEntry.created_at >= cutoff,
+            )
+            .scalar()
+            or 0
+        )
+
+    # ------------------------------------------------------------------
     # Storage stats
     # ------------------------------------------------------------------
 
@@ -404,6 +429,7 @@ class MetricsCollector:
             )
             total_snapshot_bytes += snap_bytes
             total_archive_bytes += arch_bytes
+            quota_violation = check_workspace_size(root)
             per_project.append(
                 {
                     "project_id": proj.id,
@@ -411,6 +437,15 @@ class MetricsCollector:
                     "snapshot_bytes": snap_bytes,
                     "archive_bytes": arch_bytes,
                     "total_bytes": snap_bytes + arch_bytes,
+                    "workspace_quota_violation": (
+                        None
+                        if quota_violation is None
+                        else {
+                            "kind": quota_violation.kind,
+                            "value": quota_violation.value,
+                            "limit": quota_violation.limit,
+                        }
+                    ),
                 }
             )
 
@@ -418,5 +453,8 @@ class MetricsCollector:
             "total_snapshot_bytes": total_snapshot_bytes,
             "total_archive_bytes": total_archive_bytes,
             "total_bytes": total_snapshot_bytes + total_archive_bytes,
+            "workspace_quota_max_bytes": WORKSPACE_QUOTA_MAX_BYTES,
+            "snapshot_retention_max_count": SNAPSHOT_MAX_COUNT,
+            "snapshot_retention_max_age_days": SNAPSHOT_MAX_AGE_DAYS,
             "per_project": per_project,
         }

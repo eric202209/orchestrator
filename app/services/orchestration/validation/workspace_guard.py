@@ -762,7 +762,7 @@ def normalize_plan_with_live_logging(
     stage: str,
 ) -> List[Dict[str, Any]]:
     try:
-        return normalize_plan(plan, project_dir, logger_obj)
+        normalized = normalize_plan(plan, project_dir, logger_obj)
     except TaskOperationContractViolation as exc:
         detail = str(exc)
         logger_obj.error("[CONTRACT] %s blocked: %s", stage, detail)
@@ -798,6 +798,73 @@ def normalize_plan_with_live_logging(
             metadata={"stage": stage},
         )
         raise
+
+    # Security audit: high-risk commands are logged for review-policy evidence.
+    # Secret file-operation targets are blocked because they risk credential
+    # disclosure and are never required for generated task workspaces.
+    sec_events: List[Dict[str, Any]] = []
+    try:
+        from app.services.orchestration.security_policy import audit_plan_commands
+
+        sec_events = audit_plan_commands(normalized)
+    except Exception:
+        sec_events = []
+
+    for event in sec_events:
+        level = "WARNING" if event.get("risk_level") == "high" else "INFO"
+        msg = (
+            f"[SECURITY] {stage} step {event.get('step')} "
+            f"pattern={event.get('pattern_name')} "
+            f"risk={event.get('risk_level')}"
+        )
+        logger_obj.warning(msg) if level == "WARNING" else logger_obj.info(msg)
+        try:
+            record_live_log(
+                db,
+                session_id,
+                task_id,
+                level,
+                msg,
+                session_instance_id=session_instance_id,
+                metadata=event,
+            )
+        except Exception:
+            pass
+
+    blocked_events = [
+        event
+        for event in sec_events
+        if event.get("pattern_name") == "secret_path_write"
+    ]
+    if blocked_events:
+        paths = sorted(
+            str(event.get("path") or "<unknown>") for event in blocked_events
+        )
+        detail = (
+            "Security policy blocked secret path write"
+            f" in {stage}: {', '.join(paths)}"
+        )
+        logger_obj.error("[SECURITY] %s", detail)
+        try:
+            record_live_log(
+                db,
+                session_id,
+                task_id,
+                "ERROR",
+                f"[SECURITY] {detail}",
+                session_instance_id=session_instance_id,
+                metadata={
+                    "stage": stage,
+                    "event_code": "security_policy_blocked",
+                    "pattern_name": "secret_path_write",
+                    "paths": paths,
+                },
+            )
+        except Exception:
+            pass
+        raise TaskOperationContractViolation(detail)
+
+    return normalized
 
 
 def verify_workspace_contract(

@@ -133,6 +133,7 @@ def ops_metrics_summary(
             "mutation_lock_conflicts": mc.mutation_lock_conflicts(days=days),
             "qdrant_fallback_count": mc.qdrant_fallback_count(days=days),
             "openclaw_timeout_count": mc.openclaw_timeout_count(days=days),
+            "security_events": mc.security_events_count(days=days),
         }
 
     return {

@@ -105,6 +105,7 @@ from .validation import (
     ValidatorService,
 )
 from .policy import (
+    COMPLETION_REPAIR_TIMEOUT_SECONDS,
     DEBUG_TIMEOUT_SECONDS,
     MAX_STEP_ATTEMPTS,
     MINIMAL_PLANNING_TIMEOUT_SECONDS,
@@ -192,6 +193,7 @@ __all__ = [
     "MAX_STEP_ATTEMPTS",
     "DEBUG_TIMEOUT_SECONDS",
     "SUMMARY_TIMEOUT_SECONDS",
+    "COMPLETION_REPAIR_TIMEOUT_SECONDS",
     "clamp_planning_timeout",
     "should_restore_workspace_on_failure",
     "get_task_report_path",

@@ -47,6 +47,7 @@ from app.services.orchestration.state.persistence import (
     save_orchestration_checkpoint,
 )
 from app.services.orchestration.policy import (
+    COMPLETION_REPAIR_TIMEOUT_SECONDS,
     SUMMARY_TIMEOUT_SECONDS,
 )
 from app.services.orchestration.review_policy import decide_change_set_review
@@ -458,7 +459,9 @@ def _attempt_completion_repair(
         direct=True,
     )
     repair_plan_result = asyncio.run(
-        ctx.runtime_service.execute_task(repair_prompt, timeout_seconds=120)
+        ctx.runtime_service.execute_task(
+            repair_prompt, timeout_seconds=COMPLETION_REPAIR_TIMEOUT_SECONDS
+        )
     )
     repair_output = _extract_completion_repair_json_text(
         repair_plan_result.get("output", "{}")
@@ -483,7 +486,7 @@ def _attempt_completion_repair(
             compliance_result = asyncio.run(
                 ctx.runtime_service.execute_task(
                     compliance_prompt,
-                    timeout_seconds=120,
+                    timeout_seconds=COMPLETION_REPAIR_TIMEOUT_SECONDS,
                 )
             )
             compliance_output = _extract_completion_repair_json_text(
@@ -565,7 +568,9 @@ def _attempt_completion_repair(
             + "\nReturn a replacement repair step that uses only inventory-confirmed paths or creates the referenced files first."
         )
         guarded_retry_result = asyncio.run(
-            ctx.runtime_service.execute_task(guarded_retry_prompt, timeout_seconds=120)
+            ctx.runtime_service.execute_task(
+                guarded_retry_prompt, timeout_seconds=COMPLETION_REPAIR_TIMEOUT_SECONDS
+            )
         )
         guarded_retry_output = extract_structured_text(
             guarded_retry_result.get("output", "{}")
@@ -838,7 +843,9 @@ def _run_evaluator(
             "NOTES: one-sentence rationale\n"
         )
         eval_result = asyncio.run(
-            runtime_service.execute_task(evaluator_prompt, timeout_seconds=120)
+            runtime_service.execute_task(
+                evaluator_prompt, timeout_seconds=COMPLETION_REPAIR_TIMEOUT_SECONDS
+            )
         )
         eval_output = (
             eval_result.get("output", "")

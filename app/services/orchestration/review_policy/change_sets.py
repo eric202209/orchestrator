@@ -26,6 +26,8 @@ _SOURCE_RISK_WARNING_FLAGS = {
     "deleted_files",
     "dependency_files_changed",
     "more_than_10_changed_files",
+    "secret_path_write",
+    "security_high_risk_command",
 }
 
 

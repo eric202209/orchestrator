@@ -20,6 +20,7 @@ MAX_PLAN_REVISIONS = 1
 DEBUG_TIMEOUT_SECONDS = 180
 SUMMARY_TIMEOUT_SECONDS = 45
 COMPLETION_VERIFICATION_TIMEOUT_SECONDS = 180
+COMPLETION_REPAIR_TIMEOUT_SECONDS = 120
 # Reasons that trigger an automatic rollback to the pre-run snapshot.
 # Isolation violations always restore (dangerous partial writes).
 # Most execution failures also restore so phantom / empty files do not
