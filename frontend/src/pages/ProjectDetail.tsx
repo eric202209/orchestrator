@@ -4,6 +4,7 @@ import { projectsAPI, tasksAPI, sessionsAPI } from '../api/client';
 import type { ChangeSetReviewDecision, Project, Task, Session } from '../types/api';
 import { ProjectPlannerPanel } from '../components/ProjectPlannerPanel';
 import { isLegacyTaskExecutionSession } from '../lib/sessionIdentity';
+import { deriveRunStateFromTask, getRunStateDisplay } from '../lib/runState';
 import {
   GitBranch,
   FileText,
@@ -179,34 +180,22 @@ function ProjectDetail() {
     }
   };
 
-  const getWorkspaceBadgeClass = (status?: string | null) => {
-    switch (status) {
-      case 'promoted':
-        return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300';
-      case 'ready':
-        return 'border-primary-500/30 bg-primary-400/10 text-primary-300';
-      case 'changes_requested':
-        return 'border-amber-500/30 bg-amber-500/10 text-amber-300';
-      case 'blocked':
-        return 'border-red-500/30 bg-red-500/10 text-red-300';
-      case 'in_progress':
-        return 'border-indigo-500/30 bg-indigo-500/10 text-indigo-300';
-      default:
-        return 'border-[color:var(--oc-border)] bg-[color:var(--oc-surface-raised)] text-slate-300';
-    }
-  };
+  const productRunDisplayForTask = (
+    task: Pick<Task, 'status' | 'workspace_status' | 'task_subfolder'>,
+    reviewDecision?: Pick<ChangeSetReviewDecision, 'held_for_review'> | null,
+    changeSet?: { changed_count?: number | null } | null
+  ) => getRunStateDisplay(deriveRunStateFromTask(task, reviewDecision, changeSet));
 
-  const formatWorkspaceStatus = (status?: string | null) => {
-    if (status === 'promoted') return 'accepted';
+  const formatDiagnosticStatus = (status?: string | null) => {
     return (status || 'not_created').replace(/_/g, ' ');
   };
 
   const workspaceCountItems = workspaceOverview
     ? [
-        { key: 'ready', label: 'Ready', value: workspaceOverview.counts.ready || 0, className: 'text-primary-300' },
+        { key: 'ready', label: 'Needs Review', value: workspaceOverview.counts.ready || 0, className: 'text-primary-300' },
         { key: 'promoted', label: 'Accepted', value: workspaceOverview.counts.promoted || 0, className: 'text-emerald-300' },
         { key: 'changes_requested', label: 'Changes Requested', value: workspaceOverview.counts.changes_requested || 0, className: 'text-amber-300' },
-        { key: 'blocked', label: 'Blocked', value: workspaceOverview.counts.blocked || 0, className: 'text-red-300' },
+        { key: 'blocked', label: 'Failed', value: workspaceOverview.counts.blocked || 0, className: 'text-red-300' },
       ].filter((item) => item.value > 0)
     : [];
   const duplicatedScaffoldItems = workspaceOverview?.audit
@@ -321,7 +310,7 @@ function ProjectDetail() {
       setRequestChangesTask(null);
     } catch (error) {
       console.error('Failed to mark task workspace for changes:', error);
-      alert('Failed to update workspace review state. Please try again.');
+      alert('Failed to update the review state. Please try again.');
     } finally {
       setRequestChangesSubmitting(false);
     }
@@ -404,7 +393,7 @@ function ProjectDetail() {
 
   const handleRejectChangeSet = async (taskId: number, taskExecutionId?: number | null) => {
     if (!id) return;
-    const note = window.prompt('Reason for rejecting this candidate change set:', 'needs review');
+    const note = window.prompt('Reason for rolling back these changes:', 'needs review');
     if (note === null) return;
     try {
       setRejectingChangeSetTaskId(taskId);
@@ -419,8 +408,8 @@ function ProjectDetail() {
       setTasks(tasksRes.data);
       setWorkspaceOverview(workspaceRes.data);
     } catch (error) {
-      console.error('Failed to reject change set:', error);
-      alert('Failed to reject and restore the change set. Please try again.');
+      console.error('Failed to roll back changes:', error);
+      alert('Failed to roll back these changes. Please try again.');
     } finally {
       setRejectingChangeSetTaskId(null);
     }
@@ -880,13 +869,13 @@ function ProjectDetail() {
           <div>
             <h2 className="text-sm font-medium text-white">Review Queue</h2>
             <p className="mt-1 text-xs text-slate-500">
-              Task change sets held by backend review policy.
+              Runs with generated changes waiting for an operator decision.
             </p>
           </div>
           {pendingChangeSets.length === 0 ? (
             <EmptyState
               icon={FileText}
-              title="No pending change sets"
+              title="No runs need review"
               description="Nontrivial task outputs will appear here when they need review."
             />
           ) : (
@@ -907,6 +896,13 @@ function ProjectDetail() {
                 const canRequestChanges = Boolean(
                   reviewTask?.task_subfolder && reviewTask?.workspace_status !== 'promoted'
                 );
+                const runDisplay = reviewTask
+                  ? productRunDisplayForTask(
+                      reviewTask,
+                      item.review_decision,
+                      item.change_set
+                    )
+                  : getRunStateDisplay('needs_review');
                 return (
                 <div
                   key={`${item.task_id}-${item.task_execution_id || 'latest'}`}
@@ -921,7 +917,7 @@ function ProjectDetail() {
                         {item.title}
                       </Link>
                       <p className="mt-1 text-xs text-slate-500">
-                        Execution {item.task_execution_id || 'latest'} · {formatWorkspaceStatus(item.workspace_status)}
+                        Execution {item.task_execution_id || 'latest'} · Diagnostics: {formatDiagnosticStatus(item.workspace_status)}
                       </p>
                       {item.review_decision?.reason && (
                         <p className="mt-1 text-xs text-amber-300">
@@ -929,7 +925,10 @@ function ProjectDetail() {
                         </p>
                       )}
                     </div>
-                    <div className="flex gap-2 text-xs">
+                    <div className="flex flex-wrap items-center justify-end gap-2 text-xs">
+                      <span className={`rounded-full border px-2.5 py-1 font-medium ${runDisplay.badgeClass}`}>
+                        {runDisplay.label}
+                      </span>
                       <span className="rounded-md border border-emerald-500/20 bg-emerald-500/10 px-2 py-1 text-emerald-200">
                         +{item.change_set.added_count}
                       </span>
@@ -958,7 +957,7 @@ function ProjectDetail() {
                       to={`/projects/${project.id}/tasks/${item.task_id}`}
                       className="rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-1.5 text-xs text-slate-300 transition-colors hover:border-[color:var(--oc-border)] hover:text-white"
                     >
-                      Open task review
+                      Open Diagnostics
                     </Link>
                     {canShowAccept && reviewTask && (
                       <button
@@ -1181,7 +1180,7 @@ function ProjectDetail() {
                     <div className="mt-3 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <p className="text-xs font-medium uppercase tracking-wide text-amber-200">
-                          Pending change sets
+                          Runs needing review
                         </p>
                         <span className="text-xs text-amber-200/80">
                           {pendingChangeSetFileCount} changed file{pendingChangeSetFileCount === 1 ? '' : 's'}
@@ -1203,7 +1202,7 @@ function ProjectDetail() {
                               </span>
                             </div>
                             <p className="mt-1 text-xs text-slate-500">
-                              +{item.change_set.added_count} / ~{item.change_set.modified_count} / -{item.change_set.deleted_count}
+                              Changes: +{item.change_set.added_count} / ~{item.change_set.modified_count} / -{item.change_set.deleted_count}
                               {item.review_decision?.reason ? ` · ${item.review_decision.reason.replace(/_/g, ' ')}` : ''}
                             </p>
                           </Link>
@@ -1215,7 +1214,16 @@ function ProjectDetail() {
               )}
 
               <div className="bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)] divide-y divide-[color:var(--oc-border-soft)]">
-                {tasks.map((task) => (
+                {tasks.map((task) => {
+                  const pendingRunChanges = pendingChangeSets.find(
+                    (item) => item.task_id === task.id
+                  );
+                  const runDisplay = productRunDisplayForTask(
+                    task,
+                    pendingRunChanges?.review_decision,
+                    pendingRunChanges?.change_set
+                  );
+                  return (
                   <div key={task.id} className="px-4 py-4 hover:bg-[color:var(--oc-surface-raised)] transition-colors">
                     <div className="flex items-start justify-between gap-4">
                       <div className="flex items-start gap-3 flex-1 min-w-0">
@@ -1228,8 +1236,11 @@ function ProjectDetail() {
                             <p className="text-xs text-slate-400 mt-0.5 line-clamp-2">{task.description}</p>
                           )}
                           <div className="mt-2 flex flex-wrap items-center gap-2">
-                            <span className={`rounded-full border px-2.5 py-0.5 text-xs font-medium capitalize ${getWorkspaceBadgeClass(task.workspace_status)}`}>
-                              {formatWorkspaceStatus(task.workspace_status)}
+                            <span
+                              className={`rounded-full border px-2.5 py-0.5 text-xs font-medium ${runDisplay.badgeClass}`}
+                              title={runDisplay.description}
+                            >
+                              {runDisplay.label}
                             </span>
                             {task.task_subfolder && !isArchivedPromotedWorkspace(task) && (
                               <span
@@ -1321,18 +1332,19 @@ function ProjectDetail() {
                       </div>
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
         </div>
       )}
 
-      {/* Accept Workspace Modal */}
+      {/* Accept Changes Modal */}
       {acceptTask && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4 backdrop-blur-sm">
           <div className="w-full max-w-xl rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-5 shadow-2xl">
-            <h3 className="text-sm font-semibold text-white">Accept Workspace</h3>
+            <h3 className="text-sm font-semibold text-white">Accept Changes</h3>
             {(() => {
               const diff = getTaskWorkspaceDiff(acceptTask);
               const acceptBlockedByActiveTask = Boolean(
@@ -1407,7 +1419,7 @@ function ProjectDetail() {
                       disabled={acceptingWorkspace || acceptBlockedByActiveTask}
                       className="flex-1 rounded-md border border-emerald-500/30 bg-emerald-500/15 px-3 py-2 text-sm text-emerald-200 transition-colors hover:bg-emerald-500/20 disabled:opacity-50"
                     >
-                      {acceptingWorkspace ? 'Accepting...' : 'Accept Workspace'}
+                      {acceptingWorkspace ? 'Accepting...' : 'Accept Changes'}
                     </button>
                   </div>
                 </div>

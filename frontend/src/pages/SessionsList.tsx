@@ -3,13 +3,14 @@ import { Link } from 'react-router-dom';
 import { sessionsAPI, projectsAPI, tasksAPI } from '../api/client';
 import type { Session, Project, Task } from '../types/api';
 import { isLegacyTaskExecutionSession } from '../lib/sessionIdentity';
+import { deriveRunStateFromSession, getRunStateDisplay } from '../lib/runState';
 import {
   Terminal,
   Clock,
   Search,
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
-import { EmptyState, StatusBadge, Skeleton } from '../components/ui';
+import { EmptyState, Skeleton } from '../components/ui';
 
 const sessionAccentClasses: Record<string, string> = {
   done: 'border-l-emerald-500/80',
@@ -207,6 +208,7 @@ function SessionsList() {
             const statusKey = session.status?.toLowerCase() || '';
             const accentClass = sessionAccentClasses[statusKey] || 'border-l-slate-600';
             const isMuted = mutedSessionStatuses.has(statusKey);
+            const runDisplay = getRunStateDisplay(deriveRunStateFromSession(session));
             return (
               <Link
                 key={session.id}
@@ -219,10 +221,12 @@ function SessionsList() {
               >
                 <div className="min-w-0">
                   <div className="mb-1 flex flex-wrap items-center gap-2">
-                    <StatusBadge status={session.status} size="sm" />
+                    <span className={`rounded-full border px-2.5 py-0.5 text-xs font-medium ${runDisplay.badgeClass}`}>
+                      {runDisplay.label}
+                    </span>
                     {isLegacySession && (
                       <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-300">
-                        Legacy
+                        Diagnostics
                       </span>
                     )}
                   </div>

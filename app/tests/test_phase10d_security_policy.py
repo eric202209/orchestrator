@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import tempfile
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -285,8 +287,6 @@ class TestRetentionPolicy:
         old_dir = tmp_path / "snap-old"
         old_dir.mkdir()
         # Set mtime to 40 days ago
-        import os, time
-
         old_time = time.time() - 40 * 86400
         os.utime(old_dir, (old_time, old_time))
 

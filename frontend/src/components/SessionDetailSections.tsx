@@ -19,6 +19,7 @@ import type {
 import type { TerminalLogEntry } from '@/components/TerminalViewer';
 import { TerminalViewer } from '@/components/TerminalViewer';
 import { StatusBadge } from '@/components/ui';
+import { deriveRunStateFromTask, getRunStateDisplay } from '@/lib/runState';
 import {
   Activity,
   AlertTriangle,
@@ -1642,9 +1643,9 @@ export function SessionTasksPanel({
   return (
     <div className="space-y-4">
       <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
-        <p className="text-sm font-medium text-slate-200">Workflow session tasks</p>
+        <p className="text-sm font-medium text-slate-200">Runs in this session</p>
         <p className="mt-1 text-sm text-slate-400">
-          These tasks and rerun attempts belong to this workflow session. Running a task again adds a new attempt here instead of creating a separate task session.
+          These runs belong to this workflow session. Running one again adds a new attempt here instead of creating a separate session.
         </p>
       </div>
 
@@ -1667,7 +1668,9 @@ export function SessionTasksPanel({
           )}
         </div>
       ) : (
-        tasks.map((task) => (
+        tasks.map((task) => {
+          const runDisplay = getRunStateDisplay(deriveRunStateFromTask(task));
+          return (
           <div
             key={task.id}
             className="rounded-xl border border-[color:var(--oc-border)] bg-[color:var(--oc-surface)] p-4 transition-colors hover:border-[color:var(--oc-border)]"
@@ -1680,12 +1683,17 @@ export function SessionTasksPanel({
                 </p>
                 {task.workspace_status && (
                   <p className="mt-1 text-xs capitalize text-slate-500">
-                    Workspace: {task.workspace_status.replace(/_/g, ' ')}
+                    Diagnostics: {task.workspace_status.replace(/_/g, ' ')}
                   </p>
                 )}
               </div>
               <div className="flex items-center gap-2">
-                <StatusBadge status={task.status} size="sm" />
+                <span
+                  className={`rounded-full border px-2.5 py-0.5 text-xs font-medium ${runDisplay.badgeClass}`}
+                  title={runDisplay.description}
+                >
+                  {runDisplay.label}
+                </span>
                 {onExecuteTask && (
                   session.execution_mode === 'manual' ||
                   task.status === 'pending' ||
@@ -1726,7 +1734,8 @@ export function SessionTasksPanel({
               )}
             </div>
           </div>
-        ))
+          );
+        })
       )}
     </div>
   );

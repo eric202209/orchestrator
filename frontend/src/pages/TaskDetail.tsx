@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
 import { projectsAPI, tasksAPI } from '@/api/client';
 import type { Project, Task } from '@/types/api';
+import { deriveRunStateFromTask, getRunStateDisplay } from '@/lib/runState';
 import { 
   ArrowLeft, 
   ChevronDown,
@@ -14,7 +15,7 @@ import {
   FileWarning,
   RotateCcw
 } from 'lucide-react';
-import { StatusBadge, LoadingSpinner, Button, TextArea, Alert } from '@/components/ui';
+import { LoadingSpinner, Button, TextArea, Alert } from '@/components/ui';
 import type { TaskExecutionChangeSetResponse } from '@/types/api';
 
 function TaskDetail() {
@@ -203,7 +204,7 @@ function TaskDetail() {
 
   const handleRejectChangeSet = async () => {
     if (!task || !changeSet?.task_execution_id) return;
-    const note = window.prompt('Reason for rejecting this candidate change set:', 'needs review');
+    const note = window.prompt('Reason for rolling back these changes:', 'needs review');
     if (note === null) return;
     try {
       setSaveError(null);
@@ -214,8 +215,8 @@ function TaskDetail() {
       });
       await fetchTask();
     } catch (error) {
-      console.error('Failed to reject change set:', error);
-      setSaveError('Failed to reject and restore the change set');
+      console.error('Failed to roll back changes:', error);
+      setSaveError('Failed to roll back these changes');
     } finally {
       setChangeSetRejecting(false);
     }
@@ -225,8 +226,7 @@ function TaskDetail() {
     targetTask.workspace_status === 'promoted' &&
     (targetTask.task_subfolder || '').startsWith('.openclaw/promoted-workspace-archive/');
 
-  const formatWorkspaceStatus = (status?: string | null) => {
-    if (status === 'promoted') return 'accepted';
+  const formatDiagnosticStatus = (status?: string | null) => {
     return String(status || 'not_created').replace(/_/g, ' ');
   };
 
@@ -256,6 +256,11 @@ function TaskDetail() {
       latestChangeSet &&
       reviewDecision?.held_for_review
   );
+  const runDisplay = task
+    ? getRunStateDisplay(
+        deriveRunStateFromTask(task, reviewDecision, latestChangeSet)
+      )
+    : null;
   const renderChangeSetFiles = (label: string, files: string[]) => {
     if (!files.length) return null;
     return (
@@ -316,7 +321,7 @@ function TaskDetail() {
           >
             Back to tasks
           </button>
-          <h1 className="text-2xl font-bold text-slate-100">Task Details</h1>
+          <h1 className="text-2xl font-bold text-slate-100">Run Diagnostics</h1>
         </div>
         {!editing ? (
           <Button
@@ -368,8 +373,18 @@ function TaskDetail() {
             <h2 className="text-xl font-bold text-white">
               {task.title}
             </h2>
-            <div className="mt-2">
-              <StatusBadge status={task.status} />
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              {runDisplay && (
+                <span
+                  className={`rounded-full border px-3 py-1 text-xs font-medium ${runDisplay.badgeClass}`}
+                  title={runDisplay.description}
+                >
+                  {runDisplay.label}
+                </span>
+              )}
+              <span className="rounded-full border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-1 text-xs text-slate-400">
+                Diagnostics
+              </span>
             </div>
           </div>
           {task.created_at && (
@@ -504,7 +519,7 @@ function TaskDetail() {
             <div className="rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-surface-raised)] p-4">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="rounded-full border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] px-3 py-1 text-xs capitalize text-slate-200">
-                  Workspace: {formatWorkspaceStatus(task.workspace_status)}
+                  Diagnostics: {formatDiagnosticStatus(task.workspace_status)}
                 </span>
                 {task.task_subfolder && !isArchivedPromotedWorkspace(task) && (
                   <span className="rounded-full border border-[color:var(--oc-border-soft)] px-3 py-1 text-xs text-slate-400">
@@ -524,7 +539,7 @@ function TaskDetail() {
                 <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
                   <p className="text-sm font-medium text-amber-200">Held for review</p>
                   <p className="mt-1 text-xs text-amber-100/80">
-                    Backend review policy {reviewDecision?.workspace_review_policy || 'unknown'} held this change set{reviewDecision?.reason ? `: ${reviewDecision.reason.replace(/_/g, ' ')}` : ''}.
+                    Review policy {reviewDecision?.workspace_review_policy || 'unknown'} held these changes{reviewDecision?.reason ? `: ${reviewDecision.reason.replace(/_/g, ' ')}` : ''}.
                     Accept it, request changes, or reject and restore after review.
                   </p>
                 </div>
@@ -555,7 +570,7 @@ function TaskDetail() {
                 )}
                 {task.status === 'done' && task.task_subfolder && task.workspace_status !== 'promoted' && (
                   <Button size="sm" onClick={handleAccept}>
-                    Accept Workspace
+                    Accept Changes
                   </Button>
                 )}
                 {task.task_subfolder && task.workspace_status !== 'promoted' && (
@@ -565,7 +580,7 @@ function TaskDetail() {
                 )}
                 {!task.task_subfolder && extractArchivePath(task) && (
                   <Button size="sm" variant="outline" onClick={handleRestoreArchivedWorkspace}>
-                    Restore Archived Workspace
+                    Restore Archived Changes
                   </Button>
                 )}
               </div>
@@ -577,7 +592,7 @@ function TaskDetail() {
                   <div>
                     <h3 className="flex items-center gap-2 text-sm font-medium text-slate-200">
                       <FileWarning className="h-4 w-4 text-amber-300" />
-                      {heldForReview ? 'Held Change Set' : 'Workspace Change Set'}
+                      {heldForReview ? 'Changes Need Review' : 'Generated Changes'}
                     </h3>
                     <p className="mt-1 text-xs text-slate-500">
                       Execution {latestChangeSet.task_execution_id} · {latestChangeSet.changed_count} changed file{latestChangeSet.changed_count === 1 ? '' : 's'}
