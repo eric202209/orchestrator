@@ -179,3 +179,30 @@ def ops_storage(
         "computed_at": datetime.now(UTC).isoformat(),
         **stats,
     }
+
+
+@router.get("/workflow-templates")
+def ops_workflow_templates(
+    current_user=Depends(get_current_admin_user),
+) -> Dict[str, Any]:
+    """List all available workflow templates."""
+    from app.services.orchestration.workflow_templates import list_templates
+
+    templates = list_templates()
+    return {
+        "computed_at": datetime.now(UTC).isoformat(),
+        "count": len(templates),
+        "templates": [
+            {
+                "id": t.id,
+                "display_name": t.display_name,
+                "workflow_profile": t.workflow_profile,
+                "verification": t.verification,
+                "auto_promote_eligible": t.auto_promote_eligible,
+                "allowed_ops": t.allowed_ops,
+                "risk_flags": t.risk_flags,
+                "review_policy": t.review_policy,
+            }
+            for t in templates
+        ],
+    }

@@ -71,6 +71,7 @@ def decide_change_set_review(
     workspace_review_policy: str,
     workflow_profile: Optional[str] = None,
     evaluator_evidence: Optional[dict[str, Any]] = None,
+    template_review_policy: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Return the governance decision for a task execution change set.
 
@@ -107,6 +108,68 @@ def decide_change_set_review(
         held_for_review = False
         reason = "low_risk_profile_warning_allowed"
 
+    # Template review policy overrides — applied after workspace policy.
+    # hold_if conditions have highest priority; auto_promote_if can release a hold.
+    template_signal: dict[str, Any] = {}
+    if template_review_policy:
+        from app.services.orchestration.workflow_templates import (
+            _AUTO_PROMOTE_CONDITIONS,
+            _HOLD_CONDITIONS,
+        )
+
+        wf_set = set(warning_flags)
+        hold_if = template_review_policy.get("hold_if") or []
+        auto_promote_if = template_review_policy.get("auto_promote_if") or []
+        auto_promote_eligible = template_review_policy.get(
+            "auto_promote_eligible", True
+        )
+        allowed_ops = template_review_policy.get("allowed_ops") or []
+
+        # auto_promote_eligible=False: always hold regardless of conditions.
+        if auto_promote_eligible is False:
+            held_for_review = True
+            warning_allowed_by_profile = False
+            reason = "template_auto_promote_not_eligible"
+            template_signal = {
+                "triggered_hold_conditions": ["auto_promote_eligible_false"],
+                "failed_auto_promote_conditions": [],
+            }
+        else:
+            # Unknown condition names fail-closed: unknown hold_if → triggers hold;
+            # unknown auto_promote_if → blocks auto-promote.
+            triggered_hold = [
+                c for c in hold_if if _HOLD_CONDITIONS.get(c, lambda _: True)(wf_set)
+            ]
+            failed_promote = [
+                c
+                for c in auto_promote_if
+                if not _AUTO_PROMOTE_CONDITIONS.get(c, lambda _: False)(wf_set)
+            ]
+            template_signal = {
+                "triggered_hold_conditions": triggered_hold,
+                "failed_auto_promote_conditions": failed_promote,
+            }
+            if triggered_hold:
+                held_for_review = True
+                warning_allowed_by_profile = False
+                reason = "template_hold_condition_triggered"
+            elif not failed_promote and held_for_review and policy == "hold_nontrivial":
+                held_for_review = False
+                reason = "template_auto_promote_conditions_met"
+
+        # allowed_ops enforcement: read-only templates must not produce mutations.
+        # Always surface the violation even when already held for another reason,
+        # so the operator signal is never hidden behind a generic hold.
+        _read_only_template = bool(allowed_ops) and set(allowed_ops) == {"read_file"}
+        if _read_only_template and changed_count > 0:
+            held_for_review = True
+            warning_allowed_by_profile = False
+            reason = "template_allowed_ops_violation"
+            template_signal = {
+                **template_signal,
+                "allowed_ops_violation": True,
+            }
+
     outcome = "hold_for_review" if held_for_review else "auto_promote"
     if warning_allowed_by_profile:
         outcome = "allow_with_warning"
@@ -126,6 +189,7 @@ def decide_change_set_review(
         "evidence_refs": [],
         "evaluator_evidence": evaluator,
         "evaluator_influence": "shadow" if evaluator else "none",
+        "template_signal": template_signal,
     }
 
 

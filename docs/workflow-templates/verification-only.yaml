@@ -1,0 +1,10 @@
+id: verification-only
+display_name: Verification Only
+workflow_profile: review_only
+review_policy:
+  auto_promote_if: [no_deletes]
+  hold_if: []
+allowed_ops: [read_file]
+verification: verification_only
+auto_promote_eligible: true
+risk_flags: []

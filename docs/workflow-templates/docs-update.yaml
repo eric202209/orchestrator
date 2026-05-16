@@ -1,0 +1,10 @@
+id: docs-update
+display_name: Documentation Update
+workflow_profile: review_only
+review_policy:
+  auto_promote_if: [no_deletes, no_config_changes, no_dependency_changes]
+  hold_if: [has_deletes, config_change]
+allowed_ops: [write_file, read_file, append_file, replace_in_file]
+verification: docs
+auto_promote_eligible: true
+risk_flags: []

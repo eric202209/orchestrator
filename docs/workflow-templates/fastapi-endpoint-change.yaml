@@ -1,0 +1,10 @@
+id: fastapi-endpoint-change
+display_name: FastAPI Endpoint Change
+workflow_profile: backend_only
+review_policy:
+  auto_promote_if: [no_deletes, no_dependency_changes]
+  hold_if: [has_deletes, config_change, dependency_change]
+allowed_ops: [write_file, replace_in_file, append_file, read_file, shell_command]
+verification: mutation
+auto_promote_eligible: true
+risk_flags: [modifies_config, modifies_tests]

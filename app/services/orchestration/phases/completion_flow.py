@@ -114,6 +114,24 @@ _VISIBLE_TEXT_KEYS = {
 }
 
 
+def _resolve_template_review_policy(task: Any) -> Optional[dict]:
+    template_id = getattr(task, "template_id", None)
+    if not template_id:
+        return None
+    try:
+        from app.services.orchestration.workflow_templates import get_template
+
+        tmpl = get_template(template_id)
+        if not tmpl:
+            return None
+        policy = dict(tmpl.review_policy)
+        policy["auto_promote_eligible"] = tmpl.auto_promote_eligible
+        policy["allowed_ops"] = tmpl.allowed_ops
+        return policy
+    except Exception:
+        return None
+
+
 def _deterministic_task_summary(orchestration_state: Any) -> str:
     changed_files = list(
         dict.fromkeys(
@@ -1533,17 +1551,20 @@ def finalize_successful_task(
         )
 
     nontrivial_change_flags = list((task_change_set or {}).get("warning_flags") or [])
+    _tmpl_review_policy = _resolve_template_review_policy(task)
     if hasattr(task_service, "change_set_review_decision"):
         review_decision = task_service.change_set_review_decision(
             task_change_set,
             workspace_review_policy=workspace_review_policy,
             workflow_profile=getattr(ctx, "workflow_profile", None),
+            template_review_policy=_tmpl_review_policy,
         )
     else:
         review_decision = decide_change_set_review(
             task_change_set,
             workspace_review_policy=workspace_review_policy,
             workflow_profile=getattr(ctx, "workflow_profile", None),
+            template_review_policy=_tmpl_review_policy,
         )
     should_hold_for_review = bool(review_decision["held_for_review"])
     baseline_publish_result = None

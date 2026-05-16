@@ -128,6 +128,10 @@ def _migration_001_runtime_columns(engine: Engine) -> None:
             ("started_at", "ALTER TABLE tasks ADD COLUMN started_at DATETIME"),
             ("completed_at", "ALTER TABLE tasks ADD COLUMN completed_at DATETIME"),
             ("updated_at", "ALTER TABLE tasks ADD COLUMN updated_at DATETIME"),
+            (
+                "template_id",
+                "ALTER TABLE tasks ADD COLUMN template_id VARCHAR(50)",
+            ),
         ]:
             if not _has_column(engine, "tasks", column_name):
                 statements.append(ddl)

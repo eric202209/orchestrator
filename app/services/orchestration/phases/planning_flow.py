@@ -371,6 +371,19 @@ def execute_planning_phase(
         getattr(ctx.task, "title", None),
         getattr(ctx.task, "description", None),
     )
+    # Template workflow_profile overrides the heuristic-derived value.
+    _tmpl_id = getattr(ctx.task, "template_id", None)
+    if _tmpl_id:
+        try:
+            from app.services.orchestration.workflow_templates import (
+                get_template as _gt,
+            )
+
+            _tmpl = _gt(_tmpl_id)
+            if _tmpl:
+                ctx.workflow_profile = _tmpl.workflow_profile
+        except Exception:
+            pass
     ctx.workflow_phases = get_workflow_phases(ctx.workflow_profile)
     ctx.workspace_has_existing_files = bool(workspace_review.get("has_existing_files"))
     if len(ctx.orchestration_state.project_context or "") > 3500:

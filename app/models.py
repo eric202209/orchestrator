@@ -85,6 +85,8 @@ class Task(Base):
     completed_at = Column(DateTime(timezone=True), nullable=True)
     # Task workspace subfolder within project
     task_subfolder = Column(String(255), nullable=True)
+    # Workflow template applied at task creation (optional)
+    template_id = Column(String(50), nullable=True)
 
     # Add unique constraint on (project_id, task_subfolder) to prevent race conditions
     __table_args__ = (

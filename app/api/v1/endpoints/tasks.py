@@ -680,6 +680,15 @@ def create_task(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    if task.template_id is not None:
+        from app.services.orchestration.workflow_templates import known_template_ids
+
+        if task.template_id not in known_template_ids():
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown workflow template: {task.template_id!r}",
+            )
+
     task_data = task.model_dump()
     task_data["title"] = humanize_display_name(task_data.get("title", ""))
     db_task = Task(**task_data, status=TaskStatus.PENDING)

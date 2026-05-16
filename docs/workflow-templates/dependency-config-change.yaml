@@ -1,0 +1,10 @@
+id: dependency-config-change
+display_name: Dependency / Config Change
+workflow_profile: default
+review_policy:
+  auto_promote_if: []
+  hold_if: [always]
+allowed_ops: [write_file, replace_in_file, read_file]
+verification: mutation
+auto_promote_eligible: false
+risk_flags: [dependency_change, modifies_config]

@@ -57,6 +57,7 @@ class TaskBase(BaseModel):
 class TaskCreate(TaskBase):
     project_id: int
     steps: Optional[str] = None  # JSON string of step-by-step plan
+    template_id: Optional[str] = None
 
 
 class TaskUpdate(BaseModel):
@@ -96,6 +97,7 @@ class TaskResponse(TaskBase):
     promoted_at: Optional[datetime] = None
     task_subfolder: Optional[str] = None
     session_id: Optional[int] = None
+    template_id: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
     started_at: Optional[datetime] = None

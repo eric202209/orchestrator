@@ -138,12 +138,14 @@ class ChangesetService:
         workspace_review_policy: str,
         workflow_profile: Optional[str] = None,
         evaluator_evidence: Optional[dict[str, Any]] = None,
+        template_review_policy: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         return decide_change_set_review(
             change_set,
             workspace_review_policy=workspace_review_policy,
             workflow_profile=workflow_profile,
             evaluator_evidence=evaluator_evidence,
+            template_review_policy=template_review_policy,
         )
 
     def build_task_execution_change_set(

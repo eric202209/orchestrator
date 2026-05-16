@@ -84,6 +84,7 @@ qdrant/
 
 # Documentation
 docs/*
+!docs/workflow-templates
 
 # Scripts to stop services (should be run locally)
 stop_all.sh
