@@ -1,5 +1,15 @@
 # start.ps1
 
+$requiredDirs = @("checkpoints", "logs", "knowledge", "projects", "data")
+foreach ($dir in $requiredDirs) {
+  New-Item -ItemType Directory -Force -Path (Join-Path $PWD $dir) | Out-Null
+}
+New-Item -ItemType File -Force -Path (Join-Path $PWD "orchestrator.db") | Out-Null
+
+if (-not $env:WINDOWS_PROJECTS_DIR) {
+  $env:WINDOWS_PROJECTS_DIR = Join-Path $PWD "projects"
+}
+
 Write-Host "Starting Docker backend..." -ForegroundColor Green
 Start-Process powershell -ArgumentList "-NoExit", "-Command", `
   "cd '$PWD'; docker compose -f docker-compose.windows.yml up"

@@ -83,7 +83,9 @@ class OllamaRuntime:
         self.task_execution_id: Optional[int] = None
         self.backend_descriptor = get_backend_descriptor("direct_ollama")
 
-        self._base_url = (settings.OLLAMA_BASE_URL or "http://localhost:11434").rstrip("/")
+        self._base_url = (settings.OLLAMA_BASE_URL or "http://localhost:11434").rstrip(
+            "/"
+        )
         # OLLAMA_AGENT_MODEL 優先，fallback 到 PLANNING_REPAIR_MODEL
         self._model = (
             getattr(settings, "OLLAMA_AGENT_MODEL", None)
@@ -124,14 +126,24 @@ class OllamaRuntime:
                 content = resp.json()["choices"][0]["message"]["content"]
                 return _strip_thinking(content)
         except httpx.TimeoutException as exc:
-            logger.error("[OLLAMA] Timeout after %.0fs calling %s", effective_timeout, url)
-            raise AgentRuntimeError(f"Ollama timed out after {effective_timeout}s") from exc
+            logger.error(
+                "[OLLAMA] Timeout after %.0fs calling %s", effective_timeout, url
+            )
+            raise AgentRuntimeError(
+                f"Ollama timed out after {effective_timeout}s"
+            ) from exc
         except httpx.HTTPStatusError as exc:
-            logger.error("[OLLAMA] HTTP %s: %s", exc.response.status_code, exc.response.text[:400])
+            logger.error(
+                "[OLLAMA] HTTP %s: %s",
+                exc.response.status_code,
+                exc.response.text[:400],
+            )
             raise AgentRuntimeError(f"Ollama HTTP {exc.response.status_code}") from exc
         except httpx.ConnectError as exc:
             logger.error("[OLLAMA] Cannot connect to %s", self._base_url)
-            raise AgentRuntimeError(f"Cannot connect to Ollama at {self._base_url}") from exc
+            raise AgentRuntimeError(
+                f"Cannot connect to Ollama at {self._base_url}"
+            ) from exc
         except Exception as exc:
             logger.error("[OLLAMA] Unexpected error: %s", exc)
             raise AgentRuntimeError(str(exc)) from exc
@@ -190,9 +202,8 @@ class OllamaRuntime:
         if orchestration_state is not None:
             project_context = getattr(orchestration_state, "project_context", "") or ""
 
-        is_planning = (
-            orchestration_state is not None
-            and not getattr(orchestration_state, "plan", None)
+        is_planning = orchestration_state is not None and not getattr(
+            orchestration_state, "plan", None
         )
         system = _PLAN_SYSTEM if is_planning else _STEP_SYSTEM
         user = f"{project_context}\n\n{prompt}".strip() if project_context else prompt

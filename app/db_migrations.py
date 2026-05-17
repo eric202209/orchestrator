@@ -626,6 +626,16 @@ def _migration_011_project_user_ownership(engine: Engine) -> None:
             )
 
 
+def _migration_012_task_template_id(engine: Engine) -> None:
+    if "tasks" not in _table_names(engine):
+        return
+    if not _has_column(engine, "tasks", "template_id"):
+        with engine.begin() as connection:
+            connection.execute(
+                text("ALTER TABLE tasks ADD COLUMN template_id VARCHAR(50)")
+            )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -681,6 +691,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="011_project_user_ownership",
         description="Add nullable user ownership to projects",
         upgrade=_migration_011_project_user_ownership,
+    ),
+    Migration(
+        version="012_task_template_id",
+        description="Add optional workflow template id to tasks",
+        upgrade=_migration_012_task_template_id,
     ),
 )
 

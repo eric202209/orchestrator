@@ -96,6 +96,7 @@ def test_schema_migrations_add_required_columns_and_indexes(tmp_path):
         "plan_position",
         "execution_profile",
         "task_subfolder",
+        "template_id",
     } <= task_columns
     assert {"deleted_at", "instance_id", "execution_mode"} <= session_columns
     assert {"log_metadata", "session_instance_id"} <= log_columns
@@ -137,3 +138,26 @@ def test_schema_migrations_rename_deleted_session_names(tmp_path):
         ).scalar_one()
 
     assert renamed == "retry-session__deleted__1"
+
+
+def test_schema_migrations_add_template_id_when_runtime_migration_already_applied(
+    tmp_path,
+):
+    engine = _legacy_engine(tmp_path)
+    run_schema_migrations(engine)
+
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE tasks DROP COLUMN template_id"))
+        connection.execute(
+            text(
+                """
+                DELETE FROM schema_migrations
+                WHERE version = '012_task_template_id'
+                """
+            )
+        )
+
+    run_schema_migrations(engine)
+
+    task_columns = {column["name"] for column in inspect(engine).get_columns("tasks")}
+    assert "template_id" in task_columns

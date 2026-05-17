@@ -224,10 +224,12 @@ ollama list
 ollama run qwen3:8b-q4_K_M "Return only: OK"
 ```
 
-**3.5. Pre build files for docker to avoid error
-cd orchestrator
+**3.5. Pre-create local bind-mount paths**
+
+Docker Compose expects these host paths to exist before startup:
+
 ```powershell
-New-Item -ItemType Directory -Force -Path checkpoints, logs, knowledge
+New-Item -ItemType Directory -Force -Path checkpoints, logs, knowledge, data, projects
 New-Item -ItemType File -Force -Path orchestrator.db
 ```
 
@@ -274,8 +276,13 @@ WORKSPACE_REVIEW_POLICY=hold_nontrivial
 
 **5. Build and start**
 
-For docker-compose.windows.yml, 
-first, you need to change file path at volumes.
+By default, project workspaces are mounted from `.\projects` into
+`/app/projects`. To use another Windows folder, set `WINDOWS_PROJECTS_DIR`
+before starting Compose:
+
+```powershell
+$env:WINDOWS_PROJECTS_DIR = "C:\Users\YourName\Documents\Projects"
+```
 
 ```powershell
 docker compose -f docker-compose.windows.yml up --build

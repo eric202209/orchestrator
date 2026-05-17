@@ -105,7 +105,8 @@ def test_repaired_single_step_full_lifecycle_plan_is_split_for_execution():
     assert split_plan[1]["ops"] == plan[0]["ops"]
     assert split_plan[1]["expected_files"] == ["about.html"]
     assert split_plan[2]["commands"] == [split_plan[2]["verification"]]
-    assert "node -e" in split_plan[2]["verification"]
+    assert split_plan[2]["verification"].startswith("python -c ")
+    assert "about.html" in split_plan[2]["verification"]
 
 
 def test_weak_expected_file_verification_is_strengthened():
@@ -122,7 +123,7 @@ def test_weak_expected_file_verification_is_strengthened():
 
     strengthened = _strengthen_weak_expected_file_verifications(plan)
 
-    assert strengthened[0]["verification"].startswith("node -e ")
+    assert strengthened[0]["verification"].startswith("python -c ")
     assert "README.md" in strengthened[0]["verification"]
     assert "Usage" in strengthened[0]["verification"]
     assert strengthened[0]["commands"] == [strengthened[0]["verification"]]

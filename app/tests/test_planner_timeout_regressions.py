@@ -982,7 +982,9 @@ def test_minimal_planning_prompt_requires_real_content_and_strong_verification()
     assert '"op": "write_file"' in prompt
     assert "fallback limits" in prompt
     assert "If content needs quoting, move that content into `ops`" in prompt
-    assert "For Python app import assertions, create a tiny test file with `ops`" in prompt
+    assert (
+        "For Python app import assertions, create a tiny test file with `ops`" in prompt
+    )
     assert "For static HTML/CSS without package.json, prefer `python -c`" in prompt
     assert "instead of inline `python -c` snippets" in prompt
     assert "No heredocs, background processes, absolute helpers" in prompt

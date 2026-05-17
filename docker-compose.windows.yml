@@ -33,7 +33,9 @@ services:
       - ./logs:/app/logs
       - ./checkpoints:/app/checkpoints
       - ./knowledge:/app/knowledge
-      - "C:\\Users\\Eric\\Documents\\Projects:/app/projects" # Change as your file path
+      - type: bind
+        source: ${WINDOWS_PROJECTS_DIR:-./projects}
+        target: /app/projects
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
@@ -57,7 +59,9 @@ services:
       - ./logs:/app/logs
       - ./checkpoints:/app/checkpoints
       - ./knowledge:/app/knowledge
-      - "C:\\Users\\Eric\\Documents\\Projects:/app/projects" # Change as your file path
+      - type: bind
+        source: ${WINDOWS_PROJECTS_DIR:-./projects}
+        target: /app/projects
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
