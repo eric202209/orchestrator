@@ -39,6 +39,8 @@ from app.models import (
     Session as SessionModel,
     SessionTask,
     Task,
+    TaskCheckpoint,
+    TaskExecution,
     TaskStatus,
     User,
 )
@@ -69,6 +71,23 @@ class MobilePermissionApproveBody(BaseModel):
     auto_approve_same: bool = False
 
 
+class MobileInterventionReplyBody(BaseModel):
+    reply: str
+
+
+class MobileInterventionDenyBody(BaseModel):
+    reason: Optional[str] = None
+
+
+class MobileOperatorFeedbackBody(BaseModel):
+    feedback: str
+
+
+class MobileChangeSetRejectBody(BaseModel):
+    task_execution_id: Optional[int] = None
+    note: Optional[str] = None
+
+
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
@@ -80,7 +99,15 @@ from app.services.streaming_health import (
 from app.services.workspace.system_settings import get_effective_mobile_gateway_key
 from app.services.task_service import TaskService
 from app.services.session.session_inspection_service import (
+    delete_session_checkpoint_payload,
+    list_session_checkpoints_payload,
+    load_session_checkpoint_payload,
     refresh_session_dispatch_watchdog_alert,
+)
+from app.services.session.session_lifecycle_service import (
+    pause_session_lifecycle,
+    resume_session_lifecycle,
+    stop_session_lifecycle,
 )
 
 logger = logging.getLogger(__name__)
@@ -106,6 +133,40 @@ def _status_value(value: object) -> str:
 def _normalize_permission_status(value: object) -> str:
     normalized = _status_value(value).lower()
     return "rejected" if normalized == "denied" else normalized
+
+
+def _serialize_mobile_intervention(req) -> dict[str, Any]:
+    return {
+        "id": req.id,
+        "session_id": req.session_id,
+        "task_id": req.task_id,
+        "project_id": req.project_id,
+        "intervention_type": req.intervention_type,
+        "initiated_by": req.initiated_by,
+        "prompt": req.prompt,
+        "context_snapshot": req.context_snapshot,
+        "status": req.status,
+        "operator_reply": req.operator_reply,
+        "operator_id": req.operator_id,
+        "created_at": req.created_at.isoformat() if req.created_at else None,
+        "replied_at": req.replied_at.isoformat() if req.replied_at else None,
+        "expires_at": req.expires_at.isoformat() if req.expires_at else None,
+        "updated_at": req.updated_at.isoformat() if req.updated_at else None,
+    }
+
+
+def _get_mobile_intervention_or_404(db: Session, session_id: int, intervention_id: int):
+    intervention = (
+        db.query(InterventionRequest)
+        .filter(
+            InterventionRequest.id == intervention_id,
+            InterventionRequest.session_id == session_id,
+        )
+        .first()
+    )
+    if not intervention:
+        raise HTTPException(status_code=404, detail="Intervention request not found")
+    return intervention
 
 
 def _build_task_counts(tasks: list[Task]) -> dict[str, int]:
@@ -623,11 +684,39 @@ async def list_mobile_session_checkpoints(
 ):
     """List checkpoints for a session using mobile shared-key auth."""
     _log_mobile_request(request, "session_checkpoints", session_id=session_id)
-    from app.api.v1.endpoints.sessions import list_session_checkpoints
-
-    return await list_session_checkpoints(
-        session_id=session_id, db=db, current_user=None
+    payload = list_session_checkpoints_payload(db, session_id)
+    file_checkpoint_names = {
+        str(checkpoint.get("name"))
+        for checkpoint in payload.get("checkpoints", [])
+        if checkpoint.get("name")
+    }
+    validation_checkpoints = (
+        db.query(TaskCheckpoint)
+        .filter(TaskCheckpoint.session_id == session_id)
+        .order_by(TaskCheckpoint.created_at.asc().nullslast(), TaskCheckpoint.id.asc())
+        .all()
     )
+    for checkpoint in validation_checkpoints:
+        name = f"validation_{checkpoint.id}"
+        if name in file_checkpoint_names:
+            continue
+        payload.setdefault("checkpoints", []).append(
+            {
+                "name": name,
+                "created_at": (
+                    checkpoint.created_at.isoformat() if checkpoint.created_at else None
+                ),
+                "step_index": checkpoint.step_number,
+                "completed_steps": 0,
+                "checkpoint_type": checkpoint.checkpoint_type,
+                "description": checkpoint.description,
+                "task_id": checkpoint.task_id,
+                "resumable": False,
+                "resume_reason": "Validation checkpoint is inspectable but not directly resumable",
+            }
+        )
+    payload["total_count"] = len(payload.get("checkpoints", []))
+    return payload
 
 
 @router.post("/mobile/sessions/{session_id}/stop")
@@ -639,13 +728,12 @@ async def stop_mobile_session(
 ):
     """Stop a session through the mobile API."""
     _log_mobile_request(request, "stop_session", session_id=session_id, force=force)
-    from app.api.v1.endpoints.sessions import stop_session
-
-    return await stop_session(
-        session_id=session_id,
-        db=db,
-        current_user=None,
+    return await stop_session_lifecycle(
+        db,
+        session_id,
         force=force,
+        initiated_by="mobile",
+        source=f"mobile:{request.method} {request.url.path}",
     )
 
 
@@ -657,13 +745,7 @@ async def resume_mobile_session(
 ):
     """Resume a stopped or paused session through the mobile API."""
     _log_mobile_request(request, "resume_session", session_id=session_id)
-    from app.api.v1.endpoints.sessions import resume_session
-
-    return await resume_session(
-        session_id=session_id,
-        db=db,
-        current_user=None,
-    )
+    return await resume_session_lifecycle(db, session_id)
 
 
 @router.post("/mobile/tasks/{task_id}/retry")
@@ -984,9 +1066,7 @@ async def pause_mobile_session(
 ):
     """Pause a running session via mobile (T023)."""
     _log_mobile_request(request, "pause_session", session_id=session_id)
-    from app.api.v1.endpoints.sessions import pause_session
-
-    return await pause_session(session_id=session_id, db=db, current_user=None)
+    return await pause_session_lifecycle(db, session_id)
 
 
 @router.websocket("/mobile/sessions/{session_id}/logs/stream")
@@ -1125,6 +1205,113 @@ def submit_mobile_workspace_review(
     }
 
 
+@router.get("/mobile/tasks/{task_id}/change-set")
+def get_mobile_latest_task_change_set(
+    task_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Return the latest deterministic workspace change set using mobile auth."""
+    _log_mobile_request(request, "task_change_set", task_id=task_id)
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    task_service = TaskService(db)
+    latest_change_set = task_service.get_latest_task_change_set_for_task(task_id)
+    if not latest_change_set:
+        raise HTTPException(status_code=404, detail="No change set recorded for task")
+    change_set = latest_change_set.get("change_set") or {}
+    review_decision = latest_change_set.get("review_decision")
+    if not review_decision:
+        from app.services.workspace.system_settings import (
+            get_effective_workspace_review_policy,
+        )
+
+        review_decision = task_service.change_set_review_decision(
+            change_set,
+            workspace_review_policy=get_effective_workspace_review_policy(
+                settings.WORKSPACE_REVIEW_POLICY,
+                db=db,
+            ),
+        )
+    return {
+        "task_id": task_id,
+        "task_execution_id": latest_change_set.get("task_execution_id"),
+        "change_set": change_set,
+        "review_decision": review_decision,
+        "recorded_at": latest_change_set.get("recorded_at"),
+    }
+
+
+@router.post("/mobile/tasks/{task_id}/change-set/reject")
+def reject_mobile_latest_task_change_set(
+    task_id: int,
+    body: MobileChangeSetRejectBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Archive candidate files and restore the pre-run snapshot using mobile auth."""
+    _log_mobile_request(request, "reject_task_change_set", task_id=task_id)
+    from app.services.orchestration.execution.runtime import workspace_snapshot_key
+    from app.services.workspace.project_mutation_lock import ProjectMutationLockError
+
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    project = (
+        db.query(Project)
+        .filter(Project.id == task.project_id, Project.deleted_at.is_(None))
+        .first()
+    )
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if body.task_execution_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="task_execution_id is required to reject and restore a change set",
+        )
+    task_execution = (
+        db.query(TaskExecution)
+        .filter(TaskExecution.id == body.task_execution_id)
+        .first()
+    )
+    if not task_execution:
+        raise HTTPException(status_code=404, detail="Task execution not found")
+    if task_execution.task_id != task.id:
+        raise HTTPException(
+            status_code=409,
+            detail="Task execution belongs to a different task",
+        )
+
+    task_service = TaskService(db)
+    change_set = task_service.get_task_execution_change_set(
+        task_execution_id=body.task_execution_id
+    )
+    if not change_set:
+        raise HTTPException(
+            status_code=404,
+            detail="No change set recorded for task_execution_id",
+        )
+    snapshot_key = (
+        str(change_set.get("snapshot_key"))
+        if change_set and change_set.get("snapshot_key")
+        else workspace_snapshot_key(task_id, body.task_execution_id)
+    )
+    try:
+        return task_service.reject_task_execution_change_set(
+            project,
+            task,
+            task_execution_id=body.task_execution_id,
+            snapshot_key=snapshot_key,
+            reason=(body.note or "mobile_rejected_change_set").strip()
+            or "mobile_rejected_change_set",
+            operator="mobile",
+        )
+    except ProjectMutationLockError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 # ── US4: Checkpoint Load / Delete ─────────────────────────────
 
 
@@ -1139,14 +1326,7 @@ async def load_mobile_checkpoint(
     _log_mobile_request(
         request, "load_checkpoint", session_id=session_id, name=body.checkpoint_name
     )
-    from app.api.v1.endpoints.sessions import load_session_checkpoint
-
-    return await load_session_checkpoint(
-        session_id=session_id,
-        checkpoint_name=body.checkpoint_name,
-        db=db,
-        current_user=None,
-    )
+    return await load_session_checkpoint_payload(db, session_id, body.checkpoint_name)
 
 
 @router.delete("/mobile/sessions/{session_id}/checkpoints/{checkpoint_name}")
@@ -1160,14 +1340,181 @@ async def delete_mobile_checkpoint(
     _log_mobile_request(
         request, "delete_checkpoint", session_id=session_id, name=checkpoint_name
     )
-    from app.api.v1.endpoints.sessions import delete_session_checkpoint
+    return delete_session_checkpoint_payload(db, session_id, checkpoint_name)
 
-    return await delete_session_checkpoint(
-        session_id=session_id,
-        checkpoint_name=checkpoint_name,
-        db=db,
-        current_user=None,
+
+# ── Mobile Intervention / Recovery Actions ────────────────────
+
+
+@router.get("/mobile/sessions/{session_id}/interventions")
+def list_mobile_session_interventions(
+    session_id: int,
+    request: Request,
+    status: Optional[str] = Query(default=None),
+    limit: int = Query(default=100),
+    db: Session = Depends(get_db),
+):
+    """List session intervention requests using mobile shared-key auth."""
+    _log_mobile_request(
+        request, "list_interventions", session_id=session_id, status=status
     )
+    query = db.query(InterventionRequest).filter(
+        InterventionRequest.session_id == session_id
+    )
+    if status:
+        query = query.filter(InterventionRequest.status == status)
+    items = (
+        query.order_by(InterventionRequest.created_at.desc().nullslast())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "session_id": session_id,
+        "interventions": [_serialize_mobile_intervention(item) for item in items],
+        "total": len(items),
+    }
+
+
+@router.post("/mobile/sessions/{session_id}/interventions/{intervention_id}/reply")
+def reply_to_mobile_intervention(
+    session_id: int,
+    intervention_id: int,
+    body: MobileInterventionReplyBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Submit operator guidance for a pending intervention using mobile auth."""
+    _log_mobile_request(
+        request,
+        "reply_intervention",
+        session_id=session_id,
+        intervention_id=intervention_id,
+    )
+    from app.services import submit_intervention_reply
+
+    _get_mobile_intervention_or_404(db, session_id, intervention_id)
+    req = submit_intervention_reply(
+        db,
+        intervention_id=intervention_id,
+        operator_reply=body.reply,
+        operator_id="mobile",
+    )
+    payload = _serialize_mobile_intervention(req)
+    payload["message"] = "Reply recorded. Session is now paused and ready to resume."
+    return payload
+
+
+@router.post("/mobile/sessions/{session_id}/interventions/{intervention_id}/approve")
+def approve_mobile_intervention(
+    session_id: int,
+    intervention_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Approve an approval-type intervention request using mobile auth."""
+    _log_mobile_request(
+        request,
+        "approve_intervention",
+        session_id=session_id,
+        intervention_id=intervention_id,
+    )
+    from app.services import approve_intervention
+
+    _get_mobile_intervention_or_404(db, session_id, intervention_id)
+    req = approve_intervention(
+        db,
+        intervention_id=intervention_id,
+        operator_id="mobile",
+    )
+    payload = _serialize_mobile_intervention(req)
+    payload["message"] = (
+        "Intervention approved. Session is now paused and ready to resume."
+    )
+    return payload
+
+
+@router.post("/mobile/sessions/{session_id}/interventions/{intervention_id}/deny")
+def deny_mobile_intervention(
+    session_id: int,
+    intervention_id: int,
+    body: MobileInterventionDenyBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Deny an approval-type intervention request using mobile auth."""
+    _log_mobile_request(
+        request,
+        "deny_intervention",
+        session_id=session_id,
+        intervention_id=intervention_id,
+    )
+    from app.services import deny_intervention
+
+    _get_mobile_intervention_or_404(db, session_id, intervention_id)
+    req = deny_intervention(
+        db,
+        intervention_id=intervention_id,
+        reason=body.reason,
+        operator_id="mobile",
+    )
+    payload = _serialize_mobile_intervention(req)
+    payload["message"] = (
+        "Intervention denied. Session is paused; use resume to continue with updated context."
+    )
+    return payload
+
+
+@router.get("/mobile/sessions/{session_id}/failure-summary")
+def get_mobile_failure_summary(
+    session_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Return the execution failure summary using mobile shared-key auth."""
+    _log_mobile_request(request, "failure_summary", session_id=session_id)
+    from app.api.v1.endpoints.sessions import (
+        _latest_failure_diagnostics,
+        _serialize_failure_summary,
+    )
+    from app.services import get_or_generate_failure_summary
+
+    record = get_or_generate_failure_summary(db, session_id)
+    payload = _serialize_failure_summary(db, record)
+    payload["diagnostics"] = _latest_failure_diagnostics(db, session_id)
+    return payload
+
+
+@router.post("/mobile/sessions/{session_id}/operator-feedback")
+def submit_mobile_operator_feedback(
+    session_id: int,
+    body: MobileOperatorFeedbackBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Store operator feedback using mobile shared-key auth."""
+    _log_mobile_request(request, "operator_feedback", session_id=session_id)
+    if not body.feedback.strip():
+        raise HTTPException(status_code=400, detail="feedback must not be empty")
+    from app.api.v1.endpoints.sessions import _serialize_failure_summary
+    from app.services import store_operator_feedback
+
+    record = store_operator_feedback(db, session_id, body.feedback)
+    payload = _serialize_failure_summary(db, record)
+    payload["message"] = "Operator feedback saved."
+    return payload
+
+
+@router.post("/mobile/sessions/{session_id}/replan")
+def trigger_mobile_replan(
+    session_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Seed a replan session using mobile shared-key auth."""
+    _log_mobile_request(request, "replan_session", session_id=session_id)
+    from app.services import trigger_replan
+
+    return trigger_replan(db, session_id)
 
 
 # ── US5: Permission List / Approve / Reject ───────────────────
