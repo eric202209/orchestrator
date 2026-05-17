@@ -76,7 +76,7 @@ Rules:
 4. Do not invent conventional paths like styles.css, style.css, app.css, logo.svg, or icon.svg.
 5. Use only paths from the existing workspace source files list.
 6. Use runnable inspection and verification commands only.
-7. Prefer `node -e` checks that read index.html, parse actual href/src references, and then read those referenced files.
+7. Prefer `python -c` checks that read index.html, parse actual href/src references, and then read those referenced files. Use `node -e` only when the workspace is already a Node project.
 8. `commands` must be an array of short shell strings; `verification` must be one shell string or null.
 9. `expected_files` should be [] unless the task explicitly asks to create a verification helper file.
 10. Each step must contain only: step_number, description, commands, verification, rollback, expected_files; optional ops only for verification helper files.

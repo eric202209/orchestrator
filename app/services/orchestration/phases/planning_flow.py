@@ -45,23 +45,23 @@ from app.services.orchestration.validation.workspace_guard import (
 from app.services.prompt_templates import OrchestrationStatus, estimate_token_count
 
 
-def _node_exists_verification_command(paths: list[str]) -> str:
+def _python_exists_verification_command(paths: list[str]) -> str:
     encoded_paths = json.dumps(paths)
     script = (
-        "const fs=require('fs'); "
-        f"const files={encoded_paths}; "
-        "for (const p of files) { if (!fs.existsSync(p)) process.exit(1); }"
+        "import pathlib,sys; "
+        f"files={encoded_paths}; "
+        "sys.exit(0 if all(pathlib.Path(p).exists() for p in files) else 1)"
     )
-    return "node -e " + json.dumps(script)
+    return "python -c " + json.dumps(script)
 
 
-def _node_file_contains_verification_command(path: str, needle: str) -> str:
+def _python_file_contains_verification_command(path: str, needle: str) -> str:
     script = (
-        "const fs=require('fs'); "
-        f"const content=fs.readFileSync({json.dumps(path)},'utf8'); "
-        f"if (!content.includes({json.dumps(needle)})) process.exit(1);"
+        "import pathlib,sys; "
+        f"content=pathlib.Path({json.dumps(path)}).read_text(); "
+        f"sys.exit(0 if {json.dumps(needle)} in content else 1)"
     )
-    return "node -e " + json.dumps(script)
+    return "python -c " + json.dumps(script)
 
 
 def _grep_quiet_verification_target(command: str) -> tuple[str, str] | None:
@@ -115,7 +115,7 @@ def _strengthen_weak_expected_file_verifications(
                 str(updated.get("verification") or "")
             )
             if grep_target and grep_target[0] in expected_files:
-                updated["verification"] = _node_file_contains_verification_command(
+                updated["verification"] = _python_file_contains_verification_command(
                     grep_target[0],
                     grep_target[1],
                 )
@@ -166,7 +166,7 @@ def _split_repaired_single_step_full_lifecycle_plan(
     material_paths = list(dict.fromkeys(expected_files + op_paths))
     original_verification = str(original.get("verification") or "").strip()
     verifier = (
-        _node_exists_verification_command(material_paths)
+        _python_exists_verification_command(material_paths)
         if material_paths
         else original_verification
     )
@@ -189,7 +189,7 @@ def _split_repaired_single_step_full_lifecycle_plan(
             "step_number": 1,
             "description": "Inspect the current workspace",
             "commands": ["rg --files . | sort"],
-            "verification": 'node -e "process.exit(0)"',
+            "verification": 'python -c "import sys; sys.exit(0)"',
             "rollback": None,
             "expected_files": [],
         },

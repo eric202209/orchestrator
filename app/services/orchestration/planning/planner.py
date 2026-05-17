@@ -31,6 +31,7 @@ from app.services.orchestration.planning.prompt_contracts import (
     render_ops_first_contract as _render_ops_first_contract,
     render_python_verification_contract as _render_python_verification_contract,
     render_shell_fallback_limits as _render_shell_fallback_limits,
+    render_static_site_verification_contract as _render_static_site_verification_contract,
 )
 from app.services.orchestration.planning.repair_prompts import (
     PLANNING_REPAIR_COMPACT_MALFORMED_OUTPUT_CHARS,
@@ -81,7 +82,7 @@ PLANNING_VALID_MINIMAL_JSON_EXAMPLE = """[
     "step_number": 1,
     "description": "Inspect the current workspace",
     "commands": ["rg --files . | sort"],
-    "verification": "node -e \\"console.log('workspace ok')\\"",
+    "verification": "python -c \\"import pathlib,sys; sys.exit(0 if pathlib.Path('.').exists() else 1)\\"",
     "rollback": null,
     "expected_files": []
   },
@@ -92,7 +93,7 @@ PLANNING_VALID_MINIMAL_JSON_EXAMPLE = """[
       {"op": "write_file", "path": "README.md", "content": "# Project Notes\\n\\nInitial implementation notes.\\n"}
     ],
     "commands": [],
-    "verification": "node -e \\"const fs=require('fs'); if(!fs.readFileSync('README.md','utf8').includes('Project Notes')) process.exit(1)\\"",
+    "verification": "python -c \\"import pathlib,sys; sys.exit(0 if 'Project Notes' in pathlib.Path('README.md').read_text() else 1)\\"",
     "rollback": "rm -f README.md",
     "expected_files": ["README.md"]
   },
@@ -1083,6 +1084,7 @@ class PlannerService:
         ops_contract = _render_ops_first_contract()
         shell_fallback_limits = _render_shell_fallback_limits()
         python_verification_contract = _render_python_verification_contract()
+        static_site_verification_contract = _render_static_site_verification_contract()
         knowledge_block = _render_knowledge_block(knowledge_context)
         prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
@@ -1114,13 +1116,14 @@ Rules:
 15. Do not join separate shell commands with commas
 16. Commands must be runnable shell, not prose. Do not emit pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
 17. {python_verification_contract}
+18. {static_site_verification_contract}
 20. Do not create or cd into a nested project folder; run directly from {display_project_dir}
 21. Include exactly one final meaningful verification/build step such as `npm run build`, `pytest`, or `python -m pytest`
 22. Prefer package-manager/editor-friendly commands and one-file-at-a-time edits
 23. Preserve the JSON-only output mode from the first instruction.
 24. If the workspace already has files, start by inspecting or extending them before re-scaffolding
 25. For implementation steps that list expected_files, at least one command or file-mutating `ops` entry must materially write or edit file contents; do not use touch-only or placeholder-only steps
-26. Verification must use `node -e`, `npm run build`, `python -m`, or a project test command; no `test -f`, `grep -q`, or `echo`. For implementation-heavy steps, verification must prove behavior or content.
+26. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command. For implementation-heavy steps, verification must prove behavior or content. For static HTML, prefer Python file/content assertions over Node unless package.json already exists.
 27. Prefer an inspect -> edit -> verify sequence grounded in the current workspace
 28. If a scaffold command is genuinely required, run it in the current workspace and use `ops` for any follow-up source edits.
 
@@ -1156,6 +1159,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
         ops_contract = _render_ops_first_contract()
         shell_fallback_limits = _render_shell_fallback_limits()
         python_verification_contract = _render_python_verification_contract()
+        static_site_verification_contract = _render_static_site_verification_contract()
         prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 
@@ -1173,6 +1177,7 @@ Requirements:
 4. {ops_contract}
 5. Shell fallback limits: {shell_fallback_limits}
 6. {python_verification_contract}
+6a. {static_site_verification_contract}
 7. Each step must contain exactly these required keys, plus optional `ops`, and no other keys:
    step_number, description, commands, verification, rollback, expected_files
 8. step_number values must be unique integers and exactly 1, 2, 3... in order
@@ -1182,7 +1187,7 @@ Requirements:
 12. Keep each command short and machine-runnable
 13. If the workspace already has files, inspect or extend them before re-scaffolding
 14. For implementation steps with expected_files, include at least one command or file-mutating `ops` entry that writes real file content, not just mkdir/touch
-15. Verification must use `node -e`, `npm run build`, `python -m`, or a project test command; no `test -f`, `grep -q`, or `echo`.
+15. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command. For static HTML, prefer Python file/content assertions over Node unless package.json already exists.
 16. Commands must be runnable shell, not pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
 17. Do not create or cd into a nested project folder; run directly from {display_project_dir}
 18. Include exactly one final meaningful verification/build step

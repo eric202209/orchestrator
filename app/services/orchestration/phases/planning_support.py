@@ -255,7 +255,8 @@ def _build_repair_rejection_reasons(
     if weak_verification_steps:
         targeted_reasons.append(
             f"weak_verification_steps: steps {weak_verification_steps} use weak "
-            "verification commands; replace with pytest, python -m, or npm run build."
+            "verification commands; replace with pytest, python -m, or npm run build; "
+            "python -c file/content assertion is also valid for static HTML."
         )
 
     missing_verification_steps = _normalized_step_numbers(
@@ -276,8 +277,8 @@ def _build_repair_rejection_reasons(
         targeted_reasons.append(
             "missing_commands_steps: steps "
             f"{missing_commands_steps} have no runnable command or file op; "
-            "add a bounded shell command such as node -e, python -m, npm run, "
-            "pytest, or an ops write_file/replace_in_file operation."
+            "add a bounded shell command such as python -c, python -m, node -e, "
+            "npm run, pytest, or an ops write_file/replace_in_file operation."
         )
 
     truncated_subcodes = details.get("truncated_multistep_subcodes") or []
@@ -762,8 +763,8 @@ _SECOND_REPAIR_VALIDATOR_POLICIES: dict[str, _SecondRepairPolicy] = {
         cap_attribute="post_repair_validation_second_repair_used",
         rejection_template=(
             "missing_commands_steps: steps {steps} still have no runnable command "
-            "or file op after repair; add a bounded command such as node -e, "
-            "python -m, npm run, pytest, or an ops write_file/replace_in_file "
+            "or file op after repair; add a bounded command such as python -c, "
+            "python -m, node -e, npm run, pytest, or an ops write_file/replace_in_file "
             "operation"
         ),
     ),

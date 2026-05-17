@@ -26,6 +26,13 @@ def render_shell_fallback_limits() -> str:
 def render_python_verification_contract() -> str:
     return (
         "For Python verify with `python -m py_compile`, unittest, or pytest. "
-        "For import assertions, create a tiny test file with `ops`; "
-        "do not put inline `python -c` snippets in commands."
+        "For Python app import assertions, create a tiny test file with `ops` "
+        "instead of inline `python -c` snippets."
+    )
+
+
+def render_static_site_verification_contract() -> str:
+    return (
+        "For static HTML/CSS without package.json, prefer `python -c` "
+        "file/content checks; use Node only for Node projects."
     )
