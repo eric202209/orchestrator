@@ -593,6 +593,43 @@ def test_stop_running_session_sets_status_stopped(db_session, monkeypatch):
     assert stop_metadata["source"] == "api:POST /sessions/1/stop"
 
 
+def test_force_stop_skips_agent_runtime_stop(db_session, monkeypatch):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="running", is_active=True)
+
+    def _unexpected_runtime(*args, **kwargs):
+        raise AssertionError("force stop should not create an agent runtime")
+
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.create_agent_runtime",
+        _unexpected_runtime,
+    )
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.revoke_session_celery_tasks",
+        lambda db, session_id, terminate=False: [],
+    )
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.CheckpointService",
+        type(
+            "FakeCS",
+            (),
+            {
+                "__init__": lambda self, db: None,
+                "load_checkpoint": lambda self, sid: (_ for _ in ()).throw(
+                    Exception("no checkpoint")
+                ),
+            },
+        ),
+    )
+
+    result = asyncio.run(stop_session_lifecycle(db_session, session.id, force=True))
+
+    assert result["status"] == "stopped"
+    db_session.refresh(session)
+    assert session.status == "stopped"
+    assert not session.is_active
+
+
 def test_stop_session_saves_rich_checkpoint_when_latest_checkpoint_is_hollow(
     db_session, monkeypatch
 ):

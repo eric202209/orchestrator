@@ -1159,8 +1159,8 @@ async def stop_session_lifecycle(
             checkpoint_name = None
 
         revoked_ids = revoke_session_celery_tasks(db, session_id, terminate=True)
-        runtime = create_agent_runtime(db, session_id, use_demo_mode=False)
         if not force:
+            runtime = create_agent_runtime(db, session_id, use_demo_mode=False)
             await runtime.stop_session()
 
         mark_session_stopped(session, stopped_at=datetime.now(timezone.utc))
