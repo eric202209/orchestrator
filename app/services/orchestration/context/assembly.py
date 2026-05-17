@@ -468,7 +468,7 @@ def assemble_planning_prompt(
         validation_history=_condense_dict_events(
             ctx.orchestration_state.validation_history, max_entries=3
         ),
-        max_chars=300,
+        max_chars=280,
     )
     raw_prompt = PromptTemplates.build_planning_prompt(
         task_description=ctx.prompt,
