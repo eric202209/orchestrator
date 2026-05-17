@@ -15,6 +15,7 @@ from app.services.orchestration.planning.prompt_contracts import (
     render_ops_first_contract,
     render_python_verification_contract,
     render_shell_fallback_limits,
+    render_static_site_verification_contract,
 )
 from app.services.orchestration.planning.repair_strategies import (
     build_specialized_repair_prompt,
@@ -164,6 +165,7 @@ def build_planning_repair_prompt(
     ops_contract = render_ops_first_contract()
     shell_fallback_limits = render_shell_fallback_limits()
     python_verification_contract = render_python_verification_contract()
+    static_site_verification_contract = render_static_site_verification_contract()
     prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 Do not create, edit, read, or write files during planning repair; return the JSON array as message text only.
@@ -183,18 +185,19 @@ Rules:
 2. {ops_contract}
 2a. Shell fallback limits: {shell_fallback_limits}
 2b. {python_verification_contract}
+2c. {static_site_verification_contract}
 3. verification/rollback: one shell string or null.
 4. expected_files: relative path array.
 5. Relative paths only; no absolute paths, .., ~, frontend/src/frontend/src, or backend/src/backend/src; rooted exactly once.
 6. No nested project folder; work in task workspace.
 7. No background processes, &, nohup, disown, or dev servers.
-8. No prose, markdown, payloads, logs, session history, or extra keys beyond optional ops.
+8. No prose, markdown, payloads, logs, session history, or extra keys.
 9. Replace source dumps with short commands.
-10. expected_files steps must write real content; no separate mkdir/touch-only scaffold step for normal files.
-11. Verification must use `node -e`, `npm run build`, or `python -m`; no `test -f`, `grep -q`, `echo`, or `cd /... &&`.
+10. expected_files steps must write real content; no touch-only scaffold step.
+11. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command; no `echo` or `cd /... &&`.
 12. No /root/write_file.py, /tmp helpers, absolute helper scripts, outside files.
-13. If a scaffold command is genuinely required, run it in the current workspace and use ops to edit only the files needed for the task.
-17. Each step is a separate complete JSON object in the array. Never merge content from multiple steps into one step.
+13. If scaffolding is required, run it in the current workspace and use ops for follow-up edits.
+17. Each step is a separate JSON object. Never merge steps.
 """
     return _apply_profile(prompt, prompt_profile, apply_prompt_profile)
 
@@ -214,6 +217,7 @@ def build_compact_planning_repair_prompt(
     ops_contract = render_ops_first_contract()
     shell_fallback_limits = render_shell_fallback_limits()
     python_verification_contract = render_python_verification_contract()
+    static_site_verification_contract = render_static_site_verification_contract()
     prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 
@@ -233,7 +237,8 @@ Rules:
 - {ops_contract}
 - shell fallback limits: {shell_fallback_limits}
 - {python_verification_contract}
-- verification must be one real command using `python -m`, `node -e`, or `npm run build`.
+- {static_site_verification_contract}
+- verification must be one real command using `python -c`, `python -m`, `node -e`, `npm run build`, or a project test command.
 - expected_files must be relative paths only.
 - expected_files steps must write real content; no touch-only, TODO, pass, stub, or placeholder-only implementation.
 - no nested project folder; run directly in the task workspace and do not `cd` into a new app/backend/frontend root.

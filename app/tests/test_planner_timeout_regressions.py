@@ -278,10 +278,10 @@ def test_initial_planning_prompt_contains_valid_json_contract_example():
         in prompt
     )
     assert (
-        "Verification must use `node -e`, `npm run build`, `python -m`, or a project test command"
+        "Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command"
         in prompt
     )
-    assert "no `test -f`, `grep -q`, or `echo`" in prompt
+    assert "For static HTML, prefer Python file/content assertions over Node" in prompt
     assert "If a scaffold command is genuinely required" in prompt
     assert "use `ops` for any follow-up source edits" in prompt
     assert "Never use heredoc syntax" in prompt
@@ -982,14 +982,15 @@ def test_minimal_planning_prompt_requires_real_content_and_strong_verification()
     assert '"op": "write_file"' in prompt
     assert "fallback limits" in prompt
     assert "If content needs quoting, move that content into `ops`" in prompt
-    assert "For import assertions, create a tiny test file with `ops`" in prompt
-    assert "do not put inline `python -c` snippets in commands" in prompt
+    assert "For Python app import assertions, create a tiny test file with `ops`" in prompt
+    assert "For static HTML/CSS without package.json, prefer `python -c`" in prompt
+    assert "instead of inline `python -c` snippets" in prompt
     assert "No heredocs, background processes, absolute helpers" in prompt
     assert (
-        "Verification must use `node -e`, `npm run build`, `python -m`, or a project test command"
+        "Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command"
         in prompt
     )
-    assert "no `test -f`, `grep -q`, or `echo`" in prompt
+    assert "For static HTML, prefer Python file/content assertions over Node" in prompt
     assert "If a scaffold command is genuinely required" in prompt
     assert "use `ops` for any follow-up source edits" in prompt
     assert (
@@ -1970,20 +1971,20 @@ def test_planning_repair_prompt_bans_external_helpers_and_heredoc():
     assert "Repair the plan, not the task" in prompt
     assert "Preserve valid steps" in prompt
     assert "Use 3 to 4 steps" in prompt
-    assert "no separate mkdir/touch-only scaffold step for normal files" in prompt
+    assert "no touch-only scaffold step" in prompt
     assert "/root/write_file.py" in prompt
     assert "absolute helper scripts" in prompt
-    assert "no `test -f`, `grep -q`, `echo`, or `cd /... &&`" in prompt
+    assert "no `echo` or `cd /... &&`" in prompt
     assert "{{ return <main>Ready</main>; }}" not in prompt
-    assert "If a scaffold command is genuinely required" in prompt
-    assert "use ops to edit only the files needed for the task" in prompt
+    assert "If scaffolding is required" in prompt
+    assert "use ops for follow-up edits" in prompt
     assert "Use `ops` for file writes" in prompt
     assert "fallback limits" in prompt
     assert "write_file" in prompt
     assert "exactly ONE heredoc across ENTIRE plan, all steps combined" not in prompt
     assert "use double quotes or heredoc" not in prompt
-    assert "Each step is a separate complete JSON object in the array" in prompt
-    assert "Never merge content from multiple steps into one step" in prompt
+    assert "Each step is a separate JSON object" in prompt
+    assert "Never merge steps" in prompt
 
 
 def test_planning_repair_reasons_include_heredoc_and_inline_python_subcodes():
@@ -5675,6 +5676,7 @@ def test_repair_rejection_reasons_prepend_weak_verification_step_details():
     assert enriched[0].startswith("weak_verification_steps:")
     assert "steps [1, 2]" in enriched[0]
     assert "replace with pytest, python -m, or npm run build" in enriched[0]
+    assert "python -c file/content assertion is also valid" in enriched[0]
     assert enriched[1:] == reasons
 
 
@@ -5770,6 +5772,7 @@ def test_repair_prompt_includes_injected_weak_verification_rejection_line():
     assert "Validation error:" in prompt
     assert "weak_verification_steps: steps [1, 2]" in prompt
     assert "pytest, python -m, or npm run build" in prompt
+    assert "python -c file/content assertion is also valid" in prompt
 
 
 def test_repair_prompt_includes_injected_truncated_multistep_subcodes():

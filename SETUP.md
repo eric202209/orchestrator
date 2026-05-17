@@ -224,13 +224,23 @@ ollama list
 ollama run qwen3:8b-q4_K_M "Return only: OK"
 ```
 
+**3.5. Pre build files for docker to avoid error
+cd orchestrator
+```powershell
+New-Item -ItemType Directory -Force -Path checkpoints, logs, knowledge
+New-Item -ItemType File -Force -Path orchestrator.db
+```
+
 **4. Create `.env`**
 
 Create a `.env` file in the repo root:
 
 ```ini
 # Required
-SECRET_KEY=<generate: python3 -c "import secrets; print(secrets.token_hex(32))">
+SECRET_KEY=<generate: python -c "import secrets; print(secrets.token_hex(32))">
+
+# Database
+DATABASE_URL=sqlite:////app/orchestrator.db
 
 # Backend — direct Ollama, no OpenClaw
 AGENT_BACKEND=direct_ollama
@@ -264,6 +274,9 @@ WORKSPACE_REVIEW_POLICY=hold_nontrivial
 
 **5. Build and start**
 
+For docker-compose.windows.yml, 
+first, you need to change file path at volumes.
+
 ```powershell
 docker compose -f docker-compose.windows.yml up --build
 ```
@@ -283,6 +296,23 @@ First build takes a few minutes (installs Python deps inside the image).
 > Windows, run the frontend separately with Node/pnpm as shown below.
 
 **7. Optional: run the dashboard**
+
+#Install Node.js first
+https://nodejs.org download LTS version
+
+#Update npm
+npm install -g npm@latest
+
+#Install pnpm
+npm install -g pnpm
+
+#Or update pnpm
+pnpm self-update
+
+#check
+node --version
+npm --version
+pnpm --version
 
 In a second PowerShell window:
 
@@ -313,6 +343,12 @@ Without the dashboard: use the API directly:
 curl -X POST http://localhost:8080/api/v1/auth/register `
   -H "Content-Type: application/json" `
   -d '{"email":"you@example.com","password":"yourpassword","full_name":"Your Name"}'
+
+# Or by PowerShell Invoke-WebRequest
+Invoke-WebRequest -Uri "http://localhost:8080/api/v1/auth/register" `
+  -Method POST `
+  -Headers @{"Content-Type"="application/json"} `
+  -Body '{"email":"youremail","password":"yourpassword","full_name":"Your Name"}'
 
 # Get a token
 curl -X POST http://localhost:8080/api/v1/auth/tokens `

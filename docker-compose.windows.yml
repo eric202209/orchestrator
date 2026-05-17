@@ -13,6 +13,9 @@ services:
 
   orchestrator:
     build: .
+    command: >
+      sh -c "uvicorn app.main:app --host 0.0.0.0 --port 8080 2>&1 | tee /app/logs/orchestrator.log"
+    user: root
     ports:
       - "8080:8080"
     env_file: .env
@@ -20,38 +23,43 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/1
       - QDRANT_URL=http://qdrant:6333
-      - DATABASE_URL=sqlite:////app/data/orchestrator.db
+      - DATABASE_URL=sqlite:////app/orchestrator.db
     depends_on:
       - redis
       - qdrant
     volumes:
-      - orchestrator_data:/app/data
-      - orchestrator_logs:/app/logs
-      - orchestrator_checkpoints:/app/checkpoints
+      - ./orchestrator.db:/app/orchestrator.db
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./checkpoints:/app/checkpoints
+      - ./knowledge:/app/knowledge
+      - "C:\\Users\\Eric\\Documents\\Projects:/app/projects" # Change as your file path
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
   celery_worker:
     build: .
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=2
+    user: root
+    command: >
+      sh -c "chmod -R 777 /app/checkpoints /app/logs && (celery -A app.celery_app worker --loglevel=info --concurrency=2 2>&1 | tee /app/logs/celery_worker.log)"
     env_file: .env
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/1
       - QDRANT_URL=http://qdrant:6333
-      - DATABASE_URL=sqlite:////app/data/orchestrator.db
+      - DATABASE_URL=sqlite:////app/orchestrator.db
     depends_on:
       - redis
       - qdrant
     volumes:
-      - orchestrator_data:/app/data
-      - orchestrator_logs:/app/logs
-      - orchestrator_checkpoints:/app/checkpoints
+      - ./orchestrator.db:/app/orchestrator.db
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./checkpoints:/app/checkpoints
+      - ./knowledge:/app/knowledge
+      - "C:\\Users\\Eric\\Documents\\Projects:/app/projects" # Change as your file path
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
 volumes:
   qdrant_data:
-  orchestrator_data:
-  orchestrator_logs:
-  orchestrator_checkpoints:

@@ -317,7 +317,7 @@ Do not implement anything.
 7. For routine file changes, prefer `ops`: `[{{"op":"write_file","path":"relative/path","content":"file contents"}}]`; do not shell-quote file bodies. Use append_file for appends, replace_in_file for exact literal edits, mkdir for directories, and delete_file for file deletion.
 8. Keep `commands` for shell tasks such as installs, builds, tests, inspection, and verification. Never use heredoc syntax. Use `ops` for file bodies and deterministic file mutations.
 9. Include exactly one final meaningful verification/build step such as `npm run build`, `pytest`, or `python -m pytest`.
-10. Verification must use `node -e`, `npm run build`, `python -m`, or a project test command; no `test -f`, `grep -q`, or `echo`.
+10. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command. For static HTML, prefer Python file/content assertions over Node unless package.json already exists.
 11. If a scaffold command is genuinely required, run it in the current workspace and use `ops` for any follow-up source edits.
 
 **Execution Profile Rules:**
@@ -338,7 +338,7 @@ Do not implement anything.
     "step_number": 1,
     "description": "Inspect the current workspace",
     "commands": ["rg --files . | sort"],
-    "verification": "node -e \\"console.log('workspace ok')\\"",
+    "verification": "python -c \\"import pathlib,sys; sys.exit(0 if pathlib.Path('.').exists() else 1)\\"",
     "rollback": null,
     "expected_files": []
   }},
@@ -349,7 +349,7 @@ Do not implement anything.
       {{"op": "write_file", "path": "README.md", "content": "# Project Notes\\n\\nInitial implementation notes.\\n"}}
     ],
     "commands": [],
-    "verification": "node -e \\"const fs=require('fs'); if(!fs.readFileSync('README.md','utf8').includes('Project Notes')) process.exit(1)\\"",
+    "verification": "python -c \\"import pathlib,sys; sys.exit(0 if 'Project Notes' in pathlib.Path('README.md').read_text() else 1)\\"",
     "rollback": "rm -f README.md",
     "expected_files": ["README.md"]
   }},

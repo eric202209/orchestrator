@@ -1,0 +1,7 @@
+FROM qwen3:8b-q4_K_M
+
+PARAMETER num_gpu 32
+PARAMETER num_ctx 2048
+PARAMETER num_thread 8
+PARAMETER temperature 0.1
+SYSTEM "You are a helpful assistant. Never use <think> tags. Respond directly without thinking steps."

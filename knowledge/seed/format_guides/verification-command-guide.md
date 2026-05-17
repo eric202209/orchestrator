@@ -13,7 +13,7 @@ Accepted strong verification commands by stack:
 Python (any): `pytest` or `python -m pytest` or `python -m pytest tests/`
 FastAPI: `python -m pytest` or `uvicorn app.main:app --host 0.0.0.0 --port 8000 &` then `curl -s http://localhost:8000/health`
 Node/React: `npm run build` (confirms no build error) or `npm test`
-Static HTML: `npm run build` (if build step exists) or `node -e "require('fs').existsSync('index.html') || process.exit(1)"`
+Static HTML: `npm run build` (if build step exists) or `python -c "import pathlib,sys; sys.exit(0 if pathlib.Path('index.html').exists() else 1)"`
 CLI script: `python script.py --help` or `python -c "from module import func; assert func(2,3)==5"`
 
 Commands that are always rejected as weak verification:
