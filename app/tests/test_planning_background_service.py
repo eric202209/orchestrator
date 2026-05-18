@@ -111,6 +111,75 @@ def test_process_session_sets_waiting_and_releases_processing_lease(
     assert updated.messages[-1].content == "Which rollout constraints matter most?"
 
 
+def test_replan_recovery_uses_short_timeout_and_deterministic_fallback(
+    db_session, monkeypatch
+):
+    project = _create_project(db_session, name="Replan Timeout Project")
+    session = PlanningSession(
+        project_id=project.id,
+        title="Recover timeout",
+        prompt=(
+            "## Failure Context\n\n"
+            "The following execution session failed and requires replanning.\n\n"
+            "### Failed Tasks\n"
+            "- Add final quality check: Task timed out after 180s"
+        ),
+        status="active",
+        source_brain="local",
+    )
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+
+    service = PlanningSessionService(db_session)
+    service._add_message(
+        session,
+        "user",
+        session.prompt,
+        metadata={
+            "kind": "prompt",
+            "skip_clarification": True,
+            "replan_recovery": True,
+        },
+    )
+    db_session.commit()
+
+    observed_timeouts: list[int | None] = []
+
+    def fake_run_openclaw(
+        self,
+        prompt,
+        *,
+        source_brain="local",
+        timeout_seconds=None,
+    ):
+        observed_timeouts.append(timeout_seconds)
+        raise RuntimeError("Task execution failed: Task timed out after 180s")
+
+    monkeypatch.setattr(PlanningSessionService, "_run_openclaw", fake_run_openclaw)
+
+    updated = service.process_session(session.id)
+
+    assert updated is not None
+    assert updated.status == "completed", updated.last_error
+    assert observed_timeouts == [
+        PlanningSessionService.REPLAN_SYNTHESIS_TIMEOUT_SECONDS
+    ]
+    assert updated.last_error is None
+    assert any(
+        message.metadata_json and message.metadata_json.get("kind") == "replan_fallback"
+        for message in updated.messages
+    )
+    planner = next(
+        artifact
+        for artifact in updated.artifacts
+        if artifact.artifact_type == "planner_markdown"
+    )
+    assert "Diagnose recovered failure" in planner.content
+    assert "Apply targeted recovery fix" in planner.content
+    assert "Verify recovery path" in planner.content
+
+
 def test_recover_active_sessions_clears_processing_lease_before_rescheduling(
     db_session, monkeypatch
 ):

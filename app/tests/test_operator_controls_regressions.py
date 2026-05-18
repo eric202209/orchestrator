@@ -98,9 +98,57 @@ def test_settings_can_select_openai_backend(authenticated_client):
     assert payload["system"]["agent_adaptation_profile"] == "openai_responses_default"
 
 
-def test_direct_ollama_rejects_openclaw_default_workspace(
+def test_settings_can_select_custom_direct_ollama_model(
     authenticated_client, db_session
 ):
+    set_setting_value(db_session, WORKSPACE_ROOT_KEY, "/app/projects")
+
+    response = authenticated_client.patch(
+        "/api/v1/settings/system",
+        json={
+            "agent_backend": "direct_ollama",
+            "workspace_root": "/app/projects",
+            "agent_model_family": "deepseek-coder-v2:16b",
+            "agent_adaptation_profile": "ollama_default",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["system"]["agent_backend"] == "direct_ollama"
+    assert payload["system"]["agent_model_family"] == "deepseek-coder-v2:16b"
+
+
+def test_settings_direct_ollama_default_model_comes_from_ollama_env(
+    authenticated_client, db_session, monkeypatch
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "OLLAMA_AGENT_MODEL", "operator-default:latest")
+    set_setting_value(db_session, WORKSPACE_ROOT_KEY, "/app/projects")
+
+    response = authenticated_client.patch(
+        "/api/v1/settings/system",
+        json={
+            "agent_backend": "direct_ollama",
+            "workspace_root": "/app/projects",
+            "agent_adaptation_profile": "ollama_default",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["system"]["agent_model_family"] == "operator-default:latest"
+
+
+def test_direct_ollama_rejects_openclaw_default_workspace(
+    authenticated_client, db_session, monkeypatch
+):
+    from app.config import settings
+
+    monkeypatch.setattr(
+        settings, "OLLAMA_BASE_URL", "http://host.docker.internal:11434"
+    )
     set_setting_value(
         db_session,
         WORKSPACE_ROOT_KEY,
@@ -118,6 +166,35 @@ def test_direct_ollama_rejects_openclaw_default_workspace(
     assert response.status_code == 400
     assert "direct_ollama" in response.json()["detail"]
     assert "/app/projects" in response.json()["detail"]
+
+
+def test_direct_ollama_allows_openclaw_default_workspace_for_native_ubuntu(
+    authenticated_client, db_session, monkeypatch
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "OLLAMA_BASE_URL", "http://localhost:11434")
+    set_setting_value(
+        db_session,
+        WORKSPACE_ROOT_KEY,
+        "/home/operator/.openclaw/workspace/vault/projects",
+    )
+
+    response = authenticated_client.patch(
+        "/api/v1/settings/system",
+        json={
+            "agent_backend": "direct_ollama",
+            "workspace_root": "/home/operator/.openclaw/workspace/vault/projects",
+            "agent_adaptation_profile": "ollama_default",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["system"]["agent_backend"] == "direct_ollama"
+    assert payload["system"]["workspace_root"].endswith(
+        "/.openclaw/workspace/vault/projects"
+    )
 
 
 def test_checkpoint_inspection_returns_validation_and_plan_preview(

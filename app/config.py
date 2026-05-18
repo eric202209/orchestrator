@@ -196,9 +196,11 @@ class Settings(BaseSettings):
     KNOWLEDGE_MAX_ITEMS: int = 3
     KNOWLEDGE_MAX_TOTAL_CHARS: int = 2000
 
-    # For windows users running Ollama locally
+    # Default local Ollama model. Operators can override this with OLLAMA_AGENT_MODEL
+    # or from the Settings page when the direct_ollama backend is selected.
     OLLAMA_AGENT_MODEL: str = "qwen3-8b-hybrid"
-    # Tokens passed as num_ctx to Ollama. 4096 is the low-RAM Windows default.
+    # Tokens passed as num_ctx to Ollama. Override per deployment when the model
+    # and hardware can support a larger context.
     OLLAMA_NUM_CTX: int = 4096
 
 

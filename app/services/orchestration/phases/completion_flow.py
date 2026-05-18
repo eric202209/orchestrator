@@ -1762,6 +1762,29 @@ def finalize_successful_task(
         baseline_publish_result["promoted_workspace_archive_result"] = (
             promoted_workspace_archive_result
         )
+    elif project and task and runs_in_canonical_baseline:
+        task.workspace_status = "promoted"
+        task.promoted_at = getattr(task, "promoted_at", None) or completed_at
+        existing_note = (getattr(task, "promotion_note", None) or "").strip()
+        canonical_note = (
+            "Task completed directly in the canonical project root; no separate "
+            "task workspace is retained for review."
+        )
+        task.promotion_note = (
+            f"{existing_note}\n{canonical_note}" if existing_note else canonical_note
+        )
+        archive_unlocked = getattr(
+            getattr(task_service, "baselines", None),
+            "archive_promoted_task_workspace_unlocked",
+            None,
+        )
+        if task.task_subfolder and callable(archive_unlocked):
+            promoted_workspace_archive_result = archive_unlocked(
+                project,
+                task,
+                reason="canonical_root_task_completed",
+                project_root=task_service.get_project_root(project),
+            )
     else:
         task.workspace_status = "ready" if task.task_subfolder else "not_created"
     task.completed_at = completed_at

@@ -253,6 +253,20 @@ class TestTriggerReplan:
         assert ps is not None
         assert "Focus on schema only." in ps.prompt
 
+    def test_marks_planning_prompt_as_replan_recovery(
+        self, db_session: Session, stopped_session: SessionModel
+    ):
+        result = trigger_replan(db_session, stopped_session.id)
+
+        ps = (
+            db_session.query(PlanningSession)
+            .filter(PlanningSession.id == result["planning_session_id"])
+            .first()
+        )
+        assert ps is not None
+        assert ps.messages[0].metadata_json["skip_clarification"] is True
+        assert ps.messages[0].metadata_json["replan_recovery"] is True
+
 
 # ── API tests ─────────────────────────────────────────────────────────────────
 

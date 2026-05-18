@@ -216,6 +216,10 @@ def _check_direct_ollama_health(descriptor: BackendDescriptor) -> BackendHealth:
     )
 
 
+def _default_ollama_model_family() -> str:
+    return (settings.OLLAMA_AGENT_MODEL or "").strip() or "local"
+
+
 def _base_descriptor(
     *,
     name: str,
@@ -358,7 +362,7 @@ _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
             name="direct_ollama",
             display_name="Direct Ollama",
             implementation="app.services.agents.providers.ollama_adapter.create_runtime",
-            default_model_family="qwen3-8b-hybrid",
+            default_model_family=_default_ollama_model_family(),
             implemented=True,
             capabilities=BackendCapabilities(
                 supports_planning=True,
@@ -402,7 +406,13 @@ def list_supported_backends() -> List[BackendDescriptor]:
     descriptors: List[BackendDescriptor] = []
     for registration in _BACKEND_REGISTRY.values():
         health = registration.health_check(registration.descriptor)
-        descriptors.append(replace(registration.descriptor, health=health))
+        descriptor = registration.descriptor
+        if descriptor.name == "direct_ollama":
+            descriptor = replace(
+                descriptor,
+                default_model_family=_default_ollama_model_family(),
+            )
+        descriptors.append(replace(descriptor, health=health))
     return descriptors
 
 
@@ -415,7 +425,13 @@ def get_backend_descriptor(name: Optional[str]) -> BackendDescriptor:
             f"Unsupported orchestration backend: {(name or '').strip() or '<empty>'}"
         )
     health = registration.health_check(registration.descriptor)
-    return replace(registration.descriptor, health=health)
+    descriptor = registration.descriptor
+    if descriptor.name == "direct_ollama":
+        descriptor = replace(
+            descriptor,
+            default_model_family=_default_ollama_model_family(),
+        )
+    return replace(descriptor, health=health)
 
 
 def require_backend_descriptor(name: Optional[str]) -> BackendDescriptor:

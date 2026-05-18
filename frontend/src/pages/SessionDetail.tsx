@@ -157,7 +157,7 @@ export default function SessionDetail() {
   const [showAgentInterventionModal, setShowAgentInterventionModal] = useState(false);
   const [interventionToast, setInterventionToast] = useState<InterventionToastState | null>(null);
   const [checkpointActionIntent, setCheckpointActionIntent] = useState<CheckpointActionIntent | null>(null);
-  const [executionAction, setExecutionAction] = useState<'start' | 'replay' | 'run-task' | null>(null);
+  const [executionAction, setExecutionAction] = useState<'start' | 'resume' | 'replay' | 'run-task' | null>(null);
   const [interventionPrompt, setInterventionPrompt] = useState('');
   const [interventionSubmitting, setInterventionSubmitting] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -1442,8 +1442,20 @@ export default function SessionDetail() {
 
   const replayCheckpoint = useCallback(async (checkpointName: string) => {
     if (!sessionId || executionAction) return;
+    const previousSession = session;
+    const resumedAt = new Date().toISOString();
+    setSession((current) =>
+      current
+        ? {
+            ...current,
+            status: 'running',
+            is_active: true,
+            resumed_at: resumedAt,
+          }
+        : current
+    );
     try {
-      setExecutionAction('replay');
+      setExecutionAction('resume');
       await sessionsAPI.replayCheckpoint(Number(sessionId), checkpointName);
       pushTimelineEvent(`Replay requested from checkpoint ${checkpointName}`, 'INFO');
       const updated = await sessionsAPI.getById(Number(sessionId));
@@ -1459,6 +1471,7 @@ export default function SessionDetail() {
         scheduleWebSocketConnect(Number(sessionId), 1200);
       }
     } catch (error) {
+      setSession(previousSession);
       console.error('Failed to replay checkpoint:', error);
       const apiError = error as ApiErrorLike;
       const errorMsg = apiError.response?.data?.detail || apiError.message || 'Unknown error';
@@ -1466,7 +1479,7 @@ export default function SessionDetail() {
     } finally {
       setExecutionAction(null);
     }
-  }, [executionAction, loadCheckpointCount, loadStateDiff, loadTimelineEvents, pushTimelineEvent, scheduleWebSocketConnect, sessionId]);
+  }, [executionAction, loadCheckpointCount, loadStateDiff, loadTimelineEvents, pushTimelineEvent, scheduleWebSocketConnect, session, sessionId]);
 
   const getUsefulCheckpoints = useCallback(() => {
     return [...checkpoints]
@@ -1797,6 +1810,7 @@ export default function SessionDetail() {
     pushTimelineEvent(`Resume requested for session ${sessionId}`, 'INFO');
     diffAvailableRef.current = null;
     try {
+      setExecutionAction('resume');
       await sessionsAPI.resume(Number(sessionId));
       const updated = await sessionsAPI.getById(Number(sessionId));
       setSession(updated.data);
@@ -1813,6 +1827,8 @@ export default function SessionDetail() {
       setSession(previousSession);
       console.error('Failed to resume session:', error);
       alert('Failed to resume session');
+    } finally {
+      setExecutionAction(null);
     }
   };
 
@@ -2050,10 +2066,11 @@ export default function SessionDetail() {
           <div className="flex items-center gap-2">
             <button
               onClick={handleResumeSession}
+              disabled={Boolean(executionAction)}
               className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm transition-colors"
             >
               <Play className="h-4 w-4" />
-              Resume
+              {executionAction === 'resume' ? 'Resuming...' : 'Resume'}
             </button>
             <button
               onClick={() => handleStopSession(true)}
@@ -2072,10 +2089,11 @@ export default function SessionDetail() {
             {checkpointCount > 0 && (
               <button
                 onClick={handleResumeSession}
+                disabled={Boolean(executionAction)}
                 className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm transition-colors"
               >
                 <Play className="h-4 w-4" />
-                Resume
+                {executionAction === 'resume' ? 'Resuming...' : 'Resume'}
               </button>
             )}
             <button

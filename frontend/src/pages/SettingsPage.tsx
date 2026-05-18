@@ -185,6 +185,15 @@ export default function SettingsPage() {
   const activeBackendHealth =
     selectedBackendDescriptor?.health || settings.system.backend_health;
   const activeBackendConfig = selectedBackendDescriptor?.config;
+  const modelSuggestions = Array.from(
+    new Set(
+      [
+        selectedBackendDescriptor?.default_model_family,
+        agentBackend === "direct_ollama" ? "llama3.1:8b" : null,
+        agentBackend === "openai_responses_api" ? "gpt-5" : null,
+      ].filter((value): value is string => Boolean(value && value.trim())),
+    ),
+  );
 
   return (
     <div className="space-y-6">
@@ -317,8 +326,19 @@ export default function SettingsPage() {
               <input
                 value={agentModelFamily}
                 onChange={(e) => setAgentModelFamily(e.target.value)}
+                list="agent-model-suggestions"
+                placeholder={selectedBackendDescriptor?.default_model_family}
                 className="w-full rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-white"
               />
+              <datalist id="agent-model-suggestions">
+                {modelSuggestions.map((model) => (
+                  <option key={model} value={model} />
+                ))}
+              </datalist>
+              <p className="mt-2 text-xs text-slate-400">
+                Type any model available to the selected backend. For
+                direct_ollama, this should match a local Ollama model name.
+              </p>
             </div>
           </div>
           <div>

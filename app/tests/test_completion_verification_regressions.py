@@ -1161,6 +1161,48 @@ def test_auto_completion_holds_nontrivial_change_set_for_manual_review(
     assert "deleted_files" in payload["warning_flags"]
 
 
+def test_canonical_root_completion_archives_task_path_metadata(
+    db_session, tmp_path, monkeypatch
+):
+    ctx, execution, project_root, workspace_dir = _seed_legacy_finalize_ctx(
+        db_session, tmp_path
+    )
+    del execution
+    ctx.runs_in_canonical_baseline = True
+    ctx.orchestration_state._project_dir_override = str(project_root)
+    (workspace_dir / ".openclaw" / "events").mkdir(parents=True)
+    (workspace_dir / ".openclaw" / "events" / "session.jsonl").write_text(
+        "{}\n", encoding="utf-8"
+    )
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.ValidatorService.validate_task_completion",
+        lambda **kwargs: ValidationVerdict(
+            stage="task_completion",
+            status="accepted",
+            profile="implementation",
+            reasons=[],
+            details={},
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow._detect_completion_verification_command",
+        lambda project_dir: (None, None),
+    )
+
+    result = finalize_successful_task(
+        ctx=ctx,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "completed"
+    assert ctx.task.workspace_status == "promoted"
+    assert ctx.task.task_subfolder.startswith(".openclaw/promoted-workspace-archive/")
+    assert not workspace_dir.exists()
+    assert (project_root / ctx.task.task_subfolder).exists()
+
+
 def test_auto_publish_all_policy_publishes_nontrivial_change_set(
     db_session, tmp_path, monkeypatch
 ):

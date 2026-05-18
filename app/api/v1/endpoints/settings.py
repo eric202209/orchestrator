@@ -101,12 +101,20 @@ def _is_openclaw_default_workspace_path(value: str) -> bool:
     return "/.openclaw/workspace/vault/projects" in normalized
 
 
+def _direct_ollama_requires_mounted_workspace() -> bool:
+    return "host.docker.internal" in (settings.OLLAMA_BASE_URL or "").lower()
+
+
 def _effective_next_backend(payload: SystemSettingsUpdateRequest, db: Session) -> str:
     return (
         payload.agent_backend
         if payload.agent_backend is not None
         else get_effective_agent_backend(settings.AGENT_BACKEND, db=db)
     )
+
+
+def _default_model_for_backend(backend_name: str) -> str:
+    return get_backend_descriptor(backend_name).default_model_family
 
 
 @router.get("", response_model=AppSettingsResponse)
@@ -116,15 +124,15 @@ def get_app_settings(
     db: Session = Depends(get_db),
 ):
     effective_backend_name = get_effective_agent_backend(settings.AGENT_BACKEND, db=db)
+    backend = get_backend_descriptor(effective_backend_name)
     effective_model_family = get_effective_agent_model_family(
-        settings.AGENT_MODEL, db=db
+        backend.default_model_family, db=db
     )
     effective_adaptation_profile = get_effective_adaptation_profile(db=db)
     effective_policy_profile = get_effective_policy_profile(db=db)
     effective_workspace_review_policy = get_effective_workspace_review_policy(
         settings.WORKSPACE_REVIEW_POLICY, db=db
     )
-    backend = get_backend_descriptor(effective_backend_name)
     mobile_key, key_source = get_effective_mobile_gateway_key(
         settings.MOBILE_GATEWAY_API_KEY,
         settings.OPENCLAW_API_KEY,
@@ -228,8 +236,10 @@ def update_system_settings(
         if payload.workspace_root is not None
         else str(get_effective_workspace_root(db=db))
     )
-    if next_backend_name == "direct_ollama" and _is_openclaw_default_workspace_path(
-        next_workspace_root
+    if (
+        next_backend_name == "direct_ollama"
+        and _direct_ollama_requires_mounted_workspace()
+        and _is_openclaw_default_workspace_path(next_workspace_root)
     ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -291,7 +301,7 @@ def update_system_settings(
 
         if payload.agent_model_family is None:
             previous_model_family = get_effective_agent_model_family(
-                settings.AGENT_MODEL, db=db
+                _default_model_for_backend(previous_backend), db=db
             )
             set_setting_value(
                 db,
@@ -324,10 +334,16 @@ def update_system_settings(
                 }
 
     if payload.agent_model_family is not None:
-        previous_model_family = get_effective_agent_model_family(
-            settings.AGENT_MODEL, db=db
+        effective_backend_name = (
+            payload.agent_backend
+            if payload.agent_backend is not None
+            else get_effective_agent_backend(settings.AGENT_BACKEND, db=db)
         )
-        next_model_family = payload.agent_model_family.strip() or settings.AGENT_MODEL
+        backend_default_model = _default_model_for_backend(effective_backend_name)
+        previous_model_family = get_effective_agent_model_family(
+            backend_default_model, db=db
+        )
+        next_model_family = payload.agent_model_family.strip() or backend_default_model
         set_setting_value(
             db,
             AGENT_MODEL_FAMILY_KEY,

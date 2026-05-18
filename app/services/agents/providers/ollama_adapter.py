@@ -17,6 +17,7 @@ from app.services.agents.interfaces import (
     ContextWindowPolicy,
     RetryStrategy,
 )
+from app.services.workspace.system_settings import get_effective_agent_model_family
 
 logger = logging.getLogger(__name__)
 
@@ -86,11 +87,9 @@ class OllamaRuntime:
         self._base_url = (settings.OLLAMA_BASE_URL or "http://localhost:11434").rstrip(
             "/"
         )
-        # OLLAMA_AGENT_MODEL 優先，fallback 到 PLANNING_REPAIR_MODEL
         self._model = (
-            getattr(settings, "OLLAMA_AGENT_MODEL", None)
-            or settings.PLANNING_REPAIR_MODEL
-            or "qwen3:4b-q4_K_M"
+            get_effective_agent_model_family(settings.OLLAMA_AGENT_MODEL, db=self.db)
+            or self.backend_descriptor.default_model_family
         ).strip()
         self._num_ctx = int(getattr(settings, "OLLAMA_NUM_CTX", 4096))
         self._timeout = int(settings.PLANNING_REPAIR_TIMEOUT_SECONDS or 120)
