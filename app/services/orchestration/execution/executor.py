@@ -190,6 +190,9 @@ class ExecutorService:
         try:
             return json.loads(raw_params_match.group(1))
         except json.JSONDecodeError:
+            path_match = re.search(r'"path"\s*:\s*"([^"]+)"', raw_params_match.group(1))
+            if path_match:
+                return {"path": path_match.group(1)}
             return {}
 
     @staticmethod
@@ -245,10 +248,11 @@ class ExecutorService:
 
         if normalized_project_dir in normalized_raw_path.parents:
             relative_dir = normalized_raw_path.relative_to(normalized_project_dir)
+            relative_dir_for_shell = relative_dir.as_posix()
             return [
                 "A directory inside the task workspace was passed to the file-read tool. "
                 f"Do not read `{normalized_raw_path}` directly. First inventory files under `{relative_dir}` with "
-                f"`find ./{relative_dir} -maxdepth 4 -type f | sort | head -200`, then read one confirmed file.",
+                f"`find ./{relative_dir_for_shell} -maxdepth 4 -type f | sort | head -200`, then read one confirmed file.",
                 "Use the file-read tool only on a concrete file path returned by that listing, not on the directory.",
             ]
 

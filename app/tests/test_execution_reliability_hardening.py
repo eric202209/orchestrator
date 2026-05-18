@@ -3,6 +3,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+from fastapi import HTTPException
+
 from app.models import (
     Project,
     Session as SessionModel,
@@ -129,6 +132,62 @@ def test_queue_task_for_session_emits_queued_event_and_keeps_task_pending(
     assert events[-1]["event_type"] == EventType.TASK_QUEUED
     assert events[-1]["details"]["session_instance_id"] == session.instance_id
     assert captured_delay_kwargs["queued_event_id"] == events[-1]["event_id"]
+
+
+def test_queue_task_for_session_rejects_active_task_execution(db_session, tmp_path):
+    project = Project(
+        name="Queue Active Guard",
+        workspace_path=str(tmp_path / "workspace-root"),
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    running_session = SessionModel(
+        project_id=project.id,
+        name="Running Session",
+        status="running",
+        is_active=True,
+        instance_id="running-instance",
+    )
+    retry_session = SessionModel(
+        project_id=project.id,
+        name="Retry Session",
+        status="stopped",
+        is_active=False,
+        instance_id="retry-instance",
+    )
+    task = Task(
+        project_id=project.id,
+        title="Already Running",
+        description="do work",
+        status=TaskStatus.RUNNING,
+    )
+    db_session.add_all([running_session, retry_session, task])
+    db_session.commit()
+    db_session.refresh(running_session)
+    db_session.refresh(retry_session)
+    db_session.refresh(task)
+
+    db_session.add(
+        SessionTask(
+            session_id=running_session.id,
+            task_id=task.id,
+            status=TaskStatus.RUNNING,
+            started_at=datetime.now(timezone.utc),
+        )
+    )
+    db_session.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        queue_task_for_session(
+            db=db_session,
+            session=retry_session,
+            task_id=task.id,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "active execution is in progress" in exc_info.value.detail
 
 
 def test_worker_uses_provided_queued_event_id_for_exact_lookup(tmp_path):

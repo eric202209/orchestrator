@@ -96,6 +96,19 @@ def _log_system_setting_change(
     db.commit()
 
 
+def _is_openclaw_default_workspace_path(value: str) -> bool:
+    normalized = str(value or "").replace("\\", "/").lower()
+    return "/.openclaw/workspace/vault/projects" in normalized
+
+
+def _effective_next_backend(payload: SystemSettingsUpdateRequest, db: Session) -> str:
+    return (
+        payload.agent_backend
+        if payload.agent_backend is not None
+        else get_effective_agent_backend(settings.AGENT_BACKEND, db=db)
+    )
+
+
 @router.get("", response_model=AppSettingsResponse)
 def get_app_settings(
     request: Request,
@@ -209,14 +222,32 @@ def update_system_settings(
             ),
         )
 
+    next_backend_name = _effective_next_backend(payload, db)
+    next_workspace_root = (
+        str(Path(payload.workspace_root).expanduser().resolve())
+        if payload.workspace_root is not None
+        else str(get_effective_workspace_root(db=db))
+    )
+    if next_backend_name == "direct_ollama" and _is_openclaw_default_workspace_path(
+        next_workspace_root
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "direct_ollama must use a normal mounted workspace root, not the "
+                "OpenClaw default vault path. In Windows Docker, set workspace_root "
+                "to /app/projects."
+            ),
+        )
+
     if payload.workspace_root is not None:
         previous_workspace_root = str(get_effective_workspace_root(db=db))
-        workspace_root = str(Path(payload.workspace_root).expanduser().resolve())
+        workspace_root = next_workspace_root
         set_setting_value(
             db,
             WORKSPACE_ROOT_KEY,
             workspace_root,
-            description="OpenClaw workspace root used for orchestration projects",
+            description="Workspace root used for orchestration projects",
         )
         if previous_workspace_root != workspace_root:
             changes["workspace_root"] = {

@@ -47,8 +47,9 @@ PROJECT_GITIGNORE_GUARD_LINES = [
 def resolve_project_root(project: Project, db: Session) -> Path:
     """Resolve the canonical workspace root for a project."""
     raw_workspace_path = str(project.workspace_path or "").strip()
-    if raw_workspace_path.startswith("/"):
-        explicit_path = Path(raw_workspace_path).expanduser().resolve()
+    explicit_candidate = Path(raw_workspace_path).expanduser()
+    if explicit_candidate.is_absolute():
+        explicit_path = explicit_candidate.resolve()
         project_slug = _slugify_workspace_name(project.name or "")
         if explicit_path.name == project_slug:
             return explicit_path

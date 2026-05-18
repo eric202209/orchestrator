@@ -111,6 +111,7 @@ function ProjectDetail() {
   const [requestChangesRerun, setRequestChangesRerun] = useState(true);
   const [requestChangesSubmitting, setRequestChangesSubmitting] = useState(false);
   const [rejectingChangeSetTaskId, setRejectingChangeSetTaskId] = useState<number | null>(null);
+  const [queueingTaskId, setQueueingTaskId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -515,8 +516,9 @@ function ProjectDetail() {
   };
 
   const handleRerunTask = async (task: Task, isolated = false) => {
-    if (task.status === 'running') return;
+    if (task.status === 'running' || queueingTaskId === task.id) return;
     try {
+      setQueueingTaskId(task.id);
       await tasksAPI.retry(
         task.id,
         isolated ? { execution_scope: 'new_session', create_new_session: true } : undefined
@@ -531,7 +533,10 @@ function ProjectDetail() {
       );
     } catch (error) {
       console.error('Failed to rerun task:', error);
-      alert('Failed to queue the task. Please try again.');
+      const apiError = error as { response?: { data?: { detail?: string } } };
+      alert(apiError.response?.data?.detail || 'Failed to queue the task. Please try again.');
+    } finally {
+      setQueueingTaskId(null);
     }
   };
 
@@ -1215,6 +1220,7 @@ function ProjectDetail() {
 
               <div className="bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)] divide-y divide-[color:var(--oc-border-soft)]">
                 {tasks.map((task) => {
+                  const queueingTask = queueingTaskId === task.id;
                   const pendingRunChanges = pendingChangeSets.find(
                     (item) => item.task_id === task.id
                   );
@@ -1270,9 +1276,10 @@ function ProjectDetail() {
                         {task.status !== 'running' && (
                           <button
                             onClick={() => handleRerunTask(task)}
-                            className="rounded-md border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[color:var(--oc-action-hover)]"
+                            disabled={queueingTask}
+                            className="rounded-md border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[color:var(--oc-action-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                           >
-                            {task.status === 'done' ? 'Run again' : 'Run'}
+                            {queueingTask ? 'Queueing...' : task.status === 'done' ? 'Run again' : 'Run'}
                           </button>
                         )}
                         <details className="relative">
@@ -1283,9 +1290,10 @@ function ProjectDetail() {
                             {task.status !== 'running' && (
                               <button
                                 onClick={() => handleRerunTask(task, true)}
-                                className="w-full rounded-md px-2.5 py-2 text-left text-xs text-slate-300 transition-colors hover:bg-[color:var(--oc-surface)] hover:text-white"
+                                disabled={queueingTask}
+                                className="w-full rounded-md px-2.5 py-2 text-left text-xs text-slate-300 transition-colors hover:bg-[color:var(--oc-surface)] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
                               >
-                                Run in new isolated session
+                                {queueingTask ? 'Queueing...' : 'Run in new isolated session'}
                               </button>
                             )}
                             {task.status === 'done' && task.task_subfolder && task.workspace_status !== 'promoted' && (

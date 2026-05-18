@@ -339,6 +339,35 @@ def queue_task_for_session(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found for this session")
 
+    if task.status == TaskStatus.RUNNING:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Task is already running; active execution is in progress. "
+                "Open the linked session to monitor it."
+            ),
+        )
+
+    active_link = (
+        db.query(SessionTask)
+        .join(SessionModel, SessionTask.session_id == SessionModel.id)
+        .filter(
+            SessionTask.task_id == task.id,
+            SessionTask.status == TaskStatus.RUNNING,
+            SessionModel.deleted_at.is_(None),
+            SessionModel.status.in_(["pending", "running", "active"]),
+        )
+        .first()
+    )
+    if active_link:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Task already has active execution in progress. "
+                f"Open session {active_link.session_id} to monitor it."
+            ),
+        )
+
     blocking_tasks = TaskService(db).get_blocking_prior_tasks(task)
     if blocking_tasks:
         blocking_summary = ", ".join(

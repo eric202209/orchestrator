@@ -5,17 +5,18 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager, contextmanager
 import errno
-import fcntl
 import json
 import logging
 import os
 import re
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
 
+from app.services.file_lock import fcntl
 from ..policy import (
     MINIMAL_PLANNING_TIMEOUT_SECONDS,
     PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS,
@@ -57,7 +58,7 @@ OPENCLAW_SESSION_LOCK_MARKERS = (
 OPENCLAW_PLANNING_LOCK_PATH = Path(
     os.environ.get(
         "ORCHESTRATOR_OPENCLAW_PLANNING_LOCK",
-        "/tmp/orchestrator-openclaw-planning.lock",
+        str(Path(tempfile.gettempdir()) / "orchestrator-openclaw-planning.lock"),
     )
 )
 OPENCLAW_PLANNING_LOCK_ACQUIRE_TIMEOUT_SECONDS = float(
@@ -317,9 +318,9 @@ class PlannerService:
             except Exception:
                 backend_metadata = {}
         backend_name = str(backend_metadata.get("backend") or "").strip()
-        if backend_name != "local_openclaw":
+        if backend_name not in {"local_openclaw", "direct_ollama"}:
             _logger.info(
-                "[PLANNING_DIRECT] skip: backend_name=%r (not local_openclaw)",
+                "[PLANNING_DIRECT] skip: backend_name=%r (not direct-capable)",
                 backend_name,
             )
             return False
@@ -402,13 +403,13 @@ class PlannerService:
             )
         except asyncio.TimeoutError:
             _logger.warning(
-                "[PLANNING_DIRECT] wall-clock timeout after %ds; falling back to OpenClaw",
+                "[PLANNING_DIRECT] wall-clock timeout after %ds; falling back to runtime",
                 direct_timeout,
             )
             return None
         except Exception as exc:
             _logger.warning(
-                "[PLANNING_DIRECT] failed after %.1fs (%s: %s); falling back to OpenClaw",
+                "[PLANNING_DIRECT] failed after %.1fs (%s: %s); falling back to runtime",
                 _time.monotonic() - started_at,
                 type(exc).__name__,
                 str(exc)[:200],
@@ -416,7 +417,7 @@ class PlannerService:
             return None
         if not output.strip():
             _logger.warning(
-                "[PLANNING_DIRECT] empty output after %.1fs; falling back to OpenClaw",
+                "[PLANNING_DIRECT] empty output after %.1fs; falling back to runtime",
                 _time.monotonic() - started_at,
             )
             return None
@@ -1365,9 +1366,9 @@ Return only a JSON array matching this shape. No markdown. No prose.
             except Exception:
                 backend_metadata = {}
         backend_name = str(backend_metadata.get("backend") or "").strip()
-        if backend_name != "local_openclaw":
+        if backend_name not in {"local_openclaw", "direct_ollama"}:
             _logger.info(
-                "[REPAIR_DIRECT] skip: backend_name=%r (not local_openclaw)",
+                "[REPAIR_DIRECT] skip: backend_name=%r (not direct-capable)",
                 backend_name,
             )
             return False
@@ -1430,7 +1431,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
             output = PlannerService._extract_chat_completion_content(body)
         except Exception as exc:
             _logger.warning(
-                "[REPAIR_DIRECT] failed after %.1fs (%s: %s); falling back to OpenClaw",
+                "[REPAIR_DIRECT] failed after %.1fs (%s: %s); falling back to runtime",
                 time.monotonic() - started_at,
                 type(exc).__name__,
                 str(exc)[:200],
@@ -1440,7 +1441,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
         if not output.strip():
             _logger.warning(
                 "[REPAIR_DIRECT] empty output from direct call; "
-                "falling back to OpenClaw"
+                "falling back to runtime"
             )
             return None
 

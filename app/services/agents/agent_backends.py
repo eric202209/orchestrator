@@ -358,7 +358,7 @@ _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
             name="direct_ollama",
             display_name="Direct Ollama",
             implementation="app.services.agents.providers.ollama_adapter.create_runtime",
-            default_model_family="qwen3:8b-q4_K_M",
+            default_model_family="qwen3-8b-hybrid",
             implemented=True,
             capabilities=BackendCapabilities(
                 supports_planning=True,
@@ -369,7 +369,7 @@ _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
                 supports_tool_execution=False,
                 supports_json_mode=False,
                 mcp_capable=False,
-                max_context_tokens=8192,
+                max_context_tokens=4096,
                 reliability_tier="local",
                 latency_tier="local",
             ),

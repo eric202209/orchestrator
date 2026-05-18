@@ -6,7 +6,6 @@ from pathlib import Path
 
 from app.services.workspace import project_isolation_service
 
-
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2] / "scripts" / "phase9g_live_shadow_batch.py"
 )

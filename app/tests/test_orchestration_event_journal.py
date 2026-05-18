@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+
+import pytest
 
 from app.models import Project, Session as SessionModel, Task, TaskStatus
 from app.services.orchestration.state.persistence import (
@@ -51,6 +54,7 @@ def test_append_orchestration_event_writes_append_only_jsonl(tmp_path):
     assert lines[1]["details"]["score"] == 100
 
 
+@pytest.mark.skipif(not hasattr(os, "chown"), reason="os.chown is POSIX-only")
 def test_atomic_json_write_normalizes_ownership_to_parent(monkeypatch, tmp_path):
     parent = tmp_path / "owned-parent"
     parent.mkdir()
@@ -76,6 +80,7 @@ def test_atomic_json_write_normalizes_ownership_to_parent(monkeypatch, tmp_path)
     assert any(path == str(target) for path, _, _ in chown_calls)
 
 
+@pytest.mark.skipif(not hasattr(os, "chown"), reason="os.chown is POSIX-only")
 def test_event_journal_writes_normalize_log_and_lock_ownership(monkeypatch, tmp_path):
     project_dir = tmp_path / "journal-project"
     project_dir.mkdir()

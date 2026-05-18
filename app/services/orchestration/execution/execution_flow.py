@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+import shlex
 import subprocess
+import sys
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -75,6 +77,86 @@ def determine_step_timeout(
     ):
         return max(600, min(timeout_seconds, 1800))
     return max(300, timeout_seconds // max(1, min(total_steps, 3)))
+
+
+def _portable_relative_path(project_dir: Path, raw_path: str) -> Optional[Path]:
+    path_text = str(raw_path or "").strip()
+    if not path_text:
+        return None
+    candidate = Path(path_text)
+    if candidate.is_absolute() or any(part == ".." for part in candidate.parts):
+        return None
+    resolved = (project_dir / candidate).resolve()
+    try:
+        resolved.relative_to(project_dir.resolve())
+    except ValueError:
+        return None
+    return resolved
+
+
+def _execute_portable_posix_command(
+    project_dir: Path, command: str
+) -> Optional[Dict[str, Any]]:
+    normalized = " ".join(str(command or "").strip().split())
+    if not normalized:
+        return None
+
+    try:
+        tokens = shlex.split(normalized, posix=True)
+    except ValueError:
+        return None
+
+    if len(tokens) == 2 and tokens[0] == "cat":
+        target = _portable_relative_path(project_dir, tokens[1])
+        if target is None:
+            return None
+        if not target.is_file():
+            return {
+                "success": False,
+                "command": command,
+                "returncode": 1,
+                "output": f"cat: {tokens[1]}: No such file",
+            }
+        return {
+            "success": True,
+            "command": command,
+            "returncode": 0,
+            "output": target.read_text(errors="replace")[:4000],
+        }
+
+    parts = [part.strip() for part in normalized.split("&&")]
+    if not parts or not all(part for part in parts):
+        return None
+
+    outputs: List[str] = []
+    for part in parts:
+        try:
+            part_tokens = shlex.split(part, posix=True)
+        except ValueError:
+            return None
+        if len(part_tokens) == 3 and part_tokens[:2] == ["test", "-f"]:
+            target = _portable_relative_path(project_dir, part_tokens[2])
+            if target is None:
+                return None
+            if not target.is_file():
+                return {
+                    "success": False,
+                    "command": command,
+                    "returncode": 1,
+                    "output": f"test: {part_tokens[2]}: file not found",
+                }
+            continue
+        if len(part_tokens) >= 2 and part_tokens[0] == "echo":
+            outputs.append(" ".join(part_tokens[1:]))
+            continue
+        return None
+
+    return {
+        "success": True,
+        "command": command,
+        "returncode": 0,
+        "output": "\n".join(outputs),
+    }
 
 
 # Minimum non-trivial file size in bytes.  Files smaller than this are
@@ -184,9 +266,19 @@ def execute_verification_command(
             "output": str(exc),
         }
 
+    portable_result = _execute_portable_posix_command(project_dir, raw_command)
+    if portable_result is not None:
+        return portable_result
+
+    command_to_run = raw_command
+    if raw_command == "python3" or raw_command.startswith("python3 "):
+        command_to_run = (
+            subprocess.list2cmdline([sys.executable]) + raw_command[len("python3") :]
+        )
+
     try:
         completed = subprocess.run(
-            raw_command,
+            command_to_run,
             cwd=str(project_dir),
             shell=True,
             capture_output=True,

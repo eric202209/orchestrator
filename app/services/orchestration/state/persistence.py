@@ -214,6 +214,8 @@ _WORKSPACE_HASH_CACHE_TTL_SECONDS = 1.0
 
 
 def _normalize_path_ownership_to_parent(path: Path) -> None:
+    if not hasattr(os, "chown"):
+        return
     try:
         owner = path.parent.stat()
         os.chown(path, owner.st_uid, owner.st_gid)
@@ -243,7 +245,7 @@ def _write_json_payload_atomic(path: Path, payload: Dict[str, Any]) -> None:
 
 
 def _append_jsonl_line(log_path: Path, payload: Dict[str, Any]) -> None:
-    import fcntl
+    from app.services.file_lock import fcntl
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = log_path.with_suffix(f"{log_path.suffix}.lock")

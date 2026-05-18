@@ -62,7 +62,7 @@ _FAKE_VECTOR = [0.0] * 1536
 
 
 def _parse_frontmatter(path: Path) -> dict:
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     assert text.startswith("---"), f"{path.name}: no frontmatter"
     end = text.find("\n---", 3)
     assert end != -1, f"{path.name}: frontmatter not closed"

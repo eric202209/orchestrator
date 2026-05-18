@@ -48,6 +48,9 @@ from app.services.workspace.system_settings import (
     get_effective_workspace_review_policy,
 )
 from app.services.workspace.project_mutation_lock import ProjectMutationLockError
+from app.services.workspace.project_isolation_service import (
+    resolve_project_workspace_path,
+)
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -109,6 +112,34 @@ def _prepare_task_for_fresh_execution(
         reset_steps=clear_saved_plan,
         error_message=None,
     )
+
+
+def _resolve_retry_event_project_dir(
+    *,
+    project: Project | None,
+    task: Task,
+    task_workspace: Dict,
+) -> Path | str:
+    workspace_path = task_workspace.get("workspace_path")
+    if not project:
+        return workspace_path or "."
+
+    project_root = resolve_project_workspace_path(project.workspace_path, project.name)
+    try:
+        candidate = Path(str(workspace_path or "")).resolve()
+        candidate.relative_to(project_root)
+        return candidate
+    except (OSError, ValueError):
+        pass
+
+    subfolder = (
+        task_workspace.get("task_subfolder")
+        or task_workspace.get("stored_task_subfolder")
+        or getattr(task, "task_subfolder", None)
+    )
+    if subfolder:
+        return project_root / str(subfolder)
+    return project_root
 
 
 def _get_active_task_session(db: Session, task_id: int) -> Optional[int]:
@@ -481,11 +512,11 @@ def _queue_task_retry(
         )
     _prepare_task_for_fresh_execution(task, clear_saved_plan=should_clear_saved_plan)
     repair_archive_result = None
+    project = db.query(Project).filter(Project.id == task.project_id).first()
     if (
         explicit_new_session
         and getattr(task, "workspace_status", None) == "changes_requested"
     ):
-        project = db.query(Project).filter(Project.id == task.project_id).first()
         if project:
             repair_archive_result = TaskService(
                 db
@@ -494,9 +525,14 @@ def _queue_task_retry(
                 task,
             )
     task_workspace = ensure_task_workspace(db, selected_session, task.id)
+    event_project_dir = _resolve_retry_event_project_dir(
+        project=project,
+        task=task,
+        task_workspace=task_workspace,
+    )
 
     queued_event = append_orchestration_event(
-        project_dir=task_workspace["workspace_path"],
+        project_dir=event_project_dir,
         session_id=selected_session.id,
         task_id=task.id,
         event_type=EventType.TASK_QUEUED,
@@ -1190,7 +1226,10 @@ def retry_task(
     if task.status == TaskStatus.RUNNING:
         raise HTTPException(
             status_code=409,
-            detail="Task is already running. Open the linked session to monitor it.",
+            detail=(
+                "Task is already running; active execution is in progress. "
+                "Open the linked session to monitor it."
+            ),
         )
 
     return _queue_task_retry(db, task, retry_request=retry_request)

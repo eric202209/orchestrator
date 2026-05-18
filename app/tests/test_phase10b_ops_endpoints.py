@@ -25,7 +25,6 @@ from app.models import (
 )
 from app.services.observability.metrics_collector import MetricsCollector
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

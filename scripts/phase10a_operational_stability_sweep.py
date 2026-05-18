@@ -13,7 +13,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import shutil
@@ -30,6 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from app.services.file_lock import fcntl
 from app.database import get_db_session
 from app.models import (
     KnowledgeUsageLog,

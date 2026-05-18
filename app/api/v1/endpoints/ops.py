@@ -20,13 +20,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ops", tags=["ops"])
 
 
-def _db_health() -> Dict[str, Any]:
+def _db_health(db: Session | None = None) -> Dict[str, Any]:
     try:
-        from app.database import engine
         from sqlalchemy import text
 
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
+        if db is not None:
+            db.execute(text("SELECT 1"))
+        else:
+            from app.database import engine
+
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
         return {"status": "ok"}
     except Exception as exc:
         return {"status": "unavailable", "error": str(exc)}
@@ -99,10 +103,11 @@ def _overall_status(components: Dict[str, Dict[str, Any]]) -> str:
 @router.get("/health")
 def ops_health(
     current_user=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     """Runtime health: ok / degraded / unavailable per component."""
     components = {
-        "database": _db_health(),
+        "database": _db_health(db),
         "redis": _redis_health(),
         "qdrant": _qdrant_health(),
         "celery": _celery_health(),

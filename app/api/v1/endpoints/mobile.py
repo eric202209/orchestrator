@@ -194,6 +194,7 @@ def require_mobile_gateway_key(
     request: Request,
     x_openclaw_api_key: str | None = Header(default=None, alias="X-OpenClaw-API-Key"),
     authorization: str | None = Header(default=None, alias="Authorization"),
+    db: Session = Depends(get_db),
 ):
     """
     Require a shared key from OpenClaw/Gateway before exposing orchestration data.
@@ -205,6 +206,7 @@ def require_mobile_gateway_key(
     configured_key, _ = get_effective_mobile_gateway_key(
         settings.MOBILE_GATEWAY_API_KEY,
         settings.OPENCLAW_API_KEY,
+        db=db,
     )
 
     if not configured_key:
@@ -327,9 +329,9 @@ router = APIRouter(dependencies=[Depends(require_mobile_gateway_key)])
 admin_router = APIRouter(prefix="/mobile-admin", tags=["mobile-admin"])
 
 
-def _get_mobile_shared_key() -> tuple[str, str] | tuple[None, None]:
+def _get_mobile_shared_key(db: Session) -> tuple[str, str] | tuple[None, None]:
     return get_effective_mobile_gateway_key(
-        settings.MOBILE_GATEWAY_API_KEY, settings.OPENCLAW_API_KEY
+        settings.MOBILE_GATEWAY_API_KEY, settings.OPENCLAW_API_KEY, db=db
     )
 
 
@@ -360,9 +362,10 @@ def _derive_mobile_base_url(request: Request) -> str:
 def get_mobile_connection_info(
     request: Request,
     current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
 ):
     """Return recommended mobile connection details for authenticated users."""
-    shared_key, key_source = _get_mobile_shared_key()
+    shared_key, key_source = _get_mobile_shared_key(db)
     mobile_base_url = _derive_mobile_base_url(request)
     return {
         "user_email": current_user.email,
@@ -392,9 +395,10 @@ def get_mobile_connection_info(
 @admin_router.get("/connection-secret")
 def reveal_mobile_connection_secret(
     current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
 ):
     """Return setup metadata without exposing the raw mobile shared key."""
-    shared_key, key_source = _get_mobile_shared_key()
+    shared_key, key_source = _get_mobile_shared_key(db)
     return {
         "user_email": current_user.email,
         "header_name": "X-OpenClaw-API-Key",
@@ -1082,7 +1086,7 @@ async def mobile_log_stream(
     Closes on terminal session state (stopped/failed/done).
     """
     configured_key, _ = get_effective_mobile_gateway_key(
-        settings.MOBILE_GATEWAY_API_KEY, settings.OPENCLAW_API_KEY
+        settings.MOBILE_GATEWAY_API_KEY, settings.OPENCLAW_API_KEY, db=db
     )
     presented_key = api_key or websocket.headers.get("X-OpenClaw-API-Key")
     if (
