@@ -250,7 +250,7 @@ export default function SettingsPage() {
         <div className="space-y-4">
           <div>
             <label className="block text-sm text-slate-400 mb-2">
-              OpenClaw Workspace Root
+              Workspace Root
             </label>
             <input
               value={workspaceRoot}
@@ -259,7 +259,9 @@ export default function SettingsPage() {
             />
             <p className="mt-2 text-xs text-slate-400">
               This becomes the root path used for project workspaces and
-              isolation checks.
+              isolation checks. In Windows Docker direct_ollama mode, use
+              /app/projects so generated files land in the mounted Windows
+              projects folder.
             </p>
           </div>
           <div className="grid gap-4 md:grid-cols-2">

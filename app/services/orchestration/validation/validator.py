@@ -1482,7 +1482,7 @@ class ValidatorService:
 
         project_root = Path(project_dir)
         known_paths = {
-            str(path.relative_to(project_root))
+            path.relative_to(project_root).as_posix()
             for path in project_root.rglob("*")
             if path.is_file()
         }

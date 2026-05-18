@@ -11,6 +11,7 @@ from app.services.workspace.system_settings import (
     AGENT_BACKEND_KEY,
     ORCHESTRATION_POLICY_PROFILE_KEY,
     WORKSPACE_REVIEW_POLICY_KEY,
+    WORKSPACE_ROOT_KEY,
     set_setting_value,
 )
 
@@ -95,6 +96,28 @@ def test_settings_can_select_openai_backend(authenticated_client):
     payload = response.json()
     assert payload["system"]["agent_backend"] == "openai_responses_api"
     assert payload["system"]["agent_adaptation_profile"] == "openai_responses_default"
+
+
+def test_direct_ollama_rejects_openclaw_default_workspace(
+    authenticated_client, db_session
+):
+    set_setting_value(
+        db_session,
+        WORKSPACE_ROOT_KEY,
+        "/home/operator/.openclaw/workspace/vault/projects",
+    )
+
+    response = authenticated_client.patch(
+        "/api/v1/settings/system",
+        json={
+            "agent_backend": "direct_ollama",
+            "workspace_root": "/home/operator/.openclaw/workspace/vault/projects",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "direct_ollama" in response.json()["detail"]
+    assert "/app/projects" in response.json()["detail"]
 
 
 def test_checkpoint_inspection_returns_validation_and_plan_preview(

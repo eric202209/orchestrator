@@ -94,6 +94,8 @@ class CheckpointService:
             return None
 
     def _normalize_checkpoint_file_ownership(self, path: Path) -> None:
+        if not hasattr(os, "chown"):
+            return
         owner_ids = self._checkpoint_owner_ids()
         if owner_ids is None:
             return

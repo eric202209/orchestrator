@@ -153,15 +153,15 @@ backend talks to native Ollama through `http://host.docker.internal:11434`.
 - [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/) (WSL2 backend)
 - [Ollama for Windows](https://ollama.com/download/windows) with NVIDIA GPU support
   - CUDA drivers ≥ 528 required
-  - Verify GPU: `ollama run qwen3:8b-q4_K_M` should run on GPU, not CPU
+  - Verify GPU: `ollama run qwen3-8b-hybrid` should run on GPU, not CPU
 - Optional dashboard: Node.js 18+ and `pnpm`
 
 ### Hardware recommendations
 
 | VRAM | Recommended model | `OLLAMA_NUM_CTX` |
 |---|---|---|
-| 6 GB | `qwen3:8b-q4_K_M` | 4096 |
-| 8 GB | `qwen3:8b-q4_K_M` | 8192 |
+| 6 GB | `qwen3-8b-hybrid` | 4096 |
+| 8 GB | `qwen3-8b-hybrid` | 4096 or 8192 |
 | 12 GB+ | `qwen3:14b-q4_K_M` | 8192 |
 
 27B models require CPU offloading on < 16 GB VRAM — too slow for stable use.
@@ -172,16 +172,16 @@ Use Ollama library tags, not random Hugging Face files, for this setup. The
 known-good default is:
 
 ```text
-qwen3:8b-q4_K_M
+qwen3-8b-hybrid
 ```
 
 Why this one:
 
-- small enough for a 6 GB laptop GPU when `OLLAMA_NUM_CTX=4096`
+- based on `qwen3:8b-q4_K_M`, small enough for a 6 GB laptop GPU when `OLLAMA_NUM_CTX=4096`
 - stronger for planning than smaller 1.7B/4B models
 - much less RAM/CPU offload pressure than 14B/30B/32B models
 
-If `qwen3:8b-q4_K_M` still OOMs, first lower `OLLAMA_NUM_CTX` to `4096`. If it
+If `qwen3-8b-hybrid` still OOMs, first confirm `OLLAMA_NUM_CTX=4096`. If it
 still fails, use `qwen3:4b-q4_K_M` as the fallback model and set both
 `AGENT_MODEL` and `OLLAMA_AGENT_MODEL` to that exact tag.
 
@@ -219,9 +219,10 @@ curl http://localhost:11434/api/tags
 
 ```powershell
 ollama pull qwen3:8b-q4_K_M
+ollama create qwen3-8b-hybrid -f Modelfile
 ollama pull nomic-embed-text
 ollama list
-ollama run qwen3:8b-q4_K_M "Return only: OK"
+ollama run qwen3-8b-hybrid "Return only: OK"
 ```
 
 **3.5. Pre-create local bind-mount paths**
@@ -246,20 +247,22 @@ DATABASE_URL=sqlite:////app/orchestrator.db
 
 # Backend — direct Ollama, no OpenClaw
 AGENT_BACKEND=direct_ollama
-AGENT_MODEL=qwen3:8b-q4_K_M
+AGENT_MODEL=qwen3-8b-hybrid
 
 # Ollama (native on Windows host)
 OLLAMA_BASE_URL=http://host.docker.internal:11434
-OLLAMA_AGENT_MODEL=qwen3:8b-q4_K_M
-OLLAMA_NUM_CTX=8192
-# Lower to 4096 if you hit OOM on 6 GB VRAM:
-# OLLAMA_NUM_CTX=4096
+OLLAMA_AGENT_MODEL=qwen3-8b-hybrid
+OLLAMA_NUM_CTX=4096
 OLLAMA_EMBEDDING_MODEL=nomic-embed-text
 EMBEDDING_PROVIDER=ollama
 EMBEDDING_DIM=0
 
-# Disable planning repair (no ai-gateway on this machine)
-PLANNING_REPAIR_ENABLED=false
+# Direct Ollama repair through the OpenAI-compatible endpoint
+PLANNING_REPAIR_ENABLED=true
+PLANNING_REPAIR_BASE_URL=http://host.docker.internal:11434/v1
+PLANNING_REPAIR_MODEL=qwen3-8b-hybrid
+PLANNING_REPAIR_API_KEY=
+PLANNING_REPAIR_DISABLE_THINKING=true
 
 # Internal Docker network URLs — do not change
 CELERY_BROKER_URL=redis://redis:6379/0
@@ -290,12 +293,34 @@ docker compose -f docker-compose.windows.yml up --build
 
 First build takes a few minutes (installs Python deps inside the image).
 
+After registration, open Settings and set `workspace_root` to `/app/projects`.
+Do not use the OpenClaw default vault path in `direct_ollama` mode; the backend
+will reject that combination because it points work outside the Docker bind
+mount.
+
 **6. Open the API**
 
 | Service | URL |
 |---|---|
 | API docs | http://localhost:8080/docs |
 | Health | http://localhost:8080/health |
+
+Run the Windows health check after the containers are up:
+
+```powershell
+.\scripts\windows_health_check.ps1
+```
+
+Equivalent manual checks:
+
+```powershell
+docker compose -f docker-compose.windows.yml exec orchestrator node --version
+docker compose -f docker-compose.windows.yml exec celery_worker node --version
+docker compose -f docker-compose.windows.yml exec orchestrator curl http://host.docker.internal:11434/api/tags
+curl http://localhost:8080/health
+ollama list
+ollama ps
+```
 
 > **Note:** The Windows Docker setup runs the FastAPI API only; it does not
 > build or serve the React dashboard. Use the FastAPI Swagger UI at
@@ -393,15 +418,15 @@ Add `-v` to also remove the Qdrant data volume.
 | `AGENT_BACKEND` | `local_openclaw` | Runtime backend. |
 | `OPENCLAW_GATEWAY_URL` | `http://127.0.0.1:8000` | OpenClaw gateway (Linux only). |
 | `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | Ollama API base URL. |
-| `OLLAMA_AGENT_MODEL` | `qwen3:8b-q4_K_M` | Model used for planning/execution. |
-| `OLLAMA_NUM_CTX` | `8192` | Context window tokens sent to Ollama. |
+| `OLLAMA_AGENT_MODEL` | `qwen3-8b-hybrid` | Model used for planning/execution. |
+| `OLLAMA_NUM_CTX` | `4096` | Context window tokens sent to Ollama. |
 | `OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model for knowledge retrieval. |
 | `EMBEDDING_PROVIDER` | `auto` | `auto` / `ollama` / `openai`. |
 | `EMBEDDING_DIM` | `0` | `0` = auto (768 for Ollama, 1536 for OpenAI). |
 | `QDRANT_URL` | `http://localhost:6333` | Qdrant vector store URL. |
 | `CELERY_BROKER_URL` | `redis://localhost:6379/0` | Redis broker for Celery. |
 | `WORKSPACE_REVIEW_POLICY` | `hold_nontrivial` | Change-set governance: `auto_publish_all` / `hold_nontrivial` / `hold_all`. |
-| `PLANNING_REPAIR_ENABLED` | `true` | Enable second-pass plan repair. |
+| `PLANNING_REPAIR_ENABLED` | `true` | Enable second-pass plan repair. For Windows direct Ollama, pair it with `PLANNING_REPAIR_BASE_URL=http://host.docker.internal:11434/v1`. |
 | `MOBILE_GATEWAY_API_KEY` | — | Shared key for `/api/v1/mobile/*`. |
 | `OPENAI_API_KEY` | — | Required only for `openai_responses_api` backend. |
 | `LANGFUSE_ENABLED` | `false` | Enable Langfuse tracing. |

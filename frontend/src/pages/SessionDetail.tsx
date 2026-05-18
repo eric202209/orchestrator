@@ -157,6 +157,7 @@ export default function SessionDetail() {
   const [showAgentInterventionModal, setShowAgentInterventionModal] = useState(false);
   const [interventionToast, setInterventionToast] = useState<InterventionToastState | null>(null);
   const [checkpointActionIntent, setCheckpointActionIntent] = useState<CheckpointActionIntent | null>(null);
+  const [executionAction, setExecutionAction] = useState<'start' | 'replay' | 'run-task' | null>(null);
   const [interventionPrompt, setInterventionPrompt] = useState('');
   const [interventionSubmitting, setInterventionSubmitting] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -1440,8 +1441,9 @@ export default function SessionDetail() {
   );
 
   const replayCheckpoint = useCallback(async (checkpointName: string) => {
-    if (!sessionId) return;
+    if (!sessionId || executionAction) return;
     try {
+      setExecutionAction('replay');
       await sessionsAPI.replayCheckpoint(Number(sessionId), checkpointName);
       pushTimelineEvent(`Replay requested from checkpoint ${checkpointName}`, 'INFO');
       const updated = await sessionsAPI.getById(Number(sessionId));
@@ -1461,8 +1463,10 @@ export default function SessionDetail() {
       const apiError = error as ApiErrorLike;
       const errorMsg = apiError.response?.data?.detail || apiError.message || 'Unknown error';
       alert(`Failed to replay checkpoint: ${errorMsg}`);
+    } finally {
+      setExecutionAction(null);
     }
-  }, [loadCheckpointCount, loadStateDiff, loadTimelineEvents, pushTimelineEvent, scheduleWebSocketConnect, sessionId]);
+  }, [executionAction, loadCheckpointCount, loadStateDiff, loadTimelineEvents, pushTimelineEvent, scheduleWebSocketConnect, sessionId]);
 
   const getUsefulCheckpoints = useCallback(() => {
     return [...checkpoints]
@@ -1627,6 +1631,7 @@ export default function SessionDetail() {
   }, [applyLogView, loadCheckpointCount, loadDecisionTimeline, loadDispatchWatchdog, loadFailureSummary, loadInterventions, loadReplayInvestigation, loadStateDiff, loadTimelineEvents, logVerbosity, logViewMode, scheduleWebSocketConnect, sessionId, toTerminalLogEntry, visibleLogs]);
 
   const handleStartSessionFresh = async () => {
+    if (executionAction) return;
     if (!session || !sessionId) {
       console.error('Cannot start: session or sessionId missing');
       alert('Session not loaded properly');
@@ -1648,6 +1653,7 @@ export default function SessionDetail() {
         : current
     );
     try {
+      setExecutionAction('start');
       const response = await sessionsAPI.start(Number(sessionId));
       console.log('Start API response:', response);
       const updated = await sessionsAPI.getById(Number(sessionId));
@@ -1675,6 +1681,8 @@ export default function SessionDetail() {
       const errorMsg = apiError.response?.data?.detail || apiError.message || 'Unknown error';
       pushTimelineEvent(`Session start failed: ${errorMsg}`, 'ERROR');
       alert(`Failed to start session: ${errorMsg}`);
+    } finally {
+      setExecutionAction(null);
     }
   };
 
@@ -1839,8 +1847,9 @@ export default function SessionDetail() {
   };
 
   const handleExecuteTask = useCallback(async (task: Task) => {
-    if (!sessionId) return;
+    if (!sessionId || executionAction) return;
     try {
+      setExecutionAction('run-task');
       await sessionsAPI.runTask(Number(sessionId), task.id);
       pushTimelineEvent(`Queued task ${task.id}: ${task.title}`, 'INFO');
       const [updatedSession, updatedTasks] = await Promise.all([
@@ -1855,9 +1864,12 @@ export default function SessionDetail() {
       }
     } catch (error) {
       console.error('Failed to run task manually:', error);
-      alert('Failed to queue the selected task');
+      const apiError = error as ApiErrorLike;
+      alert(apiError.response?.data?.detail || 'Failed to queue the selected task');
+    } finally {
+      setExecutionAction(null);
     }
-  }, [loadStateDiff, pushTimelineEvent, scheduleWebSocketConnect, sessionId]);
+  }, [executionAction, loadStateDiff, pushTimelineEvent, scheduleWebSocketConnect, sessionId]);
 
   const handleExecutionModeChange = useCallback(async (mode: 'automatic' | 'manual') => {
     if (!sessionId || !session) return;
@@ -2068,10 +2080,11 @@ export default function SessionDetail() {
             )}
             <button
               onClick={handleStartSession}
-              className="flex items-center gap-2 px-4 py-2 border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] rounded-lg text-sm transition-colors"
+              disabled={Boolean(executionAction)}
+              className="flex items-center gap-2 px-4 py-2 border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] rounded-lg text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Play className="h-4 w-4" />
-              Start
+              {executionAction === 'start' ? 'Starting...' : 'Start'}
             </button>
           </div>
         );
@@ -2146,7 +2159,8 @@ export default function SessionDetail() {
                     setCheckpointActionIntent(null);
                     await replayCheckpoint(checkpoint.name);
                   }}
-                  className="w-full rounded-xl border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-4 text-left transition-colors hover:border-emerald-600 hover:bg-[color:var(--oc-shell)]"
+                  disabled={Boolean(executionAction)}
+                  className="w-full rounded-xl border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-4 text-left transition-colors hover:border-emerald-600 hover:bg-[color:var(--oc-shell)] disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <div className="flex items-center justify-between gap-3">
                     <p className="text-sm font-medium text-white">
@@ -2186,9 +2200,10 @@ export default function SessionDetail() {
                     setCheckpointActionIntent(null);
                     await handleStartSessionFresh();
                   }}
-                  className="rounded-lg border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] px-3 py-2 text-sm text-white transition-colors hover:bg-[color:var(--oc-action-hover)]"
+                  disabled={Boolean(executionAction)}
+                  className="rounded-lg border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] px-3 py-2 text-sm text-white transition-colors hover:bg-[color:var(--oc-action-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  Start Fresh Instead
+                  {executionAction === 'start' ? 'Starting...' : 'Start Fresh Instead'}
                 </button>
               )}
             </div>

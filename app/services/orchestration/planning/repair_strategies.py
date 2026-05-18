@@ -111,7 +111,7 @@ def _render_workspace_source_inventory(project_dir: Path) -> str:
             continue
         if path.suffix.lower() not in _SOURCE_EXTENSIONS:
             continue
-        paths.append(str(relative))
+        paths.append(relative.as_posix())
         if len(paths) >= 60:
             break
     return "\n".join(f"- {path}" for path in paths)

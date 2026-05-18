@@ -11,7 +11,8 @@ from sqlalchemy.orm import Session
 from app.database import get_db_session
 from app.models import SystemSetting
 
-WORKSPACE_ROOT_KEY = "openclaw_workspace_root"
+WORKSPACE_ROOT_KEY = "workspace_root"
+LEGACY_WORKSPACE_ROOT_KEY = "openclaw_workspace_root"
 MOBILE_API_KEY_KEY = "mobile_gateway_api_key"
 AGENT_BACKEND_KEY = "orchestrator_agent_backend"
 AGENT_MODEL_FAMILY_KEY = "orchestrator_agent_model_family"
@@ -49,6 +50,15 @@ def get_setting_value(
     return record.value
 
 
+def get_workspace_root_setting_value(
+    db: Session, default: Optional[str] = None
+) -> Optional[str]:
+    value = get_setting_value(db, WORKSPACE_ROOT_KEY)
+    if value not in {None, ""}:
+        return value
+    return get_setting_value(db, LEGACY_WORKSPACE_ROOT_KEY, default)
+
+
 def set_setting_value(
     db: Session, key: str, value: Optional[str], description: Optional[str] = None
 ) -> SystemSetting:
@@ -74,15 +84,29 @@ def get_setting_value_runtime(
     runtime_db = get_db_session()
     try:
         return get_setting_value(runtime_db, key, default)
+    except OperationalError as exc:
+        if not _is_missing_system_settings_table(exc):
+            return default
+        return default
     finally:
         runtime_db.close()
 
 
 def get_effective_workspace_root(db: Optional[Session] = None) -> Path:
     fallback = os.environ.get(
-        "OPENCLAW_WORKSPACE", "~/.openclaw/workspace/vault/projects/"
+        "WORKSPACE_ROOT",
+        os.environ.get("OPENCLAW_WORKSPACE", "~/.openclaw/workspace/vault/projects/"),
     )
-    value = get_setting_value_runtime(WORKSPACE_ROOT_KEY, fallback, db=db) or fallback
+    if db is not None:
+        value = get_workspace_root_setting_value(db, fallback) or fallback
+    else:
+        runtime_db = get_db_session()
+        try:
+            value = get_workspace_root_setting_value(runtime_db, fallback) or fallback
+        except OperationalError:
+            value = fallback
+        finally:
+            runtime_db.close()
     return Path(value).expanduser().resolve()
 
 

@@ -41,6 +41,14 @@ async def start_session_payload(
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    if session.status in {"running", "active"}:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Session already has active execution in progress. "
+                "Stop it before starting another direct execution."
+            ),
+        )
 
     try:
         runtime = create_agent_runtime(db, session_id, use_demo_mode=False)
@@ -107,6 +115,14 @@ async def execute_task_payload(
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    if session.status in {"running", "active"}:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Session already has active execution in progress. "
+                "Stop it before queueing another task."
+            ),
+        )
 
     selected_task = None
     session_task_link = None

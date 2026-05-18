@@ -872,8 +872,11 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
 
     if session.status in ["running", "paused", "active"]:
         raise HTTPException(
-            status_code=400,
-            detail=f"Session is already {session.status}. Use stop or resume instead.",
+            status_code=409,
+            detail=(
+                f"Session is already {session.status}; active execution is in progress. "
+                "Use stop or resume instead."
+            ),
         )
 
     if session.status == "pending" and session.is_active:

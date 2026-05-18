@@ -190,14 +190,16 @@ class Settings(BaseSettings):
     # Ollama runs on the host; orchestrator reaches it via host.docker.internal.
     OLLAMA_BASE_URL: str = "http://host.docker.internal:11434"
     OLLAMA_EMBEDDING_MODEL: str = "nomic-embed-text"
-    OLLAMA_AGENT_MODEL: str = "qwen3:8b-q4_K_M"
-    # Tokens passed as num_ctx to Ollama. Lower to 4096 on 6 GB VRAM to avoid OOM.
-    OLLAMA_NUM_CTX: int = 8192
     # 0 = auto (1536 for openai, 768 for ollama nomic-embed-text)
     EMBEDDING_DIM: int = 0
     KNOWLEDGE_CONTENT_MAX_CHARS: int = 800
     KNOWLEDGE_MAX_ITEMS: int = 3
     KNOWLEDGE_MAX_TOTAL_CHARS: int = 2000
+
+    # For windows users running Ollama locally
+    OLLAMA_AGENT_MODEL: str = "qwen3-8b-hybrid"
+    # Tokens passed as num_ctx to Ollama. 4096 is the low-RAM Windows default.
+    OLLAMA_NUM_CTX: int = 4096
 
 
 settings = Settings()

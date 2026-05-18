@@ -13,7 +13,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import sqlite3
@@ -29,6 +28,8 @@ import sys
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+from app.services.file_lock import fcntl
 
 LOCK_FILE = REPO_ROOT / ".phase9n_sweep.lock"
 

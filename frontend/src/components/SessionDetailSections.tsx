@@ -1628,6 +1628,7 @@ export function SessionTimelinePanel({
 interface SessionTasksPanelProps {
   actionButtons: ReactNode;
   formatDateTime: (value?: string | null) => string;
+  executionAction?: string | null;
   onExecuteTask?: (task: Task) => void;
   session: Session;
   tasks: Task[];
@@ -1636,6 +1637,7 @@ interface SessionTasksPanelProps {
 export function SessionTasksPanel({
   actionButtons,
   formatDateTime,
+  executionAction,
   onExecuteTask,
   session,
   tasks,
@@ -1703,10 +1705,12 @@ export function SessionTasksPanel({
                 ) && (
                   <button
                     onClick={() => onExecuteTask(task)}
-                    disabled={task.status === 'running'}
+                    disabled={task.status === 'running' || Boolean(executionAction)}
                     className="rounded-lg border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[color:var(--oc-action-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    {task.status === 'done'
+                    {executionAction === 'run-task'
+                      ? 'Queueing...'
+                      : task.status === 'done'
                       ? 'Run again in workflow session'
                       : 'Run in workflow session'}
                   </button>

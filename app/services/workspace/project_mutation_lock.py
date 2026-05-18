@@ -17,7 +17,9 @@ class ProjectMutationLockError(RuntimeError):
         self.operation = operation
         self.lock_path = lock_path
         super().__init__(
-            f"Project {project_id} already has an active canonical-root writer"
+            "Project already has active canonical-root writer/execution in progress. "
+            f"Wait for the current writer to finish, then retry. "
+            f"project_id={project_id} operation={operation} lock_path={lock_path}"
         )
 
 

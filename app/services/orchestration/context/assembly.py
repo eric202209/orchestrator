@@ -114,7 +114,7 @@ def collect_workspace_inventory_paths(
             relative = relative_root / file_name
             if any(part in _IGNORED_PARTS for part in relative.parts):
                 continue
-            existing_files.append(str(relative))
+            existing_files.append(relative.as_posix())
             if len(existing_files) >= max_files:
                 return existing_files
     return existing_files
@@ -503,7 +503,10 @@ def assemble_execution_prompt(
     ctx: OrchestrationContext, step: Dict[str, Any], *, compact: bool = False
 ) -> str:
     prompt_project_dir = render_workspace_path_for_prompt(
-        ctx.orchestration_state.project_dir, db=ctx.db
+        ctx.orchestration_state.project_dir,
+        db=ctx.db,
+        preserve_external_paths=get_effective_adaptation_profile(ctx.db)
+        == "openai_responses_default",
     )
     expected_files = step.get("expected_files", []) or []
     workspace_max_files = 18 if compact else 40

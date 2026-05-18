@@ -132,15 +132,15 @@ def test_weak_expected_file_verification_is_strengthened():
 # ── start boundary conditions ─────────────────────────────────────────────────
 
 
-def test_start_already_running_session_returns_400(db_session, monkeypatch):
+def test_start_already_running_session_returns_409(db_session, monkeypatch):
     project = _make_project(db_session)
     session = _make_session(db_session, project, status="running", is_active=True)
 
     with pytest.raises(HTTPException) as exc_info:
         asyncio.run(start_session_lifecycle(db_session, session.id))
 
-    assert exc_info.value.status_code == 400
-    assert "already" in exc_info.value.detail.lower()
+    assert exc_info.value.status_code == 409
+    assert "active execution is in progress" in exc_info.value.detail.lower()
 
 
 def test_start_recovers_orphaned_planning_run_before_restarting(
@@ -406,14 +406,15 @@ def test_maybe_queue_next_automatic_task_ignores_pending_links(db_session, monke
     assert queued == [next_task.id]
 
 
-def test_start_already_paused_session_returns_400(db_session):
+def test_start_already_paused_session_returns_409(db_session):
     project = _make_project(db_session)
     session = _make_session(db_session, project, status="paused", is_active=True)
 
     with pytest.raises(HTTPException) as exc_info:
         asyncio.run(start_session_lifecycle(db_session, session.id))
 
-    assert exc_info.value.status_code == 400
+    assert exc_info.value.status_code == 409
+    assert "active execution is in progress" in exc_info.value.detail.lower()
 
 
 def test_start_nonexistent_session_returns_404(db_session):

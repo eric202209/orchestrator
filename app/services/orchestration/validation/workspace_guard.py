@@ -50,6 +50,12 @@ _TRANSIENT_EXPECTED_FILE_PARTS = frozenset(
 _WORKSPACE_STEM = "vault/projects"
 
 
+def _relative_path_text(path: Path) -> str:
+    """Render workspace-relative paths consistently across host platforms."""
+
+    return path.as_posix()
+
+
 def strip_heredoc_bodies(command_text: str) -> str:
     """Replace heredoc bodies so shell validation only sees the outer command."""
 
@@ -99,7 +105,7 @@ def normalize_path_reference(path_text: str, project_dir: Path) -> str:
         )
 
     relative = os.path.relpath(resolved, project_dir)
-    return "." if relative == "." else relative
+    return "." if relative == "." else _relative_path_text(Path(relative))
 
 
 def looks_like_plain_english_instruction(command: str) -> bool:
@@ -236,7 +242,7 @@ def _normalize_cd_target_for_cwd(
         )
 
     relative = os.path.relpath(resolved, project_dir)
-    return "." if relative == "." else relative
+    return "." if relative == "." else _relative_path_text(Path(relative))
 
 
 def _rewrite_safe_cd_chain(command: str, project_dir: Path) -> str:
@@ -700,7 +706,9 @@ def compute_workspace_checksum(project_dir: Path) -> Dict[str, str]:
         if any(part in _CHECKSUM_IGNORED for part in relative.parts):
             continue
         try:
-            checksums[str(relative)] = hashlib.sha256(path.read_bytes()).hexdigest()
+            checksums[relative.as_posix()] = hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
         except OSError:
             pass
     return checksums
@@ -719,7 +727,7 @@ def detect_scope_violations(
     """
     _NOISE_SUFFIXES = {".lock", ".log"}
     _NOISE_NAMES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml"}
-    allowed = {str(f).lstrip("./") for f in (expected_files or [])}
+    allowed = {Path(str(f).lstrip("./")).as_posix() for f in (expected_files or [])}
     post_checksum = compute_workspace_checksum(project_dir)
     violations: List[str] = []
     for rel_path, checksum in post_checksum.items():

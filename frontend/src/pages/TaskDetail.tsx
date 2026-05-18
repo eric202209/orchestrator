@@ -28,6 +28,7 @@ function TaskDetail() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [allowCurrentStepEdit, setAllowCurrentStepEdit] = useState(false);
   const [runInNewSession, setRunInNewSession] = useState(false);
+  const [rerunningTask, setRerunningTask] = useState(false);
   const [requestChangesOpen, setRequestChangesOpen] = useState(false);
   const [requestChangesNote, setRequestChangesNote] = useState('');
   const [requestChangesRerun, setRequestChangesRerun] = useState(true);
@@ -161,8 +162,9 @@ function TaskDetail() {
   };
 
   const handleRerun = async (isolated = false) => {
-    if (!task || task.status === 'running') return;
+    if (!task || task.status === 'running' || rerunningTask) return;
     try {
+      setRerunningTask(true);
       setSaveError(null);
       await tasksAPI.retry(
         task.id,
@@ -171,7 +173,10 @@ function TaskDetail() {
       await fetchTask();
     } catch (error) {
       console.error('Failed to rerun task:', error);
-      setSaveError('Failed to queue the task for another run');
+      const apiError = error as { response?: { data?: { detail?: string } } };
+      setSaveError(apiError.response?.data?.detail || 'Failed to queue the task for another run');
+    } finally {
+      setRerunningTask(false);
     }
   };
 
@@ -550,15 +555,17 @@ function TaskDetail() {
                     <Button
                       size="sm"
                       onClick={() => handleRerun(runInNewSession)}
+                      disabled={rerunningTask}
                       className="rounded-none border-0"
                     >
-                      {task.status === 'done' ? 'Run Again' : 'Run'}
+                      {rerunningTask ? 'Queueing...' : task.status === 'done' ? 'Run Again' : 'Run'}
                     </Button>
                     <label className="flex items-center gap-1 border-l border-primary-500/30 bg-[color:var(--oc-shell)] px-2 text-xs text-slate-300">
                       <ChevronDown className="h-3.5 w-3.5 text-slate-500" />
                       <select
                         value={runInNewSession ? 'new_session' : 'workflow'}
                         onChange={(event) => setRunInNewSession(event.target.value === 'new_session')}
+                        disabled={rerunningTask}
                         className="bg-transparent py-1.5 text-xs text-slate-300 focus:outline-none"
                         aria-label="Run mode"
                       >

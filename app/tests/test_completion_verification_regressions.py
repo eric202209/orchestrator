@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import shlex
 from types import SimpleNamespace
+
+import pytest
 
 from app.models import (
     LogEntry,
@@ -182,7 +186,7 @@ def test_python_completion_verification_prefers_project_venv(tmp_path):
 
     command, source = _detect_completion_verification_command(project_dir)
 
-    assert command == f"{python_bin} -m pytest"
+    assert command == f"{shlex.quote(str(python_bin))} -m pytest"
     assert source == "python test suite detected"
 
 
@@ -212,6 +216,7 @@ def test_python_module_pytest_completion_verification_imports_workspace_root(
     assert result["success"] is True
 
 
+@pytest.mark.skipif(os.name == "nt", reason="uses a POSIX shebang executable")
 def test_completion_verification_executes_project_venv_python(tmp_path):
     project_dir = tmp_path / "project"
     (project_dir / "tests").mkdir(parents=True)
