@@ -228,9 +228,8 @@ def update_system_settings(
         if payload.workspace_root is not None
         else str(get_effective_workspace_root(db=db))
     )
-    if (
-        next_backend_name == "direct_ollama"
-        and _is_openclaw_default_workspace_path(next_workspace_root)
+    if next_backend_name == "direct_ollama" and _is_openclaw_default_workspace_path(
+        next_workspace_root
     ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

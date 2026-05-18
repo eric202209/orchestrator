@@ -211,8 +211,7 @@ def test_phase7m_offline_golden_report_threshold_is_not_sufficient():
 
 
 def _report_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
+    conn.executescript("""
         create table projects (
             id integer primary key,
             name text,
@@ -247,8 +246,7 @@ def _report_schema(conn: sqlite3.Connection) -> None:
             message text,
             log_metadata text
         );
-        """
-    )
+        """)
 
 
 def _insert_report_execution(conn: sqlite3.Connection, task_execution_id: int) -> None:

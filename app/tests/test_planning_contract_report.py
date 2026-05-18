@@ -17,8 +17,7 @@ SPEC.loader.exec_module(module)
 
 
 def _schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
+    conn.executescript("""
         create table projects (
             id integer primary key,
             name text,
@@ -53,8 +52,7 @@ def _schema(conn: sqlite3.Connection) -> None:
             message text,
             log_metadata text
         );
-        """
-    )
+        """)
 
 
 def _insert_execution(

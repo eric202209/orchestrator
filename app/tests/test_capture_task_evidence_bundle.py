@@ -19,8 +19,7 @@ SPEC.loader.exec_module(module)
 
 
 def _schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
+    conn.executescript("""
         create table projects (
             id integer primary key,
             name text,
@@ -74,8 +73,7 @@ def _schema(conn: sqlite3.Connection) -> None:
             feedback_at text,
             replan_planning_session_id integer
         );
-        """
-    )
+        """)
 
 
 def _seed(

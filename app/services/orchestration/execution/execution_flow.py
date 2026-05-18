@@ -272,9 +272,9 @@ def execute_verification_command(
 
     command_to_run = raw_command
     if raw_command == "python3" or raw_command.startswith("python3 "):
-        command_to_run = subprocess.list2cmdline([sys.executable]) + raw_command[
-            len("python3") :
-        ]
+        command_to_run = (
+            subprocess.list2cmdline([sys.executable]) + raw_command[len("python3") :]
+        )
 
     try:
         completed = subprocess.run(

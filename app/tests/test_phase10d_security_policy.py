@@ -50,7 +50,6 @@ from app.services.orchestration.validation.workspace_guard import (
     normalize_plan_with_live_logging,
 )
 
-
 # ---------------------------------------------------------------------------
 # DB fixture
 # ---------------------------------------------------------------------------
