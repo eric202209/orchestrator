@@ -1479,6 +1479,75 @@ def test_resume_rotates_session_instance_id_before_checkpoint_resume(
     assert task_execution.status == TaskStatus.PENDING
 
 
+def test_resume_marks_session_running_before_checkpoint_dispatch(
+    db_session, monkeypatch
+):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="paused", is_active=False)
+    task = _make_task(db_session, project, status=TaskStatus.PENDING)
+
+    captured = {}
+
+    class _FakeCheckpointService:
+        def __init__(self, db):
+            self.db = db
+
+        def load_resume_checkpoint(self, session_id, checkpoint_name=None):
+            return {
+                "_requested_checkpoint_name": checkpoint_name,
+                "_resolved_checkpoint_name": "autosave_latest",
+                "checkpoint_name": "autosave_latest",
+                "context": {
+                    "task_id": task.id,
+                    "task_description": "resume from checkpoint",
+                },
+                "orchestration_state": {
+                    "plan": [{"step_number": 1, "description": "Resume work"}],
+                    "current_step_index": 0,
+                    "execution_results": [],
+                },
+                "step_results": [],
+            }
+
+        def _checkpoint_restore_fidelity(self, data):
+            return {
+                "score": 80,
+                "status": "high",
+                "summary": "Checkpoint has strong replay state coverage",
+                "present_signals": ["task id", "execution plan"],
+                "warnings": [],
+            }
+
+    class _FakeDelayResult:
+        id = "resume-celery-id"
+
+    class _FakeWorkerTask:
+        @staticmethod
+        def delay(**kwargs):
+            db_session.expire(session)
+            db_session.refresh(session)
+            captured["status_at_dispatch"] = session.status
+            captured["is_active_at_dispatch"] = session.is_active
+            return _FakeDelayResult()
+
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.CheckpointService",
+        _FakeCheckpointService,
+    )
+    monkeypatch.setattr(
+        "app.tasks.worker.execute_orchestration_task",
+        _FakeWorkerTask,
+    )
+
+    result = asyncio.run(resume_session_lifecycle(db_session, session.id))
+
+    assert result["status"] == "resumed"
+    assert captured == {
+        "status_at_dispatch": "running",
+        "is_active_at_dispatch": True,
+    }
+
+
 def test_resume_requested_checkpoint_does_not_silently_switch_to_fallback(
     db_session, monkeypatch, tmp_path
 ):

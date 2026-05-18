@@ -231,11 +231,20 @@ def assess_plan_workspace_compatibility(
 ) -> Dict[str, Any]:
     """Check whether a saved plan's completed portion still matches the current workspace."""
 
-    scoped_plan = (
-        plan[:completed_step_count]
-        if completed_step_count and completed_step_count > 0
-        else plan
-    )
+    if completed_step_count <= 0:
+        return {
+            "compatible": True,
+            "completed_step_count": completed_step_count,
+            "expected_core_count": 0,
+            "matched_core_count": 0,
+            "nested_match_count": 0,
+            "workspace_source_count": 0,
+            "expected_core_files": [],
+            "matched_core_files": [],
+            "nested_matches": {},
+        }
+
+    scoped_plan = plan[:completed_step_count]
     expected_core_files = core_expected_files(scoped_plan)
     candidate_files = iter_candidate_files(project_dir, expected_core_files)
     nested_matches = find_nested_expected_file_matches(project_dir, expected_core_files)

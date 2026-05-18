@@ -1396,6 +1396,10 @@ async def resume_session_lifecycle(
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    previous_status = session.status
+    previous_is_active = session.is_active
+    previous_resumed_at = session.resumed_at
+    dispatch_submitted = False
     if session.status == "running":
         _recover_orphaned_running_session_if_needed(db, session=session)
         db.refresh(session)
@@ -1508,6 +1512,9 @@ async def resume_session_lifecycle(
 
         resumed_at = datetime.now(timezone.utc)
         session.instance_id = str(uuid.uuid4())
+        mark_session_running(session)
+        session.resumed_at = resumed_at
+        db.commit()
         db.flush()
         _ensure_session_task_ready_for_resume(
             db,
@@ -1535,6 +1542,7 @@ async def resume_session_lifecycle(
             )
             dispatch_mode = "checkpoint_resume"
             task_execution_id = task_execution.id
+            dispatch_submitted = True
         else:
             queued = queue_task_for_session(
                 db=db,
@@ -1549,10 +1557,7 @@ async def resume_session_lifecycle(
             result = _QueuedResult()
             dispatch_mode = "fresh_requeue"
             task_execution_id = queued.get("task_execution_id")
-
-        mark_session_running(session)
-        session.resumed_at = resumed_at
-        db.commit()
+            dispatch_submitted = True
 
         db.add(
             LogEntry(
@@ -1620,6 +1625,14 @@ async def resume_session_lifecycle(
     except HTTPException:
         raise
     except Exception as exc:
+        if not dispatch_submitted:
+            session = (
+                db.query(SessionModel).filter(SessionModel.id == session_id).first()
+            )
+            if session and session.status == "running":
+                session.status = previous_status
+                session.is_active = previous_is_active
+                session.resumed_at = previous_resumed_at
         db.add(
             LogEntry(
                 session_id=session_id,

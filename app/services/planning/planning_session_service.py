@@ -41,6 +41,8 @@ class PlanningSessionService:
 
     ACTIVE_STATUSES = {"active", "waiting_for_input"}
     MAX_QUESTIONS = 2
+    PLANNING_SYNTHESIS_TIMEOUT_SECONDS = 180
+    REPLAN_SYNTHESIS_TIMEOUT_SECONDS = 45
     SYNTHESIS_TRANSCRIPT_CHAR_BUDGET = 1800
     SYNTHESIS_PROMPT_CHAR_BUDGET = 4200
     PROCESSING_LEASE_MINUTES = 10
@@ -110,6 +112,8 @@ class PlanningSessionService:
         msg_metadata: dict = {"kind": "prompt"}
         if skip_clarification:
             msg_metadata["skip_clarification"] = True
+        if skip_clarification and self._looks_like_replan_prompt(prompt):
+            msg_metadata["replan_recovery"] = True
         self._add_message(session, "user", prompt.strip(), metadata=msg_metadata)
         self.db.commit()
         self.schedule_processing(session.id)
@@ -426,6 +430,100 @@ class PlanningSessionService:
     def _should_process_inline() -> bool:
         return settings.INLINE_PLANNING
 
+    @staticmethod
+    def _looks_like_replan_prompt(prompt: str) -> bool:
+        prompt_text = prompt or ""
+        return (
+            "## Failure Context" in prompt_text
+            or "requires replanning" in prompt_text.lower()
+        )
+
+    def _is_replan_recovery_session(self, session: PlanningSession) -> bool:
+        first_msg = session.messages[0] if session.messages else None
+        metadata = getattr(first_msg, "metadata_json", None)
+        if isinstance(metadata, dict) and metadata.get("replan_recovery"):
+            return True
+        return self._looks_like_replan_prompt(session.prompt or "")
+
+    def _extract_replan_task_hint(self, prompt: str) -> tuple[str, str]:
+        for line in (prompt or "").splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("- "):
+                continue
+            body = stripped[2:].strip()
+            if not body:
+                continue
+            if ":" in body:
+                title, detail = body.split(":", 1)
+                title = title.strip(" -*")
+                detail = detail.strip()
+            else:
+                title, detail = (
+                    body.strip(" -*"),
+                    "Review the failed execution context.",
+                )
+            if title:
+                return title[:90], detail[:220]
+        return "Recovered failed task", "Review the failed execution context."
+
+    @staticmethod
+    def _planner_field(text: str) -> str:
+        return re.sub(r"[|\n\r]+", " ", text or "").strip()
+
+    def _build_replan_recovery_artifacts(
+        self, session: PlanningSession, project: Project
+    ) -> dict[str, str]:
+        failed_title, failure_detail = self._extract_replan_task_hint(session.prompt)
+        safe_failed_title = self._planner_field(failed_title)
+        safe_failure_detail = self._planner_field(failure_detail)
+        project_name = self._planner_field(project.name or "Project")
+
+        planner_markdown = "\n".join(
+            [
+                f"# Project: {project_name}",
+                "",
+                "## Task List",
+                (
+                    "- [ ] TASK_START: Diagnose recovered failure"
+                    f" | Inspect the failure context for {safe_failed_title}: {safe_failure_detail}"
+                    " | order=1 | P1 | effort=small | profile=review_only"
+                ),
+                (
+                    "- [ ] TASK_START: Apply targeted recovery fix"
+                    f" | Implement the smallest safe fix for {safe_failed_title} based on the recovered failure context"
+                    " | order=2 | P1 | effort=medium | profile=full_lifecycle"
+                ),
+                (
+                    "- [ ] TASK_START: Verify recovery path"
+                    " | Run focused validation for the recovery fix and confirm the session can continue without repeating the failure"
+                    " | order=3 | P1 | effort=small | profile=test_only"
+                ),
+            ]
+        )
+
+        return {
+            "requirements": (
+                "# Requirements\n\n"
+                "- Recover from the failed execution using the recorded failure summary.\n"
+                "- Keep the recovery narrow and avoid unrelated project changes.\n"
+                "- Verify the original failure mode no longer repeats."
+            ),
+            "design": (
+                "# Design\n\n"
+                "Use the deterministic recovery plan because model planning synthesis "
+                "timed out or returned malformed output. The recovery stays scoped to "
+                f"`{safe_failed_title}` and relies on focused diagnosis, a targeted fix, "
+                "and validation before continuing."
+            ),
+            "implementation_plan": (
+                "# Implementation Plan\n\n"
+                "1. Inspect the failed task logs and current workspace state.\n"
+                "2. Apply the smallest fix that addresses the recorded root cause.\n"
+                "3. Run focused validation and update the execution notes."
+            ),
+            "planner_markdown": planner_markdown,
+        }
+
     def _advance_or_finalize(self, session: PlanningSession, project: Project) -> None:
         # Skip Q&A entirely for sessions that carry full context (e.g. replan).
         first_msg = session.messages[0] if session.messages else None
@@ -458,29 +556,60 @@ class PlanningSessionService:
 
     def _finalize_session(self, session: PlanningSession, project: Project) -> None:
         prompt = self._build_synthesis_prompt(session, project)
+        is_replan_recovery = self._is_replan_recovery_session(session)
+        timeout_seconds = (
+            self.REPLAN_SYNTHESIS_TIMEOUT_SECONDS
+            if is_replan_recovery
+            else self.PLANNING_SYNTHESIS_TIMEOUT_SECONDS
+        )
+        used_replan_fallback = False
+        replan_fallback_error = ""
         try:
             result = self._run_openclaw_with_fallback(
-                prompt, source_brain=session.source_brain
+                prompt,
+                source_brain=session.source_brain,
+                timeout_seconds=timeout_seconds,
             )
             artifacts = self._parse_finalization_payload(result)
         except HTTPException:
             raise
-        except Exception:
-            # First attempt failed (e.g. OpenClaw returned empty output). Retry with compact prompt.
-            try:
-                compact = self._build_compact_synthesis_prompt(prompt)
-                result = self._invoke_openclaw(
-                    compact, source_brain=session.source_brain
+        except Exception as first_exc:
+            if is_replan_recovery:
+                used_replan_fallback = True
+                replan_fallback_error = str(first_exc)[:500]
+                artifacts = self._build_replan_recovery_artifacts(session, project)
+            else:
+                # First attempt failed (e.g. OpenClaw returned empty output). Retry with compact prompt.
+                try:
+                    compact = self._build_compact_synthesis_prompt(prompt)
+                    result = self._invoke_openclaw(
+                        compact,
+                        source_brain=session.source_brain,
+                        timeout_seconds=timeout_seconds,
+                    )
+                    artifacts = self._parse_finalization_payload(result)
+                except HTTPException:
+                    raise
+                except Exception as exc:
+                    session.status = "failed"
+                    session.last_error = str(exc)
+                    session.current_prompt_id = None
+                    session.updated_at = datetime.now(timezone.utc)
+                    return
+
+            if is_replan_recovery:
+                self._add_message(
+                    session,
+                    "assistant",
+                    (
+                        "Planning model synthesis timed out or returned malformed output; "
+                        "used deterministic replan markdown instead."
+                    ),
+                    metadata={
+                        "kind": "replan_fallback",
+                        "error": replan_fallback_error,
+                    },
                 )
-                artifacts = self._parse_finalization_payload(result)
-            except HTTPException:
-                raise
-            except Exception as exc:
-                session.status = "failed"
-                session.last_error = str(exc)
-                session.current_prompt_id = None
-                session.updated_at = datetime.now(timezone.utc)
-                return
 
         planner_markdown = artifacts.get("planner_markdown", "")
         parsed_tasks = PlannerService.parse_markdown(planner_markdown)
@@ -523,7 +652,11 @@ class PlanningSessionService:
         session.last_error = None
 
     def _run_openclaw(
-        self, prompt: str, *, source_brain: str = "local"
+        self,
+        prompt: str,
+        *,
+        source_brain: str = "local",
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         """Execute planning synthesis through the active backend runtime."""
         try:
@@ -533,37 +666,64 @@ class PlanningSessionService:
                 session_id=None,
                 task_id=None,
                 source_brain=source_brain,
-                timeout_seconds=180,
+                timeout_seconds=(
+                    timeout_seconds or self.PLANNING_SYNTHESIS_TIMEOUT_SECONDS
+                ),
                 session_prefix="planning",
             )
         except AgentRuntimeError as exc:
             raise RuntimeError(str(exc))
 
     def _run_openclaw_with_fallback(
-        self, prompt: str, *, source_brain: str = "local"
+        self,
+        prompt: str,
+        *,
+        source_brain: str = "local",
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
-        result = self._invoke_openclaw(prompt, source_brain=source_brain)
+        result = self._invoke_openclaw(
+            prompt,
+            source_brain=source_brain,
+            timeout_seconds=timeout_seconds,
+        )
         if not runtime_reports_context_overflow(self.db, result):
             return result
 
         compact_prompt = self._build_compact_synthesis_prompt(prompt)
         if compact_prompt == prompt:
             return result
-        return self._invoke_openclaw(compact_prompt, source_brain=source_brain)
+        return self._invoke_openclaw(
+            compact_prompt,
+            source_brain=source_brain,
+            timeout_seconds=timeout_seconds,
+        )
 
     def _invoke_openclaw(
-        self, prompt: str, *, source_brain: str = "local"
+        self,
+        prompt: str,
+        *,
+        source_brain: str = "local",
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         """
         Run planning synthesis while tolerating older monkeypatched helpers used in tests.
         """
 
         try:
-            return self._run_openclaw(prompt, source_brain=source_brain)
+            return self._run_openclaw(
+                prompt,
+                source_brain=source_brain,
+                timeout_seconds=timeout_seconds,
+            )
         except TypeError as exc:
-            if "source_brain" not in str(exc):
+            if "source_brain" not in str(exc) and "timeout_seconds" not in str(exc):
                 raise
-            return self._run_openclaw(prompt)
+            try:
+                return self._run_openclaw(prompt, source_brain=source_brain)
+            except TypeError as second_exc:
+                if "source_brain" not in str(second_exc):
+                    raise
+                return self._run_openclaw(prompt)
 
     def _parse_finalization_payload(self, result: dict[str, Any]) -> dict[str, str]:
         if result.get("status") == "failed":

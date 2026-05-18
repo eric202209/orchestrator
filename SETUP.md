@@ -71,6 +71,44 @@ This starts only the Qdrant container (`docker-compose.yml` is qdrant-only on Li
 
 Open the dashboard, go to the register page, and create your account.
 
+### Model selection
+
+```text
+Agent Backend: Local OpenClaw
+```
+
+In Linux / Ubuntu mode, choose the real model in the **OpenClaw dashboard**.
+Orchestrator sends work to OpenClaw, and OpenClaw runs the model selected there.
+
+Recommended Orchestrator settings:
+
+```text
+Agent Backend: Local OpenClaw
+Model Family: local
+Adaptation Profile: OpenClaw Default
+```
+
+Changing OpenClaw from Qwen to an OpenAI model usually does not require any
+Orchestrator setting change.
+
+Orchestrator also has a separate planning-speed model. Defaults are in
+`app/config.py`; override them in `.env` only if your machine needs different
+values:
+
+```ini
+PLANNING_REPAIR_ENABLED=true
+PLANNING_REPAIR_BASE_URL=http://ai-gateway:8000/v1
+PLANNING_REPAIR_MODEL=qwen-local
+```
+
+Only switch Orchestrator to:
+
+```text
+Agent Backend: OpenAI Responses API
+```
+
+if you want Orchestrator to bypass OpenClaw and call OpenAI directly.
+
 ### Stopping
 
 ```bash
@@ -297,6 +335,36 @@ After registration, open Settings and set `workspace_root` to `/app/projects`.
 Do not use the OpenClaw default vault path in `direct_ollama` mode; the backend
 will reject that combination because it points work outside the Docker bind
 mount.
+
+In the same Settings page, configure the model used by `direct_ollama`:
+
+1. Set **Agent Backend** to **Direct Ollama**.
+2. Set **Model Family** to the exact Ollama model name. For this test laptop,
+   use:
+
+   ```text
+   qwen3-8b-hybrid
+   ```
+
+3. Set **Adaptation Profile** to **Ollama Default**.
+4. Save the system settings.
+
+The **Model Family** value must match a model installed in Ollama. Check local
+models with:
+
+```powershell
+ollama list
+```
+
+If you install another model later, for example:
+
+```powershell
+ollama pull qwen3:8b
+ollama pull deepseek-coder-v2:16b
+```
+
+enter that exact `NAME` from `ollama list` in **Model Family**. The suggested
+model names in the UI are examples only; they are not forced.
 
 **6. Open the API**
 

@@ -13,7 +13,11 @@ from app.services.agents.openclaw_service import (
     OpenClawSessionError,
     OpenClawSessionService,
 )
-from app.services.workspace.system_settings import AGENT_BACKEND_KEY, set_setting_value
+from app.services.workspace.system_settings import (
+    AGENT_BACKEND_KEY,
+    AGENT_MODEL_FAMILY_KEY,
+    set_setting_value,
+)
 
 
 def test_create_agent_runtime_uses_configured_local_backend(db_session):
@@ -50,6 +54,17 @@ def test_create_agent_runtime_uses_db_backend_override(db_session, monkeypatch):
 
     assert isinstance(runtime, OpenClawSessionService)
     assert runtime.backend_descriptor.name == "local_openclaw"
+
+
+def test_direct_ollama_runtime_uses_operator_selected_model(db_session, monkeypatch):
+    from app.services.agents.providers.ollama_adapter import OllamaRuntime
+
+    monkeypatch.setattr(settings, "OLLAMA_AGENT_MODEL", "env-ollama-model")
+    set_setting_value(db_session, AGENT_MODEL_FAMILY_KEY, "operator-ollama-model")
+
+    runtime = OllamaRuntime(db_session, session_id=None)
+
+    assert runtime._model == "operator-ollama-model"
 
 
 def test_unsupported_capability_error_is_runtime_neutral():
