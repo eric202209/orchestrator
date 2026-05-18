@@ -13,7 +13,9 @@ def _legacy_engine(tmp_path: Path):
     db_path = tmp_path / "legacy.db"
     engine = create_engine(f"sqlite:///{db_path}")
     with engine.begin() as connection:
-        connection.execute(text("""
+        connection.execute(
+            text(
+                """
                 CREATE TABLE projects (
                     id INTEGER PRIMARY KEY,
                     name VARCHAR(255) NOT NULL,
@@ -21,8 +23,12 @@ def _legacy_engine(tmp_path: Path):
                     created_at DATETIME,
                     updated_at DATETIME
                 )
-                """))
-        connection.execute(text("""
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
                 CREATE TABLE tasks (
                     id INTEGER PRIMARY KEY,
                     project_id INTEGER NOT NULL,
@@ -35,8 +41,12 @@ def _legacy_engine(tmp_path: Path):
                     error_message TEXT,
                     created_at DATETIME
                 )
-                """))
-        connection.execute(text("""
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
                 CREATE TABLE sessions (
                     id INTEGER PRIMARY KEY,
                     project_id INTEGER NOT NULL,
@@ -46,8 +56,12 @@ def _legacy_engine(tmp_path: Path):
                     is_active BOOLEAN,
                     created_at DATETIME
                 )
-                """))
-        connection.execute(text("""
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
                 CREATE TABLE log_entries (
                     id INTEGER PRIMARY KEY,
                     session_id INTEGER,
@@ -57,7 +71,9 @@ def _legacy_engine(tmp_path: Path):
                     metadata TEXT,
                     created_at DATETIME
                 )
-                """))
+                """
+            )
+        )
     return engine
 
 
@@ -98,13 +114,21 @@ def test_schema_migrations_add_required_columns_and_indexes(tmp_path):
 def test_schema_migrations_rename_deleted_session_names(tmp_path):
     engine = _legacy_engine(tmp_path)
     with engine.begin() as connection:
-        connection.execute(text("""
+        connection.execute(
+            text(
+                """
                 ALTER TABLE sessions ADD COLUMN deleted_at DATETIME
-                """))
-        connection.execute(text("""
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
                 INSERT INTO sessions (id, project_id, name, status, is_active, deleted_at)
                 VALUES (1, 7, 'retry-session', 'deleted', 0, '2026-04-17T00:00:00')
-                """))
+                """
+            )
+        )
 
     run_schema_migrations(engine)
 
@@ -124,10 +148,14 @@ def test_schema_migrations_add_template_id_when_runtime_migration_already_applie
 
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE tasks DROP COLUMN template_id"))
-        connection.execute(text("""
+        connection.execute(
+            text(
+                """
                 DELETE FROM schema_migrations
                 WHERE version = '012_task_template_id'
-                """))
+                """
+            )
+        )
 
     run_schema_migrations(engine)
 
