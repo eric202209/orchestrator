@@ -8,7 +8,8 @@ from scripts.session_outcome_report import _task_outcome_rates
 def test_task_outcome_rates_are_task_centric_not_session_centric():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.executescript("""
+    conn.executescript(
+        """
         create table projects (id integer primary key, deleted_at text);
         create table tasks (id integer primary key, project_id integer, status text);
         create table task_executions (
@@ -30,7 +31,8 @@ def test_task_outcome_rates_are_task_centric_not_session_centric():
             (424, 289, 1, 'done'),
             (425, 290, 1, 'failed'),
             (426, 290, 2, 'done');
-        """)
+        """
+    )
 
     metrics = _task_outcome_rates(conn, limit=50)
 
