@@ -84,7 +84,8 @@ def test_ordered_tasks_execute_in_project_root(monkeypatch, db_session, tmp_path
     assert workspace["workspace_path"] == str(project_root)
     assert workspace["task_subfolder"] is None
     assert workspace["stored_task_subfolder"] == task.task_subfolder
-    assert task.task_subfolder is not None
+    assert task.task_subfolder is None
+    assert not any(project_root.glob("task-*"))
 
     service = OpenClawSessionService(db_session, session.id, task.id)
     assert service._resolve_execution_cwd() == str(project_root)
@@ -111,6 +112,8 @@ def test_manual_tasks_execute_in_project_root(monkeypatch, db_session, tmp_path)
     )
     assert workspace["workspace_path"] == str(project_root)
     assert workspace["task_subfolder"] is None
+    assert task.task_subfolder is None
+    assert not any(project_root.glob("task-*"))
 
 
 def test_ordered_task_reports_live_in_openclaw(monkeypatch, db_session, tmp_path):

@@ -106,6 +106,9 @@ class Task(Base):
     permission_requests = relationship(
         "PermissionRequest", back_populates="task", cascade="all, delete-orphan"
     )
+    checkpoints = relationship(
+        "TaskCheckpoint", back_populates="task", cascade="all, delete-orphan"
+    )
 
 
 class Session(Base):
@@ -146,6 +149,7 @@ class Session(Base):
             sqlite_where=text("deleted_at IS NULL"),
             postgresql_where=text("deleted_at IS NULL"),
         ),
+        Index("ix_sessions_deleted_instance", "deleted_at", "instance_id"),
     )
 
     project = relationship("Project", back_populates="sessions")
@@ -167,6 +171,9 @@ class Session(Base):
     )
     conversation_history = relationship(
         "ConversationHistory", back_populates="session", cascade="all, delete-orphan"
+    )
+    checkpoints = relationship(
+        "TaskCheckpoint", back_populates="session", cascade="all, delete-orphan"
     )
 
 
@@ -364,10 +371,10 @@ class TaskExecutionChangeSet(Base):
     snapshot_path = Column(Text, nullable=True)
     target_path = Column(Text, nullable=True)
     snapshot_exists = Column(Boolean, default=False, nullable=False)
-    added_files = Column(JSON, nullable=False, default=list)
-    modified_files = Column(JSON, nullable=False, default=list)
-    deleted_files = Column(JSON, nullable=False, default=list)
-    warning_flags = Column(JSON, nullable=False, default=list)
+    added_files = Column(JSON, nullable=False, default=lambda: [])
+    modified_files = Column(JSON, nullable=False, default=lambda: [])
+    deleted_files = Column(JSON, nullable=False, default=lambda: [])
+    warning_flags = Column(JSON, nullable=False, default=lambda: [])
     review_decision = Column(JSON, nullable=True)
     review_reason = Column(String(255), nullable=True)
     disposition = Column(String(50), default="captured", nullable=False, index=True)
@@ -396,8 +403,15 @@ class TaskCheckpoint(Base):
     __tablename__ = "task_checkpoints"
 
     id = Column(Integer, primary_key=True, index=True)
-    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False, index=True)
-    session_id = Column(Integer, ForeignKey("sessions.id"), nullable=True, index=True)
+    task_id = Column(
+        Integer, ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    session_id = Column(
+        Integer,
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
 
     # Checkpoint data
     checkpoint_type = Column(String(50), nullable=False)  # "before", "after", "error"
@@ -411,6 +425,9 @@ class TaskCheckpoint(Base):
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    task = relationship("Task", back_populates="checkpoints")
+    session = relationship("Session", back_populates="checkpoints")
 
 
 class PermissionRequest(Base):

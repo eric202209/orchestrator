@@ -562,14 +562,9 @@ async def test_task_execute_endpoint_uses_runtime_factory(db_session, monkeypatc
     assert task_execution.completed_at is not None
 
 
-def test_legacy_worker_and_endpoint_aliases_still_exist():
-    from app.api.v1.endpoints import tasks as task_endpoints
+def test_legacy_worker_alias_still_exists():
     from app.tasks import worker as worker_module
 
     assert (
         worker_module.execute_openclaw_task is worker_module.execute_orchestration_task
-    )
-    assert (
-        task_endpoints.execute_task_with_openclaw
-        is task_endpoints.execute_task_with_runtime
     )

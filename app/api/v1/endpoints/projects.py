@@ -117,64 +117,105 @@ def purge_soft_deleted_projects(
     if not old_deleted_projects:
         return {"message": "No projects to purge", "purged_count": 0}
 
+    project_ids = [project.id for project in old_deleted_projects]
+    session_ids_by_project: dict[int, list[int]] = {
+        project_id: [] for project_id in project_ids
+    }
+    task_ids_by_project: dict[int, list[int]] = {
+        project_id: [] for project_id in project_ids
+    }
+    planning_session_ids_by_project: dict[int, list[int]] = {
+        project_id: [] for project_id in project_ids
+    }
+
+    for project_id, session_id in (
+        db.query(SessionModel.project_id, SessionModel.id)
+        .filter(SessionModel.project_id.in_(project_ids))
+        .all()
+    ):
+        session_ids_by_project.setdefault(project_id, []).append(session_id)
+
+    for project_id, task_id in (
+        db.query(Task.project_id, Task.id)
+        .filter(Task.project_id.in_(project_ids))
+        .all()
+    ):
+        task_ids_by_project.setdefault(project_id, []).append(task_id)
+
+    for project_id, planning_session_id in (
+        db.query(PlanningSession.project_id, PlanningSession.id)
+        .filter(PlanningSession.project_id.in_(project_ids))
+        .all()
+    ):
+        planning_session_ids_by_project.setdefault(project_id, []).append(
+            planning_session_id
+        )
+
     purged_count = 0
 
-    for project in old_deleted_projects:
-        project_id = project.id
+    try:
         checkpoint_service = CheckpointService(db)
-        session_ids = [
-            session_id
-            for (session_id,) in db.query(SessionModel.id)
-            .filter(SessionModel.project_id == project_id)
-            .all()
-        ]
-        for session_id in session_ids:
-            checkpoint_service.delete_all_checkpoints(session_id)
-        checkpoint_service.cleanup_orphaned_checkpoints()
+        for project_id in project_ids:
+            session_ids = session_ids_by_project.get(project_id, [])
+            task_ids = task_ids_by_project.get(project_id, [])
+            planning_session_ids = planning_session_ids_by_project.get(project_id, [])
 
-        task_ids = [
-            task_id
-            for (task_id,) in db.query(Task.id)
-            .filter(Task.project_id == project_id)
-            .all()
-        ]
+            for session_id in session_ids:
+                checkpoint_service.delete_all_checkpoints(session_id)
 
-        if session_ids:
-            db.query(LogEntry).filter(LogEntry.session_id.in_(session_ids)).delete(
-                synchronize_session=False
-            )
-            db.query(SessionState).filter(
-                SessionState.session_id.in_(session_ids)
-            ).delete(synchronize_session=False)
-            db.query(ConversationHistory).filter(
-                ConversationHistory.session_id.in_(session_ids)
-            ).delete(synchronize_session=False)
-
-        if task_ids:
-            db.query(LogEntry).filter(LogEntry.task_id.in_(task_ids)).delete(
-                synchronize_session=False
-            )
-
-        if session_ids or task_ids:
-            db.query(TaskCheckpoint).filter(
-                or_(
-                    (
-                        TaskCheckpoint.session_id.in_(session_ids)
-                        if session_ids
-                        else false()
-                    ),
-                    TaskCheckpoint.task_id.in_(task_ids) if task_ids else false(),
+            if session_ids:
+                db.query(LogEntry).filter(LogEntry.session_id.in_(session_ids)).delete(
+                    synchronize_session=False
                 )
+                db.query(SessionState).filter(
+                    SessionState.session_id.in_(session_ids)
+                ).delete(synchronize_session=False)
+                db.query(ConversationHistory).filter(
+                    ConversationHistory.session_id.in_(session_ids)
+                ).delete(synchronize_session=False)
+
+            if task_ids:
+                db.query(LogEntry).filter(LogEntry.task_id.in_(task_ids)).delete(
+                    synchronize_session=False
+                )
+
+            if session_ids or task_ids:
+                db.query(TaskCheckpoint).filter(
+                    or_(
+                        (
+                            TaskCheckpoint.session_id.in_(session_ids)
+                            if session_ids
+                            else false()
+                        ),
+                        TaskCheckpoint.task_id.in_(task_ids) if task_ids else false(),
+                    )
+                ).delete(synchronize_session=False)
+
+            if planning_session_ids:
+                db.query(PlanningMessage).filter(
+                    PlanningMessage.planning_session_id.in_(planning_session_ids)
+                ).delete(synchronize_session=False)
+                db.query(PlanningArtifact).filter(
+                    PlanningArtifact.planning_session_id.in_(planning_session_ids)
+                ).delete(synchronize_session=False)
+                db.query(PlanningSession).filter(
+                    PlanningSession.id.in_(planning_session_ids)
+                ).delete(synchronize_session=False)
+
+            db.query(PermissionRequest).filter(
+                PermissionRequest.project_id == project_id
             ).delete(synchronize_session=False)
 
-        db.query(PermissionRequest).filter(
-            PermissionRequest.project_id == project_id
-        ).delete(synchronize_session=False)
+            db.query(Project).filter(Project.id == project_id).delete(
+                synchronize_session=False
+            )
+            purged_count += 1
 
-        db.delete(project)
-        purged_count += 1
-
-    db.commit()
+        checkpoint_service.cleanup_orphaned_checkpoints()
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
     return {
         "message": f"Purged {purged_count} soft-deleted projects permanently",

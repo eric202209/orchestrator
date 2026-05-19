@@ -4,7 +4,7 @@ import logging
 import json
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -18,8 +18,7 @@ from app.models import Task, TaskStatus, Project, LogEntry, SessionTask, TaskExe
 from app.schemas import TaskCreate, TaskUpdate, TaskResponse, TaskPromotionRequest
 from app.dependencies import get_current_active_user
 from app.services.agents.agent_runtime import create_agent_runtime
-from app.services.error_handler import EnhancedErrorHandler
-from app.services.log_utils import sort_logs
+from app.services.log_utils import deduplicate_logs
 from app.services.name_formatter import humanize_display_name
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.execution.runtime import workspace_snapshot_key
@@ -550,7 +549,7 @@ def _queue_task_retry(
 
     mark_session_running(
         selected_session,
-        started_at=selected_session.started_at or datetime.now(UTC),
+        started_at=selected_session.started_at or datetime.now(timezone.utc),
     )
 
     db.add(
@@ -604,13 +603,13 @@ def _queue_task_retry(
             queued_event_id=(queued_event or {}).get("event_id"),
         )
     except Exception:
-        mark_session_stopped(selected_session, stopped_at=datetime.now(UTC))
+        mark_session_stopped(selected_session, stopped_at=datetime.now(timezone.utc))
         mark_task_attempt_failed(
             task=task,
             session_task_link=session_task,
             task_execution=task_execution,
             error_message="Failed to dispatch task to worker",
-            completed_at=datetime.now(UTC),
+            completed_at=datetime.now(timezone.utc),
         )
         db.add(
             LogEntry(
@@ -727,6 +726,9 @@ def create_task(
 
     task_data = task.model_dump()
     task_data["title"] = humanize_display_name(task_data.get("title", ""))
+    task_service = TaskService(db)
+    if task_data.get("plan_position") is None:
+        task_data["plan_position"] = task_service.next_plan_position(project.id)
     db_task = Task(**task_data, status=TaskStatus.PENDING)
     db.add(db_task)
     db.commit()
@@ -802,6 +804,8 @@ async def execute_task_with_runtime(
         Execution result with logs
     """
     task = _get_task_for_user(db, task_id, current_user)
+    session_task = None
+    task_execution = None
 
     # Get prompt from request body or use task description
     try:
@@ -883,7 +887,7 @@ async def execute_task_with_runtime(
             db.rollback()
             raise
 
-        mark_session_running(new_session, started_at=datetime.now(UTC))
+        mark_session_running(new_session, started_at=datetime.now(timezone.utc))
         mark_task_attempt_running(
             task=task,
             session_task_link=session_task,
@@ -929,7 +933,7 @@ async def execute_task_with_runtime(
                 task=task,
                 session_task_link=session_task,
                 task_execution=task_execution,
-                completed_at=datetime.now(UTC),
+                completed_at=datetime.now(timezone.utc),
             )
         else:
             mark_task_attempt_failed(
@@ -937,7 +941,7 @@ async def execute_task_with_runtime(
                 session_task_link=session_task,
                 task_execution=task_execution,
                 error_message=result.get("error", "Unknown error"),
-                completed_at=datetime.now(UTC),
+                completed_at=datetime.now(timezone.utc),
             )
 
         db.commit()
@@ -947,9 +951,6 @@ async def execute_task_with_runtime(
         return result
 
     except Exception as e:
-        error_handler = EnhancedErrorHandler()
-        recovery_plan = error_handler.create_error_recovery_plan(e, "task_execution")
-
         error_msg = f"Task execution failed: {str(e)}"
         import traceback
 
@@ -959,23 +960,15 @@ async def execute_task_with_runtime(
         )
 
         if task:
-            task_execution = locals().get("task_execution")
             mark_task_attempt_failed(
                 task=task,
-                session_task_link=locals().get("session_task"),
+                session_task_link=session_task,
                 task_execution=task_execution,
-                error_message=(
-                    f"{error_msg}\nRecommended action: "
-                    f"{recovery_plan.get('recommended_action', 'manual_intervention')}"
-                ),
-                completed_at=datetime.now(UTC),
+                error_message=error_msg,
+                completed_at=datetime.now(timezone.utc),
             )
             db.commit()
         raise HTTPException(status_code=500, detail=error_msg)
-
-
-# Backward-compatible alias for older imports/tests during the rename period.
-execute_task_with_openclaw = execute_task_with_runtime
 
 
 @router.get("/tasks/{task_id}", response_model=TaskResponse)
@@ -1315,9 +1308,9 @@ def accept_task_workspace(
             )
 
     task.workspace_status = "promoted"
-    task.promoted_at = datetime.now(UTC)
+    task.promoted_at = datetime.now(timezone.utc)
     task.promotion_note = (payload.note or "").strip() or None
-    task.updated_at = datetime.now(UTC)
+    task.updated_at = datetime.now(timezone.utc)
     try:
         baseline_result = task_service.promote_task_into_baseline(project, task)
     except ProjectMutationLockError as exc:
@@ -1407,7 +1400,7 @@ def request_task_workspace_changes(
     task.workspace_status = "changes_requested"
     task.promoted_at = None
     task.promotion_note = note
-    task.updated_at = datetime.now(UTC)
+    task.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(task)
     return task
@@ -1471,7 +1464,7 @@ def update_task(
             value = None
         setattr(task, field, value)
 
-    task.updated_at = datetime.now(UTC)
+    task.updated_at = datetime.now(timezone.utc)
 
     db.commit()
     db.refresh(task)
@@ -1528,10 +1521,19 @@ def get_sorted_task_logs(
     """
     task = _get_task_for_user(db, task_id, current_user)
 
-    logs_entries = db.query(LogEntry).filter(LogEntry.task_id == task_id).all()
+    effective_limit = min(limit if limit else 100, 1000)
 
+    logs_query = db.query(LogEntry).filter(LogEntry.task_id == task_id)
     if level:
-        logs_entries = [log for log in logs_entries if log.level == level]
+        logs_query = logs_query.filter(LogEntry.level == level)
+
+    total_logs = logs_query.count()
+    if order == "desc":
+        logs_query = logs_query.order_by(LogEntry.created_at.desc())
+    else:
+        logs_query = logs_query.order_by(LogEntry.created_at.asc())
+
+    logs_entries = logs_query.limit(effective_limit).all()
 
     logs = [
         {
@@ -1546,18 +1548,18 @@ def get_sorted_task_logs(
         for log in logs_entries
     ]
 
-    sorted_logs = sort_logs(logs, order=order, deduplicate=deduplicate)
-
-    if limit:
-        sorted_logs = sorted_logs[:limit]
+    if deduplicate:
+        logs = deduplicate_logs(logs)
 
     return {
         "task_id": task_id,
-        "total_logs": len(logs),
-        "returned_logs": len(sorted_logs),
+        "total_logs": total_logs,
+        "returned_logs": len(logs),
+        "limit": effective_limit,
         "sort_order": order,
         "deduplicated": deduplicate,
-        "logs": sorted_logs,
+        "logs": logs,
+        "has_more": len(logs_entries) < total_logs,
     }
 
 
@@ -1648,13 +1650,18 @@ async def create_task_backup(
 
         protection = OverwriteProtectionService(db)
 
+        if not task.project:
+            raise HTTPException(status_code=404, detail="Project not found")
+
         backup_result = protection.create_backup_of_existing(
-            project_id=task.project.id if task.project else 1,
+            project_id=task.project.id,
             task_subfolder=_resolve_task_subfolder_name(task),
         )
 
         return BackupResponse(**backup_result).model_dump()
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Backup failed: {str(e)}")
 
@@ -1685,8 +1692,11 @@ async def get_workspace_info(
 
         protection = OverwriteProtectionService(db)
 
+        if not task.project:
+            raise HTTPException(status_code=404, detail="Project not found")
+
         workspace_info = protection.check_workspace_exists(
-            project_id=task.project.id if task.project else 1,
+            project_id=task.project.id,
             task_subfolder=_resolve_task_subfolder_name(task),
         )
 
@@ -1698,5 +1708,7 @@ async def get_workspace_info(
             "would_overwrite": workspace_info.get("would_overwrite", False),
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Workspace info failed: {str(e)}")

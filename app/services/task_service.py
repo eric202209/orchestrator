@@ -3,10 +3,12 @@
 import hashlib
 import json
 import shutil
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from app.models import LogEntry, Project, Task, TaskExecutionChangeSet, TaskStatus
@@ -65,7 +67,20 @@ class TaskService:
 
     def get_project_tasks(self, project_id: int):
         """Get all tasks for a project"""
-        tasks = (
+        tasks = self._query_project_tasks(project_id).all()
+        changed = False
+        for task in tasks:
+            changed = self.sync_workspace_status(task, commit=False) or changed
+        if changed:
+            self.db.commit()
+        return tasks
+
+    def get_project_tasks_readonly(self, project_id: int):
+        """Get project tasks without syncing or committing derived workspace state."""
+        return self._query_project_tasks(project_id).all()
+
+    def _query_project_tasks(self, project_id: int):
+        return (
             self.db.query(Task)
             .filter(Task.project_id == project_id)
             .order_by(
@@ -74,14 +89,19 @@ class TaskService:
                 Task.created_at.asc().nullslast(),
                 Task.id.asc(),
             )
-            .all()
         )
-        changed = False
-        for task in tasks:
-            changed = self.sync_workspace_status(task, commit=False) or changed
-        if changed:
-            self.db.commit()
-        return tasks
+
+    def next_plan_position(self, project_id: int) -> int:
+        """Return the next explicit task order position for a project."""
+        max_position = (
+            self.db.query(func.max(Task.plan_position))
+            .filter(Task.project_id == project_id)
+            .scalar()
+        )
+        if max_position is not None:
+            return int(max_position) + 1
+
+        return 1
 
     def get_project_root(self, project: Project) -> Path:
         return resolve_project_root(project, self.db)
@@ -106,8 +126,16 @@ class TaskService:
         return files
 
     def _file_digest(self, path: Path) -> str:
+        stat = path.stat()
+        return self._cached_file_digest(
+            str(path.resolve()), stat.st_mtime_ns, stat.st_size
+        )
+
+    @staticmethod
+    @lru_cache(maxsize=4096)
+    def _cached_file_digest(path_text: str, mtime_ns: int, size: int) -> str:
         digest = hashlib.sha256()
-        with path.open("rb") as handle:
+        with Path(path_text).open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
         return digest.hexdigest()
@@ -210,15 +238,18 @@ class TaskService:
             elif suffix in {".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs"}:
                 node_files.append(relative_text)
 
-        for child in target_dir.iterdir():
+        for child in target_dir.rglob("*"):
             if not child.is_dir():
+                continue
+            relative = child.relative_to(target_dir)
+            if not relative.parts:
                 continue
             if (
                 child.name in HYDRATION_EXCLUDED_NAMES
-                or child.name in ignored_top_level_dirs
+                or relative.parts[0] in ignored_top_level_dirs
             ):
                 continue
-            if child.name != target_dir.name:
+            if child.name != child.parent.name:
                 continue
             nested_source_files = [
                 path
@@ -228,7 +259,7 @@ class TaskService:
                 in {".py", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs"}
             ]
             if nested_source_files:
-                nested_duplicate_dirs.append(child.name)
+                nested_duplicate_dirs.append(str(relative))
 
         mixed_stack = bool(python_files and node_files)
         if mixed_stack:
@@ -496,7 +527,7 @@ class TaskService:
             preserve_project_root_rules=True,
             status=getattr(getattr(task, "status", None), "value", None),
         )
-        archived_at = datetime.now(UTC)
+        archived_at = datetime.now(timezone.utc)
         archive_dir = (
             project_root
             / REJECTED_CHANGE_ARCHIVE_ROOT
@@ -611,8 +642,6 @@ class TaskService:
             return False
 
         task.workspace_status = inferred_status
-        if inferred_status != "promoted" and getattr(task, "promoted_at", None):
-            task.promoted_at = None
         if commit:
             self.db.commit()
             self.db.refresh(task)
@@ -628,7 +657,7 @@ class TaskService:
         if not project:
             return "No project context available."
 
-        tasks = self.get_project_tasks(project.id)
+        tasks = self.get_project_tasks_readonly(project.id)
         current_order = getattr(current_task, "plan_position", None)
 
         promoted = []
@@ -1337,21 +1366,47 @@ class TaskService:
 
     def get_blocking_prior_tasks(self, task: Task):
         """Return earlier ordered tasks that must complete before this one can run."""
-        if not task or task.plan_position is None:
+        if not task:
             return []
+
+        task_id = getattr(task, "id", None)
+        if task_id is None:
+            return []
+
+        if task.plan_position is None:
+            return (
+                self.db.query(Task)
+                .filter(
+                    Task.project_id == task.project_id,
+                    Task.plan_position.is_(None),
+                    Task.status.notin_([TaskStatus.DONE, TaskStatus.CANCELLED]),
+                    Task.id < task_id,
+                )
+                .order_by(
+                    Task.created_at.asc().nullslast(),
+                    Task.id.asc(),
+                )
+                .all()
+            )
 
         return (
             self.db.query(Task)
             .filter(
                 Task.project_id == task.project_id,
-                Task.plan_position.isnot(None),
-                Task.plan_position < task.plan_position,
-                Task.status != TaskStatus.DONE,
+                Task.status.notin_([TaskStatus.DONE, TaskStatus.CANCELLED]),
+                or_(
+                    and_(
+                        Task.plan_position.isnot(None),
+                        Task.plan_position < task.plan_position,
+                    ),
+                    and_(
+                        Task.plan_position.is_(None),
+                        Task.id < task_id,
+                    ),
+                ),
             )
             .order_by(
-                Task.plan_position.asc(),
-                Task.priority.desc(),
-                Task.created_at.asc().nullslast(),
+                Task.plan_position.asc().nullslast(),
                 Task.id.asc(),
             )
             .all()

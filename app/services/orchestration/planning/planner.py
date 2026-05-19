@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -127,6 +128,30 @@ def _render_knowledge_block(knowledge_context: Any) -> str:
 
 def _estimate_prompt_tokens(prompt: str) -> int:
     return max(0, (len(prompt or "") + 3) // 4)
+
+
+def _run_coroutine_from_sync(coro):
+    """Run a coroutine for sync callers, including callers already inside an event loop."""
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    result: Dict[str, Any] = {}
+
+    def runner() -> None:
+        try:
+            result["value"] = asyncio.run(coro)
+        except BaseException as exc:
+            result["error"] = exc
+
+    thread = threading.Thread(target=runner, name="planner-sync-async-runner")
+    thread.start()
+    thread.join()
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
 
 
 class PlanningRepairBudgetExceeded(RuntimeError):
@@ -743,6 +768,139 @@ class PlannerService:
         target = match.group(1).strip()
         return f"rm -f {target}"
 
+    @staticmethod
+    def _safe_relative_verification_paths(paths: List[str]) -> List[str]:
+        safe_paths: List[str] = []
+        for raw_path in paths:
+            path_text = str(raw_path or "").strip()
+            if not path_text:
+                continue
+            path = Path(path_text)
+            if (
+                path.is_absolute()
+                or path_text.startswith(("/", "\\"))
+                or re.match(r"^[A-Za-z]:[\\/]", path_text)
+                or ".." in path.parts
+            ):
+                continue
+            safe_paths.append(path_text)
+        return safe_paths
+
+    @staticmethod
+    def _failing_verification_command() -> str:
+        return 'python -c "import sys; sys.exit(1)"'
+
+    @staticmethod
+    def _python_exists_verification_command(paths: List[str]) -> str:
+        safe_paths = PlannerService._safe_relative_verification_paths(paths)
+        if not safe_paths:
+            return PlannerService._failing_verification_command()
+        encoded_paths = json.dumps(safe_paths)
+        script = (
+            "import pathlib,sys; "
+            f"files={encoded_paths}; "
+            "sys.exit(0 if all(pathlib.Path(p).exists() for p in files) else 1)"
+        )
+        return "python -c " + json.dumps(script)
+
+    @staticmethod
+    def _python_file_contains_verification_command(path: str, expected: str) -> str:
+        safe_paths = PlannerService._safe_relative_verification_paths([path])
+        if not safe_paths:
+            return PlannerService._failing_verification_command()
+        script = (
+            "import pathlib,sys; "
+            f"path=pathlib.Path({json.dumps(safe_paths[0])}); "
+            f"expected={json.dumps(expected)}; "
+            "sys.exit(0 if path.exists() and expected in path.read_text() else 1)"
+        )
+        return "python -c " + json.dumps(script)
+
+    @staticmethod
+    def _looks_like_safe_verification_command(command: Any) -> bool:
+        text = str(command or "").strip()
+        if not text:
+            return False
+        safe_prefixes = (
+            "python -c ",
+            "python3 -c ",
+            "python -m pytest",
+            "python3 -m pytest",
+            "pytest",
+            "npm test",
+            "npm run test",
+            "npm run build",
+            "test ",
+        )
+        if not text.startswith(safe_prefixes):
+            return False
+        # Reject shell chaining — && and || are never needed in a single verification
+        if re.search(r"&&|\|\|", text):
+            return False
+        # For non-python-c commands, also reject ; | > < ` $( to prevent injection
+        if not text.startswith(("python -c ", "python3 -c ")):
+            if re.search(r";|\|(?!\|)|>|<|`|\$\(", text):
+                return False
+        return True
+
+    @staticmethod
+    def _extract_top_level_file_op(step: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        raw_op_name = str(step.get("op") or step.get("step") or "").strip()
+        return PlannerService._normalize_file_operation(
+            raw_op_name=raw_op_name,
+            path=str(step.get("path") or step.get("file") or "").strip(),
+            source=step,
+        )
+
+    @staticmethod
+    def _normalize_file_operation(
+        *,
+        raw_op_name: str,
+        path: str,
+        source: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        op_aliases = {
+            "create_file": "write_file",
+            "write_file": "write_file",
+            "write": "write_file",
+            "append_file": "append_file",
+            "append": "append_file",
+            "replace_in_file": "replace_in_file",
+            "replace": "replace_in_file",
+            "mkdir": "mkdir",
+        }
+        op_name = op_aliases.get(raw_op_name)
+        if op_name is None:
+            return None
+        if not path:
+            return None
+        operation: Dict[str, Any] = {"op": op_name, "path": path}
+        if op_name != "mkdir":
+            for key in ("content", "old", "new", "regex"):
+                if key in source:
+                    operation[key] = source[key]
+        return operation
+
+    @classmethod
+    def _extract_top_level_file_verification(
+        cls, step: Dict[str, Any]
+    ) -> Optional[str]:
+        op_name = str(
+            step.get("op") or step.get("step") or step.get("type") or ""
+        ).strip()
+        if op_name not in {"verify_file", "check"}:
+            return None
+        path = str(step.get("path") or step.get("file") or "").strip()
+        if not path:
+            return None
+        expected = step.get("expected_content")
+        if expected is None and op_name == "check":
+            expected = step.get("content")
+        if expected is None:
+            return cls._python_exists_verification_command([path])
+        expected_text = str(expected)
+        return cls._python_file_contains_verification_command(path, expected_text)
+
     @classmethod
     def sanitize_common_plan_issues(
         cls, plan: Optional[List[Dict[str, Any]]]
@@ -753,6 +911,9 @@ class PlannerService:
         for index, raw_step in enumerate(plan or [], start=1):
             step = dict(raw_step or {})
             raw_commands = step.get("commands", [])
+            cmd_single = step.get("cmd")
+            if not raw_commands and cmd_single:
+                raw_commands = [cmd_single]
             if isinstance(raw_commands, str):
                 raw_commands = [raw_commands]
             elif not isinstance(raw_commands, list):
@@ -770,6 +931,34 @@ class PlannerService:
                 for command in commands
                 if not cls._command_is_plain_english_file_instruction(command)
             ]
+            raw_ops = []
+            if isinstance(raw_step, dict):
+                if isinstance(raw_step.get("ops"), list):
+                    for operation in raw_step["ops"]:
+                        if not isinstance(operation, dict):
+                            continue
+                        normalized_op = cls._normalize_file_operation(
+                            raw_op_name=str(
+                                operation.get("op") or operation.get("type") or ""
+                            ).strip(),
+                            path=str(
+                                operation.get("path") or operation.get("file") or ""
+                            ).strip(),
+                            source=operation,
+                        )
+                        if normalized_op:
+                            raw_ops.append(normalized_op)
+                        elif top_level_verification := cls._extract_top_level_file_verification(
+                            operation
+                        ):
+                            step.setdefault("verification", top_level_verification)
+                elif top_level_op := cls._extract_top_level_file_op(raw_step):
+                    raw_ops = [top_level_op]
+                if top_level_verification := cls._extract_top_level_file_verification(
+                    raw_step
+                ):
+                    step.setdefault("verification", top_level_verification)
+
             raw_expected_files = step.get("expected_files", [])
             if isinstance(raw_expected_files, str):
                 raw_expected_files = [raw_expected_files]
@@ -782,12 +971,31 @@ class PlannerService:
                 for path in raw_expected_files
                 if str(path or "").strip()
             ]
+            op_expected_files = [
+                str(operation.get("path") or "").strip()
+                for operation in raw_ops
+                if str(operation.get("op") or "") in {"write_file", "append_file"}
+                and str(operation.get("path") or "").strip()
+            ]
+            raw_path = str(step.get("file") or step.get("path") or "").strip()
+            combined_expected_files = expected_files + op_expected_files
+            if raw_path:
+                combined_expected_files.append(raw_path)
+            expected_files = list(dict.fromkeys(combined_expected_files))
 
             verification = step.get("verification")
             if verification is not None and not isinstance(verification, str):
                 verification = None
             if verification is not None:
                 verification = str(verification).strip() or None
+            if (
+                not commands
+                and verification
+                and cls._looks_like_safe_verification_command(verification)
+            ):
+                commands = [verification]
+            if not verification and expected_files:
+                verification = cls._python_exists_verification_command(expected_files)
 
             rollback = cls._rewrite_trash_rollback(step.get("rollback"))
             if rollback is not None:
@@ -805,8 +1013,8 @@ class PlannerService:
                 "rollback": rollback,
                 "expected_files": expected_files,
             }
-            if isinstance(raw_step, dict) and isinstance(raw_step.get("ops"), list):
-                step["ops"] = raw_step["ops"]
+            if raw_ops:
+                step["ops"] = raw_ops
 
             sanitized_plan.append(step)
 
@@ -1557,6 +1765,14 @@ Return only a JSON array matching this shape. No markdown. No prose.
         workspace_has_existing_files: bool = False,
         knowledge_context: Any = None,
     ) -> Dict[str, Any]:
+        can_store_retry_guard = hasattr(runtime_service, "__dict__")
+        if can_store_retry_guard:
+            if getattr(runtime_service, "_minimal_prompt_retry_used", False):
+                raise RuntimeError(
+                    "Minimal planning retry already attempted for this runtime"
+                )
+            setattr(runtime_service, "_minimal_prompt_retry_used", True)
+
         minimal_first = reason == "dense_planning_context"
         logger.warning(
             (
@@ -1646,7 +1862,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
         )
         planning_attempt_state: Dict[str, Any] = {}
         try:
-            return asyncio.run(
+            return _run_coroutine_from_sync(
                 cls._execute_task_with_planning_lock(
                     runtime_service,
                     minimal_prompt,
@@ -1716,7 +1932,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
                     "timeout_seconds": ultra_minimal_timeout,
                 },
             )
-            return asyncio.run(
+            return _run_coroutine_from_sync(
                 cls._execute_task_with_planning_lock(
                     runtime_service,
                     cls.build_ultra_minimal_planning_prompt(
@@ -1795,10 +2011,19 @@ Return only a JSON array matching this shape. No markdown. No prose.
             _compact_invalid_output_excerpt(malformed_output)
         )
         repair_prompt_build_seconds = time.monotonic() - repair_build_started_at
+        includes_project_context = str(project_dir) in repair_prompt or bool(
+            re.search(r"\b(project|workspace|baseline)\b", repair_prompt, re.IGNORECASE)
+        )
+        includes_non_project_context = bool(
+            knowledge_context
+            or re.search(
+                r"\b(knowledge|memory|retrieved)\b", repair_prompt, re.IGNORECASE
+            )
+        )
         logger.warning(
             "[ORCHESTRATION] session_id=%s task_id=%s repair_prompt_chars=%s "
             "malformed_output_chars=%s validation_error_chars=%s knowledge_context_chars=%s "
-            "includes_project_context=false includes_non_project_context=false "
+            "includes_project_context=%s includes_non_project_context=%s "
             "repair_reason=%s repair_prompt_build_seconds=%.3f repair_attempts=%s "
             "compact_no_output_retry=%s",
             session_id,
@@ -1807,6 +2032,8 @@ Return only a JSON array matching this shape. No markdown. No prose.
             compact_malformed_output_chars,
             validation_error_chars,
             knowledge_context_chars,
+            includes_project_context,
+            includes_non_project_context,
             reason[:120],
             repair_prompt_build_seconds,
             _repair_attempt_number,
@@ -1885,7 +2112,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
         if lock_wait_seconds is not None:
             repair_lock_diagnostics["planning_lock_wait_seconds"] = lock_wait_seconds
         try:
-            result = asyncio.run(
+            result = _run_coroutine_from_sync(
                 asyncio.wait_for(
                     cls._invoke_repair_prompt(
                         runtime_service,

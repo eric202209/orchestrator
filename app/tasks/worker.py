@@ -9,7 +9,6 @@ import os
 import logging
 import json
 import asyncio
-import time
 from pathlib import Path
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
@@ -321,7 +320,7 @@ def execute_orchestration_task(
         claim_ok = False
         claim_reason = "unclaimed"
         claim_started_at = None
-        for claim_attempt in range(5):
+        for claim_attempt in range(1):
             session = (
                 db.query(SessionModel).filter(SessionModel.id == session_id).first()
             )
@@ -341,7 +340,6 @@ def execute_orchestration_task(
             )
             if claim_ok or claim_reason == "session_instance_changed":
                 break
-            time.sleep(0.2)
         if not claim_ok:
             task_execution = (
                 db.query(TaskExecution)
@@ -415,9 +413,7 @@ def execute_orchestration_task(
 
             orchestration_state._workspace_path_override = workspace_path
 
-            # Keep a stable task subfolder identifier for metadata/reporting, even
-            # when execution itself happens in the canonical project root.
-            if task.task_subfolder:
+            if not runs_in_canonical_baseline and task.task_subfolder:
                 # ✅ Subfolder already locked from a previous run — use it
                 # unconditionally so all cycles land in the same directory.
                 orchestration_state._task_subfolder_override = task.task_subfolder
@@ -426,7 +422,7 @@ def execute_orchestration_task(
                     task.task_subfolder,
                     task_id,
                 )
-            else:
+            elif not runs_in_canonical_baseline:
                 # First run: generate a stable slug and persist it immediately.
                 task_title_slug = build_task_subfolder_name(task.title, task_id)
 
@@ -456,10 +452,6 @@ def execute_orchestration_task(
                     subfolder_name,
                     task_id,
                 )
-        else:
-            # Fallback: use slugified project name
-            pass
-
         is_resume_execution = bool(resume_checkpoint_name)
         task_service = TaskService(db)
         if runs_in_canonical_baseline and project:

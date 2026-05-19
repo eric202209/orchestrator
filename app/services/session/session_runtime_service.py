@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import UTC, datetime
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -17,7 +18,10 @@ from app.services.orchestration.state.persistence import append_orchestration_ev
 from app.services.orchestration.task_rules import (
     should_execute_in_canonical_project_root,
 )
-from app.services.orchestration.run_state import mark_task_attempt_pending
+from app.services.orchestration.run_state import (
+    mark_task_attempt_failed,
+    mark_task_attempt_pending,
+)
 from app.services.orchestration.state.session_state import (
     clear_session_alert,
     mark_session_paused,
@@ -38,10 +42,12 @@ from app.services.task_execution_service import create_task_execution
 
 DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS = 1800
 MAX_AUTOMATIC_TASK_RECOVERY_ATTEMPTS = 1
+MAX_SESSION_NAME_SUFFIX = 100
+MAX_SUBFOLDER_COLLISION_ATTEMPTS = 999
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def slugify_task_name(name: str) -> str:
@@ -63,7 +69,7 @@ def ensure_unique_session_name(
     base_name = (desired_name or "session").strip() or "session"
     candidate = base_name
     suffix = 2
-    while True:
+    while suffix <= MAX_SESSION_NAME_SUFFIX:
         query = db.query(SessionModel).filter(
             SessionModel.project_id == project_id,
             SessionModel.name == candidate,
@@ -75,6 +81,7 @@ def ensure_unique_session_name(
             return candidate
         candidate = f"{base_name}-{suffix}"
         suffix += 1
+    return f"{base_name}-{uuid.uuid4().hex[:8]}"
 
 
 def build_task_subfolder_name(title: str, task_id: int) -> str:
@@ -91,12 +98,12 @@ def _resolve_task_workspace_path(project_workspace: Path, task_subfolder: str) -
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
-            detail="Task subfolder must stay within the project workspace",
+            detail=f"Task subfolder '{task_subfolder}' escapes the project workspace",
         ) from exc
     if task_workspace == project_root:
         raise HTTPException(
             status_code=400,
-            detail="Task subfolder must stay within the project workspace",
+            detail="Task subfolder cannot reference the project root directly",
         )
     return task_workspace
 
@@ -140,9 +147,7 @@ def _count_automatic_recovery_attempts(
         .filter(
             LogEntry.session_id == session_id,
             LogEntry.task_id == task_id,
-            LogEntry.message.like(
-                "Recovered earliest failed/cancelled ordered task for automatic retry:%"
-            ),
+            LogEntry.log_metadata.like('%"event_type": "automatic_recovery_attempt"%'),
         )
         .count()
     )
@@ -190,15 +195,30 @@ def ensure_task_workspace(
     TaskService(db).ensure_project_gitignore_guard(project)
     orchestration_state._workspace_path_override = str(project_workspace_path)
 
+    runs_in_canonical_workspace = should_execute_in_canonical_project_root(
+        task,
+        getattr(task, "execution_profile", None),
+        task.title,
+        task.description,
+    )
+    # Security gate: reject traversal subfolders before any execution path branches.
+    # Must run even for canonical-workspace tasks where the subfolder is ignored.
     if task.task_subfolder:
         _resolve_task_workspace_path(project_workspace_path, task.task_subfolder)
+
+    if runs_in_canonical_workspace:
+        workspace_path = project_workspace_path
+        orchestration_state._project_dir_override = str(workspace_path)
+    elif task.task_subfolder:
         orchestration_state._task_subfolder_override = task.task_subfolder
+        workspace_path = _resolve_task_workspace_path(
+            project_workspace_path, task.task_subfolder
+        )
     else:
         base_subfolder = build_task_subfolder_name(task.title, task.id)
         candidate = base_subfolder
-        suffix = 2
 
-        while True:
+        for suffix in range(2, MAX_SUBFOLDER_COLLISION_ATTEMPTS + 2):
             existing = (
                 db.query(Task)
                 .filter(
@@ -211,26 +231,14 @@ def ensure_task_workspace(
             if not existing:
                 break
             candidate = f"{base_subfolder}-{suffix}"
-            suffix += 1
+        else:
+            candidate = f"{base_subfolder}-{task.id}"
 
         task.task_subfolder = candidate
-        _resolve_task_workspace_path(project_workspace_path, candidate)
+        workspace_path = _resolve_task_workspace_path(project_workspace_path, candidate)
         orchestration_state._task_subfolder_override = candidate
         db.flush()
 
-    runs_in_canonical_workspace = should_execute_in_canonical_project_root(
-        task,
-        getattr(task, "execution_profile", None),
-        task.title,
-        task.description,
-    )
-    if runs_in_canonical_workspace:
-        workspace_path = project_workspace_path
-        orchestration_state._project_dir_override = str(workspace_path)
-    else:
-        workspace_path = _resolve_task_workspace_path(
-            project_workspace_path, task.task_subfolder
-        )
     workspace_path.mkdir(parents=True, exist_ok=True)
 
     return {
@@ -250,8 +258,12 @@ def get_session_celery_task_ids(db: Session, session_id: int) -> List[str]:
     task_ids: List[str] = []
     log_entries = (
         db.query(LogEntry)
-        .filter(LogEntry.session_id == session_id)
+        .filter(
+            LogEntry.session_id == session_id,
+            LogEntry.log_metadata.like('%"celery_task_id"%'),
+        )
         .order_by(LogEntry.created_at.desc())
+        .limit(100)
         .all()
     )
     for log in log_entries:
@@ -268,7 +280,7 @@ def get_session_celery_task_ids(db: Session, session_id: int) -> List[str]:
 
 
 def get_session_task_subfolder(db: Session, session: SessionModel) -> str:
-    """Resolve the active task subfolder for a session."""
+    """Resolve the active task subfolder for a session without creating it."""
     session_task = (
         db.query(SessionTask)
         .filter(SessionTask.session_id == session.id)
@@ -278,13 +290,8 @@ def get_session_task_subfolder(db: Session, session: SessionModel) -> str:
 
     if session_task:
         task = db.query(Task).filter(Task.id == session_task.task_id).first()
-        if task:
-            workspace = ensure_task_workspace(db, session, task.id)
-            return str(
-                workspace.get("stored_task_subfolder")
-                or workspace.get("task_subfolder")
-                or f"task_{session.id}"
-            )
+        if task and task.task_subfolder:
+            return str(task.task_subfolder)
 
     return f"task_{session.id}"
 
@@ -297,7 +304,7 @@ def set_session_alert(
 ) -> None:
     session.last_alert_level = level
     session.last_alert_message = message
-    session.last_alert_at = datetime.now(UTC) if message else None
+    session.last_alert_at = datetime.now(timezone.utc) if message else None
     db.flush()
 
 
@@ -417,7 +424,9 @@ def queue_task_for_session(
     task_prompt = build_task_execution_prompt(task)
     prepare_task_for_fresh_execution(task, clear_saved_plan=should_clear_saved_plan)
 
-    mark_session_running(session, started_at=session.started_at or datetime.now(UTC))
+    mark_session_running(
+        session, started_at=session.started_at or datetime.now(timezone.utc)
+    )
     clear_session_alert(session)
 
     event_project_dir = Path(task_workspace["workspace_path"])
@@ -441,15 +450,53 @@ def queue_task_for_session(
     )
     db.commit()
 
-    result = execute_orchestration_task.delay(
-        session_id=session.id,
-        task_id=task.id,
-        prompt=task_prompt,
-        timeout_seconds=timeout_seconds,
-        expected_session_instance_id=session.instance_id,
-        task_execution_id=task_execution.id,
-        queued_event_id=(queued_event or {}).get("event_id"),
-    )
+    try:
+        result = execute_orchestration_task.delay(
+            session_id=session.id,
+            task_id=task.id,
+            prompt=task_prompt,
+            timeout_seconds=timeout_seconds,
+            expected_session_instance_id=session.instance_id,
+            task_execution_id=task_execution.id,
+            queued_event_id=(queued_event or {}).get("event_id"),
+        )
+    except Exception as exc:
+        completed_at = datetime.now(timezone.utc)
+        mark_task_attempt_failed(
+            task=task,
+            session_task_link=session_task_link,
+            task_execution=task_execution,
+            error_message=f"Task dispatch failed: {str(exc)}",
+            completed_at=completed_at,
+        )
+        mark_session_paused(
+            session,
+            alert_level="error",
+            alert_message=(
+                "Task dispatch failed before the worker accepted it: "
+                f"{str(exc)[:1000]}"
+            ),
+        )
+        db.add(
+            LogEntry(
+                session_id=session.id,
+                session_instance_id=session.instance_id,
+                task_id=task.id,
+                task_execution_id=task_execution.id,
+                level="ERROR",
+                message="Task dispatch failed before worker acceptance",
+                log_metadata=json.dumps(
+                    {
+                        "event_type": "task_dispatch_failed",
+                        "task_execution_id": task_execution.id,
+                        "queued_event_id": (queued_event or {}).get("event_id"),
+                        "error": str(exc),
+                    }
+                ),
+            )
+        )
+        db.commit()
+        raise HTTPException(status_code=503, detail="Task dispatch failed") from exc
 
     db.add(
         LogEntry(
@@ -458,7 +505,7 @@ def queue_task_for_session(
             task_id=task.id,
             task_execution_id=task_execution.id,
             level="INFO",
-            message=f"Queued task {task.id}: {task.title}",
+            message="Queued task %s: %s" % (task.id, task.title),
             log_metadata=json.dumps(
                 {
                     "celery_task_id": result.id,
@@ -586,6 +633,13 @@ def reopen_failed_ordered_task_if_needed(
                 )
                 + f"#{getattr(retryable_task, 'plan_position', None)} {retryable_task.title}"
             ),
+            log_metadata=json.dumps(
+                {
+                    "event_type": "automatic_recovery_attempt",
+                    "task_id": retryable_task.id,
+                    "ignore_recovery_budget": ignore_recovery_budget,
+                }
+            ),
         )
     )
     db.commit()
@@ -640,7 +694,6 @@ def maybe_queue_next_automatic_task(
             .first()
         )
         if pending_blocked_task:
-            mark_session_paused(session)
             blocked_by = task_service.get_blocking_prior_tasks(pending_blocked_task)
             if blocked_by:
                 blocking_summary = ", ".join(

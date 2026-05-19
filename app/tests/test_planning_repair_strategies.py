@@ -23,6 +23,149 @@ def _static_workspace(tmp_path: Path) -> None:
     (tmp_path / "images" / "flower-bg.svg").write_text("<svg></svg>", encoding="utf-8")
 
 
+def test_direct_ollama_structured_op_plan_is_normalized_before_repair():
+    raw_plan = [
+        {
+            "step": 1,
+            "op": "write_file",
+            "path": "README.md",
+            "content": "# Project Title\n\n## Status\nIn progress.\n",
+        },
+        {
+            "step": 2,
+            "commands": [],
+            "verification": (
+                "python -c \"import pathlib,sys; sys.exit(0 if 'Status' "
+                "in pathlib.Path('README.md').read_text() else 1)\""
+            ),
+        },
+        {
+            "step": 3,
+            "commands": [],
+            "verification": (
+                'python -c "import pathlib,sys; '
+                "sys.exit(0 if pathlib.Path('README.md').exists() else 1)\""
+            ),
+        },
+        {"step": 4, "cmd": "echo Verification complete"},
+    ]
+
+    normalized = PlannerService.sanitize_common_plan_issues(raw_plan)
+
+    assert [step["step_number"] for step in normalized] == [1, 2, 3, 4]
+    assert normalized[0]["ops"] == [
+        {
+            "op": "write_file",
+            "path": "README.md",
+            "content": "# Project Title\n\n## Status\nIn progress.\n",
+        }
+    ]
+    assert normalized[0]["expected_files"] == ["README.md"]
+    assert normalized[0]["verification"].startswith("python -c ")
+    assert normalized[1]["commands"] == [normalized[1]["verification"]]
+    assert normalized[2]["commands"] == [normalized[2]["verification"]]
+    assert normalized[3]["commands"] == ["echo Verification complete"]
+
+
+def test_direct_ollama_type_file_ops_plan_is_normalized_before_repair():
+    raw_plan = [
+        {
+            "step": 1,
+            "action": "Create README.md with project description and Status section",
+            "ops": [
+                {
+                    "type": "write",
+                    "file": "README.md",
+                    "content": "# Project Description\n\n## Status\nIn progress.",
+                }
+            ],
+        },
+        {
+            "step": 2,
+            "action": "Verify README.md exists and contains Status",
+            "ops": [{"type": "check", "file": "README.md", "content": "Status"}],
+        },
+    ]
+
+    normalized = PlannerService.sanitize_common_plan_issues(raw_plan)
+
+    assert normalized[0]["ops"] == [
+        {
+            "op": "write_file",
+            "path": "README.md",
+            "content": "# Project Description\n\n## Status\nIn progress.",
+        }
+    ]
+    assert normalized[0]["expected_files"] == ["README.md"]
+    assert normalized[0]["verification"].startswith("python -c ")
+    assert normalized[1]["commands"] == [normalized[1]["verification"]]
+    assert "Status" in normalized[1]["verification"]
+
+
+def test_generated_file_verifications_reject_absolute_and_traversal_paths():
+    raw_plan = [
+        {
+            "step": 1,
+            "op": "write_file",
+            "path": "../../outside.txt",
+            "content": "bad",
+        },
+        {
+            "step": 2,
+            "op": "verify_file",
+            "path": "/etc/passwd",
+        },
+        {
+            "step": 3,
+            "op": "check",
+            "path": "../secret.txt",
+            "content": "token",
+        },
+    ]
+
+    normalized = PlannerService.sanitize_common_plan_issues(raw_plan)
+
+    assert normalized[0]["verification"] == 'python -c "import sys; sys.exit(1)"'
+    assert normalized[1]["verification"] == 'python -c "import sys; sys.exit(1)"'
+    assert normalized[2]["verification"] == 'python -c "import sys; sys.exit(1)"'
+
+
+def test_expected_files_generate_verification_without_structured_ops():
+    raw_plan = [
+        {
+            "step": 1,
+            "commands": ["cp source.txt output.txt"],
+            "expected_files": ["output.txt"],
+        }
+    ]
+
+    normalized = PlannerService.sanitize_common_plan_issues(raw_plan)
+
+    assert normalized[0]["verification"].startswith("python -c ")
+    assert "output.txt" in normalized[0]["verification"]
+
+
+def test_mkdir_operation_drops_write_only_fields():
+    raw_plan = [
+        {
+            "step": 1,
+            "ops": [
+                {
+                    "op": "mkdir",
+                    "path": "src",
+                    "content": "",
+                    "old": "x",
+                    "new": "y",
+                }
+            ],
+        }
+    ]
+
+    normalized = PlannerService.sanitize_common_plan_issues(raw_plan)
+
+    assert normalized[0]["ops"] == [{"op": "mkdir", "path": "src"}]
+
+
 def test_specialized_verification_repair_prompt_uses_inventory_without_source_dump(
     tmp_path,
 ):
