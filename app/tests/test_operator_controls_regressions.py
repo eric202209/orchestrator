@@ -9,9 +9,11 @@ from app.services.orchestration.validation.validator import ValidatorService
 from app.services.workspace.system_settings import (
     ADAPTATION_PROFILE_KEY,
     AGENT_BACKEND_KEY,
+    LEGACY_WORKSPACE_ROOT_KEY,
     ORCHESTRATION_POLICY_PROFILE_KEY,
     WORKSPACE_REVIEW_POLICY_KEY,
     WORKSPACE_ROOT_KEY,
+    get_setting_value,
     set_setting_value,
 )
 
@@ -69,19 +71,67 @@ def test_settings_reject_unknown_workspace_review_policy(authenticated_client):
     assert response.status_code == 422
 
 
+def test_workspace_root_save_keeps_legacy_workspace_key_in_sync(db_session):
+    set_setting_value(db_session, WORKSPACE_ROOT_KEY, "/app/projects")
+
+    assert get_setting_value(db_session, WORKSPACE_ROOT_KEY) == "/app/projects"
+    assert get_setting_value(db_session, LEGACY_WORKSPACE_ROOT_KEY) == "/app/projects"
+
+
 def test_settings_reject_mismatched_backend_and_adaptation_profile(
     authenticated_client,
 ):
     response = authenticated_client.patch(
         "/api/v1/settings/system",
         json={
-            "agent_backend": "local_openclaw",
-            "agent_adaptation_profile": "openai_responses_default",
+            "agent_backend": "openai_responses_api",
+            "agent_adaptation_profile": "claude_strict_tools",
+        },
+    )
+
+    assert response.status_code == 200
+    assert (
+        response.json()["system"]["agent_adaptation_profile"]
+        == "openai_responses_default"
+    )
+
+
+def test_direct_ollama_save_normalizes_stale_openclaw_adaptation_profile(
+    authenticated_client, db_session
+):
+    set_setting_value(db_session, AGENT_BACKEND_KEY, "direct_ollama")
+    set_setting_value(db_session, WORKSPACE_ROOT_KEY, "/app/projects")
+
+    response = authenticated_client.patch(
+        "/api/v1/settings/system",
+        json={
+            "agent_backend": "direct_ollama",
+            "workspace_root": "/app/projects",
+            "agent_adaptation_profile": "openclaw_default",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["system"]["agent_backend"] == "direct_ollama"
+    assert payload["system"]["agent_adaptation_profile"] == "ollama_default"
+
+
+def test_settings_reject_windows_host_path_as_container_workspace_root(
+    authenticated_client, db_session
+):
+    set_setting_value(db_session, AGENT_BACKEND_KEY, "direct_ollama")
+
+    response = authenticated_client.patch(
+        "/api/v1/settings/system",
+        json={
+            "agent_backend": "direct_ollama",
+            "workspace_root": r"C:\Users\Example\Documents\Projects",
         },
     )
 
     assert response.status_code == 400
-    assert "not supported by backend" in response.json()["detail"]
+    assert "WINDOWS_PROJECTS_DIR" in response.json()["detail"]
 
 
 def test_settings_can_select_openai_backend(authenticated_client):
@@ -192,8 +242,10 @@ def test_direct_ollama_allows_openclaw_default_workspace_for_native_ubuntu(
     assert response.status_code == 200
     payload = response.json()
     assert payload["system"]["agent_backend"] == "direct_ollama"
-    assert payload["system"]["workspace_root"].endswith(
-        "/.openclaw/workspace/vault/projects"
+    assert (
+        payload["system"]["workspace_root"]
+        .replace("\\", "/")
+        .endswith("/.openclaw/workspace/vault/projects")
     )
 
 

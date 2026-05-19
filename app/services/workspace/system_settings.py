@@ -72,6 +72,19 @@ def set_setting_value(
         record.description = description
     db.commit()
     db.refresh(record)
+    if key == WORKSPACE_ROOT_KEY:
+        legacy_record = (
+            db.query(SystemSetting)
+            .filter(SystemSetting.key == LEGACY_WORKSPACE_ROOT_KEY)
+            .first()
+        )
+        if legacy_record is None:
+            legacy_record = SystemSetting(key=LEGACY_WORKSPACE_ROOT_KEY)
+            db.add(legacy_record)
+        legacy_record.value = value
+        if description is not None:
+            legacy_record.description = description
+        db.commit()
     return record
 
 

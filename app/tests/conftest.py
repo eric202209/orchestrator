@@ -112,6 +112,7 @@ def reset_runtime_flags():
     original_langfuse_secret_key = settings.LANGFUSE_SECRET_KEY
     original_agent_backend = settings.AGENT_BACKEND
     original_agent_model = settings.AGENT_MODEL
+    original_admin_emails = settings.ADMIN_EMAILS
 
     settings.INLINE_PLANNING = True
     settings.LANGFUSE_ENABLED = False
@@ -119,6 +120,7 @@ def reset_runtime_flags():
     settings.LANGFUSE_SECRET_KEY = ""
     settings.AGENT_BACKEND = "local_openclaw"
     settings.AGENT_MODEL = "local"
+    settings.ADMIN_EMAILS = ""
     from app.services.observability import reset_for_tests
 
     reset_for_tests()
@@ -136,6 +138,7 @@ def reset_runtime_flags():
         settings.LANGFUSE_SECRET_KEY = original_langfuse_secret_key
         settings.AGENT_BACKEND = original_agent_backend
         settings.AGENT_MODEL = original_agent_model
+        settings.ADMIN_EMAILS = original_admin_emails
         reset_for_tests()
         clear_auth_rate_limits()
 

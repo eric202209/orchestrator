@@ -95,17 +95,27 @@ export default function SettingsPage() {
   };
 
   const handleSystemSave = async (rotateMobileKey = false) => {
+    if (!settings) {
+      return;
+    }
     setSavingSystem(true);
     setError(null);
     setMessage(null);
     try {
+      const selectedBackend = settings.system.supported_backends.find(
+        (backend) => backend.name === agentBackend,
+      );
+      const validAdaptationProfile =
+        selectedBackend?.config.adaptation_profiles.includes(adaptationProfile)
+          ? adaptationProfile
+          : selectedBackend?.config.adaptation_profiles[0] || "";
       const response = await settingsAPI.updateSystem({
         workspace_root: workspaceRoot.trim(),
         mobile_api_key: mobileApiKey.trim() || undefined,
         rotate_mobile_api_key: rotateMobileKey,
         agent_backend: agentBackend || undefined,
         agent_model_family: agentModelFamily.trim() || undefined,
-        agent_adaptation_profile: adaptationProfile || undefined,
+        agent_adaptation_profile: validAdaptationProfile || undefined,
         orchestration_policy_profile: policyProfile || undefined,
         workspace_review_policy: workspaceReviewPolicy || undefined,
       });
@@ -267,10 +277,10 @@ export default function SettingsPage() {
               className="w-full rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-white"
             />
             <p className="mt-2 text-xs text-slate-400">
-              This becomes the root path used for project workspaces and
-              isolation checks. In Windows Docker direct_ollama mode, use
-              /app/projects so generated files land in the mounted Windows
-              projects folder.
+              Path visible to the backend process. Linux native users can use a
+              real Linux path such as /home/user/projects. Windows Docker users
+              should use /app/projects here; the Windows host folder is
+              configured with WINDOWS_PROJECTS_DIR in .env.
             </p>
           </div>
           <div className="grid gap-4 md:grid-cols-2">

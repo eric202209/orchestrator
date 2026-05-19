@@ -34,7 +34,7 @@ services:
       - ./checkpoints:/app/checkpoints
       - ./knowledge:/app/knowledge
       - type: bind
-        source: ${WINDOWS_PROJECTS_DIR:-./projects}
+        source: ${WINDOWS_PROJECTS_DIR:?Set WINDOWS_PROJECTS_DIR to your Windows host projects folder, for example %USERPROFILE%\Documents\Projects}
         target: /app/projects
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -60,7 +60,7 @@ services:
       - ./checkpoints:/app/checkpoints
       - ./knowledge:/app/knowledge
       - type: bind
-        source: ${WINDOWS_PROJECTS_DIR:-./projects}
+        source: ${WINDOWS_PROJECTS_DIR:?Set WINDOWS_PROJECTS_DIR to your Windows host projects folder, for example %USERPROFILE%\Documents\Projects}
         target: /app/projects
     extra_hosts:
       - "host.docker.internal:host-gateway"
