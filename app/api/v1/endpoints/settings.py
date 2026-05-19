@@ -117,6 +117,43 @@ def _default_model_for_backend(backend_name: str) -> str:
     return get_backend_descriptor(backend_name).default_model_family
 
 
+def _default_adaptation_profile_for_backend(backend_name: str) -> str:
+    backend = get_backend_descriptor(backend_name)
+    return (
+        backend.config.adaptation_profiles[0]
+        if backend.config.adaptation_profiles
+        else "openclaw_default"
+    )
+
+
+def _normalize_requested_adaptation_profile(
+    requested_profile: str | None,
+    *,
+    backend_name: str,
+) -> str:
+    backend = get_backend_descriptor(backend_name)
+    profile_name = (requested_profile or "").strip()
+    if profile_name and profile_name in backend.config.adaptation_profiles:
+        return profile_name
+    return _default_adaptation_profile_for_backend(backend_name)
+
+
+def _normalize_workspace_root_for_settings(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return raw
+    if "\\" in raw or (len(raw) >= 2 and raw[1] == ":"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "workspace_root is the container path used by Orchestrator. "
+                "For Windows Docker, set it to /app/projects and set the host "
+                "folder with WINDOWS_PROJECTS_DIR in .env."
+            ),
+        )
+    return str(Path(raw).expanduser().resolve())
+
+
 @router.get("", response_model=AppSettingsResponse)
 def get_app_settings(
     request: Request,
@@ -128,7 +165,10 @@ def get_app_settings(
     effective_model_family = get_effective_agent_model_family(
         backend.default_model_family, db=db
     )
-    effective_adaptation_profile = get_effective_adaptation_profile(db=db)
+    effective_adaptation_profile = _normalize_requested_adaptation_profile(
+        get_effective_adaptation_profile(db=db),
+        backend_name=effective_backend_name,
+    )
     effective_policy_profile = get_effective_policy_profile(db=db)
     effective_workspace_review_policy = get_effective_workspace_review_policy(
         settings.WORKSPACE_REVIEW_POLICY, db=db
@@ -232,7 +272,7 @@ def update_system_settings(
 
     next_backend_name = _effective_next_backend(payload, db)
     next_workspace_root = (
-        str(Path(payload.workspace_root).expanduser().resolve())
+        _normalize_workspace_root_for_settings(payload.workspace_root)
         if payload.workspace_root is not None
         else str(get_effective_workspace_root(db=db))
     )
@@ -316,11 +356,7 @@ def update_system_settings(
                 }
         if payload.agent_adaptation_profile is None:
             previous_adaptation = get_effective_adaptation_profile(db=db)
-            default_profile = (
-                backend.config.adaptation_profiles[0]
-                if backend.config.adaptation_profiles
-                else "openclaw_default"
-            )
+            default_profile = _default_adaptation_profile_for_backend(backend.name)
             set_setting_value(
                 db,
                 ADAPTATION_PROFILE_KEY,
@@ -358,12 +394,16 @@ def update_system_settings(
 
     if payload.agent_adaptation_profile is not None:
         previous_adaptation = get_effective_adaptation_profile(db=db)
-        profile = get_adaptation_profile(payload.agent_adaptation_profile)
         effective_backend_name = (
             payload.agent_backend
             if payload.agent_backend is not None
             else get_effective_agent_backend(settings.AGENT_BACKEND, db=db)
         )
+        normalized_profile_name = _normalize_requested_adaptation_profile(
+            payload.agent_adaptation_profile,
+            backend_name=effective_backend_name,
+        )
+        profile = get_adaptation_profile(normalized_profile_name)
         try:
             backend = get_backend_descriptor(effective_backend_name)
         except UnsupportedAgentBackendError as exc:
@@ -371,14 +411,6 @@ def update_system_settings(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(exc),
             ) from exc
-        if profile.name not in backend.config.adaptation_profiles:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"Adaptation profile '{profile.name}' is not supported by backend "
-                    f"'{backend.name}'"
-                ),
-            )
         set_setting_value(
             db,
             ADAPTATION_PROFILE_KEY,
