@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from app.models import Project, Session as SessionModel
+from app.models import Project, Session as SessionModel, SessionTask, Task, TaskStatus
 
 
 def _make_project(db, *, workspace_path="/tmp/evt_test"):
@@ -101,6 +101,53 @@ def test_events_endpoint_returns_all_events(authenticated_client, db_session):
         assert len(body["events"]) == 3
         types = [e["event_type"] for e in body["events"]]
         assert types == ["phase_started", "step_finished", "task_completed"]
+
+
+def test_events_endpoint_reads_legacy_task_subfolder_journal(
+    authenticated_client, db_session
+):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        project = _make_project(db_session, workspace_path=tmpdir)
+        session = _make_session(db_session, project)
+        task = Task(
+            project_id=project.id,
+            title="Legacy event task",
+            status=TaskStatus.PENDING,
+            task_subfolder="task-legacy",
+        )
+        db_session.add(task)
+        db_session.commit()
+        db_session.refresh(task)
+        db_session.add(
+            SessionTask(
+                session_id=session.id,
+                task_id=task.id,
+                status=TaskStatus.PENDING,
+            )
+        )
+        db_session.commit()
+
+        _write_events(
+            str(Path(tmpdir) / "task-legacy"),
+            session.id,
+            task.id,
+            [
+                {
+                    "event_type": "phase_started",
+                    "session_id": session.id,
+                    "task_id": task.id,
+                    "details": {"phase": "planning"},
+                }
+            ],
+        )
+
+        resp = authenticated_client.get(
+            f"/api/v1/sessions/{session.id}/tasks/{task.id}/events"
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert [event["event_type"] for event in body["events"]] == ["phase_started"]
 
 
 def test_events_endpoint_filters_by_event_type(authenticated_client, db_session):

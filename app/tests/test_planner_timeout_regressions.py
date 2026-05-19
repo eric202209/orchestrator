@@ -890,6 +890,61 @@ def test_planner_rejects_pseudo_commands_and_flags_background_commands():
     }
 
 
+def test_validator_rejects_stringified_dict_commands_from_checkpoint_plan():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create project directory",
+            "commands": ["{'ops': 'mkdir project_root'}"],
+            "verification": "python -c \"import os; print(os.path.exists('project_root'))\"",
+            "rollback": "rm -rf project_root",
+            "expected_files": ["project_root"],
+            "ops": [],
+        }
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Update documentation in the current project root",
+        execution_profile="full_lifecycle",
+        project_dir=None,
+        title="Task 1: docs update",
+        description="Update docs in the current project root",
+    )
+
+    assert not verdict.accepted
+    assert "non-runnable pseudo-commands" in " ".join(verdict.reasons)
+    assert verdict.details["non_runnable_steps"] == [1]
+
+
+def test_validator_rejects_json_escaped_stringified_dict_commands():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create project directory",
+            "commands": ['{\\"ops\\": \\"mkdir project_root\\"}'],
+            "verification": "python -m pytest app/tests -q",
+            "rollback": None,
+            "expected_files": ["project_root"],
+            "ops": [],
+        }
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Update documentation in the current project root",
+        execution_profile="full_lifecycle",
+        project_dir=None,
+        title="Task 1: docs update",
+        description="Update docs in the current project root",
+    )
+
+    assert not verdict.accepted
+    assert verdict.details["non_runnable_steps"] == [1]
+
+
 def test_planner_flags_placeholder_only_implementation_and_weak_verification():
     issues = PlannerService.find_immediate_repair_step_issues(
         [
@@ -1914,12 +1969,14 @@ def test_planner_sanitization_aligns_schema_and_step_sequence():
         ]
     )
 
+    assert sanitized[0]["verification"].startswith("python -c ")
+    assert sanitized[0]["expected_files"] == ["app/config.py"]
     assert sanitized == [
         {
             "step_number": 1,
             "description": "Execute step 1",
             "commands": ["printf 'ok\\n' > app/config.py"],
-            "verification": None,
+            "verification": sanitized[0]["verification"],
             "rollback": None,
             "expected_files": ["app/config.py"],
         },

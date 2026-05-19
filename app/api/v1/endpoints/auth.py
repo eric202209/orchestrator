@@ -73,6 +73,7 @@ def get_user_by_api_key(api_key: str, db: Session) -> Optional[User]:
         db.commit()
     except Exception:
         db.rollback()
+        raise
 
     return db.query(User).filter(User.id == api_key_record.user_id).first()
 

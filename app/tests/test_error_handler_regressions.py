@@ -1,4 +1,5 @@
 from app.services.error_handler import EnhancedErrorHandler
+from app.services.orchestration.planning.planner import PlannerService
 
 
 def test_attempt_json_parsing_recovers_qwen_broken_shell_quotes_and_localhost_links():
@@ -157,3 +158,144 @@ def test_attempt_json_parsing_does_not_return_nested_content_object_for_plan_sou
     assert success is True
     assert isinstance(parsed, list)
     assert parsed[0]["step_number"] == 1
+
+
+def test_attempt_json_parsing_recovers_final_fenced_plan_from_prose_response():
+    handler = EnhancedErrorHandler()
+    response = """To fulfill the requirement, use these steps:
+
+```json
+{
+  "step": "create_file",
+  "file": "README.md",
+  "content": "# Project Title\\n\\n**Status:** In progress."
+}
+```
+
+Final Answer:
+
+```json
+[
+  {
+    "step": "create_file",
+    "file": "README.md",
+    "content": "# Project Title\\n\\nThis is the project description.\\n\\n**Status:** In progress."
+  },
+  {
+    "step": "verify_file",
+    "file": "README.md",
+    "expected_content": "Status"
+  }
+]
+```
+"""
+
+    success, parsed, strategy = handler.attempt_json_parsing(
+        response, context="planning"
+    )
+    normalized = PlannerService.sanitize_common_plan_issues(parsed)
+
+    assert success is True
+    assert strategy == "Extracted from mixed content"
+    assert isinstance(parsed, list)
+    assert parsed[0]["step"] == "create_file"
+    assert normalized[0]["ops"][0]["op"] == "write_file"
+    assert normalized[0]["expected_files"] == ["README.md"]
+    assert normalized[1]["commands"] == [normalized[1]["verification"]]
+    assert "Status" in normalized[1]["verification"]
+
+
+def test_attempt_json_parsing_prefers_last_plan_shaped_fence():
+    handler = EnhancedErrorHandler()
+    response = """Draft:
+
+```json
+{"step": "create_file", "file": "draft.md", "content": "draft"}
+```
+
+Final:
+
+```json
+[
+  {"step": "create_file", "file": "README.md", "content": "final"}
+]
+```
+"""
+
+    success, parsed, strategy = handler.attempt_json_parsing(
+        response, context="planning"
+    )
+
+    assert success is True
+    assert strategy == "Extracted from mixed content"
+    assert isinstance(parsed, list)
+    assert parsed[0]["file"] == "README.md"
+
+
+def test_attempt_json_parsing_does_not_treat_path_only_metadata_as_plan_shape():
+    handler = EnhancedErrorHandler()
+    response = """```json
+{"path": "/tmp/output", "size": 1024}
+```
+
+```json
+{"summary": "not a plan but longer than the path metadata block"}
+```
+"""
+
+    success, parsed, strategy = handler.attempt_json_parsing(
+        response, context="planning"
+    )
+
+    assert success is True
+    assert strategy == "Extracted from mixed content"
+    assert parsed == {"summary": "not a plan but longer than the path metadata block"}
+
+
+def test_attempt_json_parsing_prefers_longest_parseable_fence_without_plan_shape():
+    handler = EnhancedErrorHandler()
+    response = """```json
+{"summary": "short"}
+```
+
+```json
+{"result": {"files": ["README.md"], "notes": "longer parseable metadata block"}}
+```
+
+```json
+{"ok": true}
+```
+"""
+
+    success, parsed, strategy = handler.attempt_json_parsing(
+        response, context="planning"
+    )
+
+    assert success is True
+    assert strategy == "Extracted from mixed content"
+    assert parsed == {
+        "result": {
+            "files": ["README.md"],
+            "notes": "longer parseable metadata block",
+        }
+    }
+
+
+def test_attempt_json_parsing_fallback_handles_deeply_nested_json():
+    handler = EnhancedErrorHandler()
+    response = (
+        'prefix {"step_number": 1, "commands": ["echo ok"], '
+        '"verification": {"outer": {"inner": {"check": "ok"}}}} suffix'
+    )
+
+    success, parsed, strategy = handler.attempt_json_parsing(
+        response, context="planning"
+    )
+
+    assert success is True
+    assert strategy == "Extracted from mixed content"
+    assert parsed == {
+        "step_number": 1,
+        "commands": ["echo ok"],
+        "verification": {"outer": {"inner": {"check": "ok"}}},
+    }

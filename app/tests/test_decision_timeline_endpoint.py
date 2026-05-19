@@ -346,6 +346,40 @@ def test_decision_timeline_resolves_relative_project_workspace_path(
     assert [event["id"] for event in body["events"]] == ["relative-path-event"]
 
 
+def test_decision_timeline_reads_legacy_task_subfolder_event_journal(
+    authenticated_client, db_session, tmp_path
+):
+    project_dir = tmp_path / "legacy-project"
+    legacy_task_dir = project_dir / "task-legacy-folder"
+    project = _make_project(db_session, workspace_path=str(project_dir))
+    session = _make_session(db_session, project)
+    task = _make_task(db_session, project, session)
+    task.task_subfolder = "task-legacy-folder"
+    db_session.commit()
+
+    _write_events(
+        str(legacy_task_dir),
+        session.id,
+        task.id,
+        [
+            _event(
+                event_id="legacy-task-folder-event",
+                session_id=session.id,
+                task_id=task.id,
+                event_type="phase_started",
+                timestamp=datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
+                details={"phase": "planning"},
+            )
+        ],
+    )
+
+    resp = authenticated_client.get(f"/api/v1/sessions/{session.id}/decision-timeline")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [event["id"] for event in body["events"]] == ["legacy-task-folder-event"]
+
+
 def test_decision_timeline_ignores_malformed_jsonl(authenticated_client, db_session):
     with tempfile.TemporaryDirectory() as tmpdir:
         project = _make_project(db_session, workspace_path=tmpdir)

@@ -99,6 +99,18 @@ const apiClient = axios.create({
   withCredentials: true, // send httpOnly session cookie on every request
 });
 
+apiClient.interceptors.request.use((config) => {
+  const token =
+    window.localStorage.getItem("access_token") ||
+    window.sessionStorage.getItem("access_token");
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  } else {
+    delete config.headers.Authorization;
+  }
+  return config;
+});
+
 // Response interceptor: redirect to login on 401
 apiClient.interceptors.response.use(
   (response) => response,

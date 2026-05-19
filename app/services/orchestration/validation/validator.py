@@ -71,6 +71,7 @@ class ValidatorService:
     )
     persist_validation_result = staticmethod(_persist_validation_result)
 
+    @staticmethod
     def _ordered_reasons(
         *,
         warnings: List[str],
@@ -1135,6 +1136,10 @@ class ValidatorService:
         text = str(command or "").strip()
         lowered = text.lower()
         if not text:
+            return True
+        if re.match(
+            r"^\{\s*(?:\\?\"\\?|')?(?:ops|op|command|cmd)(?:\\?\"\\?|')?\s*:", text
+        ):
             return True
         non_runnable_prefixes = (
             "write ",
