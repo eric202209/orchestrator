@@ -7,13 +7,16 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Plan, Project, Task, TaskStatus
+from app.dependencies import get_current_active_user
+from app.models import Plan, Task, TaskStatus
 from app.schemas import PlanResponse, PlannerTaskCandidate, TaskResponse
+from app.services.authz import get_project_for_user
 from app.services.name_formatter import humanize_display_name
 from app.services.planning.plan_commit_service import PlanCommitService
 from app.services.planning.planner_service import PlannerService
 
 router = APIRouter()
+MAX_PLANNER_MARKDOWN_CHARS = 100_000
 
 
 class PlannerGenerateRequest(BaseModel):
@@ -58,11 +61,13 @@ class PlanUpdateRequest(BaseModel):
 
 
 @router.post("/planner/generate", response_model=PlannerGenerateResponse)
-def generate_plan(payload: PlannerGenerateRequest, db: Session = Depends(get_db)):
+def generate_plan(
+    payload: PlannerGenerateRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
     """Legacy manual planner flow retained for backward compatibility."""
-    project = db.query(Project).filter(Project.id == payload.project_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = get_project_for_user(db, payload.project_id, current_user)
 
     markdown = PlannerService.generate_markdown(
         requirement=payload.requirement,
@@ -101,7 +106,12 @@ def generate_plan(payload: PlannerGenerateRequest, db: Session = Depends(get_db)
 
 
 @router.post("/planner/parse", response_model=PlannerParseResponse)
-def parse_markdown(payload: PlannerParseRequest):
+def parse_markdown(
+    payload: PlannerParseRequest,
+    _current_user=Depends(get_current_active_user),
+):
+    if len(payload.markdown or "") > MAX_PLANNER_MARKDOWN_CHARS:
+        raise HTTPException(status_code=400, detail="Markdown too large")
     parsed_tasks = [
         PlannerTaskCandidate(
             title=item.title,
@@ -117,10 +127,12 @@ def parse_markdown(payload: PlannerParseRequest):
 
 
 @router.get("/projects/{project_id}/plans", response_model=List[PlanResponse])
-def list_project_plans(project_id: int, db: Session = Depends(get_db)):
-    project = db.query(Project).filter(Project.id == project_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+def list_project_plans(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    get_project_for_user(db, project_id, current_user)
 
     plans = (
         db.query(Plan)
@@ -134,10 +146,13 @@ def list_project_plans(project_id: int, db: Session = Depends(get_db)):
 @router.delete(
     "/projects/{project_id}/plans/{plan_id}", status_code=status.HTTP_204_NO_CONTENT
 )
-def delete_project_plan(project_id: int, plan_id: int, db: Session = Depends(get_db)):
-    project = db.query(Project).filter(Project.id == project_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+def delete_project_plan(
+    project_id: int,
+    plan_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    get_project_for_user(db, project_id, current_user)
 
     plan = (
         db.query(Plan).filter(Plan.id == plan_id, Plan.project_id == project_id).first()
@@ -160,10 +175,14 @@ def update_project_plan(
     plan_id: int,
     payload: PlanUpdateRequest,
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
 ):
-    project = db.query(Project).filter(Project.id == project_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    get_project_for_user(db, project_id, current_user)
+    if (
+        payload.markdown is not None
+        and len(payload.markdown) > MAX_PLANNER_MARKDOWN_CHARS
+    ):
+        raise HTTPException(status_code=400, detail="Markdown too large")
 
     plan = (
         db.query(Plan).filter(Plan.id == plan_id, Plan.project_id == project_id).first()
@@ -186,11 +205,17 @@ def update_project_plan(
     status_code=status.HTTP_201_CREATED,
 )
 def create_batch_tasks(
-    project_id: int, payload: BatchTaskCreateRequest, db: Session = Depends(get_db)
+    project_id: int,
+    payload: BatchTaskCreateRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
 ):
-    project = db.query(Project).filter(Project.id == project_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = get_project_for_user(db, project_id, current_user)
+    if (
+        payload.markdown is not None
+        and len(payload.markdown) > MAX_PLANNER_MARKDOWN_CHARS
+    ):
+        raise HTTPException(status_code=400, detail="Markdown too large")
     if not payload.tasks:
         raise HTTPException(status_code=400, detail="At least one task is required")
 

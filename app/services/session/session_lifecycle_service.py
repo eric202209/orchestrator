@@ -415,12 +415,14 @@ def reconcile_terminal_running_sessions(
     """
 
     query = db.query(SessionModel).filter(
-        SessionModel.status == "running",
+        SessionModel.status.in_(["running", "paused", "stopped"]),
         SessionModel.deleted_at.is_(None),
     )
     if sessions is not None:
         session_ids = [
-            session.id for session in sessions if session.status == "running"
+            session.id
+            for session in sessions
+            if session.status in ["running", "paused", "stopped"]
         ]
         if not session_ids:
             return []
@@ -428,7 +430,7 @@ def reconcile_terminal_running_sessions(
 
     reconciled: list[dict[str, Any]] = []
     for session in query.all():
-        running_execution_exists = (
+        active_running_exists = (
             db.query(TaskExecution.id)
             .filter(
                 TaskExecution.session_id == session.id,
@@ -437,7 +439,41 @@ def reconcile_terminal_running_sessions(
             .first()
             is not None
         )
-        if running_execution_exists:
+        active_pending_exists = (
+            db.query(TaskExecution.id)
+            .filter(
+                TaskExecution.session_id == session.id,
+                TaskExecution.status == TaskStatus.PENDING,
+            )
+            .first()
+            is not None
+        )
+        if active_running_exists:
+            if session.status == "paused":
+                previous_status = session.status
+                mark_session_running(session, started_at=session.started_at)
+                db.add(
+                    LogEntry(
+                        session_id=session.id,
+                        session_instance_id=session.instance_id,
+                        level="WARN",
+                        message=(
+                            "Reconciled session status after active task execution "
+                            "was still running"
+                        ),
+                    )
+                )
+                reconciled.append(
+                    {
+                        "session_id": session.id,
+                        "task_execution_id": None,
+                        "previous_status": previous_status,
+                        "next_status": "running",
+                        "terminal_task_status": None,
+                    }
+                )
+            continue
+        if active_pending_exists:
             continue
 
         latest_execution = (
@@ -454,6 +490,9 @@ def reconcile_terminal_running_sessions(
         if latest_execution is None:
             continue
 
+        if session.status != "running":
+            continue
+
         if latest_execution.status == TaskStatus.FAILED:
             next_status = "paused"
             alert_level = "error"
@@ -467,6 +506,10 @@ def reconcile_terminal_running_sessions(
         else:
             continue
 
+        if session.status == next_status and session.is_active is False:
+            continue
+
+        previous_status = session.status
         if next_status == "paused":
             mark_session_paused(
                 session,
@@ -500,7 +543,7 @@ def reconcile_terminal_running_sessions(
             {
                 "session_id": session.id,
                 "task_execution_id": latest_execution.id,
-                "previous_status": "running",
+                "previous_status": previous_status,
                 "next_status": next_status,
                 "terminal_task_status": latest_execution.status.value,
             }
@@ -887,18 +930,9 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
         mark_session_stopped(session)
         db.commit()
 
-    if session.status == "active":
-        logger.warning(
-            "Session %s has 'active' status. Treating as stopped and resetting...",
-            session_id,
-        )
-        mark_session_stopped(session)
-        db.commit()
-
     try:
         session_instance_id = str(uuid.uuid4())
         session.instance_id = session_instance_id
-        db.commit()
 
         runtime = create_agent_runtime(db, session_id, use_demo_mode=False)
         task_description = session.description or session.name
@@ -1068,6 +1102,7 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
             mark_session_running(session)
         elif session.status != "stopped":
             mark_session_running(session)
+        session.instance_id = session_instance_id
         db.commit()
 
         db.add(
@@ -1097,8 +1132,10 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
             "message": f"Session '{session.name}' started successfully",
         }
     except HTTPException:
+        db.rollback()
         raise
     except Exception as exc:
+        db.rollback()
         db.add(
             LogEntry(
                 session_id=session_id,
@@ -1551,13 +1588,12 @@ async def resume_session_lifecycle(
                 timeout_seconds=DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
             )
 
-            class _QueuedResult:
-                id = queued["celery_id"]
-
-            result = _QueuedResult()
+            celery_id_for_log = queued["celery_id"]
             dispatch_mode = "fresh_requeue"
             task_execution_id = queued.get("task_execution_id")
             dispatch_submitted = True
+        if resume_has_progress:
+            celery_id_for_log = result.id
 
         db.add(
             LogEntry(
@@ -1584,7 +1620,7 @@ async def resume_session_lifecycle(
                         "requested_checkpoint_name": requested_checkpoint_name,
                         "checkpoint_name": resolved_checkpoint_name,
                         "resolved_checkpoint_name": resolved_checkpoint_name,
-                        "celery_task_id": result.id,
+                        "celery_task_id": celery_id_for_log,
                         "task_execution_id": task_execution_id,
                         "task_id": task.id,
                         "restore_fidelity": restore_fidelity,

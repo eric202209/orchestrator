@@ -24,7 +24,6 @@ class EnhancedErrorHandler:
     def __init__(self, max_retries: int = 3, retry_delay: int = 60):
         self.max_retries = max_retries
         self.retry_delay = retry_delay
-        self.retry_count = 0
 
     def attempt_json_parsing(
         self, text: str, context: str = "JSON"
@@ -66,14 +65,15 @@ class EnhancedErrorHandler:
                     if self._should_skip_non_plan_candidate_for_planning(
                         context, text, fixed_cleaned, parsed_fixed_cleaned
                     ):
-                        raise json.JSONDecodeError(
-                            "non-plan JSON candidate", fixed_cleaned, 0
+                        logger.debug(
+                            "[JSON-PARSE] Strategy 2 fixed skipped non-plan candidate"
                         )
-                    return (
-                        True,
-                        parsed_fixed_cleaned,
-                        "Cleaned markdown fences and fixed common errors",
-                    )
+                    else:
+                        return (
+                            True,
+                            parsed_fixed_cleaned,
+                            "Cleaned markdown fences and fixed common errors",
+                        )
                 except json.JSONDecodeError as e:
                     logger.debug(f"[JSON-PARSE] Strategy 2 fixed failed: {e}")
 
@@ -155,17 +155,20 @@ class EnhancedErrorHandler:
                     if self._should_skip_non_plan_candidate_for_planning(
                         context, text, fixed, parsed_fixed_embedded
                     ):
-                        raise json.JSONDecodeError("non-plan JSON candidate", fixed, 0)
-                    return (
-                        True,
-                        parsed_fixed_embedded,
-                        "Extracted and fixed embedded JSON payload",
-                    )
+                        logger.debug(
+                            "[JSON-PARSE] Strategy 6 fixed skipped non-plan candidate"
+                        )
+                    else:
+                        return (
+                            True,
+                            parsed_fixed_embedded,
+                            "Extracted and fixed embedded JSON payload",
+                        )
                 except json.JSONDecodeError as e:
                     logger.debug(f"[JSON-PARSE] Strategy 6 fixed failed: {e}")
 
         # All strategies failed
-        error_msg = f"Failed to parse {context} after {self.retry_count + 1} attempts"
+        error_msg = f"Failed to parse {context}"
         logger.error(f"[JSON-PARSE] All strategies failed. Last attempt: {text[:200]}")
         return False, None, error_msg
 
@@ -190,13 +193,28 @@ class EnhancedErrorHandler:
 
     @staticmethod
     def _parsed_value_has_plan_shape(parsed: Any) -> bool:
-        step_keys = {"step_number", "commands", "description"}
+        strong_plan_keys = {
+            "step",
+            "step_number",
+            "commands",
+            "description",
+            "expected_content",
+        }
+        weak_plan_keys = {
+            "op",
+            "path",
+            "file",
+            "content",
+        }
         if isinstance(parsed, dict):
-            return bool(step_keys.intersection(parsed.keys()))
+            keys = set(parsed.keys())
+            if strong_plan_keys.intersection(keys):
+                return True
+            return len(weak_plan_keys.intersection(keys)) >= 2
         if isinstance(parsed, list) and parsed:
-            return isinstance(parsed[0], dict) and bool(
-                step_keys.intersection(parsed[0].keys())
-            )
+            return isinstance(
+                parsed[0], dict
+            ) and EnhancedErrorHandler._parsed_value_has_plan_shape(parsed[0])
         return False
 
     def _clean_markdown_fences(self, text: str) -> str:
@@ -214,17 +232,39 @@ class EnhancedErrorHandler:
         if not text:
             return None
 
-        # Try to find JSON array or object
-        json_patterns = [
-            r"\{(?:[^{}]|(?:\{[^{}]*\}))*\}",  # Match nested objects
-            r"\[(?:[^\[\]]|(?:\[[^\[\]]*\]))*\]",  # Match nested arrays
-        ]
+        fenced_candidates = re.findall(
+            r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
+        )
+        parseable_fenced_candidates: list[tuple[str, Any]] = []
+        for candidate in fenced_candidates:
+            candidate = candidate.strip()
+            if not candidate:
+                continue
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            parseable_fenced_candidates.append((candidate, parsed))
 
-        for pattern in json_patterns:
-            matches = re.findall(pattern, text, re.DOTALL)
-            if matches:
-                # Return the longest match (most likely to be complete)
-                return max(matches, key=len)
+        plan_candidates = [
+            candidate
+            for candidate, parsed in parseable_fenced_candidates
+            if self._parsed_value_has_plan_shape(parsed)
+        ]
+        if plan_candidates:
+            return plan_candidates[-1]
+        if parseable_fenced_candidates:
+            return max(parseable_fenced_candidates, key=lambda item: len(item[0]))[0]
+
+        decoder = json.JSONDecoder()
+        for start, char in enumerate(text):
+            if char not in "{[":
+                continue
+            try:
+                _, end = decoder.raw_decode(text[start:])
+            except json.JSONDecodeError:
+                continue
+            return text[start : start + end]
 
         return None
 
@@ -495,26 +535,16 @@ class EnhancedErrorHandler:
                 logger.warning(f"[RETRY] Skipping retry for: {pattern}")
                 return False
 
-        # Retry transient errors
-        if self.retry_count < self.max_retries:
-            logger.info(
-                f"[RETRY] Attempt {self.retry_count + 1}/{self.max_retries} for {step_name}"
-            )
-            return True
-
-        logger.warning(
-            f"[RETRY] Max retries ({self.max_retries}) exceeded for {step_name}"
-        )
-        return False
+        logger.info("[RETRY] Transient error eligible for retry for %s", step_name)
+        return True
 
     def create_retry_error(
         self, original_error: Exception, step_name: str = "step"
     ) -> Exception:
         """Create a retry error with context."""
-        self.retry_count += 1
         return RuntimeError(
             f"{step_name} failed: {str(original_error)}. "
-            f"Retry {self.retry_count}/{self.max_retries} in {self.retry_delay}s"
+            f"Retry in {self.retry_delay}s"
         )
 
 

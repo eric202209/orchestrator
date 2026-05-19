@@ -254,6 +254,75 @@ def test_reconcile_terminal_running_session_after_failed_execution(db_session):
     assert session.last_alert_level == "error"
 
 
+def test_reconcile_terminal_session_is_idempotent_after_failure(db_session):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="running", is_active=True)
+    task = _make_task(db_session, project, status=TaskStatus.FAILED)
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.FAILED,
+        started_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
+    )
+    link = SessionTask(
+        session_id=session.id,
+        task_id=task.id,
+        status=TaskStatus.FAILED,
+        started_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
+    )
+    db_session.add_all([execution, link])
+    db_session.commit()
+
+    first = reconcile_terminal_running_sessions(db_session, [session])
+    second = reconcile_terminal_running_sessions(db_session, [session])
+
+    assert len(first) == 1
+    assert second == []
+    logs = (
+        db_session.query(LogEntry)
+        .filter(
+            LogEntry.session_id == session.id,
+            LogEntry.message
+            == "Reconciled stale running session after terminal task execution",
+        )
+        .all()
+    )
+    assert len(logs) == 1
+
+
+def test_reconcile_does_not_reopen_explicitly_stopped_failed_session(db_session):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="stopped", is_active=False)
+    task = _make_task(db_session, project, status=TaskStatus.FAILED)
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.FAILED,
+        started_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
+    )
+    link = SessionTask(
+        session_id=session.id,
+        task_id=task.id,
+        status=TaskStatus.FAILED,
+        started_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
+    )
+    db_session.add_all([execution, link])
+    db_session.commit()
+
+    reconciled = reconcile_terminal_running_sessions(db_session, [session])
+
+    db_session.refresh(session)
+    assert reconciled == []
+    assert session.status == "stopped"
+    assert session.is_active is False
+
+
 def test_reconcile_keeps_running_session_with_running_execution(db_session):
     project = _make_project(db_session)
     session = _make_session(db_session, project, status="running", is_active=True)
@@ -274,6 +343,117 @@ def test_reconcile_keeps_running_session_with_running_execution(db_session):
     assert reconciled == []
     assert session.status == "running"
     assert session.is_active is True
+
+
+def test_reconcile_keeps_running_session_with_queued_pending_execution(db_session):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="running", is_active=True)
+    task = _make_task(db_session, project, status=TaskStatus.PENDING)
+    older_execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.CANCELLED,
+        completed_at=datetime.now(UTC),
+    )
+    queued_execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=2,
+        status=TaskStatus.PENDING,
+        created_at=datetime.now(UTC),
+    )
+    db_session.add_all([older_execution, queued_execution])
+    db_session.commit()
+
+    reconciled = reconcile_terminal_running_sessions(db_session, [session])
+
+    db_session.refresh(session)
+    assert reconciled == []
+    assert session.status == "running"
+    assert session.is_active is True
+
+
+def test_reconcile_does_not_reopen_stopped_session_with_only_pending_execution(
+    db_session,
+):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="stopped", is_active=False)
+    task = _make_task(db_session, project, status=TaskStatus.PENDING)
+    queued_execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.PENDING,
+        created_at=datetime.now(UTC),
+    )
+    db_session.add(queued_execution)
+    db_session.commit()
+
+    reconciled = reconcile_terminal_running_sessions(db_session, [session])
+
+    db_session.refresh(session)
+    assert reconciled == []
+    assert session.status == "stopped"
+    assert session.is_active is False
+
+
+def test_reconcile_revives_paused_session_with_active_execution(db_session):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="paused", is_active=False)
+    task = _make_task(db_session, project, status=TaskStatus.RUNNING)
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.RUNNING,
+        started_at=datetime.now(UTC),
+    )
+    link = SessionTask(
+        session_id=session.id,
+        task_id=task.id,
+        status=TaskStatus.RUNNING,
+        started_at=datetime.now(UTC),
+    )
+    db_session.add_all([execution, link])
+    db_session.commit()
+
+    reconciled = reconcile_terminal_running_sessions(db_session, [session])
+
+    db_session.refresh(session)
+    assert reconciled == [
+        {
+            "session_id": session.id,
+            "task_execution_id": None,
+            "previous_status": "paused",
+            "next_status": "running",
+            "terminal_task_status": None,
+        }
+    ]
+    assert session.status == "running"
+    assert session.is_active is True
+
+
+def test_reconcile_does_not_reopen_stopped_session_with_running_execution(db_session):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="stopped", is_active=False)
+    task = _make_task(db_session, project, status=TaskStatus.RUNNING)
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.RUNNING,
+        started_at=datetime.now(UTC),
+    )
+    db_session.add(execution)
+    db_session.commit()
+
+    reconciled = reconcile_terminal_running_sessions(db_session, [session])
+
+    db_session.refresh(session)
+    assert reconciled == []
+    assert session.status == "stopped"
+    assert session.is_active is False
 
 
 def test_recover_stale_running_session_cancels_active_execution(

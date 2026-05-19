@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -35,16 +36,19 @@ from app.services.planning.planner_service import PlannerService
 from app.services.performance_optimizations import optimize_prompt
 from app.services.workspace.system_settings import get_effective_adaptation_profile
 
+logger = logging.getLogger(__name__)
+
 
 class PlanningSessionService:
     """Manage resumable planning conversations and final plan synthesis."""
 
     ACTIVE_STATUSES = {"active", "waiting_for_input"}
     MAX_QUESTIONS = 2
-    PLANNING_SYNTHESIS_TIMEOUT_SECONDS = 180
-    REPLAN_SYNTHESIS_TIMEOUT_SECONDS = 45
+    PLANNING_SYNTHESIS_TIMEOUT_SECONDS = settings.PLANNING_SYNTHESIS_TIMEOUT_SECONDS
+    REPLAN_SYNTHESIS_TIMEOUT_SECONDS = settings.REPLAN_SYNTHESIS_TIMEOUT_SECONDS
     SYNTHESIS_TRANSCRIPT_CHAR_BUDGET = 1800
     SYNTHESIS_PROMPT_CHAR_BUDGET = 4200
+    SYNTHESIS_OUTPUT_CHAR_LIMIT = 100_000
     PROCESSING_LEASE_MINUTES = 10
 
     def __init__(self, db: Session):
@@ -390,7 +394,7 @@ class PlanningSessionService:
         stale_before = datetime.now(timezone.utc) - timedelta(
             minutes=self.PROCESSING_LEASE_MINUTES
         )
-        claimed_rows = (
+        session = (
             self.db.query(PlanningSession)
             .filter(PlanningSession.id == session_id)
             .filter(PlanningSession.status == "active")
@@ -402,22 +406,19 @@ class PlanningSessionService:
                     PlanningSession.processing_started_at < stale_before,
                 )
             )
-            .update(
-                {
-                    "processing_token": token,
-                    "processing_started_at": datetime.now(timezone.utc),
-                    "updated_at": datetime.now(timezone.utc),
-                },
-                synchronize_session=False,
-            )
+            .with_for_update()
+            .first()
         )
-        self.db.commit()
-        if claimed_rows == 0:
+        if not session:
+            self.db.rollback()
             return None
 
-        session = self.get_session(session_id)
-        if session.processing_token != token:
-            return None
+        now = datetime.now(timezone.utc)
+        session.processing_token = token
+        session.processing_started_at = now
+        session.updated_at = now
+        self.db.commit()
+        self.db.refresh(session)
         return session
 
     @staticmethod
@@ -729,21 +730,17 @@ class PlanningSessionService:
         if result.get("status") == "failed":
             raise RuntimeError(result.get("error") or "Planning synthesis failed")
 
-        output_text = result.get("output", "")
-        if isinstance(output_text, str):
-            try:
-                parsed_output = json.loads(output_text)
-                if isinstance(parsed_output, dict) and "payloads" in parsed_output:
-                    payloads = parsed_output.get("payloads") or []
-                    if payloads and isinstance(payloads[0], dict):
-                        output_text = payloads[0].get("text", output_text)
-            except json.JSONDecodeError:
-                pass
+        output_text = self._extract_output_text(
+            result,
+            context="finalization",
+            allow_parse_fallback=False,
+        )
 
         if not isinstance(output_text, str):
             raise RuntimeError("Planning synthesis returned unsupported output")
 
         cleaned = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", output_text.strip())
+        self._ensure_output_size(cleaned, context="finalization")
         parsed = json.loads(cleaned)
         required_keys = {
             "requirements",
@@ -932,16 +929,11 @@ class PlanningSessionService:
                 "question": fallback_question if fallback_needs else None,
             }
 
-        output_text = result.get("output", "")
-        if isinstance(output_text, str):
-            try:
-                parsed_output = json.loads(output_text)
-                if isinstance(parsed_output, dict) and "payloads" in parsed_output:
-                    payloads = parsed_output.get("payloads") or []
-                    if payloads and isinstance(payloads[0], dict):
-                        output_text = payloads[0].get("text", output_text)
-            except json.JSONDecodeError:
-                pass
+        output_text = self._extract_output_text(
+            result,
+            context="clarification",
+            allow_parse_fallback=True,
+        )
 
         if not isinstance(output_text, str):
             return {
@@ -950,9 +942,15 @@ class PlanningSessionService:
             }
 
         cleaned = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", output_text.strip())
+        self._ensure_output_size(cleaned, context="clarification")
         try:
             parsed = json.loads(cleaned)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "Planning clarification JSON parse failed: %s output_excerpt=%r",
+                exc,
+                cleaned[:1000],
+            )
             return {
                 "needs_clarification": fallback_needs,
                 "question": fallback_question if fallback_needs else None,
@@ -1034,15 +1032,30 @@ class PlanningSessionService:
         return None
 
     def _latest_artifacts(self, session: PlanningSession) -> list[PlanningArtifact]:
-        latest = [artifact for artifact in session.artifacts if artifact.is_latest]
+        latest = (
+            self.db.query(PlanningArtifact)
+            .filter(
+                PlanningArtifact.planning_session_id == session.id,
+                PlanningArtifact.is_latest.is_(True),
+            )
+            .order_by(PlanningArtifact.artifact_type.asc(), PlanningArtifact.id.desc())
+            .all()
+        )
         if latest:
             return latest
 
         fallback: dict[str, PlanningArtifact] = {}
-        for artifact in sorted(
-            session.artifacts,
-            key=lambda item: (item.artifact_type, item.version or 1, item.id or 0),
-        ):
+        artifacts = (
+            self.db.query(PlanningArtifact)
+            .filter(PlanningArtifact.planning_session_id == session.id)
+            .order_by(
+                PlanningArtifact.artifact_type.asc(),
+                PlanningArtifact.version.asc(),
+                PlanningArtifact.id.asc(),
+            )
+            .all()
+        )
+        for artifact in artifacts:
             fallback[artifact.artifact_type] = artifact
         return list(fallback.values())
 
@@ -1082,8 +1095,60 @@ class PlanningSessionService:
             return []
         try:
             parsed = json.loads(session.committed_task_ids)
-        except json.JSONDecodeError:
-            return []
-        return [
-            int(item) for item in parsed if isinstance(item, int) or str(item).isdigit()
-        ]
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"Planning session {session.id} has corrupted committed_task_ids"
+            ) from exc
+        if not isinstance(parsed, list):
+            raise RuntimeError(
+                f"Planning session {session.id} committed_task_ids must be a list"
+            )
+        task_ids: list[int] = []
+        for item in parsed:
+            if isinstance(item, int):
+                task_ids.append(item)
+            elif isinstance(item, str) and item.isdigit():
+                task_ids.append(int(item))
+            else:
+                raise RuntimeError(
+                    f"Planning session {session.id} committed_task_ids contains invalid value"
+                )
+        return task_ids
+
+    def _extract_output_text(
+        self,
+        result: dict[str, Any],
+        *,
+        context: str,
+        allow_parse_fallback: bool,
+    ) -> Any:
+        output_text = result.get("output", "")
+        if not isinstance(output_text, str):
+            return output_text
+        self._ensure_output_size(output_text, context=context)
+        try:
+            parsed_output = json.loads(output_text)
+        except json.JSONDecodeError as exc:
+            if allow_parse_fallback:
+                logger.warning(
+                    "Planning %s envelope JSON parse failed: %s output_excerpt=%r",
+                    context,
+                    exc,
+                    output_text[:1000],
+                )
+            return output_text
+        if isinstance(parsed_output, dict) and "payloads" in parsed_output:
+            payloads = parsed_output.get("payloads") or []
+            if payloads and isinstance(payloads[0], dict):
+                nested_text = payloads[0].get("text", output_text)
+                if isinstance(nested_text, str):
+                    self._ensure_output_size(nested_text, context=context)
+                return nested_text
+        return output_text
+
+    def _ensure_output_size(self, output_text: str, *, context: str) -> None:
+        if len(output_text or "") > self.SYNTHESIS_OUTPUT_CHAR_LIMIT:
+            raise RuntimeError(
+                f"Planning {context} returned oversized output "
+                f"({len(output_text)} chars)"
+            )
