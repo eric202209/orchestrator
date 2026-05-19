@@ -75,9 +75,7 @@ def test_workspace_root_save_keeps_legacy_workspace_key_in_sync(db_session):
     set_setting_value(db_session, WORKSPACE_ROOT_KEY, "/app/projects")
 
     assert get_setting_value(db_session, WORKSPACE_ROOT_KEY) == "/app/projects"
-    assert (
-        get_setting_value(db_session, LEGACY_WORKSPACE_ROOT_KEY) == "/app/projects"
-    )
+    assert get_setting_value(db_session, LEGACY_WORKSPACE_ROOT_KEY) == "/app/projects"
 
 
 def test_settings_reject_mismatched_backend_and_adaptation_profile(
@@ -244,8 +242,10 @@ def test_direct_ollama_allows_openclaw_default_workspace_for_native_ubuntu(
     assert response.status_code == 200
     payload = response.json()
     assert payload["system"]["agent_backend"] == "direct_ollama"
-    assert payload["system"]["workspace_root"].replace("\\", "/").endswith(
-        "/.openclaw/workspace/vault/projects"
+    assert (
+        payload["system"]["workspace_root"]
+        .replace("\\", "/")
+        .endswith("/.openclaw/workspace/vault/projects")
     )
 
 

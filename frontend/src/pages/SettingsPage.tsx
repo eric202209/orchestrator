@@ -95,6 +95,9 @@ export default function SettingsPage() {
   };
 
   const handleSystemSave = async (rotateMobileKey = false) => {
+    if (!settings) {
+      return;
+    }
     setSavingSystem(true);
     setError(null);
     setMessage(null);
