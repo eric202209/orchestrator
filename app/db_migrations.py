@@ -189,6 +189,12 @@ def _migration_001_runtime_columns(engine: Engine) -> None:
                         "CREATE INDEX ix_sessions_instance_id ON sessions (instance_id)"
                     )
                 )
+            if not _has_index(engine, "sessions", "ix_sessions_deleted_instance"):
+                connection.execute(
+                    text(
+                        "CREATE INDEX ix_sessions_deleted_instance ON sessions (deleted_at, instance_id)"
+                    )
+                )
 
     if "log_entries" in table_names:
         existing_columns = {

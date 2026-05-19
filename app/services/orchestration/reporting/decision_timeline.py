@@ -8,8 +8,9 @@ records.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 import json
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from fastapi import HTTPException
@@ -23,6 +24,7 @@ from app.models import (
     Project,
     Session as SessionModel,
     SessionTask,
+    Task,
     TaskExecution,
     TaskStatus,
 )
@@ -70,20 +72,23 @@ def get_session_decision_timeline_payload(
         raise HTTPException(status_code=404, detail="Session not found")
 
     project = db.query(Project).filter(Project.id == session.project_id).first()
-    task_ids = _discover_session_task_ids(db, session_id)
+    task_ids = _discover_session_task_ids(db, session)
     knowledge_by_task_phase = _load_knowledge_usage_by_task_phase(db, session_id)
     events: List[Dict[str, Any]] = []
 
     if project and project.workspace_path:
-        project_dir = str(
-            resolve_project_workspace_path(project.workspace_path, project.name, db=db)
-        )
+        tasks_by_id = {
+            task.id: task for task in db.query(Task).filter(Task.id.in_(task_ids)).all()
+        }
         for task_id in task_ids:
-            for raw_event in read_orchestration_events(
-                project_dir,
-                session_id,
-                task_id,
-            ):
+            raw_events = _read_task_orchestration_events(
+                db=db,
+                project=project,
+                task=tasks_by_id.get(task_id),
+                session_id=session_id,
+                task_id=task_id,
+            )
+            for raw_event in raw_events:
                 normalized = _normalize_orchestration_event(
                     raw_event,
                     session_id=session_id,
@@ -128,21 +133,64 @@ def get_session_decision_timeline_payload(
     }
 
 
+def _read_task_orchestration_events(
+    *,
+    db: Session,
+    project: Project,
+    task: Optional[Task],
+    session_id: int,
+    task_id: int,
+) -> List[Dict[str, Any]]:
+    for project_dir in event_project_dir_candidates(db=db, project=project, task=task):
+        events = read_orchestration_events(project_dir, session_id, task_id)
+        if events:
+            return events
+    return []
+
+
+def event_project_dir_candidates(
+    *,
+    db: Session,
+    project: Project,
+    task: Optional[Task],
+) -> List[Path]:
+    candidates: List[Path] = []
+
+    def add_candidate(value: Any) -> None:
+        if not value:
+            return
+        candidate = Path(value).expanduser().resolve()
+        if candidate not in candidates:
+            candidates.append(candidate)
+
+    add_candidate(
+        resolve_project_workspace_path(project.workspace_path, project.name, db=db)
+    )
+
+    raw_workspace = str(project.workspace_path or "").strip()
+    if raw_workspace and Path(raw_workspace).is_absolute():
+        add_candidate(raw_workspace)
+
+    task_subfolder = str(getattr(task, "task_subfolder", "") or "").strip()
+    if task_subfolder:
+        for candidate in list(candidates):
+            add_candidate(candidate / task_subfolder)
+
+    return candidates
+
+
 def _bounded_limit(limit: int) -> int:
-    try:
-        parsed = int(limit)
-    except (TypeError, ValueError):
-        parsed = DEFAULT_TIMELINE_LIMIT
+    parsed = limit
     if parsed <= 0:
         return DEFAULT_TIMELINE_LIMIT
     return min(parsed, MAX_TIMELINE_LIMIT)
 
 
-def _discover_session_task_ids(db: Session, session_id: int) -> List[int]:
+def _discover_session_task_ids(db: Session, session: SessionModel) -> List[int]:
     task_ids = [
         row[0]
         for row in db.query(SessionTask.task_id)
-        .filter(SessionTask.session_id == session_id)
+        .filter(SessionTask.session_id == session.id)
         .all()
         if row[0] is not None
     ]
@@ -150,7 +198,12 @@ def _discover_session_task_ids(db: Session, session_id: int) -> List[int]:
         task_ids = [
             row[0]
             for row in db.query(LogEntry.task_id)
-            .filter(LogEntry.session_id == session_id, LogEntry.task_id.isnot(None))
+            .join(Task, Task.id == LogEntry.task_id)
+            .filter(
+                LogEntry.session_id == session.id,
+                LogEntry.task_id.isnot(None),
+                Task.project_id == session.project_id,
+            )
             .distinct()
             .all()
             if row[0] is not None
@@ -1104,9 +1157,9 @@ def _parse_dt(value: Any) -> datetime:
         try:
             parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
         except ValueError:
-            parsed = datetime.min.replace(tzinfo=UTC)
+            parsed = datetime.min.replace(tzinfo=timezone.utc)
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
+        parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
 
 
@@ -1114,12 +1167,12 @@ def _serialize_dt(value: Optional[datetime]) -> str:
     if value is None:
         return _now_iso()
     if value.tzinfo is None:
-        value = value.replace(tzinfo=UTC)
+        value = value.replace(tzinfo=timezone.utc)
     return value.isoformat()
 
 
 def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _coerce_optional_int(value: Any) -> Optional[int]:

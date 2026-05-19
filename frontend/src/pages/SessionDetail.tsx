@@ -87,11 +87,16 @@ interface InterventionToastState {
 type CheckpointActionIntent = 'start' | 'resume';
 
 const MAX_TIMELINE_EVENTS = 150;
+const MAX_LOG_MESSAGE_PARSE_CHARS = 1_000_000;
+const MAX_BUFFERED_LOGS = 300;
 const TERMINAL_SESSION_STATUSES = new Set(['stopped', 'failed', 'cancelled', 'canceled']);
 
 const cleanJsonLogMessage = (message: string): string => {
   const trimmed = message.trim();
   if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) {
+    return message;
+  }
+  if (trimmed.length > MAX_LOG_MESSAGE_PARSE_CHARS) {
     return message;
   }
 
@@ -122,6 +127,23 @@ const cleanJsonLogMessage = (message: string): string => {
       : String(primary);
   } catch {
     return message;
+  }
+};
+
+const safeJsonStringify = (value: unknown): string => {
+  const seen = new WeakSet<object>();
+  try {
+    return JSON.stringify(value ?? {}, (_key, item) => {
+      if (typeof item === 'object' && item !== null) {
+        if (seen.has(item)) {
+          return '[Circular]';
+        }
+        seen.add(item);
+      }
+      return item;
+    });
+  } catch {
+    return '{}';
   }
 };
 
@@ -163,6 +185,7 @@ export default function SessionDetail() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const shouldReconnectRef = useRef(true);
+  const wsConnectingSessionRef = useRef<number | null>(null);
   const diffAvailableRef = useRef<boolean | null>(null); // null=unknown, true=has data, false=no snapshots
   const tasksRef = useRef<Task[]>([]);
   useEffect(() => { tasksRef.current = tasks; }, [tasks]);
@@ -375,7 +398,7 @@ export default function SessionDetail() {
       event.event_type || '',
       event.task_id ?? null,
       event.parent_event_id ?? null,
-      event.details || {},
+      safeJsonStringify(event.details),
     ]);
   }, []);
 
@@ -1288,25 +1311,33 @@ export default function SessionDetail() {
   }, [pushTimelineEvent, sessionId]);
 
   const setupWebSocket = useCallback(async (session_id: number) => {
-    if (wsRef.current) {
+    if (wsRef.current || wsConnectingSessionRef.current !== null) {
       return;
     }
 
+    wsConnectingSessionRef.current = session_id;
     let ws!: WebSocket;
     try {
       ws = await sessionsAPI.getLogsStream(session_id);
     } catch (error) {
+      if (wsConnectingSessionRef.current === session_id) {
+        wsConnectingSessionRef.current = null;
+      }
       console.error('Failed to obtain WebSocket ticket:', error);
       setWsConnected(false);
       return;
     }
 
     // Guard against concurrent calls resolving after this one
-    if (wsRef.current) {
+    if (wsRef.current || wsConnectingSessionRef.current !== session_id) {
+      if (wsConnectingSessionRef.current === session_id) {
+        wsConnectingSessionRef.current = null;
+      }
       ws.close();
       return;
     }
 
+    wsConnectingSessionRef.current = null;
     wsRef.current = ws;
     console.log('Attempting WebSocket connection:', ws.url);
 
@@ -1345,7 +1376,7 @@ export default function SessionDetail() {
             console.log('✅ Received log message:', data.message);
             setAllLogs(prev => {
               const next = [
-                ...prev.slice(-499),
+                ...prev.slice(-(MAX_BUFFERED_LOGS - 1)),
                 {
                   message: logVerbosity === 'clean' ? cleanJsonLogMessage(data.message) : data.message,
                   timestamp: formatLogTimestamp(data.timestamp),
@@ -1406,12 +1437,14 @@ export default function SessionDetail() {
         if (!shouldReconnectRef.current) {
           console.log('WebSocket closed');
           setWsConnected(false);
+          wsConnectingSessionRef.current = null;
           wsRef.current = null;
           return;
         }
 
         console.log('WebSocket closed, reconnecting...');
         setWsConnected(false);
+        wsConnectingSessionRef.current = null;
         wsRef.current = null;
         reconnectTimeoutRef.current = setTimeout(() => {
           setupWebSocket(session_id);
@@ -1428,7 +1461,7 @@ export default function SessionDetail() {
         reconnectTimeoutRef.current = null;
       }
 
-      if (wsRef.current) {
+      if (wsRef.current || wsConnectingSessionRef.current !== null) {
         return;
       }
 
@@ -1572,7 +1605,7 @@ export default function SessionDetail() {
         if (abortController.signal.aborted) return;
         const loadedLogs = visibleLogs((response.data?.logs || []) as SessionLogItem[]);
         console.log(`Loaded ${loadedLogs.length} visible logs for session ${sessionId}`);
-        const terminalLogs = loadedLogs.map(toTerminalLogEntry);
+        const terminalLogs = loadedLogs.map(toTerminalLogEntry).slice(-MAX_BUFFERED_LOGS);
         setAllLogs(terminalLogs);
         applyLogView(terminalLogs, logViewMode);
       } catch (err) {
@@ -1582,9 +1615,13 @@ export default function SessionDetail() {
     };
 
     // Load session data and logs
-    loadSessionData().then(() => {
-      loadLogs();
-    });
+    void (async () => {
+      await loadSessionData();
+      if (abortController.signal.aborted) return;
+      await loadLogs();
+    })();
+
+    let lastTimelineRefreshAt = 0;
 
     // Poll for status updates every 5 seconds
     const statusPollInterval = setInterval(async () => {
@@ -1604,6 +1641,12 @@ export default function SessionDetail() {
           setTasks(currentTasks.data || []);
           if (currentStatus === 'running') {
             await loadStateDiff(Number(sessionId), currentTasks.data || []);
+            const now = Date.now();
+            if (now - lastTimelineRefreshAt > 30_000) {
+              lastTimelineRefreshAt = now;
+              await loadTimelineEvents(Number(sessionId), currentTasks.data || []);
+              await loadDecisionTimeline(Number(sessionId));
+            }
           }
           await loadReplayInvestigation(Number(sessionId));
         }
@@ -1781,7 +1824,7 @@ export default function SessionDetail() {
     try {
       const response = await sessionsAPI.getLogs(Number(sessionId));
       const logs = visibleLogs((response.data?.logs || []) as SessionLogItem[]);
-      const terminalLogs = logs.map(toTerminalLogEntry);
+      const terminalLogs = logs.map(toTerminalLogEntry).slice(-MAX_BUFFERED_LOGS);
       setAllLogs(terminalLogs);
       applyLogView(terminalLogs, logViewMode);
       console.log(`Refreshed ${terminalLogs.length} logs`);

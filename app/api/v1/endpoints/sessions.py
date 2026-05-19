@@ -16,8 +16,8 @@ from typing import List, Optional, Any, Dict
 from datetime import datetime, timezone
 import json
 import logging
+import re
 import uuid
-
 from app.database import get_db
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,7 @@ from app.models import (
     Session as SessionModel,
     SessionTask,
     Task,
+    TaskCheckpoint,
     TaskExecution,
     TaskStatus,
 )
@@ -94,6 +95,7 @@ from app.services.name_formatter import humanize_display_name
 from app.services.auth_rate_limit import enforce_api_rate_limit
 from app.services.orchestration.reporting.decision_timeline import (
     DEFAULT_TIMELINE_LIMIT,
+    event_project_dir_candidates,
     get_session_decision_timeline_payload,
 )
 from app.services.orchestration.reporting.replay import reconstruct_execution_state
@@ -442,16 +444,11 @@ def delete_session(
     current_user=Depends(get_current_active_user),
 ):
     """Delete a session"""
-    import json
-    from app.models import Session as SessionModel, LogEntry, TaskCheckpoint
     from app.services.workspace.checkpoint_service import CheckpointService
 
-    logger.info(f"DELETE /sessions/{session_id} - Starting deletion")
+    logger.info("DELETE /sessions/%s - Starting deletion", session_id)
 
     db_session = _require_session_access(db, session_id, current_user)
-    if not db_session:
-        logger.warning(f"DELETE /sessions/{session_id} - Session not found")
-        raise HTTPException(status_code=404, detail="Session not found")
 
     deleted_at = datetime.now(timezone.utc)
     db_session.deleted_at = deleted_at
@@ -477,7 +474,7 @@ def delete_session(
     deleted_logs = db.query(LogEntry).filter(LogEntry.session_id == session_id).delete()
 
     db.commit()
-    logger.info(f"Deleted {deleted_logs} logs for session {session_id}")
+    logger.info("Deleted %s logs for session %s", deleted_logs, session_id)
     logger.info(
         "Deleted session %s artifacts: checkpoints=%s session_tasks=%s task_checkpoints=%s orphan_cleanup=%s",
         session_id,
@@ -491,7 +488,7 @@ def delete_session(
     # db.delete(db_session)
     # db.commit()
 
-    logger.info(f"DELETE /sessions/{session_id} - Session deleted successfully")
+    logger.info("DELETE /sessions/%s - Session deleted successfully", session_id)
     return None
 
 
@@ -692,12 +689,12 @@ async def resume_session(
 
 
 class RequestInterventionBody(BaseModel):
-    intervention_type: str
-    prompt: str
+    intervention_type: str = Field(min_length=1, max_length=64)
+    prompt: str = Field(min_length=1, max_length=4000)
     task_id: Optional[int] = None
     context_snapshot: Optional[Dict[str, Any]] = None
-    expires_in_minutes: int = 120
-    initiated_by: str = "human"
+    expires_in_minutes: int = Field(default=120, ge=1, le=10080)
+    initiated_by: str = Field(default="human", min_length=1, max_length=64)
 
 
 class InterventionReplyBody(BaseModel):
@@ -1068,18 +1065,43 @@ def get_session_task_events(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    from app.services.orchestration import read_orchestration_events
-
-    project_dir = str(
-        resolve_project_workspace_path(project.workspace_path, project.name, db=db)
-    )
-    events = read_orchestration_events(
-        project_dir,
-        session_id,
-        task_id,
+    task = db.query(Task).filter(Task.id == task_id).first()
+    events = _read_task_events_from_candidates(
+        db=db,
+        project=project,
+        task=task,
+        session_id=session_id,
+        task_id=task_id,
         event_type_filter=event_type,
     )
     return {"session_id": session_id, "task_id": task_id, "events": events}
+
+
+def _read_task_events_from_candidates(
+    *,
+    db: Session,
+    project: Project,
+    task: Optional[Task],
+    session_id: int,
+    task_id: int,
+    event_type_filter: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    from app.services.orchestration import read_orchestration_events
+
+    for project_dir in event_project_dir_candidates(
+        db=db,
+        project=project,
+        task=task,
+    ):
+        events = read_orchestration_events(
+            project_dir,
+            session_id,
+            task_id,
+            event_type_filter=event_type_filter,
+        )
+        if events:
+            return events
+    return []
 
 
 @router.get("/sessions/{session_id}/decision-timeline")
@@ -1484,10 +1506,7 @@ Return ONLY a JSON array of step objects with 'title' and 'description' fields. 
         task_name=task_name, description=description
     )
 
-    # Use a simple heuristic-based step generator as fallback
-    # This creates basic steps based on common patterns
-    import re
-
+    # Use a simple heuristic-based step generator as fallback.
     # Common patterns for different task types
     patterns = {
         "authentication|login|register": [
