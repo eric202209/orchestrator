@@ -23,6 +23,7 @@ ProductRunState = Literal[
 
 _RUNNING_STATUSES = {"pending", "running", "active", "awaiting_input"}
 _FAILED_STATUSES = {"failed", "cancelled", "stopped"}
+_COMPLETED_STATUSES = {"done", "completed", "complete", "success"}
 _ACCEPTED_DISPOSITIONS = {"accepted", "promoted"}
 _REJECTED_DISPOSITIONS = {"rejected", "changes_requested"}
 
@@ -72,6 +73,11 @@ def derive_product_run_state(
         return "rollback_available"
     if normalized_task in _FAILED_STATUSES or normalized_session in _FAILED_STATUSES:
         return "failed"
+    if (
+        normalized_task in _COMPLETED_STATUSES
+        or normalized_session in _COMPLETED_STATUSES
+    ):
+        return "accepted"
 
     return "running"
 

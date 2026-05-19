@@ -12,7 +12,14 @@ from typing import Any, Dict, List, Optional
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.models import LogEntry, Session as SessionModel, SessionTask, Task, TaskStatus
+from app.models import (
+    LogEntry,
+    Project,
+    Session as SessionModel,
+    SessionTask,
+    Task,
+    TaskStatus,
+)
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.state.persistence import append_orchestration_event
 from app.services.orchestration.task_rules import (
@@ -24,6 +31,7 @@ from app.services.orchestration.run_state import (
 )
 from app.services.orchestration.state.session_state import (
     clear_session_alert,
+    mark_session_completed,
     mark_session_paused,
     mark_session_running,
     mark_session_stopped,
@@ -39,6 +47,11 @@ from app.services.workspace.system_settings import (
     get_effective_agent_model_family,
 )
 from app.services.task_execution_service import create_task_execution
+from app.services.session.context_compaction import (
+    compact_checkpoint_payload,
+    estimate_tokens,
+    needs_compaction,
+)
 
 DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS = 1800
 MAX_AUTOMATIC_TASK_RECOVERY_ATTEMPTS = 1
@@ -253,6 +266,103 @@ def ensure_task_workspace(
     }
 
 
+def resolve_event_log_project_dir(
+    db: Session,
+    session: SessionModel,
+    task_id: Optional[int] = None,
+) -> Optional[Path]:
+    """Resolve the project_dir required by read_orchestration_events()."""
+    project = (
+        db.query(Project)
+        .filter(Project.id == session.project_id, Project.deleted_at.is_(None))
+        .first()
+    )
+    if not project:
+        return None
+
+    project_workspace = Path(
+        resolve_project_workspace_path(project.workspace_path, project.name)
+    )
+    if task_id:
+        task = (
+            db.query(Task)
+            .filter(Task.id == task_id, Task.project_id == session.project_id)
+            .first()
+        )
+        runs_in_canonical_workspace = task and should_execute_in_canonical_project_root(
+            task,
+            getattr(task, "execution_profile", None),
+            task.title,
+            task.description,
+        )
+        if task and task.task_subfolder and not runs_in_canonical_workspace:
+            return _resolve_task_workspace_path(
+                project_workspace,
+                task.task_subfolder,
+            )
+
+    return project_workspace
+
+
+def _maybe_compact_checkpoint_before_dispatch(
+    db: Session,
+    session: SessionModel,
+    task: Task,
+    event_project_dir: Path,
+) -> None:
+    """Best-effort low-resource checkpoint compaction; never blocks dispatch."""
+    if settings.RUNTIME_PROFILE != "low_resource":
+        return
+
+    try:
+        from app.services.workspace.checkpoint_service import CheckpointService
+
+        checkpoint_service = CheckpointService(db)
+        latest_checkpoint = checkpoint_service.get_latest_checkpoint(
+            session.id, task.id
+        )
+        if not latest_checkpoint:
+            return
+
+        orchestration_state = latest_checkpoint.get("orchestration_state") or {}
+        if needs_compaction(latest_checkpoint, settings.OLLAMA_NUM_CTX):
+            tokens_before = estimate_tokens(latest_checkpoint)
+            compacted = compact_checkpoint_payload(
+                latest_checkpoint,
+                max_plan_steps=settings.MAX_PLAN_STEPS,
+            )
+            checkpoint_service.save_compact_checkpoint(session.id, task.id, compacted)
+            append_orchestration_event(
+                project_dir=event_project_dir,
+                session_id=session.id,
+                task_id=task.id,
+                event_type=EventType.CONTEXT_COMPACTED,
+                details={
+                    "tokens_before": tokens_before,
+                    "tokens_after": estimate_tokens(compacted),
+                    "plan_truncated": (compacted.get("orchestration_state") or {}).get(
+                        "plan_truncated", False
+                    ),
+                },
+            )
+            return
+
+        plan = orchestration_state.get("plan") or []
+        if len(plan) > settings.MAX_PLAN_STEPS:
+            append_orchestration_event(
+                project_dir=event_project_dir,
+                session_id=session.id,
+                task_id=task.id,
+                event_type=EventType.PLAN_TRUNCATED,
+                details={
+                    "original_step_count": len(plan),
+                    "truncated_to": settings.MAX_PLAN_STEPS,
+                },
+            )
+    except Exception:
+        return
+
+
 def get_session_celery_task_ids(db: Session, session_id: int) -> List[str]:
     """Collect queued/running Celery task ids recorded for a session."""
     task_ids: List[str] = []
@@ -430,8 +540,8 @@ def queue_task_for_session(
     clear_session_alert(session)
 
     event_project_dir = Path(task_workspace["workspace_path"])
-    if task_workspace.get("task_subfolder"):
-        event_project_dir = event_project_dir / str(task_workspace["task_subfolder"])
+
+    _maybe_compact_checkpoint_before_dispatch(db, session, task, event_project_dir)
 
     # Write TASK_QUEUED to disk before dispatching so the worker's stale-dispatch
     # check always finds this fresh event instead of a stale one from a prior run.
@@ -709,7 +819,7 @@ def maybe_queue_next_automatic_task(
                     )[:2000],
                 )
         else:
-            mark_session_stopped(session)
+            mark_session_completed(session, completed_at=datetime.now(timezone.utc))
         db.commit()
         return None
 

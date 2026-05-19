@@ -1120,11 +1120,8 @@ class ValidatorService:
             for marker in (
                 "f'",
                 'f"',
-                'print("',
-                "print('",
                 "json.dumps(",
                 "assert ",
-                ";",
                 "{",
                 "}",
             )
@@ -2077,6 +2074,44 @@ class ValidatorService:
                 details["verification_profile_created_source_assets"] = (
                     created_source_assets[:20]
                 )
+
+        if len(plan) > 1 and not schema_validation.get("errors"):
+            _first = plan[0]
+            _first_ops = _first.get("ops") or []
+            _first_cmds = _first.get("commands") or []
+            _has_first_write = any(
+                (op.get("op") or "")
+                in ("write_file", "create_file", "append_file", "mkdir")
+                for op in _first_ops
+            )
+            if not _has_first_write and _first_cmds:
+                _existence_re = re.compile(r"test\s+-[fds]\s+(\S+)")
+                _checked = {
+                    Path(m.group(1)).name
+                    for cmd in _first_cmds
+                    for m in _existence_re.finditer(cmd)
+                }
+                if _checked:
+                    for _j in range(1, len(plan)):
+                        _later_ops = plan[_j].get("ops") or []
+                        _created = {
+                            Path(op.get("path") or "").name
+                            for op in _later_ops
+                            if (op.get("op") or "") in ("write_file", "create_file")
+                        }
+                        if _created & _checked:
+                            plan[0], plan[_j] = plan[_j], plan[0]
+                            for _k, _s in enumerate(plan):
+                                _s["step_number"] = _k + 1
+                            warnings.append(
+                                f"Plan step order corrected: moved file creation "
+                                f"before existence check for "
+                                f"{sorted(_created & _checked)}"
+                            )
+                            details["step_order_corrected"] = sorted(
+                                _created & _checked
+                            )
+                            break
 
         if cls._plan_contains_stack_conflict(plan, task_prompt):
             repairable.append(

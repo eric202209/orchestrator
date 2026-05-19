@@ -44,6 +44,12 @@ def test_product_run_state_surfaces_rollback_availability_before_failure():
     assert state == "rollback_available"
 
 
+def test_product_run_state_maps_completed_session_to_accepted():
+    state = derive_product_run_state(session_status="completed")
+
+    assert state == "accepted"
+
+
 def test_product_run_view_flattens_internal_change_set_language():
     view = ProductRunView.from_internal(
         project_id=7,

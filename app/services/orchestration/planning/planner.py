@@ -27,6 +27,8 @@ from ..policy import (
 )
 from app.config import settings
 from app.services.orchestration.operations.file_ops_contract import (
+    REPLACE_IN_FILE_NEW_ALIASES,
+    REPLACE_IN_FILE_OLD_ALIASES,
     operation_has_file_op_path,
 )
 from app.services.orchestration.planning.prompt_contracts import (
@@ -396,6 +398,7 @@ class PlannerService:
             "temperature": 0.0,
             "max_tokens": 2048,
             "stream": False,
+            "think": False,
             "enable_thinking": False,
             "chat_template_kwargs": {"enable_thinking": False},
         }
@@ -875,8 +878,17 @@ class PlannerService:
         if not path:
             return None
         operation: Dict[str, Any] = {"op": op_name, "path": path}
-        if op_name != "mkdir":
-            for key in ("content", "old", "new", "regex"):
+        if op_name == "replace_in_file":
+            for key in (
+                "old",
+                "new",
+                *REPLACE_IN_FILE_OLD_ALIASES,
+                *REPLACE_IN_FILE_NEW_ALIASES,
+            ):
+                if key in source:
+                    operation[key] = source[key]
+        elif op_name != "mkdir":
+            for key in ("content", "regex"):
                 if key in source:
                     operation[key] = source[key]
         return operation
@@ -1604,6 +1616,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
             "stream": False,
         }
         if settings.PLANNING_REPAIR_DISABLE_THINKING:
+            payload["think"] = False
             payload["enable_thinking"] = False
             payload["chat_template_kwargs"] = {"enable_thinking": False}
 

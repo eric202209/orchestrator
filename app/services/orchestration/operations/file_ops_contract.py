@@ -13,8 +13,21 @@ FILE_OP_FIELD_SETS: Mapping[str, Set[str]] = {
 }
 SUPPORTED_FILE_OPS = frozenset(FILE_OP_FIELD_SETS)
 CONTENT_FILE_OPS = frozenset({"write_file", "append_file"})
-REPLACE_IN_FILE_OLD_ALIASES = ("search", "match", "pattern", "old_string", "old_str")
-REPLACE_IN_FILE_NEW_ALIASES = ("replace", "replacement", "new_string", "new_str")
+REPLACE_IN_FILE_OLD_ALIASES = (
+    "search",
+    "match",
+    "pattern",
+    "target",
+    "old_string",
+    "old_str",
+)
+REPLACE_IN_FILE_NEW_ALIASES = (
+    "replace",
+    "replacement",
+    "content",
+    "new_string",
+    "new_str",
+)
 
 
 def is_supported_file_op_name(op_name: Any) -> bool:

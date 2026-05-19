@@ -10,7 +10,8 @@ from app.services.orchestration.operations.file_ops_contract import (
 def render_ops_first_contract() -> str:
     return (
         "Use `ops` for file writes; put source in write_file/append_file/replace_in_file, not shell. "
-        f"Supported ops: {render_supported_file_ops()}."
+        f"Supported ops: {render_supported_file_ops()}. "
+        "Shapes: write/append {op,path,content}; replace {op,path,old,new}; mkdir/delete {op,path}."
     )
 
 

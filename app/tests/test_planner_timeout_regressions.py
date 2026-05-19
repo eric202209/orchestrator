@@ -726,6 +726,7 @@ def test_planning_repair_uses_direct_no_thinking_chat_path(monkeypatch):
     assert captured["payload"]["messages"] == [{"role": "user", "content": "repair me"}]
     assert captured["payload"]["enable_thinking"] is False
     assert captured["payload"]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert captured["payload"]["think"] is False
 
 
 def test_planning_repair_falls_back_to_openclaw_when_direct_fails(monkeypatch):
@@ -2237,6 +2238,94 @@ def test_validator_rejects_brittle_python_c_with_nested_quotes(tmp_path):
 
     assert verdict.repairable is True
     assert "brittle" in " ".join(verdict.reasons).lower()
+
+
+def test_validator_allows_python_c_pathlib_content_assertions_from_ops_plan(tmp_path):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create README",
+            "commands": [
+                "python -c \"import pathlib,sys; sys.exit(0 if 'Reliability Smoke 2' in pathlib.Path('README.md').read_text() and 'Ready' in pathlib.Path('README.md').read_text() else 1)\""
+            ],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "README.md",
+                    "content": "# Reliability Smoke 2\n\n## Status\n\nReady\n",
+                }
+            ],
+            "verification": "python -c \"import pathlib,sys; sys.exit(0 if 'Reliability Smoke 2' in pathlib.Path('README.md').read_text() and 'Ready' in pathlib.Path('README.md').read_text() else 1)\"",
+            "rollback": "rm -f README.md",
+            "expected_files": ["README.md"],
+        },
+        {
+            "step_number": 2,
+            "description": "Verify README exists",
+            "commands": ["ls -l README.md"],
+            "verification": "python -c \"import pathlib,sys; sys.exit(0 if pathlib.Path('README.md').exists() else 1)\"",
+            "rollback": None,
+            "expected_files": ["README.md"],
+        },
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Create README",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert "brittle_inline_python" not in verdict.details.get(
+        "brittle_command_subcodes", []
+    )
+    assert "Plan contains brittle heredoc-heavy or malformed commands" not in (
+        verdict.reasons
+    )
+
+
+def test_validator_allows_python_c_print_content_assertions_from_ops_plan(tmp_path):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create README",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "README.md",
+                    "content": "# Reliability Smoke 2\n\n## Status\nReady\n",
+                }
+            ],
+            "verification": "python -c \"import pathlib; print('OK' if 'Reliability Smoke 2' in pathlib.Path('README.md').read_text() and 'Ready' in pathlib.Path('README.md').read_text() else 'FAIL')\"",
+            "rollback": "rm -f README.md",
+            "expected_files": ["README.md"],
+        },
+        {
+            "step_number": 2,
+            "description": "Verify README",
+            "commands": [],
+            "verification": "python -c \"import pathlib; print('OK' if 'Reliability Smoke 2' in pathlib.Path('README.md').read_text() and 'Ready' in pathlib.Path('README.md').read_text() else 'FAIL')\"",
+            "rollback": None,
+            "expected_files": ["README.md"],
+        },
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Create README",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert "brittle_inline_python" not in verdict.details.get(
+        "brittle_command_subcodes", []
+    )
+    assert "Plan contains brittle heredoc-heavy or malformed commands" not in (
+        verdict.reasons
+    )
 
 
 def test_shell_safe_command_guide_rejects_python_heredoc():
