@@ -1039,6 +1039,109 @@ def replan_session(
     return _trigger_replan(db, session_id)
 
 
+def _latest_session_task_link(db: Session, session_id: int) -> Optional[SessionTask]:
+    return (
+        db.query(SessionTask)
+        .filter(SessionTask.session_id == session_id)
+        .order_by(
+            SessionTask.started_at.desc().nullslast(),
+            SessionTask.id.desc(),
+        )
+        .first()
+    )
+
+
+@router.post("/sessions/{session_id}/compact-context")
+async def compact_session_context(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Manually trigger deterministic context compaction for a session."""
+    from app.config import settings
+    from app.services.session.context_compaction import (
+        compact_checkpoint_payload,
+        estimate_tokens,
+    )
+    from app.services.workspace.checkpoint_service import CheckpointService
+
+    _require_session_access(db, session_id, current_user)
+    session_task = _latest_session_task_link(db, session_id)
+    if not session_task:
+        raise HTTPException(status_code=404, detail="No task found for this session")
+
+    checkpoint_service = CheckpointService(db)
+    latest_checkpoint = checkpoint_service.get_latest_checkpoint(
+        session_id, session_task.task_id
+    )
+    if not latest_checkpoint:
+        raise HTTPException(status_code=404, detail="No checkpoint found to compact")
+
+    tokens_before = estimate_tokens(latest_checkpoint)
+    compacted = compact_checkpoint_payload(
+        latest_checkpoint,
+        max_plan_steps=settings.MAX_PLAN_STEPS,
+    )
+    checkpoint_service.save_compact_checkpoint(
+        session_id, session_task.task_id, compacted
+    )
+    tokens_after = estimate_tokens(compacted)
+
+    return {
+        "session_id": session_id,
+        "task_id": session_task.task_id,
+        "tokens_before": tokens_before,
+        "tokens_after": tokens_after,
+        "reduction_pct": round((1 - tokens_after / max(tokens_before, 1)) * 100),
+    }
+
+
+@router.get("/sessions/{session_id}/events")
+def get_session_events(
+    session_id: int,
+    task_id: Optional[int] = None,
+    limit: int = Query(50, ge=1),
+    event_type: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Return the existing orchestration event journal for a session."""
+    from app.services.orchestration.state.persistence import read_orchestration_events
+    from app.services.session.session_runtime_service import (
+        resolve_event_log_project_dir,
+    )
+
+    if event_type and not is_known_event_type(event_type):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown event_type '{event_type}'",
+        )
+
+    session = _require_session_access(db, session_id, current_user)
+    if task_id is None:
+        session_task = _latest_session_task_link(db, session_id)
+        if not session_task:
+            return {"session_id": session_id, "task_id": None, "events": [], "count": 0}
+        task_id = session_task.task_id
+
+    project_dir = resolve_event_log_project_dir(db, session, task_id)
+    if not project_dir:
+        raise HTTPException(status_code=404, detail="Could not resolve workspace path")
+
+    events = read_orchestration_events(
+        project_dir,
+        session_id,
+        task_id,
+        event_type_filter=event_type,
+    )
+    return {
+        "session_id": session_id,
+        "task_id": task_id,
+        "events": events[-limit:],
+        "count": len(events),
+    }
+
+
 @router.get("/sessions/{session_id}/tasks/{task_id}/events")
 def get_session_task_events(
     session_id: int,

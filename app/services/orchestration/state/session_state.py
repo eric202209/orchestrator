@@ -61,5 +61,19 @@ def mark_session_stopped(
         session.stopped_at = stopped_at
 
 
+def mark_session_completed(
+    session: Any | None,
+    *,
+    completed_at: datetime | None = None,
+) -> None:
+    if not session:
+        return
+    session.status = "completed"
+    session.is_active = False
+    if completed_at is not None:
+        session.stopped_at = completed_at
+    set_session_alert(session, None, None)
+
+
 def clear_session_alert(session: Any | None) -> None:
     set_session_alert(session, None, None)

@@ -36,6 +36,10 @@ class EventType:
     PLAN_REVISED = "plan_revised"
     REASONING_ARTIFACT_GENERATED = "reasoning_artifact_generated"
 
+    # Low-resource execution
+    CONTEXT_COMPACTED = "context_compacted"
+    PLAN_TRUNCATED = "plan_truncated"
+
     # ── Human-in-the-loop ─────────────────────────────────────────────────────
     WAITING_FOR_INPUT = "waiting_for_input"
     HUMAN_INTERVENTION_REQUESTED = "human_intervention_requested"

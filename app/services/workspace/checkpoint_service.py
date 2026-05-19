@@ -639,6 +639,42 @@ class CheckpointService:
             self._log_checkpoint(session_id, "ERROR", error_msg)
             raise CheckpointError(error_msg)
 
+    def get_latest_checkpoint(
+        self, session_id: int, task_id: Optional[int] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Return the best available checkpoint, preferring one for task_id."""
+        entries = self._collect_checkpoint_entries(session_id)
+        if not entries:
+            return None
+
+        if task_id is not None:
+            for entry in entries:
+                data = entry.get("data") or {}
+                context = data.get("context") or {}
+                if str(context.get("task_id")) == str(task_id):
+                    return data
+
+        return entries[0].get("data")
+
+    def save_compact_checkpoint(
+        self,
+        session_id: int,
+        task_id: int,
+        payload: Dict[str, Any],
+        checkpoint_name: str = "compact_latest",
+    ) -> Dict[str, Any]:
+        """Persist a compact checkpoint using the existing checkpoint format."""
+        context = dict(payload.get("context") or {})
+        context["task_id"] = context.get("task_id") or task_id
+        return self.save_checkpoint(
+            session_id=session_id,
+            checkpoint_name=checkpoint_name,
+            context_data=context,
+            orchestration_state=payload.get("orchestration_state") or {},
+            current_step_index=payload.get("current_step_index"),
+            step_results=payload.get("step_results") or [],
+        )
+
     def load_resume_checkpoint(
         self, session_id: int, checkpoint_name: Optional[str] = None
     ) -> Dict[str, Any]:

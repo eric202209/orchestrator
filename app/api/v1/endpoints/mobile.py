@@ -682,6 +682,75 @@ def get_mobile_session_knowledge_usage(
     return get_session_knowledge_usage_payload(db, session_id)
 
 
+@router.get("/mobile/sessions/{session_id}/events")
+def mobile_session_events(
+    session_id: int,
+    request: Request,
+    limit: int = Query(default=20, ge=1),
+    db: Session = Depends(get_db),
+):
+    """Return a compact orchestration event timeline for mobile."""
+    from app.services.orchestration.state.persistence import read_orchestration_events
+    from app.services.session.session_runtime_service import (
+        resolve_event_log_project_dir,
+    )
+
+    _log_mobile_request(request, "session_events", session_id=session_id)
+    session = (
+        db.query(SessionModel)
+        .filter(SessionModel.id == session_id, SessionModel.deleted_at.is_(None))
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    session_task = (
+        db.query(SessionTask)
+        .filter(SessionTask.session_id == session_id)
+        .order_by(
+            SessionTask.started_at.desc().nullslast(),
+            SessionTask.id.desc(),
+        )
+        .first()
+    )
+    if not session_task:
+        return {"session_id": session_id, "events": [], "health_score": None}
+
+    project_dir = resolve_event_log_project_dir(db, session, session_task.task_id)
+    if not project_dir:
+        return {"session_id": session_id, "events": [], "health_score": None}
+
+    events = read_orchestration_events(project_dir, session_id, session_task.task_id)
+    health_score = None
+    for event in reversed(events):
+        if event.get("event_type") == "health_score_updated":
+            health_score = (event.get("details") or {}).get("score")
+            break
+
+    bad_types = {
+        "task_failed",
+        "repair_rejected",
+        "workspace_contract_failed",
+        "completion_evidence_failed",
+        "task_dispatch_rejected",
+    }
+    return {
+        "session_id": session_id,
+        "task_id": session_task.task_id,
+        "health_score": health_score,
+        "events": [
+            {
+                "type": event.get("event_type"),
+                "task_id": event.get("task_id"),
+                "ts": event.get("timestamp"),
+                "ok": event.get("event_type") not in bad_types,
+                "event_id": event.get("event_id"),
+            }
+            for event in events[-limit:]
+        ],
+    }
+
+
 @router.get("/mobile/sessions/{session_id}/checkpoints")
 async def list_mobile_session_checkpoints(
     session_id: int, request: Request, db: Session = Depends(get_db)
