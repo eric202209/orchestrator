@@ -29,6 +29,7 @@ def health_payload() -> tuple[dict, int]:
     details = {
         "version": settings.VERSION,
         "openclaw_gateway_url": settings.OPENCLAW_GATEWAY_URL,
+        "runtime_profile": settings.RUNTIME_PROFILE,
     }
     overall_status = "healthy"
 

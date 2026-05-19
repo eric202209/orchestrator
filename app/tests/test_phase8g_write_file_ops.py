@@ -398,6 +398,19 @@ def test_phase8m_replace_in_file_aliases_normalize_to_contract():
         {
             "op": "replace_in_file",
             "path": "README.md",
+            "target": "draft",
+            "content": "ready",
+        }
+    ) == {
+        "op": "replace_in_file",
+        "path": "README.md",
+        "old": "draft",
+        "new": "ready",
+    }
+    assert normalize_replace_in_file_aliases(
+        {
+            "op": "replace_in_file",
+            "path": "README.md",
             "search": "draft",
             "replace": "ready",
             "comment": "model metadata",
@@ -596,6 +609,30 @@ def test_phase8m_normalize_step_accepts_replace_aliases_and_strips_metadata(tmp_
 
     assert normalized["ops"] == [
         {"op": "replace_in_file", "path": "README.md", "old": "draft", "new": "ready"}
+    ]
+
+
+def test_phase8m_plan_sanitizer_preserves_replace_target_content_aliases(tmp_path):
+    step = _ops_only_step()
+    step["ops"] = [
+        {
+            "op": "replace_in_file",
+            "path": "./README.md",
+            "target": "This project verifies smoke testing.",
+            "content": "This project verifies smoke testing.\n\n## Status\n- [Ready]",
+        },
+    ]
+
+    sanitized = PlannerService.sanitize_common_plan_issues([step])
+    normalized = normalize_step(sanitized[0], tmp_path, None, 1)
+
+    assert normalized["ops"] == [
+        {
+            "op": "replace_in_file",
+            "path": "README.md",
+            "old": "This project verifies smoke testing.",
+            "new": "This project verifies smoke testing.\n\n## Status\n- [Ready]",
+        }
     ]
 
 

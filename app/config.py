@@ -68,9 +68,11 @@ class Settings(BaseSettings):
     def CORS_ORIGINS(self) -> List[str]:
         return [
             "http://localhost:3000",
+            "http://localhost:5173",
             "http://localhost:8080",
             "http://localhost:8000",  # Keep for OpenClaw dashboard
             "http://127.0.0.1:3000",
+            "http://127.0.0.1:5173",
             "http://127.0.0.1:8080",
             "http://127.0.0.1:8000",
             "http://172.17.0.2:3000",  # Container IP for frontend
@@ -204,6 +206,36 @@ class Settings(BaseSettings):
     # Tokens passed as num_ctx to Ollama. Override per deployment when the model
     # and hardware can support a larger context.
     OLLAMA_NUM_CTX: int = 4096
+
+    # Execution profile: "standard" or "low_resource".
+    # Set low_resource for Windows / 16GB RAM / RTX 4050 / Qwen3-8B deployments.
+    RUNTIME_PROFILE: str = "standard"
+    MAX_PLAN_STEPS: int = 10
+
+    @field_validator("RUNTIME_PROFILE")
+    @classmethod
+    def validate_runtime_profile(cls, value: str) -> str:
+        profile = str(value or "standard").strip()
+        if profile not in {"standard", "low_resource"}:
+            raise ValueError("RUNTIME_PROFILE must be 'standard' or 'low_resource'")
+        return profile
+
+    @model_validator(mode="after")
+    def apply_low_resource_profile(self) -> "Settings":
+        if self.RUNTIME_PROFILE != "low_resource":
+            return self
+        if self.PLANNING_REPAIR_TIMEOUT_SECONDS > 45:
+            self.PLANNING_REPAIR_TIMEOUT_SECONDS = 45
+        if self.PLANNING_SYNTHESIS_TIMEOUT_SECONDS > 90:
+            self.PLANNING_SYNTHESIS_TIMEOUT_SECONDS = 90
+        if self.REPLAN_SYNTHESIS_TIMEOUT_SECONDS > 30:
+            self.REPLAN_SYNTHESIS_TIMEOUT_SECONDS = 30
+        if self.KNOWLEDGE_MAX_ITEMS > 1:
+            self.KNOWLEDGE_MAX_ITEMS = 1
+        if self.KNOWLEDGE_MAX_TOTAL_CHARS > 800:
+            self.KNOWLEDGE_MAX_TOTAL_CHARS = 800
+        self.MAX_PLAN_STEPS = 3
+        return self
 
 
 settings = Settings()

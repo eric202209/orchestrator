@@ -51,8 +51,13 @@ Start-Process powershell -ArgumentList "-NoExit", "-Command", `
 Start-Sleep -Seconds 5
 
 Write-Host "Starting frontend..." -ForegroundColor Green
-Start-Process powershell -ArgumentList "-NoExit", "-Command", `
-  "cd '$PWD\frontend'; `$env:VITE_API_URL='http://localhost:8080/api/v1'; pnpm dev"
+$frontendRunning = (Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue) -ne $null
+if ($frontendRunning) {
+  Write-Host "  Frontend already running on port 3000, skipping launch." -ForegroundColor Yellow
+} else {
+  Start-Process powershell -ArgumentList "-NoExit", "-Command", `
+    "cd '$PWD\frontend'; `$env:VITE_API_URL='http://localhost:8080/api/v1'; pnpm dev"
+}
 
 Write-Host ""
 Write-Host "Services starting up:" -ForegroundColor Cyan

@@ -58,6 +58,7 @@ from app.services.orchestration.run_state import (
 )
 from app.services.orchestration.state.session_state import (
     clear_session_alert,
+    mark_session_completed,
     mark_session_paused,
     mark_session_running,
     mark_session_stopped,
@@ -1856,7 +1857,7 @@ def finalize_successful_task(
                     )[:2000],
                 )
         else:
-            mark_session_stopped(session)
+            mark_session_completed(session, completed_at=datetime.now(UTC))
 
     db.commit()
     write_project_state_snapshot_fn(db, project, task, session_id)

@@ -20,6 +20,7 @@ from .persistence import (
 )
 from .session_state import (
     clear_session_alert,
+    mark_session_completed,
     mark_session_paused,
     mark_session_running,
     mark_session_stopped,
@@ -33,6 +34,7 @@ __all__ = [
     "diff_orchestration_state_snapshots",
     "emit_intent_outcome_mismatch",
     "find_latest_orchestration_event",
+    "mark_session_completed",
     "mark_session_paused",
     "mark_session_running",
     "mark_session_stopped",

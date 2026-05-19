@@ -586,6 +586,45 @@ def test_maybe_queue_next_automatic_task_ignores_pending_links(db_session, monke
     assert queued == [next_task.id]
 
 
+def test_maybe_queue_next_automatic_task_completes_session_when_no_work_remains(
+    db_session,
+):
+    project = _make_project(db_session)
+    session = _make_session(
+        db_session,
+        project,
+        status="running",
+        is_active=True,
+        execution_mode="automatic",
+    )
+    done_task = Task(
+        project_id=project.id,
+        title="Done ordered task",
+        status=TaskStatus.DONE,
+        plan_position=1,
+    )
+    db_session.add(done_task)
+    db_session.flush()
+    db_session.add(
+        SessionTask(
+            session_id=session.id,
+            task_id=done_task.id,
+            status=TaskStatus.DONE,
+        )
+    )
+    db_session.commit()
+
+    result = session_runtime_service.maybe_queue_next_automatic_task(
+        db_session,
+        session,
+    )
+
+    db_session.refresh(session)
+    assert result is None
+    assert session.status == "completed"
+    assert session.is_active is False
+
+
 def test_start_already_paused_session_returns_409(db_session):
     project = _make_project(db_session)
     session = _make_session(db_session, project, status="paused", is_active=True)
