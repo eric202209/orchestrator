@@ -71,6 +71,14 @@ This starts only the Qdrant container (`docker-compose.yml` is qdrant-only on Li
 
 Open the dashboard, go to the register page, and create your account.
 
+### Workspace paths
+
+The Settings `workspace_root` value must be the path visible to the running
+backend process.
+
+- Linux native: use the real Linux projects path, for example
+  `/home/yourname/projects`.
+
 ### Model selection
 
 ```text
@@ -317,24 +325,22 @@ WORKSPACE_REVIEW_POLICY=hold_nontrivial
 
 **5. Build and start**
 
-By default, project workspaces are mounted from `.\projects` into
-`/app/projects`. To use another Windows folder, set `WINDOWS_PROJECTS_DIR`
-before starting Compose:
-
-```powershell
-$env:WINDOWS_PROJECTS_DIR = "C:\Users\YourName\Documents\Projects"
-```
+First build takes a few minutes (installs Python deps inside the image).
 
 ```powershell
 docker compose -f docker-compose.windows.yml up --build
 ```
 
-First build takes a few minutes (installs Python deps inside the image).
-
 After registration, open Settings and set `workspace_root` to `/app/projects`.
-Do not use the OpenClaw default vault path in `direct_ollama` mode; the backend
-will reject that combination because it points work outside the Docker bind
-mount.
+That value is the container path visible to the backend. The Windows host path
+is configured by `WINDOWS_PROJECTS_DIR`; do not enter `C:\...` paths in Settings.
+
+To use another Windows folder, set `WINDOWS_PROJECTS_DIR` in
+`.env` before starting Compose:
+
+```ini
+WINDOWS_PROJECTS_DIR=C:\Users\YourName\Documents\Projects
+```
 
 In the same Settings page, configure the model used by `direct_ollama`:
 

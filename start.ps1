@@ -1,18 +1,52 @@
+param(
+  [switch]$Build,
+  [switch]$ForceRecreate
+)
+
 # start.ps1
 
-$requiredDirs = @("checkpoints", "logs", "knowledge", "projects", "data")
+$requiredDirs = @("checkpoints", "logs", "knowledge", "data")
 foreach ($dir in $requiredDirs) {
   New-Item -ItemType Directory -Force -Path (Join-Path $PWD $dir) | Out-Null
 }
-New-Item -ItemType File -Force -Path (Join-Path $PWD "orchestrator.db") | Out-Null
 
-if (-not $env:WINDOWS_PROJECTS_DIR) {
-  $env:WINDOWS_PROJECTS_DIR = Join-Path $PWD "projects"
+$dbPath = Join-Path $PWD "orchestrator.db"
+if (-not (Test-Path -LiteralPath $dbPath)) {
+  New-Item -ItemType File -Path $dbPath | Out-Null
 }
 
+if (-not $env:WINDOWS_PROJECTS_DIR) {
+  $envPath = Join-Path $PWD ".env"
+  $envWorkspaceDir = $null
+  if (Test-Path -LiteralPath $envPath) {
+    $envWorkspaceDir = Get-Content -LiteralPath $envPath |
+      Where-Object { $_ -match '^\s*WINDOWS_PROJECTS_DIR\s*=' } |
+      Select-Object -Last 1
+    if ($envWorkspaceDir) {
+      $envWorkspaceDir = ($envWorkspaceDir -replace '^\s*WINDOWS_PROJECTS_DIR\s*=\s*', '').Trim().Trim('"').Trim("'")
+    }
+  }
+  $defaultProjectsDir = Join-Path ([Environment]::GetFolderPath("MyDocuments")) "Projects"
+  $env:WINDOWS_PROJECTS_DIR = if ($envWorkspaceDir) { $envWorkspaceDir } else { $defaultProjectsDir }
+}
+
+Write-Host "Host projects folder: $env:WINDOWS_PROJECTS_DIR" -ForegroundColor Cyan
+New-Item -ItemType Directory -Force -Path $env:WINDOWS_PROJECTS_DIR | Out-Null
+
+$composeArgs = @("compose", "-f", "docker-compose.windows.yml", "up")
+if ($Build) {
+  $composeArgs += "--build"
+}
+if ($ForceRecreate) {
+  $composeArgs += "--force-recreate"
+}
+
+$composeCommand = "docker " + ($composeArgs -join " ")
+
 Write-Host "Starting Docker backend..." -ForegroundColor Green
+Write-Host "Docker command: $composeCommand" -ForegroundColor DarkGray
 Start-Process powershell -ArgumentList "-NoExit", "-Command", `
-  "cd '$PWD'; docker compose -f docker-compose.windows.yml up"
+  "cd '$PWD'; $composeCommand"
 
 Start-Sleep -Seconds 5
 
