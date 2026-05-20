@@ -488,6 +488,83 @@ def test_change_set_endpoints_show_and_reject_recorded_candidate(
     assert task.workspace_status == "changes_requested"
 
 
+def test_change_set_accept_endpoint_records_operator_acceptance(
+    authenticated_client,
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "change-set-accept-endpoint"
+    project_root.mkdir(parents=True)
+    project = Project(
+        name="change-set-accept-endpoint",
+        workspace_path=str(project_root),
+    )
+    task = Task(
+        project_id=1,
+        title="Accept canonical change set",
+        description="Review candidate",
+        status=TaskStatus.DONE,
+        workspace_status="promoted",
+        task_subfolder=None,
+    )
+    session = SessionModel(project_id=1, name="accept-session")
+    db_session.add(project)
+    db_session.flush()
+    task.project_id = project.id
+    session.project_id = project.id
+    db_session.add_all([task, session])
+    db_session.commit()
+    db_session.refresh(project)
+    db_session.refresh(task)
+    db_session.refresh(session)
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.DONE,
+    )
+    db_session.add(execution)
+    db_session.commit()
+    db_session.refresh(execution)
+
+    task_service = TaskService(db_session)
+    snapshot_key = workspace_snapshot_key(task.id, execution.id)
+    task_service.create_workspace_snapshot(
+        project,
+        project_root,
+        snapshot_key=snapshot_key,
+        preserve_project_root_rules=True,
+    )
+    (project_root / "README.md").write_text("accepted\n", encoding="utf-8")
+    task_service.persist_task_execution_change_set(
+        project,
+        task,
+        session_id=session.id,
+        task_execution_id=execution.id,
+        snapshot_key=snapshot_key,
+        target_dir=project_root,
+    )
+
+    response = authenticated_client.post(
+        f"/api/v1/tasks/{task.id}/change-set/accept",
+        json={"task_execution_id": execution.id, "note": "looks good"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["workspace_status"] == "promoted"
+    assert body["change_set_disposition"]["disposition"] == "promoted"
+    assert body["change_set_disposition"]["disposition_reason"] == "looks good"
+    metadata = body["change_set_disposition"]["disposition_metadata"]
+    assert metadata["action"] == "accept"
+    assert metadata["operator"] == "regression@example.com"
+    assert metadata["task_execution_id"] == execution.id
+    db_session.refresh(task)
+    assert task.workspace_status == "promoted"
+    assert "Accepted task execution" in task.promotion_note
+
+
 def test_change_set_reject_requires_explicit_task_execution_id(
     authenticated_client,
     db_session,

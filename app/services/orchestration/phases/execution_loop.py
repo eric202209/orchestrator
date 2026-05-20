@@ -141,6 +141,8 @@ def _is_simple_verification_command(command: str) -> bool:
     allowed_prefixes = (
         "python -m py_compile ",
         "python3 -m py_compile ",
+        "python -m unittest ",
+        "python3 -m unittest ",
         "npm run build",
         "pytest",
         "python -m pytest",
@@ -283,6 +285,8 @@ def _execute_simple_verification_step(
         and command_is_simple_verification
         and verification_is_simple
     ):
+        command_to_run = command
+    elif command_is_simple_verification and verification_is_simple:
         command_to_run = command
     else:
         return None
