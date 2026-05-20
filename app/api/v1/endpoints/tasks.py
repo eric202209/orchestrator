@@ -84,6 +84,11 @@ class TaskChangeSetRejectRequest(BaseModel):
     note: Optional[str] = None
 
 
+class TaskChangeSetAcceptRequest(BaseModel):
+    task_execution_id: Optional[int] = None
+    note: Optional[str] = None
+
+
 router = APIRouter()
 
 # Constants
@@ -1114,6 +1119,92 @@ def reject_latest_task_change_set(
     except ProjectMutationLockError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return result
+
+
+@router.post("/tasks/{task_id}/change-set/accept")
+def accept_latest_task_change_set(
+    task_id: int,
+    payload: Optional[TaskChangeSetAcceptRequest] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Record operator acceptance for a captured task execution change set."""
+    task = _get_task_for_user(db, task_id, current_user)
+    payload = payload or TaskChangeSetAcceptRequest()
+    task_execution_id = payload.task_execution_id
+    if task_execution_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="task_execution_id is required to accept a change set",
+        )
+
+    _validate_task_execution_for_change_set(
+        db,
+        task=task,
+        task_execution_id=task_execution_id,
+    )
+    task_service = TaskService(db)
+    change_set = task_service.get_task_execution_change_set(
+        task_execution_id=task_execution_id
+    )
+    if not change_set:
+        raise HTTPException(
+            status_code=404,
+            detail="No change set recorded for task_execution_id",
+        )
+    if change_set.get("task_id") not in {None, task_id}:
+        raise HTTPException(
+            status_code=409,
+            detail="Change set belongs to a different task",
+        )
+    disposition = change_set.get("disposition")
+    if disposition and disposition != "captured":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Change set has already been {disposition}",
+        )
+
+    reason = (payload.note or "operator_accepted_change_set").strip()
+    disposition_record = task_service.mark_task_execution_change_set_disposition(
+        task_execution_id=task_execution_id,
+        disposition="promoted",
+        reason=reason,
+        metadata=build_operator_override_metadata(
+            action="accept",
+            reason=reason,
+            task_execution_id=task_execution_id,
+            change_set=change_set,
+            operator=_operator_identifier(current_user),
+        ),
+        commit=False,
+    )
+    if not disposition_record:
+        raise HTTPException(
+            status_code=404,
+            detail="No change set recorded for task_execution_id",
+        )
+
+    task.workspace_status = "promoted"
+    task.promoted_at = task.promoted_at or datetime.now(timezone.utc)
+    existing_note = (getattr(task, "promotion_note", None) or "").strip()
+    accept_note = f"Accepted task execution {task_execution_id}: {reason}"
+    task.promotion_note = (
+        f"{existing_note}\n{accept_note}" if existing_note else accept_note
+    )
+    task.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(task)
+    return {
+        "accepted": True,
+        "reason": reason,
+        "workspace_status": task.workspace_status,
+        "change_set": change_set,
+        "change_set_disposition": (
+            task_service.get_task_execution_change_set(
+                task_execution_id=task_execution_id
+            )
+        ),
+    }
 
 
 @router.get("/projects/{project_id}/workspace-overview")

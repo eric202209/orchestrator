@@ -864,6 +864,154 @@ def test_planning_repair_uses_direct_no_thinking_chat_path(monkeypatch):
     assert captured["payload"]["think"] is False
 
 
+def test_direct_planning_uses_runtime_ollama_model_for_hyphen_alias(monkeypatch):
+    from app.services.orchestration.planning import planner as planner_module
+
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '[{"step_number":1,"description":"ok","commands":[],"verification":null,"rollback":null,"expected_files":[]}]'
+                        }
+                    }
+                ]
+            }
+
+    class Client:
+        def __init__(self, timeout):
+            captured["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json, headers):
+            captured["url"] = url
+            captured["payload"] = json
+            captured["headers"] = headers
+            return Response()
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {
+                "backend": "direct_ollama",
+                "model_family": "qwen3:8b-hybrid",
+            }
+
+    monkeypatch.setattr(planner_module.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(
+        planner_module.settings,
+        "PLANNING_REPAIR_BASE_URL",
+        "http://localhost:11434/v1",
+    )
+    monkeypatch.setattr(
+        planner_module.settings,
+        "PLANNING_REPAIR_MODEL",
+        "qwen3-8b-hybrid",
+    )
+    monkeypatch.setattr(
+        planner_module.settings,
+        "PLANNING_REPAIR_TIMEOUT_SECONDS",
+        45,
+    )
+
+    result = asyncio.run(
+        PlannerService._invoke_direct_no_thinking_planning(
+            Runtime(),
+            "plan me",
+            timeout_budget_seconds=45,
+        )
+    )
+
+    assert result["planning_direct"] is True
+    assert captured["url"] == "http://localhost:11434/v1/chat/completions"
+    assert captured["payload"]["model"] == "qwen3:8b-hybrid"
+
+
+def test_direct_repair_uses_runtime_ollama_model_for_hyphen_alias(monkeypatch):
+    from app.services.orchestration.planning import planner as planner_module
+
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '[{"step_number":1,"description":"ok","commands":[],"verification":null,"rollback":null,"expected_files":[]}]'
+                        }
+                    }
+                ]
+            }
+
+    class Client:
+        def __init__(self, timeout):
+            captured["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers, json):
+            captured["url"] = url
+            captured["payload"] = json
+            captured["headers"] = headers
+            return Response()
+
+    class Runtime:
+        db = object()
+
+        def get_backend_metadata(self):
+            return {
+                "backend": "direct_ollama",
+                "model_family": "qwen3:8b-hybrid",
+            }
+
+    monkeypatch.setattr(planner_module.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(planner_module.settings, "PLANNING_REPAIR_ENABLED", True)
+    monkeypatch.setattr(
+        planner_module.settings,
+        "PLANNING_REPAIR_BASE_URL",
+        "http://localhost:11434/v1",
+    )
+    monkeypatch.setattr(
+        planner_module.settings,
+        "PLANNING_REPAIR_MODEL",
+        "qwen3-8b-hybrid",
+    )
+    monkeypatch.setattr(
+        planner_module.settings,
+        "PLANNING_REPAIR_DISABLE_THINKING",
+        True,
+    )
+
+    result = asyncio.run(
+        PlannerService._invoke_repair_prompt(
+            Runtime(),
+            "repair me",
+            repair_timeout=45,
+        )
+    )
+
+    assert result["backend"] == "direct_chat_completions"
+    assert captured["payload"]["model"] == "qwen3:8b-hybrid"
+
+
 def test_planning_repair_falls_back_to_openclaw_when_direct_fails(monkeypatch):
     from app.services.orchestration.planning import planner as planner_module
 
