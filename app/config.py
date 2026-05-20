@@ -202,13 +202,13 @@ class Settings(BaseSettings):
 
     # Default local Ollama model. Operators can override this with OLLAMA_AGENT_MODEL
     # or from the Settings page when the direct_ollama backend is selected.
-    OLLAMA_AGENT_MODEL: str = "qwen3-8b-hybrid"
+    OLLAMA_AGENT_MODEL: str = "qwen3:8b-hybrid"
     # Tokens passed as num_ctx to Ollama. Override per deployment when the model
     # and hardware can support a larger context.
     OLLAMA_NUM_CTX: int = 4096
 
     # Execution profile: "standard" or "low_resource".
-    # Set low_resource for Windows / 16GB RAM / RTX 4050 / Qwen3-8B deployments.
+    # Set low_resource for Windows / 16GB RAM / RTX 4050 / Qwen3:8B deployments.
     RUNTIME_PROFILE: str = "standard"
     MAX_PLAN_STEPS: int = 10
 

@@ -1549,7 +1549,9 @@ Return only a JSON array matching this shape. No markdown. No prose.
                         source_brain="local",
                         session_prefix="planning-repair",
                         isolate_workspace_context=False,
-                        no_output_timeout_seconds=PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS,
+                        no_output_timeout_seconds=PlannerService._effective_planning_repair_no_output_timeout(
+                            repair_timeout
+                        ),
                     )
                 except Exception as exc:
                     PlannerService._attach_planning_lock_exception_diagnostics(
@@ -1565,6 +1567,27 @@ Return only a JSON array matching this shape. No markdown. No prose.
             repair_prompt,
             timeout_seconds=repair_timeout,
             reuse_task_session=False,
+        )
+
+    @staticmethod
+    def _effective_planning_repair_timeout(timeout_seconds: int) -> float:
+        configured_timeout = float(
+            getattr(settings, "PLANNING_REPAIR_TIMEOUT_SECONDS", 0)
+            or PLANNING_REPAIR_TIMEOUT_SECONDS
+        )
+        return max(
+            0.01,
+            min(
+                float(timeout_seconds or PLANNING_REPAIR_TIMEOUT_SECONDS),
+                configured_timeout,
+                float(PLANNING_REPAIR_TIMEOUT_SECONDS),
+            ),
+        )
+
+    @staticmethod
+    def _effective_planning_repair_no_output_timeout(repair_timeout: int) -> int:
+        return max(
+            1, min(int(repair_timeout), PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS)
         )
 
     @staticmethod
@@ -1996,7 +2019,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
             "[ORCHESTRATION] Planning output was malformed but salvageable; "
             f"attempting repair ({reason})"
         )
-        repair_timeout = min(timeout_seconds, PLANNING_REPAIR_TIMEOUT_SECONDS)
+        repair_timeout = cls._effective_planning_repair_timeout(timeout_seconds)
         if _compact_no_output_retry:
             repair_prompt = cls.build_compact_planning_repair_prompt(
                 malformed_output,

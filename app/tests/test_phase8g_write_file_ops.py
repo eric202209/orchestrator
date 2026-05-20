@@ -7,6 +7,9 @@ from app.services.orchestration.execution.step_support import (
     coerce_execution_step_result,
     step_needs_command_repair,
 )
+from app.services.orchestration.phases.execution_loop import (
+    _is_simple_verification_command,
+)
 from app.services.orchestration.planning.planner import PlannerService
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.orchestration.operations.file_ops_contract import (
@@ -924,3 +927,22 @@ def test_write_file_step_result_bypasses_model_output_json_recovery():
     )
 
     assert coerced == result
+
+
+def test_python_c_pathlib_content_assertion_is_simple_local_verification():
+    command = (
+        'python -c "import pathlib,sys; sys.exit(0 if '
+        "'Phase 10G Fresh Smoke: Ready' in pathlib.Path('README.md').read_text() "
+        'else 1)"'
+    )
+
+    assert _is_simple_verification_command(command) is True
+
+
+def test_python_c_mutating_pathlib_script_is_not_simple_local_verification():
+    command = (
+        'python -c "import pathlib; '
+        "pathlib.Path('README.md').write_text('changed')\""
+    )
+
+    assert _is_simple_verification_command(command) is False
