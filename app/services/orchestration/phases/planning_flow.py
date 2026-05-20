@@ -609,6 +609,7 @@ def execute_planning_phase(
         used_minimal_planning_prompt = True
 
     retry_state = _PlanningRetryState()
+    retry_state.minimal_prompt_used = used_minimal_planning_prompt
     try:
         while True:
             # Circuit breaker: abort after too many consecutive validation failures

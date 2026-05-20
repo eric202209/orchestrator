@@ -2091,8 +2091,6 @@ def execute_step_loop(
                                 "fix", step_commands[0] if step_commands else ""
                             )
                         ]
-                        if isinstance(step.get("ops"), list):
-                            step["ops"] = []
                         step_updated = True
                 if isinstance(debug_data.get("expected_files"), list):
                     step["expected_files"] = debug_data.get("expected_files", [])

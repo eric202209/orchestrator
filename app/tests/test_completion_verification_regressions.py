@@ -216,6 +216,49 @@ def test_python_module_pytest_completion_verification_imports_workspace_root(
     assert result["success"] is True
 
 
+def test_completion_validation_requires_source_path_named_by_task(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    (project_dir / "smoke_status.py").write_text(
+        'print("Reliability Smoke 2: Ready Verify")\n',
+        encoding="utf-8",
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=[
+            {
+                "step_number": 1,
+                "description": "Create smoke status script",
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "smoke_status.py",
+                        "content": 'print("Reliability Smoke 2: Ready Verify")\n',
+                    }
+                ],
+                "commands": [],
+                "verification": "python -m py_compile smoke_status.py",
+                "expected_files": ["smoke_status.py"],
+            }
+        ],
+        task_prompt=(
+            "Create deterministic Python script scripts/smoke_status.py that "
+            "prints exactly Reliability Smoke 2: Ready."
+        ),
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": ["smoke_status.py"],
+        },
+    )
+
+    assert verdict.accepted is False
+    assert "scripts/smoke_status.py" in verdict.details["missing_core_files"]
+
+
 @pytest.mark.skipif(os.name == "nt", reason="uses a POSIX shebang executable")
 def test_completion_verification_executes_project_venv_python(tmp_path):
     project_dir = tmp_path / "project"

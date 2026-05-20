@@ -1113,6 +1113,8 @@ class ValidatorService:
         lowered = raw.lower()
         if "python -c" not in lowered and "python3 -c" not in lowered:
             return False
+        if "stdin.read(" in lowered and not re.search(r"(^|[^<>])\|([^|]|$)|<", raw):
+            return True
 
         quote_chars = raw.count('"') + raw.count("'")
         has_nested_python_content = any(
@@ -1689,6 +1691,35 @@ class ValidatorService:
         return filtered
 
     @staticmethod
+    def _source_path_mentions(*values: Any) -> List[str]:
+        """Extract explicit relative source paths from task text."""
+
+        extensions = "|".join(re.escape(ext.lstrip(".")) for ext in SOURCE_EXTENSIONS)
+        pattern = re.compile(
+            rf"(?<![A-Za-z0-9_.~/-])"
+            rf"([A-Za-z0-9_.-]+(?:[/\\][A-Za-z0-9_.-]+)+\.({extensions}))"
+            rf"(?![A-Za-z0-9_.-])",
+            re.IGNORECASE,
+        )
+        files: List[str] = []
+        seen: set[str] = set()
+        for value in values:
+            for match in pattern.finditer(str(value or "")):
+                path_text = match.group(1).replace("\\", "/").strip().lstrip("./")
+                if (
+                    not path_text
+                    or path_text.startswith(("/", "../", "~"))
+                    or "/../" in path_text
+                ):
+                    continue
+                if Path(path_text).suffix.lower() not in SOURCE_EXTENSIONS:
+                    continue
+                if path_text not in seen:
+                    seen.add(path_text)
+                    files.append(path_text)
+        return files
+
+    @staticmethod
     def _plan_contains_duplicated_path_roots(
         plan: List[Dict[str, Any]],
     ) -> Dict[int, List[str]]:
@@ -1720,6 +1751,61 @@ class ValidatorService:
                 findings[int(step_number)] = fragments[:6]
 
         return findings
+
+    @staticmethod
+    def _plan_negative_existing_file_checks(
+        plan: List[Dict[str, Any]],
+        project_dir: Optional[Path],
+    ) -> Dict[int, List[str]]:
+        """Detect negative existence preconditions for files this task creates."""
+
+        if project_dir is None:
+            return {}
+
+        expected_targets = {
+            str(path or "").strip().lstrip("./")
+            for step in plan
+            for path in (step.get("expected_files", []) or [])
+            if str(path or "").strip()
+        }
+        for step in plan:
+            for operation in step.get("ops", []) or []:
+                if not isinstance(operation, dict):
+                    continue
+                if str(operation.get("op") or "").strip() not in {
+                    "write_file",
+                    "append_file",
+                    "replace_in_file",
+                }:
+                    continue
+                path_text = str(operation.get("path") or "").strip().lstrip("./")
+                if path_text:
+                    expected_targets.add(path_text)
+
+        findings: Dict[int, List[str]] = {}
+        negative_patterns = (
+            re.compile(r"\btest\s+!\s+-[efs]\s+(?P<path>[^\s;&|]+)"),
+            re.compile(r"\[\s+!\s+-[efs]\s+(?P<path>[^\]\s;&|]+)\s+\]"),
+        )
+        for index, step in enumerate(plan, start=1):
+            step_number = int(step.get("step_number", index))
+            commands = [
+                str(command or "") for command in step.get("commands", []) or []
+            ]
+            if step.get("verification"):
+                commands.append(str(step.get("verification") or ""))
+            for command in commands:
+                for pattern in negative_patterns:
+                    for match in pattern.finditer(command):
+                        path_text = (
+                            match.group("path").strip().strip("'\"").lstrip("./")
+                        )
+                        if path_text not in expected_targets:
+                            continue
+                        if (Path(project_dir) / path_text).exists():
+                            findings.setdefault(step_number, []).append(path_text)
+
+        return {step: sorted(set(paths)) for step, paths in findings.items()}
 
     @staticmethod
     def _infer_workflow_phase_for_step(
@@ -1987,6 +2073,18 @@ class ValidatorService:
                 f"(steps: {bad_steps[:5]})"
             )
             details["duplicated_root_paths"] = duplicated_root_paths
+
+        negative_existing_checks = cls._plan_negative_existing_file_checks(
+            plan, project_dir
+        )
+        if negative_existing_checks:
+            bad_steps = sorted(negative_existing_checks.keys())
+            repairable.append(
+                "Plan checks that expected output files do not exist even though "
+                "they are already present in the workspace "
+                f"(steps: {bad_steps[:5]})"
+            )
+            details["negative_existing_file_checks"] = negative_existing_checks
 
         workflow_phase_check = cls._workflow_phase_order_violations(
             plan, workflow_profile
@@ -2283,7 +2381,12 @@ class ValidatorService:
         profile = cls.infer_validation_profile(
             task_prompt, execution_profile, title=title, description=description
         )
-        expected_core_files = cls._core_expected_files(plan)
+        expected_core_files = list(
+            dict.fromkeys(
+                cls._core_expected_files(plan)
+                + cls._source_path_mentions(title, description, task_prompt)
+            )
+        )
         candidate_files = cls._iter_candidate_files(project_dir, expected_core_files)
         nested_matches = cls._find_nested_expected_file_matches(
             project_dir, expected_core_files
