@@ -8,6 +8,7 @@ from app.services.orchestration.execution.step_support import (
     step_needs_command_repair,
 )
 from app.services.orchestration.phases.execution_loop import (
+    _execute_simple_verification_step,
     _is_simple_verification_command,
 )
 from app.services.orchestration.planning.planner import PlannerService
@@ -946,3 +947,48 @@ def test_python_c_mutating_pathlib_script_is_not_simple_local_verification():
     )
 
     assert _is_simple_verification_command(command) is False
+
+
+def test_unittest_command_with_pathlib_verification_runs_locally(tmp_path):
+    scripts_dir = tmp_path / "scripts"
+    tests_dir = tmp_path / "tests"
+    scripts_dir.mkdir()
+    tests_dir.mkdir()
+    (scripts_dir / "smoke_status.py").write_text(
+        'print("Phase 10G Fresh Smoke: Ready")\n', encoding="utf-8"
+    )
+    (tests_dir / "test_smoke_status.py").write_text(
+        "\n".join(
+            [
+                "import subprocess",
+                "import unittest",
+                "",
+                "class TestSmokeStatus(unittest.TestCase):",
+                "    def test_smoke_status(self):",
+                "        result = subprocess.run(",
+                "            ['python', 'scripts/smoke_status.py'],",
+                "            capture_output=True,",
+                "            text=True,",
+                "            check=True,",
+                "        )",
+                "        self.assertEqual(",
+                "            result.stdout.strip(),",
+                "            'Phase 10G Fresh Smoke: Ready',",
+                "        )",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = _execute_simple_verification_step(
+        project_dir=tmp_path,
+        commands=["python -m unittest tests.test_smoke_status"],
+        verification_command=(
+            'python -c "import pathlib,sys; sys.exit(0 if '
+            "'Phase 10G Fresh Smoke: Ready' in "
+            "pathlib.Path('tests/test_smoke_status.py').read_text() else 1)\""
+        ),
+    )
+
+    assert result is not None
+    assert result["status"] == "completed"
