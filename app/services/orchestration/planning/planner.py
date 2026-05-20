@@ -386,7 +386,7 @@ class PlannerService:
         import httpx
 
         base_url = settings.PLANNING_REPAIR_BASE_URL.rstrip("/")
-        model = settings.PLANNING_REPAIR_MODEL
+        model = cls._direct_no_thinking_model(runtime_service)
         api_key = settings.PLANNING_REPAIR_API_KEY
         configured_direct_timeout = settings.PLANNING_REPAIR_TIMEOUT_SECONDS
         direct_timeout = configured_direct_timeout
@@ -1621,6 +1621,30 @@ Return only a JSON array matching this shape. No markdown. No prose.
         return has_db
 
     @staticmethod
+    def _direct_no_thinking_model(runtime_service: Any) -> str:
+        configured_model = (settings.PLANNING_REPAIR_MODEL or "").strip()
+        backend_metadata: Dict[str, Any] = {}
+        get_backend_metadata = getattr(runtime_service, "get_backend_metadata", None)
+        if callable(get_backend_metadata):
+            try:
+                backend_metadata = get_backend_metadata() or {}
+            except Exception:
+                backend_metadata = {}
+
+        backend_name = str(backend_metadata.get("backend") or "").strip()
+        runtime_model = str(backend_metadata.get("model_family") or "").strip()
+        if (
+            backend_name == "direct_ollama"
+            and configured_model
+            and runtime_model
+            and ":" in runtime_model
+            and ":" not in configured_model
+            and runtime_model.replace(":", "-", 1) == configured_model
+        ):
+            return runtime_model
+        return configured_model
+
+    @staticmethod
     async def _invoke_direct_no_thinking_repair(
         runtime_service: Any,
         repair_prompt: str,
@@ -1630,7 +1654,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
             return None
 
         base_url = settings.PLANNING_REPAIR_BASE_URL.rstrip("/")
-        model = settings.PLANNING_REPAIR_MODEL.strip()
+        model = PlannerService._direct_no_thinking_model(runtime_service)
         payload: Dict[str, Any] = {
             "model": model,
             "messages": [{"role": "user", "content": repair_prompt}],
