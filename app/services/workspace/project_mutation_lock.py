@@ -34,7 +34,13 @@ def project_mutation_lock(
 ) -> Iterator[Path]:
     lock_dir = project_root / ".openclaw" / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_dir.chmod(0o777)
+    try:
+        lock_dir.chmod(0o777)
+    except PermissionError:
+        # Windows-mounted project folders can reject chmod even when the
+        # directory is writable. The atomic lock file creation below is the
+        # authority; chmod is only a permissive-mode best effort.
+        pass
     lock_path = lock_dir / f"project-{project_id}.mutation.lock"
     token = str(uuid.uuid4())
     now = time.time()

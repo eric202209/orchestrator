@@ -134,11 +134,11 @@ def _is_simple_verification_command(command: str) -> bool:
     normalized = " ".join(str(command or "").strip().split())
     if not normalized:
         return False
+    if normalized.startswith(("python -c ", "python3 -c ")):
+        return _python_inline_verification_script(normalized) is not None
     if normalized.startswith("node -e "):
         return _node_eval_script(normalized) is not None
     allowed_prefixes = (
-        "python -c ",
-        "python3 -c ",
         "python -m py_compile ",
         "python3 -m py_compile ",
         "npm run build",
@@ -151,6 +151,50 @@ def _is_simple_verification_command(command: str) -> bool:
     return not any(
         token in normalized for token in (" >", ">>", ";", "&&", "||", "$(", "`")
     )
+
+
+def _python_inline_verification_script(command: str) -> str | None:
+    normalized = " ".join(str(command or "").strip().split())
+    try:
+        tokens = shlex.split(normalized, posix=True)
+    except ValueError:
+        return None
+    if len(tokens) != 3 or tokens[0] not in {"python", "python3"} or tokens[1] != "-c":
+        return None
+
+    script = tokens[2]
+    lowered = script.lower()
+    blocked_fragments = (
+        "__",
+        "open(",
+        ".write(",
+        ".unlink(",
+        ".rename(",
+        ".replace(",
+        "remove(",
+        "rmdir(",
+        "mkdir(",
+        "shutil",
+        "subprocess",
+        "socket",
+        "requests",
+        "urllib",
+        "http://",
+        "https://",
+        "os.",
+        "sys.argv",
+        "eval(",
+        "exec(",
+    )
+    if any(fragment in lowered for fragment in blocked_fragments):
+        return None
+    if "pathlib.path(" not in lowered:
+        return None
+    if not any(fragment in lowered for fragment in (".read_text(", ".exists(")):
+        return None
+    if not any(fragment in lowered for fragment in ("sys.exit(", "print(")):
+        return None
+    return script
 
 
 def _node_eval_script(command: str) -> str | None:
