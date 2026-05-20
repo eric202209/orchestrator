@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 if (-not $Model) {
-  $Model = "qwen3-8b-hybrid"
+  $Model = "qwen3:8b-hybrid"
 }
 
 function Invoke-Check {

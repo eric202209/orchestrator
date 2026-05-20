@@ -202,6 +202,141 @@ def test_operation_contract_violation_terminal_reason_is_not_workspace_isolation
     assert "step 1 op 1" in task.error_message
 
 
+def test_minimal_first_unexpected_plan_shape_routes_to_repair_not_second_minimal(
+    tmp_path, monkeypatch
+):
+    plan = _valid_three_step_plan()
+    _patch_planning_flow_external_writes(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow._build_reasoning_artifact",
+        lambda *args, **kwargs: {
+            "intent": "Create smoke script",
+            "workspace_facts": ["README.md already exists"],
+            "planned_actions": ["Create scripts/smoke_status.py"],
+            "verification_plan": ["Run the smoke script"],
+        },
+    )
+    monkeypatch.setattr(
+        ValidatorService,
+        "validate_reasoning_artifact",
+        classmethod(
+            lambda cls, *args, **kwargs: type(
+                "Verdict",
+                (),
+                {"accepted": True, "status": "accepted", "reasons": []},
+            )()
+        ),
+    )
+    monkeypatch.setattr(
+        ValidatorService,
+        "validate_plan",
+        staticmethod(
+            lambda *args, **kwargs: type(
+                "Verdict",
+                (),
+                {
+                    "accepted": True,
+                    "warning": False,
+                    "status": "accepted",
+                    "reasons": [],
+                    "details": {},
+                    "verdict": {"status": "accepted"},
+                },
+            )()
+        ),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "should_start_with_minimal_prompt",
+        staticmethod(lambda *args, **kwargs: True),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "find_immediate_repair_step_issues",
+        staticmethod(lambda *args, **kwargs: {}),
+    )
+
+    minimal_calls = {"count": 0}
+    repair_calls = {"count": 0, "reason": None}
+
+    def _minimal_retry(*args, **kwargs):
+        minimal_calls["count"] += 1
+        return {"status": "completed", "output": json.dumps({"steps": plan})}
+
+    def _repair_output(*args, **kwargs):
+        repair_calls["count"] += 1
+        repair_calls["reason"] = kwargs.get("reason")
+        return {"status": "completed", "output": json.dumps(plan)}
+
+    monkeypatch.setattr(
+        PlannerService,
+        "retry_with_minimal_prompt",
+        classmethod(lambda cls, *args, **kwargs: _minimal_retry(*args, **kwargs)),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "repair_output",
+        classmethod(lambda cls, *args, **kwargs: _repair_output(*args, **kwargs)),
+    )
+
+    orchestration_state = MagicMock()
+    orchestration_state.project_dir = tmp_path
+    orchestration_state.project_context = ""
+    orchestration_state.plan = []
+    orchestration_state.current_step_index = 0
+    orchestration_state.reasoning_artifact = None
+
+    task = MagicMock()
+    task.title = "Create Smoke Status Script"
+    task.description = "Create scripts/smoke_status.py"
+
+    ctx = OrchestrationRunContext(
+        db=MagicMock(),
+        session=MagicMock(instance_id=None),
+        project=MagicMock(),
+        task=task,
+        session_task_link=MagicMock(),
+        session_id=9,
+        task_id=8,
+        prompt="Create scripts/smoke_status.py",
+        timeout_seconds=300,
+        execution_profile="full_lifecycle",
+        validation_profile="standard",
+        runs_in_canonical_baseline=False,
+        orchestration_state=orchestration_state,
+        runtime_service=MagicMock(),
+        task_service=MagicMock(),
+        logger=logging.getLogger("test.minimal_first_unexpected_shape"),
+        emit_live=lambda *args, **kwargs: None,
+        error_handler=MagicMock(),
+        task_execution_id=15,
+    )
+    ctx.runtime_service.get_backend_metadata.return_value = {}
+    ctx.error_handler.attempt_json_parsing = lambda output, **kwargs: (
+        True,
+        json.loads(output),
+        "ok",
+    )
+
+    result = execute_planning_phase(
+        ctx=ctx,
+        workspace_review={"has_existing_files": True},
+        extract_structured_text=extract_structured_text,
+        extract_plan_steps=lambda value: value if isinstance(value, list) else None,
+        looks_like_truncated_multistep_plan=lambda text, plan: False,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: args[3],
+        workspace_violation_error_cls=RuntimeError,
+    )
+
+    assert result == {"status": "completed"}
+    assert minimal_calls["count"] == 1
+    assert repair_calls == {
+        "count": 1,
+        "reason": "unexpected_plan_shape_after_minimal",
+    }
+    assert orchestration_state.plan == plan
+
+
 def test_build_task_with_clean_architecture_does_not_start_minimal_first():
     assert (
         PlannerService.should_start_with_minimal_prompt(
@@ -776,10 +911,7 @@ def test_planning_repair_falls_back_to_openclaw_when_direct_fails(monkeypatch):
     assert result["output"] == "[]"
     assert captured["direct_timeout"] == 60
     assert captured["fallback_prompt"] == "repair me"
-    assert (
-        captured["fallback_kwargs"]["no_output_timeout_seconds"]
-        == PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS
-    )
+    assert captured["fallback_kwargs"]["no_output_timeout_seconds"] == 60
 
 
 def test_minimal_prompt_retry_flags_ultra_dense_prompt_without_changing_retry(
@@ -2240,6 +2372,84 @@ def test_validator_rejects_brittle_python_c_with_nested_quotes(tmp_path):
     assert "brittle" in " ".join(verdict.reasons).lower()
 
 
+def test_validator_rejects_python_c_stdin_read_without_input_pipe(tmp_path):
+    command = (
+        'python -c "import sys; sys.exit(0 if sys.stdin.read().strip() '
+        "== 'Phase 10G Windows Smoke: Ready' else 1)\""
+    )
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Create smoke status script",
+                "commands": [command],
+                "verification": command,
+                "rollback": None,
+                "expected_files": ["scripts/smoke_status.py"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "scripts/smoke_status.py",
+                        "content": 'print("Phase 10G Windows Smoke: Ready")\n',
+                    }
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Create scripts/smoke_status.py",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.repairable is True
+    assert "brittle_inline_python" in verdict.details["brittle_command_subcodes"]
+    assert 1 in verdict.details["brittle_command_step_details"]
+
+
+def test_validator_rejects_negative_existing_file_precondition_on_retry(tmp_path):
+    script = tmp_path / "scripts" / "smoke_status.py"
+    script.parent.mkdir()
+    script.write_text('print("Phase 10G Windows Smoke: Ready")\n', encoding="utf-8")
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Reproduce the bug by verifying script absence",
+            "commands": ["test ! -f scripts/smoke_status.py"],
+            "verification": "test ! -f scripts/smoke_status.py",
+            "rollback": None,
+            "expected_files": [],
+        },
+        {
+            "step_number": 2,
+            "description": "Create script",
+            "commands": ["python scripts/smoke_status.py"],
+            "verification": "python scripts/smoke_status.py",
+            "rollback": None,
+            "expected_files": ["scripts/smoke_status.py"],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "scripts/smoke_status.py",
+                    "content": 'print("Phase 10G Windows Smoke: Ready")\n',
+                }
+            ],
+        },
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Create scripts/smoke_status.py",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.repairable is True
+    assert verdict.details["negative_existing_file_checks"] == {
+        1: ["scripts/smoke_status.py"]
+    }
+
+
 def test_validator_allows_python_c_pathlib_content_assertions_from_ops_plan(tmp_path):
     plan = [
         {
@@ -2440,7 +2650,14 @@ def test_openclaw_invocation_metadata_redacts_prompt_and_captures_flags():
     assert "secret prompt" not in json.dumps(metadata)
 
 
-def test_planning_repair_timeout_is_capped_below_full_local_planning_budget():
+def test_planning_repair_timeout_uses_effective_runtime_profile_timeout(monkeypatch):
+    from app.services.orchestration.planning import planner as planner_module
+
+    monkeypatch.setattr(
+        planner_module.settings,
+        "PLANNING_REPAIR_TIMEOUT_SECONDS",
+        45,
+    )
     captured = {}
 
     class Runtime:
@@ -2464,11 +2681,8 @@ def test_planning_repair_timeout_is_capped_below_full_local_planning_budget():
         task_id=2,
     )
 
-    assert captured["timeout_seconds"] == PLANNING_REPAIR_TIMEOUT_SECONDS
-    assert (
-        captured["no_output_timeout_seconds"]
-        == PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS
-    )
+    assert captured["timeout_seconds"] == 45
+    assert captured["no_output_timeout_seconds"] == 45
     assert captured["timeout_seconds"] < MINIMAL_PLANNING_TIMEOUT_SECONDS
 
 
@@ -2506,7 +2720,9 @@ def test_planning_repair_logs_duration(caplog):
     ]
     assert duration_events
     assert duration_events[0]["duration_seconds"] >= 0
-    assert duration_events[0]["timeout_seconds"] == PLANNING_REPAIR_TIMEOUT_SECONDS
+    assert duration_events[0]["timeout_seconds"] == (
+        PlannerService._effective_planning_repair_timeout(300)
+    )
     assert "repair_prompt_build_seconds" in duration_events[0]
     assert "openclaw_request_seconds" in duration_events[0]
     assert "parser_validation_seconds" in duration_events[0]

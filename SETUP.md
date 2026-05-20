@@ -199,15 +199,15 @@ backend talks to native Ollama through `http://host.docker.internal:11434`.
 - [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/) (WSL2 backend)
 - [Ollama for Windows](https://ollama.com/download/windows) with NVIDIA GPU support
   - CUDA drivers ≥ 528 required
-  - Verify GPU: `ollama run qwen3-8b-hybrid` should run on GPU, not CPU
+  - Verify GPU: `ollama run qwen3:8b-hybrid` should run on GPU, not CPU
 - Optional dashboard: Node.js 18+ and `pnpm`
 
 ### Hardware recommendations
 
 | VRAM | Recommended model | `OLLAMA_NUM_CTX` |
 |---|---|---|
-| 6 GB | `qwen3-8b-hybrid` | 4096 |
-| 8 GB | `qwen3-8b-hybrid` | 4096 or 8192 |
+| 6 GB | `qwen3:8b-hybrid` | 4096 |
+| 8 GB | `qwen3:8b-hybrid` | 4096 or 8192 |
 | 12 GB+ | `qwen3:14b-q4_K_M` | 8192 |
 
 27B models require CPU offloading on < 16 GB VRAM — too slow for stable use.
@@ -218,7 +218,7 @@ Use Ollama library tags, not random Hugging Face files, for this setup. The
 known-good default is:
 
 ```text
-qwen3-8b-hybrid
+qwen3:8b-hybrid
 ```
 
 Why this one:
@@ -227,7 +227,7 @@ Why this one:
 - stronger for planning than smaller 1.7B/4B models
 - much less RAM/CPU offload pressure than 14B/30B/32B models
 
-If `qwen3-8b-hybrid` still OOMs, first confirm `OLLAMA_NUM_CTX=4096`. If it
+If `qwen3:8b-hybrid` still OOMs, first confirm `OLLAMA_NUM_CTX=4096`. If it
 still fails, use `qwen3:4b-q4_K_M` as the fallback model and set both
 `AGENT_MODEL` and `OLLAMA_AGENT_MODEL` to that exact tag.
 
@@ -265,10 +265,10 @@ curl http://localhost:11434/api/tags
 
 ```powershell
 ollama pull qwen3:8b-q4_K_M
-ollama create qwen3-8b-hybrid -f Modelfile
+ollama create qwen3:8b-hybrid -f Modelfile
 ollama pull nomic-embed-text
 ollama list
-ollama run qwen3-8b-hybrid "Return only: OK"
+ollama run qwen3:8b-hybrid "Return only: OK"
 ```
 
 **3.5. Pre-create local bind-mount paths**
@@ -293,11 +293,11 @@ DATABASE_URL=sqlite:////app/orchestrator.db
 
 # Backend — direct Ollama, no OpenClaw
 AGENT_BACKEND=direct_ollama
-AGENT_MODEL=qwen3-8b-hybrid
+AGENT_MODEL=qwen3:8b-hybrid
 
 # Ollama (native on Windows host)
 OLLAMA_BASE_URL=http://host.docker.internal:11434
-OLLAMA_AGENT_MODEL=qwen3-8b-hybrid
+OLLAMA_AGENT_MODEL=qwen3:8b-hybrid
 OLLAMA_NUM_CTX=4096
 OLLAMA_EMBEDDING_MODEL=nomic-embed-text
 EMBEDDING_PROVIDER=ollama
@@ -306,7 +306,7 @@ EMBEDDING_DIM=0
 # Direct Ollama repair through the OpenAI-compatible endpoint
 PLANNING_REPAIR_ENABLED=true
 PLANNING_REPAIR_BASE_URL=http://host.docker.internal:11434/v1
-PLANNING_REPAIR_MODEL=qwen3-8b-hybrid
+PLANNING_REPAIR_MODEL=qwen3:8b-hybrid
 PLANNING_REPAIR_API_KEY=
 PLANNING_REPAIR_DISABLE_THINKING=true
 
@@ -349,7 +349,7 @@ In the same Settings page, configure the model used by `direct_ollama`:
    use:
 
    ```text
-   qwen3-8b-hybrid
+   qwen3:8b-hybrid
    ```
 
 3. Set **Adaptation Profile** to **Ollama Default**.
@@ -492,7 +492,7 @@ Add `-v` to also remove the Qdrant data volume.
 | `AGENT_BACKEND` | `local_openclaw` | Runtime backend. |
 | `OPENCLAW_GATEWAY_URL` | `http://127.0.0.1:8000` | OpenClaw gateway (Linux only). |
 | `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | Ollama API base URL. |
-| `OLLAMA_AGENT_MODEL` | `qwen3-8b-hybrid` | Model used for planning/execution. |
+| `OLLAMA_AGENT_MODEL` | `qwen3:8b-hybrid` | Model used for planning/execution. |
 | `OLLAMA_NUM_CTX` | `4096` | Context window tokens sent to Ollama. |
 | `OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model for knowledge retrieval. |
 | `EMBEDDING_PROVIDER` | `auto` | `auto` / `ollama` / `openai`. |
