@@ -20,8 +20,10 @@ from app.services.workspace.project_isolation_service import (
 )
 from app.services.prompt_templates import OrchestrationState
 from app.services.orchestration.run_state import (
+    mark_task_attempt_cancelled,
     mark_task_attempt_done,
     mark_task_attempt_failed,
+    mark_task_attempt_pending,
     mark_task_attempt_running,
 )
 from app.services.orchestration.state.session_state import (
@@ -309,6 +311,142 @@ async def execute_task_payload(
                 else "Task execution failed. Check session logs for details."
             ),
         )
+
+
+def update_execution_failure_metadata(
+    db: Session,
+    task_execution_id: int,
+    *,
+    failure_category: str,
+    backend_id: str | None = None,
+) -> None:
+    """Write failure_category and optional backend_id to a TaskExecution row."""
+    from app.models import TaskExecution
+
+    execution = (
+        db.query(TaskExecution).filter(TaskExecution.id == task_execution_id).first()
+    )
+    if not execution:
+        return
+    if hasattr(execution, "failure_category"):
+        execution.failure_category = failure_category
+    if backend_id is not None and hasattr(execution, "backend_id"):
+        execution.backend_id = backend_id
+
+
+def mark_execution_running(
+    *,
+    task: object | None,
+    session_task_link: object | None = None,
+    task_execution: object | None = None,
+    started_at: datetime | None = None,
+) -> datetime:
+    """Mark an attempt running through the session execution service boundary."""
+
+    return mark_task_attempt_running(
+        task=task,
+        session_task_link=session_task_link,
+        task_execution=task_execution,
+        started_at=started_at,
+    )
+
+
+def mark_execution_pending(
+    *,
+    task: object | None,
+    session_task_link: object | None = None,
+    task_execution: object | None = None,
+    reset_started_at: bool = False,
+    reset_steps: bool = False,
+    workspace_status: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    """Reset an attempt through the session execution service boundary."""
+
+    mark_task_attempt_pending(
+        task=task,
+        session_task_link=session_task_link,
+        task_execution=task_execution,
+        reset_started_at=reset_started_at,
+        reset_steps=reset_steps,
+        workspace_status=workspace_status,
+        error_message=error_message,
+    )
+
+
+def mark_execution_failed(
+    *,
+    task: object | None,
+    session_task_link: object | None = None,
+    task_execution: object | None = None,
+    error_message: str | None = None,
+    completed_at: datetime | None = None,
+    workspace_status: str | None = None,
+) -> datetime:
+    """Mark an attempt failed through the session execution service boundary."""
+
+    return mark_task_attempt_failed(
+        task=task,
+        session_task_link=session_task_link,
+        task_execution=task_execution,
+        error_message=error_message,
+        completed_at=completed_at,
+        workspace_status=workspace_status,
+    )
+
+
+def mark_execution_done(
+    *,
+    task: object | None,
+    session_task_link: object | None = None,
+    task_execution: object | None = None,
+    completed_at: datetime | None = None,
+) -> datetime:
+    """Mark an attempt complete through the session execution service boundary."""
+
+    return mark_task_attempt_done(
+        task=task,
+        session_task_link=session_task_link,
+        task_execution=task_execution,
+        completed_at=completed_at,
+    )
+
+
+def mark_execution_cancelled(
+    *,
+    task: object | None,
+    session_task_link: object | None = None,
+    task_execution: object | None = None,
+    completed_at: datetime | None = None,
+) -> datetime:
+    """Mark an attempt cancelled through the session execution service boundary."""
+
+    return mark_task_attempt_cancelled(
+        task=task,
+        session_task_link=session_task_link,
+        task_execution=task_execution,
+        completed_at=completed_at,
+    )
+
+
+def mark_execution_cancelled_for_session_stop(
+    db: Session,
+    *,
+    session_id: int,
+    task: object | None = None,
+    session_task_link: object | None = None,
+    task_execution: object | None = None,
+) -> None:
+    """Cancel an in-flight attempt when a session is stopped or paused.
+
+    Delegates to the shared transition helper; exists so worker/endpoint code
+    does not call transitions directly for this lifecycle scenario.
+    """
+    mark_execution_cancelled(
+        task=task,
+        session_task_link=session_task_link,
+        task_execution=task_execution,
+    )
 
 
 def get_tool_execution_history_payload(

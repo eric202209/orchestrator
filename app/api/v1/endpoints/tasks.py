@@ -25,11 +25,11 @@ from app.services.orchestration.execution.runtime import workspace_snapshot_key
 from app.services.orchestration.review_policy import build_operator_override_metadata
 from app.services.orchestration.state.persistence import append_orchestration_event
 from app.services.orchestration.context.assembly import render_adapted_runtime_prompt
-from app.services.orchestration.run_state import (
-    mark_task_attempt_done,
-    mark_task_attempt_failed,
-    mark_task_attempt_pending,
-    mark_task_attempt_running,
+from app.services.session.session_execution_service import (
+    mark_execution_done,
+    mark_execution_failed,
+    mark_execution_pending,
+    mark_execution_running,
 )
 from app.services.orchestration.state.session_state import (
     mark_session_running,
@@ -110,7 +110,7 @@ def _prepare_task_for_fresh_execution(
     task: Task, clear_saved_plan: bool = False
 ) -> None:
     """Reset task execution state before a fresh run."""
-    mark_task_attempt_pending(
+    mark_execution_pending(
         task=task,
         reset_started_at=True,
         reset_steps=clear_saved_plan,
@@ -494,7 +494,7 @@ def _queue_task_retry(
         )
         db.add(session_task)
     else:
-        mark_task_attempt_pending(
+        mark_execution_pending(
             task=None,
             session_task_link=session_task,
             reset_started_at=True,
@@ -615,7 +615,7 @@ def _queue_task_retry(
         )
     except Exception:
         mark_session_stopped(selected_session, stopped_at=datetime.now(timezone.utc))
-        mark_task_attempt_failed(
+        mark_execution_failed(
             task=task,
             session_task_link=session_task,
             task_execution=task_execution,
@@ -899,7 +899,7 @@ async def execute_task_with_runtime(
             raise
 
         mark_session_running(new_session, started_at=datetime.now(timezone.utc))
-        mark_task_attempt_running(
+        mark_execution_running(
             task=task,
             session_task_link=session_task,
             task_execution=task_execution,
@@ -940,14 +940,14 @@ async def execute_task_with_runtime(
         )
 
         if result["status"] == "completed":
-            mark_task_attempt_done(
+            mark_execution_done(
                 task=task,
                 session_task_link=session_task,
                 task_execution=task_execution,
                 completed_at=datetime.now(timezone.utc),
             )
         else:
-            mark_task_attempt_failed(
+            mark_execution_failed(
                 task=task,
                 session_task_link=session_task,
                 task_execution=task_execution,
@@ -971,7 +971,7 @@ async def execute_task_with_runtime(
         )
 
         if task:
-            mark_task_attempt_failed(
+            mark_execution_failed(
                 task=task,
                 session_task_link=session_task,
                 task_execution=task_execution,

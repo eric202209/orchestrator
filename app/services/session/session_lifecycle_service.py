@@ -217,6 +217,12 @@ def _stop_running_session_for_recovery(
         .first()
     )
     if running_execution is not None:
+        if running_execution.status == TaskStatus.RUNNING:
+            from app.services.session.execution_policy import (
+                resolve_ambiguous_execution,
+            )
+
+            resolve_ambiguous_execution(db, running_execution.id, runtime=None)
         mark_task_attempt_cancelled(
             task=None,
             session_task_link=None,

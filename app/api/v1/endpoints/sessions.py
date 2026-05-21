@@ -105,6 +105,10 @@ from app.services.workspace.project_isolation_service import (
 from app.services.session.session_lifecycle_service import (
     reconcile_terminal_running_sessions,
 )
+from app.services.orchestration.state.session_state import (
+    mark_session_deleted,
+    mark_session_pending,
+)
 
 
 def _serialize_session_timestamp(value: datetime | None) -> str | None:
@@ -195,8 +199,7 @@ def create_session(
         humanize_display_name(session_data.get("name") or "session"),
     )
     db_session = SessionModel(**session_data)
-    db_session.status = "pending"
-    db_session.is_active = False
+    mark_session_pending(db_session)
     db_session.instance_id = str(
         uuid.uuid4()
     )  # Generate unique instance ID immediately
@@ -528,10 +531,7 @@ def delete_session(
 
     db_session = _require_session_access(db, session_id, current_user)
 
-    deleted_at = datetime.now(timezone.utc)
-    db_session.deleted_at = deleted_at
-    db_session.is_active = False
-    db_session.status = "deleted"
+    mark_session_deleted(db_session, deleted_at=datetime.now(timezone.utc))
     if "__deleted__" not in db_session.name:
         db_session.name = f"{db_session.name}__deleted__{db_session.id}"
 

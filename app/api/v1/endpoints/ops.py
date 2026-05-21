@@ -186,6 +186,83 @@ def ops_storage(
     }
 
 
+@router.get("/backends")
+def ops_backends(
+    current_user=Depends(get_current_admin_user),
+) -> Dict[str, Any]:
+    """List all registered backend descriptors with capabilities and config."""
+    from app.services.agents.agent_backends import list_supported_backends
+
+    backends = list_supported_backends()
+    return {
+        "computed_at": datetime.now(UTC).isoformat(),
+        "count": len(backends),
+        "backends": [b.to_dict() for b in backends],
+    }
+
+
+@router.get("/backends/health")
+def ops_backends_health(
+    current_user=Depends(get_current_admin_user),
+) -> Dict[str, Any]:
+    """Health status for each registered backend."""
+    from app.services.agents.agent_backends import list_supported_backends
+
+    backends = list_supported_backends()
+    return {
+        "computed_at": datetime.now(UTC).isoformat(),
+        "backends": [
+            {
+                "name": b.name,
+                "available": b.health.available,
+                "ready": b.health.ready,
+                "status": b.health.status,
+                "errors": b.health.errors,
+                "warnings": b.health.warnings,
+            }
+            for b in backends
+        ],
+    }
+
+
+@router.get("/backends/concurrency")
+def ops_backends_concurrency(
+    current_user=Depends(get_current_admin_user),
+) -> Dict[str, Any]:
+    """Live Redis slot usage per backend."""
+    from app.services.agents.agent_backends import list_supported_backends
+    from app.services.agents.backend_concurrency import (
+        get_concurrency_snapshot,
+        make_redis_client,
+    )
+
+    backends = list_supported_backends()
+    try:
+        redis_client = make_redis_client()
+        redis_client.ping()
+        redis_ok = True
+    except Exception as exc:
+        return {
+            "computed_at": datetime.now(UTC).isoformat(),
+            "redis_available": False,
+            "error": str(exc),
+            "backends": [],
+        }
+
+    snapshots = []
+    for b in backends:
+        max_slots = b.capabilities.max_parallel_sessions
+        snapshot = get_concurrency_snapshot(redis_client, b.name)
+        snapshot["max_slots"] = max_slots
+        snapshots.append(snapshot)
+
+    return {
+        "computed_at": datetime.now(UTC).isoformat(),
+        "redis_available": redis_ok,
+        "backends": snapshots,
+    }
+
+
 @router.get("/workflow-templates")
 def ops_workflow_templates(
     current_user=Depends(get_current_admin_user),
