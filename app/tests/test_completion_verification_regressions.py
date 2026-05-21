@@ -1024,6 +1024,56 @@ def test_finalize_uses_deterministic_summary_when_runtime_summary_times_out(
     assert execution.status == TaskStatus.DONE
 
 
+def test_auto_advance_preserves_current_timeout_budget(
+    db_session, tmp_path, monkeypatch
+):
+    ctx, _execution = _seed_finalize_ctx(db_session, tmp_path)
+    ctx.session.execution_mode = "automatic"
+    ctx.timeout_seconds = 90
+
+    next_task = Task(
+        project_id=ctx.project.id,
+        title="Next low-resource task",
+        description="Continue with the same low-resource budget",
+        status=TaskStatus.PENDING,
+        plan_position=2,
+    )
+    db_session.add(next_task)
+    db_session.commit()
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.ValidatorService.validate_task_completion",
+        lambda **kwargs: ValidationVerdict(
+            stage="task_completion",
+            status="accepted",
+            profile="implementation",
+            reasons=[],
+            details={"expected_core_files": ["calc_smoke.py"]},
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow._detect_completion_verification_command",
+        lambda project_dir: (None, None),
+    )
+
+    captured_delay = {}
+
+    result = finalize_successful_task(
+        ctx=ctx,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
+        get_next_pending_project_task_fn=lambda db, project_id: next_task,
+        get_latest_session_task_link_fn=lambda db, session_id, task_id: None,
+        execute_orchestration_task_delay_fn=lambda **kwargs: captured_delay.update(
+            kwargs
+        ),
+    )
+
+    assert result["status"] == "completed"
+    assert captured_delay["task_id"] == next_task.id
+    assert captured_delay["timeout_seconds"] == 90
+
+
 def test_auto_completion_stamps_change_set_metadata_on_trivial_publish(
     db_session, tmp_path, monkeypatch
 ):

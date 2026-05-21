@@ -45,6 +45,7 @@ from app.services.orchestration.policy import (
     PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS,
     STRICT_JSON_RETRY_TIMEOUT_SECONDS,
     ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS,
+    clamp_planning_timeout,
 )
 from app.services.agents.openclaw_service import (
     OpenClawSessionError,
@@ -363,6 +364,50 @@ def test_planning_fallback_timeouts_are_relaxed_for_local_models():
     assert PLANNING_REPAIR_TIMEOUT_SECONDS == 240
     assert PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS == 200
     assert ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS == 240
+
+
+def test_low_resource_runtime_profile_caps_planning_timeout(monkeypatch):
+    from app.services.orchestration import policy as policy_module
+
+    monkeypatch.setattr(policy_module.settings, "RUNTIME_PROFILE", "low_resource")
+    monkeypatch.setattr(
+        policy_module.settings,
+        "PLANNING_SYNTHESIS_TIMEOUT_SECONDS",
+        90,
+    )
+
+    assert clamp_planning_timeout(300) == 90
+    assert clamp_planning_timeout(1800) == 90
+    assert clamp_planning_timeout(10) == 90
+
+
+def test_medium_runtime_profile_caps_planning_timeout(monkeypatch):
+    from app.services.orchestration import policy as policy_module
+
+    monkeypatch.setattr(policy_module.settings, "RUNTIME_PROFILE", "medium")
+    monkeypatch.setattr(
+        policy_module.settings,
+        "PLANNING_SYNTHESIS_TIMEOUT_SECONDS",
+        120,
+    )
+
+    assert clamp_planning_timeout(300) == 120
+    assert clamp_planning_timeout(1800) == 120
+
+
+def test_standard_runtime_profile_keeps_existing_planning_timeout_bounds(monkeypatch):
+    from app.services.orchestration import policy as policy_module
+
+    monkeypatch.setattr(policy_module.settings, "RUNTIME_PROFILE", "standard")
+    monkeypatch.setattr(
+        policy_module.settings,
+        "PLANNING_SYNTHESIS_TIMEOUT_SECONDS",
+        90,
+    )
+
+    assert clamp_planning_timeout(10) == 180
+    assert clamp_planning_timeout(240) == 240
+    assert clamp_planning_timeout(1800) == 300
 
 
 def test_worker_soft_time_limit_allows_planning_retries_and_execution_headroom():

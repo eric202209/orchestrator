@@ -90,7 +90,7 @@ def _commands_are_weak_expected_file_verification(commands: Any) -> bool:
     if len(normalized_commands) != len(commands):
         return False
     return all(
-        PlannerService._verification_is_weak(command)
+        ValidatorService._verification_is_weak(command)
         or " ".join(command.split()).startswith(("grep ", "cat ", "test "))
         for command in normalized_commands
     )
@@ -108,7 +108,7 @@ def _strengthen_weak_expected_file_verifications(
             if str(path or "").strip()
         ]
         grep_target = None
-        if expected_files and PlannerService._verification_is_weak(
+        if expected_files and ValidatorService._verification_is_weak(
             updated.get("verification")
         ):
             grep_target = _grep_quiet_verification_target(
