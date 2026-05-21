@@ -107,6 +107,8 @@ logger = logging.getLogger(__name__)
 
 MAX_SUBFOLDER_COLLISION_ATTEMPTS = 999
 
+from celery.signals import worker_ready
+
 from app.tasks.worker_support.worker_helpers import (
     _apply_checkpoint_payload,
     _build_base_project_context,
@@ -125,6 +127,35 @@ from app.tasks.worker_support.worker_helpers import (
     _sync_task_execution_from_task_state,
     _sync_task_execution_state,
 )
+
+
+@worker_ready.connect
+def on_worker_ready(sender, **kwargs):
+    """On cold boot, immediately recover sessions orphaned by a previous worker crash.
+
+    The periodic beat sweep fires every 15 min; this closes the cold-start gap.
+    stale_after_seconds=60 gives a brief grace window for rolling restarts.
+    """
+    try:
+        db = get_db_session()
+        try:
+            from app.services.session.session_lifecycle_service import (
+                recover_stale_running_sessions,
+            )
+
+            recovered = recover_stale_running_sessions(db, stale_after_seconds=60)
+            if recovered:
+                logger.warning(
+                    "Worker boot recovery: recovered %d orphaned session(s): %s",
+                    len(recovered),
+                    [r.get("session_id") for r in recovered],
+                )
+            else:
+                logger.info("Worker boot recovery: no orphaned sessions found.")
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.error("Worker boot recovery scan failed: %s", exc)
 
 
 @celery_app.task(

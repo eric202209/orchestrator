@@ -253,6 +253,84 @@ def list_sessions(
     return sessions
 
 
+class StuckSessionInfo(BaseModel):
+    session_id: int
+    session_name: Optional[str] = None
+    project_id: Optional[int] = None
+    stalled_minutes: float
+    last_task_id: Optional[int] = None
+
+
+@router.get("/sessions/stuck", response_model=List[StuckSessionInfo])
+def list_stuck_sessions(
+    stalled_minutes: int = Query(default=10, ge=1, le=1440),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Return active running sessions with no task execution progress in the last N minutes."""
+    from sqlalchemy import not_, exists as sa_exists
+    from datetime import timedelta
+
+    threshold = datetime.now(timezone.utc) - timedelta(minutes=stalled_minutes)
+    threshold_naive = threshold.replace(tzinfo=None)
+
+    candidates = (
+        db.query(SessionModel)
+        .join(Project, Project.id == SessionModel.project_id)
+        .filter(
+            SessionModel.is_active.is_(True),
+            SessionModel.status == "running",
+            SessionModel.deleted_at.is_(None),
+            Project.deleted_at.is_(None),
+            project_access_filter(db, current_user),
+            not_(
+                sa_exists().where(
+                    TaskExecution.session_id == SessionModel.id,
+                    TaskExecution.status == TaskStatus.RUNNING,
+                )
+            ),
+        )
+        .all()
+    )
+
+    result = []
+    for s in candidates:
+        last_progress = s.updated_at or s.started_at or s.created_at
+        if last_progress is None:
+            continue
+        lp_naive = (
+            last_progress.replace(tzinfo=None)
+            if last_progress.tzinfo is not None
+            else last_progress
+        )
+        if lp_naive > threshold_naive:
+            continue
+        delta_minutes = (
+            datetime.now(timezone.utc).replace(tzinfo=None) - lp_naive
+        ).total_seconds() / 60
+
+        last_task_id: Optional[int] = None
+        latest_link = (
+            db.query(SessionTask)
+            .filter(SessionTask.session_id == s.id)
+            .order_by(SessionTask.id.desc())
+            .first()
+        )
+        if latest_link:
+            last_task_id = latest_link.task_id
+
+        result.append(
+            StuckSessionInfo(
+                session_id=s.id,
+                session_name=getattr(s, "name", None),
+                project_id=s.project_id,
+                stalled_minutes=round(delta_minutes, 1),
+                last_task_id=last_task_id,
+            )
+        )
+    return result
+
+
 @router.get("/projects/{project_id}/sessions", response_model=List[SessionResponse])
 def get_project_sessions(
     project_id: int,

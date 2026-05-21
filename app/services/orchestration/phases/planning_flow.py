@@ -321,6 +321,41 @@ def _finalize_planning_timeout_failure(
     )
 
 
+def _last_plan_output_snippet(planning_result: dict, max_chars: int = 400) -> str:
+    """Extract a truncated text snippet from the last planning result for operator context."""
+    output = planning_result.get("output", "")
+    if isinstance(output, dict):
+        text = str(output.get("text", "") or output.get("content", "") or "")
+    else:
+        text = str(output or "")
+    text = text.strip()
+    if len(text) > max_chars:
+        text = text[:max_chars] + "…"
+    return text
+
+
+def _count_prior_failed_planning_executions(ctx: OrchestrationRunContext) -> int:
+    """Count failed TaskExecution rows for this task/session before current execution.
+
+    Used to seed _PlanningRetryState.persisted_failures so the circuit breaker
+    survives worker restarts — F12 (stateless reducer).
+    """
+    if not ctx.db or not ctx.task_id or not ctx.session_id:
+        return 0
+    try:
+        query = ctx.db.query(TaskExecution).filter(
+            TaskExecution.task_id == ctx.task_id,
+            TaskExecution.session_id == ctx.session_id,
+            TaskExecution.status == TaskStatus.FAILED,
+        )
+        if ctx.task_execution_id:
+            query = query.filter(TaskExecution.id < ctx.task_execution_id)
+        count = query.count()
+        return count if isinstance(count, int) else 0
+    except Exception:
+        return 0
+
+
 def execute_planning_phase(
     *,
     ctx: OrchestrationRunContext,
@@ -431,6 +466,28 @@ def execute_planning_phase(
             ctx, planning_knowledge_ctx, used_in_prompt=bool(planning_prompt)
         )
     planning_prompt_tokens = estimate_token_count(planning_prompt or "")
+    # 10H-C: emit context budget on every planning attempt so it appears in
+    # session debug output regardless of dense-prompt detection.
+    emit_phase_event(
+        ctx.orchestration_state,
+        ctx.emit_live,
+        level="INFO",
+        phase="planning",
+        message=(
+            f"[ORCHESTRATION] Planning context budget: "
+            f"~{planning_prompt_tokens} tokens "
+            f"(project_context={len(ctx.orchestration_state.project_context or '')}c "
+            f"task={len(ctx.prompt or '')}c)"
+        ),
+        details={
+            "planning_prompt_tokens": planning_prompt_tokens,
+            "project_context_chars": len(ctx.orchestration_state.project_context or ""),
+            "task_chars": len(ctx.prompt or ""),
+            "context_budget_status": (
+                "dense" if planning_prompt_tokens > 8000 else "normal"
+            ),
+        },
+    )
 
     planning_timeout_seconds = clamp_planning_timeout(ctx.timeout_seconds)
     start_with_minimal_planning_prompt = (
@@ -608,15 +665,37 @@ def execute_planning_phase(
         )
         used_minimal_planning_prompt = True
 
-    retry_state = _PlanningRetryState()
+    persisted_failures = _count_prior_failed_planning_executions(ctx)
+    retry_state = _PlanningRetryState(persisted_failures=persisted_failures)
     retry_state.minimal_prompt_used = used_minimal_planning_prompt
+    if persisted_failures > 0:
+        ctx.logger.warning(
+            "[ORCHESTRATION] session_id=%s task_id=%s "
+            "persisted_planning_failures=%d — circuit breaker seeded from DB",
+            ctx.session_id,
+            ctx.task_id,
+            persisted_failures,
+        )
     try:
         while True:
-            # Circuit breaker: abort after too many consecutive validation failures
+            # Circuit breaker: abort after too many consecutive validation failures.
+            # Combined count includes persisted failures from prior executions so
+            # a worker restart cannot reset the counter to zero (F12).
             if retry_state.circuit_open:
+                has_persisted = retry_state.persisted_failures > 0
+                cb_reason = (
+                    "planning_circuit_breaker_opened_persisted_attempts"
+                    if has_persisted
+                    else "planning_circuit_breaker_opened"
+                )
+                total_failures = (
+                    retry_state.consecutive_failures + retry_state.persisted_failures
+                )
                 ctx.orchestration_state.status = OrchestrationStatus.ABORTED
                 ctx.orchestration_state.abort_reason = (
-                    f"Planning failed {MAX_PLANNING_RETRIES} consecutive times; "
+                    f"Planning failed {total_failures} time(s) "
+                    f"({retry_state.persisted_failures} prior + "
+                    f"{retry_state.consecutive_failures} this run); "
                     "circuit breaker opened to prevent infinite retry loop"
                 )
                 emit_phase_event(
@@ -626,23 +705,41 @@ def execute_planning_phase(
                     phase="planning",
                     message=(
                         f"[ORCHESTRATION] Planning circuit breaker opened after "
-                        f"{MAX_PLANNING_RETRIES} consecutive failures"
+                        f"{total_failures} failure(s) "
+                        f"({retry_state.persisted_failures} persisted + "
+                        f"{retry_state.consecutive_failures} in-session)"
                     ),
-                    details={"reason": "planning_circuit_breaker_opened"},
+                    details={
+                        "reason": cb_reason,
+                        "persisted_failures": retry_state.persisted_failures,
+                        "consecutive_failures": retry_state.consecutive_failures,
+                        "total_failures": total_failures,
+                    },
+                )
+                last_snippet = _last_plan_output_snippet(planning_result)
+                last_repair = retry_state.last_repair_reason or "none"
+                cb_failure_reason = (
+                    f"Planning failed {total_failures} time(s) "
+                    f"({retry_state.persisted_failures} prior + "
+                    f"{retry_state.consecutive_failures} this run). "
+                    f"Last repair reason: {last_repair}. "
+                    + (
+                        f"Last plan output: {last_snippet}"
+                        if last_snippet
+                        else "No plan output was produced."
+                    )
                 )
                 _finalize_planning_terminal_failure(
                     ctx=ctx,
-                    failure_type="planning_circuit_breaker_opened",
-                    failure_reason=(
-                        f"Planning failed {MAX_PLANNING_RETRIES} consecutive times. "
-                        "The agent was unable to produce a valid execution plan."
-                    ),
+                    failure_type=cb_reason,
+                    failure_reason=cb_failure_reason,
+                    generate_failure_summary=True,
                 )
                 if ctx.restore_workspace_snapshot_if_needed:
                     ctx.restore_workspace_snapshot_if_needed(
                         "planning circuit breaker opened"
                     )
-                return {"status": "failed", "reason": "planning_circuit_breaker_opened"}
+                return {"status": "failed", "reason": cb_reason}
 
             output_result = planning_result.get("output", {})
             ctx.logger.info(

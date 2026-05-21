@@ -669,10 +669,16 @@ def _is_repairable_malformed_shell_quoting_violation(exc: Exception) -> bool:
 
 
 class _PlanningRetryState:
-    """Track retry/repair attempts to implement circuit breaking."""
+    """Track retry/repair attempts to implement circuit breaking.
 
-    def __init__(self):
+    persisted_failures: count of prior failed TaskExecution rows for this
+    task/session loaded from DB at planning start.  Survives worker restarts
+    so the circuit breaker cannot be reset to zero by a crash.
+    """
+
+    def __init__(self, persisted_failures: int = 0):
         self.consecutive_failures = 0
+        self.persisted_failures = persisted_failures
         self.minimal_prompt_used = False
         self.repair_prompt_used = False
         self.post_repair_blocking_second_repair_used = False
@@ -683,7 +689,9 @@ class _PlanningRetryState:
 
     @property
     def circuit_open(self) -> bool:
-        return self.consecutive_failures >= MAX_PLANNING_RETRIES
+        return (
+            self.consecutive_failures + self.persisted_failures >= MAX_PLANNING_RETRIES
+        )
 
 
 @dataclass(frozen=True)

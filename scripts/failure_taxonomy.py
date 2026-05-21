@@ -43,6 +43,7 @@ KNOWN_TERMINAL_REASONS = {
     "planning_parse_error",
     "plan_revision_cap_reached",
     "planning_circuit_breaker_opened",
+    "planning_circuit_breaker_opened_persisted_attempts",
     "revised_plan_validation_failed",
     "truncated_multistep_plan_after_retry",
     # Execution / repair failures

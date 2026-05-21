@@ -844,9 +844,8 @@ class TestUnittestPlanMaterialization:
             "description": "Verify script output",
             "commands": [],
             "verification": (
-                'python -c "import os, subprocess; '
-                "sys.exit(0 if subprocess.check_output('python scripts/smoke_status.py', "
-                "shell=True).decode().strip() == 'Phase 10G Third Machine: Ready' else 1)\""
+                'python -c "import pathlib; '
+                "sys.exit(0 if pathlib.Path('scripts/smoke_status.py').exists() else 1)\""
             ),
             "rollback": None,
             "expected_files": ["scripts/smoke_status.py"],
