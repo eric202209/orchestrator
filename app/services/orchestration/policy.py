@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from app.config import settings
+
 PLANNING_TIMEOUT_MIN_SECONDS = 180
 PLANNING_TIMEOUT_MAX_SECONDS = 300
 MINIMAL_PLANNING_TIMEOUT_SECONDS = 300
@@ -138,9 +140,13 @@ _POLICY_PROFILES = {
 def clamp_planning_timeout(timeout_seconds: int) -> int:
     """Bound planning time so dense tasks fail faster and more predictably."""
 
+    max_timeout = PLANNING_TIMEOUT_MAX_SECONDS
+    if settings.RUNTIME_PROFILE in {"low_resource", "medium"}:
+        max_timeout = min(max_timeout, int(settings.PLANNING_SYNTHESIS_TIMEOUT_SECONDS))
+    min_timeout = min(PLANNING_TIMEOUT_MIN_SECONDS, max_timeout)
     return max(
-        PLANNING_TIMEOUT_MIN_SECONDS,
-        min(timeout_seconds, PLANNING_TIMEOUT_MAX_SECONDS),
+        min_timeout,
+        min(timeout_seconds, max_timeout),
     )
 
 

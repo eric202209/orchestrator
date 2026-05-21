@@ -1962,7 +1962,7 @@ def finalize_successful_task(
             session_id=session_id,
             task_id=next_task.id,
             prompt=next_task.description or next_task.title,
-            timeout_seconds=900,
+            timeout_seconds=ctx.timeout_seconds,
             task_execution_id=next_task_execution.id,
         )
 

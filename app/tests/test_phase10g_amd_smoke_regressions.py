@@ -329,6 +329,22 @@ class TestPatchPythonVerificationCmd:
 
 
 class TestReadOnlyInspectionVerification:
+    def test_planner_and_validator_share_read_only_inspection_classification(self):
+        from app.services.orchestration.planning.planner import PlannerService
+        from app.services.orchestration.validation.validator import ValidatorService
+
+        step = {
+            "step_number": 1,
+            "description": "Inspect the current workspace",
+            "commands": ["rg --files"],
+            "ops": [{"op": "noop", "note": "diagnostic marker"}],
+            "verification": None,
+            "expected_files": [],
+        }
+
+        assert ValidatorService._step_is_readonly_inspection(step) is True
+        assert PlannerService._step_is_readonly_inspection(step) is True
+
     def test_read_only_inspection_marks_declared_verification_skippable(
         self, tmp_path: Path
     ):

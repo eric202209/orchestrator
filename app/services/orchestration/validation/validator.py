@@ -1219,7 +1219,7 @@ class ValidatorService:
     @staticmethod
     def _step_is_readonly_inspection(step: Dict[str, Any]) -> bool:
         ops = step.get("ops") or []
-        if isinstance(ops, list) and any(isinstance(op, dict) for op in ops):
+        if isinstance(ops, list) and any(operation_has_file_op_path(op) for op in ops):
             return False
         commands = [
             str(command or "").strip()
