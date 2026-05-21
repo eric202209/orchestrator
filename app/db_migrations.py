@@ -642,6 +642,33 @@ def _migration_012_task_template_id(engine: Engine) -> None:
             )
 
 
+def _migration_013_failure_metadata(engine: Engine) -> None:
+    table_names = _table_names(engine)
+    if "task_executions" in table_names:
+        statements: list[str] = []
+        if not _has_column(engine, "task_executions", "failure_category"):
+            statements.append(
+                "ALTER TABLE task_executions ADD COLUMN failure_category VARCHAR(64)"
+            )
+        if not _has_column(engine, "task_executions", "backend_id"):
+            statements.append(
+                "ALTER TABLE task_executions ADD COLUMN backend_id VARCHAR(64)"
+            )
+        if statements:
+            with engine.begin() as connection:
+                for statement in statements:
+                    connection.execute(text(statement))
+
+    if "sessions" in table_names:
+        if not _has_column(engine, "sessions", "escalation_backend_id"):
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "ALTER TABLE sessions ADD COLUMN escalation_backend_id VARCHAR(64)"
+                    )
+                )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -702,6 +729,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="012_task_template_id",
         description="Add optional workflow template id to tasks",
         upgrade=_migration_012_task_template_id,
+    ),
+    Migration(
+        version="013_failure_metadata",
+        description="Add failure_category/backend_id to task_executions and escalation_backend_id to sessions",
+        upgrade=_migration_013_failure_metadata,
     ),
 )
 

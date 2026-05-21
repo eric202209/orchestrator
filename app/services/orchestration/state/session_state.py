@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from app.services.orchestration.state.persistence import set_session_alert
@@ -77,3 +77,36 @@ def mark_session_completed(
 
 def clear_session_alert(session: Any | None) -> None:
     set_session_alert(session, None, None)
+
+
+def mark_session_pending(session: Any | None) -> None:
+    if not session:
+        return
+    session.status = "pending"
+    session.is_active = False
+
+
+def mark_session_deleted(
+    session: Any | None,
+    *,
+    deleted_at: datetime | None = None,
+) -> None:
+    if not session:
+        return
+    session.status = "deleted"
+    session.is_active = False
+    session.deleted_at = deleted_at or datetime.now(timezone.utc)
+
+
+def mark_session_resumed(
+    session: Any | None,
+    *,
+    resumed_at: datetime | None = None,
+) -> None:
+    if not session:
+        return
+    session.status = "running"
+    session.is_active = True
+    session.resumed_at = resumed_at or datetime.now(timezone.utc)
+    if getattr(session, "paused_at", None):
+        session.paused_at = None

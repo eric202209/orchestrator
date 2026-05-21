@@ -2,7 +2,7 @@
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import model_validator, field_validator
-from typing import Any, List
+from typing import Any, List, Optional
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -131,6 +131,10 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
     MOBILE_GATEWAY_API_KEY: str = ""
     AGENT_BACKEND: str = "local_openclaw"
+    PLANNING_BACKEND: Optional[str] = None
+    EXECUTION_BACKEND: Optional[str] = None
+    REPAIR_BACKEND: Optional[str] = None
+    LOCAL_OPENCLAW_MAX_PARALLEL_SESSIONS: int = 1
     AGENT_MODEL: str = "local"
     PLANNING_REPAIR_ENABLED: bool = True
     PLANNING_REPAIR_BASE_URL: str = "http://ai-gateway:8000/v1"
@@ -291,6 +295,27 @@ def validate_runtime_secrets() -> None:
             descriptor.name,
             settings.AGENT_MODEL,
         )
+
+        role_backends = {
+            "PLANNING_BACKEND": settings.PLANNING_BACKEND,
+            "EXECUTION_BACKEND": settings.EXECUTION_BACKEND,
+            "REPAIR_BACKEND": settings.REPAIR_BACKEND,
+        }
+        for env_name, role_backend in role_backends.items():
+            if not role_backend:
+                continue
+            role_descriptor = require_backend_descriptor(role_backend)
+            role_missing = [
+                var
+                for var in role_descriptor.config.required_env_vars
+                if not str(getattr(settings, var, "")).strip()
+            ]
+            if role_missing:
+                raise RuntimeError(
+                    f"{env_name}='{role_backend}' requires env var(s) not set: "
+                    + ", ".join(role_missing)
+                )
+            logger.info("Role backend %s: %s", env_name, role_descriptor.name)
     except RuntimeError:
         raise
     except Exception as exc:  # UnsupportedAgentBackendError or import error

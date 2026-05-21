@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
 from app.models import Session as SessionModel, SessionState, TaskCheckpoint
+from app.services.orchestration.state import mark_session_paused, mark_session_resumed
 
 logger = logging.getLogger(__name__)
 
@@ -137,8 +138,11 @@ class ResumeSessionService:
         """Pause current session and save state"""
         try:
             # Update session status
-            self.session_model.status = "paused"
-            self.session_model.paused_at = datetime.utcnow()
+            mark_session_paused(
+                self.session_model,
+                paused_at=datetime.utcnow(),
+                is_active=self.session_model.is_active,
+            )
 
             # Save checkpoint before pausing
             if self.session_model.is_active:
@@ -186,13 +190,7 @@ class ResumeSessionService:
                 logger.info(f"Resuming from last checkpoint: {current_step}")
 
             # Update session status
-            self.session_model.status = "running"
-            self.session_model.is_active = True
-            self.session_model.resumed_at = datetime.utcnow()
-
-            # Clear paused timestamp if set
-            if self.session_model.paused_at:
-                self.session_model.paused_at = None
+            mark_session_resumed(self.session_model, resumed_at=datetime.utcnow())
 
             self.db.commit()
 
@@ -281,7 +279,7 @@ class ResumeSessionService:
                 raise ResumeError(f"Invalid step number: {step_number}")
 
             # Update session to indicate retry mode
-            self.session_model.status = "running"
+            mark_session_resumed(self.session_model, resumed_at=datetime.utcnow())
             self.db.commit()
 
             result = {

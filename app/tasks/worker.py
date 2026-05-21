@@ -27,6 +27,13 @@ from app.services import (
     build_task_subfolder_name,
     get_session_or_404,
 )
+from app.config import settings
+from app.services.agents.agent_runtime import BackendRole, resolve_backend_name_for_role
+from app.services.agents.agent_backends import get_backend_descriptor
+from app.services.session.execution_policy import classify_failure
+from app.services.session.session_execution_service import (
+    update_execution_failure_metadata,
+)
 from app.services.orchestration import (
     STALE_RUN_GUARD_SECONDS,
     OrchestrationRunContext,
@@ -85,10 +92,10 @@ from app.services.workspace.system_settings import get_effective_policy_profile
 from app.services.orchestration.validation.workspace_guard import (
     verify_workspace_contract,
 )
-from app.services.orchestration.run_state import (
-    mark_task_attempt_cancelled,
-    mark_task_attempt_failed,
-    mark_task_attempt_running,
+from app.services.session.session_execution_service import (
+    mark_execution_cancelled,
+    mark_execution_failed,
+    mark_execution_running,
 )
 from app.services.orchestration.state.session_state import (
     mark_session_paused,
@@ -212,6 +219,10 @@ def execute_orchestration_task(
     active_policy = None
     restore_workspace_snapshot_if_needed = None
     project_mutation_lock_context = None
+    _backend_slot_acquired: bool = False
+    _backend_slot_backend_id: Optional[str] = None
+    _backend_slot_redis = None
+    _resolved_execution_backend: str = settings.AGENT_BACKEND
 
     try:
         # Get session and task
@@ -220,6 +231,10 @@ def execute_orchestration_task(
 
         if not session or not task:
             raise ValueError("Session or task not found")
+
+        _resolved_execution_backend = resolve_backend_name_for_role(
+            db, BackendRole.EXECUTION
+        )
 
         if task_execution_id is None:
             task_execution = create_task_execution(
@@ -325,7 +340,7 @@ def execute_orchestration_task(
                 if task_execution_id
                 else None
             )
-            mark_task_attempt_cancelled(
+            mark_execution_cancelled(
                 task=None,
                 task_execution=task_execution,
                 completed_at=datetime.now(timezone.utc),
@@ -379,7 +394,7 @@ def execute_orchestration_task(
                 if task_execution_id
                 else None
             )
-            mark_task_attempt_cancelled(
+            mark_execution_cancelled(
                 task=None,
                 task_execution=task_execution,
                 completed_at=datetime.now(timezone.utc),
@@ -672,7 +687,7 @@ def execute_orchestration_task(
                     if task_execution_id
                     else None
                 )
-                mark_task_attempt_failed(
+                mark_execution_failed(
                     task=task,
                     session_task_link=session_task_link,
                     task_execution=task_execution,
@@ -682,6 +697,13 @@ def execute_orchestration_task(
                     ),
                     completed_at=datetime.now(timezone.utc),
                 )
+                if task_execution is not None:
+                    update_execution_failure_metadata(
+                        db,
+                        task_execution.id,
+                        failure_category="lifecycle_inconsistency",
+                        backend_id=_resolved_execution_backend,
+                    )
                 db.commit()
                 raise Exception("Task timeout - already running too long")
         elif task.started_at and is_resume_execution:
@@ -699,7 +721,52 @@ def execute_orchestration_task(
             if task_execution_id
             else None
         )
-        mark_task_attempt_running(
+
+        # --- Backend concurrency slot acquisition ---
+        _eff_backend = _resolved_execution_backend
+        _bd = get_backend_descriptor(_eff_backend)
+        if _bd.capabilities.max_parallel_sessions is not None:
+            try:
+                from app.services.agents.backend_concurrency import (
+                    acquire_backend_slot,
+                    make_redis_client,
+                )
+
+                _backend_slot_redis = make_redis_client()
+                _backend_slot_backend_id = _bd.name
+                _backend_slot_acquired = acquire_backend_slot(
+                    _backend_slot_redis,
+                    _bd.name,
+                    session_id,
+                    max_slots=settings.LOCAL_OPENCLAW_MAX_PARALLEL_SESSIONS,
+                )
+            except Exception as _redis_exc:
+                logger.warning(
+                    "[ORCHESTRATION] Redis slot acquisition error (non-fatal, proceeding): %s",
+                    _redis_exc,
+                )
+                _backend_slot_acquired = True  # fail open on Redis unavailability
+            if not _backend_slot_acquired:
+                if task_execution is not None:
+                    update_execution_failure_metadata(
+                        db,
+                        task_execution.id,
+                        failure_category="backend_capacity_limit",
+                        backend_id=_bd.name,
+                    )
+                db.commit()
+                emit_live(
+                    "WARN",
+                    f"[ORCHESTRATION] Backend '{_bd.name}' at capacity; retrying dispatch",
+                    metadata={
+                        "phase": "slot_acquisition",
+                        "backend_id": _bd.name,
+                        "failure_category": "backend_capacity_limit",
+                    },
+                )
+                raise self.retry(countdown=15, max_retries=5)
+
+        mark_execution_running(
             task=task,
             session_task_link=session_task_link,
             task_execution=task_execution,
@@ -707,6 +774,8 @@ def execute_orchestration_task(
                 claim_started_at or task.started_at or datetime.now(timezone.utc)
             ),
         )
+        if task_execution is not None and hasattr(task_execution, "backend_id"):
+            task_execution.backend_id = _resolved_execution_backend
         db.commit()
         _write_project_state_snapshot(db, project, task, session_id)
 
@@ -734,7 +803,9 @@ def execute_orchestration_task(
             )
 
         # Initialize the active runtime service
-        runtime_service = create_agent_runtime(db, session_id, task_id)
+        runtime_service = create_agent_runtime(
+            db, session_id, task_id, role=BackendRole.EXECUTION
+        )
         if hasattr(runtime_service, "task_execution_id"):
             runtime_service.task_execution_id = task_execution_id
         runtime_metadata = (
@@ -792,7 +863,7 @@ def execute_orchestration_task(
                 contract_error = "Workspace contract failed before execution: " + str(
                     workspace_contract.get("reason") or "unknown mismatch"
                 )
-                mark_task_attempt_failed(
+                mark_execution_failed(
                     task=task,
                     session_task_link=session_task_link,
                     task_execution=task_execution,
@@ -800,6 +871,13 @@ def execute_orchestration_task(
                     completed_at=datetime.now(timezone.utc),
                     workspace_status="blocked",
                 )
+                if task_execution is not None:
+                    update_execution_failure_metadata(
+                        db,
+                        task_execution.id,
+                        failure_category="governance_hold",
+                        backend_id=_resolved_execution_backend,
+                    )
                 mark_session_paused(
                     session,
                     alert_level="error",
@@ -840,7 +918,7 @@ def execute_orchestration_task(
             orchestration_state.abort_reason = ""
             task.steps = None
             task.current_step = 0
-            mark_task_attempt_running(
+            mark_execution_running(
                 task=task,
                 session_task_link=session_task_link,
                 task_execution=task_execution,
@@ -1166,13 +1244,20 @@ def execute_orchestration_task(
                 if task_execution_id
                 else None
             )
-            mark_task_attempt_failed(
+            mark_execution_failed(
                 task=task,
                 session_task_link=session_task_link,
                 task_execution=task_execution,
                 error_message=gate_error,
                 completed_at=datetime.now(timezone.utc),
             )
+            if task_execution is not None:
+                update_execution_failure_metadata(
+                    db,
+                    task_execution.id,
+                    failure_category="governance_hold",
+                    backend_id=_resolved_execution_backend,
+                )
             mark_session_paused(
                 session,
                 alert_level="error",
@@ -1424,6 +1509,21 @@ def execute_orchestration_task(
         return step_loop_result
 
     except Exception as exc:
+        from celery.exceptions import Retry as _CeleryRetry
+
+        if isinstance(exc, _CeleryRetry):
+            raise
+        try:
+            _fail_cat = classify_failure(str(exc), _resolved_execution_backend, {})
+            if task_execution_id is not None:
+                update_execution_failure_metadata(
+                    db,
+                    task_execution_id,
+                    failure_category=_fail_cat,
+                    backend_id=_resolved_execution_backend,
+                )
+        except Exception:
+            pass
         update_langfuse_observation(
             trace_observation,
             output={"status": "failed", "reason": "exception"},
@@ -1510,6 +1610,23 @@ def execute_orchestration_task(
                 task_execution_id,
                 sync_exc,
             )
+        if (
+            _backend_slot_acquired
+            and _backend_slot_redis is not None
+            and _backend_slot_backend_id
+        ):
+            try:
+                from app.services.agents.backend_concurrency import release_backend_slot
+
+                release_backend_slot(
+                    _backend_slot_redis, _backend_slot_backend_id, session_id
+                )
+            except Exception as _rel_exc:
+                logger.warning(
+                    "[ORCHESTRATION] Failed to release backend slot for %s: %s",
+                    _backend_slot_backend_id,
+                    _rel_exc,
+                )
         if project_mutation_lock_context is not None:
             project_mutation_lock_context.__exit__(None, None, None)
         if trace_context_manager is not None:

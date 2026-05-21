@@ -139,6 +139,7 @@ class Session(Base):
     instance_id = Column(
         String(36), nullable=True, index=True
     )  # UUID for session versioning
+    escalation_backend_id = Column(String(64), nullable=True)
 
     __table_args__ = (
         Index(
@@ -332,6 +333,8 @@ class TaskExecution(Base):
     task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False, index=True)
     attempt_number = Column(Integer, nullable=False)
     status = Column(Enum(TaskStatus), default=TaskStatus.PENDING, nullable=False)
+    failure_category = Column(String(64), nullable=True)
+    backend_id = Column(String(64), nullable=True)
     started_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import enum
 import logging
 from typing import Any, Optional
 
@@ -20,16 +21,40 @@ from app.services.workspace.system_settings import get_effective_agent_backend
 logger = logging.getLogger(__name__)
 
 
+class BackendRole(str, enum.Enum):
+    PLANNING = "planning"
+    EXECUTION = "execution"
+    REPAIR = "repair"
+
+
+def resolve_backend_name_for_role(db: Session, role: BackendRole) -> str:
+    """Return the configured backend name for role, falling back to AGENT_BACKEND."""
+    role_setting = {
+        BackendRole.PLANNING: settings.PLANNING_BACKEND,
+        BackendRole.EXECUTION: settings.EXECUTION_BACKEND,
+        BackendRole.REPAIR: settings.REPAIR_BACKEND,
+    }.get(role)
+    if role_setting:
+        return role_setting.strip()
+    return get_effective_agent_backend(settings.AGENT_BACKEND, db=db).strip()
+
+
 def create_agent_runtime(
     db: Session,
     session_id: Optional[int],
     task_id: Optional[int] = None,
     *,
     use_demo_mode: Optional[bool] = None,
+    role: Optional[BackendRole] = None,
 ) -> AgentRuntime:
     """Instantiate the configured backend runtime for a session/task pair."""
 
-    backend_name = get_effective_agent_backend(settings.AGENT_BACKEND, db=db).strip()
+    if role is not None:
+        backend_name = resolve_backend_name_for_role(db, role)
+    else:
+        backend_name = get_effective_agent_backend(
+            settings.AGENT_BACKEND, db=db
+        ).strip()
     descriptor = require_backend_descriptor(backend_name)
     runtime_factory = get_runtime_factory(descriptor.name)
     if runtime_factory is not None:

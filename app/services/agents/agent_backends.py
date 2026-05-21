@@ -24,6 +24,7 @@ class BackendCapabilities:
     supports_json_mode: bool
     mcp_capable: bool = False
     max_context_tokens: Optional[int] = None
+    max_parallel_sessions: Optional[int] = None
     reliability_tier: str = "standard"
     latency_tier: str = "standard"
 
@@ -266,6 +267,7 @@ _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
                 supports_json_mode=False,
                 mcp_capable=False,
                 max_context_tokens=128000,
+                max_parallel_sessions=1,
                 reliability_tier="standard",
                 latency_tier="local",
             ),
