@@ -4,7 +4,7 @@ Three paths depending on your machine:
 
 - [Linux / Ubuntu (with OpenClaw)](#linux--ubuntu-with-openclaw) — native processes, `start.sh`
 - [Windows (Ollama, no OpenClaw)](#windows-Nvidia-gpu--ollama-no-openclaw) — `start.ps1`
-- [Windows (llama.cpp, no OpenClaw)](#windows-AMD-gpu--llamacpp-no-openclaw) — `./start-amd.sh`
+- [Windows (llama.cpp, no OpenClaw)](#windows-llamacpp-no-openclaw) — `./wsl-start.sh`
 
 ---
 
@@ -127,7 +127,7 @@ If Ollama is not installed, set `EMBEDDING_PROVIDER=openai` and provide `OPENAI_
 
 Uses `docker-compose.windows.yml` for the backend stack. Ollama runs natively on Windows for GPU access.
 
-> **Note:** This path is tested on NVIDIA GPU with CUDA. For AMD GPU, see the [Windows AMD GPU + llama.cpp](#windows-amd-gpu--llamacpp-no-openclaw) path below.
+> **Note:** This path is tested on NVIDIA GPU with CUDA. For GGUF/llama.cpp endpoints, see the [Windows llama.cpp](#windows-llamacpp-no-openclaw) path below.
 
 Windows process layout:
 
@@ -287,7 +287,7 @@ Add `-v` to also remove the Qdrant data volume.
 
 ---
 
-## Windows (AMD GPU + llama.cpp, no OpenClaw)
+## Windows (llama.cpp, no OpenClaw)
 
 Uses `docker-compose.windows.yml` for the backend stack. llama.cpp runs natively on Windows with the Vulkan backend for AMD GPU access. Ollama runs only for embeddings.
 
@@ -591,10 +591,32 @@ LOCALHOST=127.0.0.1
 
 > Do not run the frontend during stability testing.
 
+Run the preflight check first. It validates host tools, `.env`, WSL2 project
+path shape, llama-server inputs, and Docker Compose config without starting
+services.
+
 ```bash
 cd ~/orchestrator
-export WINDOWS_PROJECTS_DIR=/home/yourname/projects
-docker compose -f docker-compose.windows.yml up --build
+LLAMA_CTX=4096 \
+LLAMA_MODEL_PATH="D:\\AI\\models\\Qwen2.5-Coder-7B-Instruct-Q5_K_M.gguf" \
+LLAMA_EXE_WIN="/mnt/d/AI/llama.cpp/llama-server.exe" \
+./wsl-start.sh --check --backend-only
+```
+
+`--check` expects `RUNTIME_PROFILE=low_resource` by default. For a previously
+validated machine intentionally running `medium`, use
+`EXPECTED_RUNTIME_PROFILE=medium ./wsl-start.sh --check --backend-only`.
+It also expects Ollama to be absent by default for the third-machine path. For
+current-machine validation where Ollama is intentionally installed, add
+`EXPECTED_OLLAMA_ABSENT=false`.
+
+Start the backend stack through `wsl-start.sh`:
+
+```bash
+LLAMA_CTX=4096 \
+LLAMA_MODEL_PATH="D:\\AI\\models\\Qwen2.5-Coder-7B-Instruct-Q5_K_M.gguf" \
+LLAMA_EXE_WIN="/mnt/d/AI/llama.cpp/llama-server.exe" \
+./wsl-start.sh --backend-only
 ```
 
 First build takes several minutes. Verify all containers are up:
