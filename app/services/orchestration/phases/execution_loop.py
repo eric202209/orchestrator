@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os as _os
@@ -91,6 +92,15 @@ from app.services.orchestration.context.hitl_sentinel import (
     parse as _parse_hitl_sentinel,
 )
 from app.services.prompt_templates import OrchestrationStatus, StepResult
+
+
+def _run_coroutine(coro: Any) -> Any:
+    # asyncio.run() deadlocks inside a Celery ForkPoolWorker because os.fork()
+    # inherits Python's asyncio internal mutexes in a locked state from the
+    # parent process. Running in a fresh ThreadPoolExecutor thread avoids this:
+    # the thread is not forked, so it starts with a clean event loop state.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _executor:
+        return _executor.submit(asyncio.run, coro).result()
 
 
 def _get_task_execution(
@@ -922,7 +932,7 @@ def execute_step_loop(
                                 step_description=step_description,
                                 task_prompt=prompt,
                             )
-                            step_result = asyncio.run(
+                            step_result = _run_coroutine(
                                 runtime_service.execute_task(
                                     execution_prompt,
                                     timeout_seconds=step_timeout_seconds,
@@ -946,7 +956,7 @@ def execute_step_loop(
                                 compact_execution_prompt = assemble_execution_prompt(
                                     ctx, step, compact=True
                                 )
-                                step_result = asyncio.run(
+                                step_result = _run_coroutine(
                                     runtime_service.execute_task(
                                         compact_execution_prompt,
                                         timeout_seconds=step_timeout_seconds,
@@ -1887,7 +1897,7 @@ def execute_step_loop(
         except Exception:
             pass
 
-        debug_result = asyncio.run(
+        debug_result = _run_coroutine(
             runtime_service.execute_task(
                 debug_prompt, timeout_seconds=DEBUG_TIMEOUT_SECONDS
             )
@@ -1921,7 +1931,7 @@ def execute_step_loop(
                     failure_envelope=failure_envelope,
                 ),
             )
-            debug_result = asyncio.run(
+            debug_result = _run_coroutine(
                 runtime_service.execute_task(
                     compact_debug_prompt, timeout_seconds=DEBUG_TIMEOUT_SECONDS
                 )
@@ -1953,7 +1963,7 @@ def execute_step_loop(
                         expected_shape="array or object",
                     )
                     try:
-                        compliance_result = asyncio.run(
+                        compliance_result = _run_coroutine(
                             runtime_service.execute_task(
                                 compliance_prompt,
                                 timeout_seconds=DEBUG_TIMEOUT_SECONDS,
@@ -2127,7 +2137,7 @@ def execute_step_loop(
                     failed_steps=[step_record],
                     debug_analysis=debug_result.get("output", ""),
                 )
-                revise_result = asyncio.run(
+                revise_result = _run_coroutine(
                     runtime_service.execute_task(
                         revise_prompt, timeout_seconds=DEBUG_TIMEOUT_SECONDS
                     )
