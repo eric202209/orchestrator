@@ -53,6 +53,7 @@ INTEGRATION_TEST_MODULE_KEYWORDS = (
     "_endpoints",
     "admin_diagnostics",
     "canonical_workspace",
+    "context_budget",
     "execution_reliability",
     "github",
     "knowledge_service",
@@ -63,6 +64,7 @@ INTEGRATION_TEST_MODULE_KEYWORDS = (
     "phase6a_runtime",
     "planner_recovery",
     "planning_background",
+    "planning_circuit_breaker",
     "planning_knowledge",
     "planning_sessions",
     "project_tasks",
@@ -73,6 +75,7 @@ INTEGRATION_TEST_MODULE_KEYWORDS = (
     "session_execution_service",
     "session_lifecycle",
     "stopped_session",
+    "stuck_sessions",
     "task_execution_transaction",
     "workspace_restore",
 )

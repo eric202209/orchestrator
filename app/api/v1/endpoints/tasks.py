@@ -123,12 +123,17 @@ def _resolve_retry_event_project_dir(
     project: Project | None,
     task: Task,
     task_workspace: Dict,
+    db: Session,
 ) -> Path | str:
     workspace_path = task_workspace.get("workspace_path")
     if not project:
         return workspace_path or "."
 
-    project_root = resolve_project_workspace_path(project.workspace_path, project.name)
+    project_root = resolve_project_workspace_path(
+        project.workspace_path,
+        project.name,
+        db=db,
+    )
     try:
         candidate = Path(str(workspace_path or "")).resolve()
         candidate.relative_to(project_root)
@@ -533,6 +538,7 @@ def _queue_task_retry(
         project=project,
         task=task,
         task_workspace=task_workspace,
+        db=db,
     )
 
     queued_event = append_orchestration_event(

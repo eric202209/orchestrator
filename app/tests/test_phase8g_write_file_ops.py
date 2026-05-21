@@ -961,12 +961,13 @@ def test_unittest_command_with_pathlib_verification_runs_locally(tmp_path):
         "\n".join(
             [
                 "import subprocess",
+                "import sys",
                 "import unittest",
                 "",
                 "class TestSmokeStatus(unittest.TestCase):",
                 "    def test_smoke_status(self):",
                 "        result = subprocess.run(",
-                "            ['python', 'scripts/smoke_status.py'],",
+                "            [sys.executable, 'scripts/smoke_status.py'],",
                 "            capture_output=True,",
                 "            text=True,",
                 "            check=True,",

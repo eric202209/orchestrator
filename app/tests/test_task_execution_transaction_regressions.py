@@ -216,7 +216,7 @@ def test_task_retry_commits_records_before_worker_dispatch(
 
 
 def test_task_retry_dual_writes_pending_task_execution(
-    authenticated_client, db_session, monkeypatch
+    authenticated_client, db_session, monkeypatch, isolated_workspace_root
 ):
     project = Project(name="Dual Write Project")
     db_session.add(project)
@@ -247,6 +247,14 @@ def test_task_retry_dual_writes_pending_task_execution(
     assert task_execution.task_id == task.id
     assert task_execution.attempt_number == 1
     assert task_execution.status == TaskStatus.PENDING
+    assert (
+        isolated_workspace_root
+        / "dual-write-project"
+        / "retry-task-1"
+        / ".openclaw"
+        / "events"
+        / f"session_{payload['session_id']}_task_{task.id}.jsonl"
+    ).exists()
 
 
 def test_task_retry_default_reuses_latest_project_session_without_duplicates(
