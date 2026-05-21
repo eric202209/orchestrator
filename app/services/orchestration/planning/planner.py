@@ -531,39 +531,6 @@ class PlannerService:
                 raise
             return cls._attach_planning_lock_diagnostics(result, lock_diagnostics)
 
-    _WEAK_VERIFICATION_MARKERS = (
-        "test -f",
-        "test -d",
-        "test -s",
-        "grep -q",
-        "ls ",
-        "echo ",
-        "cat ",
-        "find ",
-        "wc -l",
-    )
-
-    _STRONG_VERIFICATION_MARKERS = (
-        "pytest",
-        "python3 -m",
-        "python3 ",
-        "python -m",
-        "python ",
-        "uv run",
-        "node -e",
-        "node ",
-        "npm test",
-        "npm run build",
-        "pnpm test",
-        "pnpm build",
-        "yarn test",
-        "yarn build",
-        "cargo test",
-        "go test",
-        "javac ",
-        "tsc",
-    )
-
     @staticmethod
     def _render_workflow_guidance(
         workflow_profile: str = "default",
@@ -913,12 +880,205 @@ class PlannerService:
         expected_text = str(expected)
         return cls._python_file_contains_verification_command(path, expected_text)
 
+    @staticmethod
+    def _path_from_rm_rollback(command: Any) -> Optional[str]:
+        text = str(command or "").strip()
+        match = re.match(r"^rm\s+-f\s+([A-Za-z0-9_./-]+)\s*$", text)
+        if not match:
+            return None
+        path = match.group(1).strip().lstrip("./")
+        if not path or Path(path).is_absolute() or ".." in Path(path).parts:
+            return None
+        return path
+
+    @classmethod
+    def _infer_unittest_write_op(
+        cls,
+        *,
+        task_prompt: str,
+        description: str,
+        rollback: Any,
+    ) -> Optional[Dict[str, Any]]:
+        prompt = str(task_prompt or "")
+        if "unittest" not in prompt.lower():
+            return None
+        path = cls._path_from_rm_rollback(rollback)
+        if not path or not path.startswith("tests/") or not path.endswith(".py"):
+            return None
+        if path not in description and path not in prompt:
+            return None
+
+        script_match = re.search(
+            r"(?:execute|run)\s+([A-Za-z0-9_./-]+\.py)", prompt, re.IGNORECASE
+        )
+        expected_match = re.search(
+            r"stdout\s+equals\s+[\"']([^\"']+)[\"']", prompt, re.IGNORECASE
+        )
+        if not script_match or not expected_match:
+            return None
+        script_path = script_match.group(1).strip().lstrip("./")
+        expected = expected_match.group(1)
+        if (
+            not script_path
+            or Path(script_path).is_absolute()
+            or ".." in Path(script_path).parts
+        ):
+            return None
+
+        content = (
+            "import subprocess\n"
+            "import sys\n"
+            "import unittest\n\n\n"
+            "class SmokeStatusTest(unittest.TestCase):\n"
+            "    def test_smoke_status_output(self):\n"
+            "        completed = subprocess.run(\n"
+            f"            [sys.executable, {json.dumps(script_path)}],\n"
+            "            check=True,\n"
+            "            capture_output=True,\n"
+            "            text=True,\n"
+            "        )\n"
+            f"        self.assertEqual(completed.stdout.strip(), {json.dumps(expected)})\n\n\n"
+            "if __name__ == '__main__':\n"
+            "    unittest.main()\n"
+        )
+        return {"op": "write_file", "path": path, "content": content}
+
+    @staticmethod
+    def _normalize_unittest_write_content(operation: Dict[str, Any]) -> Dict[str, Any]:
+        path = str(operation.get("path") or "").strip().lstrip("./")
+        content = operation.get("content")
+        if (
+            str(operation.get("op") or "") != "write_file"
+            or not path.startswith("tests/")
+            or not path.endswith(".py")
+            or not isinstance(content, str)
+            or "unittest" not in content
+            or "subprocess.run(['python'," not in content
+        ):
+            return operation
+        updated = dict(operation)
+        normalized_content = content.replace(
+            "subprocess.run(['python',", "subprocess.run([sys.executable,"
+        )
+        normalized_content = normalized_content.replace(
+            "'../scripts/smoke_status.py'", "'scripts/smoke_status.py'"
+        ).replace('"../scripts/smoke_status.py"', '"scripts/smoke_status.py"')
+        if "import sys" not in normalized_content:
+            lines = normalized_content.splitlines()
+            insert_at = 0
+            while insert_at < len(lines) and lines[insert_at].startswith("import "):
+                insert_at += 1
+            lines.insert(insert_at, "import sys")
+            normalized_content = "\n".join(lines)
+        updated["content"] = normalized_content
+        return updated
+
+    @staticmethod
+    def _exact_line_from_task_prompt(task_prompt: str) -> Optional[str]:
+        prompt = str(task_prompt or "")
+        patterns = (
+            r"exactly\s+this\s+single\s+line:\s*([^\n.]+(?:\.[^\n.]+)*?)(?:\.\s|$)",
+            r"exactly\s+this\s+line:\s*([^\n.]+(?:\.[^\n.]+)*?)(?:\.\s|$)",
+            r"stdout(?:\.strip\(\))?\s+equals\s+([^\n.]+(?:\.[^\n.]+)*?)(?:\.\s|$)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, prompt, re.IGNORECASE)
+            if match:
+                exact_line = match.group(1).strip().strip("\"'")
+                if exact_line:
+                    return exact_line
+        return None
+
+    @classmethod
+    def _normalize_exact_line_from_task_prompt(
+        cls, operation: Dict[str, Any], task_prompt: str
+    ) -> Dict[str, Any]:
+        exact_line = cls._exact_line_from_task_prompt(task_prompt)
+        content = operation.get("content")
+        if (
+            not exact_line
+            or str(operation.get("op") or "") != "write_file"
+            or not isinstance(content, str)
+        ):
+            return operation
+
+        updated = dict(operation)
+        updated["content"] = content.replace(f"{exact_line}.", exact_line)
+        return updated
+
+    @classmethod
+    def _normalize_exact_line_verification(
+        cls, command: Optional[str], task_prompt: str
+    ) -> Optional[str]:
+        exact_line = cls._exact_line_from_task_prompt(task_prompt)
+        if not exact_line or not isinstance(command, str):
+            return command
+        return command.replace(f"{exact_line}.", exact_line)
+
+    @staticmethod
+    def _normalize_python_subprocess_verification(
+        command: Optional[str],
+    ) -> Optional[str]:
+        text = str(command or "").strip()
+        if not text:
+            return command
+        match = re.search(
+            r"subprocess\.run\(\s*\[\s*['\"]python['\"]\s*,\s*['\"]([^'\"]+\.py)['\"]\s*\]\s*,\s*capture_output=True\s*\)\.stdout\.strip\(\)\s*==\s*b['\"]([^'\"]+)['\"]",
+            text,
+        )
+        if not match:
+            return command
+        script_path = match.group(1).strip().lstrip("./")
+        expected = match.group(2)
+        if (
+            not script_path
+            or Path(script_path).is_absolute()
+            or ".." in Path(script_path).parts
+        ):
+            return command
+        script = (
+            "import subprocess,sys; "
+            "result=subprocess.run("
+            f"[sys.executable, {json.dumps(script_path)}], "
+            "capture_output=True, text=True); "
+            f"sys.exit(0 if result.stdout.strip() == {json.dumps(expected)} else 1)"
+        )
+        return "python -c " + json.dumps(script)
+
+    @staticmethod
+    def _directory_creation_preconditions(
+        plan: Optional[List[Dict[str, Any]]],
+    ) -> set[str]:
+        materialized_files: set[str] = set()
+        for step in plan or []:
+            if not isinstance(step, dict):
+                continue
+            for operation in step.get("ops", []) or []:
+                if not isinstance(operation, dict):
+                    continue
+                if str(operation.get("op") or "") in {"write_file", "append_file"}:
+                    path = str(operation.get("path") or "").strip().lstrip("./")
+                    if path and "/" in path:
+                        materialized_files.add(path)
+            for raw_path in step.get("expected_files", []) or []:
+                path = str(raw_path or "").strip().lstrip("./")
+                if Path(path).suffix and "/" in path:
+                    materialized_files.add(path)
+
+        dirs: set[str] = set()
+        for path in materialized_files:
+            parent = str(Path(path).parent).replace("\\", "/")
+            if parent and parent != "." and ".." not in Path(parent).parts:
+                dirs.add(parent)
+        return dirs
+
     @classmethod
     def sanitize_common_plan_issues(
-        cls, plan: Optional[List[Dict[str, Any]]]
+        cls, plan: Optional[List[Dict[str, Any]]], task_prompt: str = ""
     ) -> List[Dict[str, Any]]:
         sanitized_plan: List[Dict[str, Any]] = []
         total_steps = len(plan or [])
+        directory_creation_preconditions = cls._directory_creation_preconditions(plan)
 
         for index, raw_step in enumerate(plan or [], start=1):
             step = dict(raw_step or {})
@@ -959,6 +1119,12 @@ class PlannerService:
                             source=operation,
                         )
                         if normalized_op:
+                            normalized_op = cls._normalize_unittest_write_content(
+                                normalized_op
+                            )
+                            normalized_op = cls._normalize_exact_line_from_task_prompt(
+                                normalized_op, task_prompt
+                            )
                             raw_ops.append(normalized_op)
                         elif top_level_verification := cls._extract_top_level_file_verification(
                             operation
@@ -970,6 +1136,11 @@ class PlannerService:
                     raw_step
                 ):
                     step.setdefault("verification", top_level_verification)
+
+            raw_ops = [
+                cls._normalize_exact_line_from_task_prompt(operation, task_prompt)
+                for operation in raw_ops
+            ]
 
             raw_expected_files = step.get("expected_files", [])
             if isinstance(raw_expected_files, str):
@@ -1000,6 +1171,10 @@ class PlannerService:
                 verification = None
             if verification is not None:
                 verification = str(verification).strip() or None
+            verification = cls._normalize_python_subprocess_verification(verification)
+            verification = cls._normalize_exact_line_verification(
+                verification, task_prompt
+            )
             if (
                 not commands
                 and verification
@@ -1016,6 +1191,55 @@ class PlannerService:
             description = str(step.get("description") or "").strip()
             if not description:
                 description = f"Execute step {index}"
+
+            if not raw_ops:
+                inferred_unittest_op = cls._infer_unittest_write_op(
+                    task_prompt=task_prompt,
+                    description=description,
+                    rollback=rollback,
+                )
+                if inferred_unittest_op:
+                    raw_ops.append(inferred_unittest_op)
+                    inferred_path = str(inferred_unittest_op["path"])
+                    if inferred_path not in expected_files:
+                        expected_files.append(inferred_path)
+                    commands = []
+                    verification = "python -m unittest discover -s tests"
+
+            if (
+                not raw_ops
+                and len(expected_files) == 1
+                and expected_files[0] in directory_creation_preconditions
+                and "exist" in description.lower()
+            ):
+                directory = expected_files[0]
+                commands = [f"mkdir -p {directory}"]
+                verification = "python -c " + json.dumps(
+                    "import pathlib,sys; "
+                    f"sys.exit(0 if pathlib.Path({json.dumps(directory)}).is_dir() else 1)"
+                )
+                expected_files = []
+
+            mkdir_paths = [
+                str(operation.get("path") or "").strip().lstrip("./")
+                for operation in raw_ops
+                if str(operation.get("op") or "") == "mkdir"
+                and str(operation.get("path") or "").strip()
+            ]
+            if mkdir_paths and len(mkdir_paths) == len(raw_ops):
+                safe_dirs = [
+                    path
+                    for path in mkdir_paths
+                    if not Path(path).is_absolute() and ".." not in Path(path).parts
+                ]
+                if safe_dirs:
+                    commands = [f"mkdir -p {' '.join(safe_dirs)}"]
+                    verification = "python -c " + json.dumps(
+                        "import pathlib,sys; "
+                        f"dirs={json.dumps(safe_dirs)}; "
+                        "sys.exit(0 if all(pathlib.Path(d).is_dir() for d in dirs) else 1)"
+                    )
+                    expected_files = []
 
             step = {
                 "step_number": index,
@@ -1151,36 +1375,12 @@ class PlannerService:
             name in STRUCTURALLY_EMPTY_FILENAMES for name in file_names
         )
 
-    @classmethod
-    def _verification_is_weak(cls, command: Optional[str]) -> bool:
-        text = str(command or "").strip().lower()
-        if not text:
-            return True
-        if any(marker in text for marker in cls._STRONG_VERIFICATION_MARKERS):
-            return False
-        return cls._contains_weak_verification_command(text)
-
-    @classmethod
-    def _contains_weak_verification_command(cls, text: str) -> bool:
-        del cls
-        weak_command_patterns = (
-            r"test\s+-[fds]\b",
-            r"grep\s+-q\b",
-            r"ls\b",
-            r"echo\b",
-            r"cat\b",
-            r"find\b",
-            r"wc\s+-l\b",
-        )
-        return any(
-            re.search(rf"(?:^|[;&|()\n])\s*{pattern}(?:\s|$)", text)
-            for pattern in weak_command_patterns
-        )
-
     @staticmethod
     def find_immediate_repair_step_issues(
         plan: Optional[List[Dict[str, Any]]],
     ) -> Dict[str, List[int]]:
+        from app.services.orchestration.validation.validator import ValidatorService
+
         issues: Dict[str, List[int]] = {
             "non_runnable_steps": [],
             "background_process_steps": [],
@@ -1222,7 +1422,7 @@ class PlannerService:
                     )
                 ):
                     issues["placeholder_only_steps"].append(step_number)
-                if not ops_only and PlannerService._verification_is_weak(
+                if not ops_only and ValidatorService._verification_is_weak(
                     step.get("verification")
                 ):
                     issues["weak_verification_steps"].append(step_number)

@@ -316,6 +316,24 @@ def execute_verification_command(
         }
 
 
+def patch_python_verification_imports(command: str) -> str:
+    """Patch common model-generated python -c verification import omissions."""
+    normalized = " ".join(str(command or "").strip().split())
+    if not normalized.startswith(("python -c ", "python3 -c ")):
+        return command
+    try:
+        tokens = shlex.split(normalized, posix=True)
+    except ValueError:
+        return command
+    if len(tokens) != 3:
+        return command
+    script = tokens[2]
+    if "sys." in script and "import sys" not in script:
+        script = "import sys; " + script
+        return f"{tokens[0]} -c {shlex.quote(script)}"
+    return command
+
+
 def assess_step_execution(
     *,
     db: Session,
@@ -394,7 +412,12 @@ def assess_step_execution(
             error_message += " | Retry hints: " + " | ".join(correction_hints[:3])
 
     verification_command = str(step.get("verification") or "").strip()
-    if step_status == "success" and verification_command:
+    if (
+        step_status == "success"
+        and verification_command
+        and not step_result.get("skip_declared_verification")
+    ):
+        verification_command = patch_python_verification_imports(verification_command)
         verification_result = execute_verification_command(
             project_dir=project_dir,
             command=verification_command,

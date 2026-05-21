@@ -352,7 +352,7 @@ else
     info "Starting llama-server (model load takes 20-60 seconds)..."
     powershell.exe -Command "
         Start-Process -FilePath '$LLAMA_EXE' \`
-            -ArgumentList '-m \"$MODEL_PATH\" --host 0.0.0.0 --port $LLAMA_PORT -ngl 99 -c $LLAMA_CTX -b $LLAMA_BATCH -ub $LLAMA_UBATCH --threads $LLAMA_THREADS --threads-batch $LLAMA_THREADS_BATCH -ctk q8_0 -ctv q8_0 --flash-attn --jinja' \`
+            -ArgumentList '-m \"$MODEL_PATH\" --host 0.0.0.0 --port $LLAMA_PORT -ngl 99 -c $LLAMA_CTX -b $LLAMA_BATCH -ub $LLAMA_UBATCH --threads $LLAMA_THREADS --threads-batch $LLAMA_THREADS_BATCH -ctk q8_0 -ctv q8_0 --flash-attn on --jinja' \`
             -WindowStyle Normal
     " 2>/dev/null &
 

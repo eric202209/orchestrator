@@ -1196,7 +1196,9 @@ def execute_planning_phase(
                     f"(type={plan_shape}, keys={plan_keys}, preview={str(plan_data)[:240]})"
                 )
 
-            sanitized_plan = PlannerService.sanitize_common_plan_issues(extracted_plan)
+            sanitized_plan = PlannerService.sanitize_common_plan_issues(
+                extracted_plan, task_prompt=ctx.prompt
+            )
             sanitized_plan = _strengthen_weak_expected_file_verifications(
                 sanitized_plan
             )

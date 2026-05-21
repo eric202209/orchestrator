@@ -5,6 +5,7 @@ Covers defects found and fixed during the 2026-05-20 AMD llama.cpp smoke.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -67,6 +68,11 @@ class TestSafeLocalShellCommandDetection:
     def test_touch_is_safe(self):
         fn = self._fn()
         assert fn("touch requirements.txt")
+
+    def test_chmod_executable_bit_is_safe(self):
+        fn = self._fn()
+        assert fn("chmod +x scripts/smoke_status.py")
+        assert fn("chmod 755 scripts/smoke_status.py")
 
     def test_blocked_commands_not_safe(self):
         fn = self._fn()
@@ -215,6 +221,30 @@ class TestExecuteLocalShellCommandsStep:
         )
         assert result is None, "Windows absolute target must not run locally"
 
+    def test_chmod_marks_script_executable(self, tmp_path: Path):
+        import os
+
+        from app.services.orchestration.phases.execution_loop import (
+            _execute_local_shell_commands_step,
+        )
+
+        script = tmp_path / "scripts" / "smoke_status.py"
+        script.parent.mkdir()
+        script.write_text("#!/usr/bin/env python\nprint('ok')\n", encoding="utf-8")
+
+        result = _execute_local_shell_commands_step(
+            project_dir=tmp_path,
+            commands=["chmod +x scripts/smoke_status.py"],
+            verification_command=(
+                'python -c "import os,sys; '
+                "sys.exit(0 if os.access('scripts/smoke_status.py', os.X_OK) else 1)\""
+            ),
+        )
+
+        assert result is not None
+        assert result["status"] == "completed"
+        assert os.access(script, os.X_OK)
+
 
 # ---------------------------------------------------------------------------
 # Fix 3: _patch_python_verification_cmd auto-injects 'import sys'
@@ -291,6 +321,433 @@ class TestPatchPythonVerificationCmd:
 
         assert result is not None
         assert result["status"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# Fix 7: read-only inspection steps do not run brittle generated verification
+# ---------------------------------------------------------------------------
+
+
+class TestReadOnlyInspectionVerification:
+    def test_read_only_inspection_marks_declared_verification_skippable(
+        self, tmp_path: Path
+    ):
+        from app.services.orchestration.phases.execution_loop import (
+            _execute_read_only_inspection_step,
+        )
+
+        (tmp_path / "README.md").write_text(
+            "Phase 10G Third Machine: Ready\n", encoding="utf-8"
+        )
+
+        result = _execute_read_only_inspection_step(
+            project_dir=tmp_path,
+            commands=["ls"],
+        )
+
+        assert result is not None
+        assert result["status"] == "completed"
+        assert result["skip_declared_verification"] is True
+
+    def test_assessment_skips_brittle_verification_for_read_only_inspection(
+        self, tmp_path: Path
+    ):
+        from app.services.orchestration.execution.execution_flow import (
+            assess_step_execution,
+        )
+        from app.services.orchestration.types import ValidationVerdict
+
+        step = {
+            "step_number": 1,
+            "description": "Inspect the current workspace",
+            "commands": ["ls"],
+            "verification": (
+                "python -c \"import os; sys.exit(0 if 'scripts' in "
+                "os.listdir('.') and 'smoke_status.py' not in "
+                "os.listdir('scripts') else 1)\""
+            ),
+            "rollback": None,
+            "expected_files": [],
+        }
+        step_result = {
+            "status": "completed",
+            "output": "$ ls\nREADME.md",
+            "verification_output": "",
+            "skip_declared_verification": True,
+            "files_changed": [],
+        }
+
+        with patch(
+            "app.services.orchestration.execution.execution_flow.ExecutorService.recent_step_tool_failures",
+            return_value=[],
+        ), patch(
+            "app.services.orchestration.execution.execution_flow.ValidatorService.validate_step_success",
+            return_value=ValidationVerdict(
+                stage="step_validation",
+                status="accepted",
+                profile="full_lifecycle",
+            ),
+        ):
+            assessment = assess_step_execution(
+                db=MagicMock(),
+                session_id=1,
+                task_id=1,
+                project_dir=tmp_path,
+                step=step,
+                step_result=step_result,
+                step_started_at=datetime.now(timezone.utc),
+                validation_profile="full_lifecycle",
+            )
+
+        assert assessment.step_status == "success"
+        assert assessment.error_message == ""
+
+
+# ---------------------------------------------------------------------------
+# Fix 8: simple unittest file creation must materialize requested test file
+# ---------------------------------------------------------------------------
+
+
+class TestUnittestPlanMaterialization:
+    def test_sanitizer_materializes_unittest_file_from_task_prompt(self):
+        from app.services.orchestration.planning.planner import PlannerService
+
+        task_prompt = (
+            "Create tests/test_smoke_status.py using unittest. The test must "
+            "execute scripts/smoke_status.py and assert stdout equals "
+            '"Phase 10G Third Machine: Ready".'
+        )
+        plan = [
+            {
+                "step_number": 1,
+                "description": "Inspect the current workspace",
+                "commands": ["ls"],
+                "verification": None,
+                "rollback": None,
+                "expected_files": [],
+            },
+            {
+                "step_number": 2,
+                "description": "Create the tests/test_smoke_status.py file",
+                "commands": [
+                    'python -c "import os,sys; sys.exit(0 if '
+                    "'tests/test_smoke_status.py' in os.listdir('tests') else 1)\""
+                ],
+                "verification": (
+                    'python -c "import os,sys; sys.exit(0 if '
+                    "'tests/test_smoke_status.py' in os.listdir('tests') else 1)\""
+                ),
+                "rollback": "rm -f tests/test_smoke_status.py",
+                "expected_files": [],
+            },
+            {
+                "step_number": 3,
+                "description": "Run the unittest",
+                "commands": ["python -m unittest discover -s tests"],
+                "verification": "python -m unittest discover -s tests",
+                "rollback": None,
+                "expected_files": [],
+            },
+        ]
+
+        sanitized = PlannerService.sanitize_common_plan_issues(
+            plan, task_prompt=task_prompt
+        )
+        create_step = sanitized[1]
+
+        assert create_step["commands"] == []
+        assert create_step["verification"] == "python -m unittest discover -s tests"
+        assert create_step["expected_files"] == ["tests/test_smoke_status.py"]
+        assert create_step["ops"][0]["op"] == "write_file"
+        assert create_step["ops"][0]["path"] == "tests/test_smoke_status.py"
+        assert "class SmokeStatusTest" in create_step["ops"][0]["content"]
+        assert "scripts/smoke_status.py" in create_step["ops"][0]["content"]
+        assert "Phase 10G Third Machine: Ready" in create_step["ops"][0]["content"]
+
+    def test_sanitizer_replaces_python_executable_in_unittest_ops(self):
+        from app.services.orchestration.planning.planner import PlannerService
+
+        plan = [
+            {
+                "step_number": 1,
+                "description": "Create the tests/test_smoke_status.py file",
+                "commands": [],
+                "verification": "python -m unittest tests/test_smoke_status.py",
+                "rollback": "rm -f tests/test_smoke_status.py",
+                "expected_files": ["tests/test_smoke_status.py"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "tests/test_smoke_status.py",
+                        "content": (
+                            "import unittest\n"
+                            "import subprocess\n\n"
+                            "class TestSmokeStatus(unittest.TestCase):\n"
+                            "    def test_status(self):\n"
+                            "        result = subprocess.run(['python', 'scripts/smoke_status.py'], capture_output=True, text=True)\n"
+                            "        self.assertEqual(result.stdout.strip(), 'Phase 10G Third Machine: Ready')\n"
+                        ),
+                    }
+                ],
+            }
+        ]
+
+        sanitized = PlannerService.sanitize_common_plan_issues(plan)
+        content = sanitized[0]["ops"][0]["content"]
+
+        assert "import sys" in content
+        assert "subprocess.run([sys.executable, 'scripts/smoke_status.py']" in content
+        assert "['python'," not in content
+
+    def test_sanitizer_normalizes_smoke_unittest_script_path_from_workspace_root(self):
+        from app.services.orchestration.planning.planner import PlannerService
+
+        plan = [
+            {
+                "step_number": 1,
+                "description": "Create the tests/test_smoke_status.py file",
+                "commands": [],
+                "verification": "python -m unittest discover -s tests",
+                "rollback": "rm -f tests/test_smoke_status.py",
+                "expected_files": ["tests/test_smoke_status.py"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "tests/test_smoke_status.py",
+                        "content": (
+                            "import unittest\n"
+                            "import subprocess\n\n"
+                            "class TestSmokeStatus(unittest.TestCase):\n"
+                            "    def test_status_output(self):\n"
+                            "        result = subprocess.run(['python', '../scripts/smoke_status.py'], capture_output=True, text=True)\n"
+                            "        self.assertEqual(result.stdout.strip(), 'Phase 10G Third Machine: Ready')\n"
+                        ),
+                    }
+                ],
+            }
+        ]
+
+        sanitized = PlannerService.sanitize_common_plan_issues(plan)
+        content = sanitized[0]["ops"][0]["content"]
+
+        assert "../scripts/smoke_status.py" not in content
+        assert "scripts/smoke_status.py" in content
+
+    def test_sanitizer_rewrites_boolean_subprocess_sys_exit_verification(self):
+        from app.services.orchestration.planning.planner import PlannerService
+
+        plan = [
+            {
+                "step_number": 1,
+                "description": "Run the smoke_status.py file",
+                "commands": ["python scripts/smoke_status.py"],
+                "verification": (
+                    'python -c "import subprocess,sys; '
+                    "sys.exit(subprocess.run(['python', 'scripts/smoke_status.py'], "
+                    "capture_output=True).stdout.strip() == "
+                    "b'Phase 10G Third Machine: Ready')\""
+                ),
+                "rollback": None,
+                "expected_files": [],
+            }
+        ]
+
+        sanitized = PlannerService.sanitize_common_plan_issues(plan)
+        verification = sanitized[0]["verification"]
+
+        assert "sys.executable" in verification
+        assert "sys.exit(0 if" in verification
+        assert "else 1" in verification
+        assert "['python'," not in verification
+
+    def test_sanitizer_turns_directory_existence_precondition_into_mkdir(self):
+        from app.services.orchestration.planning.planner import PlannerService
+
+        plan = [
+            {
+                "step_number": 1,
+                "description": "Check if scripts directory exists",
+                "commands": [
+                    'python -c "import pathlib,sys; '
+                    "sys.exit(0 if pathlib.Path('scripts').is_dir() else 1)\""
+                ],
+                "verification": (
+                    'python -c "import pathlib,sys; '
+                    "sys.exit(0 if pathlib.Path('scripts').is_dir() else 1)\""
+                ),
+                "rollback": None,
+                "expected_files": ["scripts"],
+            },
+            {
+                "step_number": 2,
+                "description": "Create scripts/smoke_status.py",
+                "commands": [],
+                "verification": (
+                    'python -c "import pathlib,sys; '
+                    "sys.exit(0 if pathlib.Path('scripts/smoke_status.py').exists() else 1)\""
+                ),
+                "rollback": "rm -f scripts/smoke_status.py",
+                "expected_files": ["scripts/smoke_status.py"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "scripts/smoke_status.py",
+                        "content": "print('Phase 10G Third Machine: Ready')\n",
+                    }
+                ],
+            },
+        ]
+
+        sanitized = PlannerService.sanitize_common_plan_issues(plan)
+
+        assert sanitized[0]["commands"] == ["mkdir -p scripts"]
+        assert "python -c" in sanitized[0]["verification"]
+        assert "pathlib.Path" in sanitized[0]["verification"]
+        assert sanitized[0]["expected_files"] == []
+
+    def test_sanitizer_adds_strong_verification_for_mkdir_only_ops(self):
+        from app.services.orchestration.planning.planner import PlannerService
+        from app.services.orchestration.validation.validator import ValidatorService
+        from app.services.orchestration.types import PlanAccepted
+
+        plan = [
+            {
+                "step_number": 1,
+                "description": "Ensure the scripts directory exists",
+                "commands": [],
+                "verification": None,
+                "rollback": None,
+                "expected_files": [],
+                "ops": [{"op": "mkdir", "path": "scripts"}],
+            },
+            {
+                "step_number": 2,
+                "description": "Create scripts/smoke_status.py",
+                "commands": [],
+                "verification": ("python -m py_compile scripts/smoke_status.py"),
+                "rollback": "rm -f scripts/smoke_status.py",
+                "expected_files": ["scripts/smoke_status.py"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "scripts/smoke_status.py",
+                        "content": "print('Phase 10G Third Machine: Ready')\n",
+                    }
+                ],
+            },
+        ]
+
+        sanitized = PlannerService.sanitize_common_plan_issues(plan)
+
+        assert sanitized[0]["commands"] == ["mkdir -p scripts"]
+        assert "python -c" in sanitized[0]["verification"]
+        assert "pathlib.Path" in sanitized[0]["verification"]
+        outcome = ValidatorService.validate_plan(
+            sanitized,
+            output_text="",
+            task_prompt=(
+                "Create scripts/smoke_status.py that prints exactly this line: "
+                "Phase 10G Third Machine: Ready."
+            ),
+            execution_profile="full_lifecycle",
+        )
+        assert isinstance(outcome, PlanAccepted)
+
+    def test_sanitizer_preserves_phase10g_exact_line_without_extra_period(self):
+        from app.services.orchestration.planning.planner import PlannerService
+
+        task_prompt = (
+            "Create scripts/smoke_status.py that prints exactly this line: "
+            "Phase 10G Third Machine: Ready. Ensure the scripts directory exists."
+        )
+        plan = [
+            {
+                "step_number": 1,
+                "description": "Create the smoke_status.py script",
+                "commands": [],
+                "verification": (
+                    'python -c "import subprocess,sys; '
+                    "sys.exit(0 if subprocess.run('./scripts/smoke_status.py', "
+                    "capture_output=True).stdout.decode().strip() == "
+                    "'Phase 10G Third Machine: Ready.' else 1)\""
+                ),
+                "rollback": "rm -f scripts/smoke_status.py",
+                "expected_files": ["scripts/smoke_status.py"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "scripts/smoke_status.py",
+                        "content": "print('Phase 10G Third Machine: Ready.')\n",
+                    }
+                ],
+            }
+        ]
+
+        sanitized = PlannerService.sanitize_common_plan_issues(
+            plan, task_prompt=task_prompt
+        )
+
+        content = sanitized[0]["ops"][0]["content"]
+        verification = sanitized[0]["verification"]
+        assert "Phase 10G Third Machine: Ready." not in content
+        assert "Phase 10G Third Machine: Ready." not in verification
+        assert "Phase 10G Third Machine: Ready" in content
+        assert "Phase 10G Third Machine: Ready" in verification
+
+    def test_assessment_patches_missing_sys_import_in_verification(
+        self, tmp_path: Path
+    ):
+        from app.services.orchestration.execution.execution_flow import (
+            assess_step_execution,
+        )
+        from app.services.orchestration.types import ValidationVerdict
+
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        (scripts / "smoke_status.py").write_text(
+            "print('Phase 10G Third Machine: Ready')\n", encoding="utf-8"
+        )
+        step = {
+            "step_number": 1,
+            "description": "Verify script output",
+            "commands": [],
+            "verification": (
+                'python -c "import os, subprocess; '
+                "sys.exit(0 if subprocess.check_output('python scripts/smoke_status.py', "
+                "shell=True).decode().strip() == 'Phase 10G Third Machine: Ready' else 1)\""
+            ),
+            "rollback": None,
+            "expected_files": ["scripts/smoke_status.py"],
+        }
+
+        with patch(
+            "app.services.orchestration.execution.execution_flow.ExecutorService.recent_step_tool_failures",
+            return_value=[],
+        ), patch(
+            "app.services.orchestration.execution.execution_flow.ValidatorService.validate_step_success",
+            return_value=ValidationVerdict(
+                stage="step_validation",
+                status="accepted",
+                profile="full_lifecycle",
+            ),
+        ):
+            assessment = assess_step_execution(
+                db=MagicMock(),
+                session_id=1,
+                task_id=1,
+                project_dir=tmp_path,
+                step=step,
+                step_result={
+                    "status": "completed",
+                    "output": "",
+                    "files_changed": ["scripts/smoke_status.py"],
+                },
+                step_started_at=datetime.now(timezone.utc),
+                validation_profile="full_lifecycle",
+            )
+
+        assert assessment.step_status == "success"
+        assert "NameError" not in assessment.verification_output
 
     def test_module_assert_verification_runs_as_simple_local_check(
         self, tmp_path: Path

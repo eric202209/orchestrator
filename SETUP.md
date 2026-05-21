@@ -128,6 +128,9 @@ If Ollama is not installed, set `EMBEDDING_PROVIDER=openai` and provide `OPENAI_
 Uses `docker-compose.windows.yml` for the backend stack. Ollama runs natively on Windows for GPU access.
 
 > **Note:** This path is tested on NVIDIA GPU with CUDA. For GGUF/llama.cpp endpoints, see the [Windows llama.cpp](#windows-llamacpp-no-openclaw) path below.
+> For users with less than 8 GB VRAM, start here. Ollama/direct_ollama is the
+> easier supported path for constrained NVIDIA machines; use `RUNTIME_PROFILE=low_resource`
+> and `OLLAMA_NUM_CTX=4096`.
 
 Windows process layout:
 
@@ -289,9 +292,12 @@ Add `-v` to also remove the Qdrant data volume.
 
 ## Windows (llama.cpp, no OpenClaw)
 
-Uses `docker-compose.windows.yml` for the backend stack. llama.cpp runs natively on Windows with the Vulkan backend for AMD GPU access. Ollama runs only for embeddings.
+Uses `docker-compose.windows.yml` for the backend stack. llama.cpp runs natively on Windows with the Vulkan backend for AMD GPU access. Ollama is optional for embeddings; the Phase 10G third-machine path intentionally leaves it uninstalled and accepts degraded knowledge retrieval.
 
 > **This path does not use Ollama for LLM inference.** llama.cpp exposes an OpenAI-compatible endpoint that the orchestrator treats as its agent backend.
+> This is a compatibility/stability path for GGUF/Vulkan users, not the default
+> recommendation for low-VRAM NVIDIA users. If Ollama supports your GPU and model,
+> the Ollama path above is simpler.
 
 Windows process layout:
 
@@ -442,6 +448,9 @@ Run for 30–60 minutes. Pass condition: no crashes, no VRAM growth, every reque
 ### Step 5 — Set up Ollama for embeddings only
 
 Ollama is used only for `nomic-embed-text` embeddings, not for LLM inference.
+Skip this step for the Phase 10G third-machine no-Ollama test. In that path,
+keep `EMBEDDING_PROVIDER=ollama` so `OPENAI_API_KEY=dummy` is not treated as an
+OpenAI embeddings signal; the backend should warn/degrade rather than exit.
 
 ```powershell
 ollama pull nomic-embed-text
@@ -554,9 +563,10 @@ CELERY_BROKER_URL=redis://redis:6379/0
 CELERY_RESULT_BACKEND=redis://redis:6379/1
 QDRANT_URL=http://qdrant:6333
 
-# Embeddings via Ollama (use actual Windows host IP from Step 5)
+# Embeddings intentionally unavailable for the third-machine no-Ollama test.
+# Keep provider=ollama so OPENAI_API_KEY=dummy is not treated as OpenAI embeddings.
 EMBEDDING_PROVIDER=ollama
-OLLAMA_BASE_URL=http://<windows-host-ip>:11434
+OLLAMA_BASE_URL=http://host.docker.internal:11434
 OLLAMA_EMBEDDING_MODEL=nomic-embed-text
 EMBEDDING_DIM=0
 

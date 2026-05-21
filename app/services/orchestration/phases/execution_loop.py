@@ -290,6 +290,7 @@ def _execute_read_only_inspection_step(
         "status": "completed",
         "output": "\n\n".join(outputs),
         "verification_output": "",
+        "skip_declared_verification": True,
         "files_changed": [],
     }
 
@@ -336,6 +337,8 @@ def _is_safe_local_shell_command(command: str) -> bool:
         "cp\t",
         "mv ",
         "mv\t",
+        "chmod ",
+        "chmod\t",
     )
     return any(normalized.startswith(p) for p in safe_prefixes)
 
@@ -392,6 +395,18 @@ def _local_shell_command_paths_are_safe(command: str, project_dir: Path) -> bool
         operands = [token for token in tokens[1:] if not token.startswith("-")]
         return len(operands) >= 2 and all(
             _is_workspace_local_path_token(token, project_dir) for token in operands
+        )
+
+    if executable == "chmod":
+        operands = [token for token in tokens[1:] if not token.startswith("-")]
+        if len(operands) < 2:
+            return False
+        mode = operands[0]
+        if not _re.match(r"^(?:[0-7]{3,4}|[ugoa]*[+-=][rwxXstugo,+-=]+)$", mode):
+            return False
+        paths = operands[1:]
+        return all(
+            _is_workspace_local_path_token(token, project_dir) for token in paths
         )
 
     return False
