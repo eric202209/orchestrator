@@ -281,7 +281,13 @@ WINDOWS_PROJECTS_DIR=/home/yourname/projects
 
 **5. Build and start**
 
-Setup "- RUNTIME_PROFILE=low_resource" in docker-compose.windows.yml
+Set the runtime profile in your private `.env`, not in
+`docker-compose.windows.yml`. The compose file passes `RUNTIME_PROFILE` through
+to the containers and falls back to `medium` only if it is unset:
+
+```ini
+RUNTIME_PROFILE=low_resource
+```
 
 ```bash
 export WINDOWS_PROJECTS_DIR=/home/yourname/projects

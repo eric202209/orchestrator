@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 import pytest
+import sys
+
+_skip_win = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="requires Linux shell tools (bash, mkdir -p, chmod, ls, python3)",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +123,7 @@ class TestExecuteLocalShellCommandsStep:
         assert (tmp_path / "hello.txt").exists()
         assert "hello.txt" in result["files_changed"]
 
+    @_skip_win
     def test_mkdir_creates_dir(self, tmp_path: Path):
         from app.services.orchestration.phases.execution_loop import (
             _execute_local_shell_commands_step,
@@ -221,6 +228,7 @@ class TestExecuteLocalShellCommandsStep:
         )
         assert result is None, "Windows absolute target must not run locally"
 
+    @_skip_win
     def test_chmod_marks_script_executable(self, tmp_path: Path):
         import os
 
@@ -281,6 +289,7 @@ class TestPatchPythonVerificationCmd:
         cmd = "python3 -c \"import pathlib; print(pathlib.Path('f.py').exists())\""
         assert fn(cmd) == cmd
 
+    @_skip_win
     def test_patched_command_actually_runs(self, tmp_path: Path):
         """Patched verification command must execute without NameError."""
         import subprocess
@@ -298,6 +307,7 @@ class TestPatchPythonVerificationCmd:
         assert result.returncode in (0, 1), f"NameError or crash: {result.stderr}"
         assert "NameError" not in result.stderr
 
+    @_skip_win
     def test_configparser_verification_runs_as_simple_local_check(self, tmp_path: Path):
         from app.services.orchestration.phases.execution_loop import (
             _execute_simple_verification_step,
@@ -345,6 +355,7 @@ class TestReadOnlyInspectionVerification:
         assert ValidatorService._step_is_readonly_inspection(step) is True
         assert PlannerService._step_is_readonly_inspection(step) is True
 
+    @_skip_win
     def test_read_only_inspection_marks_declared_verification_skippable(
         self, tmp_path: Path
     ):
@@ -826,6 +837,7 @@ class TestUnittestPlanMaterialization:
         assert "sys.executable" in verification
         assert "Phase 10G AMD LlamaCpp: Ready" in verification
 
+    @_skip_win
     def test_assessment_patches_missing_sys_import_in_verification(
         self, tmp_path: Path
     ):
@@ -934,6 +946,7 @@ class TestPythonInlineExceptionAssertionNormalization:
             assert "unittest.TestCase().assertRaises" in normalized
             assert "try:" not in normalized
 
+    @_skip_win
     def test_normalized_exception_assertion_runs(self, tmp_path: Path):
         import subprocess
         import sys

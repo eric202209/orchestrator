@@ -997,7 +997,7 @@ def test_worker_and_tasks_endpoint_do_not_import_run_state_attempt_helpers():
     ]
 
     for path in checked_paths:
-        tree = ast.parse(path.read_text(), filename=str(path))
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if not isinstance(node, (ast.Import, ast.ImportFrom)):
                 continue

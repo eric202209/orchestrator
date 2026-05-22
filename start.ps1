@@ -1,9 +1,38 @@
 param(
   [switch]$Build,
-  [switch]$ForceRecreate
+  [switch]$ForceRecreate,
+  [switch]$StartOllama,
+  [string]$OllamaExe = $env:OLLAMA_EXE
 )
 
 # start.ps1
+
+if ($StartOllama) {
+  Write-Host "Starting Ollama..." -ForegroundColor Green
+
+  if (-not $OllamaExe) {
+    $ollamaCommand = Get-Command ollama.exe -ErrorAction SilentlyContinue
+    if ($ollamaCommand) {
+      $OllamaExe = $ollamaCommand.Source
+    }
+  }
+
+  if (-not $OllamaExe -or -not (Test-Path -LiteralPath $OllamaExe)) {
+    Write-Host "  Ollama executable not found. Set OLLAMA_EXE or start Ollama manually." -ForegroundColor Yellow
+  } else {
+    Get-Process -Name "ollama*" -ErrorAction SilentlyContinue | Stop-Process -Force
+    Start-Sleep -Seconds 3
+
+    $env:CUDA_VISIBLE_DEVICES = if ($env:CUDA_VISIBLE_DEVICES) { $env:CUDA_VISIBLE_DEVICES } else { "0" }
+    $env:OLLAMA_HOST = if ($env:OLLAMA_HOST) { $env:OLLAMA_HOST } else { "0.0.0.0" }
+    $env:OLLAMA_NUM_PARALLEL = if ($env:OLLAMA_NUM_PARALLEL) { $env:OLLAMA_NUM_PARALLEL } else { "1" }
+    $env:OLLAMA_MAX_LOADED_MODELS = if ($env:OLLAMA_MAX_LOADED_MODELS) { $env:OLLAMA_MAX_LOADED_MODELS } else { "1" }
+
+    Start-Process $OllamaExe -ArgumentList "serve" -WindowStyle Hidden
+    Start-Sleep -Seconds 5
+    Write-Host "  Ollama API  : http://localhost:11434" -ForegroundColor White
+  }
+}
 
 $requiredDirs = @("checkpoints", "logs", "knowledge", "data")
 foreach ($dir in $requiredDirs) {

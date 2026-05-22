@@ -5,6 +5,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import subprocess
+import sys
+
+import pytest
 
 
 def _write_executable(path: Path, content: str) -> None:
@@ -12,6 +15,9 @@ def _write_executable(path: Path, content: str) -> None:
     path.chmod(0o755)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="requires bash to execute wsl-start.sh"
+)
 def test_start_llamacpp_windows_check_accepts_crlf_env_and_strict_defaults(
     tmp_path: Path,
 ):
@@ -86,6 +92,9 @@ esac
     assert "Backend runtime_profile=low_resource" in result.stdout
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="requires bash to execute wsl-start.sh"
+)
 def test_start_llamacpp_windows_startup_strips_crlf_from_projects_dir(
     tmp_path: Path,
 ):
