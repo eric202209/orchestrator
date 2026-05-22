@@ -22,6 +22,7 @@ from app.services.session.execution_policy import (
     classify_failure,
     resolve_ambiguous_execution,
     should_retry,
+    timeout_terminal_state_blocks_late_success,
 )
 from app.services.agents.backend_concurrency import (
     acquire_backend_slot,
@@ -275,6 +276,12 @@ class TestClassifyFailure:
     def test_empty_reason_maps_to_execution_failure(self):
         assert classify_failure("", "local_openclaw", {}) == "execution_failure"
 
+    def test_timeout_maps_to_backend_timeout(self):
+        assert (
+            classify_failure("Soft time limit exceeded", "local_openclaw", {})
+            == "backend_timeout"
+        )
+
 
 class TestShouldRetry:
     def test_governance_hold_never_retries(self, db_session):
@@ -508,6 +515,10 @@ def test_ops_backends_listed_correctly(authenticated_client):
     names = {b["name"] for b in data["backends"]}
     assert "local_openclaw" in names
     assert "direct_ollama" in names
+    local_openclaw = next(b for b in data["backends"] if b["name"] == "local_openclaw")
+    assert "roles" in local_openclaw
+    assert "configured_for_roles" in local_openclaw
+    assert "max_parallel_sessions" in local_openclaw
 
 
 def test_ops_backends_health_returns_per_backend_status(authenticated_client):
@@ -526,6 +537,40 @@ def test_ops_backends_concurrency_returns_snapshots(authenticated_client):
     assert resp.status_code == 200
     data = resp.json()
     assert "backends" in data or "redis_available" in data
+
+
+def test_ops_backends_concurrency_includes_capacity_and_failure_fields(
+    authenticated_client, db_session, monkeypatch
+):
+    import app.services.agents.backend_concurrency as backend_concurrency
+
+    r = FakeRedis()
+    acquire_backend_slot(r, "local_openclaw", session_id=123, max_slots=1)
+    monkeypatch.setattr(backend_concurrency, "make_redis_client", lambda: r)
+
+    _, session, task = _make_project_session_task(db_session)
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.FAILED,
+        backend_id="local_openclaw",
+        failure_category="backend_capacity_limit",
+        completed_at=datetime.now(timezone.utc),
+    )
+    db_session.add(execution)
+    db_session.commit()
+
+    resp = authenticated_client.get("/api/v1/ops/backends/concurrency")
+    assert resp.status_code == 200
+    data = resp.json()
+    local_openclaw = next(
+        b for b in data["backends"] if b["backend_id"] == "local_openclaw"
+    )
+    assert local_openclaw["max_parallel_sessions"] == 1
+    assert local_openclaw["active_count"] == 1
+    assert local_openclaw["capacity_available"] is False
+    assert local_openclaw["last_failure_category"] == "backend_capacity_limit"
 
 
 # ---------------------------------------------------------------------------
@@ -632,6 +677,60 @@ def test_update_execution_failure_metadata_noop_on_missing(db_session):
     # no exception
 
 
+def test_timeout_terminal_state_blocks_late_success(db_session):
+    _, session, task = _make_project_session_task(db_session)
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.FAILED,
+        failure_category="backend_timeout",
+        backend_id="local_openclaw",
+        completed_at=datetime.now(timezone.utc),
+    )
+    db_session.add(execution)
+    db_session.flush()
+
+    assert timeout_terminal_state_blocks_late_success(execution) is True
+
+
+def test_mark_execution_done_does_not_promote_after_backend_timeout(db_session):
+    from app.models import SessionTask
+    from app.services.session.session_execution_service import mark_execution_done
+
+    _, session, task = _make_project_session_task(db_session)
+    task.status = TaskStatus.FAILED
+    link = SessionTask(
+        session_id=session.id,
+        task_id=task.id,
+        status=TaskStatus.FAILED,
+        completed_at=datetime.now(timezone.utc),
+    )
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.FAILED,
+        failure_category="backend_timeout",
+        backend_id="local_openclaw",
+        completed_at=datetime.now(timezone.utc),
+    )
+    db_session.add_all([link, execution])
+    db_session.flush()
+
+    mark_execution_done(
+        task=task,
+        session_task_link=link,
+        task_execution=execution,
+        completed_at=datetime.now(timezone.utc),
+    )
+
+    assert execution.status == TaskStatus.FAILED
+    assert task.status == TaskStatus.FAILED
+    assert link.status == TaskStatus.FAILED
+    assert execution.failure_category == "backend_timeout"
+
+
 # ---------------------------------------------------------------------------
 # Worker import sanity (regression: settings was missing from worker.py)
 # ---------------------------------------------------------------------------
@@ -648,6 +747,18 @@ def test_worker_module_has_settings_and_resolve_backend():
     assert hasattr(
         worker_module, "resolve_backend_name_for_role"
     ), "resolve_backend_name_for_role not imported in worker.py"
+
+
+def test_backend_capacity_retry_state_marks_exhaustion():
+    import app.tasks.worker as worker_module
+
+    class Request:
+        retries = worker_module.BACKEND_CAPACITY_RETRY_MAX_RETRIES
+
+    retry_count, exhausted = worker_module.backend_capacity_retry_state(Request())
+
+    assert retry_count == worker_module.BACKEND_CAPACITY_RETRY_MAX_RETRIES
+    assert exhausted is True
 
 
 def test_classify_failure_defaults_to_execution_failure_for_unknown_reason():
@@ -751,6 +862,21 @@ def test_openclaw_execution_result_classifies_capacity_failure():
     assert result.failure_category == "backend_capacity_limit"
 
 
+def test_openclaw_execution_result_classifies_timeout_with_terminal_reason():
+    result = normalize_openclaw_execution_result(
+        {
+            "status": "failed",
+            "error": "execution timed out",
+        },
+        backend_id="local_openclaw",
+        role="execution",
+    )
+
+    assert result.success is False
+    assert result.failure_category == "backend_timeout"
+    assert result.terminal_reason == "timeout_before_backend_completion"
+
+
 def test_execution_loop_uses_runtime_backend_result_for_execution_path():
     from app.services.orchestration.phases.execution_loop import (
         _normalize_runtime_execution_result,
@@ -781,6 +907,41 @@ def test_execution_loop_uses_runtime_backend_result_for_execution_path():
         output="ok",
         duration_seconds=0.5,
     )
+
+
+def test_execution_loop_persists_runtime_backend_result_metadata(db_session):
+    from app.services.orchestration.phases.execution_loop import (
+        _persist_runtime_backend_result,
+    )
+
+    _, session, task = _make_project_session_task(db_session)
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.RUNNING,
+    )
+    db_session.add(execution)
+    db_session.flush()
+
+    _persist_runtime_backend_result(
+        db_session,
+        execution.id,
+        RuntimeBackendResult(
+            backend_id="local_openclaw",
+            role="execution",
+            success=False,
+            exit_reason="execution timed out",
+            output="timeout",
+            duration_seconds=10,
+            failure_category="backend_timeout",
+            terminal_reason="timeout_before_backend_completion",
+        ),
+    )
+
+    db_session.refresh(execution)
+    assert execution.backend_id == "local_openclaw"
+    assert execution.failure_category == "backend_timeout"
 
 
 def test_worker_and_tasks_endpoint_do_not_import_run_state_attempt_helpers():

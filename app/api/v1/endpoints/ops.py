@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.dependencies import get_current_admin_user, get_db
-from app.models import Project
+from app.models import Project, TaskExecution
 from app.services.observability.metrics_collector import MetricsCollector
 
 logger = logging.getLogger(__name__)
@@ -98,6 +98,38 @@ def _overall_status(components: Dict[str, Dict[str, Any]]) -> str:
     if "degraded" in statuses:
         return "degraded"
     return "ok"
+
+
+def _configured_backend_roles() -> Dict[str, list[str]]:
+    role_settings = {
+        "planning": settings.PLANNING_BACKEND or settings.AGENT_BACKEND,
+        "execution": settings.EXECUTION_BACKEND or settings.AGENT_BACKEND,
+        "repair": settings.REPAIR_BACKEND or settings.AGENT_BACKEND,
+    }
+    roles_by_backend: Dict[str, list[str]] = {}
+    for role, backend_id in role_settings.items():
+        normalized = str(backend_id or "").strip()
+        if not normalized:
+            continue
+        roles_by_backend.setdefault(normalized, []).append(role)
+    return roles_by_backend
+
+
+def _last_failure_category_for_backend(db: Session, backend_id: str) -> str | None:
+    latest = (
+        db.query(TaskExecution)
+        .filter(
+            TaskExecution.backend_id == backend_id,
+            TaskExecution.failure_category.isnot(None),
+        )
+        .order_by(
+            TaskExecution.completed_at.desc().nullslast(),
+            TaskExecution.started_at.desc().nullslast(),
+            TaskExecution.id.desc(),
+        )
+        .first()
+    )
+    return latest.failure_category if latest is not None else None
 
 
 @router.get("/health")
@@ -194,10 +226,19 @@ def ops_backends(
     from app.services.agents.agent_backends import list_supported_backends
 
     backends = list_supported_backends()
+    roles_by_backend = _configured_backend_roles()
     return {
         "computed_at": datetime.now(UTC).isoformat(),
         "count": len(backends),
-        "backends": [b.to_dict() for b in backends],
+        "backends": [
+            {
+                **b.to_dict(),
+                "roles": roles_by_backend.get(b.name, []),
+                "configured_for_roles": roles_by_backend.get(b.name, []),
+                "max_parallel_sessions": b.capabilities.max_parallel_sessions,
+            }
+            for b in backends
+        ],
     }
 
 
@@ -228,6 +269,7 @@ def ops_backends_health(
 @router.get("/backends/concurrency")
 def ops_backends_concurrency(
     current_user=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     """Live Redis slot usage per backend."""
     from app.services.agents.agent_backends import list_supported_backends
@@ -237,6 +279,7 @@ def ops_backends_concurrency(
     )
 
     backends = list_supported_backends()
+    roles_by_backend = _configured_backend_roles()
     try:
         redis_client = make_redis_client()
         redis_client.ping()
@@ -254,6 +297,19 @@ def ops_backends_concurrency(
         max_slots = b.capabilities.max_parallel_sessions
         snapshot = get_concurrency_snapshot(redis_client, b.name)
         snapshot["max_slots"] = max_slots
+        snapshot["max_parallel_sessions"] = max_slots
+        snapshot["roles"] = roles_by_backend.get(b.name, [])
+        snapshot["role"] = (
+            roles_by_backend.get(b.name, [None])[0]
+            if roles_by_backend.get(b.name)
+            else None
+        )
+        snapshot["capacity_available"] = (
+            True if max_slots is None else snapshot["active_count"] < max_slots
+        )
+        snapshot["last_failure_category"] = _last_failure_category_for_backend(
+            db, b.name
+        )
         snapshots.append(snapshot)
 
     return {
