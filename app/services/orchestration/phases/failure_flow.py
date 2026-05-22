@@ -309,7 +309,8 @@ def handle_task_failure(
             mark_task_attempt_failed(
                 task=task,
                 session_task_link=session_task_link,
-                error_message=str(recovery_queue_error),
+                task_execution=task_execution,
+                error_message=f"{str(exc)} | recovery queue error: {str(recovery_queue_error)}",
                 completed_at=datetime.now(UTC),
                 workspace_status=("blocked" if task.task_subfolder else "not_created"),
             )

@@ -77,6 +77,16 @@ Open the dashboard, go to the register page, and create your account.
 The Settings `workspace_root` value must be the path visible to the running backend process.
 
 - Linux native: use the real Linux projects path, e.g. `/home/yourname/projects`.
+- Each device should set `WORKSPACE_ROOT` in `.env` to its own host-visible
+  projects directory. This is model/backend neutral and applies to OpenClaw,
+  Ollama, and llama.cpp deployments:
+
+```text
+WORKSPACE_ROOT=/home/yourname/projects
+```
+
+- Docker installs can keep Settings `workspace_root=/app/projects`; that
+  container path is mapped from the host path configured for that device.
 
 ### Model selection
 
@@ -276,7 +286,7 @@ OPENCLAW_API_KEY=
 OPENAI_API_KEY=
 WORKSPACE_REVIEW_POLICY=hold_nontrivial
 
-WINDOWS_PROJECTS_DIR=/home/yourname/projects
+WORKSPACE_ROOT=/home/yourname/projects
 ```
 
 **5. Build and start**
@@ -290,7 +300,7 @@ RUNTIME_PROFILE=low_resource
 ```
 
 ```bash
-export WINDOWS_PROJECTS_DIR=/home/yourname/projects
+export WORKSPACE_ROOT=/home/yourname/projects
 docker compose -f docker-compose.windows.yml up --build
 ```
 
@@ -641,7 +651,7 @@ JUDGE_AGENT_ENABLED=False
 INLINE_PLANNING=False
 
 # Projects path (WSL2 ext4 path, not Windows path)
-WINDOWS_PROJECTS_DIR=/home/yourname/projects
+WORKSPACE_ROOT=/home/yourname/projects
 
 # Not used in this setup
 OPENCLAW_GATEWAY_URL=
@@ -739,7 +749,7 @@ In the dashboard Settings, set `workspace_root` to:
 /app/projects
 ```
 
-This is the container-internal path. The host path (`~/projects`) is mapped via `WINDOWS_PROJECTS_DIR` in `.env`.
+This is the container-internal path. The host path (`~/projects`) is mapped via `WORKSPACE_ROOT` in `.env`.
 
 ---
 
@@ -811,7 +821,7 @@ Kill llama-server: `Ctrl+C` in the PowerShell window running it.
 | Structured JSON malformed | Verify `--jinja` flag is set; check model tokenizer config |
 | Overnight test fails silently | Sleep/suspend triggered; confirm `powercfg` settings |
 | Inference unstable | Overlay software conflict; disable all overlays before testing |
-| `WINDOWS_PROJECTS_DIR` error on compose up | Run `export WINDOWS_PROJECTS_DIR=...` before `docker compose` command |
+| `WORKSPACE_ROOT` error on compose up | Run `export WORKSPACE_ROOT=...` before `docker compose` command |
 
 ---
 
@@ -832,10 +842,13 @@ Kill llama-server: `Ctrl+C` in the PowerShell window running it.
 | `EMBEDDING_DIM` | `0` | `0` = auto (768 for Ollama, 1536 for OpenAI). |
 | `QDRANT_URL` | `http://localhost:6333` | Qdrant vector store URL. |
 | `CELERY_BROKER_URL` | `redis://localhost:6379/0` | Redis broker for Celery. |
+| `WORKSPACE_ROOT` | `~/projects` | Host-visible project workspace root for native/host-run backend and worker. Set this per device in `.env`. |
+| `HOST_WORKSPACE_ROOT` | — | Optional host-only override used when persisted Settings still contain a container path such as `/app/projects`. |
+| `OPENCLAW_WORKSPACE` | — | Legacy fallback for older OpenClaw-oriented installs. Prefer `WORKSPACE_ROOT` for new installs, including Ollama and llama.cpp lanes. |
 | `WORKSPACE_REVIEW_POLICY` | `hold_nontrivial` | `auto_publish_all` / `hold_nontrivial` / `hold_all`. |
 | `PLANNING_REPAIR_ENABLED` | `true` | Enable second-pass plan repair. |
 | `PLANNING_REPAIR_BASE_URL` | — | Endpoint for planning repair model. |
 | `RUNTIME_PROFILE` | `standard` | `standard`, `medium`, or `low_resource`. Use `low_resource` for 8 GB llama.cpp or constrained local backends; use `medium` only after a 12-16 GB VRAM llama.cpp setup is stable. |
 | `MOBILE_GATEWAY_API_KEY` | — | Shared key for `/api/v1/mobile/*`. |
 | `LANGFUSE_ENABLED` | `false` | Enable Langfuse tracing. |
-| `WINDOWS_PROJECTS_DIR` | — | Host path mounted to `/app/projects` in containers. Use WSL2 ext4 path, not Windows path. |
+| `WINDOWS_PROJECTS_DIR` | — | Legacy alias for `WORKSPACE_ROOT` in older Windows Docker `.env` files. Prefer `WORKSPACE_ROOT`. |

@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from app.models import LogEntry, Project, Session as SessionModel
 from app.services.orchestration.policy import (
@@ -13,6 +14,7 @@ from app.services.workspace.system_settings import (
     ORCHESTRATION_POLICY_PROFILE_KEY,
     WORKSPACE_REVIEW_POLICY_KEY,
     WORKSPACE_ROOT_KEY,
+    get_effective_workspace_root,
     get_setting_value,
     set_setting_value,
 )
@@ -78,6 +80,62 @@ def test_workspace_root_save_keeps_legacy_workspace_key_in_sync(db_session):
     assert get_setting_value(db_session, LEGACY_WORKSPACE_ROOT_KEY) == "/app/projects"
 
 
+def test_host_runtime_uses_env_workspace_root_for_container_setting(
+    db_session, monkeypatch, tmp_path
+):
+    import app.services.workspace.system_settings as system_settings
+
+    env_projects = tmp_path / "device-projects"
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.delenv("HOST_WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("OPENCLAW_WORKSPACE", str(env_projects))
+    monkeypatch.setattr(system_settings, "_running_in_container", lambda: False)
+    set_setting_value(db_session, WORKSPACE_ROOT_KEY, "/app/projects")
+
+    assert get_effective_workspace_root(db=db_session) == env_projects.resolve()
+
+
+def test_host_runtime_prefers_explicit_host_workspace_for_container_root(
+    db_session, monkeypatch, tmp_path
+):
+    import app.services.workspace.system_settings as system_settings
+
+    host_projects = tmp_path / "host-projects"
+    monkeypatch.setenv("HOST_WORKSPACE_ROOT", str(host_projects))
+    monkeypatch.setattr(system_settings, "_running_in_container", lambda: False)
+    set_setting_value(db_session, WORKSPACE_ROOT_KEY, "/app/projects")
+
+    assert get_effective_workspace_root(db=db_session) == host_projects.resolve()
+
+
+def test_host_runtime_prefers_workspace_root_before_openclaw_workspace(
+    db_session, monkeypatch, tmp_path
+):
+    import app.services.workspace.system_settings as system_settings
+
+    workspace_root = tmp_path / "workspace-root"
+    openclaw_workspace = tmp_path / "openclaw-workspace"
+    monkeypatch.delenv("HOST_WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("OPENCLAW_WORKSPACE", str(openclaw_workspace))
+    monkeypatch.setattr(system_settings, "_running_in_container", lambda: False)
+    set_setting_value(db_session, WORKSPACE_ROOT_KEY, "/app/projects")
+
+    assert get_effective_workspace_root(db=db_session) == workspace_root.resolve()
+
+
+def test_container_runtime_keeps_container_workspace_root(db_session, monkeypatch):
+    import app.services.workspace.system_settings as system_settings
+
+    monkeypatch.setenv("HOST_WORKSPACE_ROOT", "/home/eric/projects")
+    monkeypatch.setenv("WORKSPACE_ROOT", "/home/eric/other-projects")
+    monkeypatch.setenv("OPENCLAW_WORKSPACE", "/home/eric/openclaw-projects")
+    monkeypatch.setattr(system_settings, "_running_in_container", lambda: True)
+    set_setting_value(db_session, WORKSPACE_ROOT_KEY, "/app/projects")
+
+    assert get_effective_workspace_root(db=db_session) == Path("/app/projects")
+
+
 def test_settings_reject_mismatched_backend_and_adaptation_profile(
     authenticated_client,
 ):
@@ -131,7 +189,7 @@ def test_settings_reject_windows_host_path_as_container_workspace_root(
     )
 
     assert response.status_code == 400
-    assert "WINDOWS_PROJECTS_DIR" in response.json()["detail"]
+    assert "WORKSPACE_ROOT" in response.json()["detail"]
 
 
 def test_settings_can_select_openai_backend(authenticated_client):

@@ -35,7 +35,7 @@ services:
       - ./checkpoints:/app/checkpoints
       - ./knowledge:/app/knowledge
       - type: bind
-        source: ${WINDOWS_PROJECTS_DIR:?Set WINDOWS_PROJECTS_DIR to a WSL2 ext4 path, for example /home/yourname/projects}
+        source: ${WORKSPACE_ROOT:-${WINDOWS_PROJECTS_DIR:?Set WORKSPACE_ROOT to a WSL2 ext4 path, for example /home/yourname/projects}}
         target: /app/projects
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -62,7 +62,7 @@ services:
       - ./checkpoints:/app/checkpoints
       - ./knowledge:/app/knowledge
       - type: bind
-        source: ${WINDOWS_PROJECTS_DIR:?Set WINDOWS_PROJECTS_DIR to a WSL2 ext4 path, for example /home/yourname/projects}
+        source: ${WORKSPACE_ROOT:-${WINDOWS_PROJECTS_DIR:?Set WORKSPACE_ROOT to a WSL2 ext4 path, for example /home/yourname/projects}}
         target: /app/projects
     extra_hosts:
       - "host.docker.internal:host-gateway"

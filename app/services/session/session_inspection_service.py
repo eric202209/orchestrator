@@ -18,6 +18,7 @@ from app.models import (
     Session as SessionModel,
     SessionTask,
     Task,
+    TaskCheckpoint,
     TaskExecution,
     TaskStatus,
 )
@@ -70,6 +71,29 @@ from .session_lookup import get_session_or_404
 
 QUEUE_WATCHDOG_SLA_SECONDS = 30
 _DIGEST_ENRICHMENT_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _latest_validation_evidence(
+    db: Session, *, session_id: int, task_id: Optional[int] = None
+) -> Optional[Dict[str, Any]]:
+    query = db.query(TaskCheckpoint).filter(
+        TaskCheckpoint.session_id == session_id,
+        TaskCheckpoint.checkpoint_type == "validation_task_completion",
+    )
+    if task_id is not None:
+        query = query.filter(TaskCheckpoint.task_id == task_id)
+    checkpoint = query.order_by(TaskCheckpoint.id.desc()).first()
+    if not checkpoint or not checkpoint.state_snapshot:
+        return None
+    try:
+        payload = json.loads(checkpoint.state_snapshot)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    details = payload.get("details") if isinstance(payload, dict) else None
+    if not isinstance(details, dict):
+        return None
+    evidence = details.get("validation_evidence")
+    return evidence if isinstance(evidence, dict) else None
 
 
 def get_inspectable_session_or_404(db: Session, session_id: int) -> SessionModel:
@@ -1889,6 +1913,9 @@ def get_session_recovery_context_payload(
             added = list(changeset.added_files or [])
             modified = list(changeset.modified_files or [])
             files_changed = (added + modified)[:10]
+        validation_evidence = _latest_validation_evidence(
+            db, session_id=session_id, task_id=task.id
+        )
 
         resolved_status: str
         if task_status_str == "done":
@@ -1912,6 +1939,7 @@ def get_session_recovery_context_payload(
                 "files_changed": files_changed,
                 "repair_attempts": repair_attempts,
                 "committed": committed,
+                "validation_evidence": validation_evidence,
             }
         )
 
@@ -1971,6 +1999,7 @@ def get_session_recovery_context_payload(
         f"Recovery context assembled from {cp_note}, session stats, and last validation error"
         " — no raw log reading required."
     )
+    latest_validation_evidence = _latest_validation_evidence(db, session_id=session_id)
 
     return {
         "session_id": session_id,
@@ -1993,6 +2022,7 @@ def get_session_recovery_context_payload(
             "remaining_plan_intact": not_started_count > 0,
         },
         "recommended_actions": actions,
+        "validation_evidence": latest_validation_evidence,
         "source_note": source_note,
     }
 
@@ -2142,6 +2172,13 @@ def get_session_digest_payload(
     stop_reason_text = stop_reasons[0] if stop_reasons else "Unknown stop reason."
 
     next_actions = [a["label"] for a in recovery["recommended_actions"][:3]]
+    validation_evidence = recovery.get("validation_evidence") or {}
+    integrity_findings = validation_evidence.get("integrity_findings") or []
+    verification_insufficient = bool(
+        validation_evidence.get("verification_insufficient")
+    )
+    if verification_insufficient:
+        stop_reason_text = "Verification integrity is insufficient; review repair evidence before resuming."
 
     payload = {
         "session_id": session_id,
@@ -2158,6 +2195,10 @@ def get_session_digest_payload(
         "last_checkpoint_id": cp_id,
         "last_checkpoint_age_minutes": cp_age,
         "next_actions": next_actions,
+        "validation_evidence": validation_evidence,
+        "command_quality": validation_evidence.get("command_quality"),
+        "integrity_findings": integrity_findings[:20],
+        "verification_insufficient": verification_insufficient,
         "enriched": False,
         "enriched_text": None,
         "enrichment_error": None,

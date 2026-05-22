@@ -127,19 +127,29 @@ env_value() {
     grep -E "^${key}=" "$env_file" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\r' || true
 }
 
+projects_dir_value() {
+    local value
+    value=$(env_value WORKSPACE_ROOT)
+    if [ -n "$value" ]; then
+        printf '%s' "$value"
+        return 0
+    fi
+    env_value WINDOWS_PROJECTS_DIR
+}
+
 validate_projects_dir() {
     local projects_dir="$1"
     if [ -z "$projects_dir" ]; then
-        fail "WINDOWS_PROJECTS_DIR is unset in $ORCHESTRATOR_DIR/.env. Set it to a WSL2 ext4 path, for example /home/yourname/projects."
+        fail "WORKSPACE_ROOT is unset in $ORCHESTRATOR_DIR/.env. Set it to a WSL2 ext4 path, for example /home/yourname/projects."
     fi
     if [[ "$projects_dir" == /mnt/* || "$projects_dir" == *:* || "$projects_dir" == *\\* ]]; then
-        fail "WINDOWS_PROJECTS_DIR must be a WSL2 ext4 path, not '$projects_dir'"
+        fail "WORKSPACE_ROOT must be a WSL2 ext4 path, not '$projects_dir'"
     fi
     if [[ "$projects_dir" != /* ]]; then
-        fail "WINDOWS_PROJECTS_DIR must be absolute: $projects_dir"
+        fail "WORKSPACE_ROOT must be absolute: $projects_dir"
     fi
     if [[ "$projects_dir" == /root || "$projects_dir" == /root/* ]]; then
-        fail "WINDOWS_PROJECTS_DIR must not point under /root. Use your WSL user path, for example /home/yourname/projects."
+        fail "WORKSPACE_ROOT must not point under /root. Use your WSL user path, for example /home/yourname/projects."
     fi
 }
 
@@ -274,31 +284,31 @@ run_preflight_check() {
         check_env_equals RUNTIME_PROFILE "$EXPECTED_RUNTIME_PROFILE"
 
         local projects_dir
-        projects_dir=$(env_value WINDOWS_PROJECTS_DIR)
+        projects_dir=$(projects_dir_value)
         if [ -z "$projects_dir" ]; then
-            check_fail "WINDOWS_PROJECTS_DIR is unset"
+            check_fail "WORKSPACE_ROOT is unset"
         elif [[ "$projects_dir" == /mnt/* || "$projects_dir" == *:* || "$projects_dir" == *\\* ]]; then
-            check_fail "WINDOWS_PROJECTS_DIR must be a WSL2 ext4 path, not '$projects_dir'"
+            check_fail "WORKSPACE_ROOT must be a WSL2 ext4 path, not '$projects_dir'"
         elif [[ "$projects_dir" == /* ]]; then
-            check_ok "WINDOWS_PROJECTS_DIR=$projects_dir"
+            check_ok "WORKSPACE_ROOT=$projects_dir"
             if [ -d "$projects_dir" ]; then
-                check_ok "WINDOWS_PROJECTS_DIR exists"
+                check_ok "WORKSPACE_ROOT exists"
             else
-                check_warn "WINDOWS_PROJECTS_DIR does not exist yet; startup will create it"
+                check_warn "WORKSPACE_ROOT does not exist yet; startup will create it"
             fi
         else
-            check_fail "WINDOWS_PROJECTS_DIR must be absolute: $projects_dir"
+            check_fail "WORKSPACE_ROOT must be absolute: $projects_dir"
         fi
     fi
 
     step "Docker compose"
     if command_exists docker && [ -f "$ORCHESTRATOR_DIR/.env" ]; then
         local projects_dir
-        projects_dir=$(env_value WINDOWS_PROJECTS_DIR)
+        projects_dir=$(projects_dir_value)
         if [ -n "$projects_dir" ]; then
             (
                 cd "$ORCHESTRATOR_DIR"
-                WINDOWS_PROJECTS_DIR="$projects_dir" docker compose -f "$COMPOSE_FILE" config --quiet
+                WORKSPACE_ROOT="$projects_dir" docker compose -f "$COMPOSE_FILE" config --quiet
             ) >/dev/null 2>&1 && check_ok "docker compose config valid" || check_fail "docker compose config failed"
         fi
     fi
@@ -407,11 +417,15 @@ step "Starting Docker backend"
 
 [ -f "$ORCHESTRATOR_DIR/.env" ] || fail ".env not found at $ORCHESTRATOR_DIR/.env"
 
-PROJECTS_DIR=$(env_file_value WINDOWS_PROJECTS_DIR)
+PROJECTS_DIR=$(env_file_value WORKSPACE_ROOT)
+if [ -z "$PROJECTS_DIR" ]; then
+    PROJECTS_DIR=$(env_file_value WINDOWS_PROJECTS_DIR)
+fi
 validate_projects_dir "$PROJECTS_DIR"
 mkdir -p "$PROJECTS_DIR"
 
 cd "$ORCHESTRATOR_DIR"
+export WORKSPACE_ROOT="$PROJECTS_DIR"
 export WINDOWS_PROJECTS_DIR="$PROJECTS_DIR"
 docker compose -f "$COMPOSE_FILE" up -d 2>&1 | tail -5
 

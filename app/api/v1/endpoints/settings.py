@@ -148,7 +148,7 @@ def _normalize_workspace_root_for_settings(value: str) -> str:
             detail=(
                 "workspace_root is the container path used by Orchestrator. "
                 "For Windows Docker, set it to /app/projects and set the host "
-                "folder with WINDOWS_PROJECTS_DIR in .env."
+                "folder with WORKSPACE_ROOT in .env."
             ),
         )
     return str(Path(raw).expanduser().resolve())

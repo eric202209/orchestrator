@@ -73,6 +73,10 @@ from app.services.orchestration.validation.parsing import (
     extract_structured_text,
 )
 from app.services.orchestration.validation.validator import ValidatorService
+from app.services.orchestration.validation.integrity import (
+    capture_baseline_result,
+    compare_baseline,
+)
 from app.services.workspace.system_settings import get_effective_workspace_review_policy
 from app.services.prompt_templates import OrchestrationStatus, StepResult
 from app.services.orchestration.phases.completion_repair import (
@@ -1041,15 +1045,16 @@ def finalize_successful_task(
             if str(path).strip()
         )
     )
+    workspace_consistency = task_service.analyze_workspace_consistency(
+        orchestration_state.project_dir
+    )
 
     completion_validation = ValidatorService.validate_task_completion(
         project_dir=orchestration_state.project_dir,
         plan=orchestration_state.plan,
         task_prompt=prompt,
         execution_profile=execution_profile,
-        workspace_consistency=task_service.analyze_workspace_consistency(
-            orchestration_state.project_dir
-        ),
+        workspace_consistency=workspace_consistency,
         title=task.title if task else None,
         description=task.description if task else None,
         relaxed_mode=orchestration_state.relaxed_mode,
@@ -1081,9 +1086,7 @@ def finalize_successful_task(
                 plan=orchestration_state.plan,
                 task_prompt=prompt,
                 execution_profile=execution_profile,
-                workspace_consistency=task_service.analyze_workspace_consistency(
-                    orchestration_state.project_dir
-                ),
+                workspace_consistency=workspace_consistency,
                 title=task.title if task else None,
                 description=task.description if task else None,
                 relaxed_mode=orchestration_state.relaxed_mode,
@@ -1253,6 +1256,7 @@ def finalize_successful_task(
     completion_verification_command, completion_verification_source = (
         _detect_completion_verification_command(orchestration_state.project_dir)
     )
+    behavior_baseline_result = None
     if completion_verification_command:
         emit_live(
             "INFO",
@@ -1275,6 +1279,7 @@ def finalize_successful_task(
                 completion_validation=completion_validation,
             )
             if verification_failure_verdict and verification_failure_verdict.repairable:
+                completion_verification_before_repair = dict(completion_verification)
                 record_validation_verdict(
                     db,
                     session_id,
@@ -1300,6 +1305,24 @@ def finalize_successful_task(
                     completion_verification = _execute_completion_verification(
                         project_dir=orchestration_state.project_dir,
                         command=completion_verification_command,
+                    )
+                    behavior_baseline_result = compare_baseline(
+                        capture_baseline_result(
+                            command=completion_verification_command,
+                            returncode=completion_verification_before_repair.get(
+                                "returncode"
+                            ),
+                            stderr=str(
+                                completion_verification_before_repair.get("output")
+                                or ""
+                            ),
+                        ),
+                        capture_baseline_result(
+                            command=completion_verification_command,
+                            returncode=completion_verification.get("returncode"),
+                            stderr=str(completion_verification.get("output") or ""),
+                        ),
+                        policy="pass_fail_transition",
                     )
                 else:
                     completion_error = "Completion repair failed: " + str(
@@ -1459,6 +1482,19 @@ def finalize_successful_task(
                             project_dir=orchestration_state.project_dir,
                             command=completion_verification_command,
                         )
+                        behavior_baseline_result = compare_baseline(
+                            capture_baseline_result(
+                                command=completion_verification_command,
+                                returncode=debug_feedback_envelope.return_code,
+                                stderr=debug_feedback_envelope.stderr_excerpt,
+                            ),
+                            capture_baseline_result(
+                                command=completion_verification_command,
+                                returncode=completion_verification.get("returncode"),
+                                stderr=str(completion_verification.get("output") or ""),
+                            ),
+                            policy="pass_fail_transition",
+                        )
                     else:
                         verification_error = "Completion repair failed: " + str(
                             repair_result.get("reason") or "unknown reason"
@@ -1550,6 +1586,94 @@ def finalize_successful_task(
             workflow_profile=getattr(ctx, "workflow_profile", None),
             commit=False,
         )
+
+    if task_change_set:
+        completion_validation = ValidatorService.validate_task_completion(
+            project_dir=orchestration_state.project_dir,
+            plan=orchestration_state.plan,
+            task_prompt=prompt,
+            execution_profile=execution_profile,
+            workspace_consistency=workspace_consistency,
+            title=task.title if task else None,
+            description=task.description if task else None,
+            relaxed_mode=orchestration_state.relaxed_mode,
+            completion_evidence={
+                "summary_generated": bool(summary_result),
+                "execution_results_count": len(orchestration_state.execution_results),
+                "reported_changed_files": reported_changed_files,
+                "change_set": task_change_set,
+                "completion_verification_command": completion_verification_command,
+                "completion_verification_source": completion_verification_source,
+                "behavior_baseline": behavior_baseline_result,
+            },
+            validation_severity=ctx.validation_severity,
+        )
+        record_validation_verdict(
+            db,
+            session_id,
+            task_id,
+            orchestration_state,
+            completion_validation,
+        )
+        db.commit()
+        if not completion_validation.accepted:
+            integrity_error = (
+                "Completion validation failed after change-set integrity checks: "
+                + "; ".join(completion_validation.reasons[:5])
+            )
+            orchestration_state.status = OrchestrationStatus.ABORTED
+            orchestration_state.abort_reason = integrity_error
+            task_execution = (
+                db.query(TaskExecution)
+                .filter(TaskExecution.id == ctx.task_execution_id)
+                .first()
+                if ctx.task_execution_id
+                else None
+            )
+            mark_task_attempt_failed(
+                task=task,
+                session_task_link=session_task_link,
+                task_execution=task_execution,
+                error_message=integrity_error,
+                completed_at=datetime.now(UTC),
+                workspace_status="blocked",
+            )
+            task.current_step = len(orchestration_state.plan)
+            if session:
+                mark_session_paused(
+                    session,
+                    alert_level="error",
+                    alert_message=integrity_error[:2000],
+                )
+            db.commit()
+            emit_live(
+                "ERROR",
+                "[ORCHESTRATION] Completion failed verification integrity checks",
+                metadata={
+                    "phase": "task_summary",
+                    "validation_status": completion_validation.status,
+                    "reasons": completion_validation.reasons[:10],
+                    "validation_evidence": completion_validation.details.get(
+                        "validation_evidence"
+                    ),
+                },
+            )
+            append_orchestration_event(
+                project_dir=orchestration_state.project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                event_type=EventType.PHASE_FINISHED,
+                details={
+                    "phase": "task_summary",
+                    "status": "verification_integrity_failed",
+                    "task_status": str(task.status.value if task else "failed"),
+                },
+            )
+            write_project_state_snapshot_fn(db, project, task, session_id)
+            return {
+                "status": "failed",
+                "reason": "verification_integrity_failed",
+            }
 
     nontrivial_change_flags = list((task_change_set or {}).get("warning_flags") or [])
     _tmpl_review_policy = _resolve_template_review_policy(task)

@@ -3000,6 +3000,36 @@ export function SessionDigestPanel({
                 </div>
               </div>
 
+              {(digest.command_quality || digest.verification_insufficient || (digest.integrity_findings?.length ?? 0) > 0) && (
+                <div className="rounded-md border border-amber-800/60 bg-amber-950/20 p-3">
+                  <div className="mb-2 flex flex-wrap items-center gap-2">
+                    <p className="text-xs font-semibold uppercase tracking-widest text-amber-200">
+                      Verification integrity
+                    </p>
+                    {digest.command_quality && (
+                      <span className="rounded bg-amber-900/50 px-2 py-0.5 text-xs text-amber-100">
+                        {digest.command_quality}
+                      </span>
+                    )}
+                    {digest.verification_insufficient && (
+                      <span className="rounded bg-red-900/60 px-2 py-0.5 text-xs text-red-100">
+                        insufficient
+                      </span>
+                    )}
+                  </div>
+                  {(digest.integrity_findings?.length ?? 0) > 0 && (
+                    <ul className="space-y-1 text-xs text-amber-100">
+                      {digest.integrity_findings?.slice(0, 5).map((finding, index) => (
+                        <li key={`${finding.code}-${finding.path ?? index}`}>
+                          {finding.message}
+                          {finding.path ? ` (${finding.path}${finding.line ? `:${finding.line}` : ''})` : ''}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
               <div>
                 <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-slate-400">
                   What changed

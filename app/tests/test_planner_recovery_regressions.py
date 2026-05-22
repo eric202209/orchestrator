@@ -171,6 +171,107 @@ def test_handle_task_failure_queues_one_automatic_recovery_for_failed_ordered_ta
     assert session.is_active is True
 
 
+def test_auto_recovery_queue_failure_preserves_original_error_and_execution(
+    db_session,
+):
+    project = Project(name="Recovery Queue Failure Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    session = SessionModel(
+        project_id=project.id,
+        name="Recovery Queue Failure Session",
+        status="running",
+        execution_mode="automatic",
+        is_active=True,
+    )
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+
+    task = Task(
+        project_id=project.id,
+        title="Inspect current project architecture",
+        description="Inspect the existing workspace and identify the real structure.",
+        status=TaskStatus.RUNNING,
+        execution_profile="review_only",
+        plan_position=1,
+        workspace_status="isolated",
+        task_subfolder="task-inspect-current-project-architecture",
+    )
+    db_session.add(task)
+    db_session.commit()
+    db_session.refresh(task)
+
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.RUNNING,
+    )
+    db_session.add(execution)
+    db_session.commit()
+    db_session.refresh(execution)
+
+    def failing_queue_task_for_session(*, db, session, task_id, timeout_seconds=1800):
+        raise RuntimeError("broker unavailable")
+
+    ctx = OrchestrationRunContext(
+        db=db_session,
+        session=session,
+        project=project,
+        task=task,
+        session_task_link=None,
+        session_id=session.id,
+        task_id=task.id,
+        prompt=task.description,
+        timeout_seconds=300,
+        execution_profile="review_only",
+        validation_profile="implementation",
+        runs_in_canonical_baseline=True,
+        orchestration_state=None,
+        runtime_service=None,
+        task_service=None,
+        logger=logging.getLogger(__name__),
+        emit_live=lambda *_args, **_kwargs: None,
+        error_handler=type(
+            "StubErrorHandler",
+            (),
+            {"should_retry": staticmethod(lambda _exc, _context: False)},
+        )(),
+        restore_workspace_snapshot_if_needed=None,
+        task_execution_id=execution.id,
+    )
+
+    try:
+        handle_task_failure(
+            self_task=_FakeSelfTask(),
+            ctx=ctx,
+            exc=RuntimeError("original workspace failure"),
+            get_latest_session_task_link_fn=lambda *_args, **_kwargs: None,
+            queue_task_for_session_fn=failing_queue_task_for_session,
+            write_project_state_snapshot_fn=lambda *_args, **_kwargs: None,
+            save_orchestration_checkpoint_fn=lambda *_args, **_kwargs: None,
+            record_live_log_fn=lambda *_args, **_kwargs: None,
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "original workspace failure"
+    else:
+        raise AssertionError("handle_task_failure should re-raise the original error")
+
+    db_session.refresh(task)
+    db_session.refresh(execution)
+    db_session.refresh(session)
+
+    assert task.status == TaskStatus.FAILED
+    assert "original workspace failure" in (task.error_message or "")
+    assert "broker unavailable" in (task.error_message or "")
+    assert execution.status == TaskStatus.FAILED
+    assert execution.completed_at is not None
+    assert session.status == "paused"
+
+
 def test_celery_retry_leaves_task_pending_so_claim_can_succeed(db_session):
     """When handle_task_failure schedules a Celery retry, task.status must be PENDING.
 

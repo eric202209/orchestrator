@@ -91,7 +91,7 @@ def _commands_are_weak_expected_file_verification(commands: Any) -> bool:
         return False
     return all(
         ValidatorService._verification_is_weak(command)
-        or " ".join(command.split()).startswith(("grep ", "cat ", "test "))
+        or " ".join(command.split()).startswith(("grep ", "test "))
         for command in normalized_commands
     )
 

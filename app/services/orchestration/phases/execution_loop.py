@@ -1529,6 +1529,7 @@ def execute_step_loop(
                 orchestration_state.debug_attempts.append(
                     {
                         "attempt": len(orchestration_state.debug_attempts) + 1,
+                        "step_index": step_index,
                         "fix_type": "command_fix",
                         "fix": "Rewrote inspection step into workspace discovery commands after repeated guessed-path failures",
                         "analysis": step_record.error_message[:500],
@@ -1631,6 +1632,7 @@ def execute_step_loop(
                 orchestration_state.debug_attempts.append(
                     {
                         "attempt": len(orchestration_state.debug_attempts) + 1,
+                        "step_index": step_index,
                         "fix_type": "command_fix",
                         "fix": "Rewrote inspection step into workspace discovery commands after directory-read tool failure",
                         "analysis": step_record.error_message[:500],

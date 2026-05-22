@@ -20,6 +20,7 @@ ADAPTATION_PROFILE_KEY = "orchestrator_adaptation_profile"
 ORCHESTRATION_POLICY_PROFILE_KEY = "orchestration_policy_profile"
 WORKSPACE_REVIEW_POLICY_KEY = "workspace_review_policy"
 WORKSPACE_REVIEW_POLICIES = {"auto_publish_all", "hold_nontrivial", "hold_all"}
+CONTAINER_WORKSPACE_ROOTS = {"/app/projects", "/app"}
 
 
 def normalize_workspace_review_policy(value: Optional[str]) -> str:
@@ -105,6 +106,33 @@ def get_setting_value_runtime(
         runtime_db.close()
 
 
+def _running_in_container() -> bool:
+    return Path("/.dockerenv").exists() or os.environ.get("ORCHESTRATOR_IN_DOCKER") in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def _host_workspace_root_fallback() -> str:
+    return (
+        os.environ.get("HOST_WORKSPACE_ROOT")
+        or os.environ.get("WORKSPACE_ROOT")
+        or os.environ.get("OPENCLAW_WORKSPACE")
+        or "~/.openclaw/workspace/vault/projects/"
+    )
+
+
+def _coerce_workspace_root_for_runtime(value: str) -> str:
+    normalized = str(Path(value).expanduser())
+    if (
+        normalized.rstrip("/") in CONTAINER_WORKSPACE_ROOTS
+        and not _running_in_container()
+    ):
+        return _host_workspace_root_fallback()
+    return value
+
+
 def get_effective_workspace_root(db: Optional[Session] = None) -> Path:
     fallback = os.environ.get(
         "WORKSPACE_ROOT",
@@ -120,7 +148,7 @@ def get_effective_workspace_root(db: Optional[Session] = None) -> Path:
             value = fallback
         finally:
             runtime_db.close()
-    return Path(value).expanduser().resolve()
+    return Path(_coerce_workspace_root_for_runtime(value)).expanduser().resolve()
 
 
 def get_effective_mobile_gateway_key(

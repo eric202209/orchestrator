@@ -55,6 +55,15 @@ class _FakeTaskService:
         return {}
 
 
+class _CountingTaskService(_FakeTaskService):
+    def __init__(self):
+        self.analyze_calls = 0
+
+    def analyze_workspace_consistency(self, project_dir):
+        self.analyze_calls += 1
+        return {"calls": self.analyze_calls}
+
+
 def test_missing_jest_binary_is_treated_as_repairable_completion_verification():
     completion_validation = SimpleNamespace(
         profile="implementation",
@@ -987,6 +996,50 @@ def test_final_verification_7f_gate_repairs_when_classifier_misses(
     )
     assert repair_calls[0].details["failure_class"] == "import_error"
     assert ctx.orchestration_state.debug_repair_task_execution_ids == []
+    assert ctx.task.status == TaskStatus.DONE
+
+
+def test_finalize_reuses_workspace_consistency_across_completion_validations(
+    db_session, tmp_path, monkeypatch
+):
+    ctx, execution = _seed_finalize_ctx(db_session, tmp_path)
+    counting_service = _CountingTaskService()
+    ctx.task_service = counting_service
+    validations = []
+
+    def fake_validate_task_completion(**kwargs):
+        validations.append(kwargs["workspace_consistency"])
+        return ValidationVerdict(
+            stage="task_completion",
+            status=("repair_required" if len(validations) == 1 else "accepted"),
+            profile="implementation",
+            reasons=(["needs completion repair"] if len(validations) == 1 else []),
+            details={"expected_core_files": ["calc_smoke.py"]},
+        )
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.ValidatorService.validate_task_completion",
+        fake_validate_task_completion,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow._attempt_completion_repair",
+        lambda **kwargs: {"status": "success", "step": {"description": "repair"}},
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow._detect_completion_verification_command",
+        lambda project_dir: (None, None),
+    )
+
+    result = finalize_successful_task(
+        ctx=ctx,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "completed", result
+    assert counting_service.analyze_calls == 1
+    assert len(validations) >= 2
+    assert all(consistency is validations[0] for consistency in validations)
     assert ctx.task.status == TaskStatus.DONE
 
 

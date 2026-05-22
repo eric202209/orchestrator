@@ -775,6 +775,25 @@ export interface RecoveryTaskInfo {
   files_changed: string[];
   repair_attempts: number;
   committed: boolean;
+  validation_evidence?: ValidationEvidence | null;
+}
+
+export interface IntegrityFinding {
+  code: string;
+  message: string;
+  path?: string | null;
+  line?: number | null;
+  severity?: string;
+  confidence?: string;
+}
+
+export interface ValidationEvidence {
+  command_quality?: string | null;
+  command_quality_by_step?: Array<Record<string, unknown>>;
+  integrity_findings?: IntegrityFinding[];
+  semantic_violation_codes?: string[];
+  requires_independent_evidence?: boolean;
+  verification_insufficient?: boolean;
 }
 
 export interface RecoveryAction {
@@ -805,6 +824,7 @@ export interface SessionRecoveryContext {
     remaining_plan_intact: boolean;
   };
   recommended_actions: RecoveryAction[];
+  validation_evidence?: ValidationEvidence | null;
   source_note: string;
 }
 
@@ -857,6 +877,10 @@ export interface SessionDigest {
   last_checkpoint_id: string | null;
   last_checkpoint_age_minutes: number | null;
   next_actions: string[];
+  validation_evidence?: ValidationEvidence | null;
+  command_quality?: string | null;
+  integrity_findings?: IntegrityFinding[];
+  verification_insufficient?: boolean;
   enriched?: boolean;
   enriched_text?: string | null;
   enrichment_error?: string | null;

@@ -20,6 +20,7 @@ from ..validation.workspace_guard import (
     TaskWorkspaceViolationError,
     assert_no_workspace_cd_escape,
 )
+from ..validation.integrity import python_test_files
 from ..validation.validator import ValidatorService
 
 
@@ -161,10 +162,7 @@ def _execute_portable_posix_command(
 
 
 def _python_test_files_exist(project_dir: Path) -> bool:
-    for candidate in project_dir.rglob("test*.py"):
-        if ".openclaw" not in candidate.parts and candidate.is_file():
-            return True
-    return False
+    return bool(python_test_files(project_dir))
 
 
 def _verification_success(

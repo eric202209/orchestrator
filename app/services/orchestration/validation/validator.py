@@ -44,6 +44,12 @@ from .workspace_guard import (
     TaskWorkspaceViolationError,
     normalize_path_reference,
 )
+from .integrity import (
+    check_test_preservation,
+    classify_verification_command,
+    pre_existing_python_test_files,
+    scan_test_file_changes,
+)
 
 MAX_INITIAL_PLAN_STEPS = 4
 MAX_PLANNING_COMMAND_CHARS = 900
@@ -455,6 +461,21 @@ class ValidatorService:
         return any(
             re.search(rf"(?:^|[;&|()\n])\s*{pattern}(?:\s|$)", text)
             for pattern in weak_command_patterns
+        )
+
+    @staticmethod
+    def repair_requires_independent_evidence(
+        task_prompt: str,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> bool:
+        combined = " ".join([task_prompt or "", title or "", description or ""])
+        return bool(
+            re.search(
+                r"\b(?:repair|fix|debug|regression|bug|failure|failing|broken)\b",
+                combined,
+                re.IGNORECASE,
+            )
         )
 
     @staticmethod
@@ -2143,6 +2164,16 @@ class ValidatorService:
                     f"(steps: {weak_verification_steps[:5]})"
                 )
                 details["weak_verification_steps"] = weak_verification_steps
+                details["verification_command_quality"] = [
+                    {
+                        "step_number": step.get("step_number"),
+                        "command_quality": classify_verification_command(
+                            step.get("verification")
+                        ),
+                    }
+                    for step in plan
+                    if step.get("step_number") in weak_verification_steps
+                ]
 
             if cls._plan_contains_placeholder_intent(plan, task_prompt):
                 repairable.append(
@@ -2239,6 +2270,14 @@ class ValidatorService:
             semantic_violation_codes.append("missing_verification_command")
         if details.get("weak_verification_steps"):
             semantic_violation_codes.append("weak_verification")
+            weak_quality_values = {
+                str(entry.get("command_quality") or "")
+                for entry in details.get("verification_command_quality", [])
+            }
+            if "insufficient" in weak_quality_values:
+                semantic_violation_codes.append("command_quality_insufficient")
+            if "smoke_only" in weak_quality_values:
+                semantic_violation_codes.append("command_quality_smoke_only")
         if details.get("malformed_shell_quoting_steps"):
             semantic_violation_codes.append("malformed_shell_quoting")
         if details.get("verification_profile_mutated_source_assets"):
@@ -2446,6 +2485,96 @@ class ValidatorService:
         }
         details["completion_contract"] = contract
         details["mutation_completion"] = mutation_completion
+        command_quality_rank = {
+            "missing": 0,
+            "insufficient": 1,
+            "smoke_only": 2,
+            "behavioral": 3,
+            "regression_test": 4,
+        }
+        command_quality_by_step: List[Dict[str, Any]] = []
+        for step in plan or []:
+            command = str(step.get("verification") or "").strip()
+            quality = classify_verification_command(command)
+            command_quality_by_step.append(
+                {
+                    "step_number": step.get("step_number"),
+                    "command": command,
+                    "command_quality": quality,
+                }
+            )
+        completion_verification_command = str(
+            completion_evidence.get("completion_verification_command")
+            or completion_evidence.get("verification_command")
+            or ""
+        ).strip()
+        if completion_verification_command:
+            command_quality_by_step.append(
+                {
+                    "step_number": None,
+                    "source": "completion_verification",
+                    "command": completion_verification_command,
+                    "command_quality": classify_verification_command(
+                        completion_verification_command
+                    ),
+                }
+            )
+        best_command_quality = max(
+            (entry["command_quality"] for entry in command_quality_by_step),
+            key=lambda quality: command_quality_rank.get(str(quality), 0),
+            default="missing",
+        )
+        requires_independent_evidence = cls.repair_requires_independent_evidence(
+            task_prompt, title=title, description=description
+        )
+        integrity_findings = scan_test_file_changes(
+            reported_changed_files,
+            project_dir,
+        )
+        change_set = completion_evidence.get("change_set")
+        if isinstance(change_set, dict):
+            integrity_findings.extend(check_test_preservation(change_set, project_dir))
+        else:
+            change_set = None
+        pre_existing_tests = pre_existing_python_test_files(project_dir, change_set)
+        behavior_baseline = completion_evidence.get("behavior_baseline")
+        behavior_baseline_passed = bool(
+            isinstance(behavior_baseline, dict) and behavior_baseline.get("passed")
+        )
+        has_independent_regression_test = (
+            best_command_quality == "regression_test" and bool(pre_existing_tests)
+        )
+        integrity_payload = [finding.to_dict() for finding in integrity_findings]
+        integrity_blockers = [
+            finding
+            for finding in integrity_findings
+            if finding.severity == "error" and finding.confidence == "high"
+        ]
+        verification_insufficient = False
+        semantic_violation_codes: List[str] = []
+        if best_command_quality == "missing":
+            semantic_violation_codes.append("command_quality_missing")
+        elif best_command_quality == "insufficient":
+            semantic_violation_codes.append("command_quality_insufficient")
+        elif best_command_quality == "smoke_only":
+            semantic_violation_codes.append("command_quality_smoke_only")
+        semantic_violation_codes.extend(
+            sorted({finding.code for finding in integrity_findings})
+        )
+        if integrity_blockers:
+            semantic_violation_codes.append("test_preservation_violation")
+        details["validation_evidence"] = {
+            "command_quality": best_command_quality,
+            "command_quality_by_step": command_quality_by_step[:20],
+            "integrity_findings": integrity_payload[:50],
+            "semantic_violation_codes": sorted(set(semantic_violation_codes)),
+            "requires_independent_evidence": requires_independent_evidence,
+            "pre_existing_test_files": pre_existing_tests[:20],
+            "has_independent_regression_test": has_independent_regression_test,
+            "behavior_baseline": behavior_baseline,
+            "behavior_baseline_passed": behavior_baseline_passed,
+            "verification_insufficient": False,
+        }
         if not contract["summary_generated"]:
             rejected.append("Completion contract requires a generated task summary")
         if (
@@ -2455,6 +2584,40 @@ class ValidatorService:
             rejected.append(
                 "Completion contract requires at least one recorded execution result"
             )
+        if requires_independent_evidence:
+            if best_command_quality in {"missing", "insufficient"}:
+                verification_insufficient = True
+                rejected.append(
+                    "Repair task verification is insufficient: no meaningful independent verification command ran"
+                )
+            elif best_command_quality == "smoke_only":
+                verification_insufficient = True
+                warnings.append(
+                    "Repair task verification is smoke-only; independent behavioral evidence is weak"
+                )
+            elif (
+                best_command_quality == "regression_test"
+                and not has_independent_regression_test
+                and not behavior_baseline_passed
+            ):
+                verification_insufficient = True
+                rejected.append(
+                    "Repair task verification is insufficient: regression tests appear to be newly generated without pre-existing test coverage"
+                )
+            if integrity_blockers:
+                verification_insufficient = True
+                for finding in integrity_blockers[:5]:
+                    rejected.append(
+                        f"Verification integrity blocker: {finding.message}"
+                    )
+        elif integrity_blockers:
+            warnings.extend(
+                f"Verification integrity warning: {finding.message}"
+                for finding in integrity_blockers[:5]
+            )
+        details["validation_evidence"][
+            "verification_insufficient"
+        ] = verification_insufficient
 
         if missing_core:
             repairable.append(
