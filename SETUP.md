@@ -121,6 +121,54 @@ ollama pull nomic-embed-text
 
 If Ollama is not installed, set `EMBEDDING_PROVIDER=openai` and provide `OPENAI_API_KEY`.
 
+## Alpha Operator Verification Path
+
+Use this path after setup to verify the current alpha baseline. The goal is not
+new functionality; it is proving the install can run, recover, and report state
+without manual database cleanup.
+
+1. Clone the repo and create `.env` from `.env.example`.
+2. Start the real platform entrypoint:
+   - Linux: `./start.sh`
+   - WSL/llama.cpp: `./wsl-start.sh`
+   - Windows Docker/Ollama: `.\start.ps1`
+3. Confirm service health:
+
+```bash
+curl -fsS http://127.0.0.1:8080/health
+```
+
+4. Run backend tests:
+
+```bash
+PYTHONPATH=. venv/bin/python -m pytest app/tests -q
+```
+
+5. Run a small smoke:
+   - 1 project
+   - 3 tasks: `docs-update`, `python-bug-fix`, `verification-only`
+6. Confirm:
+   - session reaches `completed`
+   - all tasks reach `done/promoted`
+   - no running `TaskExecution` remains
+   - change sets are captured
+   - `/api/v1/ops/backends*` diagnostics are healthy
+   - no manual database cleanup was needed
+
+### Alpha Operational Caveats
+
+- `local_openclaw` defaults to `LOCAL_OPENCLAW_MAX_PARALLEL_SESSIONS=1`.
+- `backend_capacity_limit` may appear during concurrent smoke runs; this is an
+  operational capacity signal and should retry before becoming actionable.
+- Qdrant positive-path retrieval is not the primary alpha proof; SQLite fallback
+  is the proven retrieval path.
+- Windows paths should be short, local, and plain ASCII. Avoid synced folders,
+  deep paths, and non-ASCII workspace paths for active execution.
+- Local runtime speed depends on GPU availability, backend process health, and
+  gateway responsiveness.
+- Test stubs (`stub_success`, `stub_capacity`) are for automated tests only and
+  require `ENABLE_TEST_RUNTIME_BACKENDS=True`.
+
 ---
 
 ## Windows (Nvidia GPU + Ollama, no OpenClaw)
