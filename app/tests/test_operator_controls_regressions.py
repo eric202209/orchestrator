@@ -769,3 +769,201 @@ def test_policy_profiles_change_workspace_restore_behavior():
     assert should_restore_workspace_on_failure(
         "planning parse error", policy_profile="strict"
     )
+
+
+# ── Phase 10M: runtime lane doctor ───────────────────────────────────────────
+
+
+def test_lane_doctor_host_with_writable_root_returns_ok(monkeypatch, tmp_path):
+    import app.services.workspace.system_settings as system_settings
+
+    writable_root = tmp_path / "projects"
+    writable_root.mkdir()
+    monkeypatch.setattr(system_settings, "_running_in_container", lambda: False)
+    monkeypatch.setenv("WORKSPACE_ROOT", str(writable_root))
+
+    from app.services.workspace.system_settings import diagnose_runtime_lane
+
+    result = diagnose_runtime_lane()
+    assert result["verdict"] == "ok"
+    assert result["runtime"] == "host"
+    assert result["workspace_writable"] is True
+    assert result["container_path_on_host"] is False
+    assert result["reasons"] == []
+
+
+def test_lane_doctor_host_uses_host_workspace_root_without_db_setting(
+    monkeypatch, tmp_path
+):
+    import app.services.workspace.system_settings as system_settings
+
+    host_root = tmp_path / "host-projects"
+    workspace_root = tmp_path / "workspace-root"
+    host_root.mkdir()
+    workspace_root.mkdir()
+    monkeypatch.setattr(system_settings, "_running_in_container", lambda: False)
+    monkeypatch.setenv("HOST_WORKSPACE_ROOT", str(host_root))
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.delenv("OPENCLAW_WORKSPACE", raising=False)
+
+    from app.services.workspace.system_settings import diagnose_runtime_lane
+
+    result = diagnose_runtime_lane()
+    assert result["verdict"] == "ok"
+    assert result["effective_workspace_root"] == str(host_root.resolve())
+
+
+def test_lane_doctor_probe_does_not_delete_existing_lane_probe(monkeypatch, tmp_path):
+    import app.services.workspace.system_settings as system_settings
+
+    writable_root = tmp_path / "projects"
+    writable_root.mkdir()
+    existing_probe = writable_root / ".lane_probe"
+    existing_probe.write_text("operator data", encoding="utf-8")
+    monkeypatch.setattr(system_settings, "_running_in_container", lambda: False)
+    monkeypatch.setenv("WORKSPACE_ROOT", str(writable_root))
+    monkeypatch.delenv("HOST_WORKSPACE_ROOT", raising=False)
+    monkeypatch.delenv("OPENCLAW_WORKSPACE", raising=False)
+
+    from app.services.workspace.system_settings import diagnose_runtime_lane
+
+    result = diagnose_runtime_lane()
+    assert result["workspace_writable"] is True
+    assert existing_probe.read_text(encoding="utf-8") == "operator data"
+
+
+def test_lane_doctor_container_path_on_host_returns_misconfigured(
+    monkeypatch, tmp_path
+):
+    import app.services.workspace.system_settings as system_settings
+
+    monkeypatch.setattr(system_settings, "_running_in_container", lambda: False)
+    # Raw stored value is a container path; on host this should be flagged.
+    monkeypatch.setenv("WORKSPACE_ROOT", "/app/projects")
+    monkeypatch.delenv("HOST_WORKSPACE_ROOT", raising=False)
+    monkeypatch.delenv("OPENCLAW_WORKSPACE", raising=False)
+
+    from app.services.workspace.system_settings import diagnose_runtime_lane
+
+    result = diagnose_runtime_lane()
+    assert result["container_path_on_host"] is True
+    assert result["verdict"] == "misconfigured"
+    assert any("container" in r.lower() for r in result["reasons"])
+
+
+def test_lane_doctor_container_runtime_keeps_container_path(monkeypatch, tmp_path):
+    import app.services.workspace.system_settings as system_settings
+
+    monkeypatch.setattr(system_settings, "_running_in_container", lambda: True)
+    monkeypatch.setenv("WORKSPACE_ROOT", "/app/projects")
+
+    from app.services.workspace.system_settings import diagnose_runtime_lane
+
+    result = diagnose_runtime_lane()
+    assert result["runtime"] == "container"
+    assert result["container_path_on_host"] is False
+
+
+def test_lane_doctor_unwritable_root_flagged(monkeypatch, tmp_path):
+    import app.services.workspace.system_settings as system_settings
+
+    missing_root = tmp_path / "does-not-exist"
+    monkeypatch.setattr(system_settings, "_running_in_container", lambda: False)
+    monkeypatch.setenv("WORKSPACE_ROOT", str(missing_root))
+    monkeypatch.delenv("HOST_WORKSPACE_ROOT", raising=False)
+    monkeypatch.delenv("OPENCLAW_WORKSPACE", raising=False)
+
+    from app.services.workspace.system_settings import diagnose_runtime_lane
+
+    result = diagnose_runtime_lane()
+    assert result["workspace_writable"] is False
+    assert result["verdict"] in {"misconfigured", "warning"}
+    assert any(
+        "not writable" in r.lower() or "does not exist" in r.lower()
+        for r in result["reasons"]
+    )
+
+
+# ── Phase 10M: prefer_typed_ops validator flag ────────────────────────────────
+
+
+def test_plan_contract_violations_flags_python_c_content_write(monkeypatch):
+    from app.services.orchestration.planning.planner import PlannerService
+
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Write config via python -c",
+            "commands": [
+                "python -c \"from pathlib import Path; Path('src/config.py').write_text('# config')\""
+            ],
+            "verification": "python -m py_compile src/config.py",
+            "rollback": None,
+            "expected_files": ["src/config.py"],
+        }
+    ]
+    issues = PlannerService.find_immediate_repair_step_issues(plan)
+    assert 1 in issues.get("prefer_typed_ops_steps", [])
+
+
+def test_plan_contract_violations_does_not_flag_verification_only_python_c(monkeypatch):
+    from app.services.orchestration.planning.planner import PlannerService
+
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Run module and verify",
+            "commands": ["python src/main.py"],
+            "verification": "python -c \"import pathlib; assert pathlib.Path('out.txt').exists()\"",
+            "rollback": None,
+            "expected_files": ["out.txt"],
+        }
+    ]
+    issues = PlannerService.find_immediate_repair_step_issues(plan)
+    assert 1 not in issues.get("prefer_typed_ops_steps", [])
+
+
+def test_sanitizer_rewrites_safe_python_c_write_text_to_ops(tmp_path):
+    from app.services.orchestration.planning.planner import PlannerService
+
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Write file via python -c",
+            "commands": [
+                'python -c \'from pathlib import Path; Path("src/x.py").write_text("# content")\''
+            ],
+            "verification": "python -m py_compile src/x.py",
+            "rollback": None,
+            "expected_files": ["src/x.py"],
+        }
+    ]
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+    step = sanitized[0]
+    # Command removed, op promoted
+    assert not any("write_text" in cmd for cmd in step["commands"])
+    ops = step.get("ops", [])
+    assert any(
+        op.get("op") == "write_file" and op.get("path") == "src/x.py" for op in ops
+    )
+
+
+def test_sanitizer_leaves_ambiguous_python_c_unchanged():
+    from app.services.orchestration.planning.planner import PlannerService
+
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Complex write",
+            "commands": [
+                "python -c \"import sys; from pathlib import Path; Path(sys.argv[1]).write_text('x')\""
+            ],
+            "verification": "python -m py_compile src/out.py",
+            "rollback": None,
+            "expected_files": ["src/out.py"],
+        }
+    ]
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+    step = sanitized[0]
+    # Command must still be present (not rewritten)
+    assert any("write_text" in cmd for cmd in step["commands"])

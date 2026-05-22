@@ -1,15 +1,18 @@
 """Helpers for runtime-configurable system settings."""
 
+import logging
 import os
 import secrets
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.database import get_db_session
 from app.models import SystemSetting
+
+logger = logging.getLogger(__name__)
 
 WORKSPACE_ROOT_KEY = "workspace_root"
 LEGACY_WORKSPACE_ROOT_KEY = "openclaw_workspace_root"
@@ -134,10 +137,7 @@ def _coerce_workspace_root_for_runtime(value: str) -> str:
 
 
 def get_effective_workspace_root(db: Optional[Session] = None) -> Path:
-    fallback = os.environ.get(
-        "WORKSPACE_ROOT",
-        os.environ.get("OPENCLAW_WORKSPACE", "~/.openclaw/workspace/vault/projects/"),
-    )
+    fallback = _host_workspace_root_fallback()
     if db is not None:
         value = get_workspace_root_setting_value(db, fallback) or fallback
     else:
@@ -210,3 +210,160 @@ def get_effective_workspace_review_policy(
         WORKSPACE_REVIEW_POLICY_KEY, default_policy, db=db
     )
     return normalize_workspace_review_policy(policy)
+
+
+def diagnose_runtime_lane(db: Optional[Session] = None) -> Dict[str, Any]:
+    """Return a structured health verdict for the current runtime lane.
+
+    Checks whether the process is a container or host worker, whether the
+    effective workspace root is reachable and writable, and whether any
+    DB-persisted project workspace roots conflict with the current runtime.
+    """
+    in_container = _running_in_container()
+    runtime = "container" if in_container else "host"
+
+    # Read raw stored value (before coercion) to detect container-path misconfiguration.
+    fallback = os.environ.get(
+        "WORKSPACE_ROOT",
+        os.environ.get("OPENCLAW_WORKSPACE", "~/.openclaw/workspace/vault/projects/"),
+    )
+    try:
+        _db = db
+        _owned_inner = False
+        if _db is None:
+            _db = get_db_session()
+            _owned_inner = True
+        try:
+            raw_value = get_workspace_root_setting_value(_db, fallback) or fallback
+        finally:
+            if _owned_inner:
+                _db.close()
+    except Exception:
+        raw_value = fallback
+
+    raw_normalized = str(Path(raw_value).expanduser()).rstrip("/")
+    container_path_on_host = (
+        not in_container and raw_normalized in CONTAINER_WORKSPACE_ROOTS
+    )
+
+    try:
+        effective_root = get_effective_workspace_root(db)
+        root_str = str(effective_root)
+    except Exception as exc:
+        return {
+            "runtime": runtime,
+            "effective_workspace_root": None,
+            "workspace_writable": False,
+            "container_path_on_host": container_path_on_host,
+            "db_conflict_projects": [],
+            "verdict": "misconfigured",
+            "reasons": [f"Failed to resolve effective workspace root: {exc}"],
+        }
+
+    writable = False
+    writable_reason: Optional[str] = None
+    if effective_root.exists():
+        probe: Optional[Path] = None
+        try:
+            probe = effective_root / f".lane_probe_{secrets.token_hex(8)}"
+            with probe.open("x", encoding="utf-8") as handle:
+                handle.write("ok\n")
+            probe.unlink()
+            writable = True
+        except OSError as exc:
+            writable_reason = str(exc)
+            if probe is not None:
+                try:
+                    if probe.exists():
+                        probe.unlink()
+                except OSError:
+                    pass
+    else:
+        writable_reason = f"Path does not exist: {root_str}"
+
+    db_conflict_projects: List[Dict[str, Any]] = []
+    try:
+        from app.models import Project as ProjectModel
+
+        _db = db
+        _owned = False
+        if _db is None:
+            _db = get_db_session()
+            _owned = True
+        try:
+            projects = (
+                _db.query(ProjectModel)
+                .filter(
+                    ProjectModel.deleted_at.is_(None),
+                    ProjectModel.workspace_path.isnot(None),
+                )
+                .all()
+            )
+            for project in projects:
+                ws = str(project.workspace_path or "").strip()
+                if not ws:
+                    continue
+                ws_norm = Path(ws).expanduser()
+                # Conflict: project path is under a container root but runtime is host
+                if not in_container and any(
+                    str(ws_norm).startswith(cr) for cr in CONTAINER_WORKSPACE_ROOTS
+                ):
+                    db_conflict_projects.append(
+                        {"project_id": project.id, "workspace_path": ws}
+                    )
+        finally:
+            if _owned:
+                _db.close()
+    except Exception:
+        pass
+
+    reasons: List[str] = []
+    if container_path_on_host:
+        reasons.append(
+            f"Configured workspace root '{raw_normalized}' is a container-only path "
+            "but the process is not running in a container"
+        )
+    if not writable:
+        reasons.append(
+            f"Workspace root '{root_str}' is not writable: "
+            + (writable_reason or "unknown error")
+        )
+    if db_conflict_projects:
+        ids = [str(p["project_id"]) for p in db_conflict_projects[:5]]
+        reasons.append(
+            f"Projects with container-path workspace_root running on host "
+            f"(project_ids: {', '.join(ids)})"
+        )
+
+    if reasons:
+        verdict = (
+            "misconfigured" if (container_path_on_host or not writable) else "warning"
+        )
+    else:
+        verdict = "ok"
+
+    return {
+        "runtime": runtime,
+        "effective_workspace_root": root_str,
+        "workspace_writable": writable,
+        "container_path_on_host": container_path_on_host,
+        "db_conflict_projects": db_conflict_projects,
+        "verdict": verdict,
+        "reasons": reasons,
+    }
+
+
+def emit_runtime_lane_warning() -> None:
+    """Log a WARNING if the runtime lane is not healthy. Called at startup."""
+    try:
+        result = diagnose_runtime_lane()
+        if result.get("verdict") != "ok":
+            logger.warning(
+                "[RUNTIME LANE] verdict=%s runtime=%s workspace_root=%s reasons=%s",
+                result.get("verdict"),
+                result.get("runtime"),
+                result.get("effective_workspace_root"),
+                result.get("reasons"),
+            )
+    except Exception as exc:
+        logger.warning("[RUNTIME LANE] Lane diagnosis failed at startup: %s", exc)

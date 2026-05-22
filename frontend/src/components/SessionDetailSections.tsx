@@ -5,6 +5,7 @@ import type {
   CheckpointInspection,
   ExecutionFailureSummary,
   FailureDiagnostics,
+  IntegrityFinding,
   InterventionRequest,
   KnowledgeUsageEntry,
   Project,
@@ -2876,6 +2877,85 @@ export function SessionRecoveryCard({
   );
 }
 
+// ── VerificationIntegrityCard ─────────────────────────────────────────────────
+
+const QUALITY_LABEL: Record<string, string> = {
+  regression_test: 'Regression test',
+  behavioral: 'Behavioral',
+  smoke_only: 'Smoke only',
+  insufficient: 'Insufficient',
+  missing: 'Missing',
+};
+
+const QUALITY_COLOR: Record<string, string> = {
+  regression_test: 'bg-emerald-900/50 text-emerald-100',
+  behavioral: 'bg-sky-900/50 text-sky-100',
+  smoke_only: 'bg-amber-900/50 text-amber-100',
+  insufficient: 'bg-red-900/60 text-red-100',
+  missing: 'bg-red-900/60 text-red-100',
+};
+
+interface VerificationIntegrityCardProps {
+  commandQuality: string | null;
+  verificationInsufficient: boolean;
+  integrityFindings: IntegrityFinding[];
+  promotionBlockers: string[];
+}
+
+function VerificationIntegrityCard({
+  commandQuality,
+  verificationInsufficient,
+  integrityFindings,
+  promotionBlockers,
+}: VerificationIntegrityCardProps) {
+  const isBlocked = verificationInsufficient || promotionBlockers.length > 0 || integrityFindings.some(f => f.severity === 'error');
+  const isGreen = !isBlocked && commandQuality && ['regression_test', 'behavioral'].includes(commandQuality) && integrityFindings.length === 0;
+
+  if (isGreen) {
+    return (
+      <div className="rounded-md border border-emerald-800/60 bg-emerald-950/20 p-3">
+        <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-emerald-300">
+          Verified
+        </p>
+        <ul className="space-y-1 text-xs text-emerald-100">
+          {commandQuality && (
+            <li>Command quality: <span className={`rounded px-1.5 py-0.5 ${QUALITY_COLOR[commandQuality] ?? 'bg-slate-700 text-slate-200'}`}>{QUALITY_LABEL[commandQuality] ?? commandQuality}</span></li>
+          )}
+          <li>Test preservation: no tests removed or weakened</li>
+        </ul>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`rounded-md border p-3 ${isBlocked ? 'border-red-800/60 bg-red-950/20' : 'border-amber-800/60 bg-amber-950/20'}`}>
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <p className={`text-xs font-semibold uppercase tracking-widest ${isBlocked ? 'text-red-300' : 'text-amber-200'}`}>
+          {isBlocked ? 'Verification blocked' : 'Verification integrity'}
+        </p>
+        {commandQuality && (
+          <span className={`rounded px-2 py-0.5 text-xs ${QUALITY_COLOR[commandQuality] ?? 'bg-slate-700 text-slate-200'}`}>
+            {QUALITY_LABEL[commandQuality] ?? commandQuality}
+          </span>
+        )}
+      </div>
+      {(promotionBlockers.length > 0 || integrityFindings.length > 0) && (
+        <ul className={`space-y-1 text-xs ${isBlocked ? 'text-red-100' : 'text-amber-100'}`}>
+          {promotionBlockers.map((blocker, i) => (
+            <li key={`blocker-${i}`}>• {blocker}</li>
+          ))}
+          {integrityFindings.slice(0, 5).map((finding, i) => (
+            <li key={`${finding.code}-${finding.path ?? i}`}>
+              • {finding.message}
+              {finding.path ? ` (${finding.path}${finding.line ? `:${finding.line}` : ''})` : ''}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 // ── SessionDigestPanel ────────────────────────────────────────────────────────
 
 interface SessionDigestPanelProps {
@@ -3000,34 +3080,13 @@ export function SessionDigestPanel({
                 </div>
               </div>
 
-              {(digest.command_quality || digest.verification_insufficient || (digest.integrity_findings?.length ?? 0) > 0) && (
-                <div className="rounded-md border border-amber-800/60 bg-amber-950/20 p-3">
-                  <div className="mb-2 flex flex-wrap items-center gap-2">
-                    <p className="text-xs font-semibold uppercase tracking-widest text-amber-200">
-                      Verification integrity
-                    </p>
-                    {digest.command_quality && (
-                      <span className="rounded bg-amber-900/50 px-2 py-0.5 text-xs text-amber-100">
-                        {digest.command_quality}
-                      </span>
-                    )}
-                    {digest.verification_insufficient && (
-                      <span className="rounded bg-red-900/60 px-2 py-0.5 text-xs text-red-100">
-                        insufficient
-                      </span>
-                    )}
-                  </div>
-                  {(digest.integrity_findings?.length ?? 0) > 0 && (
-                    <ul className="space-y-1 text-xs text-amber-100">
-                      {digest.integrity_findings?.slice(0, 5).map((finding, index) => (
-                        <li key={`${finding.code}-${finding.path ?? index}`}>
-                          {finding.message}
-                          {finding.path ? ` (${finding.path}${finding.line ? `:${finding.line}` : ''})` : ''}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
+              {(digest.command_quality || digest.verification_insufficient || (digest.integrity_findings?.length ?? 0) > 0 || (digest.validation_evidence?.promotion_blockers?.length ?? 0) > 0) && (
+                <VerificationIntegrityCard
+                  commandQuality={digest.command_quality ?? null}
+                  verificationInsufficient={digest.verification_insufficient ?? false}
+                  integrityFindings={digest.integrity_findings ?? []}
+                  promotionBlockers={digest.validation_evidence?.promotion_blockers ?? []}
+                />
               )}
 
               <div>

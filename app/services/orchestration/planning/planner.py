@@ -1164,6 +1164,25 @@ class PlannerService:
                 for command in commands
                 if not cls._command_is_plain_english_file_instruction(command)
             ]
+
+            # Rewrite safe single-expression python -c write_text to ops.write_file.
+            # Only the unambiguous form is touched; anything else is left for the
+            # validator prefer_typed_ops flag to surface during repair.
+            rewritten_commands: List[str] = []
+            extra_ops_from_rewrite: List[Dict[str, Any]] = []
+            for cmd in commands:
+                m = cls._SAFE_PYTHON_C_WRITE_TEXT_RE.match(cmd.strip())
+                if m:
+                    rel_path = m.group("path").lstrip("./")
+                    content = m.group("content")
+                    if rel_path and not Path(rel_path).is_absolute():
+                        extra_ops_from_rewrite.append(
+                            {"op": "write_file", "path": rel_path, "content": content}
+                        )
+                        continue
+                rewritten_commands.append(cmd)
+            commands = rewritten_commands
+
             raw_ops = []
             if isinstance(raw_step, dict):
                 if isinstance(raw_step.get("ops"), list):
@@ -1202,6 +1221,8 @@ class PlannerService:
                 cls._normalize_exact_line_from_task_prompt(operation, task_prompt)
                 for operation in raw_ops
             ]
+            # Append any ops promoted from python -c rewrites.
+            raw_ops.extend(extra_ops_from_rewrite)
 
             raw_expected_files = step.get("expected_files", [])
             if isinstance(raw_expected_files, str):
@@ -1356,6 +1377,33 @@ class PlannerService:
         )
         return any(re.match(pattern, text) for pattern in empty_write_patterns)
 
+    _PYTHON_C_CONTENT_WRITE_RE = re.compile(
+        r"python3?\s+-c\s+.+(?:write_text|write_bytes|open\s*\([^)]+['\"]w['\"])",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    # Matches only the safe single-expression form:
+    # python[-3] -c ["']...; Path('rel/path').write_text('literal content')["']
+    # Groups: (1) path string, (2) content string
+    _SAFE_PYTHON_C_WRITE_TEXT_RE = re.compile(
+        r"""^python3?\s+-c\s+(?P<q>["'])"""
+        r"""(?:from\s+pathlib\s+import\s+Path\s*;\s*|import\s+pathlib\s*;\s*pathlib\.)?"""
+        r"""Path\((?P<pq>["'])(?P<path>[^'"]+)(?P=pq)\)\.write_text\((?P<cq>["'])(?P<content>[^'"\\]*)(?P=cq)\)"""
+        r"""\s*(?P=q)$""",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _command_is_python_c_content_write(command: str) -> bool:
+        """Return True when a command uses python -c to write file content.
+
+        These should be ops.write_file instead. Only flags actual content-write
+        patterns; verification-only python -c commands are left alone.
+        """
+        return bool(
+            PlannerService._PYTHON_C_CONTENT_WRITE_RE.search(str(command or ""))
+        )
+
     @staticmethod
     def _step_is_readonly_inspection(step: Dict[str, Any]) -> bool:
         from app.services.orchestration.validation.validator import ValidatorService
@@ -1431,6 +1479,7 @@ class PlannerService:
             "background_process_steps": [],
             "placeholder_only_steps": [],
             "weak_verification_steps": [],
+            "prefer_typed_ops_steps": [],
         }
         for index, step in enumerate(plan or [], start=1):
             step_number = int(step.get("step_number") or index)
@@ -1471,6 +1520,13 @@ class PlannerService:
                     step.get("verification")
                 ):
                     issues["weak_verification_steps"].append(step_number)
+            # Flag commands that use python -c to write file content alongside
+            # expected_files — these should use ops.write_file instead.
+            if expected_files and any(
+                PlannerService._command_is_python_c_content_write(str(cmd or ""))
+                for cmd in commands
+            ):
+                issues["prefer_typed_ops_steps"].append(step_number)
         return {key: sorted(set(value)) for key, value in issues.items() if value}
 
     @staticmethod
@@ -1526,6 +1582,7 @@ class PlannerService:
                 "background_process_steps": "background process command",
                 "placeholder_only_steps": "placeholder-only implementation step",
                 "weak_verification_steps": "weak verification command",
+                "prefer_typed_ops_steps": "python -c content write should use ops.write_file",
             }.get(issue_key, issue_key)
             violations.append(f"{label} in steps {steps[:5]}")
         return list(dict.fromkeys(violations))

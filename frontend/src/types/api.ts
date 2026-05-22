@@ -791,6 +791,7 @@ export interface ValidationEvidence {
   command_quality?: string | null;
   command_quality_by_step?: Array<Record<string, unknown>>;
   integrity_findings?: IntegrityFinding[];
+  promotion_blockers?: string[];
   semantic_violation_codes?: string[];
   requires_independent_evidence?: boolean;
   verification_insufficient?: boolean;

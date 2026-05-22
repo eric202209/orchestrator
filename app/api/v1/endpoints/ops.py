@@ -14,6 +14,7 @@ from app.config import settings
 from app.dependencies import get_current_admin_user, get_db
 from app.models import Project, TaskExecution
 from app.services.observability.metrics_collector import MetricsCollector
+from app.services.workspace.system_settings import diagnose_runtime_lane
 
 logger = logging.getLogger(__name__)
 
@@ -242,16 +243,36 @@ def ops_backends(
     }
 
 
+@router.get("/runtime-lane")
+def ops_runtime_lane(
+    current_user=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Runtime lane health: container/host identity, workspace root, writability, DB conflicts."""
+    return {
+        "computed_at": datetime.now(UTC).isoformat(),
+        **diagnose_runtime_lane(db),
+    }
+
+
 @router.get("/backends/health")
 def ops_backends_health(
     current_user=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    """Health status for each registered backend."""
+    """Health status for each registered backend, including runtime lane verdict."""
     from app.services.agents.agent_backends import list_supported_backends
 
     backends = list_supported_backends()
+    lane = diagnose_runtime_lane(db)
     return {
         "computed_at": datetime.now(UTC).isoformat(),
+        "runtime_lane": {
+            "verdict": lane.get("verdict"),
+            "runtime": lane.get("runtime"),
+            "container_path_on_host": lane.get("container_path_on_host"),
+            "reasons": lane.get("reasons"),
+        },
         "backends": [
             {
                 "name": b.name,
