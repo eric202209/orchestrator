@@ -67,7 +67,10 @@ FRONTEND_PORT=3000
 # Resolve Windows host IP from WSL2 default gateway.
 # Falls back to /etc/resolv.conf nameserver (also reliable in WSL2).
 # If both fail, exits early — all Windows-side services depend on this address.
-WINDOWS_HOST=$(ip route | grep default | awk '{print $3}' 2>/dev/null | head -1)
+WINDOWS_HOST="${WINDOWS_HOST:-}"
+if [ -z "$WINDOWS_HOST" ] && command -v ip >/dev/null 2>&1; then
+    WINDOWS_HOST=$(ip route | grep default | awk '{print $3}' 2>/dev/null | head -1)
+fi
 if [ -z "$WINDOWS_HOST" ]; then
     WINDOWS_HOST=$(grep -m1 nameserver /etc/resolv.conf 2>/dev/null | awk '{print $2}')
 fi

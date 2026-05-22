@@ -10,11 +10,13 @@ import os as _os
 import re as _re
 import shlex
 import subprocess as _subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from app.models import TaskExecution, TaskStatus
+from app.services.agents.interfaces import RuntimeBackendResult
 from app.services.orchestration.context.assembly import (
     DebugPromptInputs,
     assemble_debugging_prompt,
@@ -109,6 +111,22 @@ def _get_task_execution(
     if task_execution_id is None:
         return None
     return db.query(TaskExecution).filter(TaskExecution.id == task_execution_id).first()
+
+
+def _normalize_runtime_execution_result(
+    runtime_service: Any,
+    result: Dict[str, Any],
+    *,
+    duration_seconds: float,
+) -> RuntimeBackendResult | None:
+    normalizer = getattr(runtime_service, "normalize_execution_result", None)
+    if not callable(normalizer):
+        return None
+    return normalizer(
+        result,
+        role="execution",
+        duration_seconds=duration_seconds,
+    )
 
 
 def _verification_can_replace_stale_commands(step: dict[str, Any]) -> bool:
@@ -932,12 +950,25 @@ def execute_step_loop(
                                 step_description=step_description,
                                 task_prompt=prompt,
                             )
+                            runtime_started_at = time.monotonic()
                             step_result = _run_coroutine(
                                 runtime_service.execute_task(
                                     execution_prompt,
                                     timeout_seconds=step_timeout_seconds,
                                 )
                             )
+                            runtime_backend_result = (
+                                _normalize_runtime_execution_result(
+                                    runtime_service,
+                                    step_result,
+                                    duration_seconds=time.monotonic()
+                                    - runtime_started_at,
+                                )
+                            )
+                            if runtime_backend_result is not None:
+                                step_result["_runtime_backend_result"] = (
+                                    runtime_backend_result.to_dict()
+                                )
                             if runtime_service.reports_context_overflow(step_result):
                                 logger.warning(
                                     "[ORCHESTRATION] Execution prompt exceeded context window at step %s; "
@@ -956,12 +987,25 @@ def execute_step_loop(
                                 compact_execution_prompt = assemble_execution_prompt(
                                     ctx, step, compact=True
                                 )
+                                runtime_started_at = time.monotonic()
                                 step_result = _run_coroutine(
                                     runtime_service.execute_task(
                                         compact_execution_prompt,
                                         timeout_seconds=step_timeout_seconds,
                                     )
                                 )
+                                runtime_backend_result = (
+                                    _normalize_runtime_execution_result(
+                                        runtime_service,
+                                        step_result,
+                                        duration_seconds=time.monotonic()
+                                        - runtime_started_at,
+                                    )
+                                )
+                                if runtime_backend_result is not None:
+                                    step_result["_runtime_backend_result"] = (
+                                        runtime_backend_result.to_dict()
+                                    )
             else:
                 step_result = {
                     "status": "completed",

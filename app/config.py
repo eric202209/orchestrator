@@ -135,6 +135,7 @@ class Settings(BaseSettings):
     EXECUTION_BACKEND: Optional[str] = None
     REPAIR_BACKEND: Optional[str] = None
     LOCAL_OPENCLAW_MAX_PARALLEL_SESSIONS: int = 1
+    ENABLE_TEST_RUNTIME_BACKENDS: bool = False
     AGENT_MODEL: str = "local"
     PLANNING_REPAIR_ENABLED: bool = True
     PLANNING_REPAIR_BASE_URL: str = "http://ai-gateway:8000/v1"
@@ -265,6 +266,14 @@ def validate_runtime_secrets() -> None:
 
     logger = logging.getLogger(__name__)
 
+    test_runtime_backend_names = {"stub_success", "stub_capacity"}
+
+    def _is_enabled_test_runtime_backend(backend_name: str | None) -> bool:
+        return (
+            settings.ENABLE_TEST_RUNTIME_BACKENDS
+            and (backend_name or "").strip() in test_runtime_backend_names
+        )
+
     if not settings.SECRET_KEY:
         raise RuntimeError(
             "SECRET_KEY is unset; configure a unique SECRET_KEY before starting the API"
@@ -272,29 +281,42 @@ def validate_runtime_secrets() -> None:
 
     # Validate the configured backend is registered and its required env vars are set.
     try:
-        from app.services.agents.agent_backends import require_backend_descriptor
+        from app.services.agents.agent_backends import (
+            UnsupportedAgentBackendError,
+            require_backend_descriptor,
+        )
 
-        descriptor = require_backend_descriptor(settings.AGENT_BACKEND)
-        missing = [
-            var
-            for var in descriptor.config.required_env_vars
-            if not str(getattr(settings, var, "")).strip()
-        ]
+        if _is_enabled_test_runtime_backend(settings.AGENT_BACKEND):
+            logger.warning(
+                "Using test-only runtime backend: %s", settings.AGENT_BACKEND
+            )
+            descriptor = None
+        else:
+            descriptor = require_backend_descriptor(settings.AGENT_BACKEND)
+        if descriptor is None:
+            missing = []
+        else:
+            missing = [
+                var
+                for var in descriptor.config.required_env_vars
+                if not str(getattr(settings, var, "")).strip()
+            ]
         if missing:
             raise RuntimeError(
                 f"Backend '{descriptor.name}' requires environment variable(s) that are not set: "
                 + ", ".join(missing)
             )
-        if not descriptor.health.ready:
+        if descriptor is not None and not descriptor.health.ready:
             raise RuntimeError(
                 f"Backend '{descriptor.name}' is not ready: "
                 + ", ".join(descriptor.health.errors)
             )
-        logger.info(
-            "Active backend: %s | model family: %s",
-            descriptor.name,
-            settings.AGENT_MODEL,
-        )
+        if descriptor is not None:
+            logger.info(
+                "Active backend: %s | model family: %s",
+                descriptor.name,
+                settings.AGENT_MODEL,
+            )
 
         role_backends = {
             "PLANNING_BACKEND": settings.PLANNING_BACKEND,
@@ -304,7 +326,19 @@ def validate_runtime_secrets() -> None:
         for env_name, role_backend in role_backends.items():
             if not role_backend:
                 continue
-            role_descriptor = require_backend_descriptor(role_backend)
+            if _is_enabled_test_runtime_backend(role_backend):
+                logger.warning(
+                    "Role backend %s uses test-only runtime backend: %s",
+                    env_name,
+                    role_backend,
+                )
+                continue
+            try:
+                role_descriptor = require_backend_descriptor(role_backend)
+            except UnsupportedAgentBackendError as exc:
+                raise RuntimeError(
+                    f"{env_name}='{role_backend}' is invalid: {exc}"
+                ) from exc
             role_missing = [
                 var
                 for var in role_descriptor.config.required_env_vars
