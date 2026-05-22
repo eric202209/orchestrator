@@ -148,6 +148,24 @@ def test_outcome_class_recovered_success_when_retry_succeeds_same_task():
     assert result == "recovered_success"
 
 
+def test_outcome_class_capacity_retry_success_preserves_first_pass_success():
+    result = outcome_class(
+        _done_session("stopped"),
+        [
+            {
+                "id": 1,
+                "task_id": 10,
+                "attempt_number": 1,
+                "status": "failed",
+                "failure_category": "backend_capacity_limit",
+            },
+            {"id": 2, "task_id": 10, "attempt_number": 2, "status": "done"},
+        ],
+        [_reason_row("backend_capacity_limit")],
+    )
+    assert result == "first_pass_success"
+
+
 def test_outcome_class_recovered_success_via_repair_metadata():
     repair_row = {"log_metadata": json.dumps({"repair_attempts": 1})}
     result = outcome_class(
@@ -184,6 +202,45 @@ def test_outcome_class_failed_but_actionable_any_diagnostic():
         {"status": "stopped", "started_at": "2026-01-01T00:00:00+00:00"},
         [_execution(status="cancelled")],
         [_reason_row("some_diagnostic_reason_not_in_known_set")],
+    )
+    assert result == "failed_but_actionable"
+
+
+def test_outcome_class_capacity_only_failure_is_not_actionable_before_retry_exhaustion():
+    result = outcome_class(
+        {"status": "stopped", "started_at": "2026-01-01T00:00:00+00:00"},
+        [
+            {
+                "attempt_number": 1,
+                "status": "failed",
+                "failure_category": "backend_capacity_limit",
+            }
+        ],
+        [_reason_row("backend_capacity_limit")],
+    )
+    assert result == "stuck_or_manual_db_cleanup"
+
+
+def test_outcome_class_capacity_retry_exhaustion_is_actionable():
+    result = outcome_class(
+        {"status": "stopped", "started_at": "2026-01-01T00:00:00+00:00"},
+        [
+            {
+                "attempt_number": 5,
+                "status": "failed",
+                "failure_category": "backend_capacity_limit",
+            }
+        ],
+        [
+            {
+                "log_metadata": json.dumps(
+                    {
+                        "reason": "backend_capacity_limit",
+                        "retry_budget_exhausted": True,
+                    }
+                )
+            }
+        ],
     )
     assert result == "failed_but_actionable"
 

@@ -36,7 +36,11 @@ from app.services.agents.interfaces import (
     AgentInterfaceDescriptor,
     AgentRuntimeError,
     ContextWindowPolicy,
+    RuntimeBackendResult,
     RetryStrategy,
+)
+from app.services.agents.runtime_adapters.openclaw_adapter import (
+    normalize_openclaw_execution_result,
 )
 from app.services.model_adaptation import resolve_adaptation_profile
 from app.services.workspace.project_isolation_service import (
@@ -236,6 +240,22 @@ class OpenClawSessionService:
             "agent_interface": self.describe_interface().to_dict(),
             "capabilities": self.backend_descriptor.capabilities.to_dict(),
         }
+
+    def normalize_execution_result(
+        self,
+        result: Dict[str, Any],
+        *,
+        role: str = "execution",
+        duration_seconds: float = 0.0,
+    ) -> RuntimeBackendResult:
+        """Normalize OpenClaw execution output into the shared backend contract."""
+
+        return normalize_openclaw_execution_result(
+            result,
+            backend_id=self.backend_descriptor.name,
+            role=role,
+            duration_seconds=duration_seconds,
+        )
 
     def describe_interface(self) -> AgentInterfaceDescriptor:
         model_family = get_effective_agent_model_family(

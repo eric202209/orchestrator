@@ -202,3 +202,15 @@ def test_validate_raises_when_openai_backend_has_whitespace_only_api_key(monkeyp
 def test_validate_raises_when_backend_is_registered_but_unimplemented(monkeypatch):
     with pytest.raises(RuntimeError, match="not implemented yet"):
         _call_validate(monkeypatch, backend="remote_openclaw_gateway")
+
+
+def test_validate_raises_clear_error_for_unknown_role_backend(monkeypatch):
+    from app import config as config_module
+
+    monkeypatch.setattr(config_module.settings, "SECRET_KEY", "strong-unique-key")
+    monkeypatch.setattr(config_module.settings, "AGENT_BACKEND", "openai_responses_api")
+    monkeypatch.setattr(config_module.settings, "OPENAI_API_KEY", "sk-test-key-abc123")
+    monkeypatch.setattr(config_module.settings, "EXECUTION_BACKEND", "missing_backend")
+
+    with pytest.raises(RuntimeError, match="EXECUTION_BACKEND='missing_backend'"):
+        config_module.validate_runtime_secrets()

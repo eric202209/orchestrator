@@ -27,6 +27,17 @@ class BackendRole(str, enum.Enum):
     REPAIR = "repair"
 
 
+_TEST_RUNTIME_BACKENDS = {"stub_success", "stub_capacity"}
+
+
+def _test_runtime_backends_enabled() -> bool:
+    return bool(getattr(settings, "ENABLE_TEST_RUNTIME_BACKENDS", False))
+
+
+def _is_test_runtime_backend(backend_name: str) -> bool:
+    return backend_name in _TEST_RUNTIME_BACKENDS
+
+
 def resolve_backend_name_for_role(db: Session, role: BackendRole) -> str:
     """Return the configured backend name for role, falling back to AGENT_BACKEND."""
     role_setting = {
@@ -55,6 +66,20 @@ def create_agent_runtime(
         backend_name = get_effective_agent_backend(
             settings.AGENT_BACKEND, db=db
         ).strip()
+    if _is_test_runtime_backend(backend_name):
+        if not _test_runtime_backends_enabled():
+            raise UnsupportedAgentBackendError(
+                f"Backend '{backend_name}' is test-only and ENABLE_TEST_RUNTIME_BACKENDS is false."
+            )
+        from app.services.agents.stub_runtime import create_stub_runtime
+
+        return create_stub_runtime(
+            db,
+            session_id,
+            task_id,
+            use_demo_mode=use_demo_mode,
+            backend_id=backend_name,
+        )
     descriptor = require_backend_descriptor(backend_name)
     runtime_factory = get_runtime_factory(descriptor.name)
     if runtime_factory is not None:

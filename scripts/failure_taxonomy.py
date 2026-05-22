@@ -205,6 +205,24 @@ def _int_value(value: Any, default: int = 0) -> int:
         return default
 
 
+def _is_capacity_limit_row(row: dict[str, Any]) -> bool:
+    return str(row.get("failure_category") or "").strip() == "backend_capacity_limit"
+
+
+def _capacity_retry_budget_exhausted(metadata_rows: list[dict[str, Any]]) -> bool:
+    for row in metadata_rows:
+        metadata = parse_log_metadata(row.get("log_metadata"))
+        if str(metadata.get("reason") or "").strip() != "backend_capacity_limit":
+            continue
+        if bool(
+            metadata.get("retry_budget_exhausted")
+            or metadata.get("max_retries_exhausted")
+            or metadata.get("capacity_retry_budget_exhausted")
+        ):
+            return True
+    return False
+
+
 def _latest_task_executions(
     task_executions: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -291,15 +309,21 @@ def outcome_class(
     )
 
     if is_done:
+        non_capacity_executions = [
+            row for row in task_executions if not _is_capacity_limit_row(row)
+        ]
         max_attempt = max(
-            (int(row.get("attempt_number") or 1) for row in task_executions),
+            (int(row.get("attempt_number") or 1) for row in non_capacity_executions),
             default=1,
         )
         had_failed_attempt = any(
             status_key(row.get("status")) in FAILED_EXECUTION_STATUSES
-            for row in task_executions
+            for row in non_capacity_executions
         )
+        had_capacity_attempt = any(_is_capacity_limit_row(row) for row in task_executions)
         repair_used = _has_repair_evidence(metadata_rows)
+        if had_capacity_attempt and not repair_used and not had_failed_attempt:
+            return "first_pass_success"
         if max_attempt == 1 and not repair_used and not had_failed_attempt:
             return "first_pass_success"
         return "recovered_success"
@@ -310,9 +334,12 @@ def outcome_class(
         return "failed_but_actionable"
 
     # Any diagnostic reason (not necessarily a known terminal reason) is actionable
+    capacity_retry_budget_exhausted = _capacity_retry_budget_exhausted(metadata_rows)
     for row in metadata_rows:
         meta = parse_log_metadata(row.get("log_metadata"))
         reason = str(meta.get("reason") or "").strip()
+        if reason == "backend_capacity_limit" and not capacity_retry_budget_exhausted:
+            continue
         if reason:
             return "failed_but_actionable"
 

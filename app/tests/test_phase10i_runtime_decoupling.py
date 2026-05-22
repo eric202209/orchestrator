@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ast
 import pytest
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from app.models import Project, Session as SessionModel, Task, TaskExecution, TaskStatus
@@ -11,6 +13,10 @@ from app.services.agents.agent_runtime import BackendRole, resolve_backend_name_
 from app.services.agents.agent_backends import (
     get_backend_descriptor,
     list_supported_backends,
+)
+from app.services.agents.interfaces import RuntimeBackendResult
+from app.services.agents.runtime_adapters.openclaw_adapter import (
+    normalize_openclaw_execution_result,
 )
 from app.services.session.execution_policy import (
     classify_failure,
@@ -679,3 +685,180 @@ def test_planning_and_execution_can_resolve_independently():
     assert planning_backend == "direct_ollama"
     assert execution_backend == "openai_responses_api"
     assert planning_backend != execution_backend
+
+
+# ---------------------------------------------------------------------------
+# Phase 10I-post: execution backend result contract
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_backend_result_to_dict_is_contract_shape():
+    result = RuntimeBackendResult(
+        backend_id="local_openclaw",
+        role="execution",
+        success=False,
+        exit_reason="backend_at_capacity",
+        output=None,
+        duration_seconds=1.25,
+        failure_category="backend_capacity_limit",
+        terminal_reason="retry_later",
+    )
+
+    assert result.to_dict() == {
+        "backend_id": "local_openclaw",
+        "role": "execution",
+        "success": False,
+        "exit_reason": "backend_at_capacity",
+        "output": None,
+        "duration_seconds": 1.25,
+        "failure_category": "backend_capacity_limit",
+        "terminal_reason": "retry_later",
+    }
+
+
+def test_openclaw_execution_result_normalizes_success():
+    result = normalize_openclaw_execution_result(
+        {
+            "status": "completed",
+            "output": "changed files",
+        },
+        backend_id="local_openclaw",
+        role="execution",
+        duration_seconds=2.5,
+    )
+
+    assert result.backend_id == "local_openclaw"
+    assert result.role == "execution"
+    assert result.success is True
+    assert result.exit_reason == "completed"
+    assert result.output == "changed files"
+    assert result.duration_seconds == 2.5
+    assert result.failure_category is None
+
+
+def test_openclaw_execution_result_classifies_capacity_failure():
+    result = normalize_openclaw_execution_result(
+        {
+            "status": "failed",
+            "error": "session file locked",
+        },
+        backend_id="local_openclaw",
+        role="execution",
+    )
+
+    assert result.success is False
+    assert result.exit_reason == "session file locked"
+    assert result.failure_category == "backend_capacity_limit"
+
+
+def test_execution_loop_uses_runtime_backend_result_for_execution_path():
+    from app.services.orchestration.phases.execution_loop import (
+        _normalize_runtime_execution_result,
+    )
+
+    class RuntimeWithNormalizer:
+        def normalize_execution_result(self, result, *, role, duration_seconds):
+            return RuntimeBackendResult(
+                backend_id="stub_runtime",
+                role=role,
+                success=True,
+                exit_reason="completed",
+                output=result.get("output"),
+                duration_seconds=duration_seconds,
+            )
+
+    normalized = _normalize_runtime_execution_result(
+        RuntimeWithNormalizer(),
+        {"status": "completed", "output": "ok"},
+        duration_seconds=0.5,
+    )
+
+    assert normalized == RuntimeBackendResult(
+        backend_id="stub_runtime",
+        role="execution",
+        success=True,
+        exit_reason="completed",
+        output="ok",
+        duration_seconds=0.5,
+    )
+
+
+def test_worker_and_tasks_endpoint_do_not_import_run_state_attempt_helpers():
+    forbidden_names = {
+        "mark_task_attempt_pending",
+        "mark_task_attempt_running",
+        "mark_task_attempt_done",
+        "mark_task_attempt_failed",
+        "mark_task_attempt_cancelled",
+    }
+    checked_paths = [
+        Path("app/tasks/worker.py"),
+        Path("app/api/v1/endpoints/tasks.py"),
+    ]
+
+    for path in checked_paths:
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
+            imported_names = {alias.name for alias in node.names}
+            overlap = forbidden_names & imported_names
+            assert not overlap, f"{path} imports direct run_state helpers: {overlap}"
+
+
+def test_stub_backends_are_not_production_registered():
+    backend_names = {descriptor.name for descriptor in list_supported_backends()}
+
+    assert "stub_success" not in backend_names
+    assert "stub_capacity" not in backend_names
+
+
+def test_stub_backend_rejected_unless_test_backends_enabled(db_session, monkeypatch):
+    from app.services.agents.agent_runtime import create_agent_runtime
+    from app.services.agents.agent_backends import UnsupportedAgentBackendError
+    from app.services.agents import agent_runtime as runtime_module
+
+    monkeypatch.setattr(runtime_module.settings, "ENABLE_TEST_RUNTIME_BACKENDS", False)
+    monkeypatch.setattr(runtime_module.settings, "EXECUTION_BACKEND", "stub_success")
+
+    with pytest.raises(UnsupportedAgentBackendError, match="test-only"):
+        create_agent_runtime(db_session, session_id=1, role=BackendRole.EXECUTION)
+
+
+def test_stub_success_backend_enabled_only_for_tests(db_session, monkeypatch):
+    import asyncio
+
+    from app.services.agents.agent_runtime import create_agent_runtime
+    from app.services.agents import agent_runtime as runtime_module
+
+    monkeypatch.setattr(runtime_module.settings, "ENABLE_TEST_RUNTIME_BACKENDS", True)
+    monkeypatch.setattr(runtime_module.settings, "EXECUTION_BACKEND", "stub_success")
+
+    runtime = create_agent_runtime(db_session, session_id=1, role=BackendRole.EXECUTION)
+    raw = asyncio.run(runtime.execute_task("do work"))
+    normalized = runtime.normalize_execution_result(raw, role="execution")
+
+    assert raw["status"] == "completed"
+    assert normalized.backend_id == "stub_success"
+    assert normalized.success is True
+    assert normalized.failure_category is None
+
+
+def test_stub_capacity_backend_reports_capacity_category(db_session, monkeypatch):
+    import asyncio
+
+    from app.services.agents.agent_runtime import create_agent_runtime
+    from app.services.agents import agent_runtime as runtime_module
+
+    monkeypatch.setattr(runtime_module.settings, "ENABLE_TEST_RUNTIME_BACKENDS", True)
+    monkeypatch.setattr(runtime_module.settings, "EXECUTION_BACKEND", "stub_capacity")
+
+    runtime = create_agent_runtime(db_session, session_id=1, role=BackendRole.EXECUTION)
+    raw = asyncio.run(runtime.execute_task("do work"))
+    normalized = runtime.normalize_execution_result(raw, role="execution")
+
+    assert raw["status"] == "failed"
+    assert normalized.backend_id == "stub_capacity"
+    assert normalized.success is False
+    assert normalized.exit_reason == "backend_at_capacity"
+    assert normalized.failure_category == "backend_capacity_limit"

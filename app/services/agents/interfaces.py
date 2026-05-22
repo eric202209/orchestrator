@@ -39,6 +39,23 @@ class RetryStrategy:
 
 
 @dataclass(frozen=True)
+class RuntimeBackendResult:
+    """Normalized result shape returned by runtime backend adapters."""
+
+    backend_id: str
+    role: str
+    success: bool
+    exit_reason: str
+    output: Optional[str]
+    duration_seconds: float
+    failure_category: Optional[str] = None
+    terminal_reason: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class AgentInterfaceDescriptor:
     """Backend/model-specific contract used by orchestration flows."""
 
