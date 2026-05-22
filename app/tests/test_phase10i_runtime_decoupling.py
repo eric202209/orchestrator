@@ -761,6 +761,45 @@ def test_backend_capacity_retry_state_marks_exhaustion():
     assert exhausted is True
 
 
+def test_prepare_backend_capacity_retry_returns_attempt_to_pending(db_session):
+    import app.tasks.worker as worker_module
+    from app.models import SessionTask
+
+    _, session, task = _make_project_session_task(db_session)
+    task.status = TaskStatus.RUNNING
+    task.workspace_status = "not_created"
+    link = SessionTask(
+        session_id=session.id,
+        task_id=task.id,
+        status=TaskStatus.RUNNING,
+        started_at=datetime.now(timezone.utc),
+    )
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.RUNNING,
+        backend_id="local_openclaw",
+        started_at=datetime.now(timezone.utc),
+    )
+    db_session.add_all([link, execution])
+    db_session.flush()
+
+    worker_module.prepare_backend_capacity_retry(
+        task=task,
+        session_task_link=link,
+        task_execution=execution,
+        backend_id="local_openclaw",
+    )
+
+    assert task.status == TaskStatus.PENDING
+    assert link.status == TaskStatus.PENDING
+    assert execution.status == TaskStatus.PENDING
+    assert execution.failure_category == "backend_capacity_limit"
+    assert execution.backend_id == "local_openclaw"
+    assert execution.completed_at is None
+
+
 def test_classify_failure_defaults_to_execution_failure_for_unknown_reason():
     """Arbitrary exception messages that match no pattern → execution_failure."""
     result = classify_failure("something went wrong", "local_openclaw", {})

@@ -95,6 +95,7 @@ from app.services.orchestration.validation.workspace_guard import (
 from app.services.session.session_execution_service import (
     mark_execution_cancelled,
     mark_execution_failed,
+    mark_execution_pending,
     mark_execution_running,
 )
 from app.services.orchestration.state.session_state import (
@@ -126,6 +127,29 @@ def backend_capacity_retry_state(
         BACKEND_CAPACITY_RETRY_MAX_RETRIES if max_retries is None else int(max_retries)
     )
     return retry_count, retry_count >= retry_limit
+
+
+def prepare_backend_capacity_retry(
+    *,
+    task: Task | None,
+    session_task_link: SessionTask | None,
+    task_execution: TaskExecution | None,
+    backend_id: str,
+) -> None:
+    """Return capacity-only attempts to a retryable state without task failure."""
+
+    mark_execution_pending(
+        task=task,
+        session_task_link=session_task_link,
+        task_execution=task_execution,
+        reset_started_at=True,
+        reset_steps=False,
+        workspace_status=getattr(task, "workspace_status", None) if task else None,
+        error_message=None,
+    )
+    if task_execution is not None:
+        task_execution.failure_category = "backend_capacity_limit"
+        task_execution.backend_id = backend_id
 
 
 from celery.signals import worker_ready
@@ -768,7 +792,6 @@ def execute_orchestration_task(
                         failure_category="backend_capacity_limit",
                         backend_id=_bd.name,
                     )
-                db.commit()
                 capacity_retry_count, capacity_retry_exhausted = (
                     backend_capacity_retry_state(
                         getattr(self, "request", None),
@@ -824,6 +847,13 @@ def execute_orchestration_task(
                         "reason": "backend_capacity_limit",
                         "retry_budget_exhausted": True,
                     }
+                prepare_backend_capacity_retry(
+                    task=task,
+                    session_task_link=session_task_link,
+                    task_execution=task_execution,
+                    backend_id=_bd.name,
+                )
+                db.commit()
                 raise self.retry(
                     countdown=15, max_retries=BACKEND_CAPACITY_RETRY_MAX_RETRIES
                 )
