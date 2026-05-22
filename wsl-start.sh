@@ -23,6 +23,10 @@ fail()  { echo -e "    ${RED}[FAIL]${NC} $1"; exit 1; }
 warn()  { echo -e "    ${YELLOW}[WARN]${NC} $1"; }
 info()  { echo -e "    ${GRAY}$1${NC}"; }
 
+if [ "$(id -u)" -eq 0 ] && [ "${ALLOW_ROOT_WSL_START:-}" != "true" ]; then
+    fail "Do not run wsl-start.sh as root. It can resolve HOME to /root and create /root/projects. Run as your WSL user, or set ALLOW_ROOT_WSL_START=true intentionally."
+fi
+
 # ─── Configuration ────────────────────────────────────────────────────────────
 # All values below can be overridden by environment variables before running:
 #   LLAMA_EXE_WIN=/mnt/d/AI/llama.cpp/llama-server.exe ./wsl-start.sh
@@ -121,6 +125,22 @@ env_value() {
     local env_file="$ORCHESTRATOR_DIR/.env"
     [ -f "$env_file" ] || return 0
     grep -E "^${key}=" "$env_file" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\r' || true
+}
+
+validate_projects_dir() {
+    local projects_dir="$1"
+    if [ -z "$projects_dir" ]; then
+        fail "WINDOWS_PROJECTS_DIR is unset in $ORCHESTRATOR_DIR/.env. Set it to a WSL2 ext4 path, for example /home/yourname/projects."
+    fi
+    if [[ "$projects_dir" == /mnt/* || "$projects_dir" == *:* || "$projects_dir" == *\\* ]]; then
+        fail "WINDOWS_PROJECTS_DIR must be a WSL2 ext4 path, not '$projects_dir'"
+    fi
+    if [[ "$projects_dir" != /* ]]; then
+        fail "WINDOWS_PROJECTS_DIR must be absolute: $projects_dir"
+    fi
+    if [[ "$projects_dir" == /root || "$projects_dir" == /root/* ]]; then
+        fail "WINDOWS_PROJECTS_DIR must not point under /root. Use your WSL user path, for example /home/yourname/projects."
+    fi
 }
 
 check_failures=0
@@ -388,7 +408,7 @@ step "Starting Docker backend"
 [ -f "$ORCHESTRATOR_DIR/.env" ] || fail ".env not found at $ORCHESTRATOR_DIR/.env"
 
 PROJECTS_DIR=$(env_file_value WINDOWS_PROJECTS_DIR)
-PROJECTS_DIR=${PROJECTS_DIR:-"$HOME/projects"}
+validate_projects_dir "$PROJECTS_DIR"
 mkdir -p "$PROJECTS_DIR"
 
 cd "$ORCHESTRATOR_DIR"
