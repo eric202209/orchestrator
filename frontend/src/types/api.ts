@@ -767,3 +767,65 @@ export interface KnowledgeUsageResponse {
   session_id: number;
   phases: Record<string, KnowledgeUsageEntry[]>;
 }
+
+export interface RecoveryTaskInfo {
+  task_id: number;
+  title: string;
+  status: 'completed' | 'failed' | 'not_started' | 'running';
+  files_changed: string[];
+  repair_attempts: number;
+  committed: boolean;
+}
+
+export interface RecoveryAction {
+  label: string;
+  action: string;
+  task_id: number | null;
+  variant: 'primary' | 'secondary' | 'danger';
+}
+
+export interface SessionRecoveryContext {
+  session_id: number;
+  session_name: string;
+  session_status: string;
+  stop_reasons: string[];
+  stop_category: string;
+  last_checkpoint_id: string | null;
+  last_checkpoint_age_minutes: number | null;
+  branch: string | null;
+  tasks: RecoveryTaskInfo[];
+  tasks_total: number;
+  tasks_completed: number;
+  tasks_failed: number;
+  tasks_not_started: number;
+  preserved: {
+    completed_tasks_checkpointed: boolean;
+    conversation_history_resumable: boolean;
+    failed_task_rolled_back: boolean;
+    remaining_plan_intact: boolean;
+  };
+  recommended_actions: RecoveryAction[];
+  source_note: string;
+}
+
+export interface SessionDigest {
+  session_id: number;
+  session_name: string;
+  session_status: string;
+  generated_at: string;
+  summary: string;
+  tasks_total: number;
+  tasks_completed: number;
+  tasks_failed: number;
+  changed_files: string[];
+  why_stopped: string;
+  preserved: {
+    completed_tasks_checkpointed: boolean;
+    conversation_history_resumable: boolean;
+    failed_task_rolled_back: boolean;
+    remaining_plan_intact: boolean;
+  };
+  last_checkpoint_id: string | null;
+  last_checkpoint_age_minutes: number | null;
+  next_actions: string[];
+}

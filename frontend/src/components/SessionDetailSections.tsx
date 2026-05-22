@@ -8,10 +8,13 @@ import type {
   InterventionRequest,
   KnowledgeUsageEntry,
   Project,
+  RecoveryAction,
   Session,
   SessionDecisionEvent,
+  SessionDigest,
   SessionDispatchWatchdogResponse,
   SessionDivergenceCompareResponse,
+  SessionRecoveryContext,
   SessionReplayResponse,
   SessionStateDiffResponse,
   Task,
@@ -23,11 +26,17 @@ import { deriveRunStateFromTask, getRunStateDisplay } from '@/lib/runState';
 import {
   Activity,
   AlertTriangle,
+  CheckCircle2,
   ChevronDown,
+  Circle,
   Clock,
   ExternalLink,
+  FileText,
+  GitBranch,
   MessageCircle,
+  Copy,
   RefreshCw,
+  RotateCcw,
   Settings,
   Terminal as TerminalIcon,
   XCircle,
@@ -2536,6 +2545,413 @@ export function FailureSummaryPanel({
             >
               Open Project Architect
             </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── SessionRecoveryCard ───────────────────────────────────────────────────────
+
+interface SessionRecoveryCardProps {
+  context: SessionRecoveryContext | null;
+  loading: boolean;
+  onAction: (action: RecoveryAction) => void;
+}
+
+function TaskStatusIcon({ status }: { status: string }) {
+  if (status === 'completed') return <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />;
+  if (status === 'failed') return <XCircle className="h-4 w-4 shrink-0 text-red-400" />;
+  if (status === 'running') return <RefreshCw className="h-4 w-4 shrink-0 animate-spin text-cyan-400" />;
+  return <Circle className="h-4 w-4 shrink-0 text-slate-500" />;
+}
+
+function PreservedItem({
+  label,
+  sub,
+  ok,
+}: {
+  label: string;
+  sub: string;
+  ok: boolean;
+}) {
+  return (
+    <div className="flex items-start gap-2">
+      <span
+        className={cn(
+          'mt-0.5 h-2 w-2 shrink-0 rounded-full',
+          ok ? 'bg-emerald-400' : 'bg-red-400',
+        )}
+      />
+      <div>
+        <p className={cn('text-sm font-medium', ok ? 'text-slate-100' : 'text-slate-400')}>
+          {label}
+        </p>
+        <p className="text-xs text-slate-500">{sub}</p>
+      </div>
+    </div>
+  );
+}
+
+export function SessionRecoveryCard({
+  context,
+  loading,
+  onAction,
+}: SessionRecoveryCardProps) {
+  if (loading) {
+    return (
+      <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-5">
+        <p className="flex items-center gap-2 text-sm text-slate-400">
+          <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-cyan-400 border-t-transparent" />
+          Assembling recovery context…
+        </p>
+      </div>
+    );
+  }
+
+  if (!context) return null;
+
+  const {
+    session_name,
+    session_status,
+    stop_reasons,
+    last_checkpoint_id,
+    last_checkpoint_age_minutes,
+    branch,
+    tasks,
+    preserved,
+    recommended_actions,
+    source_note,
+  } = context;
+
+  const statusColor =
+    session_status === 'paused'
+      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+      : session_status === 'awaiting_input'
+        ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+        : 'bg-red-500/20 text-red-300 border border-red-500/30';
+
+  const actionBtnClass = (variant: string) =>
+    cn(
+      'flex items-center gap-1.5 rounded-md border px-3 py-2 text-sm font-medium transition-colors',
+      variant === 'primary'
+        ? 'border-slate-500 bg-[color:var(--oc-surface-deep)] text-slate-100 hover:border-slate-400 hover:text-white'
+        : variant === 'danger'
+          ? 'border-red-700/50 bg-red-950/30 text-red-300 hover:border-red-500 hover:text-red-200'
+          : 'border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] text-slate-300 hover:border-slate-500 hover:text-slate-100',
+    );
+
+  const actionIcon = (action: string) => {
+    switch (action) {
+      case 'retry_task': return <RotateCcw className="h-3.5 w-3.5" />;
+      case 'resume': return <RefreshCw className="h-3.5 w-3.5" />;
+      case 'diagnostics': return <FileText className="h-3.5 w-3.5" />;
+      case 'rollback': return <RotateCcw className="h-3.5 w-3.5" />;
+      default: return null;
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] shadow-sm shadow-black/20">
+      {/* Header */}
+      <div className="flex flex-wrap items-center gap-3 border-b border-[color:var(--oc-border-soft)] px-5 py-3">
+        <span className="font-semibold text-slate-100">{session_name}</span>
+        <span className={cn('rounded px-2 py-0.5 text-xs font-medium', statusColor)}>
+          {session_status === 'awaiting_input' ? 'Awaiting Input' : session_status.charAt(0).toUpperCase() + session_status.slice(1)}
+        </span>
+        {branch && (
+          <span className="flex items-center gap-1 rounded bg-[color:var(--oc-surface-deep)] px-2 py-0.5 text-xs text-slate-400">
+            <GitBranch className="h-3 w-3" />
+            {branch}
+          </span>
+        )}
+        {last_checkpoint_id && (
+          <span className="rounded bg-[color:var(--oc-surface-deep)] px-2 py-0.5 text-xs text-slate-400">
+            {last_checkpoint_id}
+            {last_checkpoint_age_minutes != null
+              ? ` · ${last_checkpoint_age_minutes < 60
+                  ? `${last_checkpoint_age_minutes} min ago`
+                  : `${Math.round(last_checkpoint_age_minutes / 60)}h ago`}`
+              : ''}
+          </span>
+        )}
+      </div>
+
+      <div className="space-y-5 p-5">
+        {/* Stop reasons */}
+        <div>
+          <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-slate-400">
+            Session paused because
+          </p>
+          <ul className="space-y-1">
+            {stop_reasons.map((reason, i) => (
+              <li key={i} className="flex items-start gap-2 text-sm">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+                <span className="text-slate-200">{reason}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        {/* Task progress */}
+        {tasks.length > 0 && (
+          <div>
+            <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-slate-400">
+              Task progress
+            </p>
+            <div className="divide-y divide-[color:var(--oc-border-soft)] rounded-md border border-[color:var(--oc-border-soft)]">
+              {tasks.map((task) => (
+                <div
+                  key={task.task_id}
+                  className="flex items-center justify-between gap-3 px-3 py-2"
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    <TaskStatusIcon status={task.status} />
+                    <span className="truncate text-sm text-slate-200">{task.title}</span>
+                  </div>
+                  <div className="shrink-0 text-right text-xs text-slate-400">
+                    {task.status === 'completed' && task.files_changed.length > 0 && (
+                      <span className="text-slate-400">
+                        {task.files_changed.length} file{task.files_changed.length !== 1 ? 's' : ''} · committed
+                      </span>
+                    )}
+                    {task.status === 'failed' && (
+                      <span className="text-red-400">
+                        rolled back{task.repair_attempts > 0 ? ` · ${task.repair_attempts} repair attempt${task.repair_attempts !== 1 ? 's' : ''}` : ''}
+                      </span>
+                    )}
+                    {task.status === 'not_started' && (
+                      <span className="text-slate-500">not started</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* What was preserved */}
+        <div>
+          <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-slate-400">
+            What was preserved
+          </p>
+          <div className="grid grid-cols-2 gap-x-6 gap-y-3">
+            <PreservedItem
+              label="Completed task workspace"
+              sub={preserved.completed_tasks_checkpointed ? 'committed to checkpoint' : 'no completed tasks'}
+              ok={preserved.completed_tasks_checkpointed}
+            />
+            <PreservedItem
+              label="Conversation context"
+              sub={preserved.conversation_history_resumable ? 'resumable' : 'not available'}
+              ok={preserved.conversation_history_resumable}
+            />
+            <PreservedItem
+              label="Failed task changes"
+              sub={preserved.failed_task_rolled_back ? 'not committed, rolled back' : 'no failed tasks'}
+              ok={!preserved.failed_task_rolled_back}
+            />
+            <PreservedItem
+              label="Remaining plan"
+              sub={preserved.remaining_plan_intact ? 'intact, not started' : 'all tasks attempted'}
+              ok={preserved.remaining_plan_intact}
+            />
+          </div>
+        </div>
+
+        {/* Recommended actions */}
+        {recommended_actions.length > 0 && (
+          <div>
+            <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-slate-400">
+              Recommended actions
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {recommended_actions.map((action, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  onClick={() => onAction(action)}
+                  className={actionBtnClass(action.variant)}
+                >
+                  {actionIcon(action.action)}
+                  {action.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Footer */}
+      <div className="rounded-b-lg border-t border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-5 py-2">
+        <p className="flex items-center gap-1.5 text-xs text-slate-500">
+          <Clock className="h-3 w-3 shrink-0" />
+          {source_note}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ── SessionDigestPanel ────────────────────────────────────────────────────────
+
+interface SessionDigestPanelProps {
+  digest: SessionDigest | null;
+  loading: boolean;
+  onGenerate: () => void;
+}
+
+export function SessionDigestPanel({
+  digest,
+  loading,
+  onGenerate,
+}: SessionDigestPanelProps) {
+  const [expanded, setExpanded] = useState(false);
+
+  const copyDigest = () => {
+    if (!digest) return;
+    const text = [
+      'SUMMARY',
+      digest.summary,
+      '',
+      'WHAT CHANGED',
+      digest.changed_files.length > 0 ? digest.changed_files.join('\n') : 'No changed files recorded.',
+      '',
+      'WHY IT STOPPED',
+      digest.why_stopped,
+      '',
+      'WHAT WAS PRESERVED',
+      `Completed task workspace: ${digest.preserved.completed_tasks_checkpointed ? 'preserved' : 'not available'}`,
+      `Conversation context: ${digest.preserved.conversation_history_resumable ? 'resumable' : 'not available'}`,
+      `Failed task changes: ${digest.preserved.failed_task_rolled_back ? 'rolled back' : 'none recorded'}`,
+      `Remaining plan: ${digest.preserved.remaining_plan_intact ? 'intact' : 'fully attempted'}`,
+      '',
+      'WHAT TO DO NEXT',
+      digest.next_actions.join('\n'),
+    ].join('\n');
+    void navigator.clipboard?.writeText(text);
+  };
+
+  return (
+    <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] shadow-sm shadow-black/20">
+      <button
+        type="button"
+        onClick={() => {
+          if (!digest && !loading) onGenerate();
+          setExpanded((current) => !current);
+        }}
+        className="flex w-full items-center justify-between gap-3 px-5 py-3 text-left"
+      >
+        <span className="flex items-center gap-2 text-sm font-semibold text-slate-100">
+          <FileText className="h-4 w-4 text-cyan-300" />
+          Session digest
+        </span>
+        <span className="text-xs text-slate-500">
+          {loading ? 'Generating...' : expanded ? 'Collapse' : 'Expand'}
+        </span>
+      </button>
+
+      {expanded && (
+        <div className="space-y-4 border-t border-[color:var(--oc-border-soft)] px-5 py-4">
+          {loading && (
+            <p className="flex items-center gap-2 text-sm text-slate-400">
+              <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-cyan-400 border-t-transparent" />
+              Generating digest...
+            </p>
+          )}
+
+          {!loading && !digest && (
+            <button
+              type="button"
+              onClick={onGenerate}
+              className="rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-sm text-slate-200 hover:border-slate-500"
+            >
+              Generate digest
+            </button>
+          )}
+
+          {digest && (
+            <>
+              <div className="grid gap-4 md:grid-cols-2">
+                <div>
+                  <p className="mb-1 text-xs font-semibold uppercase tracking-widest text-slate-400">
+                    Summary
+                  </p>
+                  <p className="text-sm text-slate-200">{digest.summary}</p>
+                </div>
+                <div>
+                  <p className="mb-1 text-xs font-semibold uppercase tracking-widest text-slate-400">
+                    Why it stopped
+                  </p>
+                  <p className="text-sm text-slate-200">{digest.why_stopped}</p>
+                </div>
+              </div>
+
+              <div>
+                <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-slate-400">
+                  What changed
+                </p>
+                {digest.changed_files.length > 0 ? (
+                  <div className="grid gap-1 text-xs text-slate-300 md:grid-cols-2">
+                    {digest.changed_files.slice(0, 12).map((file) => (
+                      <span key={file} className="truncate rounded bg-[color:var(--oc-surface-deep)] px-2 py-1">
+                        {file}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-slate-500">No changed files recorded.</p>
+                )}
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-2">
+                <PreservedItem
+                  label="Completed task workspace"
+                  sub={digest.preserved.completed_tasks_checkpointed ? 'checkpointed' : 'not available'}
+                  ok={digest.preserved.completed_tasks_checkpointed}
+                />
+                <PreservedItem
+                  label="Conversation context"
+                  sub={digest.preserved.conversation_history_resumable ? 'resumable' : 'not available'}
+                  ok={digest.preserved.conversation_history_resumable}
+                />
+                <PreservedItem
+                  label="Failed task changes"
+                  sub={digest.preserved.failed_task_rolled_back ? 'rolled back' : 'none recorded'}
+                  ok={!digest.preserved.failed_task_rolled_back}
+                />
+                <PreservedItem
+                  label="Remaining plan"
+                  sub={digest.preserved.remaining_plan_intact ? 'intact' : 'fully attempted'}
+                  ok={digest.preserved.remaining_plan_intact}
+                />
+              </div>
+
+              {digest.next_actions.length > 0 && (
+                <div>
+                  <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-slate-400">
+                    What to do next
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {digest.next_actions.map((action) => (
+                      <span key={action} className="rounded bg-[color:var(--oc-surface-deep)] px-2 py-1 text-xs text-slate-300">
+                        {action}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={copyDigest}
+                className="inline-flex items-center gap-1.5 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-3 py-2 text-xs text-slate-300 hover:border-slate-500 hover:text-slate-100"
+              >
+                <Copy className="h-3.5 w-3.5" />
+                Copy digest
+              </button>
+            </>
           )}
         </div>
       )}

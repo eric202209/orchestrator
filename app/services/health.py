@@ -8,6 +8,10 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.database import engine
+from app.services.agents.agent_backends import (
+    UnsupportedAgentBackendError,
+    get_backend_descriptor,
+)
 
 
 def api_root_payload() -> dict:
@@ -25,11 +29,12 @@ def health_payload() -> tuple[dict, int]:
         "api": "ok",
         "database": "unknown",
         "redis": "unknown",
+        "backend": "unknown",
     }
     details = {
         "version": settings.VERSION,
-        "openclaw_gateway_url": settings.OPENCLAW_GATEWAY_URL,
         "runtime_profile": settings.RUNTIME_PROFILE,
+        "agent_backend": settings.AGENT_BACKEND,
     }
     overall_status = "healthy"
 
@@ -60,6 +65,22 @@ def health_payload() -> tuple[dict, int]:
         checks["redis"] = "error"
         details["redis_error"] = str(exc)
         overall_status = "degraded"
+
+    try:
+        backend = get_backend_descriptor(settings.AGENT_BACKEND)
+        checks["backend"] = "ok" if backend.health.ready else "degraded"
+        details["backend"] = {
+            "name": backend.name,
+            "display_name": backend.display_name,
+            "status": backend.health.status,
+            "available": backend.health.available,
+            "ready": backend.health.ready,
+            "errors": backend.health.errors,
+            "warnings": backend.health.warnings,
+        }
+    except UnsupportedAgentBackendError as exc:
+        checks["backend"] = "degraded"
+        details["backend_error"] = str(exc)
 
     payload = {
         "status": overall_status,

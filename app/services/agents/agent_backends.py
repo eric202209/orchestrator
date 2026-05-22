@@ -6,9 +6,10 @@ import shutil
 import shlex
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from app.config import settings
+from app.services.agents.interfaces import BackendHealthCheck
 
 
 @dataclass(frozen=True)
@@ -98,7 +99,7 @@ class UnsupportedAgentBackendError(ValueError):
 @dataclass(frozen=True)
 class _BackendRegistration:
     descriptor: BackendDescriptor
-    health_check: Callable[[BackendDescriptor], BackendHealth]
+    health_check: BackendHealthCheck
 
 
 def _resolve_openclaw_command_candidates() -> List[Path]:
@@ -249,6 +250,9 @@ def _base_descriptor(
     )
 
 
+# BACKEND_COUPLING: This registry is OpenClaw-centric. Future transports register here.
+# Each entry must supply a BackendHealthCheck callable and a BackendDescriptor.
+# See app/services/agents/interfaces.py for the BackendHealthCheck protocol.
 _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
     "local_openclaw": _BackendRegistration(
         descriptor=_base_descriptor(

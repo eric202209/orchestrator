@@ -66,6 +66,8 @@ from app.services import (
     get_session_dispatch_watchdog_payload as _get_session_dispatch_watchdog_payload,
     get_session_focus_mode_payload as _get_session_focus_mode_payload,
     get_session_mobile_interruptions_payload as _get_session_mobile_interruptions_payload,
+    get_session_recovery_context_payload as _get_session_recovery_context_payload,
+    get_session_digest_payload as _get_session_digest_payload,
     get_session_state_diff_payload as _get_session_state_diff_payload,
     get_session_trace_export_payload as _get_session_trace_export_payload,
     get_session_workspace_info_payload as _get_session_workspace_info_payload,
@@ -1554,6 +1556,36 @@ def get_session_mobile_interruptions(
     _require_session_access(db, session_id, current_user)
 
     return _get_session_mobile_interruptions_payload(db, session_id)
+
+
+@router.get("/sessions/{session_id}/recovery-context")
+def get_session_recovery_context(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Return structured recovery context for paused, stopped, or failed sessions.
+
+    Assembles stop reason, task progress, preserved state, and recommended
+    actions from existing data — no raw log parsing required by the operator.
+    """
+    _require_session_access(db, session_id, current_user)
+    return _get_session_recovery_context_payload(db, session_id)
+
+
+@router.get("/sessions/{session_id}/digest")
+def get_session_digest(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Return a compact human-readable digest of session execution.
+
+    Answers: what happened, why it stopped, what was preserved, what changed,
+    and what to do next. Suitable for returning operators who weren't watching live.
+    """
+    _require_session_access(db, session_id, current_user)
+    return _get_session_digest_payload(db, session_id)
 
 
 @router.get("/sessions/{session_id}/dispatch-watchdog")

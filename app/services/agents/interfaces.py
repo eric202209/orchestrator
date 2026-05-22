@@ -88,6 +88,18 @@ class AgentInterfaceDescriptor:
         return payload
 
 
+class BackendHealthCheck(Protocol):
+    """Contract for a backend health probe.
+
+    Each backend registered in the backend registry must supply a callable
+    matching this protocol so health aggregation works transport-agnostically.
+    """
+
+    def __call__(self, descriptor: Any) -> Any:
+        """Run the health check and return a BackendHealth result."""
+        ...
+
+
 class AgentRuntime(Protocol):
     """Minimal runtime contract shared by orchestration entrypoints."""
 
