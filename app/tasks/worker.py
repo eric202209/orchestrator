@@ -113,6 +113,20 @@ from app.services.observability import (
 logger = logging.getLogger(__name__)
 
 MAX_SUBFOLDER_COLLISION_ATTEMPTS = 999
+BACKEND_CAPACITY_RETRY_MAX_RETRIES = 5
+
+
+def backend_capacity_retry_state(
+    request, max_retries: int | None = None
+) -> tuple[int, bool]:
+    """Return current capacity retry count and whether capacity retries are exhausted."""
+
+    retry_count = int(getattr(request, "retries", 0) or 0)
+    retry_limit = (
+        BACKEND_CAPACITY_RETRY_MAX_RETRIES if max_retries is None else int(max_retries)
+    )
+    return retry_count, retry_count >= retry_limit
+
 
 from celery.signals import worker_ready
 
@@ -755,16 +769,64 @@ def execute_orchestration_task(
                         backend_id=_bd.name,
                     )
                 db.commit()
+                capacity_retry_count, capacity_retry_exhausted = (
+                    backend_capacity_retry_state(
+                        getattr(self, "request", None),
+                        BACKEND_CAPACITY_RETRY_MAX_RETRIES,
+                    )
+                )
                 emit_live(
-                    "WARN",
-                    f"[ORCHESTRATION] Backend '{_bd.name}' at capacity; retrying dispatch",
+                    "ERROR" if capacity_retry_exhausted else "WARN",
+                    (
+                        f"[ORCHESTRATION] Backend '{_bd.name}' at capacity; "
+                        + (
+                            "retry budget exhausted"
+                            if capacity_retry_exhausted
+                            else "retrying dispatch"
+                        )
+                    ),
                     metadata={
                         "phase": "slot_acquisition",
+                        "reason": "backend_capacity_limit",
                         "backend_id": _bd.name,
                         "failure_category": "backend_capacity_limit",
+                        "retry_count": capacity_retry_count,
+                        "max_retries": BACKEND_CAPACITY_RETRY_MAX_RETRIES,
+                        "retry_budget_exhausted": capacity_retry_exhausted,
                     },
                 )
-                raise self.retry(countdown=15, max_retries=5)
+                if capacity_retry_exhausted:
+                    mark_execution_failed(
+                        task=task,
+                        session_task_link=session_task_link,
+                        task_execution=task_execution,
+                        error_message=(
+                            f"Backend '{_bd.name}' remained at capacity after "
+                            f"{BACKEND_CAPACITY_RETRY_MAX_RETRIES} retries"
+                        ),
+                        completed_at=datetime.now(timezone.utc),
+                        workspace_status=(
+                            "in_progress" if task.task_subfolder else "not_created"
+                        ),
+                    )
+                    if session is not None:
+                        mark_session_paused(
+                            session,
+                            alert_level="error",
+                            alert_message=(
+                                f"Backend '{_bd.name}' is at capacity and retry "
+                                "budget was exhausted"
+                            )[:2000],
+                        )
+                    db.commit()
+                    return {
+                        "status": "failed",
+                        "reason": "backend_capacity_limit",
+                        "retry_budget_exhausted": True,
+                    }
+                raise self.retry(
+                    countdown=15, max_retries=BACKEND_CAPACITY_RETRY_MAX_RETRIES
+                )
 
         mark_execution_running(
             task=task,
@@ -1522,6 +1584,21 @@ def execute_orchestration_task(
                     failure_category=_fail_cat,
                     backend_id=_resolved_execution_backend,
                 )
+            if _fail_cat == "backend_timeout":
+                try:
+                    emit_live(
+                        "ERROR",
+                        "[ORCHESTRATION] Backend timeout reached before backend completion; timeout remains authoritative",
+                        metadata={
+                            "phase": "execution_timeout",
+                            "reason": "backend_timeout",
+                            "backend_id": _resolved_execution_backend,
+                            "failure_category": "backend_timeout",
+                            "terminal_reason": "timeout_before_backend_completion",
+                        },
+                    )
+                except Exception:
+                    pass
         except Exception:
             pass
         update_langfuse_observation(

@@ -129,6 +129,24 @@ def _normalize_runtime_execution_result(
     )
 
 
+def _persist_runtime_backend_result(
+    db: Any,
+    task_execution_id: Optional[int],
+    result: RuntimeBackendResult | None,
+) -> None:
+    """Persist normalized backend metadata for the active execution attempt."""
+
+    if task_execution_id is None or result is None:
+        return
+    task_execution = _get_task_execution(db, task_execution_id)
+    if task_execution is None:
+        return
+    task_execution.backend_id = result.backend_id
+    if not result.success and result.failure_category:
+        task_execution.failure_category = result.failure_category
+    db.flush()
+
+
 def _verification_can_replace_stale_commands(step: dict[str, Any]) -> bool:
     commands = step.get("commands")
     if not isinstance(commands, list) or not commands:
@@ -966,6 +984,11 @@ def execute_step_loop(
                                 )
                             )
                             if runtime_backend_result is not None:
+                                _persist_runtime_backend_result(
+                                    db,
+                                    ctx.task_execution_id,
+                                    runtime_backend_result,
+                                )
                                 step_result["_runtime_backend_result"] = (
                                     runtime_backend_result.to_dict()
                                 )
@@ -1003,6 +1026,11 @@ def execute_step_loop(
                                     )
                                 )
                                 if runtime_backend_result is not None:
+                                    _persist_runtime_backend_result(
+                                        db,
+                                        ctx.task_execution_id,
+                                        runtime_backend_result,
+                                    )
                                     step_result["_runtime_backend_result"] = (
                                         runtime_backend_result.to_dict()
                                     )

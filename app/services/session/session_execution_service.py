@@ -31,6 +31,9 @@ from app.services.orchestration.state.session_state import (
     mark_session_stopped,
 )
 from app.services.session.session_runtime_service import ensure_task_workspace
+from app.services.session.execution_policy import (
+    timeout_terminal_state_blocks_late_success,
+)
 from app.services.task_execution_service import create_task_execution
 from app.services.tool_tracking_service import ToolTrackingService
 
@@ -403,6 +406,9 @@ def mark_execution_done(
     completed_at: datetime | None = None,
 ) -> datetime:
     """Mark an attempt complete through the session execution service boundary."""
+
+    if timeout_terminal_state_blocks_late_success(task_execution):
+        return task_execution.completed_at or completed_at or datetime.now(timezone.utc)
 
     return mark_task_attempt_done(
         task=task,

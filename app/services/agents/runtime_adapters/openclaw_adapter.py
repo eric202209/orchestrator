@@ -11,6 +11,8 @@ def _classify_openclaw_failure(exit_reason: str) -> str:
     reason = (exit_reason or "").lower()
     if any(k in reason for k in ("capacity", "lock", "slot", "busy")):
         return "backend_capacity_limit"
+    if any(k in reason for k in ("time limit", "timeout", "timed out")):
+        return "backend_timeout"
     if any(
         k in reason
         for k in ("transport", "connect", "unavailable", "config", "cli_not_found")
@@ -39,8 +41,14 @@ def normalize_openclaw_execution_result(
         duration_seconds=duration_seconds,
         default_failure_category=None,
     )
-    if normalized.success or normalized.failure_category:
+    if normalized.success:
         return normalized
+    failure_category = normalized.failure_category or _classify_openclaw_failure(
+        normalized.exit_reason
+    )
+    terminal_reason = normalized.terminal_reason
+    if failure_category == "backend_timeout" and not terminal_reason:
+        terminal_reason = "timeout_before_backend_completion"
     return normalized.__class__(
         backend_id=normalized.backend_id,
         role=normalized.role,
@@ -48,6 +56,6 @@ def normalize_openclaw_execution_result(
         exit_reason=normalized.exit_reason,
         output=normalized.output,
         duration_seconds=normalized.duration_seconds,
-        failure_category=_classify_openclaw_failure(normalized.exit_reason),
-        terminal_reason=normalized.terminal_reason,
+        failure_category=failure_category,
+        terminal_reason=terminal_reason,
     )

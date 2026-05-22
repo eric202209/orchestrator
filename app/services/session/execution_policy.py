@@ -20,6 +20,8 @@ def classify_failure(exit_reason: str, backend_id: str, context: dict) -> str:
     reason = (exit_reason or "").lower()
     if any(k in reason for k in ("capacity", "lock", "slot", "busy")):
         return "backend_capacity_limit"
+    if any(k in reason for k in ("time limit", "timeout", "timed out")):
+        return "backend_timeout"
     if any(
         k in reason
         for k in ("transport", "connect", "unavailable", "config", "cli_not_found")
@@ -32,6 +34,17 @@ def classify_failure(exit_reason: str, backend_id: str, context: dict) -> str:
     if any(k in reason for k in ("governance", "review", "hold", "permission")):
         return "governance_hold"
     return "execution_failure"
+
+
+def timeout_terminal_state_blocks_late_success(execution: TaskExecution | None) -> bool:
+    """Return True when timeout already owns the terminal state for this execution."""
+
+    if execution is None:
+        return False
+    return execution.failure_category == "backend_timeout" and execution.status in {
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
+    }
 
 
 def should_retry(db: Session, task_execution_id: int, failure_category: str) -> bool:
