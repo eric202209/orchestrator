@@ -9,11 +9,14 @@ import type {
   KnowledgeUsageEntry,
   OrchestrationEvent,
   Project,
+  RecoveryAction,
   Session,
   SessionDecisionEvent,
+  SessionDigest,
   SessionDispatchWatchdogResponse,
   SessionDivergenceCompareResponse,
   SessionReplayResponse,
+  SessionRecoveryContext,
   SessionStateDiffResponse,
   Task,
 } from '@/types/api';
@@ -25,8 +28,10 @@ import {
   KnowledgeUsagePanel,
   SessionConnectionNotice,
   SessionDiagnosticsPanel,
+  SessionDigestPanel,
   SessionHeader,
   SessionLogsPanel,
+  SessionRecoveryCard,
   SessionSettingsPanel,
   SessionStats,
   SessionTabs,
@@ -174,6 +179,10 @@ export default function SessionDetail() {
   const [stateDiff, setStateDiff] = useState<SessionStateDiffResponse | null>(null);
   const [interventions, setInterventions] = useState<InterventionRequest[]>([]);
   const [failureSummary, setFailureSummary] = useState<ExecutionFailureSummary | null>(null);
+  const [recoveryContext, setRecoveryContext] = useState<SessionRecoveryContext | null>(null);
+  const [recoveryContextLoading, setRecoveryContextLoading] = useState(false);
+  const [sessionDigest, setSessionDigest] = useState<SessionDigest | null>(null);
+  const [sessionDigestLoading, setSessionDigestLoading] = useState(false);
   const [knowledgeUsage, setKnowledgeUsage] = useState<Record<string, KnowledgeUsageEntry[]>>({});
   const [failureSummaryLoading, setFailureSummaryLoading] = useState(false);
   const [showAgentInterventionModal, setShowAgentInterventionModal] = useState(false);
@@ -1243,6 +1252,30 @@ export default function SessionDetail() {
     }
   }, []);
 
+  const loadRecoveryContext = useCallback(async (id: number) => {
+    setRecoveryContextLoading(true);
+    try {
+      const res = await sessionsAPI.getRecoveryContext(id);
+      setRecoveryContext(res.data);
+    } catch {
+      setRecoveryContext(null);
+    } finally {
+      setRecoveryContextLoading(false);
+    }
+  }, []);
+
+  const loadSessionDigest = useCallback(async (id: number) => {
+    setSessionDigestLoading(true);
+    try {
+      const res = await sessionsAPI.getSessionDigest(id);
+      setSessionDigest(res.data);
+    } catch {
+      setSessionDigest(null);
+    } finally {
+      setSessionDigestLoading(false);
+    }
+  }, []);
+
   const handleFeedbackSubmit = useCallback(async (feedbackText: string) => {
     if (!sessionId) return;
     const res = await sessionsAPI.submitOperatorFeedback(Number(sessionId), feedbackText);
@@ -1255,6 +1288,42 @@ export default function SessionDetail() {
     setFailureSummary((prev) => prev ? { ...prev, replan_planning_session_id: res.data.planning_session_id } : prev);
     navigate(`/projects/${project.id}?tab=planner`);
   }, [sessionId, project, navigate]);
+
+  const handleRecoveryAction = useCallback((action: RecoveryAction) => {
+    if (!session || !sessionId) return;
+    const id = Number(sessionId);
+    switch (action.action) {
+      case 'resume':
+        void sessionsAPI.resume(id).then(() => sessionsAPI.getById(id)).then((r) => setSession(r.data));
+        break;
+      case 'retry_task':
+        if (action.task_id != null) {
+          void sessionsAPI.runTask(id, action.task_id)
+            .then(() => sessionsAPI.getById(id))
+            .then((r) => setSession(r.data))
+            .then(() => {
+              void loadRecoveryContext(id);
+              void loadSessionDigest(id);
+            });
+        }
+        break;
+      case 'diagnostics':
+        setActiveTab('timeline');
+        break;
+      case 'submit_guidance':
+        if (pendingAgentInterventions.length > 0) {
+          setShowAgentInterventionModal(true);
+        } else {
+          setActiveTab('timeline');
+        }
+        break;
+      case 'rollback':
+        setCheckpointActionIntent('start');
+        break;
+      default:
+        break;
+    }
+  }, [loadRecoveryContext, loadSessionDigest, pendingAgentInterventions.length, session, sessionId]);
 
   const handleSubmitReply = useCallback(async (interventionId: number, reply: string) => {
     if (!sessionId) return;
@@ -1588,6 +1657,11 @@ export default function SessionDetail() {
         if (sessionRes.data.status === 'stopped') {
           void loadFailureSummary(sessionRes.data.id);
         }
+        const recoveryStatuses = new Set(['paused', 'stopped', 'failed', 'cancelled', 'canceled', 'awaiting_input']);
+        if (recoveryStatuses.has(sessionRes.data.status)) {
+          void loadRecoveryContext(sessionRes.data.id);
+          void loadSessionDigest(sessionRes.data.id);
+        }
       } catch (err) {
         if (abortController.signal.aborted) return;
         console.error('Failed to load session:', err);
@@ -1684,7 +1758,7 @@ export default function SessionDetail() {
       }
       clearInterval(statusPollInterval);
     };
-  }, [applyLogView, loadCheckpointCount, loadDecisionTimeline, loadDispatchWatchdog, loadFailureSummary, loadInterventions, loadReplayInvestigation, loadStateDiff, loadTimelineEvents, logVerbosity, logViewMode, scheduleWebSocketConnect, sessionId, toTerminalLogEntry, visibleLogs]);
+  }, [applyLogView, loadCheckpointCount, loadDecisionTimeline, loadDispatchWatchdog, loadFailureSummary, loadInterventions, loadRecoveryContext, loadSessionDigest, loadReplayInvestigation, loadStateDiff, loadTimelineEvents, logVerbosity, logViewMode, scheduleWebSocketConnect, sessionId, toTerminalLogEntry, visibleLogs]);
 
   const handleStartSessionFresh = async () => {
     if (executionAction) return;
@@ -2415,6 +2489,22 @@ export default function SessionDetail() {
           onApprove={handleApproveIntervention}
           onDeny={handleDenyIntervention}
           onReply={handleSubmitReply}
+        />
+      )}
+
+      {(recoveryContext || recoveryContextLoading) && (
+        <SessionRecoveryCard
+          context={recoveryContext}
+          loading={recoveryContextLoading}
+          onAction={handleRecoveryAction}
+        />
+      )}
+
+      {(recoveryContext || sessionDigest || sessionDigestLoading) && (
+        <SessionDigestPanel
+          digest={sessionDigest}
+          loading={sessionDigestLoading}
+          onGenerate={() => loadSessionDigest(session.id)}
         />
       )}
 

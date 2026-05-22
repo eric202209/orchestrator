@@ -130,7 +130,9 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
     MOBILE_GATEWAY_API_KEY: str = ""
-    AGENT_BACKEND: str = "local_openclaw"
+    AGENT_BACKEND: str = (
+        "local_openclaw"  # BACKEND_COUPLING: default names OpenClaw directly; future backends register here
+    )
     PLANNING_BACKEND: Optional[str] = None
     EXECUTION_BACKEND: Optional[str] = None
     REPAIR_BACKEND: Optional[str] = None

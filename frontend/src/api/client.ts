@@ -31,6 +31,8 @@ import type {
   ExecutionFailureSummary,
   KnowledgeUsageResponse,
   ChangeSetReviewDecision,
+  SessionRecoveryContext,
+  SessionDigest,
 } from "../types/api";
 
 const API_BASE_URL =
@@ -699,6 +701,12 @@ export const sessionsAPI = {
         params: { sync_alert: syncAlert },
       },
     ),
+
+  getRecoveryContext: (sessionId: number) =>
+    apiClient.get<SessionRecoveryContext>(`/sessions/${sessionId}/recovery-context`),
+
+  getSessionDigest: (sessionId: number) =>
+    apiClient.get<SessionDigest>(`/sessions/${sessionId}/digest`),
 
   replayCheckpoint: (sessionId: number, checkpointName: string) =>
     apiClient.post<{

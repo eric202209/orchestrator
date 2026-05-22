@@ -99,6 +99,7 @@ async def start_agent_session_payload(
     )
 
 
+# BACKEND_COUPLING: function name encodes OpenClaw as the transport; kept for backward-compat
 async def start_openclaw_session_payload(
     db: Session, session_id: int, *, task_description: str
 ) -> Dict[str, Any]:

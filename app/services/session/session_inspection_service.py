@@ -17,6 +17,7 @@ from app.models import (
     Session as SessionModel,
     SessionTask,
     Task,
+    TaskExecution,
     TaskStatus,
 )
 from app.services.agents.agent_runtime import create_agent_runtime
@@ -1254,6 +1255,501 @@ def cleanup_session_checkpoints_payload(
         "deleted_count": result.get("deleted", 0),
         "kept_count": result.get("kept", 0),
         "error": result.get("error"),
+    }
+
+
+_RECOVERY_STATUS_LABELS: Dict[str, str] = {
+    "paused": "operator_paused",
+    "awaiting_input": "awaiting_input",
+    "stopped": "stopped",
+    "failed": "failed",
+    "cancelled": "cancelled",
+    "canceled": "cancelled",
+}
+
+_RECOVERY_ACTION_MAP: Dict[str, List[Dict[str, Any]]] = {
+    "repair_budget_exhausted": [
+        {
+            "label": "Retry last task",
+            "action": "retry_task",
+            "variant": "primary",
+            "task_id": None,
+        },
+        {
+            "label": "Resume from checkpoint",
+            "action": "resume",
+            "variant": "primary",
+            "task_id": None,
+        },
+        {
+            "label": "Open diagnostics",
+            "action": "diagnostics",
+            "variant": "secondary",
+            "task_id": None,
+        },
+        {
+            "label": "Rollback to baseline",
+            "action": "rollback",
+            "variant": "danger",
+            "task_id": None,
+        },
+    ],
+    "validation_rejected": [
+        {
+            "label": "Retry task",
+            "action": "retry_task",
+            "variant": "primary",
+            "task_id": None,
+        },
+        {
+            "label": "Open diagnostics",
+            "action": "diagnostics",
+            "variant": "secondary",
+            "task_id": None,
+        },
+        {
+            "label": "Rollback to baseline",
+            "action": "rollback",
+            "variant": "danger",
+            "task_id": None,
+        },
+    ],
+    "operator_paused": [
+        {
+            "label": "Resume from checkpoint",
+            "action": "resume",
+            "variant": "primary",
+            "task_id": None,
+        },
+        {
+            "label": "Open diagnostics",
+            "action": "diagnostics",
+            "variant": "secondary",
+            "task_id": None,
+        },
+        {
+            "label": "Rollback to baseline",
+            "action": "rollback",
+            "variant": "danger",
+            "task_id": None,
+        },
+    ],
+    "backend_capacity_error": [
+        {
+            "label": "Retry last task",
+            "action": "retry_task",
+            "variant": "primary",
+            "task_id": None,
+        },
+        {
+            "label": "Resume from checkpoint",
+            "action": "resume",
+            "variant": "primary",
+            "task_id": None,
+        },
+        {
+            "label": "Open diagnostics",
+            "action": "diagnostics",
+            "variant": "secondary",
+            "task_id": None,
+        },
+    ],
+    "checkpoint_conflict": [
+        {
+            "label": "Force resume",
+            "action": "resume",
+            "variant": "primary",
+            "task_id": None,
+        },
+        {
+            "label": "Inspect diff",
+            "action": "diagnostics",
+            "variant": "secondary",
+            "task_id": None,
+        },
+        {
+            "label": "Rollback to baseline",
+            "action": "rollback",
+            "variant": "danger",
+            "task_id": None,
+        },
+    ],
+    "awaiting_input": [
+        {
+            "label": "Submit guidance",
+            "action": "submit_guidance",
+            "variant": "primary",
+            "task_id": None,
+        },
+        {
+            "label": "Open diagnostics",
+            "action": "diagnostics",
+            "variant": "secondary",
+            "task_id": None,
+        },
+    ],
+    "default": [
+        {
+            "label": "Resume from checkpoint",
+            "action": "resume",
+            "variant": "primary",
+            "task_id": None,
+        },
+        {
+            "label": "Open diagnostics",
+            "action": "diagnostics",
+            "variant": "secondary",
+            "task_id": None,
+        },
+        {
+            "label": "Rollback to baseline",
+            "action": "rollback",
+            "variant": "danger",
+            "task_id": None,
+        },
+    ],
+}
+
+
+def _extract_stop_reasons(
+    db: Session,
+    session: SessionModel,
+) -> tuple[List[str], str]:
+    """Return (human_readable_reasons, stop_category)."""
+    reasons: List[str] = []
+    category = _RECOVERY_STATUS_LABELS.get(str(session.status or ""), "stopped")
+
+    if session.last_alert_message:
+        alert = str(session.last_alert_message)
+        reasons.append(alert)
+        lowered_alert = alert.lower()
+        if "repair budget" in lowered_alert or "repair_budget" in lowered_alert:
+            category = "repair_budget_exhausted"
+        elif "validation" in lowered_alert or "validator" in lowered_alert:
+            category = "validation_rejected"
+        elif any(
+            term in lowered_alert
+            for term in (
+                "capacity",
+                "slot",
+                "busy",
+                "gateway unreachable",
+                "overloaded",
+            )
+        ):
+            category = "backend_capacity_error"
+        elif any(
+            term in lowered_alert
+            for term in ("checkpoint conflict", "stale checkpoint", "branch state")
+        ):
+            category = "checkpoint_conflict"
+
+    # Scan recent error logs for structured metadata
+    recent_errors = (
+        db.query(LogEntry)
+        .filter(
+            LogEntry.session_id == session.id,
+            LogEntry.level.in_(["ERROR", "WARNING"]),
+            LogEntry.log_metadata.isnot(None),
+        )
+        .order_by(LogEntry.created_at.desc())
+        .limit(40)
+        .all()
+    )
+
+    for entry in recent_errors:
+        try:
+            meta = json.loads(entry.log_metadata or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(meta, dict):
+            continue
+
+        reason_val = meta.get("reason") or ""
+        reason_text = str(reason_val).lower()
+        if "repair_budget" in reason_text or "repair_budget_exhausted" in reason_text:
+            category = "repair_budget_exhausted"
+            attempts = meta.get("repair_attempts") or meta.get("attempt_count") or ""
+            reasons.append(f"Repair budget exhausted ({attempts or '?'} attempts used)")
+        elif any(
+            term in reason_text
+            for term in ("backend_capacity", "capacity", "slot", "busy")
+        ):
+            category = "backend_capacity_error"
+            reasons.append("Backend capacity unavailable or overloaded.")
+        elif any(
+            term in reason_text
+            for term in ("checkpoint_conflict", "stale_checkpoint", "stale checkpoint")
+        ):
+            category = "checkpoint_conflict"
+            reasons.append("Checkpoint conflict detected against current branch state.")
+
+        validation_reasons = (
+            meta.get("validation_reasons") or meta.get("contract_violations") or []
+        )
+        if isinstance(validation_reasons, list) and validation_reasons:
+            if category not in {
+                "repair_budget_exhausted",
+                "backend_capacity_error",
+                "checkpoint_conflict",
+            }:
+                category = "validation_rejected"
+            for vr in validation_reasons[:3]:
+                reasons.append(f"Validator rejected: {str(vr)[:120]}")
+
+        if reasons:
+            break
+
+    if category not in {"backend_capacity_error", "checkpoint_conflict"}:
+        recent_failure = (
+            db.query(TaskExecution)
+            .filter(
+                TaskExecution.session_id == session.id,
+                TaskExecution.failure_category.isnot(None),
+            )
+            .order_by(
+                TaskExecution.completed_at.desc().nullslast(),
+                TaskExecution.started_at.desc().nullslast(),
+                TaskExecution.id.desc(),
+            )
+            .first()
+        )
+        failure_category = str(getattr(recent_failure, "failure_category", "") or "")
+        if failure_category == "backend_capacity_limit":
+            category = "backend_capacity_error"
+            if not reasons:
+                reasons.append("Backend capacity unavailable or overloaded.")
+
+    if not reasons and session.status == "awaiting_input":
+        reasons = ["Waiting for operator input before continuing."]
+        category = "awaiting_input"
+    elif not reasons and session.status == "paused":
+        reasons = ["Session paused by operator."]
+        category = "operator_paused"
+    elif not reasons:
+        reasons = [f"Session {session.status}."]
+
+    return reasons, category
+
+
+def get_session_recovery_context_payload(
+    db: Session,
+    session_id: int,
+) -> Dict[str, Any]:
+    from app.models import ConversationHistory, Project, TaskExecutionChangeSet
+
+    session = get_inspectable_session_or_404(db, session_id)
+
+    # --- task progress ---
+    links = (
+        db.query(SessionTask)
+        .filter(SessionTask.session_id == session_id)
+        .order_by(SessionTask.id.asc())
+        .all()
+    )
+    seen_task_ids: set = set()
+    task_progress: List[Dict[str, Any]] = []
+    failed_task_id: Optional[int] = None
+
+    for link in links:
+        if link.task_id in seen_task_ids:
+            continue
+        seen_task_ids.add(link.task_id)
+        task = db.query(Task).filter(Task.id == link.task_id).first()
+        if not task:
+            continue
+
+        if hasattr(task.status, "value"):
+            task_status_str = task.status.value
+        else:
+            task_status_str = str(task.status or "").lower()
+
+        # repair attempts = count of FAILED executions for this task in this session
+        repair_attempts = (
+            db.query(TaskExecution)
+            .filter(
+                TaskExecution.session_id == session_id,
+                TaskExecution.task_id == task.id,
+                TaskExecution.status == TaskStatus.FAILED,
+            )
+            .count()
+        )
+
+        # files changed = most recent changeset for this task
+        changeset = (
+            db.query(TaskExecutionChangeSet)
+            .filter(
+                TaskExecutionChangeSet.session_id == session_id,
+                TaskExecutionChangeSet.task_id == task.id,
+            )
+            .order_by(TaskExecutionChangeSet.id.desc())
+            .first()
+        )
+        files_changed: List[str] = []
+        if changeset:
+            added = list(changeset.added_files or [])
+            modified = list(changeset.modified_files or [])
+            files_changed = (added + modified)[:10]
+
+        resolved_status: str
+        if task_status_str == "done":
+            resolved_status = "completed"
+        elif task_status_str == "failed":
+            resolved_status = "failed"
+            if failed_task_id is None:
+                failed_task_id = task.id
+        elif task_status_str == "running":
+            resolved_status = "running"
+        else:
+            resolved_status = "not_started"
+
+        committed = resolved_status == "completed" and bool(files_changed or changeset)
+
+        task_progress.append(
+            {
+                "task_id": task.id,
+                "title": task.title,
+                "status": resolved_status,
+                "files_changed": files_changed,
+                "repair_attempts": repair_attempts,
+                "committed": committed,
+            }
+        )
+
+    # --- checkpoints ---
+    checkpoint_service = CheckpointService(db)
+    checkpoints = checkpoint_service.list_checkpoints(session_id)
+    latest_cp = checkpoints[-1] if checkpoints else None
+    last_cp_id: Optional[str] = None
+    last_cp_age_minutes: Optional[float] = None
+    if latest_cp:
+        last_cp_id = str(latest_cp.get("checkpoint_name") or "")
+        cp_created = latest_cp.get("created_at")
+        if cp_created:
+            try:
+                cp_dt = datetime.fromisoformat(str(cp_created).replace("Z", "+00:00"))
+                if cp_dt.tzinfo is None:
+                    cp_dt = cp_dt.replace(tzinfo=UTC)
+                last_cp_age_minutes = round(
+                    (datetime.now(UTC) - cp_dt).total_seconds() / 60, 1
+                )
+            except ValueError:
+                pass
+
+    # --- conversation history preserved? ---
+    has_conversation = (
+        db.query(ConversationHistory)
+        .filter(ConversationHistory.session_id == session_id)
+        .first()
+        is not None
+    )
+
+    completed_count = sum(1 for t in task_progress if t["status"] == "completed")
+    failed_count = sum(1 for t in task_progress if t["status"] == "failed")
+    not_started_count = sum(1 for t in task_progress if t["status"] == "not_started")
+
+    # --- stop reasons ---
+    stop_reasons, stop_category = _extract_stop_reasons(db, session)
+
+    # --- inject failed task_id into retry actions ---
+    actions = [
+        dict(a)
+        for a in _RECOVERY_ACTION_MAP.get(
+            stop_category, _RECOVERY_ACTION_MAP["default"]
+        )
+    ]
+    for action in actions:
+        if action["action"] in ("retry_task",) and failed_task_id is not None:
+            action["task_id"] = failed_task_id
+
+    # --- project branch ---
+    project = db.query(Project).filter(Project.id == session.project_id).first()
+    branch = getattr(project, "branch", None) if project else None
+
+    # --- source note ---
+    cp_note = f"checkpoint {last_cp_id}" if last_cp_id else "no checkpoint"
+    source_note = (
+        f"Recovery context assembled from {cp_note}, session stats, and last validation error"
+        " — no raw log reading required."
+    )
+
+    return {
+        "session_id": session_id,
+        "session_name": session.name,
+        "session_status": session.status,
+        "stop_reasons": stop_reasons,
+        "stop_category": stop_category,
+        "last_checkpoint_id": last_cp_id,
+        "last_checkpoint_age_minutes": last_cp_age_minutes,
+        "branch": branch,
+        "tasks": task_progress,
+        "tasks_total": len(task_progress),
+        "tasks_completed": completed_count,
+        "tasks_failed": failed_count,
+        "tasks_not_started": not_started_count,
+        "preserved": {
+            "completed_tasks_checkpointed": completed_count > 0 and bool(checkpoints),
+            "conversation_history_resumable": has_conversation,
+            "failed_task_rolled_back": failed_count > 0,
+            "remaining_plan_intact": not_started_count > 0,
+        },
+        "recommended_actions": actions,
+        "source_note": source_note,
+    }
+
+
+def get_session_digest_payload(
+    db: Session,
+    session_id: int,
+) -> Dict[str, Any]:
+    session = get_inspectable_session_or_404(db, session_id)
+
+    recovery = get_session_recovery_context_payload(db, session_id)
+
+    # Aggregate changed files across all completed tasks
+    all_changed: List[str] = []
+    for t in recovery["tasks"]:
+        all_changed.extend(t.get("files_changed") or [])
+    changed_files = sorted(set(all_changed))
+
+    completed = recovery["tasks_completed"]
+    failed = recovery["tasks_failed"]
+    total = recovery["tasks_total"]
+    stop_reasons = recovery["stop_reasons"]
+    cp_id = recovery["last_checkpoint_id"]
+    cp_age = recovery["last_checkpoint_age_minutes"]
+
+    # Build summary sentence
+    if completed > 0 and failed > 0:
+        summary = f"Ran {total} planned tasks. Completed {completed}; {failed} failed."
+    elif completed == total and total > 0:
+        summary = f"All {total} tasks completed successfully."
+    elif failed > 0:
+        summary = f"Session stopped. {failed} task(s) failed."
+    elif total == 0:
+        summary = "No tasks were executed in this session."
+    else:
+        summary = f"{completed} of {total} tasks completed."
+
+    stop_reason_text = stop_reasons[0] if stop_reasons else "Unknown stop reason."
+
+    next_actions = [a["label"] for a in recovery["recommended_actions"][:3]]
+
+    return {
+        "session_id": session_id,
+        "session_name": session.name,
+        "session_status": session.status,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "summary": summary,
+        "tasks_total": total,
+        "tasks_completed": completed,
+        "tasks_failed": failed,
+        "changed_files": changed_files[:20],
+        "why_stopped": stop_reason_text,
+        "preserved": recovery["preserved"],
+        "last_checkpoint_id": cp_id,
+        "last_checkpoint_age_minutes": cp_age,
+        "next_actions": next_actions,
     }
 
 
