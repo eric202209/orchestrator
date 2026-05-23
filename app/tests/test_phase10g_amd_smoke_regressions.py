@@ -429,6 +429,58 @@ class TestReadOnlyInspectionVerification:
         assert assessment.step_status == "success"
         assert assessment.error_message == ""
 
+    def test_assessment_skips_future_expected_files_for_read_only_inspection(
+        self, tmp_path: Path
+    ):
+        from app.services.orchestration.execution.execution_flow import (
+            assess_step_execution,
+        )
+        from app.services.orchestration.types import ValidationVerdict
+
+        step = {
+            "step_number": 1,
+            "description": "Inspect the current workspace",
+            "commands": ["ls"],
+            "verification": (
+                'python -c "import pathlib,sys; sys.exit(0 if '
+                "pathlib.Path('index.html').exists() else 1)\""
+            ),
+            "rollback": None,
+            "expected_files": ["index.html", "css/style.css"],
+        }
+        step_result = {
+            "status": "completed",
+            "output": "$ ls\n",
+            "verification_output": "",
+            "skip_declared_verification": True,
+            "files_changed": [],
+        }
+
+        with patch(
+            "app.services.orchestration.execution.execution_flow.ExecutorService.recent_step_tool_failures",
+            return_value=[],
+        ), patch(
+            "app.services.orchestration.execution.execution_flow.ValidatorService.validate_step_success",
+            return_value=ValidationVerdict(
+                stage="step_validation",
+                status="accepted",
+                profile="full_lifecycle",
+            ),
+        ):
+            assessment = assess_step_execution(
+                db=MagicMock(),
+                session_id=1,
+                task_id=1,
+                project_dir=tmp_path,
+                step=step,
+                step_result=step_result,
+                step_started_at=datetime.now(timezone.utc),
+                validation_profile="full_lifecycle",
+            )
+
+        assert assessment.step_status == "success"
+        assert assessment.error_message == ""
+
     def test_sanitizer_does_not_require_future_file_during_inspection(self):
         from app.services.orchestration.planning.planner import PlannerService
 

@@ -485,6 +485,67 @@ def test_validator_rejects_parent_directory_traversal_in_plan_commands():
     assert verdict.details["unsafe_command_paths"] == {1: ["../backend"]}
 
 
+def test_validator_does_not_treat_css_heredoc_asset_url_as_parent_traversal():
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Create stylesheet with relative asset URL",
+                "commands": [
+                    "mkdir -p css && cat > css/style.css <<'EOF'\n"
+                    ".hero { background-image: url('../images/flower-bg.svg'); }\n"
+                    "EOF"
+                ],
+                "verification": "python -c \"from pathlib import Path; assert Path('css/style.css').exists()\"",
+                "rollback": "rm -f css/style.css",
+                "expected_files": ["css/style.css"],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Create a static flower landing page",
+        execution_profile="full_lifecycle",
+    )
+
+    assert "unsafe_command_paths" not in verdict.details
+    assert "parent-directory paths outside the task workspace" not in " ".join(
+        verdict.reasons
+    )
+
+
+def test_validator_does_not_treat_inline_python_css_url_literal_as_parent_traversal():
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Create stylesheet with relative asset URL",
+                "commands": [],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "css/style.css",
+                        "content": ".hero { background-image: url('../images/flower-bg.svg'); }",
+                    }
+                ],
+                "verification": (
+                    'python -c "from pathlib import Path; '
+                    "content = Path('css/style.css').read_text(); "
+                    'assert \\"url(\'../images/flower-bg.svg\')\\" in content"'
+                ),
+                "rollback": "rm -f css/style.css",
+                "expected_files": ["css/style.css"],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Create a static flower landing page",
+        execution_profile="full_lifecycle",
+    )
+
+    assert "unsafe_command_paths" not in verdict.details
+    assert "parent-directory paths outside the task workspace" not in " ".join(
+        verdict.reasons
+    )
+
+
 def test_validator_rejects_absolute_helper_script_paths_in_plan_commands():
     verdict = ValidatorService.validate_plan(
         [
@@ -609,6 +670,45 @@ def test_validator_flags_write_pseudo_commands_and_background_processes():
     assert "background processes or long-running dev servers" in joined
     assert verdict.details["non_runnable_steps"] == [1]
     assert verdict.details["background_process_steps"] == [2]
+
+
+def test_validator_requires_materializing_step_for_declared_deliverables():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Inspect the current workspace",
+            "commands": ["ls -la"],
+            "verification": 'python -c "import sys; sys.exit(0)"',
+            "rollback": None,
+            "expected_files": [],
+        },
+        {
+            "step_number": 2,
+            "description": "Verify requested files exist",
+            "commands": [
+                "python -c \"import pathlib,sys; files=['index.html','css/style.css']; sys.exit(0 if all(pathlib.Path(p).exists() for p in files) else 1)\""
+            ],
+            "verification": "python -c \"import pathlib,sys; files=['index.html','css/style.css']; sys.exit(0 if all(pathlib.Path(p).exists() for p in files) else 1)\"",
+            "rollback": None,
+            "expected_files": ["index.html", "css/style.css"],
+        },
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Create index.html and css/style.css for a static landing page",
+        execution_profile="full_lifecycle",
+    )
+
+    assert verdict.repairable is True
+    assert "declares expected files without materializing them" in " ".join(
+        verdict.reasons
+    )
+    assert verdict.details["unmaterialized_expected_files"] == [
+        "css/style.css",
+        "index.html",
+    ]
 
 
 def test_validator_does_not_flag_html_entities_as_background_processes():

@@ -21,6 +21,7 @@ class ParsedPlannerTask:
     title: str
     description: str
     execution_profile: str = "full_lifecycle"
+    workflow_stage: Optional[str] = None
     priority: int = 0
     plan_position: Optional[int] = None
     estimated_effort: Optional[str] = None
@@ -40,6 +41,30 @@ class PlannerService:
         "test_only",
         "debug_only",
         "review_only",
+    }
+    EXECUTION_PROFILE_ALIASES = {
+        "plan_only": "review_only",
+        "validate_only": "test_only",
+        "validation_only": "test_only",
+    }
+    WORKFLOW_STAGES = {
+        "diagnose",
+        "plan",
+        "execute",
+        "debug",
+        "validate",
+        "complete",
+        "review",
+    }
+    SCOPE_STAGE_ALIASES = {
+        "plan_only": "plan",
+        "validate_only": "validate",
+        "validation_only": "validate",
+        "test_only": "validate",
+        "review_only": "review",
+        "debug_only": "debug",
+        "execute_only": "execute",
+        "full_lifecycle": None,
     }
 
     @classmethod
@@ -100,9 +125,12 @@ class PlannerService:
             if not normalized_title:
                 continue
 
-            explicit_profile, normalized_title, normalized_description = (
-                cls._extract_profile_metadata(normalized_title, normalized_description)
-            )
+            (
+                explicit_profile,
+                explicit_stage,
+                normalized_title,
+                normalized_description,
+            ) = cls._extract_scope_metadata(normalized_title, normalized_description)
 
             dedupe_key = normalized_title.lower()
             if dedupe_key in seen_keys:
@@ -123,6 +151,10 @@ class PlannerService:
                     execution_profile=explicit_profile
                     or cls._infer_execution_profile(
                         normalized_title, normalized_description
+                    ),
+                    workflow_stage=explicit_stage
+                    or cls._infer_workflow_stage(
+                        normalized_title, normalized_description, explicit_profile
                     ),
                     priority=inferred_priority,
                     plan_position=inferred_position,
@@ -324,35 +356,103 @@ class PlannerService:
         return "full_lifecycle"
 
     @classmethod
-    def _extract_profile_metadata(
-        cls, title: str, description: str
-    ) -> tuple[Optional[str], str, str]:
-        combined = f"{title} {description}"
-        match = re.search(
-            r"\b(?:profile|mode)\s*=\s*(full_lifecycle|execute_only|test_only|debug_only|review_only)\b",
-            combined,
-            re.IGNORECASE,
-        )
-        if not match:
-            return None, title, description
+    def _infer_workflow_stage(
+        cls, title: str, description: str, execution_profile: Optional[str] = None
+    ) -> Optional[str]:
+        if execution_profile:
+            stage = cls.SCOPE_STAGE_ALIASES.get(execution_profile)
+            if stage:
+                return stage
 
-        profile = match.group(1).lower()
+        combined = f"{title} {description}".lower()
+        if any(word in combined for word in ["diagnose", "inspect", "investigate"]):
+            return "diagnose"
+        if any(word in combined for word in ["plan", "design", "approach"]):
+            return "plan"
+        if any(word in combined for word in ["debug", "fix", "repair", "root cause"]):
+            return "debug"
+        if any(
+            word in combined for word in ["validate", "verify", "test", "testing", "qa"]
+        ):
+            return "validate"
+        if any(word in combined for word in ["complete", "final", "outcome"]):
+            return "complete"
+        if any(word in combined for word in ["review", "audit"]):
+            return "review"
+        if any(
+            word in combined for word in ["execute", "implement", "build", "create"]
+        ):
+            return "execute"
+        return None
+
+    @classmethod
+    def _extract_scope_metadata(
+        cls, title: str, description: str
+    ) -> tuple[Optional[str], Optional[str], str, str]:
+        combined = f"{title} {description}"
+        profile_values = "|".join(
+            sorted(
+                {
+                    *cls.EXECUTION_PROFILES,
+                    *cls.EXECUTION_PROFILE_ALIASES.keys(),
+                }
+            )
+        )
+        stage_values = "|".join(sorted(cls.WORKFLOW_STAGES))
+        profile_pattern = rf"\b(?:profile|mode)\s*=\s*({profile_values})\b"
+        stage_pattern = rf"\b(?:stage|workflow_stage|scope)\s*=\s*({stage_values}|{profile_values})\b"
+        profile_match = re.search(profile_pattern, combined, re.IGNORECASE)
+        stage_match = re.search(stage_pattern, combined, re.IGNORECASE)
+        if not profile_match and not stage_match:
+            return None, None, title, description
+
+        raw_profile = profile_match.group(1).lower() if profile_match else None
+        raw_stage = stage_match.group(1).lower() if stage_match else None
+        profile = (
+            cls.EXECUTION_PROFILE_ALIASES.get(raw_profile, raw_profile)
+            if raw_profile
+            else None
+        )
+        stage = None
+        if raw_stage:
+            stage = cls.SCOPE_STAGE_ALIASES.get(raw_stage, raw_stage)
+        if stage is None and raw_profile:
+            stage = cls.SCOPE_STAGE_ALIASES.get(raw_profile)
         if profile not in cls.EXECUTION_PROFILES:
-            return None, title, description
+            profile = None
+        if stage not in cls.WORKFLOW_STAGES:
+            stage = None
 
         cleaned_title = re.sub(
-            r"\b(?:profile|mode)\s*=\s*(full_lifecycle|execute_only|test_only|debug_only|review_only)\b",
+            profile_pattern,
             "",
             title,
             flags=re.IGNORECASE,
         ).strip(" |-")
+        cleaned_title = re.sub(
+            stage_pattern,
+            "",
+            cleaned_title,
+            flags=re.IGNORECASE,
+        ).strip(" |-")
         cleaned_description = re.sub(
-            r"\b(?:profile|mode)\s*=\s*(full_lifecycle|execute_only|test_only|debug_only|review_only)\b",
+            profile_pattern,
             "",
             description,
             flags=re.IGNORECASE,
         ).strip(" |-")
-        return profile, cleaned_title or title, cleaned_description or description
+        cleaned_description = re.sub(
+            stage_pattern,
+            "",
+            cleaned_description,
+            flags=re.IGNORECASE,
+        ).strip(" |-")
+        return (
+            profile,
+            stage,
+            cleaned_title or title,
+            cleaned_description or description,
+        )
 
     @classmethod
     def _build_objectives(

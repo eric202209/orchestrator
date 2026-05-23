@@ -8,7 +8,11 @@ from app.services.orchestration.execution.step_support import (
     is_runnable_shell_command_fix,
     normalize_runnable_shell_command_fix,
 )
-from app.services.orchestration.execution.execution_flow import stub_expected_files
+from app.services.orchestration.execution.execution_flow import (
+    execute_verification_command,
+    missing_expected_files,
+    stub_expected_files,
+)
 from app.services.orchestration.diagnostics.debug_feedback import (
     DebugFeedbackEnvelope,
     build_bounded_debug_repair_prompt,
@@ -211,3 +215,29 @@ def test_stub_expected_files_still_flags_ordinary_empty_expected_file(tmp_path):
     (tmp_path / "logs" / "marker.txt").write_text("")
 
     assert stub_expected_files(tmp_path, ["logs/marker.txt"]) == ["logs/marker.txt"]
+
+
+def test_expected_files_glob_matches_existing_nonstub_files(tmp_path):
+    (tmp_path / "images").mkdir()
+    (tmp_path / "images" / "flower-bg.svg").write_text("<svg></svg>")
+
+    assert missing_expected_files(tmp_path, ["images/*.svg"]) == []
+    assert stub_expected_files(tmp_path, ["images/*.svg"]) == []
+
+
+def test_expected_files_glob_reports_missing_when_no_match(tmp_path):
+    (tmp_path / "images").mkdir()
+
+    assert missing_expected_files(tmp_path, ["images/*.svg"]) == ["images/*.svg"]
+
+
+def test_empty_verification_failure_reports_command(tmp_path):
+    result = execute_verification_command(
+        project_dir=tmp_path,
+        command='python -c "import sys; sys.exit(1)"',
+        timeout_seconds=5,
+    )
+
+    assert result["success"] is False
+    assert "Verification command failed with return code 1" in result["output"]
+    assert "sys.exit(1)" in result["output"]

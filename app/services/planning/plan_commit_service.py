@@ -52,6 +52,7 @@ class PlanCommitService:
                 title=humanize_display_name(item.title),
                 description=item.description,
                 execution_profile=item.execution_profile,
+                workflow_stage=item.workflow_stage,
                 priority=item.priority,
                 plan_position=item.plan_position or index,
                 estimated_effort=item.estimated_effort,

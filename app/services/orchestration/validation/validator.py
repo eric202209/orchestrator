@@ -812,6 +812,73 @@ class ValidatorService:
 
         return False
 
+    @classmethod
+    def _plan_declared_expected_files(cls, plan: List[Dict[str, Any]]) -> set[str]:
+        files: set[str] = set()
+        for step in plan:
+            for raw_path in step.get("expected_files", []) or []:
+                path = str(raw_path or "").strip().rstrip("/").lstrip("./")
+                if path:
+                    files.add(path)
+        return files
+
+    @classmethod
+    def _plan_materialized_file_targets(cls, plan: List[Dict[str, Any]]) -> set[str]:
+        files: set[str] = set()
+        for step in plan:
+            for operation in step.get("ops", []) or []:
+                if not isinstance(operation, dict):
+                    continue
+                if str(operation.get("op") or "") in {"write_file", "append_file"}:
+                    path = (
+                        str(operation.get("path") or "")
+                        .strip()
+                        .rstrip("/")
+                        .lstrip("./")
+                    )
+                    if path:
+                        files.add(path)
+            top_level_op = str(
+                step.get("op") or step.get("step") or step.get("type") or ""
+            ).strip()
+            if top_level_op in {"create_file", "write_file", "write", "append_file"}:
+                path = (
+                    str(step.get("path") or step.get("file") or "")
+                    .strip()
+                    .rstrip("/")
+                    .lstrip("./")
+                )
+                if path:
+                    files.add(path)
+            for command in step.get("commands", []) or []:
+                for target in cls._command_write_targets(str(command or "")):
+                    path = str(target or "").strip().rstrip("/").lstrip("./")
+                    if path:
+                        files.add(path)
+        return files
+
+    @staticmethod
+    def _task_prompt_requires_materialization(
+        task_prompt: str,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> bool:
+        combined = " ".join(
+            str(value or "") for value in (task_prompt, title, description)
+        ).lower()
+        return any(
+            marker in combined
+            for marker in (
+                "create",
+                "build",
+                "add",
+                "write",
+                "implement",
+                "generate",
+                "scaffold",
+            )
+        )
+
     @staticmethod
     def _task_allows_multiple_stacks(
         task_prompt: str,
@@ -1355,9 +1422,6 @@ class ValidatorService:
         """Detect command paths that violate the task-workspace contract."""
 
         findings: Dict[int, List[str]] = {}
-        traversal_pattern = re.compile(
-            r"(?<![\w./-])\.\.(?:/[A-Za-z0-9._@:+-]+)+(?:/)?"
-        )
         absolute_path_pattern = re.compile(
             r"^/[A-Za-z0-9._@:+-]+(?:/[A-Za-z0-9._@:+-]+)*/*$"
         )
@@ -1380,16 +1444,25 @@ class ValidatorService:
             )
 
             for text in step_text_parts:
-                for match in traversal_pattern.finditer(text):
-                    fragment = match.group(0)
-                    if fragment not in fragments:
-                        fragments.append(fragment)
+                text = ValidatorService._strip_heredoc_bodies_for_command_scanning(text)
                 try:
                     tokens = shlex.split(text, posix=True)
                 except ValueError:
                     tokens = []
-                for token in tokens:
+                for token_index, token in enumerate(tokens):
+                    previous = tokens[token_index - 1] if token_index >= 1 else ""
+                    command_name = Path(tokens[0]).name if tokens else ""
+                    if previous in {"-c", "-e"} and command_name in {
+                        "python",
+                        "python3",
+                        "node",
+                    }:
+                        continue
                     if token in allowed_absolute_tokens:
+                        continue
+                    if token.startswith("../") or "/../" in token:
+                        if token not in fragments:
+                            fragments.append(token)
                         continue
                     if absolute_path_pattern.fullmatch(token):
                         if token not in fragments:
@@ -1399,6 +1472,44 @@ class ValidatorService:
                 findings[int(step_number)] = fragments[:6]
 
         return findings
+
+    @staticmethod
+    def _strip_heredoc_bodies_for_command_scanning(command: str) -> str:
+        """Keep shell syntax visible while hiding heredoc payload text.
+
+        Path-safety checks should inspect the command and heredoc target, not file
+        content such as CSS `url('../images/foo.svg')` written by the heredoc.
+        """
+
+        lines = str(command or "").splitlines()
+        if not lines:
+            return ""
+
+        visible: List[str] = []
+        delimiter: Optional[str] = None
+        heredoc_pattern = re.compile(
+            r"<<-?\s*(?:'(?P<single>[A-Za-z_][A-Za-z0-9_]*)'"
+            r'|"(?P<double>[A-Za-z_][A-Za-z0-9_]*)"'
+            r"|(?P<bare>[A-Za-z_][A-Za-z0-9_]*))"
+        )
+
+        for line in lines:
+            stripped = line.strip()
+            if delimiter is not None:
+                if stripped == delimiter:
+                    delimiter = None
+                continue
+
+            visible.append(line)
+            match = heredoc_pattern.search(line)
+            if match:
+                delimiter = (
+                    match.group("single")
+                    or match.group("double")
+                    or match.group("bare")
+                )
+
+        return "\n".join(visible)
 
     @staticmethod
     def _plan_nests_task_workspace(
@@ -2143,6 +2254,23 @@ class ValidatorService:
                 ]
 
         if profile == "implementation":
+            if cls._task_prompt_requires_materialization(
+                task_prompt, title=title, description=description
+            ):
+                declared_expected_files = cls._plan_declared_expected_files(plan)
+                materialized_targets = cls._plan_materialized_file_targets(plan)
+                unmaterialized_expected_files = sorted(
+                    declared_expected_files.difference(materialized_targets)
+                )
+                if declared_expected_files and unmaterialized_expected_files:
+                    repairable.append(
+                        "Plan declares expected files without materializing them "
+                        "through file operations or shell writes"
+                    )
+                    details["unmaterialized_expected_files"] = (
+                        unmaterialized_expected_files[:20]
+                    )
+
             missing_verification_steps = cls._plan_missing_verification_steps(plan)
             if missing_verification_steps:
                 repairable.append(

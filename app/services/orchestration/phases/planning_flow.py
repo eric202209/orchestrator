@@ -29,6 +29,9 @@ from app.services.orchestration.planning.planner import (
     PlanningRepairBudgetExceeded,
     PlanningRepairOutputContractViolation,
 )
+from app.services.orchestration.planning.normalization import (
+    complete_repaired_plan_contract,
+)
 from app.services.orchestration.policy import clamp_planning_timeout
 from app.services.orchestration.run_state import mark_task_attempt_failed
 from app.services.orchestration.state.session_state import mark_session_paused
@@ -203,6 +206,66 @@ def _split_repaired_single_step_full_lifecycle_plan(
             "expected_files": [],
         },
     ]
+
+
+def _retrieve_validation_repair_knowledge(
+    ctx: OrchestrationRunContext,
+    *,
+    query: str,
+    failure_signature: str | None = None,
+) -> KnowledgeContext | None:
+    knowledge_ctx = _retrieve_knowledge(
+        ctx,
+        trigger_phase="validation",
+        knowledge_types=[
+            "failure_memory",
+            "format_guide",
+            "debug_case",
+        ],
+        query=query,
+        failure_signature=failure_signature,
+    )
+    if knowledge_ctx:
+        _log_knowledge_usage(ctx, knowledge_ctx, used_in_prompt=True)
+    return knowledge_ctx
+
+
+def _looks_like_verification_only_task(
+    title: str | None,
+    description: str | None,
+) -> bool:
+    combined = f"{title or ''}\n{description or ''}".lower()
+    verification_markers = (
+        "verification command",
+        "verification commands",
+        "improve task verification",
+        "strengthen verification",
+        "checks prove",
+        "content-aware checks",
+        "file/content checks",
+        "audit",
+        "inspect current files",
+        "no major implementation",
+        "do not change page design",
+        "do not change page design much",
+    )
+    if not any(marker in combined for marker in verification_markers):
+        return False
+    implementation_markers = (
+        "create `",
+        "create ",
+        "add new ",
+        "add a new ",
+        "add seasonal",
+        "add second",
+        "adjust one content block",
+        "adjust one css",
+        "update css",
+        "edit `",
+        "edits `",
+        "start task that edits",
+    )
+    return not any(marker in combined for marker in implementation_markers)
 
 
 # Circuit breaker: abort planning after this many consecutive validation failures
@@ -981,6 +1044,10 @@ def execute_planning_phase(
 
             repair_shrank_multistep_plan = False
             single_step_full_lifecycle_plan = False
+            verification_only_task = _looks_like_verification_only_task(
+                getattr(ctx.task, "title", None),
+                getattr(ctx.task, "description", None),
+            )
             if isinstance(extracted_plan, list):
                 if len(extracted_plan) > 1:
                     retry_state.last_multistep_plan_step_count = max(
@@ -997,6 +1064,7 @@ def execute_planning_phase(
                     len(extracted_plan) == 1
                     and ctx.execution_profile == "full_lifecycle"
                     and bool(getattr(ctx, "workspace_has_existing_files", False))
+                    and not verification_only_task
                 ):
                     single_step_full_lifecycle_plan = True
 
@@ -1068,10 +1136,13 @@ def execute_planning_phase(
                         else "before_first_repair"
                     ),
                 )
-                if _should_repair_truncated_single_step_plan(
-                    prompt_profile=prompt_profile,
-                    extracted_plan=extracted_plan,
-                    execution_profile=ctx.execution_profile,
+                if (
+                    _should_repair_truncated_single_step_plan(
+                        prompt_profile=prompt_profile,
+                        extracted_plan=extracted_plan,
+                        execution_profile=ctx.execution_profile,
+                    )
+                    and not verification_only_task
                 ):
                     emit_phase_event(
                         ctx.orchestration_state,
@@ -1299,6 +1370,24 @@ def execute_planning_phase(
             sanitized_plan = _strengthen_weak_expected_file_verifications(
                 sanitized_plan
             )
+            sanitized_plan, completion_details = complete_repaired_plan_contract(
+                sanitized_plan,
+                task_prompt=ctx.prompt,
+                repaired=retry_state.repair_prompt_used,
+            )
+            if completion_details.get("changed"):
+                ctx.logger.info(
+                    "[ORCHESTRATION] Completed deterministic plan contract gaps: %s",
+                    completion_details,
+                )
+                emit_phase_event(
+                    ctx.orchestration_state,
+                    ctx.emit_live,
+                    level="INFO",
+                    phase="planning",
+                    message="[ORCHESTRATION] Completed deterministic plan contract gaps",
+                    details=completion_details,
+                )
             try:
                 ctx.orchestration_state.plan = normalize_plan_with_live_logging(
                     ctx.db,
@@ -1441,6 +1530,16 @@ def execute_planning_phase(
                 semantic_violation_codes = _semantic_codes_for_immediate_repair_issues(
                     blocking_repair_issues
                 )
+                validation_knowledge_ctx = _retrieve_validation_repair_knowledge(
+                    ctx,
+                    query="Plan immediate repair issue: "
+                    + "; ".join(issue_fragments[:4]),
+                    failure_signature=(
+                        "; ".join(semantic_violation_codes)
+                        if semantic_violation_codes
+                        else "plan_contains_immediate_repair_issues"
+                    ),
+                )
                 emit_phase_event(
                     ctx.orchestration_state,
                     ctx.emit_live,
@@ -1473,6 +1572,14 @@ def execute_planning_phase(
                     + "; ".join(issue_fragments),
                     rejection_reasons=issue_fragments,
                     prompt_profile=prompt_profile,
+                    knowledge_context=(
+                        validation_knowledge_ctx
+                        if (
+                            validation_knowledge_ctx
+                            and validation_knowledge_ctx.retrieved_items
+                        )
+                        else None
+                    ),
                 )
                 retry_state.repair_prompt_used = True
                 retry_state.consecutive_failures += 1
@@ -1541,6 +1648,12 @@ def execute_planning_phase(
                         output_text=output_text,
                         strategy_info=second_repair_reason.event_reason,
                     )
+                    validation_knowledge_ctx = _retrieve_validation_repair_knowledge(
+                        ctx,
+                        query="Plan immediate repair still failed after repair: "
+                        + "; ".join(issue_fragments[:4]),
+                        failure_signature=second_repair_reason.semantic_violation_code,
+                    )
                     retry_state.last_repair_reason = second_repair_reason.event_reason
                     planning_result = __repair_planning_output(
                         ctx=ctx,
@@ -1550,6 +1663,14 @@ def execute_planning_phase(
                         + "; ".join(issue_fragments),
                         rejection_reasons=issue_fragments,
                         prompt_profile=prompt_profile,
+                        knowledge_context=(
+                            validation_knowledge_ctx
+                            if (
+                                validation_knowledge_ctx
+                                and validation_knowledge_ctx.retrieved_items
+                            )
+                            else None
+                        ),
                     )
                     setattr(
                         retry_state,

@@ -50,6 +50,7 @@ class TaskBase(BaseModel):
     title: str
     description: Optional[str] = None
     execution_profile: Optional[str] = "full_lifecycle"
+    workflow_stage: Optional[str] = None
     priority: Optional[int] = 0
     plan_position: Optional[int] = None
 
@@ -65,6 +66,7 @@ class TaskUpdate(BaseModel):
     description: Optional[str] = None
     status: Optional[TaskStatusEnum] = None
     execution_profile: Optional[str] = None
+    workflow_stage: Optional[str] = None
     priority: Optional[int] = None
     plan_position: Optional[int] = None
     steps: Optional[str] = None
@@ -87,6 +89,7 @@ class TaskResponse(TaskBase):
     plan_id: Optional[int] = None
     status: TaskStatusEnum
     execution_profile: str = "full_lifecycle"
+    workflow_stage: Optional[str] = None
     estimated_effort: Optional[str] = None
     plan_position: Optional[int] = None
     steps: Optional[str] = None
@@ -108,6 +111,7 @@ class PlannerTaskCandidate(BaseModel):
     title: str
     description: Optional[str] = None
     execution_profile: str = "full_lifecycle"
+    workflow_stage: Optional[str] = None
     priority: int = 0
     plan_position: Optional[int] = None
     estimated_effort: Optional[str] = None

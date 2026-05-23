@@ -555,6 +555,7 @@ def queue_task_for_session(
             "project_dir": task_workspace["workspace_path"],
             "task_title": task.title,
             "execution_profile": task.execution_profile,
+            "workflow_stage": getattr(task, "workflow_stage", None),
             **_runtime_selection_details(db),
         },
     )
