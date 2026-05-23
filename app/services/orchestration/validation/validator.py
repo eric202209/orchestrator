@@ -1953,6 +1953,48 @@ class ValidatorService:
         return {step: sorted(set(paths)) for step, paths in findings.items()}
 
     @staticmethod
+    def _plan_mutating_steps_for_read_only_stage(
+        plan: List[Dict[str, Any]], workflow_stage: Optional[str]
+    ) -> List[int]:
+        if workflow_stage not in {"diagnose", "plan", "review", "validate", "complete"}:
+            return []
+
+        mutating_ops = {
+            "write_file",
+            "append_file",
+            "replace_in_file",
+            "create_file",
+            "mkdir",
+            "delete_file",
+        }
+        mutating_command_patterns = (
+            re.compile(r"(^|[;&|]\s*)(mkdir|touch|cp|mv|rm)\b"),
+            re.compile(r"\bsed\s+-i\b"),
+            re.compile(r">\s*[^&\s]"),
+            re.compile(r"\btee\s+"),
+        )
+        findings: List[int] = []
+        for index, step in enumerate(plan, start=1):
+            step_number = int(step.get("step_number", index))
+            if any(
+                isinstance(operation, dict)
+                and str(operation.get("op") or "").strip() in mutating_ops
+                for operation in (step.get("ops") or [])
+            ):
+                findings.append(step_number)
+                continue
+            commands = [
+                str(command or "") for command in step.get("commands", []) or []
+            ]
+            if any(
+                pattern.search(command)
+                for command in commands
+                for pattern in mutating_command_patterns
+            ):
+                findings.append(step_number)
+        return findings
+
+    @staticmethod
     def _infer_workflow_phase_for_step(
         step: Dict[str, Any], workflow_profile: Optional[str]
     ) -> Optional[str]:
@@ -2053,10 +2095,13 @@ class ValidatorService:
         description: Optional[str] = None,
         validation_severity: str = "standard",
         workflow_profile: Optional[str] = None,
+        workflow_stage: Optional[str] = None,
     ) -> PlanOutcome:
         profile = cls.infer_validation_profile(
             task_prompt, execution_profile, title=title, description=description
         )
+        if workflow_stage in {"diagnose", "plan", "review", "validate", "complete"}:
+            profile = "verification"
         warnings: List[str] = []
         repairable: List[str] = []
         rejected: List[str] = []
@@ -2066,6 +2111,15 @@ class ValidatorService:
         if not schema_validation["valid"]:
             rejected.extend(schema_validation["errors"])
             details.update(schema_validation["details"])
+
+        read_only_stage_mutations = cls._plan_mutating_steps_for_read_only_stage(
+            plan, workflow_stage
+        )
+        if read_only_stage_mutations:
+            repairable.append(
+                f"Workflow stage '{workflow_stage}' must not mutate files or directories"
+            )
+            details["read_only_stage_mutation_steps"] = read_only_stage_mutations
 
         if project_dir is not None:
             invalid_ops_path_steps = cls._plan_invalid_file_ops_paths(
@@ -2253,14 +2307,31 @@ class ValidatorService:
                     "missing_phases"
                 ]
 
+        stage_allows_materialization = workflow_stage not in {
+            "diagnose",
+            "plan",
+            "review",
+            "validate",
+            "complete",
+        }
         if profile == "implementation":
-            if cls._task_prompt_requires_materialization(
-                task_prompt, title=title, description=description
+            if (
+                cls._task_prompt_requires_materialization(
+                    task_prompt, title=title, description=description
+                )
+                and stage_allows_materialization
             ):
                 declared_expected_files = cls._plan_declared_expected_files(plan)
                 materialized_targets = cls._plan_materialized_file_targets(plan)
+                existing_expected_files = {
+                    path
+                    for path in declared_expected_files
+                    if project_dir is not None and (Path(project_dir) / path).exists()
+                }
                 unmaterialized_expected_files = sorted(
-                    declared_expected_files.difference(materialized_targets)
+                    declared_expected_files.difference(
+                        materialized_targets | existing_expected_files
+                    )
                 )
                 if declared_expected_files and unmaterialized_expected_files:
                     repairable.append(
@@ -2557,10 +2628,13 @@ class ValidatorService:
         relaxed_mode: bool = False,
         completion_evidence: Optional[Dict[str, Any]] = None,
         validation_severity: str = "standard",
+        workflow_stage: Optional[str] = None,
     ) -> ValidationVerdict:
         profile = cls.infer_validation_profile(
             task_prompt, execution_profile, title=title, description=description
         )
+        if workflow_stage in {"diagnose", "plan", "review", "validate", "complete"}:
+            profile = "verification"
         expected_core_files = list(
             dict.fromkeys(
                 cls._core_expected_files(plan)

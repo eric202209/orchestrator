@@ -18,7 +18,8 @@ confidence: 0.84
 # Static Site Verification Contract
 
 Use this for plain HTML/CSS/SVG tasks that ask to strengthen verification or
-check content/link integrity.
+check content/link integrity. Prefer this as retrieved knowledge for matching
+static-site tasks, not as unconditional runtime behavior for every project.
 
 Do:
 - Inspect the existing file layout before choosing verification targets.
@@ -27,8 +28,8 @@ Do:
   - If HTML has an `<img>` or inline SVG, verify that exact HTML reference.
   - If CSS uses `background-image: url(...)`, verify the CSS `url(...)` points
     to an existing SVG file.
-- Use concrete existing asset paths such as `images/flower-bg.svg`; do not invent
-  placeholder names like `images/example.svg`, `images/logo.svg`, or
+- Use concrete existing asset paths from the current workspace or task prompt.
+  Do not invent placeholder names like `images/example.svg`, `images/logo.svg`, or
   `images/*.svg` inside content assertions.
 - Keep `expected_files` to concrete files that must exist. Use glob patterns only
   when checking a family of already existing files and the runtime supports it.
@@ -46,11 +47,11 @@ Example verification commands:
     "step_number": 1,
     "description": "Verify stylesheet link and CSS SVG background",
     "commands": [
-      "python -c \"import pathlib,re,sys; html=pathlib.Path('index.html').read_text(); css=pathlib.Path('css/style.css').read_text(); ok='css/style.css' in html and re.search(r\\\"url\\\\(['\\\\\\\"]?\\\\.\\\\./images/flower-bg\\\\.svg['\\\\\\\"]?\\\\)\\\", css) and pathlib.Path('images/flower-bg.svg').is_file(); sys.exit(0 if ok else 1)\""
+      "python -c \"import pathlib,sys; html=pathlib.Path('index.html').read_text(); css=pathlib.Path('css/style.css').read_text(); asset='images/site-asset.svg'; ok='css/style.css' in html and pathlib.Path(asset).is_file() and pathlib.Path(asset).name in css; sys.exit(0 if ok else 1)\""
     ],
-    "verification": "python -c \"import pathlib,re,sys; html=pathlib.Path('index.html').read_text(); css=pathlib.Path('css/style.css').read_text(); ok='css/style.css' in html and 'background-image' in css and pathlib.Path('images/flower-bg.svg').is_file(); sys.exit(0 if ok else 1)\"",
+    "verification": "python -c \"import pathlib,sys; html=pathlib.Path('index.html').read_text(); css=pathlib.Path('css/style.css').read_text(); asset='images/site-asset.svg'; ok='css/style.css' in html and 'background-image' in css and pathlib.Path(asset).name in css and pathlib.Path(asset).is_file(); sys.exit(0 if ok else 1)\"",
     "rollback": null,
-    "expected_files": ["index.html", "css/style.css", "images/flower-bg.svg"]
+    "expected_files": ["index.html", "css/style.css", "images/site-asset.svg"]
   }
 ]
 ```

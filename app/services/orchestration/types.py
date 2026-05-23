@@ -232,6 +232,7 @@ class OrchestrationRunContext:
     validation_severity: str = "standard"
     completion_repair_budget: int = 1
     workflow_profile: str = "default"
+    workflow_stage: Optional[str] = None
     task_execution_id: Optional[int] = None
     restore_workspace_snapshot_if_needed: Optional[Callable[[str], Any]] = None
 

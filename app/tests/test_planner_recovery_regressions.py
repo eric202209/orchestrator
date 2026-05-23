@@ -107,6 +107,18 @@ def test_planner_preserves_explicit_workflow_stage_separate_from_execution_profi
     ]
 
 
+def test_planner_extracts_equals_style_order_metadata():
+    parsed = PlannerService.parse_markdown(
+        """
+## Task List
+- [ ] TASK_START: First task | Start here | order=1 | profile=review_only
+- [ ] TASK_START: Third task | Preserve explicit ordering | order=3 | profile=test_only
+"""
+    )
+
+    assert [task.plan_position for task in parsed] == [1, 3]
+
+
 def test_build_task_execution_prompt_includes_failure_recovery_context():
     task = Task(
         title="Inspect current project architecture",

@@ -266,6 +266,7 @@ class PlannerService:
         combined = f"{title} {description}"
 
         explicit_patterns = [
+            r"\b(?:step|task|item|order)\s*=\s*(\d{1,3})\b",
             r"\b(?:step|task|item|order)\s*(\d{1,3})\b",
             r"^\s*(\d{1,3})[.)-]?\s+",
         ]
