@@ -386,6 +386,7 @@ def test_planning_commit_uses_edited_markdown_for_plan_and_tasks(
                     "title": "Edited task",
                     "description": "Use the edited markdown when committing",
                     "execution_profile": "full_lifecycle",
+                    "workflow_stage": "execute",
                     "priority": 1,
                     "plan_position": 1,
                     "estimated_effort": "medium",
@@ -398,6 +399,7 @@ def test_planning_commit_uses_edited_markdown_for_plan_and_tasks(
     payload = commit.json()
     assert payload["plan"]["markdown"] == edited_markdown
     assert [task["title"] for task in payload["tasks"]] == ["Edited task"]
+    assert payload["tasks"][0]["workflow_stage"] == "execute"
 
 
 def test_soft_deleted_project_blocks_planning_endpoints(

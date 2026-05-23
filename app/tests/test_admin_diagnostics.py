@@ -16,6 +16,7 @@ def test_diagnostics_endpoint_returns_expected_shape(authenticated_client):
     assert "backends" in body
     assert "queue" in body
     assert "streaming" in body
+    assert "knowledge" in body
     assert "sessions" in body
     assert "recent_audit_events" in body
     assert "checked_at" in body
@@ -42,6 +43,20 @@ def test_diagnostics_queue_shape(authenticated_client):
     assert "status" in q
     assert "active_tasks" in q
     assert "worker_count" in q
+
+
+def test_knowledge_readiness_endpoint_returns_runtime_counts(authenticated_client):
+    resp = authenticated_client.get(
+        "/api/v1/admin/knowledge-readiness?probe_embedding=false"
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "candidate_file_count" in body
+    assert "sqlite_item_count" in body
+    assert "qdrant" in body
+    assert "embedding" in body
+    assert "recommended_ingest_command" in body
+    assert body["embedding"]["status"] == "not_probed"
 
 
 def test_diagnostics_streaming_shape(authenticated_client):

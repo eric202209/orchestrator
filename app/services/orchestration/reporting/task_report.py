@@ -38,6 +38,7 @@ def build_task_report_payload(db: Any, task_id: int) -> Dict[str, Any]:
             "status": task.status.value,
             "plan_position": getattr(task, "plan_position", None),
             "execution_profile": getattr(task, "execution_profile", None),
+            "workflow_stage": getattr(task, "workflow_stage", None),
             "workspace_status": getattr(task, "workspace_status", None),
             "task_subfolder": getattr(task, "task_subfolder", None),
             "created_at": task.created_at.isoformat(),

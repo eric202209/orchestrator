@@ -95,6 +95,7 @@ def test_schema_migrations_add_required_columns_and_indexes(tmp_path):
         "plan_id",
         "plan_position",
         "execution_profile",
+        "workflow_stage",
         "task_subfolder",
         "template_id",
     } <= task_columns

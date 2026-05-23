@@ -4,6 +4,7 @@ import json
 
 from app.models import PlanningArtifact, PlanningSession, Project
 from app.services.planning.planning_session_service import PlanningSessionService
+from app.services.planning.planner_service import PlannerService
 
 
 def _create_project(db_session, name: str = "Planning Background Project") -> Project:
@@ -176,8 +177,118 @@ def test_replan_recovery_uses_short_timeout_and_deterministic_fallback(
         if artifact.artifact_type == "planner_markdown"
     )
     assert "Diagnose recovered failure" in planner.content
+    assert "Plan bounded recovery approach" in planner.content
     assert "Apply targeted recovery fix" in planner.content
-    assert "Verify recovery path" in planner.content
+    assert "Validate recovery path" in planner.content
+    assert "Review recovery outcome" in planner.content
+    parsed = PlannerService.parse_markdown(planner.content)
+    assert [task.execution_profile for task in parsed] == [
+        "review_only",
+        "review_only",
+        "debug_only",
+        "test_only",
+        "review_only",
+    ]
+    assert [task.workflow_stage for task in parsed] == [
+        "diagnose",
+        "plan",
+        "debug",
+        "validate",
+        "complete",
+    ]
+
+
+def test_replan_recovery_replaces_full_lifecycle_model_tasks_with_scoped_tasks(
+    db_session, monkeypatch
+):
+    project = _create_project(db_session, name="Replan Scope Project")
+    session = PlanningSession(
+        project_id=project.id,
+        title="Recover full lifecycle model output",
+        prompt=(
+            "## Failure Context\n\n"
+            "The following execution session failed and requires replanning.\n\n"
+            "### Failed Tasks\n"
+            "- Build static page: no source files were produced"
+        ),
+        status="active",
+        source_brain="local",
+    )
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+
+    service = PlanningSessionService(db_session)
+    service._add_message(
+        session,
+        "user",
+        session.prompt,
+        metadata={
+            "kind": "prompt",
+            "skip_clarification": True,
+            "replan_recovery": True,
+        },
+    )
+    db_session.commit()
+
+    def fake_run_openclaw(
+        self,
+        prompt,
+        *,
+        source_brain="local",
+        timeout_seconds=None,
+    ):
+        return {
+            "status": "completed",
+            "output": json.dumps(
+                {
+                    "requirements": "# Requirements",
+                    "design": "# Design",
+                    "implementation_plan": "# Implementation Plan",
+                    "planner_markdown": "\n".join(
+                        [
+                            "# Project: Replan Scope Project",
+                            "",
+                            "## Task List",
+                            "- [ ] TASK_START: Setup Project Environment | Rebuild the page from scratch | order=1 | profile=full_lifecycle",
+                            "- [ ] TASK_START: Test the Page | Verify the page works | order=2 | profile=full_lifecycle",
+                        ]
+                    ),
+                }
+            ),
+        }
+
+    monkeypatch.setattr(PlanningSessionService, "_run_openclaw", fake_run_openclaw)
+
+    updated = service.process_session(session.id)
+
+    assert updated is not None
+    assert updated.status == "completed", updated.last_error
+    assert any(
+        message.metadata_json
+        and message.metadata_json.get("kind") == "replan_scope_fallback"
+        for message in updated.messages
+    )
+    planner = next(
+        artifact
+        for artifact in updated.artifacts
+        if artifact.artifact_type == "planner_markdown"
+    )
+    parsed = PlannerService.parse_markdown(planner.content)
+    assert [task.execution_profile for task in parsed] == [
+        "review_only",
+        "review_only",
+        "debug_only",
+        "test_only",
+        "review_only",
+    ]
+    assert [task.workflow_stage for task in parsed] == [
+        "diagnose",
+        "plan",
+        "debug",
+        "validate",
+        "complete",
+    ]
 
 
 def test_recover_active_sessions_clears_processing_lease_before_rescheduling(

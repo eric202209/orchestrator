@@ -116,6 +116,10 @@ def _migration_001_runtime_columns(engine: Engine) -> None:
                 "ALTER TABLE tasks ADD COLUMN execution_profile VARCHAR(30) DEFAULT 'full_lifecycle'",
             ),
             (
+                "workflow_stage",
+                "ALTER TABLE tasks ADD COLUMN workflow_stage VARCHAR(30)",
+            ),
+            (
                 "workspace_status",
                 "ALTER TABLE tasks ADD COLUMN workspace_status VARCHAR(30) DEFAULT 'isolated'",
             ),
@@ -669,6 +673,16 @@ def _migration_013_failure_metadata(engine: Engine) -> None:
                 )
 
 
+def _migration_014_task_workflow_stage(engine: Engine) -> None:
+    if "tasks" not in _table_names(engine):
+        return
+    if not _has_column(engine, "tasks", "workflow_stage"):
+        with engine.begin() as connection:
+            connection.execute(
+                text("ALTER TABLE tasks ADD COLUMN workflow_stage VARCHAR(30)")
+            )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -734,6 +748,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="013_failure_metadata",
         description="Add failure_category/backend_id to task_executions and escalation_backend_id to sessions",
         upgrade=_migration_013_failure_metadata,
+    ),
+    Migration(
+        version="014_task_workflow_stage",
+        description="Add optional Project Architect workflow stage to tasks",
+        upgrade=_migration_014_task_workflow_stage,
     ),
 )
 

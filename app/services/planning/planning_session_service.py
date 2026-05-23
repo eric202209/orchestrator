@@ -376,6 +376,7 @@ class PlanningSessionService:
                     title=item.title,
                     description=item.description,
                     execution_profile=item.execution_profile,
+                    workflow_stage=item.workflow_stage,
                     priority=item.priority,
                     plan_position=item.plan_position,
                     estimated_effort=item.estimated_effort,
@@ -487,17 +488,27 @@ class PlanningSessionService:
                 (
                     "- [ ] TASK_START: Diagnose recovered failure"
                     f" | Inspect the failure context for {safe_failed_title}: {safe_failure_detail}"
-                    " | order=1 | P1 | effort=small | profile=review_only"
+                    " | order=1 | P1 | effort=small | stage=diagnose | profile=review_only"
+                ),
+                (
+                    "- [ ] TASK_START: Plan bounded recovery approach"
+                    f" | Turn the failure context for {safe_failed_title} into a minimal repair plan without changing files"
+                    " | order=2 | P1 | effort=small | stage=plan | profile=review_only"
                 ),
                 (
                     "- [ ] TASK_START: Apply targeted recovery fix"
                     f" | Implement the smallest safe fix for {safe_failed_title} based on the recovered failure context"
-                    " | order=2 | P1 | effort=medium | profile=full_lifecycle"
+                    " | order=3 | P1 | effort=medium | stage=debug | profile=debug_only"
                 ),
                 (
-                    "- [ ] TASK_START: Verify recovery path"
+                    "- [ ] TASK_START: Validate recovery path"
                     " | Run focused validation for the recovery fix and confirm the session can continue without repeating the failure"
-                    " | order=3 | P1 | effort=small | profile=test_only"
+                    " | order=4 | P1 | effort=small | stage=validate | profile=test_only"
+                ),
+                (
+                    "- [ ] TASK_START: Review recovery outcome"
+                    " | Audit the changed files, validation evidence, and remaining session risks after the recovery fix"
+                    " | order=5 | P2 | effort=small | stage=complete | profile=review_only"
                 ),
             ]
         )
@@ -519,8 +530,10 @@ class PlanningSessionService:
             "implementation_plan": (
                 "# Implementation Plan\n\n"
                 "1. Inspect the failed task logs and current workspace state.\n"
-                "2. Apply the smallest fix that addresses the recorded root cause.\n"
-                "3. Run focused validation and update the execution notes."
+                "2. Write down the smallest bounded recovery approach.\n"
+                "3. Apply only the fix that addresses the recorded root cause.\n"
+                "4. Run focused validation for the original failure mode.\n"
+                "5. Review evidence and remaining risk before continuing."
             ),
             "planner_markdown": planner_markdown,
         }
@@ -614,6 +627,19 @@ class PlanningSessionService:
 
         planner_markdown = artifacts.get("planner_markdown", "")
         parsed_tasks = PlannerService.parse_markdown(planner_markdown)
+        if is_replan_recovery and self._replan_tasks_need_scope_fallback(parsed_tasks):
+            artifacts = self._build_replan_recovery_artifacts(session, project)
+            planner_markdown = artifacts.get("planner_markdown", "")
+            parsed_tasks = PlannerService.parse_markdown(planner_markdown)
+            self._add_message(
+                session,
+                "assistant",
+                (
+                    "Planning model produced full-lifecycle recovery tasks; used "
+                    "deterministic scoped replan markdown instead."
+                ),
+                metadata={"kind": "replan_scope_fallback"},
+            )
         if not planner_markdown or not parsed_tasks:
             session.status = "failed"
             session.last_error = (
@@ -651,6 +677,16 @@ class PlanningSessionService:
         session.completed_at = datetime.now(timezone.utc)
         session.updated_at = datetime.now(timezone.utc)
         session.last_error = None
+
+    @staticmethod
+    def _replan_tasks_need_scope_fallback(tasks: list[Any]) -> bool:
+        if not tasks:
+            return False
+        profiles = [
+            getattr(task, "execution_profile", "full_lifecycle") for task in tasks
+        ]
+        scoped_profiles = {"review_only", "test_only", "debug_only"}
+        return not any(profile in scoped_profiles for profile in profiles)
 
     def _run_openclaw(
         self,

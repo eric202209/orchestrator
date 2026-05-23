@@ -183,6 +183,7 @@ def _verification_success(
 # Minimum non-trivial file size in bytes.  Files smaller than this are
 # treated as "empty" (touch, echo '', placeholder stubs).
 _MIN_MEANINGFUL_BYTES = 4
+_GLOB_META_CHARS = {"*", "?", "["}
 
 
 def _is_allowed_empty_sentinel_file(path: Path) -> bool:
@@ -213,15 +214,41 @@ def _resolve_expected_path(
     return project_dir / path_text, path_text
 
 
+def _expand_expected_file_entry(
+    project_dir: Path, raw_path: str
+) -> tuple[list[tuple[Path, str]], str | None]:
+    path_text = str(raw_path or "").strip().strip("'\"\\")
+    if not path_text:
+        return [], None
+    if not any(char in path_text for char in _GLOB_META_CHARS):
+        resolved = _resolve_expected_path(project_dir, path_text)
+        return ([resolved] if resolved else []), path_text
+    candidate = Path(path_text)
+    if candidate.is_absolute() or any(part == ".." for part in candidate.parts):
+        resolved = _resolve_expected_path(project_dir, path_text)
+        return ([resolved] if resolved else []), path_text
+    matches: list[tuple[Path, str]] = []
+    for match in sorted(project_dir.glob(path_text)):
+        try:
+            rel = match.resolve().relative_to(project_dir.resolve())
+        except ValueError:
+            continue
+        if match.is_file():
+            matches.append((match, rel.as_posix()))
+    return matches, path_text
+
+
 def missing_expected_files(project_dir: Path, expected_files: List[str]) -> List[str]:
     """Return expected paths that are truly absent (do not exist on disk at all)."""
     missing: List[str] = []
     for raw_path in expected_files or []:
-        resolved = _resolve_expected_path(project_dir, raw_path)
-        if resolved is None:
+        resolved_entries, label = _expand_expected_file_entry(project_dir, raw_path)
+        if not label:
             continue
-        full_path, label = resolved
-        if not full_path.exists():
+        if not resolved_entries:
+            missing.append(label)
+            continue
+        if not any(full_path.exists() for full_path, _ in resolved_entries):
             missing.append(label)
         # Directories are not deliverable files — skip silently.
     return missing
@@ -238,28 +265,28 @@ def stub_expected_files(project_dir: Path, expected_files: List[str]) -> List[st
     """
     stubs: List[str] = []
     for raw_path in expected_files or []:
-        resolved = _resolve_expected_path(project_dir, raw_path)
-        if resolved is None:
+        resolved_entries, _ = _expand_expected_file_entry(project_dir, raw_path)
+        if not resolved_entries:
             continue
-        full_path, label = resolved
-        if not full_path.exists() or full_path.is_dir():
-            continue
-        if _is_allowed_empty_sentinel_file(full_path):
-            continue
-        size = full_path.stat().st_size
-        if size == 0:
-            stubs.append(label)
-            continue
-        if size < _MIN_MEANINGFUL_BYTES:
-            try:
-                content = full_path.read_text(errors="replace").strip()
-                if not content or all(
-                    line.strip().startswith("#") or not line.strip()
-                    for line in content.splitlines()
-                ):
-                    stubs.append(label)
-            except OSError:
-                pass
+        for full_path, label in resolved_entries:
+            if not full_path.exists() or full_path.is_dir():
+                continue
+            if _is_allowed_empty_sentinel_file(full_path):
+                continue
+            size = full_path.stat().st_size
+            if size == 0:
+                stubs.append(label)
+                continue
+            if size < _MIN_MEANINGFUL_BYTES:
+                try:
+                    content = full_path.read_text(errors="replace").strip()
+                    if not content or all(
+                        line.strip().startswith("#") or not line.strip()
+                        for line in content.splitlines()
+                    ):
+                        stubs.append(label)
+                except OSError:
+                    pass
     return stubs
 
 
@@ -321,6 +348,11 @@ def execute_verification_command(
             for part in [completed.stdout.strip(), completed.stderr.strip()]
             if part
         ).strip()
+        if completed.returncode != 0 and not output:
+            output = (
+                "Verification command failed with return code "
+                f"{completed.returncode}: {raw_command}"
+            )
         success = _verification_success(
             project_dir=project_dir,
             raw_command=raw_command,
@@ -383,6 +415,10 @@ def assess_step_execution(
     verification_output = str(step_result.get("verification_output", "") or "")
 
     expected_files = step.get("expected_files", []) or []
+    if step_result.get(
+        "skip_declared_verification"
+    ) and ValidatorService._step_is_readonly_inspection(step):
+        expected_files = []
     stub_files: List[str] = []
 
     if step_status == "success":

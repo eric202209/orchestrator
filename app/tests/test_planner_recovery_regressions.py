@@ -69,6 +69,44 @@ def test_planner_marks_architecture_inspection_as_review_only():
     assert parsed[0].execution_profile == "review_only"
 
 
+def test_planner_canonicalizes_partial_scope_aliases():
+    parsed = PlannerService.parse_markdown(
+        """
+## Task List
+- [ ] TASK_START: Plan recovery | Decide the bounded repair approach only. | order=1 | profile=plan_only
+- [ ] TASK_START: Validate recovery | Run focused verification only. | order=2 | profile=validate_only
+"""
+    )
+
+    assert [task.execution_profile for task in parsed] == [
+        "review_only",
+        "test_only",
+    ]
+    assert [task.workflow_stage for task in parsed] == [
+        "plan",
+        "validate",
+    ]
+
+
+def test_planner_preserves_explicit_workflow_stage_separate_from_execution_profile():
+    parsed = PlannerService.parse_markdown(
+        """
+## Task List
+- [ ] TASK_START: Plan bounded recovery approach | Decide the repair shape only. | order=1 | stage=plan | profile=review_only
+- [ ] TASK_START: Review recovery outcome | Audit evidence before continuing. | order=2 | stage=complete | profile=review_only
+"""
+    )
+
+    assert [task.execution_profile for task in parsed] == [
+        "review_only",
+        "review_only",
+    ]
+    assert [task.workflow_stage for task in parsed] == [
+        "plan",
+        "complete",
+    ]
+
+
 def test_build_task_execution_prompt_includes_failure_recovery_context():
     task = Task(
         title="Inspect current project architecture",

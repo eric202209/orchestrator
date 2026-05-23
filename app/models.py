@@ -70,6 +70,7 @@ class Task(Base):
     description = Column(Text, nullable=True)
     status = Column(Enum(TaskStatus), default=TaskStatus.PENDING)
     execution_profile = Column(String(30), default="full_lifecycle")
+    workflow_stage = Column(String(30), nullable=True)
     priority = Column(Integer, default=0)  # Higher = more important
     plan_position = Column(Integer, nullable=True, index=True)
     estimated_effort = Column(String(50), nullable=True)

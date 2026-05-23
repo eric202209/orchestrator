@@ -738,6 +738,170 @@ def test_planning_validation_failure_records_planning_validation_and_failure_kno
     assert sorted(phases) == ["failure", "planning", "validation"]
 
 
+def test_immediate_stale_replace_repair_uses_validation_knowledge(
+    mem_db, tmp_path, monkeypatch
+):
+    project, session, task, link, item = _seed_db(mem_db)
+    (tmp_path / "index.html").write_text("<main><h1>Garden Story</h1></main>\n")
+    stale_plan = [
+        {
+            "step_number": 1,
+            "description": "Update existing image reference",
+            "commands": [],
+            "verification": 'python -c "import sys; sys.exit(0)"',
+            "rollback": None,
+            "expected_files": ["index.html"],
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "index.html",
+                    "old": '<img src="images/',
+                    "new": '<img src="images/',
+                }
+            ],
+        }
+    ]
+    repaired_plan = [
+        {
+            "step_number": 1,
+            "description": "Verify existing page",
+            "commands": [
+                "python -c \"import pathlib; assert pathlib.Path('index.html').exists()\""
+            ],
+            "verification": "python -c \"import pathlib; assert pathlib.Path('index.html').exists()\"",
+            "rollback": None,
+            "expected_files": ["index.html"],
+        }
+    ]
+    planning_ctx = _knowledge_ctx_for(item)
+    validation_ctx = KnowledgeContext(
+        retrieved_items=planning_ctx.retrieved_items,
+        query="Plan immediate repair issue",
+        trigger_phase="validation",
+        retrieval_reason="failure_signature_match",
+        confidence=0.92,
+        matched_failure_memory=True,
+        recommended_action=RecommendedAction.adjust_format,
+    )
+    ctx = _build_ctx(mem_db, session, task, link, item)
+    ctx.orchestration_state.project_dir = tmp_path
+
+    async def _execute_task(*args, **kwargs):
+        return {"status": "completed", "output": json.dumps(stale_plan)}
+
+    ctx.runtime_service.execute_task = _execute_task
+    ctx.error_handler.attempt_json_parsing = lambda output, **kwargs: (
+        True,
+        json.loads(output),
+        "json",
+    )
+
+    def _retrieve_by_phase(*args, **kwargs):
+        if kwargs.get("trigger_phase") == "validation":
+            return validation_ctx
+        return planning_ctx
+
+    captured_repair: dict[str, object] = {}
+
+    def _repair_output(cls, *args, **kwargs):
+        captured_repair.update(kwargs)
+        return {"output": json.dumps(repaired_plan)}
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow._retrieve_knowledge",
+        _retrieve_by_phase,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.assemble_planning_prompt",
+        lambda *a, **kw: "mock planning prompt",
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.append_orchestration_event",
+        lambda *a, **kw: {},
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.write_orchestration_state_snapshot",
+        lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.emit_phase_event",
+        lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.record_validation_verdict",
+        lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow.maybe_emit_divergence_detected",
+        lambda *a, **kw: None,
+    )
+
+    from app.services.orchestration.planning.planner import PlannerService
+    from app.services.orchestration.validation.validator import ValidatorService
+
+    monkeypatch.setattr(
+        PlannerService,
+        "should_start_with_minimal_prompt",
+        staticmethod(lambda *a, **kw: False),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "repair_output",
+        classmethod(_repair_output),
+    )
+    monkeypatch.setattr(
+        ValidatorService,
+        "validate_plan",
+        staticmethod(
+            lambda *a, **kw: type(
+                "Verdict",
+                (),
+                {
+                    "accepted": True,
+                    "warning": False,
+                    "status": "accepted",
+                    "reasons": [],
+                    "details": {},
+                    "verdict": {"status": "accepted"},
+                },
+            )()
+        ),
+    )
+    monkeypatch.setattr(
+        ValidatorService,
+        "validate_reasoning_artifact",
+        staticmethod(
+            lambda *a, **kw: type(
+                "Verdict",
+                (),
+                {"accepted": True, "status": "accepted", "reasons": []},
+            )()
+        ),
+    )
+
+    result = execute_planning_phase(
+        ctx=ctx,
+        workspace_review={},
+        extract_structured_text=lambda x: str(x),
+        extract_plan_steps=lambda value: value if isinstance(value, list) else None,
+        looks_like_truncated_multistep_plan=lambda text, plan: False,
+        normalize_plan_with_live_logging=lambda *a, **kw: a[3],
+        workspace_violation_error_cls=RuntimeError,
+    )
+
+    assert result == {"status": "completed"}
+    assert captured_repair["knowledge_context"] is validation_ctx
+    assert captured_repair["reason"].startswith("plan_contains_immediate_repair_issues")
+    logs = (
+        mem_db.query(KnowledgeUsageLog)
+        .filter_by(session_id=session.id, task_id=task.id, trigger_phase="validation")
+        .all()
+    )
+    assert len(logs) == 1
+    assert logs[0].retrieval_reason == "failure_signature_match"
+    assert logs[0].used_in_prompt is True
+
+
 def test_oversized_planning_repair_prompt_skips_repair_and_records_failure_knowledge(
     mem_db, monkeypatch
 ):
