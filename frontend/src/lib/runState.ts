@@ -142,8 +142,8 @@ export function getRunStateDisplay(state: ProductRunState): ProductRunStateDispl
     case 'running':
     default:
       return {
-        label: 'Queued / Running',
-        description: 'Work is queued or in progress.',
+        label: 'Active',
+        description: 'Work is not in a terminal state.',
         badgeClass: 'border-sky-500/30 bg-sky-500/10 text-sky-300',
       };
   }

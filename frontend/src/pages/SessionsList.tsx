@@ -8,6 +8,7 @@ import {
   Terminal,
   Clock,
   Search,
+  Activity,
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { EmptyState, Skeleton } from '../components/ui';
@@ -49,6 +50,52 @@ const getSessionTime = (session: Session): number => {
     session.started_at ||
     session.created_at;
   return candidate ? new Date(candidate).getTime() : 0;
+};
+
+const activeSortRank = (session: Session, tasks: Task[]): number => {
+  const statusKey = session.status?.toLowerCase() || '';
+  const sessionTasks = tasks.filter((task) => task.session_id === session.id);
+  if (sessionTasks.some((task) => task.status === 'running')) return 0;
+  if (statusKey === 'running') return 1;
+  if (statusKey === 'pending' || sessionTasks.some((task) => task.status === 'pending')) return 2;
+  if (statusKey === 'awaiting_input') return 3;
+  if (statusKey === 'paused') return 4;
+  return 5;
+};
+
+const getSessionActivityDisplay = (session: Session, tasks: Task[]) => {
+  const statusKey = session.status?.toLowerCase() || '';
+  const sessionTasks = tasks.filter((task) => task.session_id === session.id);
+  const runningTask = sessionTasks.find((task) => task.status === 'running');
+  const queuedTask = sessionTasks.find((task) => task.status === 'pending');
+  const baseRunState = deriveRunStateFromSession(session);
+  const baseDisplay = getRunStateDisplay(baseRunState);
+
+  if (runningTask) {
+    return {
+      ...baseDisplay,
+      label: 'Running',
+      description: runningTask.title,
+    };
+  }
+
+  if (statusKey === 'running') {
+    return {
+      ...baseDisplay,
+      label: queuedTask ? 'Queued' : 'Running',
+      description: queuedTask?.title || 'Worker is preparing the next task.',
+    };
+  }
+
+  if (statusKey === 'pending' || queuedTask) {
+    return {
+      ...baseDisplay,
+      label: 'Queued',
+      description: queuedTask?.title || 'Waiting for execution to start.',
+    };
+  }
+
+  return baseDisplay;
 };
 
 const matchesSessionFilter = (session: Session, filter: SessionFilter): boolean => {
@@ -126,7 +173,13 @@ function SessionsList() {
         `${session.name || ''} ${session.description || ''} ${project?.name || ''}`.toLowerCase();
       return !query.trim() || haystack.includes(query.trim().toLowerCase());
     })
-    .sort((a, b) => getSessionTime(b) - getSessionTime(a));
+    .sort((a, b) => {
+      const aTasks = tasksByProject[a.project_id] || [];
+      const bTasks = tasksByProject[b.project_id] || [];
+      const rankDelta = activeSortRank(a, aTasks) - activeSortRank(b, bTasks);
+      if (rankDelta !== 0) return rankDelta;
+      return getSessionTime(b) - getSessionTime(a);
+    });
 
   return (
     <div className="space-y-6">
@@ -208,7 +261,8 @@ function SessionsList() {
             const statusKey = session.status?.toLowerCase() || '';
             const accentClass = sessionAccentClasses[statusKey] || 'border-l-slate-600';
             const isMuted = mutedSessionStatuses.has(statusKey);
-            const runDisplay = getRunStateDisplay(deriveRunStateFromSession(session));
+            const sessionTasks = tasksByProject[session.project_id] || [];
+            const runDisplay = getSessionActivityDisplay(session, sessionTasks);
             return (
               <Link
                 key={session.id}
@@ -224,6 +278,12 @@ function SessionsList() {
                     <span className={`rounded-full border px-2.5 py-0.5 text-xs font-medium ${runDisplay.badgeClass}`}>
                       {runDisplay.label}
                     </span>
+                    {runDisplay.label === 'Running' && (
+                      <span className="inline-flex items-center gap-1 rounded-full border border-sky-400/30 bg-sky-400/10 px-2 py-0.5 text-[11px] font-medium text-sky-200">
+                        <Activity className="h-3 w-3" />
+                        Current
+                      </span>
+                    )}
                     {isLegacySession && (
                       <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-300">
                         Diagnostics
@@ -236,6 +296,11 @@ function SessionsList() {
                   {session.description && (
                     <p className="mt-1 line-clamp-1 text-xs text-slate-400">
                       {session.description}
+                    </p>
+                  )}
+                  {activeSessionStatuses.has(statusKey) && runDisplay.description && (
+                    <p className="mt-1 truncate text-xs text-sky-200/80">
+                      {runDisplay.description}
                     </p>
                   )}
                 </div>

@@ -7,6 +7,7 @@
 #   --no-frontend     skip frontend dev server
 #   --backend-only    same as --no-frontend
 #   --skip-ollama     skip Ollama check (if already running)
+#   --ingest-knowledge ingest knowledge/ into the active Docker SQLite/Qdrant runtime
 
 set -euo pipefail
 
@@ -89,11 +90,13 @@ fi
 CHECK_ONLY=false
 NO_FRONTEND=false
 SKIP_OLLAMA=false
+INGEST_KNOWLEDGE=false
 for arg in "$@"; do
     case $arg in
         --check) CHECK_ONLY=true ;;
         --no-frontend|--backend-only) NO_FRONTEND=true ;;
         --skip-ollama) SKIP_OLLAMA=true ;;
+        --ingest-knowledge) INGEST_KNOWLEDGE=true ;;
         *) fail "Unknown option: $arg" ;;
     esac
 done
@@ -114,6 +117,44 @@ wait_port() {
         info "Waiting for $label on port $port... (${elapsed}s)"
     done
     return 1
+}
+
+docker_knowledge_ingest_command() {
+    echo "docker compose -f $COMPOSE_FILE exec -T orchestrator python scripts/ingest_knowledge.py --source-dir /app --qdrant-url http://qdrant:6333"
+}
+
+maybe_ingest_knowledge() {
+    local candidate_count
+    if [ -d "$ORCHESTRATOR_DIR/knowledge" ]; then
+        candidate_count=$(find "$ORCHESTRATOR_DIR/knowledge" -type f \( -name '*.md' -o -name '*.json' \) 2>/dev/null | wc -l | tr -d ' ')
+    else
+        candidate_count=0
+    fi
+    if [ "${candidate_count:-0}" -eq 0 ]; then
+        info "No knowledge files found under $ORCHESTRATOR_DIR/knowledge"
+        return 0
+    fi
+
+    local ingest_cmd
+    ingest_cmd="$(docker_knowledge_ingest_command)"
+    if [ "$INGEST_KNOWLEDGE" = true ]; then
+        step "Ingesting knowledge into active Docker runtime"
+        info "$ingest_cmd"
+        docker compose -f "$COMPOSE_FILE" exec -T orchestrator \
+            python scripts/ingest_knowledge.py \
+            --source-dir /app \
+            --qdrant-url http://qdrant:6333
+        ok "Knowledge ingest command completed"
+        return 0
+    fi
+
+    local readiness
+    readiness=$(curl -sf --connect-timeout 5 "http://localhost:${BACKEND_PORT}/api/v1/admin/knowledge-readiness?probe_embedding=false" 2>/dev/null || true)
+    if [[ "$readiness" == *"knowledge_files_exist_but_sqlite_empty"* || "$readiness" == *"knowledge_files_exist_but_qdrant_empty"* ]]; then
+        warn "Knowledge files exist, but the active Docker runtime is not fully ingested."
+        warn "Run: ./wsl-start.sh --ingest-knowledge"
+        info "Equivalent command: $ingest_cmd"
+    fi
 }
 
 command_exists() {
@@ -434,6 +475,8 @@ if wait_port $BACKEND_PORT "orchestrator backend" 60; then
 else
     fail "Backend did not become healthy within 60s. Run: docker compose -f $COMPOSE_FILE logs"
 fi
+
+maybe_ingest_knowledge
 
 # ─── 4. Frontend ──────────────────────────────────────────────────────────────
 if [ "$NO_FRONTEND" = false ]; then

@@ -96,6 +96,11 @@ def test_knowledge_usage_empty(authenticated_client, db_session):
     data = resp.json()
     assert data["session_id"] == session.id
     assert data["phases"] == {}
+    assert data["knowledge_used"] is False
+    assert (
+        data["omission_reason"] == "no_retrieval_attempts_or_no_matching_items_logged"
+    )
+    assert data["phase_summaries"]["planning"]["knowledge_used"] is False
 
 
 def test_knowledge_usage_single_phase(authenticated_client, db_session):
@@ -123,6 +128,11 @@ def test_knowledge_usage_single_phase(authenticated_client, db_session):
     assert e["usage_count"] == 1
     assert e["first_used_at"] is not None
     assert e["last_used_at"] is not None
+    assert data["knowledge_used"] is True
+    assert data["phase_summaries"]["planning"]["knowledge_used"] is True
+    assert data["phase_summaries"]["planning"]["top_item_titles"] == ["Format Guide"]
+    assert data["top_items"][0]["title"] == "Format Guide"
+    assert data["top_items"][0]["phase"] == "planning"
 
 
 def test_mobile_knowledge_usage_uses_mobile_gateway_auth(

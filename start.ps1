@@ -1,6 +1,7 @@
 param(
   [switch]$Build,
   [switch]$ForceRecreate,
+  [switch]$IngestKnowledge,
   [switch]$StartOllama,
   [string]$OllamaExe = $env:OLLAMA_EXE
 )
@@ -78,6 +79,37 @@ Start-Process powershell -ArgumentList "-NoExit", "-Command", `
   "cd '$PWD'; $composeCommand"
 
 Start-Sleep -Seconds 5
+for ($i = 0; $i -lt 24; $i++) {
+  try {
+    Invoke-RestMethod -Uri "http://localhost:8080/health" -TimeoutSec 3 | Out-Null
+    break
+  } catch {
+    if ($i -eq 23) {
+      Write-Host "Backend health was not reachable before knowledge readiness check." -ForegroundColor Yellow
+    } else {
+      Start-Sleep -Seconds 2
+    }
+  }
+}
+
+$ingestCommand = "docker compose -f docker-compose.windows.yml exec -T orchestrator python scripts/ingest_knowledge.py --source-dir /app --qdrant-url http://qdrant:6333"
+if ($IngestKnowledge) {
+  Write-Host "Ingesting knowledge into active Docker runtime..." -ForegroundColor Green
+  Write-Host "Command: $ingestCommand" -ForegroundColor DarkGray
+  & docker compose -f docker-compose.windows.yml exec -T orchestrator python scripts/ingest_knowledge.py --source-dir /app --qdrant-url http://qdrant:6333
+} else {
+  try {
+    $readiness = Invoke-RestMethod -Uri "http://localhost:8080/api/v1/admin/knowledge-readiness?probe_embedding=false" -TimeoutSec 5
+    if ($readiness.warnings -contains "knowledge_files_exist_but_sqlite_empty" -or
+        $readiness.warnings -contains "knowledge_files_exist_but_qdrant_empty") {
+      Write-Host "Knowledge files exist, but the active Docker runtime is not fully ingested." -ForegroundColor Yellow
+      Write-Host "Run: .\start.ps1 -IngestKnowledge" -ForegroundColor Yellow
+      Write-Host "Equivalent command: $ingestCommand" -ForegroundColor DarkGray
+    }
+  } catch {
+    Write-Host "Knowledge readiness was not available yet; check /api/v1/admin/knowledge-readiness after startup." -ForegroundColor Yellow
+  }
+}
 
 Write-Host "Starting frontend..." -ForegroundColor Green
 $frontendRunning = (Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue) -ne $null

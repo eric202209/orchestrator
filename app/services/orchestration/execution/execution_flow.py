@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -386,7 +387,8 @@ def patch_python_verification_imports(command: str) -> str:
     if len(tokens) != 3:
         return command
     script = tokens[2]
-    if "sys." in script and "import sys" not in script:
+    imports_sys = bool(re.search(r"(^|;)\s*import\s+[^;]*\bsys\b", script))
+    if "sys." in script and not imports_sys:
         script = "import sys; " + script
         return f"{tokens[0]} -c {shlex.quote(script)}"
     return command

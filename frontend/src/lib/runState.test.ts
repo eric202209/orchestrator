@@ -41,9 +41,9 @@ describe('deriveRunState', () => {
     expect(deriveRunStateFromSession({ status: 'awaiting_input' })).toBe('running');
   });
 
-  it('maps pending sessions to the queued/running state', () => {
+  it('maps pending sessions to the active state', () => {
     expect(deriveRunStateFromSession({ status: 'pending' })).toBe('running');
-    expect(getRunStateDisplay('running').label).toBe('Queued / Running');
+    expect(getRunStateDisplay('running').label).toBe('Active');
   });
 
   it('does not map stopped sessions to running', () => {
