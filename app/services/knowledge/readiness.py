@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict
@@ -100,6 +101,27 @@ def _embedding_status() -> Dict[str, Any]:
         }
 
 
+def _running_in_container() -> bool:
+    return Path("/.dockerenv").exists() or os.environ.get("ORCHESTRATOR_IN_DOCKER") in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def _recommended_ingest_command() -> str:
+    if _running_in_container():
+        return (
+            "docker compose -f docker-compose.windows.yml exec -T orchestrator "
+            "python scripts/ingest_knowledge.py --source-dir /app "
+            "--qdrant-url http://qdrant:6333"
+        )
+    return (
+        "venv/bin/python scripts/ingest_knowledge.py --source-dir . "
+        f"--qdrant-url {settings.QDRANT_URL}"
+    )
+
+
 def knowledge_readiness_snapshot(
     db: Session, *, probe_embedding: bool = True
 ) -> Dict[str, Any]:
@@ -147,9 +169,5 @@ def knowledge_readiness_snapshot(
         "embedding": embedding,
         "last_ingest_at": last_updated.isoformat() if last_updated else None,
         "warnings": warnings,
-        "recommended_ingest_command": (
-            "docker compose -f docker-compose.windows.yml exec -T orchestrator "
-            "python scripts/ingest_knowledge.py --source-dir /app "
-            "--qdrant-url http://qdrant:6333"
-        ),
+        "recommended_ingest_command": _recommended_ingest_command(),
     }

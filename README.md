@@ -1,6 +1,6 @@
 # Orchestrator
 
-Orchestrator is a FastAPI + React control plane for AI-driven development work. It manages projects, tasks, execution sessions, change-set governance, a knowledge layer, and a mobile-facing API — with backends ranging from local OpenClaw to native Ollama to OpenAI.
+Orchestrator is a FastAPI + React control plane for AI-driven development work. It manages projects, ordered tasks, execution sessions, change-set governance, scoped knowledge retrieval, and a mobile-facing API — with backends ranging from local OpenClaw to native Ollama to OpenAI.
 
 [![Release](https://img.shields.io/github/v/release/henrycode03/orchestrator?style=flat-square&label=release&color=555555)](https://github.com/henrycode03/orchestrator/releases)
 [![Downloads](https://img.shields.io/github/downloads/henrycode03/orchestrator/total?style=flat-square&label=downloads&color=4c9be8)](https://github.com/henrycode03/orchestrator/releases)
@@ -13,7 +13,7 @@ Orchestrator is a FastAPI + React control plane for AI-driven development work. 
 
 - Plan and execute development tasks via configurable AI backends
 - Review, approve, or hold workspace changes before they are promoted
-- Retrieve relevant knowledge from Qdrant at planning time (semantic search)
+- Retrieve scoped knowledge during planning, validation, and failure handling
 - Monitor session health, outcome rates, and security events from a dashboard
 - Bridge to ClawMobile and OpenClaw via a mobile API layer
 
@@ -33,7 +33,7 @@ Orchestrator is a FastAPI + React control plane for AI-driven development work. 
 - **Multi-backend runtime** — swap AI backends via one env var (`AGENT_BACKEND`)
 - **Workflow templates** — YAML-defined governance per task shape; auto-promote or hold based on warning flags
 - **Change-set review policy** — auto_publish_all / hold_nontrivial / hold_all; full operator override trail
-- **Knowledge layer** — Qdrant vector store with Ollama or OpenAI embeddings; injected at planning time
+- **Knowledge layer** — SQLite/Qdrant runtime with task-type and failure-signature gates; session logs expose `knowledge_used`, retrieval reason, top items, and phase
 - **Security audit** — command, path, quota, and retention policy checks; shadow-mode audit on every execution
 - **Outcome classification** — terminal reasons tracked, aggregated at `/admin/outcome-rates`
 - **Production observability** — `/health`, `/ops/metrics/summary`, `/ops/backends`, Langfuse tracing optional
@@ -48,7 +48,7 @@ See the [Setup Guide](SETUP.md) for step-by-step instructions:
 - **Linux / Ubuntu** (with OpenClaw) → [Linux setup](SETUP.md#linux--ubuntu-with-openclaw)
 - **Windows** (native Ollama, no OpenClaw) → [Windows setup](SETUP.md#windows-native-ollama-no-openclaw)
 
-Linux `start.sh` runs the API, worker, and React dashboard. Windows Docker setup runs the API and `/docs`; detailed setup stays in [SETUP.md](SETUP.md).
+Linux `start.sh` runs the API, worker, Qdrant, and React dashboard as native processes. Windows/WSL Docker setup uses `docker-compose.windows.yml` for the API, worker, Redis, and Qdrant. Use the ingest command for the runtime you are actually running: native Linux uses `venv/bin/python scripts/ingest_knowledge.py --source-dir . --qdrant-url http://localhost:6333`; Docker/WSL uses `wsl-start.sh --ingest-knowledge` or `start.ps1 -IngestKnowledge`.
 
 ## Stack
 
@@ -59,7 +59,7 @@ Linux `start.sh` runs the API, worker, and React dashboard. Windows Docker setup
 | Database | SQLite (`orchestrator.db`) |
 | Queue | Redis |
 | Vector store | Qdrant |
-| Auth | JWT bearer tokens |
+| Auth | HTTP-only session cookie for dashboard routes; JWT bearer support for token/mobile flows |
 
 ## Project Layout
 
@@ -78,6 +78,7 @@ orchestrator/
 ├── docs/
 │   └── workflow-templates/       YAML workflow template definitions
 ├── frontend/src/                 React dashboard
+├── knowledge/                    Runtime knowledge source files
 ├── scripts/                      Operational helpers
 ├── SETUP.md                      Step-by-step setup guide (Linux + Windows)
 ├── docker-compose.yml            Linux: qdrant only
@@ -86,9 +87,21 @@ orchestrator/
 └── requirements.txt
 ```
 
-## Authentication
+## API and Authentication
 
-Dashboard APIs use JWT bearer tokens:
+All versioned API routes are mounted under:
+```http
+/api/v1
+```
+
+Dashboard login uses a session cookie through:
+```http
+POST /api/v1/auth/session/login
+```
+
+For compatibility with older clients, auth is also mounted at `/auth/*`, but new clients should use `/api/v1/auth/*`.
+
+Bearer tokens are still supported for token/mobile flows:
 ```http
 Authorization: Bearer <access_token>
 ```
@@ -105,11 +118,17 @@ GET /health
 ```
 Returns `200 healthy` or `503 degraded` with a per-dependency breakdown.
 
+## Workspace Paths
+
+Projects store `workspace_path` as a root-relative slug. API responses also include `resolved_workspace_path`; use that field when a script needs filesystem access. In Docker, resolved paths are under `/app/projects`. Host-side scripts should map that to the configured host project root, normally e.g. `/home/user/projects`, instead of resolving the slug against the repository checkout.
+
 ## Useful Scripts
 
 | Script | Purpose |
 |---|---|
 | `./start.sh` | Start full stack (Linux native) |
+| `./wsl-start.sh --ingest-knowledge` | Start WSL runtime and ingest `knowledge/` into Docker runtime |
+| `start.ps1 -IngestKnowledge` | Start Windows runtime and ingest `knowledge/` |
 | `./stop_all.sh` | Stop all processes |
 | `./scripts/orchestrator-mobile-api.sh` | Query mobile API from shell |
 | `./scripts/security_check.sh` | Run security audit |
@@ -121,14 +140,16 @@ Returns `200 healthy` or `503 degraded` with a per-dependency breakdown.
 |---|---|
 | `SECRET_KEY is unset` | Set a real `SECRET_KEY` in `.env` |
 | API calls fail from frontend | Check `VITE_API_URL` and `logs/backend.log` |
+| Login calls hit `/auth/session/login` | Rebuild/restart backend/frontend; current frontend normalizes API base to `/api/v1`, and backend keeps `/auth/*` as compatibility |
 | Celery jobs don't run | Confirm Redis is up; check `logs/worker.log` |
+| Project files appear inside repo checkout | Use API `resolved_workspace_path`; do not resolve relative `workspace_path` against the current shell directory |
 | Ollama not reachable from container | Set `OLLAMA_HOST=0.0.0.0` on Windows host |
 | Mobile status pages empty | Set `MOBILE_GATEWAY_API_KEY` in `.env` |
 | OpenClaw operations fail | Confirm `OPENCLAW_GATEWAY_URL` points to port `8000`, not `8001` |
 
 ---
 
-**Last updated: 2026-05-16**
+**Last updated: 2026-05-23**
 
 <p align="center">
   <a href="https://github.com/henrycode03/orchestrator/stargazers">

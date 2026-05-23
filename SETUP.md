@@ -77,6 +77,11 @@ Open the dashboard, go to the register page, and create your account.
 The Settings `workspace_root` value must be the path visible to the running backend process.
 
 - Linux native: use the real Linux projects path, e.g. `/home/yourname/projects`.
+- OpenClaw may run inside one of the container, and Orchestrator itself runs 
+  as a normal project under the OpenClaw workspace. When you login to Dashboard, 
+  at Settings page, set `workspace_root` to the projects root e.g.
+  (`~/.openclaw/workspace/vault/projects`), not to Docker `/app/projects` and
+  not to the Orchestrator repo directory.
 - Each device should set `WORKSPACE_ROOT` in `.env` to its own host-visible
   projects directory. This is model/backend neutral and applies to OpenClaw,
   Ollama, and llama.cpp deployments:
@@ -85,8 +90,12 @@ The Settings `workspace_root` value must be the path visible to the running back
 WORKSPACE_ROOT=/home/yourname/projects
 ```
 
-- Docker installs can keep Settings `workspace_root=/app/projects`; that
-  container path is mapped from the host path configured for that device.
+Project API responses store `workspace_path` as a project-root-relative slug
+and also return `resolved_workspace_path` for scripts that need filesystem
+access. On Linux native/OpenClaw, `resolved_workspace_path` should already be a
+host-visible path. On Docker/WSL, map Docker `/app/projects/...` back to the
+configured host projects root when seeding files outside Docker. Do not resolve
+the relative slug against the orchestrator repo checkout.
 
 ### Model selection
 
@@ -130,6 +139,26 @@ ollama pull nomic-embed-text
 ```
 
 If Ollama is not installed, set `EMBEDDING_PROVIDER=openai` and provide `OPENAI_API_KEY`.
+
+For Linux native/OpenClaw installs, ingest `knowledge/` into the same local
+SQLite/Qdrant runtime started by `start.sh`:
+
+```bash
+venv/bin/python scripts/ingest_knowledge.py --source-dir . --qdrant-url http://localhost:6333
+```
+
+For Docker/WSL installs, use the Docker-specific startup flags below instead
+so ingest targets the active container runtime rather than a host-side database:
+
+```bash
+./wsl-start.sh --ingest-knowledge
+```
+
+On Windows PowerShell:
+
+```powershell
+.\start.ps1 -IngestKnowledge
+```
 
 ## Alpha Operator Verification Path
 
@@ -304,6 +333,13 @@ export WORKSPACE_ROOT=/home/yourname/projects
 docker compose -f docker-compose.windows.yml up --build
 ```
 
+To ingest local `knowledge/` into the active Docker runtime during startup,
+use:
+
+```powershell
+.\start.ps1 -IngestKnowledge
+```
+
 **6. Open the API**
 
 | Service | URL |
@@ -334,6 +370,8 @@ curl -s -X POST http://localhost:8080/api/v1/auth/register \
 **9. Configure workspace**
 
 In Settings, set `workspace_root` to `/app/projects` (the container path, not the host path).
+API responses include both the stored relative `workspace_path` and the runtime
+`resolved_workspace_path` under `/app/projects/...`.
 
 ### Stopping
 
@@ -703,6 +741,12 @@ LLAMA_EXE_WIN="/mnt/d/AI/llama.cpp/llama-server.exe" \
 ./wsl-start.sh --backend-only
 ```
 
+To ingest `knowledge/` into the active Docker runtime while starting, run:
+
+```bash
+./wsl-start.sh --ingest-knowledge --backend-only
+```
+
 First build takes several minutes. Verify all containers are up:
 
 ```bash
@@ -750,6 +794,8 @@ In the dashboard Settings, set `workspace_root` to:
 ```
 
 This is the container-internal path. The host path (`~/projects`) is mapped via `WORKSPACE_ROOT` in `.env`.
+API responses include `resolved_workspace_path=/app/projects/...`; map that
+path to `~/projects/...` for host-side setup scripts.
 
 ---
 
@@ -822,6 +868,8 @@ Kill llama-server: `Ctrl+C` in the PowerShell window running it.
 | Overnight test fails silently | Sleep/suspend triggered; confirm `powercfg` settings |
 | Inference unstable | Overlay software conflict; disable all overlays before testing |
 | `WORKSPACE_ROOT` error on compose up | Run `export WORKSPACE_ROOT=...` before `docker compose` command |
+| Project files appear inside repo checkout | Use API `resolved_workspace_path`; do not resolve relative `workspace_path` against the current shell directory |
+| Login calls hit `/auth/session/login` | Current backend keeps `/auth/*` as compatibility, but new frontend/API clients should use `/api/v1/auth/*` |
 
 ---
 

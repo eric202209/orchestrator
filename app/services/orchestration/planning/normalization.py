@@ -293,6 +293,17 @@ def _materialized_write_paths(step: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
+def _set_ops_preserving_absence(
+    step: dict[str, Any], ops: list[dict[str, Any]]
+) -> None:
+    """Store ops only when the source step had ops or normalization created ops."""
+
+    if ops or "ops" in step:
+        step["ops"] = ops
+    else:
+        step.pop("ops", None)
+
+
 def _workspace_file_paths(project_dir: Path) -> list[str]:
     paths: list[str] = []
     for path in project_dir.rglob("*"):
@@ -446,7 +457,7 @@ def normalize_existing_file_target_plan(
                 rewritten_op["path"] = rewritten_path
                 changed = True
             ops.append(rewritten_op)
-        updated["ops"] = ops
+        _set_ops_preserving_absence(updated, ops)
 
         expected_files = []
         for path in updated.get("expected_files") or []:
@@ -628,7 +639,7 @@ def normalize_stale_replace_ops_to_small_file_writes(
             converted_paths.append(path_text)
             changed = True
             ops.append(rewritten_op)
-        updated["ops"] = ops
+        _set_ops_preserving_absence(updated, ops)
         normalized.append(updated)
 
     return normalized, {
@@ -794,7 +805,7 @@ def normalize_existing_static_site_plan(
                 expected_files.append(rewritten)
         updated["expected_files"] = expected_files
 
-        updated["ops"] = ops
+        _set_ops_preserving_absence(updated, ops)
         for op in ops:
             if str(op.get("op") or "") not in {
                 "append_file",
@@ -952,7 +963,7 @@ def complete_repaired_plan_contract(
             updated["rollback"] = "true"
             changed = True
 
-        updated["ops"] = ops
+        _set_ops_preserving_absence(updated, ops)
         updated["expected_files"] = expected_files
         completed.append(updated)
 
