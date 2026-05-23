@@ -105,6 +105,7 @@ from app.services.orchestration.reporting.replay import reconstruct_execution_st
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
+from app.services.workspace.system_settings import model_lane_snapshot
 from app.services.session.session_lifecycle_service import (
     reconcile_terminal_running_sessions,
 )
@@ -206,6 +207,9 @@ def create_session(
     db_session.instance_id = str(
         uuid.uuid4()
     )  # Generate unique instance ID immediately
+    lane = model_lane_snapshot(db)
+    db_session.model_lane_label = lane.get("label")
+    db_session.model_lane_metadata = lane
     db.add(db_session)
     db.flush()
 

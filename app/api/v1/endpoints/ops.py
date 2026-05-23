@@ -164,6 +164,7 @@ def ops_metrics_summary(
         return {
             "phase_latency": mc.phase_latency(days=days),
             "repair": mc.repair_stats(days=days),
+            "model_lanes": mc.model_lane_distribution(days=days),
             "retry_distribution": mc.retry_distribution(days=days),
             "review_policy_outcomes": mc.review_policy_outcomes(days=days),
             "operator_decisions": mc.operator_decisions(days=days),

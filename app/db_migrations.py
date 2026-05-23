@@ -683,6 +683,22 @@ def _migration_014_task_workflow_stage(engine: Engine) -> None:
             )
 
 
+def _migration_015_session_model_lane(engine: Engine) -> None:
+    if "sessions" not in _table_names(engine):
+        return
+    statements: list[str] = []
+    if not _has_column(engine, "sessions", "model_lane_label"):
+        statements.append(
+            "ALTER TABLE sessions ADD COLUMN model_lane_label VARCHAR(64)"
+        )
+    if not _has_column(engine, "sessions", "model_lane_metadata"):
+        statements.append("ALTER TABLE sessions ADD COLUMN model_lane_metadata JSON")
+    if statements:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -753,6 +769,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="014_task_workflow_stage",
         description="Add optional Project Architect workflow stage to tasks",
         upgrade=_migration_014_task_workflow_stage,
+    ),
+    Migration(
+        version="015_session_model_lane",
+        description="Add model-lane reporting metadata to sessions",
+        upgrade=_migration_015_session_model_lane,
     ),
 )
 

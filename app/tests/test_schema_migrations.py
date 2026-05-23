@@ -99,7 +99,13 @@ def test_schema_migrations_add_required_columns_and_indexes(tmp_path):
         "task_subfolder",
         "template_id",
     } <= task_columns
-    assert {"deleted_at", "instance_id", "execution_mode"} <= session_columns
+    assert {
+        "deleted_at",
+        "instance_id",
+        "execution_mode",
+        "model_lane_label",
+        "model_lane_metadata",
+    } <= session_columns
     assert {"log_metadata", "session_instance_id"} <= log_columns
     assert "ix_sessions_project_name_active" in session_indexes
     assert {

@@ -52,6 +52,12 @@ const getSessionTime = (session: Session): number => {
   return candidate ? new Date(candidate).getTime() : 0;
 };
 
+const formatModelLane = (session: Session): string => {
+  const label = session.model_lane_label || session.model_lane_metadata?.label;
+  if (!label) return 'unknown lane';
+  return label.replace(/_/g, ' ');
+};
+
 const activeSortRank = (session: Session, tasks: Task[]): number => {
   const statusKey = session.status?.toLowerCase() || '';
   const sessionTasks = tasks.filter((task) => task.session_id === session.id);
@@ -309,6 +315,9 @@ function SessionsList() {
                   <p className="truncate text-slate-300">{project?.name || 'Unknown project'}</p>
                   <p className="mt-1 text-slate-400">
                     {session.execution_mode ? `${session.execution_mode} mode` : 'workflow session'}
+                  </p>
+                  <p className="mt-1 truncate text-slate-500">
+                    {formatModelLane(session)}
                   </p>
                 </div>
 

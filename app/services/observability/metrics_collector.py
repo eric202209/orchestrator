@@ -15,6 +15,7 @@ from app.models import (
     KnowledgeUsageLog,
     LogEntry,
     Project,
+    Session,
     TaskExecution,
     TaskExecutionChangeSet,
     TaskStatus,
@@ -211,6 +212,39 @@ class MetricsCollector:
                 round(success_count / repair_count, 3) if repair_count > 0 else None
             ),
             "total_repair_events": total_events,
+        }
+
+    # ------------------------------------------------------------------
+    # Model lane distribution
+    # ------------------------------------------------------------------
+
+    def model_lane_distribution(self, days: int = 7) -> dict[str, Any]:
+        cutoff = self._cutoff(days)
+        rows = (
+            self.db.query(Session.model_lane_label, Session.model_lane_metadata)
+            .filter(Session.created_at >= cutoff, Session.deleted_at.is_(None))
+            .all()
+        )
+
+        labels: dict[str, int] = {}
+        capability_tiers: dict[str, int] = {}
+        unknown_count = 0
+
+        for label, metadata in rows:
+            normalized_label = str(label or "").strip() or "unknown"
+            labels[normalized_label] = labels.get(normalized_label, 0) + 1
+            if normalized_label == "unknown":
+                unknown_count += 1
+
+            meta = metadata if isinstance(metadata, dict) else _parse_meta(metadata)
+            tier = str(meta.get("capability_tier") or "").strip() or "unknown"
+            capability_tiers[tier] = capability_tiers.get(tier, 0) + 1
+
+        return {
+            "total_sessions": len(rows),
+            "labels": labels,
+            "capability_tiers": capability_tiers,
+            "unknown_count": unknown_count,
         }
 
     # ------------------------------------------------------------------

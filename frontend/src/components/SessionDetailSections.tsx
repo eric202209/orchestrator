@@ -548,6 +548,12 @@ interface SessionHeaderProps {
   actionButtons: ReactNode;
 }
 
+const formatModelLaneLabel = (session: Session): string => {
+  const label = session.model_lane_label || session.model_lane_metadata?.label;
+  if (!label) return 'unknown lane';
+  return label.replace(/_/g, ' ');
+};
+
 export function SessionHeader({
   project,
   session,
@@ -579,6 +585,12 @@ export function SessionHeader({
               <ExternalLink className="inline h-4 w-4" />
             </a>
           )}
+        </p>
+        <p className="mt-1 text-xs text-slate-500">
+          {formatModelLaneLabel(session)}
+          {session.model_lane_metadata?.capability_tier
+            ? ` • ${session.model_lane_metadata.capability_tier.replace(/_/g, ' ')}`
+            : ''}
         </p>
       </div>
       {actionButtons}

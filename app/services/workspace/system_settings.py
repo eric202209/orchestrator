@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db_session
 from app.models import SystemSetting
 
@@ -210,6 +211,66 @@ def get_effective_workspace_review_policy(
         WORKSPACE_REVIEW_POLICY_KEY, default_policy, db=db
     )
     return normalize_workspace_review_policy(policy)
+
+
+def classify_model_lane(
+    *, backend: str, model_family: str, adaptation_profile: str
+) -> Dict[str, Any]:
+    backend_normalized = str(backend or "").strip().lower()
+    model_normalized = str(model_family or "").strip().lower()
+    adaptation_normalized = str(adaptation_profile or "").strip().lower()
+    reasons: List[str] = []
+
+    if "openai" in backend_normalized:
+        label = "hosted_openai"
+        capability_tier = "hosted"
+        reasons.append("Hosted OpenAI backend")
+    elif "ollama" in backend_normalized:
+        label = "local_ollama"
+        capability_tier = "local_default"
+        reasons.append("Local Ollama backend")
+    elif "llama" in backend_normalized:
+        label = "local_llama"
+        capability_tier = "local_constrained"
+        reasons.append("Local llama.cpp-style backend")
+    elif "openclaw" in backend_normalized:
+        label = "local_openclaw"
+        capability_tier = "local_default"
+        reasons.append("Local OpenClaw backend")
+    else:
+        safe_backend = backend_normalized.replace("-", "_") or "unknown"
+        label = f"backend_{safe_backend}"
+        capability_tier = "unknown"
+        reasons.append("Unclassified backend")
+
+    constrained_markers = ("7b", "8b", "13b", "14b", "q4", "q5", "low")
+    if any(marker in model_normalized for marker in constrained_markers):
+        capability_tier = "local_constrained"
+        reasons.append("Model name suggests constrained local capacity")
+
+    if "compact" in adaptation_normalized or "low" in adaptation_normalized:
+        capability_tier = "local_constrained"
+        reasons.append("Adaptation profile uses compact/low-resource mode")
+
+    return {
+        "label": label,
+        "capability_tier": capability_tier,
+        "backend": backend,
+        "model_family": model_family,
+        "adaptation_profile": adaptation_profile,
+        "reasons": reasons,
+    }
+
+
+def model_lane_snapshot(db: Optional[Session] = None) -> Dict[str, Any]:
+    backend = get_effective_agent_backend(settings.AGENT_BACKEND, db=db)
+    model_family = get_effective_agent_model_family(settings.AGENT_MODEL, db=db)
+    adaptation_profile = get_effective_adaptation_profile(db=db)
+    return classify_model_lane(
+        backend=backend,
+        model_family=model_family,
+        adaptation_profile=adaptation_profile,
+    )
 
 
 def diagnose_runtime_lane(db: Optional[Session] = None) -> Dict[str, Any]:

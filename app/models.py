@@ -141,6 +141,8 @@ class Session(Base):
         String(36), nullable=True, index=True
     )  # UUID for session versioning
     escalation_backend_id = Column(String(64), nullable=True)
+    model_lane_label = Column(String(64), nullable=True)
+    model_lane_metadata = Column(JSON, nullable=True)
 
     __table_args__ = (
         Index(

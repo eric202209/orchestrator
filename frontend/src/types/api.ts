@@ -107,6 +107,15 @@ export interface Session {
   // Instance tracking for preventing ID reuse issues
   instance_id?: string | null;
   deleted_at?: string | null;
+  model_lane_label?: string | null;
+  model_lane_metadata?: {
+    label?: string;
+    capability_tier?: string;
+    backend?: string;
+    model_family?: string;
+    adaptation_profile?: string;
+    reasons?: string[];
+  } | null;
 }
 
 export interface Plan {

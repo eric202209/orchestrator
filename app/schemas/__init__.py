@@ -255,6 +255,8 @@ class SessionResponse(SessionBase):
     updated_at: Optional[datetime] = None
     instance_id: Optional[str] = None
     deleted_at: Optional[datetime] = None
+    model_lane_label: Optional[str] = None
+    model_lane_metadata: Optional[dict[str, Any]] = None
 
 
 # Log Entry Schemas

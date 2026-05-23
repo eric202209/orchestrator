@@ -102,6 +102,16 @@ class TestMetricsCollectorEmptyDB:
         assert result["repair_success_rate"] is None
         assert result["total_repair_events"] == 0
 
+    def test_model_lane_distribution_empty(self, mem_db):
+        mc = MetricsCollector(mem_db)
+        result = mc.model_lane_distribution(days=1)
+        assert result == {
+            "total_sessions": 0,
+            "labels": {},
+            "capability_tiers": {},
+            "unknown_count": 0,
+        }
+
     def test_retry_distribution_empty(self, mem_db):
         mc = MetricsCollector(mem_db)
         result = mc.retry_distribution(days=7)
@@ -560,6 +570,44 @@ class TestMetricsCollectorWithData:
         assert result["sessions_with_repair"] == 1  # one session, two events
         assert result["total_repair_events"] == 2
 
+    def test_model_lane_distribution_counts_labels_and_tiers(self, mem_db):
+        _, project, _, _ = _seed_basic(mem_db)
+        mem_db.add_all(
+            [
+                SessionModel(
+                    name="hosted",
+                    project_id=project.id,
+                    status="completed",
+                    model_lane_label="hosted_openai",
+                    model_lane_metadata={"capability_tier": "hosted"},
+                ),
+                SessionModel(
+                    name="local",
+                    project_id=project.id,
+                    status="completed",
+                    model_lane_label="local_openclaw",
+                    model_lane_metadata={"capability_tier": "local_constrained"},
+                ),
+                SessionModel(
+                    name="legacy",
+                    project_id=project.id,
+                    status="completed",
+                ),
+            ]
+        )
+        mem_db.commit()
+
+        result = MetricsCollector(mem_db).model_lane_distribution(days=1)
+
+        assert result["total_sessions"] == 4
+        assert result["labels"]["hosted_openai"] == 1
+        assert result["labels"]["local_openclaw"] == 1
+        assert result["labels"]["unknown"] == 2
+        assert result["capability_tiers"]["hosted"] == 1
+        assert result["capability_tiers"]["local_constrained"] == 1
+        assert result["capability_tiers"]["unknown"] == 2
+        assert result["unknown_count"] == 2
+
 
 # ---------------------------------------------------------------------------
 # Ops endpoint integration tests
@@ -614,6 +662,7 @@ class TestOpsMetricsSummaryEndpoint:
             w = body[window]
             assert "phase_latency" in w
             assert "repair" in w
+            assert "model_lanes" in w
             assert "retry_distribution" in w
             assert "review_policy_outcomes" in w
             assert "operator_decisions" in w
@@ -638,6 +687,14 @@ class TestOpsMetricsSummaryEndpoint:
         assert "sessions_repair_succeeded" in repair
         assert "repair_success_rate" in repair
         assert "total_repair_events" in repair
+
+    def test_metrics_summary_model_lane_shape(self, authenticated_client):
+        body = authenticated_client.get("/api/v1/ops/metrics/summary").json()
+        model_lanes = body["last_24h"]["model_lanes"]
+        assert "total_sessions" in model_lanes
+        assert "labels" in model_lanes
+        assert "capability_tiers" in model_lanes
+        assert "unknown_count" in model_lanes
 
     def test_metrics_summary_requires_auth(self, api_client):
         resp = api_client.get("/api/v1/ops/metrics/summary")

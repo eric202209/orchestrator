@@ -87,3 +87,35 @@ def test_missing_project_returns_detail_message(authenticated_client):
     assert response.status_code == 404
     payload = response.json()
     assert "detail" in payload
+
+
+def test_session_create_exposes_model_lane_without_runtime_behavior_change(
+    authenticated_client,
+):
+    project_response = authenticated_client.post(
+        "/api/v1/projects",
+        json={
+            "name": "Model Lane Contract Project",
+            "description": "Verify model lane reporting on sessions",
+        },
+    )
+    assert project_response.status_code == 201
+    project = project_response.json()
+
+    session_response = authenticated_client.post(
+        "/api/v1/sessions",
+        json={
+            "project_id": project["id"],
+            "name": "Model Lane Contract Session",
+            "execution_mode": "automatic",
+            "default_execution_profile": "full_lifecycle",
+        },
+    )
+
+    assert session_response.status_code == 201
+    session = session_response.json()
+    assert session["model_lane_label"] == "local_openclaw"
+    assert session["model_lane_metadata"]["label"] == "local_openclaw"
+    assert session["model_lane_metadata"]["backend"] == "local_openclaw"
+    assert session["model_lane_metadata"]["model_family"] == "local"
+    assert session["default_execution_profile"] == "full_lifecycle"
