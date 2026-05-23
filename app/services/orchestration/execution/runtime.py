@@ -39,28 +39,35 @@ def build_project_state_snapshot(
     task_service = TaskService(db)
     ordered_tasks = task_service.get_project_tasks(project.id)
     inconsistent_pairs = []
-    highest_incomplete_position = None
+    plan_groups: dict[int | str, list[Task]] = {}
     for task in ordered_tasks:
-        if task.plan_position is None:
-            continue
-        if task.status != TaskStatus.DONE:
-            highest_incomplete_position = task.plan_position
-            break
+        plan_key = task.plan_id if task.plan_id is not None else "legacy"
+        plan_groups.setdefault(plan_key, []).append(task)
 
-    if highest_incomplete_position is not None:
-        for task in ordered_tasks:
-            if (
-                task.plan_position is not None
-                and task.plan_position > highest_incomplete_position
-                and task.status == TaskStatus.DONE
-            ):
-                inconsistent_pairs.append(
-                    {
-                        "task_id": task.id,
-                        "plan_position": task.plan_position,
-                        "title": task.title,
-                    }
-                )
+    for plan_key, plan_tasks in plan_groups.items():
+        highest_incomplete_position = None
+        for task in plan_tasks:
+            if task.plan_position is None:
+                continue
+            if task.status != TaskStatus.DONE:
+                highest_incomplete_position = task.plan_position
+                break
+
+        if highest_incomplete_position is not None:
+            for task in plan_tasks:
+                if (
+                    task.plan_position is not None
+                    and task.plan_position > highest_incomplete_position
+                    and task.status == TaskStatus.DONE
+                ):
+                    inconsistent_pairs.append(
+                        {
+                            "task_id": task.id,
+                            "plan_id": None if plan_key == "legacy" else plan_key,
+                            "plan_position": task.plan_position,
+                            "title": task.title,
+                        }
+                    )
 
     failed_or_cancelled = [
         task
@@ -89,6 +96,7 @@ def build_project_state_snapshot(
             {
                 "task_id": task.id,
                 "title": task.title,
+                "plan_id": getattr(task, "plan_id", None),
                 "plan_position": task.plan_position,
                 "status": task.status.value,
                 "workspace_status": getattr(task, "workspace_status", None),

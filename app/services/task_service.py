@@ -1373,11 +1373,16 @@ class TaskService:
         if task_id is None:
             return []
 
+        plan_scope_filter = (
+            Task.plan_id == task.plan_id if task.plan_id is not None else True
+        )
+
         if task.plan_position is None:
             return (
                 self.db.query(Task)
                 .filter(
                     Task.project_id == task.project_id,
+                    plan_scope_filter,
                     Task.plan_position.is_(None),
                     Task.status.notin_([TaskStatus.DONE, TaskStatus.CANCELLED]),
                     Task.id < task_id,
@@ -1393,6 +1398,7 @@ class TaskService:
             self.db.query(Task)
             .filter(
                 Task.project_id == task.project_id,
+                plan_scope_filter,
                 Task.status.notin_([TaskStatus.DONE, TaskStatus.CANCELLED]),
                 or_(
                     and_(

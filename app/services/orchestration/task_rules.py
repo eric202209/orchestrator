@@ -222,6 +222,10 @@ def run_virtual_merge_gate(
         if task.id != current_task.id
         and task.plan_position is not None
         and task.plan_position < current_task.plan_position
+        and (
+            current_task.plan_id is None
+            or getattr(task, "plan_id", None) == current_task.plan_id
+        )
     ]
     incomplete = [task for task in prior_tasks if task.status != TaskStatus.DONE]
     if incomplete:

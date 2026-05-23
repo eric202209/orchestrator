@@ -1213,6 +1213,7 @@ def execute_orchestration_task(
                     title=task.title if task else None,
                     description=task.description if task else None,
                     validation_severity=active_policy.validation_severity,
+                    workflow_stage=getattr(task, "workflow_stage", None),
                 )
                 _record_validation_verdict(
                     db,
@@ -1315,6 +1316,7 @@ def execute_orchestration_task(
             policy_profile_name=active_policy.name,
             validation_severity=active_policy.validation_severity,
             completion_repair_budget=active_policy.completion_repair_budget,
+            workflow_stage=getattr(task, "workflow_stage", None),
             task_execution_id=task_execution_id,
             restore_workspace_snapshot_if_needed=restore_workspace_snapshot_if_needed,
         )
@@ -1389,6 +1391,7 @@ def execute_orchestration_task(
                         title=task.title if task else None,
                         description=task.description if task else None,
                         validation_severity=active_policy.validation_severity,
+                        workflow_stage=getattr(task, "workflow_stage", None),
                     )
                     _record_validation_verdict(
                         db,
@@ -1678,6 +1681,7 @@ def execute_orchestration_task(
                             if active_policy is not None
                             else 1
                         ),
+                        workflow_stage=getattr(task, "workflow_stage", None),
                         task_execution_id=task_execution_id,
                         restore_workspace_snapshot_if_needed=restore_workspace_snapshot_if_needed,
                     )

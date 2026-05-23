@@ -250,3 +250,41 @@ def test_legacy_null_position_task_blocks_new_positioned_task(db_session):
         older_failed
     ]
     assert TaskService(db_session).get_next_pending_task(project.id) is None
+
+
+def test_blocking_prior_tasks_are_scoped_to_same_plan(db_session):
+    project = Project(
+        name="Plan Scoped Order", workspace_path="/tmp/plan_scoped", user_id=1
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    original_failed = Task(
+        project_id=project.id,
+        plan_id=10,
+        title="Original failed task",
+        description="Original plan failed.",
+        status=TaskStatus.FAILED,
+        plan_position=1,
+    )
+    recovery_prior_done = Task(
+        project_id=project.id,
+        plan_id=11,
+        title="Recovery diagnosis",
+        description="Diagnose failure.",
+        status=TaskStatus.DONE,
+        plan_position=1,
+    )
+    recovery_validation = Task(
+        project_id=project.id,
+        plan_id=11,
+        title="Validate recovery path",
+        description="Validate the recovery.",
+        status=TaskStatus.PENDING,
+        plan_position=2,
+    )
+    db_session.add_all([original_failed, recovery_prior_done, recovery_validation])
+    db_session.commit()
+
+    assert TaskService(db_session).get_blocking_prior_tasks(recovery_validation) == []

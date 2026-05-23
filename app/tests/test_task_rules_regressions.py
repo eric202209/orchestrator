@@ -173,6 +173,51 @@ def test_virtual_merge_gate_blocks_unsynced_prior_task(db_session, tmp_path):
     assert "prior failed/cancelled tasks" in reason
 
 
+def test_virtual_merge_gate_scopes_prior_tasks_to_same_plan(db_session, tmp_path):
+    project_root = tmp_path / "plan-scoped-gate"
+    project_root.mkdir(parents=True)
+
+    project = Project(name="Plan Scoped Gate", workspace_path=str(project_root))
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    unrelated_failed_task = Task(
+        project_id=project.id,
+        plan_id=1,
+        title="Original failed task",
+        description="Original plan failed.",
+        status=TaskStatus.FAILED,
+        plan_position=1,
+        task_subfolder="task-original",
+    )
+    recovery_validation = Task(
+        project_id=project.id,
+        plan_id=2,
+        title="Validate recovery path",
+        description="Run focused recovery validation.",
+        status=TaskStatus.PENDING,
+        execution_profile="test_only",
+        workflow_stage="validate",
+        plan_position=4,
+        task_subfolder="task-recovery-validate",
+    )
+    db_session.add_all([unrelated_failed_task, recovery_validation])
+    db_session.commit()
+    db_session.refresh(recovery_validation)
+
+    assert (
+        run_virtual_merge_gate(
+            db_session,
+            project,
+            recovery_validation,
+            "test_only",
+            lambda root: root / ".openclaw" / "state_manager.json",
+        )
+        is None
+    )
+
+
 def test_virtual_merge_gate_accepts_legacy_root_task_report(db_session, tmp_path):
     project_root = tmp_path / "legacy-report"
     project_root.mkdir(parents=True)

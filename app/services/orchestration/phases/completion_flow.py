@@ -1064,6 +1064,7 @@ def finalize_successful_task(
             "reported_changed_files": reported_changed_files,
         },
         validation_severity=ctx.validation_severity,
+        workflow_stage=ctx.workflow_stage,
     )
     record_validation_verdict(
         db,
@@ -1098,6 +1099,7 @@ def finalize_successful_task(
                     "reported_changed_files": reported_changed_files,
                 },
                 validation_severity=ctx.validation_severity,
+                workflow_stage=ctx.workflow_stage,
             )
             record_validation_verdict(
                 db,
@@ -1607,6 +1609,7 @@ def finalize_successful_task(
                 "behavior_baseline": behavior_baseline_result,
             },
             validation_severity=ctx.validation_severity,
+            workflow_stage=ctx.workflow_stage,
         )
         record_validation_verdict(
             db,

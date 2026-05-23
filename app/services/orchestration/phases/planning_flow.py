@@ -31,6 +31,7 @@ from app.services.orchestration.planning.planner import (
 )
 from app.services.orchestration.planning.normalization import (
     complete_repaired_plan_contract,
+    normalize_existing_static_site_plan,
 )
 from app.services.orchestration.policy import clamp_planning_timeout
 from app.services.orchestration.run_state import mark_task_attempt_failed
@@ -130,6 +131,32 @@ def _strengthen_weak_expected_file_verifications(
             updated["commands"] = [str(updated.get("verification") or "").strip()]
         strengthened.append(updated)
     return strengthened
+
+
+def _read_only_stage_fallback_plan(
+    ctx: OrchestrationRunContext,
+) -> list[dict[str, Any]] | None:
+    if ctx.workflow_stage not in {"diagnose", "plan", "review", "validate", "complete"}:
+        return None
+
+    script = (
+        "import pathlib; "
+        "files=[p for p in pathlib.Path('.').rglob('*') "
+        "if p.is_file() and '.openclaw' not in p.parts]; "
+        "print('\\n'.join(str(p) for p in files[:200]))"
+    )
+    command = "python -c " + json.dumps(script)
+    stage_label = str(ctx.workflow_stage or "review").replace("_", " ")
+    return [
+        {
+            "step_number": 1,
+            "description": f"Inspect workspace for {stage_label} stage",
+            "commands": [command],
+            "verification": command,
+            "rollback": "true",
+            "expected_files": [],
+        }
+    ]
 
 
 def _split_repaired_single_step_full_lifecycle_plan(
@@ -1370,6 +1397,25 @@ def execute_planning_phase(
             sanitized_plan = _strengthen_weak_expected_file_verifications(
                 sanitized_plan
             )
+            sanitized_plan, static_site_normalization = (
+                normalize_existing_static_site_plan(
+                    sanitized_plan,
+                    project_dir=ctx.orchestration_state.project_dir,
+                )
+            )
+            if static_site_normalization.get("changed"):
+                ctx.logger.info(
+                    "[ORCHESTRATION] Normalized existing static-site plan paths: %s",
+                    static_site_normalization,
+                )
+                emit_phase_event(
+                    ctx.orchestration_state,
+                    ctx.emit_live,
+                    level="INFO",
+                    phase="planning",
+                    message="[ORCHESTRATION] Normalized existing static-site plan paths",
+                    details=static_site_normalization,
+                )
             sanitized_plan, completion_details = complete_repaired_plan_contract(
                 sanitized_plan,
                 task_prompt=ctx.prompt,
@@ -1708,7 +1754,49 @@ def execute_planning_phase(
                 description=ctx.task.description if ctx.task else None,
                 validation_severity=ctx.validation_severity,
                 workflow_profile=ctx.workflow_profile,
+                workflow_stage=ctx.workflow_stage,
             )
+            if not plan_verdict.accepted and (
+                (plan_verdict.details or {}).get("read_only_stage_mutation_steps")
+                or (plan_verdict.details or {}).get("missing_workspace_expected_files")
+            ):
+                fallback_plan = _read_only_stage_fallback_plan(ctx)
+                if fallback_plan:
+                    verdict_details = plan_verdict.details or {}
+                    emit_phase_event(
+                        ctx.orchestration_state,
+                        ctx.emit_live,
+                        level="WARN",
+                        phase="planning",
+                        message=(
+                            "[ORCHESTRATION] Replaced mutating read-only stage plan "
+                            "with deterministic inspection plan"
+                        ),
+                        details={
+                            "reason": "read_only_stage_plan_normalized",
+                            "workflow_stage": ctx.workflow_stage,
+                            "mutating_steps": verdict_details.get(
+                                "read_only_stage_mutation_steps"
+                            ),
+                            "missing_workspace_expected_files": verdict_details.get(
+                                "missing_workspace_expected_files"
+                            ),
+                        },
+                    )
+                    ctx.orchestration_state.plan = fallback_plan
+                    output_text = json.dumps(fallback_plan)
+                    plan_verdict = ValidatorService.validate_plan(
+                        ctx.orchestration_state.plan,
+                        output_text=output_text,
+                        task_prompt=ctx.prompt,
+                        execution_profile=ctx.execution_profile,
+                        project_dir=ctx.orchestration_state.project_dir,
+                        title=ctx.task.title if ctx.task else None,
+                        description=ctx.task.description if ctx.task else None,
+                        validation_severity=ctx.validation_severity,
+                        workflow_profile=ctx.workflow_profile,
+                        workflow_stage=ctx.workflow_stage,
+                    )
             record_validation_verdict(
                 ctx.db,
                 ctx.session_id,
