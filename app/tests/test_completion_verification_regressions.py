@@ -50,6 +50,23 @@ class _FailingSummaryRuntime:
         return {"backend": "fake", "model_family": "test"}
 
 
+class _NeedsReviewEvaluatorRuntime:
+    async def execute_task(self, prompt, timeout_seconds=None):
+        if "independent QA evaluator" in prompt:
+            return {
+                "output": (
+                    "SCORES: goal=1/3 regressions=1/2 quality=1/2 files=1/3\n"
+                    "TOTAL: 4/10\n"
+                    "VERDICT: NEEDS_REVIEW\n"
+                    "NOTES: incomplete task coverage"
+                )
+            }
+        return {"output": "Task summary"}
+
+    def get_backend_metadata(self):
+        return {"backend": "fake", "model_family": "test"}
+
+
 class _FakeTaskService:
     def analyze_workspace_consistency(self, project_dir):
         return {}
@@ -1467,6 +1484,62 @@ def test_auto_publish_all_policy_publishes_nontrivial_change_set(
     assert (
         "deleted_files" in payload["accepted_change_set"]["change_set"]["warning_flags"]
     )
+
+
+def test_evaluator_needs_review_holds_before_auto_publish(
+    db_session, tmp_path, monkeypatch
+):
+    ctx, execution, project_root, workspace_dir = _seed_legacy_finalize_ctx(
+        db_session, tmp_path
+    )
+    ctx.runtime_service = _NeedsReviewEvaluatorRuntime()
+    task_service = ctx.task_service
+    (workspace_dir / "README.md").write_text("before\n", encoding="utf-8")
+    snapshot_key = workspace_snapshot_key(ctx.task_id, execution.id)
+    task_service.create_workspace_snapshot(
+        ctx.project,
+        workspace_dir,
+        snapshot_key=snapshot_key,
+        preserve_project_root_rules=False,
+    )
+    (workspace_dir / "README.md").write_text("after\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.get_effective_workspace_review_policy",
+        lambda default_policy, db=None: "auto_publish_all",
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.ValidatorService.validate_task_completion",
+        lambda **kwargs: ValidationVerdict(
+            stage="task_completion",
+            status="accepted",
+            profile="mutation",
+            reasons=[],
+            details={"expected_core_files": ["README.md"]},
+        ),
+    )
+
+    result = finalize_successful_task(
+        ctx=ctx,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "completed"
+    assert not (project_root / "README.md").exists()
+    assert workspace_dir.exists()
+    assert ctx.task.workspace_status == "ready"
+    review_log = (
+        db_session.query(LogEntry)
+        .filter(LogEntry.task_id == ctx.task_id)
+        .filter(
+            LogEntry.message == "[ORCHESTRATION] Held task workspace for manual review"
+        )
+        .one()
+    )
+    payload = json.loads(review_log.log_metadata)
+    assert payload["auto_publish_skipped"] is True
+    assert payload["reason"] == "evaluator_needs_review"
 
 
 def test_hold_all_policy_holds_trivial_change_set_for_manual_review(

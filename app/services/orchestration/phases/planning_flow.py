@@ -32,7 +32,9 @@ from app.services.orchestration.planning.planner import (
 )
 from app.services.orchestration.planning.normalization import (
     complete_repaired_plan_contract,
+    normalize_existing_file_target_plan,
     normalize_existing_static_site_plan,
+    normalize_stale_replace_ops_to_small_file_writes,
 )
 from app.services.orchestration.policy import clamp_planning_timeout
 from app.services.orchestration.run_state import mark_task_attempt_failed
@@ -43,7 +45,10 @@ from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.validation.parsing import (
     extract_plan_steps_from_summary_text,
 )
-from app.services.orchestration.validation.validator import ValidatorService
+from app.services.orchestration.validation.validator import (
+    READ_ONLY_WORKFLOW_STAGES,
+    ValidatorService,
+)
 from app.services.orchestration.validation.workspace_guard import (
     TaskOperationContractViolation,
 )
@@ -137,7 +142,7 @@ def _strengthen_weak_expected_file_verifications(
 def _read_only_stage_fallback_plan(
     ctx: OrchestrationRunContext,
 ) -> list[dict[str, Any]] | None:
-    if ctx.workflow_stage not in {"diagnose", "plan", "review", "validate", "complete"}:
+    if ctx.workflow_stage not in READ_ONLY_WORKFLOW_STAGES:
         return None
 
     script = (
@@ -163,7 +168,7 @@ def _read_only_stage_fallback_plan(
 def _static_site_validation_fallback_plan(
     ctx: OrchestrationRunContext,
 ) -> list[dict[str, Any]] | None:
-    if ctx.workflow_stage != "validate":
+    if ctx.workflow_stage not in {"validate", "validation"}:
         return None
 
     prompt = str(ctx.prompt or "")
@@ -1557,6 +1562,44 @@ def execute_planning_phase(
                     message="[ORCHESTRATION] Normalized existing static-site plan paths",
                     details=static_site_normalization,
                 )
+            sanitized_plan, file_target_normalization = (
+                normalize_existing_file_target_plan(
+                    sanitized_plan,
+                    project_dir=ctx.orchestration_state.project_dir,
+                )
+            )
+            if file_target_normalization.get("changed"):
+                ctx.logger.info(
+                    "[ORCHESTRATION] Normalized plan file targets to existing workspace paths: %s",
+                    file_target_normalization,
+                )
+                emit_phase_event(
+                    ctx.orchestration_state,
+                    ctx.emit_live,
+                    level="INFO",
+                    phase="planning",
+                    message="[ORCHESTRATION] Normalized plan file targets to existing workspace paths",
+                    details=file_target_normalization,
+                )
+            sanitized_plan, stale_replace_normalization = (
+                normalize_stale_replace_ops_to_small_file_writes(
+                    sanitized_plan,
+                    project_dir=ctx.orchestration_state.project_dir,
+                )
+            )
+            if stale_replace_normalization.get("changed"):
+                ctx.logger.info(
+                    "[ORCHESTRATION] Converted stale replace ops to guarded small-file writes: %s",
+                    stale_replace_normalization,
+                )
+                emit_phase_event(
+                    ctx.orchestration_state,
+                    ctx.emit_live,
+                    level="INFO",
+                    phase="planning",
+                    message="[ORCHESTRATION] Converted stale replace ops to guarded small-file writes",
+                    details=stale_replace_normalization,
+                )
             sanitized_plan, completion_details = complete_repaired_plan_contract(
                 sanitized_plan,
                 task_prompt=ctx.prompt,
@@ -1950,6 +1993,9 @@ def execute_planning_phase(
             if not plan_verdict.accepted and (
                 (plan_verdict.details or {}).get("read_only_stage_mutation_steps")
                 or (plan_verdict.details or {}).get("missing_workspace_expected_files")
+                or (plan_verdict.details or {}).get(
+                    "read_only_stage_failable_probe_steps"
+                )
             ):
                 fallback_plan = _read_only_stage_fallback_plan(ctx)
                 if fallback_plan:
@@ -1971,6 +2017,9 @@ def execute_planning_phase(
                             ),
                             "missing_workspace_expected_files": verdict_details.get(
                                 "missing_workspace_expected_files"
+                            ),
+                            "failable_probe_steps": verdict_details.get(
+                                "read_only_stage_failable_probe_steps"
                             ),
                         },
                     )

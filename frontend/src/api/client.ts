@@ -36,9 +36,18 @@ import type {
   SessionNarrativeTimeline,
 } from "../types/api";
 
-const API_BASE_URL =
+const normalizeApiBaseUrl = (value: string): string => {
+  const raw = value.trim().replace(/\/+$/, "");
+  if (!raw) {
+    return "/api/v1";
+  }
+  return raw.endsWith("/api/v1") ? raw : `${raw}/api/v1`;
+};
+
+const API_BASE_URL = normalizeApiBaseUrl(
   import.meta.env.VITE_API_URL ||
-  (import.meta.env.DEV ? "/api/v1" : "http://localhost:8080/api/v1");
+    (import.meta.env.DEV ? "" : "http://localhost:8080"),
+);
 
 const getBrowserSafeHost = (host: string): string => {
   if (!host) {

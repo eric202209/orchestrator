@@ -260,7 +260,13 @@ def handle_task_failure(
         db.commit()
         raise self_task.retry(exc=exc)
 
-    if auto_recovery_eligible and queue_task_for_session_fn and session and task:
+    if (
+        not knowledge_halted
+        and auto_recovery_eligible
+        and queue_task_for_session_fn
+        and session
+        and task
+    ):
         recovery_message = (
             "Automatic recovery queued for failed ordered task. "
             "The next run will inspect the real workspace first and fix the underlying issue."

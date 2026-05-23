@@ -808,14 +808,13 @@ def _run_evaluator(
     summary: str,
     emit_live: Any,
     logger: Any,
-) -> None:
+) -> Dict[str, Any]:
     """Run an independent QA evaluation pass after structural validation passes.
 
     The evaluator is intentionally separate from the generator: it receives the
     task goal, the execution record, and the summary, then grades the result
-    against concrete criteria.  A failing grade is logged as a warning (not a
-    hard failure) so the task still completes, but the signal is surfaced in
-    the live log and stored in the orchestration events for later review.
+    against concrete criteria. A NEEDS_REVIEW grade is surfaced to callers so
+    auto-publish paths can hold the workspace for review before promotion.
     """
     try:
         reasoning_artifact = (
@@ -928,8 +927,14 @@ def _run_evaluator(
                 "output": eval_output[:800],
             },
         )
+        return {
+            "verdict": verdict,
+            "judge_verdict": judge_verdict,
+            "output": eval_output[:800],
+        }
     except Exception as e:
         logger.warning("[EVALUATOR] QA evaluation failed (non-blocking): %s", e)
+        return {"verdict": "ERROR", "error": str(e)}
 
 
 def _write_progress_notes(
@@ -1695,6 +1700,39 @@ def finalize_successful_task(
             template_review_policy=_tmpl_review_policy,
         )
     should_hold_for_review = bool(review_decision["held_for_review"])
+    evaluator_result = None
+    if (
+        task_change_set
+        and ctx.task_execution_id
+        and not should_hold_for_review
+        and review_decision.get("outcome") == "auto_promote"
+    ):
+        evaluator_result = _run_evaluator(
+            runtime_service=runtime_service,
+            orchestration_state=orchestration_state,
+            prompt=prompt,
+            summary=summary_result.get("output", ""),
+            emit_live=emit_live,
+            logger=logger,
+        )
+        if (evaluator_result or {}).get("verdict") == "NEEDS_REVIEW":
+            should_hold_for_review = True
+            review_decision = {
+                **review_decision,
+                "outcome": "hold_for_review",
+                "held_for_review": True,
+                "reason": "evaluator_needs_review",
+                "evaluator_verdict": "NEEDS_REVIEW",
+            }
+            emit_live(
+                "WARN",
+                "[ORCHESTRATION] Evaluator requested review; holding workspace instead of auto-publishing",
+                metadata={
+                    "phase": "evaluation",
+                    "verdict": "NEEDS_REVIEW",
+                    "reason": "evaluator_needs_review",
+                },
+            )
     baseline_publish_result = None
     baseline_publish_validation = None
     if project and task.task_subfolder and not runs_in_canonical_baseline:
@@ -1852,16 +1890,6 @@ def finalize_successful_task(
                 if hasattr(task_service, "get_task_execution_change_set")
                 else None
             )
-
-        _run_evaluator(
-            runtime_service=runtime_service,
-            orchestration_state=orchestration_state,
-            prompt=prompt,
-            summary=summary_result.get("output", ""),
-            emit_live=emit_live,
-            logger=logger,
-        )
-
     task_execution = (
         db.query(TaskExecution)
         .filter(TaskExecution.id == ctx.task_execution_id)

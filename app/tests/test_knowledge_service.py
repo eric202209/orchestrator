@@ -247,6 +247,43 @@ def test_static_site_knowledge_is_gated_from_ordinary_backend_tasks(svc, db):
     assert any(ref.id == backend_item.id for ref in ctx.retrieved_items)
 
 
+def test_negated_static_site_mentions_do_not_open_static_site_gate(svc, db):
+    _make_item(
+        db,
+        title="Static Site Verification Contract",
+        content="Verify index.html and css/style.css for plain static sites.",
+        applies_to=["planning", "validation"],
+        knowledge_type=KnowledgeType.format_guide,
+        tags=["static-site", "verification", "html", "css"],
+        priority=20,
+    )
+    backend_item = _make_item(
+        db,
+        title="Backend Repair Guide",
+        content="Keep backend bug fixes scoped to the target module and tests.",
+        applies_to=["planning"],
+        knowledge_type=KnowledgeType.format_guide,
+        tags=["backend"],
+        priority=1,
+    )
+
+    with patch.object(svc, "_has_indexed_points", return_value=False):
+        ctx = svc.retrieve(
+            query=(
+                "Fix the backend tax calculation bug. Do not create frontend or "
+                "static-site files. Do not create index.html."
+            ),
+            trigger_phase="planning",
+            knowledge_types=[KnowledgeType.format_guide],
+            db=db,
+        )
+
+    titles = {ref.title for ref in ctx.retrieved_items}
+    assert "Backend Repair Guide" in titles
+    assert "Static Site Verification Contract" not in titles
+    assert any(ref.id == backend_item.id for ref in ctx.retrieved_items)
+
+
 def test_static_site_knowledge_is_returned_for_matching_static_site_task(svc, db):
     item = _make_item(
         db,

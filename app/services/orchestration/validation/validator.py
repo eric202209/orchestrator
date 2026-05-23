@@ -60,6 +60,14 @@ PLAN_STRUCTURAL_PLACEHOLDER_MARKER_PATTERN = re.compile(
 )
 PLAN_PASS_MARKER_PATTERN = re.compile(r"\bpass\b", re.IGNORECASE)
 PLAN_TODO_FIXME_MARKER_PATTERN = re.compile(r"\b(?:todo|fixme)\b", re.IGNORECASE)
+READ_ONLY_WORKFLOW_STAGES = {
+    "diagnose",
+    "plan",
+    "review",
+    "validate",
+    "validation",
+    "complete",
+}
 
 
 class ValidatorService:
@@ -663,10 +671,20 @@ class ValidatorService:
         for step in plan:
             if ValidatorService._step_is_readonly_inspection(step):
                 continue
-            text = " ".join(
-                [step.get("description", "")]
-                + [str(command or "") for command in step.get("commands", []) or []]
-            ).lower()
+            text_parts = [str(step.get("description") or "")]
+            for command in step.get("commands", []) or []:
+                command_text = str(command or "").strip()
+                lowered_command = command_text.lower()
+                if (
+                    lowered_command.startswith("python -c ")
+                    and ".py" not in lowered_command
+                    and "pytest" not in lowered_command
+                    and "pip " not in lowered_command
+                    and "requirements.txt" not in lowered_command
+                ):
+                    continue
+                text_parts.append(command_text)
+            text = " ".join(text_parts).lower()
             if any(
                 token in text
                 for token in ("requirements.txt", "python ", ".py", "pip ", "pytest")
@@ -921,13 +939,113 @@ class ValidatorService:
             for marker in (
                 "create",
                 "build",
+                "fix",
                 "add",
                 "write",
+                "modify",
                 "implement",
                 "generate",
                 "scaffold",
+                "update",
             )
         )
+
+    @classmethod
+    def _frontend_wrong_stack_materializations(
+        cls,
+        plan: List[Dict[str, Any]],
+        workflow_profile: Optional[str],
+    ) -> List[str]:
+        if workflow_profile != "frontend_only":
+            return []
+        wrong_paths: List[str] = []
+        for step in plan:
+            for operation in step.get("ops", []) or []:
+                if not isinstance(operation, dict):
+                    continue
+                if str(operation.get("op") or "") not in {
+                    "write_file",
+                    "append_file",
+                    "replace_in_file",
+                }:
+                    continue
+                path_text = str(operation.get("path") or "").strip().lstrip("./")
+                suffix = Path(path_text).suffix.lower()
+                content = str(operation.get("content") or operation.get("new") or "")
+                if (
+                    not suffix
+                    or suffix == ".py"
+                    or re.search(r"(?m)^def\s+\w+\(", content)
+                ):
+                    wrong_paths.append(path_text or "(missing path)")
+        return sorted(set(wrong_paths))
+
+    @classmethod
+    def _plan_writes_obvious_undefined_js_identifiers(
+        cls,
+        plan: List[Dict[str, Any]],
+    ) -> List[str]:
+        bad_paths: List[str] = []
+        allowed_globals = {
+            "array",
+            "boolean",
+            "date",
+            "json",
+            "math",
+            "number",
+            "object",
+            "string",
+            "undefined",
+        }
+        for step in plan:
+            for operation in step.get("ops", []) or []:
+                if not isinstance(operation, dict):
+                    continue
+                if str(operation.get("op") or "") not in {"write_file", "append_file"}:
+                    continue
+                path_text = str(operation.get("path") or "").strip().lstrip("./")
+                if Path(path_text).suffix.lower() not in {".js", ".jsx", ".ts", ".tsx"}:
+                    continue
+                content = str(operation.get("content") or "")
+                function_match = re.search(
+                    r"function\s+\w+\s*\((?P<params>[^)]*)\)\s*\{(?P<body>.*?)\}",
+                    content,
+                    flags=re.DOTALL,
+                )
+                if not function_match:
+                    continue
+                declared = {
+                    part.strip().split("=")[0].split(":")[0].strip()
+                    for part in function_match.group("params").split(",")
+                    if part.strip()
+                }
+                body = function_match.group("body")
+                declared.update(
+                    re.findall(
+                        r"\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+                        body,
+                    )
+                )
+                for return_match in re.finditer(r"\breturn\s+([^;\n]+)", body):
+                    return_expression = return_match.group(1)
+                    identifiers = [
+                        match.group(1)
+                        for match in re.finditer(
+                            r"\b([A-Za-z_$][A-Za-z0-9_$]*)\b",
+                            return_expression,
+                        )
+                        if match.start() == 0
+                        or return_expression[match.start() - 1] != "."
+                    ]
+                    if any(
+                        identifier not in declared
+                        and identifier.lower() not in allowed_globals
+                        and identifier not in {"true", "false", "null"}
+                        for identifier in identifiers
+                    ):
+                        bad_paths.append(path_text)
+                        break
+        return sorted(set(bad_paths))
 
     @staticmethod
     def _task_allows_multiple_stacks(
@@ -1286,6 +1404,16 @@ class ValidatorService:
         text = str(command or "").strip()
         lowered = text.lower()
         if not text:
+            return True
+        if re.match(
+            r"^(?:npm|pnpm|yarn)\s+install\s+\.?/[\w./-]+\.(?:js|jsx|ts|tsx)\s*$",
+            lowered,
+        ):
+            return True
+        if re.match(
+            r"^(?:mv|cp)\s+\.?/[\w./-]+\.(?:py|js|jsx|ts|tsx)\s+\.?/[\w./-]+\.(?:py|js|jsx|ts|tsx)\s*$",
+            lowered,
+        ):
             return True
         if re.match(
             r"^\{\s*(?:\\?\"\\?|')?(?:ops|op|command|cmd)(?:\\?\"\\?|')?\s*:", text
@@ -1862,6 +1990,15 @@ class ValidatorService:
                     if token.startswith("-") or token.startswith((">", "2>")):
                         continue
                     targets.append(token)
+            elif command_name in {"ls", "find"}:
+                for token in tokens[1:]:
+                    if token in {"|", "||", "&&", ";"}:
+                        break
+                    if token.startswith("-") or token.startswith((">", "2>")):
+                        continue
+                    if token == ".":
+                        continue
+                    targets.append(token)
             elif command_name in {"node", "python", "python3"} and len(tokens) > 1:
                 script = tokens[1]
                 if script not in {"-e", "-c"}:
@@ -1878,7 +2015,10 @@ class ValidatorService:
                 or any(char in path_text for char in "*?[]{}")
             ):
                 continue
-            if Path(path_text).suffix.lower() not in SOURCE_EXTENSIONS:
+            path = Path(path_text)
+            if path.suffix.lower() not in SOURCE_EXTENSIONS and not (
+                path_text.endswith("/") or "/" in path_text
+            ):
                 continue
             if path_text not in seen:
                 seen.add(path_text)
@@ -2034,7 +2174,7 @@ class ValidatorService:
     def _plan_mutating_steps_for_read_only_stage(
         plan: List[Dict[str, Any]], workflow_stage: Optional[str]
     ) -> List[int]:
-        if workflow_stage not in {"diagnose", "plan", "review", "validate", "complete"}:
+        if workflow_stage not in READ_ONLY_WORKFLOW_STAGES:
             return []
 
         mutating_ops = {
@@ -2076,6 +2216,37 @@ class ValidatorService:
                 if any(pattern.search(command) for pattern in patterns):
                     findings.append(step_number)
                     break
+        return findings
+
+    @staticmethod
+    def _plan_failable_review_probe_steps(
+        plan: List[Dict[str, Any]], workflow_stage: Optional[str]
+    ) -> List[int]:
+        if workflow_stage != "review":
+            return []
+
+        findings: List[int] = []
+        for index, step in enumerate(plan, start=1):
+            step_number = int(step.get("step_number", index))
+            commands = [
+                str(command or "") for command in step.get("commands", []) or []
+            ]
+            verification = str(step.get("verification") or "")
+            for command in commands + ([verification] if verification else []):
+                command_text = command.strip()
+                if not command_text:
+                    continue
+                try:
+                    tokens = shlex.split(command_text, posix=True)
+                except ValueError:
+                    tokens = command_text.split()
+                command_name = Path(tokens[0]).name if tokens else ""
+                if command_name != "grep":
+                    continue
+                if re.search(r"(\|\|\s*true|\|\|\s*echo|\bif\s+grep\b)", command_text):
+                    continue
+                findings.append(step_number)
+                break
         return findings
 
     @staticmethod
@@ -2134,6 +2305,9 @@ class ValidatorService:
         plan: List[Dict[str, Any]],
         workflow_profile: Optional[str],
     ) -> Dict[str, Any]:
+        if workflow_profile != "fullstack_scaffold":
+            return {}
+
         phase_order = get_workflow_phases(workflow_profile or "")
         if not phase_order:
             return {}
@@ -2184,7 +2358,7 @@ class ValidatorService:
         profile = cls.infer_validation_profile(
             task_prompt, execution_profile, title=title, description=description
         )
-        if workflow_stage in {"diagnose", "plan", "review", "validate", "complete"}:
+        if workflow_stage in READ_ONLY_WORKFLOW_STAGES:
             profile = "verification"
         warnings: List[str] = []
         repairable: List[str] = []
@@ -2204,6 +2378,15 @@ class ValidatorService:
                 f"Workflow stage '{workflow_stage}' must not mutate files or directories"
             )
             details["read_only_stage_mutation_steps"] = read_only_stage_mutations
+        failable_review_probes = cls._plan_failable_review_probe_steps(
+            plan, workflow_stage
+        )
+        if failable_review_probes:
+            repairable.append(
+                "Review-only plans must not fail execution when an inspected pattern "
+                "is absent; absence should be reported as a finding"
+            )
+            details["read_only_stage_failable_probe_steps"] = failable_review_probes
 
         if project_dir is not None:
             invalid_ops_path_steps = cls._plan_invalid_file_ops_paths(
@@ -2406,13 +2589,7 @@ class ValidatorService:
                     "missing_phases"
                 ]
 
-        stage_allows_materialization = workflow_stage not in {
-            "diagnose",
-            "plan",
-            "review",
-            "validate",
-            "complete",
-        }
+        stage_allows_materialization = workflow_stage not in READ_ONLY_WORKFLOW_STAGES
         if profile == "implementation":
             if (
                 cls._task_prompt_requires_materialization(
@@ -2432,6 +2609,11 @@ class ValidatorService:
                         materialized_targets | existing_expected_files
                     )
                 )
+                if not materialized_targets:
+                    repairable.append(
+                        "Implementation task plan does not materialize any source changes"
+                    )
+                    details["missing_materialization_for_implementation"] = True
                 if declared_expected_files and unmaterialized_expected_files:
                     repairable.append(
                         "Plan declares expected files without materializing them "
@@ -2478,6 +2660,30 @@ class ValidatorService:
                     "Plan appears to generate placeholder or stub implementations"
                 )
                 details["placeholder_only_implementation"] = True
+            frontend_wrong_stack_files = cls._frontend_wrong_stack_materializations(
+                plan,
+                workflow_profile,
+            )
+            if frontend_wrong_stack_files:
+                repairable.append(
+                    "Frontend-only plan materializes non-frontend or extensionless source files "
+                    f"(files: {frontend_wrong_stack_files[:5]})"
+                )
+                details["frontend_wrong_stack_materializations"] = (
+                    frontend_wrong_stack_files[:20]
+                )
+            undefined_js_identifier_files = (
+                cls._plan_writes_obvious_undefined_js_identifiers(plan)
+            )
+            if undefined_js_identifier_files:
+                repairable.append(
+                    "Plan writes JavaScript/TypeScript functions with obvious "
+                    "undefined return identifiers "
+                    f"(files: {undefined_js_identifier_files[:5]})"
+                )
+                details["undefined_js_identifier_materializations"] = (
+                    undefined_js_identifier_files[:20]
+                )
         elif profile == "verification":
             mutated_source_assets = cls._verification_plan_mutates_app_source_assets(
                 plan, project_dir
@@ -2732,7 +2938,7 @@ class ValidatorService:
         profile = cls.infer_validation_profile(
             task_prompt, execution_profile, title=title, description=description
         )
-        if workflow_stage in {"diagnose", "plan", "review", "validate", "complete"}:
+        if workflow_stage in READ_ONLY_WORKFLOW_STAGES:
             profile = "verification"
         expected_core_files = list(
             dict.fromkeys(
