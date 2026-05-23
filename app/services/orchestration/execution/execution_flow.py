@@ -456,12 +456,23 @@ def assess_step_execution(
             if correction_hints:
                 error_message += " | Retry hints: " + " | ".join(correction_hints[:3])
 
-    tool_failures = ExecutorService.recent_step_tool_failures(
-        db,
-        session_id,
-        task_id,
-        step_started_at,
+    structured_ops_present = isinstance(step.get("ops"), list) and any(
+        isinstance(operation, dict)
+        and str(operation.get("op") or "").strip()
+        in {"write_file", "append_file", "replace_in_file"}
+        for operation in step.get("ops", []) or []
     )
+    commands_present = any(
+        str(command or "").strip() for command in step.get("commands", []) or []
+    )
+    tool_failures = []
+    if not (structured_ops_present and not commands_present):
+        tool_failures = ExecutorService.recent_step_tool_failures(
+            db,
+            session_id,
+            task_id,
+            step_started_at,
+        )
     if step_status == "success" and tool_failures:
         step_status = "failed"
         failure_summary = " | ".join(tool_failures[:3])

@@ -152,8 +152,8 @@ def _contains_negated_stack_marker(text: str, markers: tuple[str, ...]) -> bool:
     for marker in markers:
         escaped = re.escape(marker)
         patterns = (
-            rf"\bdo\s+not\s+(?:create|build|add|include|use|make|set\s+up|setup)\s+(?:a\s+|an\s+)?{escaped}\b",
-            rf"\bdon't\s+(?:create|build|add|include|use|make|set\s+up|setup)\s+(?:a\s+|an\s+)?{escaped}\b",
+            rf"\bdo\s+not\s+(?:create|build|add|include|use|make|run|start|set\s+up|setup)\s+(?:a\s+|an\s+)?(?:\w+\s+){{0,2}}{escaped}\b",
+            rf"\bdon't\s+(?:create|build|add|include|use|make|run|start|set\s+up|setup)\s+(?:a\s+|an\s+)?(?:\w+\s+){{0,2}}{escaped}\b",
             rf"\bwithout\s+(?:a\s+|an\s+)?{escaped}\b",
             rf"\bno\s+(?:new\s+)?{escaped}\b",
         )

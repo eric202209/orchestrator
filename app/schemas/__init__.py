@@ -1,6 +1,13 @@
 """Pydantic schemas for API validation"""
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    computed_field,
+    field_validator,
+)
 from typing import Optional, Any, List
 from datetime import datetime
 from enum import Enum
@@ -43,6 +50,17 @@ class ProjectResponse(ProjectBase):
     id: int
     created_at: datetime
     updated_at: Optional[datetime] = None
+
+    @computed_field
+    @property
+    def resolved_workspace_path(self) -> str:
+        """Absolute runtime path for callers that need filesystem access."""
+
+        from app.services.workspace.project_isolation_service import (
+            resolve_project_workspace_path,
+        )
+
+        return str(resolve_project_workspace_path(self.workspace_path, self.name))
 
 
 # Task Schemas

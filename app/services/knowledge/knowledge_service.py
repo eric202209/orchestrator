@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from openai import OpenAI
@@ -93,6 +94,9 @@ def _matches_task_type_gate(
         )
 
     text = f"{query or ''} {item.failure_signature or ''}".lower()
+    if _explicitly_excludes_static_site(text):
+        return False
+
     static_markers = (
         "static site",
         "static-site",
@@ -105,6 +109,22 @@ def _matches_task_type_gate(
         ".css",
     )
     return any(marker in text for marker in static_markers)
+
+
+def _explicitly_excludes_static_site(text: str) -> bool:
+    """Treat negated static-site mentions as exclusion, not task-family signal."""
+
+    patterns = (
+        r"\bnot\s+(?:a\s+)?static[-\s]site\b",
+        r"\bnot\s+static[-\s]site\b",
+        r"\bno\s+static[-\s]site\b",
+        r"\bwithout\s+static[-\s]site\b",
+        r"\bdo\s+not\s+[^.;\n]{0,120}\bstatic[-\s]site\b",
+        r"\bdon't\s+[^.;\n]{0,120}\bstatic[-\s]site\b",
+        r"\bdo\s+not\s+[^.;\n]{0,120}\bindex\.html\b",
+        r"\bdon't\s+[^.;\n]{0,120}\bindex\.html\b",
+    )
+    return any(re.search(pattern, text) for pattern in patterns)
 
 
 class KnowledgeService:

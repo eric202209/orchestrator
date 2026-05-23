@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings, validate_runtime_secrets
 from app.api.v1.router import api_router
+from app.api.v1.endpoints.auth import router as auth_router
 from app.database import init_db, get_db_session
 from app.services.observability import flush_langfuse
 from app.services.workspace.checkpoint_service import CheckpointService
@@ -135,6 +136,10 @@ async def general_exception_handler(request: Request, exc: Exception):
 
 # Include routers (API_V1_STR = "/api/v1")
 app.include_router(api_router, prefix=settings.API_V1_STR, tags=["API"])
+# Browser clients have previously cached API bases without `/api/v1`. Keep
+# auth endpoints available at `/auth/*` so stale bundles can still log in and
+# refresh user state after a backend/frontend restart.
+app.include_router(auth_router, prefix="/auth", tags=["authentication-compat"])
 
 
 @app.get("/")

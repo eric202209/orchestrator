@@ -47,6 +47,8 @@ def test_project_create_and_detail_contract(authenticated_client):
     assert project["name"] == "Regression Test Project"
     assert "id" in project
     assert "created_at" in project
+    assert Path(project["resolved_workspace_path"]).is_absolute()
+    assert project["resolved_workspace_path"].endswith(project["workspace_path"])
 
     detail_response = authenticated_client.get(f"/api/v1/projects/{project['id']}")
     assert detail_response.status_code == 200
@@ -74,6 +76,7 @@ def test_project_create_writes_guard_to_isolated_test_workspace(
     project_root = isolated_workspace_root / project["workspace_path"]
     gitignore = project_root / ".gitignore"
 
+    assert Path(project["resolved_workspace_path"]) == project_root.resolve()
     assert gitignore.exists()
     assert "# BEGIN OpenClaw workspace guard" in gitignore.read_text(encoding="utf-8")
 
