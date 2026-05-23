@@ -59,6 +59,38 @@ def test_knowledge_readiness_endpoint_returns_runtime_counts(authenticated_clien
     assert body["embedding"]["status"] == "not_probed"
 
 
+def test_knowledge_readiness_recommends_native_ingest_for_host_runtime(
+    authenticated_client, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.services.knowledge.readiness._running_in_container", lambda: False
+    )
+
+    resp = authenticated_client.get(
+        "/api/v1/admin/knowledge-readiness?probe_embedding=false"
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["recommended_ingest_command"].startswith(
+        "venv/bin/python scripts/ingest_knowledge.py"
+    )
+
+
+def test_knowledge_readiness_recommends_docker_ingest_for_container_runtime(
+    authenticated_client, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.services.knowledge.readiness._running_in_container", lambda: True
+    )
+
+    resp = authenticated_client.get(
+        "/api/v1/admin/knowledge-readiness?probe_embedding=false"
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["recommended_ingest_command"].startswith("docker compose")
+
+
 def test_diagnostics_streaming_shape(authenticated_client):
     clear_streaming_health()
     resp = authenticated_client.get("/api/v1/admin/diagnostics")
