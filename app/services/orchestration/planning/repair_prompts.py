@@ -16,6 +16,7 @@ from app.services.orchestration.planning.prompt_contracts import (
     render_python_verification_contract,
     render_shell_fallback_limits,
     render_static_site_verification_contract,
+    render_test_scaffold_contract,
 )
 from app.services.orchestration.planning.repair_strategies import (
     build_specialized_repair_prompt,
@@ -166,6 +167,7 @@ def build_planning_repair_prompt(
     shell_fallback_limits = render_shell_fallback_limits()
     python_verification_contract = render_python_verification_contract()
     static_site_verification_contract = render_static_site_verification_contract()
+    test_scaffold_contract = render_test_scaffold_contract()
     prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 Do not create, edit, read, or write files during planning repair; return the JSON array as message text only.
@@ -186,6 +188,7 @@ Rules:
 2a. Shell fallback limits: {shell_fallback_limits}
 2b. {python_verification_contract}
 2c. {static_site_verification_contract}
+2d. {test_scaffold_contract}
 3. verification/rollback: one shell string or null.
 4. expected_files: relative path array.
 5. Relative paths only; no absolute paths, .., ~, frontend/src/frontend/src, or backend/src/backend/src; rooted exactly once.
@@ -218,6 +221,7 @@ def build_compact_planning_repair_prompt(
     shell_fallback_limits = render_shell_fallback_limits()
     python_verification_contract = render_python_verification_contract()
     static_site_verification_contract = render_static_site_verification_contract()
+    test_scaffold_contract = render_test_scaffold_contract()
     prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 
@@ -238,6 +242,7 @@ Rules:
 - shell fallback limits: {shell_fallback_limits}
 - {python_verification_contract}
 - {static_site_verification_contract}
+- {test_scaffold_contract}
 - verification must be one real command using `python -c`, `python -m`, `node -e`, `npm run build`, or a project test command.
 - expected_files must be relative paths only.
 - expected_files steps must write real content; no touch-only, TODO, pass, stub, or placeholder-only implementation.

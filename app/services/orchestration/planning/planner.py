@@ -36,6 +36,7 @@ from app.services.orchestration.planning.prompt_contracts import (
     render_python_verification_contract as _render_python_verification_contract,
     render_shell_fallback_limits as _render_shell_fallback_limits,
     render_static_site_verification_contract as _render_static_site_verification_contract,
+    render_test_scaffold_contract as _render_test_scaffold_contract,
 )
 from app.services.orchestration.planning.repair_prompts import (
     PLANNING_REPAIR_COMPACT_MALFORMED_OUTPUT_CHARS,
@@ -898,6 +899,7 @@ class PlannerService:
         task_prompt: str,
         description: str,
         rollback: Any,
+        prefer_pytest: bool = False,
     ) -> Optional[Dict[str, Any]]:
         prompt = str(task_prompt or "")
         if "unittest" not in prompt.lower():
@@ -925,23 +927,51 @@ class PlannerService:
         ):
             return None
 
-        content = (
-            "import subprocess\n"
-            "import sys\n"
-            "import unittest\n\n\n"
-            "class SmokeStatusTest(unittest.TestCase):\n"
-            "    def test_smoke_status_output(self):\n"
-            "        completed = subprocess.run(\n"
-            f"            [sys.executable, {json.dumps(script_path)}],\n"
-            "            check=True,\n"
-            "            capture_output=True,\n"
-            "            text=True,\n"
-            "        )\n"
-            f"        self.assertEqual(completed.stdout.strip(), {json.dumps(expected)})\n\n\n"
-            "if __name__ == '__main__':\n"
-            "    unittest.main()\n"
-        )
+        if prefer_pytest:
+            content = (
+                "import subprocess\n"
+                "import sys\n\n\n"
+                "def test_smoke_status_output():\n"
+                "    completed = subprocess.run(\n"
+                f"        [sys.executable, {json.dumps(script_path)}],\n"
+                "        check=True,\n"
+                "        capture_output=True,\n"
+                "        text=True,\n"
+                "    )\n"
+                f"    assert completed.stdout.strip() == {json.dumps(expected)}\n"
+            )
+        else:
+            content = (
+                "import subprocess\n"
+                "import sys\n"
+                "import unittest\n\n\n"
+                "class SmokeStatusTest(unittest.TestCase):\n"
+                "    def test_smoke_status_output(self):\n"
+                "        completed = subprocess.run(\n"
+                f"            [sys.executable, {json.dumps(script_path)}],\n"
+                "            check=True,\n"
+                "            capture_output=True,\n"
+                "            text=True,\n"
+                "        )\n"
+                f"        self.assertEqual(completed.stdout.strip(), {json.dumps(expected)})\n\n\n"
+                "if __name__ == '__main__':\n"
+                "    unittest.main()\n"
+            )
         return {"op": "write_file", "path": path, "content": content}
+
+    @staticmethod
+    def _prompt_has_pytest_project_signal(*texts: str) -> bool:
+        combined = "\n".join(str(text or "") for text in texts).lower()
+        pytest_markers = (
+            "pytest",
+            "pytest.ini",
+            "[tool.pytest",
+            "pytest_plugins",
+            "@pytest.mark",
+            "conftest.py",
+            "python -m pytest",
+        )
+        return any(marker in combined for marker in pytest_markers)
 
     @staticmethod
     def _normalize_unittest_write_content(operation: Dict[str, Any]) -> Dict[str, Any]:
@@ -1292,10 +1322,14 @@ class PlannerService:
                 description = f"Execute step {index}"
 
             if not raw_ops:
+                prefer_pytest = cls._prompt_has_pytest_project_signal(
+                    task_prompt, description, verification or ""
+                )
                 inferred_unittest_op = cls._infer_unittest_write_op(
                     task_prompt=task_prompt,
                     description=description,
                     rollback=rollback,
+                    prefer_pytest=prefer_pytest,
                 )
                 if inferred_unittest_op:
                     raw_ops.append(inferred_unittest_op)
@@ -1303,7 +1337,11 @@ class PlannerService:
                     if inferred_path not in expected_files:
                         expected_files.append(inferred_path)
                     commands = []
-                    verification = "python -m unittest discover -s tests"
+                    verification = (
+                        "python -m pytest tests/ -q"
+                        if prefer_pytest
+                        else "python -m unittest discover -s tests"
+                    )
 
             if (
                 not raw_ops
@@ -1471,6 +1509,7 @@ class PlannerService:
     @staticmethod
     def find_immediate_repair_step_issues(
         plan: Optional[List[Dict[str, Any]]],
+        project_dir: Optional[Path] = None,
     ) -> Dict[str, List[int]]:
         from app.services.orchestration.validation.validator import ValidatorService
 
@@ -1480,6 +1519,7 @@ class PlannerService:
             "placeholder_only_steps": [],
             "weak_verification_steps": [],
             "prefer_typed_ops_steps": [],
+            "stale_replace_ops_steps": [],
         }
         for index, step in enumerate(plan or [], start=1):
             step_number = int(step.get("step_number") or index)
@@ -1527,7 +1567,97 @@ class PlannerService:
                 for cmd in commands
             ):
                 issues["prefer_typed_ops_steps"].append(step_number)
+            if project_dir and PlannerService._step_has_stale_replace_ops(
+                step, Path(project_dir)
+            ):
+                issues["stale_replace_ops_steps"].append(step_number)
         return {key: sorted(set(value)) for key, value in issues.items() if value}
+
+    @staticmethod
+    def _step_has_stale_replace_ops(step: Dict[str, Any], project_dir: Path) -> bool:
+        ops = step.get("ops") or []
+        if not isinstance(ops, list):
+            return False
+        for operation in ops:
+            if not isinstance(operation, dict):
+                continue
+            if str(operation.get("op") or "").strip() != "replace_in_file":
+                continue
+            rel_path = str(operation.get("path") or "").strip().lstrip("./")
+            old_text = operation.get("old")
+            if not rel_path or not isinstance(old_text, str) or not old_text:
+                continue
+            path = (project_dir / rel_path).resolve()
+            try:
+                path.relative_to(project_dir.resolve())
+            except ValueError:
+                return True
+            if not path.is_file():
+                return True
+            try:
+                if path.stat().st_size > 500_000:
+                    continue
+                content = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return True
+            if old_text not in content:
+                return True
+        return False
+
+    @staticmethod
+    def stale_replace_repair_hints(
+        plan: Optional[List[Dict[str, Any]]],
+        project_dir: Path,
+        *,
+        max_hints: int = 2,
+        max_excerpt_chars: int = 900,
+    ) -> List[str]:
+        hints: List[str] = []
+        root = Path(project_dir).resolve()
+        for index, step in enumerate(plan or [], start=1):
+            if len(hints) >= max_hints or not isinstance(step, dict):
+                break
+            for operation in step.get("ops") or []:
+                if len(hints) >= max_hints or not isinstance(operation, dict):
+                    break
+                if str(operation.get("op") or "").strip() != "replace_in_file":
+                    continue
+                rel_path = str(operation.get("path") or "").strip().lstrip("./")
+                old_text = operation.get("old")
+                if not rel_path or not isinstance(old_text, str) or not old_text:
+                    continue
+                path = (root / rel_path).resolve()
+                try:
+                    path.relative_to(root)
+                except ValueError:
+                    hints.append(
+                        f"step {index} replace_in_file path escapes workspace: {rel_path}"
+                    )
+                    continue
+                if not path.is_file():
+                    hints.append(
+                        f"step {index} replace_in_file target missing: {rel_path}"
+                    )
+                    continue
+                try:
+                    if path.stat().st_size > 500_000:
+                        continue
+                    content = path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    hints.append(
+                        f"step {index} replace_in_file target unreadable: {rel_path}"
+                    )
+                    continue
+                if old_text in content:
+                    continue
+                excerpt = content[:max_excerpt_chars].replace("\n", "\\n")
+                hints.append(
+                    "step "
+                    f"{index} replace_in_file old text not found in {rel_path}. "
+                    "Use exact text from current file excerpt or choose a different "
+                    f"operation. Current file excerpt: {excerpt}"
+                )
+        return hints
 
     @staticmethod
     def describe_planning_contract_violations(
@@ -1583,6 +1713,7 @@ class PlannerService:
                 "placeholder_only_steps": "placeholder-only implementation step",
                 "weak_verification_steps": "weak verification command",
                 "prefer_typed_ops_steps": "python -c content write should use ops.write_file",
+                "stale_replace_ops_steps": "replace_in_file old text not found in workspace",
             }.get(issue_key, issue_key)
             violations.append(f"{label} in steps {steps[:5]}")
         return list(dict.fromkeys(violations))
@@ -1608,6 +1739,7 @@ class PlannerService:
         shell_fallback_limits = _render_shell_fallback_limits()
         python_verification_contract = _render_python_verification_contract()
         static_site_verification_contract = _render_static_site_verification_contract()
+        test_scaffold_contract = _render_test_scaffold_contract()
         knowledge_block = _render_knowledge_block(knowledge_context)
         prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
@@ -1640,6 +1772,7 @@ Rules:
 16. Commands must be runnable shell, not prose. Do not emit pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
 17. {python_verification_contract}
 18. {static_site_verification_contract}
+19. {test_scaffold_contract}
 20. Do not create or cd into a nested project folder; run directly from {display_project_dir}
 21. Include exactly one final meaningful verification/build step such as `npm run build`, `pytest`, or `python -m pytest`
 22. Prefer package-manager/editor-friendly commands and one-file-at-a-time edits
@@ -1683,6 +1816,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
         shell_fallback_limits = _render_shell_fallback_limits()
         python_verification_contract = _render_python_verification_contract()
         static_site_verification_contract = _render_static_site_verification_contract()
+        test_scaffold_contract = _render_test_scaffold_contract()
         prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 
@@ -1701,6 +1835,7 @@ Requirements:
 5. Shell fallback limits: {shell_fallback_limits}
 6. {python_verification_contract}
 6a. {static_site_verification_contract}
+6b. {test_scaffold_contract}
 7. Each step must contain exactly these required keys, plus optional `ops`, and no other keys:
    step_number, description, commands, verification, rollback, expected_files
 8. step_number values must be unique integers and exactly 1, 2, 3... in order

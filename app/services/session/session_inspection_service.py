@@ -234,6 +234,23 @@ def _extract_failure_summary(
     }
 
 
+def _classify_test_scaffold_failure(error_message: Any) -> Optional[str]:
+    text = str(error_message or "").lower()
+    if not text:
+        return None
+    if "nameerror" in text or "importerror" in text or "no module named" in text:
+        return "test_scaffold_import_error"
+    if (
+        "dict" in text
+        and ("has no attribute" in text or "attributeerror" in text)
+        and ("test" in text or "pytest" in text)
+    ):
+        return "test_scaffold_type_mismatch"
+    if "unexpected keyword argument" in text and ("test" in text or "pytest" in text):
+        return "test_scaffold_constructor_mismatch"
+    return None
+
+
 def get_session_dispatch_watchdog_payload(
     db: Session,
     session_id: int,
@@ -1897,6 +1914,19 @@ def get_session_recovery_context_payload(
             )
             .count()
         )
+        latest_execution = (
+            db.query(TaskExecution)
+            .filter(
+                TaskExecution.session_id == session_id,
+                TaskExecution.task_id == task.id,
+            )
+            .order_by(
+                TaskExecution.completed_at.desc().nullslast(),
+                TaskExecution.started_at.desc().nullslast(),
+                TaskExecution.id.desc(),
+            )
+            .first()
+        )
 
         # files changed = most recent changeset for this task
         changeset = (
@@ -1940,6 +1970,15 @@ def get_session_recovery_context_payload(
                 "repair_attempts": repair_attempts,
                 "committed": committed,
                 "validation_evidence": validation_evidence,
+                "error_message": str(task.error_message or "")[:500] or None,
+                "failure_category": (
+                    str(latest_execution.failure_category or "") or None
+                    if latest_execution
+                    else None
+                ),
+                "failure_cause_bucket": _classify_test_scaffold_failure(
+                    task.error_message
+                ),
             }
         )
 

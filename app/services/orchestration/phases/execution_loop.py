@@ -160,6 +160,31 @@ def _is_read_only_inspection_command(command: str) -> bool:
     normalized = " ".join(str(command or "").strip().split())
     if not normalized:
         return False
+    blocked_tokens = (" >", ">>", "&&", ";", "||", "$(", "`")
+    if any(token in normalized for token in blocked_tokens):
+        if normalized == "rg --files . | sort":
+            return True
+        return False
+    try:
+        tokens = shlex.split(normalized, posix=True)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    executable = tokens[0]
+    if executable in {"grep", "rg", "ripgrep"}:
+        path_tokens = [
+            token
+            for token in tokens[1:]
+            if token not in {"--"}
+            and not token.startswith("-")
+            and "/" in token
+            and not token.startswith(("~", "/"))
+            and ".." not in Path(token).parts
+        ]
+        if executable in {"rg", "ripgrep"} and normalized.startswith("rg --files"):
+            return True
+        return bool(path_tokens)
     allowed_prefixes = (
         "ls",
         "find .",
@@ -170,16 +195,32 @@ def _is_read_only_inspection_command(command: str) -> bool:
     )
     if not normalized.startswith(allowed_prefixes):
         return False
-    blocked_tokens = (" >", ">>", "&&", ";", "||", "$(", "`")
-    if any(token in normalized for token in blocked_tokens):
-        if normalized == "rg --files . | sort":
-            return True
-        return False
     if normalized == "rg --files . | sort":
         return True
     if normalized.startswith("find .") and "| head" in normalized:
         return True
     return "|" not in normalized
+
+
+def _debug_ops_have_placeholder_content(ops: Any) -> bool:
+    if not isinstance(ops, list):
+        return False
+    for operation in ops:
+        if not isinstance(operation, dict):
+            continue
+        op_name = str(operation.get("op") or "").strip()
+        if op_name not in {"write_file", "append_file"}:
+            continue
+        path = str(operation.get("path") or "").strip()
+        content = operation.get("content")
+        has_placeholder_content = isinstance(
+            content, str
+        ) and ValidatorService._write_file_content_has_placeholder_implementation(
+            path, content
+        )
+        if has_placeholder_content:
+            return True
+    return False
 
 
 def _is_simple_verification_command(command: str) -> bool:
@@ -2374,6 +2415,39 @@ def execute_step_loop(
                 debug_changed_files = (
                     debug_files_changed if isinstance(debug_files_changed, list) else []
                 )
+                if fix_type == "ops_fix" and _debug_ops_have_placeholder_content(
+                    debug_data.get("ops")
+                ):
+                    reason = "placeholder_debug_ops_rejected"
+                    logger.warning(
+                        "[ORCHESTRATION] Rejecting placeholder-only ops_fix before retrying step %s",
+                        step_index + 1,
+                    )
+                    emit_live(
+                        "ERROR",
+                        "[ORCHESTRATION] Debug repair returned placeholder-only file content; stopping instead of corrupting the workspace",
+                        metadata={
+                            "phase": "debugging",
+                            "step_index": step_index + 1,
+                            "reason": reason,
+                            "fix_type": fix_type,
+                        },
+                    )
+                    orchestration_state.status = OrchestrationStatus.ABORTED
+                    orchestration_state.abort_reason = (
+                        "Debug repair returned placeholder-only file content"
+                    )
+                    mark_task_attempt_failed(
+                        task=task,
+                        session_task_link=session_task_link,
+                        task_execution=_get_task_execution(db, task_execution_id),
+                        error_message=orchestration_state.abort_reason,
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                    db.commit()
+                    restore_workspace_snapshot_if_needed(reason)
+                    write_project_state_snapshot_fn(db, project, task, session_id)
+                    return {"status": "failed", "reason": reason}
                 structured_ops_present = isinstance(step.get("ops"), list) and bool(
                     step.get("ops")
                 )
