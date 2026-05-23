@@ -93,6 +93,9 @@ def get_workflow_profile(
         return "debug_only"
 
     combined = " ".join([title or "", description or ""]).lower()
+    if _looks_like_plain_static_site_task(combined):
+        return "default" if "default" in WORKFLOW_PROFILES else execution_profile
+
     marker_groups = get_workflow_markers("fullstack_scaffold")
     frontend_markers = tuple(marker_groups.get("frontend") or [])
     backend_markers = tuple(marker_groups.get("backend") or [])
@@ -112,6 +115,35 @@ def get_workflow_profile(
             return "backend_only"
 
     return "default" if "default" in WORKFLOW_PROFILES else execution_profile
+
+
+def _looks_like_plain_static_site_task(text: str) -> bool:
+    """Plain HTML/CSS sites should not inherit app scaffold lifecycle phases."""
+
+    static_markers = (
+        "plain static site",
+        "static site",
+        "public/status-site",
+        "index.html",
+        "css/style.css",
+    )
+    if not any(marker in text for marker in static_markers):
+        return False
+    if any(marker in text for marker in ("react", "vite", "npm", "package.json")):
+        return any(
+            exclusion in text
+            for exclusion in (
+                "no react",
+                "no vite",
+                "no npm",
+                "without react",
+                "without vite",
+                "without npm",
+                "do not use react",
+                "do not use vite",
+            )
+        )
+    return True
 
 
 def _contains_negated_stack_marker(text: str, markers: tuple[str, ...]) -> bool:

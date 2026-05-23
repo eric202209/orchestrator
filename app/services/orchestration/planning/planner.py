@@ -568,16 +568,42 @@ class PlannerService:
     ) -> str:
         backend = (backend_name or "").strip().lower()
         model = (model_family or "").strip().lower()
+        capability = PlannerService.model_capability_label(backend, model)
+        if backend == "local_openclaw" and capability == "local_qwen_small_strict":
+            return "local_qwen_small_json_array"
         if backend == "local_openclaw" and ("qwen" in model or model == "local"):
             return "local_qwen_json_array"
         return "default"
 
     @staticmethod
+    def model_capability_label(
+        backend_name: Optional[str],
+        model_family: Optional[str],
+    ) -> str:
+        backend = (backend_name or "").strip().lower()
+        model = (model_family or "").strip().lower()
+        if backend == "local_openclaw" and (
+            model == "local"
+            or "14b" in model
+            or "q5_k_m" in model
+            or "qwen2.5-coder" in model
+        ):
+            return "local_qwen_small_strict"
+        if backend == "local_openclaw" and "qwen" in model:
+            return "local_qwen_capable"
+        if "gpt" in model:
+            return "remote_structured_capable"
+        return "standard"
+
+    @staticmethod
     def apply_prompt_profile(prompt: str, prompt_profile: str = "default") -> str:
-        if prompt_profile != "local_qwen_json_array":
+        if prompt_profile not in {
+            "local_qwen_json_array",
+            "local_qwen_small_json_array",
+        }:
             return prompt
 
-        return (
+        profiled = (
             f"{prompt.rstrip()}\n\n"
             "Output discipline for this model:\n"
             "11. Return only a JSON array of steps. Do not wrap it in an object.\n"
@@ -585,6 +611,13 @@ class PlannerService:
             "13. The first non-whitespace character must be `[` and the last must be `]`.\n"
             "14. Do not describe the file contents outside the JSON fields for each step.\n"
         )
+        if prompt_profile == "local_qwen_small_json_array":
+            profiled += (
+                "15. Use the smallest valid plan shape for the workflow profile; prefer 2-3 concrete steps over broad multi-step choreography.\n"
+                "16. Prefer typed `ops` for file writes and one bounded Python verification command per implementation step.\n"
+                "17. Do not include speculative future files in `expected_files`; list only files materialized by typed ops or already present in the workspace.\n"
+            )
+        return profiled
 
     @staticmethod
     def looks_salvageable_planning_output(output_text: str) -> bool:
@@ -2128,18 +2161,23 @@ Return only a JSON array matching this shape. No markdown. No prose.
             return stripped if stripped.startswith("[") else None
 
         match = re.match(
-            r"^```(?:json)?\s*(?P<body>\[.*\])\s*```\s*$",
+            r"^```(?:json)?\s*(?P<body>.*?)\s*```\s*.*$",
             stripped,
             flags=re.DOTALL,
         )
         if not match:
             return None
 
-        candidate = match.group("body").strip()
+        body = match.group("body").strip()
+        array_start = body.find("[")
+        if array_start < 0:
+            return None
+        decoder = json.JSONDecoder()
         try:
-            parsed = json.loads(candidate)
+            parsed, end_index = decoder.raw_decode(body[array_start:])
         except json.JSONDecodeError:
             return None
+        candidate = body[array_start : array_start + end_index].strip()
         return candidate if isinstance(parsed, list) else None
 
     @staticmethod

@@ -436,6 +436,35 @@ def test_qwen_local_prompt_profile_enforces_array_only_output():
     assert "Do not wrap it in an object" in prompt
 
 
+def test_amd_14b_lane_uses_smaller_stricter_plan_shape_label():
+    profile = PlannerService.select_prompt_profile(
+        "local_openclaw", "Qwen2.5-Coder-14B-Instruct-Q5_K_M"
+    )
+    prompt = PlannerService.apply_prompt_profile(
+        "Return a plan.", prompt_profile=profile
+    )
+
+    assert (
+        PlannerService.model_capability_label(
+            "local_openclaw", "Qwen2.5-Coder-14B-Instruct-Q5_K_M"
+        )
+        == "local_qwen_small_strict"
+    )
+    assert profile == "local_qwen_small_json_array"
+    assert "smallest valid plan shape" in prompt
+    assert "Prefer typed `ops` for file writes" in prompt
+
+
+def test_larger_qwen_lane_keeps_general_qwen_profile():
+    profile = PlannerService.select_prompt_profile("local_openclaw", "qwen3.6:27b")
+
+    assert (
+        PlannerService.model_capability_label("local_openclaw", "qwen3.6:27b")
+        == "local_qwen_capable"
+    )
+    assert profile == "local_qwen_json_array"
+
+
 def test_initial_planning_prompt_contains_valid_json_contract_example():
     from app.services.prompt_templates import PromptTemplates
 
@@ -519,6 +548,43 @@ def test_planning_repair_normalizes_fenced_json_array(tmp_path):
             (level, message, metadata or {})
         ),
         reason="plan_validation_failed",
+    )
+
+    assert result["output"] == plan_json
+    assert any(
+        metadata.get("reason") == "planning_repair_fenced_json_normalized"
+        for _, _, metadata in events
+    )
+
+
+def test_planning_repair_normalizes_fenced_json_array_with_trailing_text(tmp_path):
+    events = []
+    plan_json = json.dumps(_valid_three_step_plan())
+
+    class Runtime:
+        async def invoke_prompt(self, *args, **kwargs):
+            return {
+                "output": (
+                    "```json\n"
+                    f"{plan_json}\n"
+                    "```\n"
+                    "This plan now satisfies the contract."
+                )
+            }
+
+    result = PlannerService.repair_output(
+        runtime_service=Runtime(),
+        task_description="Update an existing static site",
+        malformed_output="not json",
+        project_dir=tmp_path,
+        timeout_seconds=10,
+        logger=logging.getLogger(
+            "test.planning_repair_normalizes_fenced_json_array_with_trailing_text"
+        ),
+        emit_live=lambda level, message, metadata=None: events.append(
+            (level, message, metadata or {})
+        ),
+        reason="single_step_full_lifecycle_plan",
     )
 
     assert result["output"] == plan_json

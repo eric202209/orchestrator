@@ -2202,7 +2202,57 @@ def get_session_knowledge_usage_payload(db: Session, session_id: int) -> Dict[st
             )
         )
 
-    return {"session_id": session_id, "phases": phases}
+    flat_entries = [entry for entries in phases.values() for entry in entries]
+    flat_entries_with_phase = [
+        (phase, entry) for phase, entries in phases.items() for entry in entries
+    ]
+    top_items = sorted(
+        flat_entries_with_phase,
+        key=lambda item: (
+            -float(item[1].get("confidence_max") or 0.0),
+            str(item[1].get("title") or ""),
+        ),
+    )[:5]
+    phase_summaries: Dict[str, Dict[str, Any]] = {}
+    for phase in ("planning", "validation", "failure"):
+        entries = phases.get(phase, [])
+        phase_summaries[phase] = {
+            "knowledge_used": any(bool(entry["used_in_prompt"]) for entry in entries),
+            "item_count": len(entries),
+            "retrieval_reasons": sorted(
+                {
+                    str(entry["retrieval_reason"])
+                    for entry in entries
+                    if entry.get("retrieval_reason")
+                }
+            ),
+            "top_item_titles": [entry["title"] for entry in entries[:3]],
+            "omission_reason": (
+                None if entries else "no_retrieval_attempts_or_no_matching_items_logged"
+            ),
+        }
+
+    return {
+        "session_id": session_id,
+        "knowledge_used": any(bool(entry["used_in_prompt"]) for entry in flat_entries),
+        "omission_reason": (
+            None
+            if flat_entries
+            else "no_retrieval_attempts_or_no_matching_items_logged"
+        ),
+        "top_items": [
+            {
+                "title": entry["title"],
+                "knowledge_type": entry["knowledge_type"],
+                "confidence": entry["confidence_max"],
+                "phase": phase,
+                "retrieval_reason": entry["retrieval_reason"],
+            }
+            for phase, entry in top_items
+        ],
+        "phase_summaries": phase_summaries,
+        "phases": phases,
+    }
 
 
 @router.post("/checkpoints/orphaned/cleanup")

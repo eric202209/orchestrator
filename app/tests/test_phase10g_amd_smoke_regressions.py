@@ -279,6 +279,12 @@ class TestPatchPythonVerificationCmd:
         out = fn(cmd)
         assert out == cmd
 
+    def test_does_not_duplicate_comma_imported_sys(self):
+        fn = self._fn()
+        cmd = "python3 -c \"import pathlib,sys; sys.exit(0 if pathlib.Path('f.py').exists() else 1)\""
+        out = fn(cmd)
+        assert out == cmd
+
     def test_leaves_non_python_commands_unchanged(self):
         fn = self._fn()
         for cmd in ("ls -la", 'node -e "process.exit(0)"', "pytest app/tests"):

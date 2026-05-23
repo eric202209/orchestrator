@@ -66,6 +66,38 @@ def test_static_frontend_task_with_negated_backend_resolves_frontend_only():
     )
 
 
+def test_plain_static_site_with_preview_server_exclusion_uses_default_profile():
+    assert (
+        get_workflow_profile(
+            "full_lifecycle",
+            "Step 1: create base status site files",
+            (
+                "Create the base plain static site under public/status-site. "
+                "Required files are public/status-site/index.html, "
+                "public/status-site/css/style.css, and "
+                "public/status-site/images/status-badge.svg. "
+                "No React, Vite, npm, or preview server."
+            ),
+        )
+        == "default"
+    )
+
+
+def test_plain_static_site_with_api_label_does_not_resolve_backend_only():
+    assert (
+        get_workflow_profile(
+            "full_lifecycle",
+            "Step 2: add incident summary section",
+            (
+                "Update public/status-site/index.html and "
+                "public/status-site/css/style.css with three status cards: "
+                "API, Queue, and Knowledge."
+            ),
+        )
+        == "default"
+    )
+
+
 def test_virtual_merge_gate_ignores_stale_unsynced_state_for_current_task_retry(
     db_session, tmp_path
 ):

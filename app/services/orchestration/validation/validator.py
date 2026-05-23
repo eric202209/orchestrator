@@ -829,7 +829,11 @@ class ValidatorService:
             for operation in step.get("ops", []) or []:
                 if not isinstance(operation, dict):
                     continue
-                if str(operation.get("op") or "") in {"write_file", "append_file"}:
+                if str(operation.get("op") or "") in {
+                    "write_file",
+                    "append_file",
+                    "replace_in_file",
+                }:
                     path = (
                         str(operation.get("path") or "")
                         .strip()
@@ -856,6 +860,52 @@ class ValidatorService:
                     if path:
                         files.add(path)
         return files
+
+    @staticmethod
+    def _existing_static_site_roots(project_dir: Optional[Path]) -> List[str]:
+        if project_dir is None or not Path(project_dir).exists():
+            return []
+        root = Path(project_dir)
+        roots: List[str] = []
+        if (root / "index.html").is_file() and (root / "css" / "style.css").is_file():
+            roots.append("")
+        public_dir = root / "public"
+        if public_dir.is_dir():
+            for child in sorted(public_dir.iterdir()):
+                if not child.is_dir():
+                    continue
+                if (child / "index.html").is_file() and (
+                    child / "css" / "style.css"
+                ).is_file():
+                    roots.append(f"public/{child.name}")
+        return roots
+
+    @classmethod
+    def _plan_static_site_off_root_mutations(
+        cls,
+        plan: List[Dict[str, Any]],
+        project_dir: Optional[Path],
+        task_prompt: str,
+    ) -> List[str]:
+        prompt = str(task_prompt or "").lower()
+        if not any(marker in prompt for marker in ("static site", "status site")):
+            return []
+        roots = cls._existing_static_site_roots(project_dir)
+        if not roots:
+            return []
+        allowed_roots = [f"{root}/" for root in roots if root]
+        suffixes = {".css", ".html", ".js", ".svg"}
+        off_root: List[str] = []
+        for path in sorted(cls._plan_materialized_file_targets(plan)):
+            normalized = path.strip().lstrip("./")
+            if Path(normalized).suffix.lower() not in suffixes:
+                continue
+            if "" in roots and "/" not in normalized:
+                continue
+            if any(normalized.startswith(prefix) for prefix in allowed_roots):
+                continue
+            off_root.append(normalized)
+        return off_root
 
     @staticmethod
     def _task_prompt_requires_materialization(
@@ -1865,6 +1915,34 @@ class ValidatorService:
         return files
 
     @staticmethod
+    def _resolve_existing_static_site_mentions(
+        project_dir: Path,
+        file_paths: List[str],
+        *context_values: Any,
+    ) -> List[str]:
+        context = " ".join(str(value or "") for value in context_values).lower()
+        if "public/status-site" not in context:
+            return file_paths
+        static_root = Path("public/status-site")
+        resolved: List[str] = []
+        seen: set[str] = set()
+        for path_text in file_paths:
+            normalized = str(path_text or "").strip().rstrip("/").lstrip("./")
+            if not normalized:
+                continue
+            candidate = Path(normalized)
+            if not (project_dir / normalized).exists() and not normalized.startswith(
+                f"{static_root.as_posix()}/"
+            ):
+                scoped = (static_root / candidate).as_posix()
+                if (project_dir / scoped).exists():
+                    normalized = scoped
+            if normalized not in seen:
+                seen.add(normalized)
+                resolved.append(normalized)
+        return resolved
+
+    @staticmethod
     def _plan_contains_duplicated_path_roots(
         plan: List[Dict[str, Any]],
     ) -> Dict[int, List[str]]:
@@ -1986,12 +2064,18 @@ class ValidatorService:
             commands = [
                 str(command or "") for command in step.get("commands", []) or []
             ]
-            if any(
-                pattern.search(command)
-                for command in commands
-                for pattern in mutating_command_patterns
-            ):
-                findings.append(step_number)
+            for command in commands:
+                command_text = command.strip()
+                patterns = mutating_command_patterns
+                if command_text.startswith(("python -c ", "python3 -c ")):
+                    patterns = (
+                        mutating_command_patterns[0],
+                        mutating_command_patterns[1],
+                        mutating_command_patterns[3],
+                    )
+                if any(pattern.search(command) for pattern in patterns):
+                    findings.append(step_number)
+                    break
         return findings
 
     @staticmethod
@@ -2144,6 +2228,21 @@ class ValidatorService:
                     f"plan step (steps: {bad_steps[:5]})"
                 )
                 details["missing_replace_in_file_targets"] = missing_replace_targets
+
+            static_site_off_root_mutations = cls._plan_static_site_off_root_mutations(
+                plan,
+                Path(project_dir),
+                task_prompt,
+            )
+            if static_site_off_root_mutations:
+                repairable.append(
+                    "Existing static-site tasks must keep static file edits inside "
+                    "the detected static-site root "
+                    f"(files: {static_site_off_root_mutations[:5]})"
+                )
+                details["static_site_off_root_mutations"] = (
+                    static_site_off_root_mutations[:20]
+                )
 
         command_budget = cls._plan_command_budget_diagnostics(plan, output_text)
         details["step_count"] = command_budget["step_count"]
@@ -2640,6 +2739,13 @@ class ValidatorService:
                 cls._core_expected_files(plan)
                 + cls._source_path_mentions(title, description, task_prompt)
             )
+        )
+        expected_core_files = cls._resolve_existing_static_site_mentions(
+            project_dir,
+            expected_core_files,
+            title,
+            description,
+            task_prompt,
         )
         candidate_files = cls._iter_candidate_files(project_dir, expected_core_files)
         nested_matches = cls._find_nested_expected_file_matches(

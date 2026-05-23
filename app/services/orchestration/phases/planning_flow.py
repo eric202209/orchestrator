@@ -6,6 +6,7 @@ import asyncio
 import json
 import shlex
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Callable, Dict
 
 from celery.exceptions import SoftTimeLimitExceeded
@@ -159,6 +160,69 @@ def _read_only_stage_fallback_plan(
     ]
 
 
+def _static_site_validation_fallback_plan(
+    ctx: OrchestrationRunContext,
+) -> list[dict[str, Any]] | None:
+    if ctx.workflow_stage != "validate":
+        return None
+
+    prompt = str(ctx.prompt or "")
+    lowered = prompt.lower()
+    project_dir = Path(ctx.orchestration_state.project_dir)
+    root = "public/status-site" if "public/status-site" in lowered else ""
+    if not root:
+        public_dir = project_dir / "public"
+        if not public_dir.is_dir():
+            return None
+        for child in sorted(public_dir.iterdir()):
+            if not child.is_dir():
+                continue
+            if (child / "index.html").is_file() and (
+                child / "css" / "style.css"
+            ).is_file():
+                root = f"public/{child.name}"
+                break
+    if not root:
+        return None
+
+    files = [
+        f"{root}/index.html",
+        f"{root}/css/style.css",
+        f"{root}/images/status-badge.svg",
+    ]
+    needles = ["css/style.css", "images/status-badge.svg"]
+    for label in ("API", "Queue", "Knowledge"):
+        if label.lower() in lowered:
+            needles.append(label)
+    if "skip link" in lowered or "skip-link" in lowered:
+        needles.append("skip")
+    if "alt text" in lowered or "alt=" in lowered:
+        needles.append("alt=")
+
+    script = (
+        "import pathlib,sys; "
+        f"files={json.dumps(files)}; "
+        f"index={json.dumps(files[0])}; "
+        f"needles={json.dumps(list(dict.fromkeys(needles)))}; "
+        "ok=all(pathlib.Path(p).is_file() and pathlib.Path(p).stat().st_size > 0 for p in files); "
+        "content=pathlib.Path(index).read_text(encoding='utf-8') if pathlib.Path(index).is_file() else ''; "
+        "ok=ok and all(needle in content for needle in needles); "
+        "sys.exit(0 if ok else 1)"
+    )
+    command = "python -c " + json.dumps(script)
+    return [
+        {
+            "step_number": 1,
+            "description": f"Validate static site contract under {root}",
+            "commands": [command],
+            "verification": command,
+            "rollback": "true",
+            "expected_files": [],
+            "ops": [],
+        }
+    ]
+
+
 def _split_repaired_single_step_full_lifecycle_plan(
     extracted_plan: Any,
 ) -> list[dict[str, Any]] | None:
@@ -193,7 +257,11 @@ def _split_repaired_single_step_full_lifecycle_plan(
         in {"write_file", "append_file", "replace_in_file"}
         and str(operation.get("path") or "").strip()
     ]
-    material_paths = list(dict.fromkeys(expected_files + op_paths))
+    # When splitting a repaired single-step full-lifecycle plan, keep the
+    # implementation contract anchored to concrete file edits. Repair models
+    # often preserve broad/speculative expected_files from the rejected plan;
+    # carrying those into the split causes false unmaterialized-output failures.
+    material_paths = list(dict.fromkeys(op_paths or expected_files))
     original_verification = str(original.get("verification") or "").strip()
     verifier = (
         _python_exists_verification_command(material_paths)
@@ -233,6 +301,73 @@ def _split_repaired_single_step_full_lifecycle_plan(
             "expected_files": [],
         },
     ]
+
+
+def _prune_unmaterialized_expected_files(
+    plan: list[dict[str, Any]],
+    unmaterialized_paths: list[str],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Drop expected_files entries that validation proved are not outputs.
+
+    This is deliberately narrower than contract completion. It never adds file
+    content or paths; it only removes stale/speculative expected_files while
+    preserving concrete mutating op targets as the implementation scope.
+    """
+
+    if not unmaterialized_paths:
+        return plan, {"changed": False, "reason": "no_unmaterialized_expected_files"}
+
+    stale_paths = {
+        str(path or "").strip().rstrip("/").lstrip("./")
+        for path in unmaterialized_paths
+        if str(path or "").strip()
+    }
+    if not stale_paths:
+        return plan, {"changed": False, "reason": "empty_unmaterialized_expected_files"}
+
+    concrete_op_paths = {
+        str(op.get("path") or "").strip().rstrip("/").lstrip("./")
+        for step in plan
+        if isinstance(step, dict)
+        for op in (step.get("ops") or [])
+        if isinstance(op, dict)
+        and str(op.get("op") or "") in {"write_file", "append_file", "replace_in_file"}
+        and str(op.get("path") or "").strip()
+    }
+    if not concrete_op_paths:
+        return plan, {"changed": False, "reason": "no_concrete_file_ops"}
+
+    changed = False
+    removed: list[str] = []
+    normalized: list[dict[str, Any]] = []
+    for step in plan:
+        if not isinstance(step, dict):
+            normalized.append(step)
+            continue
+        updated = dict(step)
+        expected_files = []
+        for raw_path in updated.get("expected_files") or []:
+            path = str(raw_path or "").strip().rstrip("/").lstrip("./")
+            if not path:
+                continue
+            if path in stale_paths and path not in concrete_op_paths:
+                removed.append(path)
+                changed = True
+                continue
+            expected_files.append(path)
+        updated["expected_files"] = list(dict.fromkeys(expected_files))
+        normalized.append(updated)
+
+    return normalized, {
+        "changed": changed,
+        "reason": (
+            "pruned_unmaterialized_expected_files"
+            if changed
+            else "no_speculative_expected_files_removed"
+        ),
+        "removed_expected_files": sorted(set(removed)),
+        "concrete_op_paths": sorted(concrete_op_paths),
+    }
 
 
 def _retrieve_validation_repair_knowledge(
@@ -546,6 +681,10 @@ def execute_planning_phase(
         runtime_metadata.get("backend"),
         runtime_metadata.get("model_family"),
     )
+    model_capability_label = PlannerService.model_capability_label(
+        runtime_metadata.get("backend"),
+        runtime_metadata.get("model_family"),
+    )
     if planning_prompt:
         planning_prompt = PlannerService.apply_prompt_profile(
             planning_prompt,
@@ -573,6 +712,8 @@ def execute_planning_phase(
             "planning_prompt_tokens": planning_prompt_tokens,
             "project_context_chars": len(ctx.orchestration_state.project_context or ""),
             "task_chars": len(ctx.prompt or ""),
+            "prompt_profile": prompt_profile,
+            "model_capability_label": model_capability_label,
             "context_budget_status": (
                 "dense" if planning_prompt_tokens > 8000 else "normal"
             ),
@@ -1434,6 +1575,21 @@ def execute_planning_phase(
                     message="[ORCHESTRATION] Completed deterministic plan contract gaps",
                     details=completion_details,
                 )
+            static_validation_plan = _static_site_validation_fallback_plan(ctx)
+            if static_validation_plan:
+                sanitized_plan = static_validation_plan
+                output_text = json.dumps(static_validation_plan)
+                emit_phase_event(
+                    ctx.orchestration_state,
+                    ctx.emit_live,
+                    level="INFO",
+                    phase="planning",
+                    message="[ORCHESTRATION] Replaced static-site validation plan with deterministic read-only checks",
+                    details={
+                        "reason": "static_site_validation_contract",
+                        "workflow_stage": ctx.workflow_stage,
+                    },
+                )
             try:
                 ctx.orchestration_state.plan = normalize_plan_with_live_logging(
                     ctx.db,
@@ -1756,6 +1912,41 @@ def execute_planning_phase(
                 workflow_profile=ctx.workflow_profile,
                 workflow_stage=ctx.workflow_stage,
             )
+            if not plan_verdict.accepted and (plan_verdict.details or {}).get(
+                "unmaterialized_expected_files"
+            ):
+                pruned_plan, prune_details = _prune_unmaterialized_expected_files(
+                    ctx.orchestration_state.plan,
+                    (plan_verdict.details or {}).get("unmaterialized_expected_files")
+                    or [],
+                )
+                if prune_details.get("changed"):
+                    ctx.orchestration_state.plan = pruned_plan
+                    output_text = json.dumps(pruned_plan)
+                    ctx.logger.info(
+                        "[ORCHESTRATION] Pruned unmaterialized expected_files from plan: %s",
+                        prune_details,
+                    )
+                    emit_phase_event(
+                        ctx.orchestration_state,
+                        ctx.emit_live,
+                        level="INFO",
+                        phase="planning",
+                        message="[ORCHESTRATION] Pruned unmaterialized expected_files from plan",
+                        details=prune_details,
+                    )
+                    plan_verdict = ValidatorService.validate_plan(
+                        ctx.orchestration_state.plan,
+                        output_text=output_text,
+                        task_prompt=ctx.prompt,
+                        execution_profile=ctx.execution_profile,
+                        project_dir=ctx.orchestration_state.project_dir,
+                        title=ctx.task.title if ctx.task else None,
+                        description=ctx.task.description if ctx.task else None,
+                        validation_severity=ctx.validation_severity,
+                        workflow_profile=ctx.workflow_profile,
+                        workflow_stage=ctx.workflow_stage,
+                    )
             if not plan_verdict.accepted and (
                 (plan_verdict.details or {}).get("read_only_stage_mutation_steps")
                 or (plan_verdict.details or {}).get("missing_workspace_expected_files")

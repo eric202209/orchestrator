@@ -65,6 +65,48 @@ def _applies_to_candidates(trigger_phase: str, knowledge_types: list[str]) -> li
     return list(dict.fromkeys(candidates))
 
 
+def _matches_task_type_gate(
+    item: KnowledgeItem,
+    *,
+    query: Optional[str],
+    failure_signature: Optional[str],
+) -> bool:
+    """Keep task-family guides from leaking into unrelated planning prompts."""
+
+    tags = {str(tag or "").strip().lower() for tag in (item.tags or [])}
+    if "static-site" not in tags:
+        return True
+
+    signature = (failure_signature or "").strip().lower()
+    if signature:
+        return any(
+            marker in signature
+            for marker in (
+                "static",
+                "html",
+                "css",
+                "svg",
+                "asset",
+                "expected_files",
+                "materialization",
+            )
+        )
+
+    text = f"{query or ''} {item.failure_signature or ''}".lower()
+    static_markers = (
+        "static site",
+        "static-site",
+        "plain html",
+        "index.html",
+        "css/style.css",
+        "stylesheet link",
+        "svg",
+        ".html",
+        ".css",
+    )
+    return any(marker in text for marker in static_markers)
+
+
 class KnowledgeService:
     def __init__(
         self,
@@ -190,7 +232,17 @@ class KnowledgeService:
         if db is not None:
             items = db.query(KnowledgeItem).filter(KnowledgeItem.id.in_(ids)).all()
         # Preserve scores alongside items for budget sorting
-        scored = [(item, hit_scores.get(item.id, 0.0)) for item in items]
+        scored = [
+            (item, hit_scores.get(item.id, 0.0))
+            for item in items
+            if _matches_task_type_gate(
+                item, query=query, failure_signature=failure_signature
+            )
+        ]
+        if not scored and items:
+            return self._build_context(
+                [], query, trigger_phase, "filtered_by_task_type_gate"
+            )
         scored = self._apply_budget(scored, failure_signature)
 
         reason = (
@@ -334,6 +386,9 @@ class KnowledgeService:
             for r in rows
             if r.applies_to
             and any(phase in r.applies_to for phase in applies_to_candidates)
+            and _matches_task_type_gate(
+                r, query=query, failure_signature=failure_signature
+            )
         ]
         scored = [
             (item, self._sqlite_fallback_score(item, query, failure_signature))

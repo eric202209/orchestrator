@@ -6,7 +6,10 @@ from app.services.orchestration.planning.normalization import (
 )
 from app.services.orchestration.phases.planning_flow import (
     _looks_like_verification_only_task,
+    _prune_unmaterialized_expected_files,
     _read_only_stage_fallback_plan,
+    _static_site_validation_fallback_plan,
+    _split_repaired_single_step_full_lifecycle_plan,
 )
 from app.services.orchestration.validation.validator import ValidatorService
 
@@ -108,6 +111,34 @@ def test_non_static_plan_contract_completion_does_not_change_plan():
 
     assert completed == plan
     assert details["changed"] is False
+
+
+def test_contract_completion_does_not_generate_content_from_expected_files_only():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Declare static files without materializing content",
+            "commands": ["test -f index.html || true"],
+            "verification": None,
+            "expected_files": ["index.html", "css/style.css", "images/site.svg"],
+            "ops": [],
+        }
+    ]
+
+    completed, details = complete_repaired_plan_contract(
+        plan,
+        task_prompt="Create a plain static site with index.html, CSS, and SVG",
+        repaired=True,
+    )
+
+    assert completed == plan
+    assert details["changed"] is False
+    assert details["added_expected_files"] == []
+    assert not any(
+        op.get("op") == "write_file"
+        for step in completed
+        for op in (step.get("ops") or [])
+    )
 
 
 def test_existing_static_site_plan_normalization_rewrites_framework_drift(tmp_path):
@@ -242,6 +273,503 @@ def test_existing_static_site_plan_normalization_simplifies_css_svg_url_check(
     assert details["changed"] is True
     assert "flower-bg.svg" in normalized[0]["verification"]
     assert "background-image" not in normalized[0]["verification"]
+
+
+def test_existing_nested_static_site_verification_uses_existing_html_svg_link(
+    tmp_path,
+):
+    site_root = tmp_path / "public" / "status-site"
+    (site_root / "css").mkdir(parents=True)
+    (site_root / "images").mkdir()
+    (site_root / "index.html").write_text(
+        "<html><head><link rel='stylesheet' href='css/style.css'></head>"
+        "<body><img src='images/status-badge.svg' alt='Status Badge'></body></html>",
+        encoding="utf-8",
+    )
+    (site_root / "css" / "style.css").write_text("body {}", encoding="utf-8")
+    (site_root / "images" / "status-badge.svg").write_text(
+        "<svg></svg>",
+        encoding="utf-8",
+    )
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Add incident cards and preserve SVG reference",
+            "commands": [],
+            "verification": (
+                "grep 'background-image: url(../status-badge.svg)' "
+                "public/status-site/css/style.css"
+            ),
+            "rollback": "true",
+            "expected_files": [
+                "public/status-site/index.html",
+                "public/status-site/css/style.css",
+            ],
+            "ops": [
+                {
+                    "op": "append_file",
+                    "path": "public/status-site/index.html",
+                    "content": "<section><h2>Incident Summary</h2></section>",
+                }
+            ],
+        }
+    ]
+
+    normalized, details = normalize_existing_static_site_plan(
+        plan,
+        project_dir=tmp_path,
+    )
+
+    assert details["changed"] is True
+    assert "public/status-site/index.html" in normalized[0]["verification"]
+    assert "status-badge.svg" in normalized[0]["verification"]
+    assert "background-image" not in normalized[0]["verification"]
+
+
+def test_existing_nested_static_site_normalization_rewrites_root_file_drift(
+    tmp_path,
+):
+    site_root = tmp_path / "public" / "status-site"
+    (site_root / "css").mkdir(parents=True)
+    (site_root / "index.html").write_text(
+        "<main id='main-content'></main>", encoding="utf-8"
+    )
+    (site_root / "css" / "style.css").write_text("body {}", encoding="utf-8")
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Improve existing status site accessibility",
+            "commands": [],
+            "verification": (
+                'python -c "from pathlib import Path; '
+                "assert 'main-content' in Path('index.html').read_text(); "
+                "assert 'body' in Path('style.css').read_text()\""
+            ),
+            "rollback": "true",
+            "expected_files": ["index.html", "style.css"],
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "index.html",
+                    "old": "<main id='main-content'></main>",
+                    "new": "<a href='#main-content'>Skip to main content</a>"
+                    "<main id='main-content'></main>",
+                },
+                {
+                    "op": "append_file",
+                    "path": "style.css",
+                    "content": "@media (max-width: 600px) { body { margin: 0; } }",
+                },
+            ],
+        }
+    ]
+
+    normalized, details = normalize_existing_static_site_plan(
+        plan,
+        project_dir=tmp_path,
+    )
+
+    assert details["changed"] is True
+    assert normalized[0]["expected_files"] == [
+        "public/status-site/index.html",
+        "public/status-site/css/style.css",
+    ]
+    assert [op["path"] for op in normalized[0]["ops"]] == [
+        "public/status-site/index.html",
+        "public/status-site/css/style.css",
+    ]
+    assert "Path('public/status-site/index.html')" in normalized[0]["verification"]
+    assert "Path('public/status-site/css/style.css')" in normalized[0]["verification"]
+
+
+def test_existing_static_site_normalization_appends_html_fragments_instead_of_overwriting(
+    tmp_path,
+):
+    site_root = tmp_path / "public" / "status-site"
+    (site_root / "css").mkdir(parents=True)
+    (site_root / "index.html").write_text(
+        "<!doctype html><html><head><link rel='stylesheet' href='css/style.css'>"
+        "</head><body><img src='images/status-badge.svg' alt='Status'></body></html>",
+        encoding="utf-8",
+    )
+    (site_root / "css" / "style.css").write_text("body {}", encoding="utf-8")
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Add incident summary cards",
+            "commands": [],
+            "verification": "python -c \"import pathlib; print(pathlib.Path('public/status-site/index.html').exists())\"",
+            "rollback": "true",
+            "expected_files": ["public/status-site/index.html"],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "public/status-site/index.html",
+                    "content": "<div class='incident-summary'>API Queue Knowledge</div>",
+                }
+            ],
+        }
+    ]
+
+    normalized, details = normalize_existing_static_site_plan(
+        plan,
+        project_dir=tmp_path,
+    )
+
+    assert details["changed"] is True
+    assert normalized[0]["ops"][0]["op"] == "append_file"
+    assert normalized[0]["ops"][0]["path"] == "public/status-site/index.html"
+
+
+def test_repaired_single_step_split_uses_actual_edit_paths_not_speculative_expected_files(
+    tmp_path,
+):
+    site_root = tmp_path / "public" / "status-site"
+    (site_root / "css").mkdir(parents=True)
+    (site_root / "index.html").write_text("<main></main>", encoding="utf-8")
+    (site_root / "css" / "style.css").write_text("body {}", encoding="utf-8")
+    repaired_single_step = [
+        {
+            "step_number": 1,
+            "description": "Add incident summary to existing status site",
+            "commands": [],
+            "verification": "python -c \"from pathlib import Path; assert Path('public/status-site/index.html').exists()\"",
+            "rollback": "true",
+            "expected_files": [
+                "public/status-site/index.html",
+                "public/status-site/css/style.css",
+                "README.md",
+            ],
+            "ops": [
+                {
+                    "op": "append_file",
+                    "path": "public/status-site/index.html",
+                    "content": "<section>API Queue Knowledge</section>",
+                },
+                {
+                    "op": "replace_in_file",
+                    "path": "public/status-site/css/style.css",
+                    "old": "body {}",
+                    "new": "body { color: #111; }",
+                },
+            ],
+        }
+    ]
+
+    split_plan = _split_repaired_single_step_full_lifecycle_plan(repaired_single_step)
+
+    assert split_plan is not None
+    assert split_plan[1]["expected_files"] == [
+        "public/status-site/index.html",
+        "public/status-site/css/style.css",
+    ]
+    verdict = ValidatorService.validate_plan(
+        split_plan,
+        output_text="[]",
+        task_prompt="Add incident summary section to existing status site",
+        execution_profile="full_lifecycle",
+        workflow_stage="implement",
+        project_dir=tmp_path,
+    )
+    assert verdict.accepted
+    assert "unmaterialized_expected_files" not in verdict.details
+
+
+def test_prune_unmaterialized_expected_files_keeps_concrete_edit_scope(tmp_path):
+    site_root = tmp_path / "public" / "status-site"
+    (site_root / "css").mkdir(parents=True)
+    (site_root / "index.html").write_text("<main></main>", encoding="utf-8")
+    (site_root / "css" / "style.css").write_text("body {}", encoding="utf-8")
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Edit existing status site",
+            "commands": [],
+            "verification": "python -c \"from pathlib import Path; assert Path('public/status-site/index.html').exists()\"",
+            "rollback": "true",
+            "expected_files": [
+                "public/status-site/index.html",
+                "public/status-site/css/style.css",
+                "README.md",
+            ],
+            "ops": [
+                {
+                    "op": "append_file",
+                    "path": "public/status-site/index.html",
+                    "content": "<section>Knowledge</section>",
+                }
+            ],
+        }
+    ]
+
+    pruned, details = _prune_unmaterialized_expected_files(plan, ["README.md"])
+
+    assert details["changed"] is True
+    assert details["removed_expected_files"] == ["README.md"]
+    assert pruned[0]["expected_files"] == [
+        "public/status-site/index.html",
+        "public/status-site/css/style.css",
+    ]
+
+
+def test_prune_unmaterialized_expected_files_does_not_hide_missing_outputs():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Declare files without edits",
+            "commands": [],
+            "verification": None,
+            "rollback": "true",
+            "expected_files": ["index.html"],
+            "ops": [],
+        }
+    ]
+
+    pruned, details = _prune_unmaterialized_expected_files(plan, ["index.html"])
+
+    assert pruned == plan
+    assert details["changed"] is False
+    assert details["reason"] == "no_concrete_file_ops"
+
+
+def test_static_site_contract_completion_rewrites_quoted_html_link_verification():
+    brittle_verification = (
+        'python -c "import pathlib,sys; content = '
+        "pathlib.Path('public/status-site/index.html').read_text(); "
+        'sys.exit(0 if \'<link rel="stylesheet" href="css/style.css">\' '
+        'in content and \'<img src="images/status-badge.svg" '
+        'alt="Status Badge">\' in content else 1)"'
+    )
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create base static site files",
+            "commands": [],
+            "verification": brittle_verification,
+            "rollback": "true",
+            "expected_files": [
+                "public/status-site/index.html",
+                "public/status-site/css/style.css",
+                "public/status-site/images/status-badge.svg",
+            ],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "public/status-site/index.html",
+                    "content": (
+                        '<link rel="stylesheet" href="css/style.css">'
+                        '<img src="images/status-badge.svg" alt="Status Badge">'
+                    ),
+                },
+                {
+                    "op": "write_file",
+                    "path": "public/status-site/css/style.css",
+                    "content": "body {}",
+                },
+                {
+                    "op": "write_file",
+                    "path": "public/status-site/images/status-badge.svg",
+                    "content": "<svg></svg>",
+                },
+            ],
+        }
+    ]
+
+    completed, details = complete_repaired_plan_contract(
+        plan,
+        task_prompt="Create a plain static site with HTML, CSS, and SVG",
+    )
+
+    assert details["changed"] is True
+    assert completed[0]["verification"].startswith("python -c ")
+    assert '\\"stylesheet\\"' not in completed[0]["verification"]
+    assert "css/style.css" in completed[0]["verification"]
+    assert "images/status-badge.svg" in completed[0]["verification"]
+
+
+def test_static_site_contract_completion_rewrites_final_link_verification_step():
+    brittle_verification = (
+        'python -c "import pathlib,sys; content = '
+        "pathlib.Path('public/status-site/index.html').read_text(); "
+        'sys.exit(0 if \'<link rel="stylesheet" href="css/style.css">\' '
+        'in content and \'<img src="images/status-badge.svg" '
+        'alt="Status Badge">\' in content else 1)"'
+    )
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create base static site files",
+            "commands": [],
+            "verification": None,
+            "rollback": "true",
+            "expected_files": [
+                "public/status-site/index.html",
+                "public/status-site/css/style.css",
+                "public/status-site/images/status-badge.svg",
+            ],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "public/status-site/index.html",
+                    "content": (
+                        '<link rel="stylesheet" href="css/style.css">'
+                        '<img src="images/status-badge.svg" alt="Status Badge">'
+                    ),
+                },
+                {
+                    "op": "write_file",
+                    "path": "public/status-site/css/style.css",
+                    "content": "body {}",
+                },
+                {
+                    "op": "write_file",
+                    "path": "public/status-site/images/status-badge.svg",
+                    "content": "<svg></svg>",
+                },
+            ],
+        },
+        {
+            "step_number": 2,
+            "description": "Verify links",
+            "commands": [brittle_verification],
+            "verification": brittle_verification,
+            "rollback": "true",
+            "expected_files": [],
+            "ops": [],
+        },
+    ]
+
+    completed, details = complete_repaired_plan_contract(
+        plan,
+        task_prompt="Create a plain static site with HTML, CSS, and SVG",
+    )
+
+    assert details["changed"] is True
+    assert completed[1]["verification"].startswith("python -c ")
+    assert completed[1]["commands"] == [completed[1]["verification"]]
+    assert '\\"stylesheet\\"' not in completed[1]["verification"]
+    assert "css/style.css" in completed[1]["verification"]
+    assert "images/status-badge.svg" in completed[1]["verification"]
+
+
+def test_static_site_contract_completion_rewrites_html_selector_content_check():
+    brittle_verification = (
+        "python -c 'import pathlib,sys; content = "
+        'pathlib.Path("public/status-site/index.html").read_text(); '
+        'sys.exit(0 if ".incident-summary" in content and ".status-card" '
+        'in content and "API" in content and "Queue" in content and '
+        '"Knowledge" in content else 1)\''
+    )
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Add incident summary cards",
+            "commands": [brittle_verification],
+            "verification": brittle_verification,
+            "rollback": "true",
+            "expected_files": ["public/status-site/index.html"],
+            "ops": [
+                {
+                    "op": "append_file",
+                    "path": "public/status-site/index.html",
+                    "content": (
+                        '<section class="incident-summary">'
+                        '<article class="status-card">API</article>'
+                        '<article class="status-card">Queue</article>'
+                        '<article class="status-card">Knowledge</article>'
+                        "</section>"
+                    ),
+                }
+            ],
+        }
+    ]
+
+    completed, details = complete_repaired_plan_contract(
+        plan,
+        task_prompt="Add incident summary cards to the static status site",
+    )
+
+    assert details["changed"] is True
+    assert completed[0]["verification"].startswith("python -c ")
+    assert ".incident-summary" not in completed[0]["verification"]
+    assert ".status-card" not in completed[0]["verification"]
+    assert "incident-summary" in completed[0]["verification"]
+    assert "status-card" in completed[0]["verification"]
+    assert completed[0]["commands"] == [completed[0]["verification"]]
+
+
+def test_static_site_contract_completion_does_not_attach_whole_site_check_to_partial_step():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create the SVG asset first",
+            "commands": [],
+            "verification": None,
+            "rollback": "rm -rf public/status-site",
+            "expected_files": ["public/status-site/images/status-badge.svg"],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "public/status-site/images/status-badge.svg",
+                    "content": "<svg></svg>",
+                }
+            ],
+        },
+        {
+            "step_number": 2,
+            "description": "Verify the completed site after later steps",
+            "commands": [],
+            "verification": None,
+            "rollback": "true",
+            "expected_files": [
+                "public/status-site/index.html",
+                "public/status-site/css/style.css",
+                "public/status-site/images/status-badge.svg",
+            ],
+            "ops": [],
+        },
+    ]
+
+    completed, details = complete_repaired_plan_contract(
+        plan,
+        task_prompt="Create a plain static site with HTML, CSS, and SVG",
+    )
+
+    assert details["changed"] is True
+    assert "public/status-site/images/status-badge.svg" in completed[0]["verification"]
+    assert "public/status-site/index.html" not in completed[0]["verification"]
+    assert "public/status-site/css/style.css" not in completed[0]["verification"]
+    assert "public/status-site/index.html" in completed[1]["verification"]
+    assert "public/status-site/css/style.css" in completed[1]["verification"]
+
+
+def test_static_site_contract_completion_neutralizes_malformed_typed_op_rollback():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Append incident summary section",
+            "commands": [],
+            "verification": "python -c \"import pathlib,sys; sys.exit(0 if 'API' in pathlib.Path('public/status-site/index.html').read_text() else 1)\"",
+            "rollback": "sed -i '/<section id=\\'incident-summary\\'>/,/<\\/section>/d' public/status-site/index.html",
+            "expected_files": ["public/status-site/index.html"],
+            "ops": [
+                {
+                    "op": "append_file",
+                    "path": "public/status-site/index.html",
+                    "content": "<section id='incident-summary'>API Queue Knowledge</section>",
+                }
+            ],
+        }
+    ]
+
+    completed, details = complete_repaired_plan_contract(
+        plan,
+        task_prompt="Update the existing public/status-site static site",
+    )
+
+    assert details["changed"] is True
+    assert completed[0]["rollback"] == "true"
+    assert completed[0]["ops"][0]["op"] == "append_file"
 
 
 def test_plan_workflow_stage_rejects_mutating_file_ops():
@@ -429,6 +957,144 @@ def test_validate_workflow_stage_completion_allows_no_source_outputs(tmp_path):
     assert verdict.details["completion_contract"]["validation_profile"] == (
         "verification"
     )
+
+
+def test_validate_workflow_stage_completion_resolves_static_site_relative_mentions(
+    tmp_path,
+):
+    site_root = tmp_path / "public" / "status-site"
+    (site_root / "css").mkdir(parents=True)
+    (site_root / "images").mkdir()
+    (site_root / "index.html").write_text(
+        "<link rel='stylesheet' href='css/style.css'>"
+        "<img src='images/status-badge.svg' alt='Status Badge'>"
+        "<section>API Queue Knowledge</section>",
+        encoding="utf-8",
+    )
+    (site_root / "css" / "style.css").write_text("body {}", encoding="utf-8")
+    (site_root / "images" / "status-badge.svg").write_text(
+        "<svg></svg>",
+        encoding="utf-8",
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=tmp_path,
+        plan=[
+            {
+                "step_number": 1,
+                "description": "Inspect workspace for validate stage",
+                "commands": ["python -c 'print(1)'"],
+                "verification": "python -c 'print(1)'",
+                "rollback": "true",
+                "expected_files": [],
+            }
+        ],
+        task_prompt=(
+            "Validate the final public/status-site without changing files. "
+            "Check that index.html, css/style.css, and images/status-badge.svg exist."
+        ),
+        execution_profile="test_only",
+        workflow_stage="validate",
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": [],
+        },
+    )
+
+    assert verdict.accepted
+    assert verdict.details["expected_core_files"] == [
+        "public/status-site/css/style.css",
+        "public/status-site/images/status-badge.svg",
+    ]
+    assert "missing_core_files" not in verdict.details
+
+
+def test_validate_stage_static_site_fallback_checks_requested_content(tmp_path):
+    site_root = tmp_path / "public" / "status-site"
+    (site_root / "css").mkdir(parents=True)
+    (site_root / "images").mkdir()
+    (site_root / "index.html").write_text(
+        "<link rel='stylesheet' href='css/style.css'>"
+        "<img src='images/status-badge.svg' alt='Status Badge'>"
+        "<a class='skip-link' href='#main'>Skip</a>"
+        "API Queue Knowledge",
+        encoding="utf-8",
+    )
+    (site_root / "css" / "style.css").write_text("body {}", encoding="utf-8")
+    (site_root / "images" / "status-badge.svg").write_text(
+        "<svg></svg>", encoding="utf-8"
+    )
+    ctx = SimpleNamespace(
+        workflow_stage="validate",
+        prompt=(
+            "Validate the final public/status-site. Check that index.html, "
+            "css/style.css, and images/status-badge.svg exist, that index.html "
+            "links css/style.css, references images/status-badge.svg, and contains "
+            "API, Queue, Knowledge, skip link, and alt text."
+        ),
+        orchestration_state=SimpleNamespace(project_dir=tmp_path),
+    )
+
+    plan = _static_site_validation_fallback_plan(ctx)
+
+    assert plan is not None
+    command = plan[0]["verification"]
+    assert "public/status-site/index.html" in command
+    assert "API" in command
+    assert "Queue" in command
+    assert "Knowledge" in command
+    assert "skip" in command
+    assert "alt=" in command
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text="[]",
+        task_prompt=ctx.prompt,
+        execution_profile="test_only",
+        workflow_stage="validate",
+        project_dir=tmp_path,
+    )
+    assert verdict.accepted
+
+
+def test_existing_static_site_plan_rejects_static_writes_outside_detected_root(
+    tmp_path,
+):
+    site_root = tmp_path / "public" / "status-site"
+    (site_root / "css").mkdir(parents=True)
+    (site_root / "index.html").write_text("<main></main>", encoding="utf-8")
+    (site_root / "css" / "style.css").write_text("body {}", encoding="utf-8")
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Improve existing status site styling",
+            "commands": [],
+            "verification": "python -c \"import pathlib; print(pathlib.Path('styles/additional.css').exists())\"",
+            "rollback": "true",
+            "expected_files": ["styles/additional.css"],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "styles/additional.css",
+                    "content": "@media (max-width: 600px) { body { margin: 0; } }",
+                }
+            ],
+        }
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text="[]",
+        task_prompt="Update the existing status site responsive styling",
+        execution_profile="full_lifecycle",
+        workflow_stage="implement",
+        project_dir=tmp_path,
+    )
+
+    assert not verdict.accepted
+    assert verdict.details["static_site_off_root_mutations"] == [
+        "styles/additional.css"
+    ]
 
 
 def test_verification_only_task_detection_excludes_static_site_mutation_tasks():

@@ -213,6 +213,62 @@ def test_sqlite_fallback_tolerates_legacy_non_string_tags(svc, db):
     assert any(ref.id == item.id for ref in ctx.retrieved_items)
 
 
+def test_static_site_knowledge_is_gated_from_ordinary_backend_tasks(svc, db):
+    _make_item(
+        db,
+        title="Static Site Materialization Contract",
+        content="Use typed ops for index.html and css/style.css.",
+        applies_to=["planning", "validation"],
+        knowledge_type=KnowledgeType.format_guide,
+        tags=["static-site", "html", "css"],
+        priority=20,
+    )
+    backend_item = _make_item(
+        db,
+        title="Backend API Guide",
+        content="Use FastAPI routers and service functions.",
+        applies_to=["planning"],
+        knowledge_type=KnowledgeType.format_guide,
+        tags=["backend", "api"],
+        priority=1,
+    )
+
+    with patch.object(svc, "_has_indexed_points", return_value=False):
+        ctx = svc.retrieve(
+            query="Add a FastAPI endpoint and service method",
+            trigger_phase="planning",
+            knowledge_types=[KnowledgeType.format_guide],
+            db=db,
+        )
+
+    titles = {ref.title for ref in ctx.retrieved_items}
+    assert "Backend API Guide" in titles
+    assert "Static Site Materialization Contract" not in titles
+    assert any(ref.id == backend_item.id for ref in ctx.retrieved_items)
+
+
+def test_static_site_knowledge_is_returned_for_matching_static_site_task(svc, db):
+    item = _make_item(
+        db,
+        title="Static Site Materialization Contract",
+        content="Use typed ops for index.html and css/style.css.",
+        applies_to=["planning", "validation"],
+        knowledge_type=KnowledgeType.format_guide,
+        tags=["static-site", "html", "css"],
+        priority=20,
+    )
+
+    with patch.object(svc, "_has_indexed_points", return_value=False):
+        ctx = svc.retrieve(
+            query="Create a plain static site with index.html and css/style.css",
+            trigger_phase="planning",
+            knowledge_types=[KnowledgeType.format_guide],
+            db=db,
+        )
+
+    assert any(ref.id == item.id for ref in ctx.retrieved_items)
+
+
 def test_max_items_budget_enforced(svc, db):
     items = []
     for i in range(5):
