@@ -1374,6 +1374,8 @@ def execute_planning_phase(
                 "placeholder_only_steps",
                 "weak_verification_steps",
                 "stale_replace_ops_steps",
+                "test_assertion_loss_ops_steps",
+                "test_deletion_ops_steps",
             )
             blocking_repair_issues = {
                 key: value
@@ -1423,6 +1425,18 @@ def execute_planning_phase(
                             ctx.orchestration_state.project_dir,
                         )
                     )
+                if blocking_repair_issues.get("test_assertion_loss_ops_steps"):
+                    issue_fragments.append(
+                        "test file rewrite would remove existing assertions in steps "
+                        f"{blocking_repair_issues['test_assertion_loss_ops_steps'][:5]}; "
+                        "preserve existing tests and assertion intent"
+                    )
+                if blocking_repair_issues.get("test_deletion_ops_steps"):
+                    issue_fragments.append(
+                        "test file deletion in steps "
+                        f"{blocking_repair_issues['test_deletion_ops_steps'][:5]}; "
+                        "do not delete existing tests during fallback repair"
+                    )
                 retry_state.last_repair_reason = "plan_contains_immediate_repair_issues"
                 semantic_violation_codes = _semantic_codes_for_immediate_repair_issues(
                     blocking_repair_issues
@@ -1470,6 +1484,13 @@ def execute_planning_phase(
                 )
                 if second_repair_reason and not second_repair_reason.cap_used:
                     issue_fragments = [second_repair_reason.rejection_text]
+                    if second_repair_reason.issue_key == "stale_replace_ops_steps":
+                        issue_fragments.extend(
+                            PlannerService.stale_replace_fallback_hints(
+                                ctx.orchestration_state.plan,
+                                ctx.orchestration_state.project_dir,
+                            )
+                        )
                     contract_violations = (
                         PlannerService.describe_planning_contract_violations(
                             output_text=output_text,
@@ -1496,6 +1517,12 @@ def execute_planning_phase(
                             ),
                             "contract_violations": contract_violations[:8],
                             "repair_attempts": retry_state.consecutive_failures + 1,
+                            "fallback_strategy": (
+                                "structured_rewrite_or_preserved_write_file"
+                                if second_repair_reason.issue_key
+                                == "stale_replace_ops_steps"
+                                else None
+                            ),
                         },
                     )
                     ctx.logger.warning(

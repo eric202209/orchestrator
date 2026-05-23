@@ -238,6 +238,22 @@ def _classify_test_scaffold_failure(error_message: Any) -> Optional[str]:
     text = str(error_message or "").lower()
     if not text:
         return None
+    if (
+        "patch_strategy_fallback_required" in text
+        or "post_repair_stale_replace_fallback" in text
+        or "exact-text patching is exhausted" in text
+    ):
+        return "patch_strategy_fallback_required"
+    if (
+        "test_assertion_preservation_failed" in text
+        or "test_assertion_loss_ops_steps" in text
+        or "fewer assertions" in text
+    ):
+        return "test_assertion_preservation_failed"
+    if "test_deletion_ops_steps" in text or "test_preservation_violation" in text:
+        return "test_preservation_violation"
+    if "stale_replace_ops_steps" in text or "old text not found" in text:
+        return "stale_replace_in_file_old_text"
     if "nameerror" in text or "importerror" in text or "no module named" in text:
         return "test_scaffold_import_error"
     if (

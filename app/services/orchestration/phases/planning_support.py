@@ -657,6 +657,8 @@ def _semantic_codes_for_immediate_repair_issues(
         "weak_verification_steps": "weak_verification",
         "missing_verification_steps": "missing_verification_command",
         "stale_replace_ops_steps": "stale_replace_in_file_old_text",
+        "test_assertion_loss_ops_steps": "test_assertion_preservation_failed",
+        "test_deletion_ops_steps": "test_preservation_violation",
     }
     for issue_key, code in issue_map.items():
         if (issues or {}).get(issue_key) and code not in codes:
@@ -744,6 +746,49 @@ _SECOND_REPAIR_BLOCKING_POLICIES: dict[str, _SecondRepairPolicy] = {
             "background_process_steps: steps {steps} still start background or "
             "long-running processes after repair; replace each with bounded "
             "foreground commands that terminate"
+        ),
+    ),
+    "stale_replace_ops_steps": _SecondRepairPolicy(
+        issue_key="stale_replace_ops_steps",
+        issue_label="stale replace_in_file operations",
+        retry_reason="post_repair_stale_replace_fallback",
+        event_reason="post_repair_stale_replace_fallback_pass",
+        semantic_violation_code="patch_strategy_fallback_required",
+        cap_attribute="post_repair_blocking_second_repair_used",
+        rejection_template=(
+            "stale_replace_ops_steps: steps {steps} still use replace_in_file "
+            "with old text that is absent from the current workspace. Exact-text "
+            "patching is exhausted for these targets; do not emit another "
+            "replace_in_file for the same missing old text. Use a targeted "
+            "structured rewrite grounded in current file content, or ops.write_file "
+            "with complete preserved file content as a last resort"
+        ),
+    ),
+    "test_assertion_loss_ops_steps": _SecondRepairPolicy(
+        issue_key="test_assertion_loss_ops_steps",
+        issue_label="test assertion loss",
+        retry_reason="post_repair_test_assertion_preservation",
+        event_reason="post_repair_test_assertion_preservation_pass",
+        semantic_violation_code="test_assertion_preservation_failed",
+        cap_attribute="post_repair_blocking_second_repair_used",
+        rejection_template=(
+            "test_assertion_loss_ops_steps: steps {steps} rewrite an existing "
+            "Python test file with fewer assertions. Preserve existing tests and "
+            "assertion intent; do not replace behavioral checks with pass, stubs, "
+            "tautologies, or weaker smoke checks"
+        ),
+    ),
+    "test_deletion_ops_steps": _SecondRepairPolicy(
+        issue_key="test_deletion_ops_steps",
+        issue_label="test deletion",
+        retry_reason="post_repair_test_deletion_preservation",
+        event_reason="post_repair_test_deletion_preservation_pass",
+        semantic_violation_code="test_preservation_violation",
+        cap_attribute="post_repair_blocking_second_repair_used",
+        rejection_template=(
+            "test_deletion_ops_steps: steps {steps} delete existing Python test "
+            "files. Do not delete tests during fallback repair; preserve the file "
+            "and update only the minimal assertions/imports needed for the task"
         ),
     ),
 }

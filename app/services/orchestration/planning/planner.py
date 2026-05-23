@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 from contextlib import asynccontextmanager, contextmanager
 import errno
 import json
@@ -1520,6 +1521,8 @@ class PlannerService:
             "weak_verification_steps": [],
             "prefer_typed_ops_steps": [],
             "stale_replace_ops_steps": [],
+            "test_assertion_loss_ops_steps": [],
+            "test_deletion_ops_steps": [],
         }
         for index, step in enumerate(plan or [], start=1):
             step_number = int(step.get("step_number") or index)
@@ -1571,6 +1574,14 @@ class PlannerService:
                 step, Path(project_dir)
             ):
                 issues["stale_replace_ops_steps"].append(step_number)
+            if project_dir and PlannerService._step_has_test_assertion_loss_ops(
+                step, Path(project_dir)
+            ):
+                issues["test_assertion_loss_ops_steps"].append(step_number)
+            if project_dir and PlannerService._step_deletes_existing_python_tests(
+                step, Path(project_dir)
+            ):
+                issues["test_deletion_ops_steps"].append(step_number)
         return {key: sorted(set(value)) for key, value in issues.items() if value}
 
     @staticmethod
@@ -1603,6 +1614,105 @@ class PlannerService:
             if old_text not in content:
                 return True
         return False
+
+    @staticmethod
+    def _step_has_test_assertion_loss_ops(
+        step: Dict[str, Any], project_dir: Path
+    ) -> bool:
+        ops = step.get("ops") or []
+        if not isinstance(ops, list):
+            return False
+        root = Path(project_dir).resolve()
+        for operation in ops:
+            if not isinstance(operation, dict):
+                continue
+            if str(operation.get("op") or "").strip() != "write_file":
+                continue
+            rel_path = str(operation.get("path") or "").strip().lstrip("./")
+            if not PlannerService._is_python_test_path(rel_path):
+                continue
+            new_content = operation.get("content")
+            if not isinstance(new_content, str):
+                continue
+            path = (root / rel_path).resolve()
+            try:
+                path.relative_to(root)
+            except ValueError:
+                return True
+            if not path.is_file():
+                continue
+            try:
+                if path.stat().st_size > 500_000:
+                    continue
+                old_content = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return True
+            old_count = PlannerService._python_test_assertion_count(old_content)
+            new_count = PlannerService._python_test_assertion_count(new_content)
+            if old_count > 0 and new_count < old_count:
+                return True
+        return False
+
+    @staticmethod
+    def _step_deletes_existing_python_tests(
+        step: Dict[str, Any], project_dir: Path
+    ) -> bool:
+        ops = step.get("ops") or []
+        if not isinstance(ops, list):
+            return False
+        root = Path(project_dir).resolve()
+        for operation in ops:
+            if not isinstance(operation, dict):
+                continue
+            if str(operation.get("op") or "").strip() != "delete_file":
+                continue
+            rel_path = str(operation.get("path") or "").strip().lstrip("./")
+            if not PlannerService._is_python_test_path(rel_path):
+                continue
+            path = (root / rel_path).resolve()
+            try:
+                path.relative_to(root)
+            except ValueError:
+                return True
+            if path.is_file():
+                return True
+        return False
+
+    @staticmethod
+    def _is_python_test_path(path_text: str) -> bool:
+        normalized = str(path_text or "").replace("\\", "/").lstrip("./")
+        name = Path(normalized).name
+        return normalized.endswith(".py") and (
+            name.startswith("test_")
+            or name.endswith("_test.py")
+            or "/tests/" in f"/{normalized}"
+        )
+
+    @staticmethod
+    def _python_test_assertion_count(content: str) -> int:
+        try:
+            tree = ast.parse(str(content or ""))
+        except SyntaxError:
+            return 0
+        count = 0
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assert):
+                count += 1
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr.startswith("assert")
+            ):
+                count += 1
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "raises"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "pytest"
+            ):
+                count += 1
+        return count
 
     @staticmethod
     def stale_replace_repair_hints(
@@ -1656,6 +1766,77 @@ class PlannerService:
                     f"{index} replace_in_file old text not found in {rel_path}. "
                     "Use exact text from current file excerpt or choose a different "
                     f"operation. Current file excerpt: {excerpt}"
+                )
+        return hints
+
+    @staticmethod
+    def stale_replace_fallback_hints(
+        plan: Optional[List[Dict[str, Any]]],
+        project_dir: Path,
+        *,
+        max_hints: int = 2,
+        max_excerpt_chars: int = 1200,
+    ) -> List[str]:
+        hints: List[str] = []
+        root = Path(project_dir).resolve()
+        for index, step in enumerate(plan or [], start=1):
+            if len(hints) >= max_hints or not isinstance(step, dict):
+                break
+            for operation in step.get("ops") or []:
+                if len(hints) >= max_hints or not isinstance(operation, dict):
+                    break
+                if str(operation.get("op") or "").strip() != "replace_in_file":
+                    continue
+                rel_path = str(operation.get("path") or "").strip().lstrip("./")
+                old_text = operation.get("old")
+                if not rel_path or not isinstance(old_text, str) or not old_text:
+                    continue
+                path = (root / rel_path).resolve()
+                try:
+                    path.relative_to(root)
+                except ValueError:
+                    hints.append(
+                        "patch_strategy_fallback_required: "
+                        f"step {index} target escapes workspace ({rel_path}); "
+                        "do not retry this replace_in_file operation"
+                    )
+                    continue
+                if not path.is_file():
+                    hints.append(
+                        "patch_strategy_fallback_required: "
+                        f"step {index} target is missing ({rel_path}); "
+                        "do not retry this replace_in_file operation"
+                    )
+                    continue
+                try:
+                    if path.stat().st_size > 500_000:
+                        continue
+                    content = path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    hints.append(
+                        "patch_strategy_fallback_required: "
+                        f"step {index} target is unreadable ({rel_path}); "
+                        "do not retry this replace_in_file operation"
+                    )
+                    continue
+                if old_text in content:
+                    continue
+                excerpt = content[:max_excerpt_chars].replace("\n", "\\n")
+                test_preservation = (
+                    " If this is a test file, preserve existing tests and assertion "
+                    "intent; do not replace assertions with pass, stubs, or tautologies."
+                    if "/test" in f"/{rel_path}" or rel_path.endswith("_test.py")
+                    else ""
+                )
+                hints.append(
+                    "patch_strategy_fallback_required: "
+                    f"step {index} replace_in_file old text is still absent in "
+                    f"{rel_path}. Exact-text patching is exhausted for this target; "
+                    "do not emit another replace_in_file for the same missing old "
+                    "text. Prefer a targeted structured rewrite grounded in the "
+                    "current excerpt, or use ops.write_file with complete preserved "
+                    "file content as a last resort."
+                    f"{test_preservation} Current file excerpt: {excerpt}"
                 )
         return hints
 
@@ -1714,6 +1895,8 @@ class PlannerService:
                 "weak_verification_steps": "weak verification command",
                 "prefer_typed_ops_steps": "python -c content write should use ops.write_file",
                 "stale_replace_ops_steps": "replace_in_file old text not found in workspace",
+                "test_assertion_loss_ops_steps": "test rewrite would remove existing assertions",
+                "test_deletion_ops_steps": "test file deletion requires explicit preservation review",
             }.get(issue_key, issue_key)
             violations.append(f"{label} in steps {steps[:5]}")
         return list(dict.fromkeys(violations))
