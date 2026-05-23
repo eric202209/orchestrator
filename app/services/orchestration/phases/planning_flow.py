@@ -1365,13 +1365,15 @@ def execute_planning_phase(
                     continue
                 raise
             immediate_repair_issues = PlannerService.find_immediate_repair_step_issues(
-                ctx.orchestration_state.plan
+                ctx.orchestration_state.plan,
+                project_dir=ctx.orchestration_state.project_dir,
             )
             blocking_issue_keys = (
                 "non_runnable_steps",
                 "background_process_steps",
                 "placeholder_only_steps",
                 "weak_verification_steps",
+                "stale_replace_ops_steps",
             )
             blocking_repair_issues = {
                 key: value
@@ -1409,6 +1411,17 @@ def execute_planning_phase(
                     issue_fragments.append(
                         "weak verification commands in steps "
                         f"{blocking_repair_issues['weak_verification_steps'][:5]}"
+                    )
+                if blocking_repair_issues.get("stale_replace_ops_steps"):
+                    issue_fragments.append(
+                        "replace_in_file old text not found in workspace in steps "
+                        f"{blocking_repair_issues['stale_replace_ops_steps'][:5]}"
+                    )
+                    issue_fragments.extend(
+                        PlannerService.stale_replace_repair_hints(
+                            ctx.orchestration_state.plan,
+                            ctx.orchestration_state.project_dir,
+                        )
                     )
                 retry_state.last_repair_reason = "plan_contains_immediate_repair_issues"
                 semantic_violation_codes = _semantic_codes_for_immediate_repair_issues(

@@ -26,9 +26,19 @@ def render_shell_fallback_limits() -> str:
 
 def render_python_verification_contract() -> str:
     return (
-        "For Python verify with `python -m py_compile`, unittest, or pytest. "
+        "For Python verify with `python -m py_compile`, unittest, or pytest; "
+        "if pytest config/tests exist, prefer final `python -m pytest tests/ -q`. "
         "For Python app import assertions, create a tiny test file with `ops` "
         "instead of inline `python -c` snippets."
+    )
+
+
+def render_test_scaffold_contract() -> str:
+    return (
+        "For new/changed tests: inspect nearby tests first; match their imports, "
+        "fixtures, factories, and domain constructors. Do not replace project "
+        "objects with raw dicts unless existing tests do. Compile changed Python "
+        "tests before or with the final suite run."
     )
 
 

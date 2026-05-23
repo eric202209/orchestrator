@@ -656,6 +656,7 @@ def _semantic_codes_for_immediate_repair_issues(
         "nested_project_root_steps": "nested_project_folder_command",
         "weak_verification_steps": "weak_verification",
         "missing_verification_steps": "missing_verification_command",
+        "stale_replace_ops_steps": "stale_replace_in_file_old_text",
     }
     for issue_key, code in issue_map.items():
         if (issues or {}).get(issue_key) and code not in codes:
