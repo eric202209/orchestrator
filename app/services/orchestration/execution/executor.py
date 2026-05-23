@@ -15,6 +15,7 @@ from app.services.orchestration.operations.file_ops_contract import (
     CONTENT_FILE_OPS,
     SUPPORTED_FILE_OPS,
 )
+from app.services.orchestration.operations.patch_python import try_deterministic_patch
 
 
 class ExecutorService:
@@ -494,6 +495,24 @@ class ExecutorService:
                         "success": False,
                         "files_changed": files_changed,
                         "output": f"replace_in_file regex old text is ambiguous in {relative}: {len(regex_matches)} occurrences",
+                    }
+                patch_result = try_deterministic_patch(
+                    target, old, new, normalized_project_dir
+                )
+                if patch_result is not None:
+                    if patch_result.success:
+                        files_changed.append(relative)
+                        output_lines.append(
+                            f"replace_in_file {relative} (patch_helper: {patch_result.evidence})"
+                        )
+                        continue
+                    return {
+                        "success": False,
+                        "files_changed": files_changed,
+                        "output": (
+                            f"replace_in_file old text not found in {relative}; "
+                            f"patch_helper: {patch_result.evidence}"
+                        ),
                     }
                 return {
                     "success": False,
