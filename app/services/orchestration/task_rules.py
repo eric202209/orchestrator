@@ -94,7 +94,7 @@ def get_workflow_profile(
 
     combined = " ".join([title or "", description or ""]).lower()
     if _looks_like_plain_static_site_task(combined):
-        return "default" if "default" in WORKFLOW_PROFILES else execution_profile
+        return "frontend_only"
 
     marker_groups = get_workflow_markers("fullstack_scaffold")
     frontend_markers = tuple(marker_groups.get("frontend") or [])

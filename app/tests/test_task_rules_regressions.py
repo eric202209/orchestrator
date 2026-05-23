@@ -66,7 +66,7 @@ def test_static_frontend_task_with_negated_backend_resolves_frontend_only():
     )
 
 
-def test_plain_static_site_with_preview_server_exclusion_uses_default_profile():
+def test_plain_static_site_with_preview_server_exclusion_stays_frontend_only():
     assert (
         get_workflow_profile(
             "full_lifecycle",
@@ -79,7 +79,7 @@ def test_plain_static_site_with_preview_server_exclusion_uses_default_profile():
                 "No React, Vite, npm, or preview server."
             ),
         )
-        == "default"
+        == "frontend_only"
     )
 
 
@@ -94,7 +94,7 @@ def test_plain_static_site_with_api_label_does_not_resolve_backend_only():
                 "API, Queue, and Knowledge."
             ),
         )
-        == "default"
+        == "frontend_only"
     )
 
 
