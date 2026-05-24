@@ -225,3 +225,15 @@ def test_repair_governor_does_not_fire_constrained_lane_below_threshold():
     )
     assert should_stop is False
     assert trigger is None
+
+
+def test_planning_flow_line_count_does_not_exceed_gate():
+    planning_flow = (
+        REPO_ROOT / "app" / "services" / "orchestration" / "phases" / "planning_flow.py"
+    )
+    line_count = sum(1 for _ in planning_flow.open(encoding="utf-8"))
+    assert line_count <= 2600, (
+        f"planning_flow.py is {line_count} lines. "
+        "D1/D2/D3 extractions should have reduced it below 2600. "
+        "Do not add code to planning_flow.py without first extracting existing content."
+    )

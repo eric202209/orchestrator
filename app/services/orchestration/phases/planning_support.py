@@ -1,16 +1,20 @@
-"""Planning retry and diagnostics helpers."""
+"""Planning retry, diagnostics, and failure helpers."""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Dict
 
+from app.models import TaskExecution, TaskStatus
 from app.services.orchestration.context.assembly import compress_orchestration_context
 from app.services.orchestration.planning.planner import (
     PlannerService,
     PlanningRepairNoOutputTimeout,
 )
+from app.services.orchestration.run_state import mark_task_attempt_failed
+from app.services.orchestration.state.session_state import mark_session_paused
 from app.services.orchestration.types import OrchestrationRunContext, ReasoningArtifact
 from app.services.orchestration.validation.validator import MAX_PLANNING_COMMAND_CHARS
 
@@ -966,3 +970,127 @@ def _classify_planning_timeout_failure(
             return "malformed_planning_output_repair_timeout"
         return "planning_repair_timeout"
     return "planning_timeout"
+
+
+def _finalize_planning_terminal_failure(
+    *,
+    ctx: OrchestrationRunContext,
+    failure_type: str,
+    failure_reason: str,
+    generate_failure_summary: bool = False,
+) -> bool:
+    completed_at = datetime.now(UTC)
+    task_execution = None
+    if ctx.task_execution_id:
+        task_execution = (
+            ctx.db.query(TaskExecution)
+            .filter(TaskExecution.id == ctx.task_execution_id)
+            .first()
+        )
+    mark_task_attempt_failed(
+        task=ctx.task,
+        session_task_link=ctx.session_task_link,
+        task_execution=task_execution,
+        error_message=failure_reason,
+        completed_at=completed_at,
+    )
+    if ctx.session:
+        mark_session_paused(
+            ctx.session,
+            alert_level="error",
+            alert_message=failure_reason[:2000],
+            paused_at=completed_at,
+        )
+    ctx.db.commit()
+    if generate_failure_summary:
+        try:
+            from app.services.session.replan_service import (
+                get_or_generate_failure_summary,
+            )
+
+            get_or_generate_failure_summary(ctx.db, ctx.session_id)
+        except Exception as summary_exc:
+            ctx.logger.debug(
+                "[ORCHESTRATION] Failed to create/update failure summary for session=%s: %s",
+                ctx.session_id,
+                summary_exc,
+            )
+
+    knowledge_recorded = False
+    try:
+        from app.services.orchestration.phases.failure_flow import (
+            record_failure_knowledge_for_stopped_session,
+        )
+
+        knowledge_recorded = bool(
+            record_failure_knowledge_for_stopped_session(
+                db=ctx.db,
+                session_id=ctx.session_id,
+                task_id=ctx.task_id,
+                failure_reason=failure_type,
+                logger=ctx.logger,
+            )
+        )
+    except Exception as knowledge_exc:
+        ctx.logger.warning(
+            "[ORCHESTRATION] session_id=%s task_id=%s failure_type=%s "
+            "handle_task_failure_called=False knowledge_recorded=False error=%s",
+            ctx.session_id,
+            ctx.task_id,
+            failure_type,
+            knowledge_exc,
+        )
+        return False
+
+    ctx.logger.warning(
+        "[ORCHESTRATION] session_id=%s task_id=%s failure_type=%s "
+        "handle_task_failure_called=False knowledge_recorded=%s",
+        ctx.session_id,
+        ctx.task_id,
+        failure_type,
+        knowledge_recorded,
+    )
+    return knowledge_recorded
+
+
+def _finalize_planning_timeout_failure(
+    *,
+    ctx: OrchestrationRunContext,
+    failure_type: str,
+    failure_reason: str,
+) -> bool:
+    return _finalize_planning_terminal_failure(
+        ctx=ctx,
+        failure_type=failure_type,
+        failure_reason=failure_reason,
+        generate_failure_summary=True,
+    )
+
+
+def _last_plan_output_snippet(planning_result: dict, max_chars: int = 400) -> str:
+    output = planning_result.get("output", "")
+    if isinstance(output, dict):
+        text = str(output.get("text", "") or output.get("content", "") or "")
+    else:
+        text = str(output or "")
+    text = text.strip()
+    if len(text) > max_chars:
+        text = text[:max_chars] + "…"
+    return text
+
+
+def _count_prior_failed_planning_executions(ctx: OrchestrationRunContext) -> int:
+    if not ctx.db or not ctx.task_id or not ctx.session_id:
+        return 0
+    try:
+        query = ctx.db.query(TaskExecution).filter(
+            TaskExecution.task_id == ctx.task_id,
+            TaskExecution.session_id == ctx.session_id,
+            TaskExecution.status == TaskStatus.FAILED,
+        )
+        if ctx.task_execution_id:
+            query = query.filter(TaskExecution.id < ctx.task_execution_id)
+        count = query.count()
+        return count if isinstance(count, int) else 0
+    except Exception:
+        return 0

@@ -4,14 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shlex
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Dict
 
 from celery.exceptions import SoftTimeLimitExceeded
 
-from app.models import TaskExecution, TaskStatus
 from app.schemas.knowledge import KnowledgeContext
 from app.services.orchestration.context.assembly import (
     assemble_planning_prompt,
@@ -37,8 +34,6 @@ from app.services.orchestration.planning.normalization import (
     normalize_stale_replace_ops_to_small_file_writes,
 )
 from app.services.orchestration.policy import clamp_planning_timeout
-from app.services.orchestration.run_state import mark_task_attempt_failed
-from app.services.orchestration.state.session_state import mark_session_paused
 from app.services.orchestration.task_rules import get_workflow_profile
 from app.services.orchestration.workflow_profiles import get_workflow_phases
 from app.services.orchestration.types import OrchestrationRunContext
@@ -53,90 +48,19 @@ from app.services.orchestration.validation.workspace_guard import (
     TaskOperationContractViolation,
 )
 from app.services.prompt_templates import OrchestrationStatus, estimate_token_count
-
-
-def _python_exists_verification_command(paths: list[str]) -> str:
-    encoded_paths = json.dumps(paths)
-    script = (
-        "import pathlib,sys; "
-        f"files={encoded_paths}; "
-        "sys.exit(0 if all(pathlib.Path(p).exists() for p in files) else 1)"
-    )
-    return "python -c " + json.dumps(script)
-
-
-def _python_file_contains_verification_command(path: str, needle: str) -> str:
-    script = (
-        "import pathlib,sys; "
-        f"content=pathlib.Path({json.dumps(path)}).read_text(); "
-        f"sys.exit(0 if {json.dumps(needle)} in content else 1)"
-    )
-    return "python -c " + json.dumps(script)
-
-
-def _grep_quiet_verification_target(command: str) -> tuple[str, str] | None:
-    try:
-        tokens = shlex.split(str(command or ""), posix=True)
-    except ValueError:
-        return None
-    if len(tokens) < 4 or tokens[0] != "grep" or "-q" not in tokens:
-        return None
-    quiet_index = tokens.index("-q")
-    if quiet_index + 2 >= len(tokens):
-        return None
-    needle = tokens[quiet_index + 1]
-    path = tokens[quiet_index + 2]
-    if not needle or not path or path.startswith("-"):
-        return None
-    return path.lstrip("./"), needle
-
-
-def _commands_are_weak_expected_file_verification(commands: Any) -> bool:
-    if not isinstance(commands, list) or not commands:
-        return False
-    normalized_commands = [
-        str(command or "").strip() for command in commands if str(command or "").strip()
-    ]
-    if len(normalized_commands) != len(commands):
-        return False
-    return all(
-        ValidatorService._verification_is_weak(command)
-        or " ".join(command.split()).startswith(("grep ", "test "))
-        for command in normalized_commands
-    )
-
-
-def _strengthen_weak_expected_file_verifications(
-    plan: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    strengthened: list[dict[str, Any]] = []
-    for step in plan:
-        updated = dict(step)
-        expected_files = [
-            str(path or "").strip().lstrip("./")
-            for path in (updated.get("expected_files") or [])
-            if str(path or "").strip()
-        ]
-        grep_target = None
-        if expected_files and ValidatorService._verification_is_weak(
-            updated.get("verification")
-        ):
-            grep_target = _grep_quiet_verification_target(
-                str(updated.get("verification") or "")
-            )
-            if grep_target and grep_target[0] in expected_files:
-                updated["verification"] = _python_file_contains_verification_command(
-                    grep_target[0],
-                    grep_target[1],
-                )
-        if (
-            expected_files
-            and _commands_are_weak_expected_file_verification(updated.get("commands"))
-            and grep_target
-        ):
-            updated["commands"] = [str(updated.get("verification") or "").strip()]
-        strengthened.append(updated)
-    return strengthened
+from app.services.orchestration.phases.planning_verification import (
+    _commands_are_weak_expected_file_verification,
+    _grep_quiet_verification_target,
+    _python_exists_verification_command,
+    _python_file_contains_verification_command,
+    _strengthen_weak_expected_file_verifications,
+)
+from app.services.orchestration.phases.planning_knowledge import (
+    _log_knowledge_usage,
+    _looks_like_verification_only_task,
+    _retrieve_knowledge,
+    _retrieve_validation_repair_knowledge,
+)
 
 
 def _read_only_stage_fallback_plan(
@@ -375,68 +299,6 @@ def _prune_unmaterialized_expected_files(
     }
 
 
-def _retrieve_validation_repair_knowledge(
-    ctx: OrchestrationRunContext,
-    *,
-    query: str,
-    failure_signature: str | None = None,
-) -> KnowledgeContext | None:
-    knowledge_ctx = _retrieve_knowledge(
-        ctx,
-        trigger_phase="validation",
-        knowledge_types=[
-            "failure_memory",
-            "format_guide",
-            "debug_case",
-        ],
-        query=query,
-        failure_signature=failure_signature,
-    )
-    if knowledge_ctx:
-        _log_knowledge_usage(ctx, knowledge_ctx, used_in_prompt=True)
-    return knowledge_ctx
-
-
-def _looks_like_verification_only_task(
-    title: str | None,
-    description: str | None,
-) -> bool:
-    combined = f"{title or ''}\n{description or ''}".lower()
-    verification_markers = (
-        "verification command",
-        "verification commands",
-        "improve task verification",
-        "strengthen verification",
-        "checks prove",
-        "content-aware checks",
-        "file/content checks",
-        "audit",
-        "inspect current files",
-        "no major implementation",
-        "do not change page design",
-        "do not change page design much",
-    )
-    if not any(marker in combined for marker in verification_markers):
-        return False
-    implementation_markers = (
-        "create `",
-        "create ",
-        "add new ",
-        "add a new ",
-        "add seasonal",
-        "add second",
-        "adjust one content block",
-        "adjust one css",
-        "update css",
-        "edit `",
-        "edits `",
-        "start task that edits",
-    )
-    return not any(marker in combined for marker in implementation_markers)
-
-
-# Circuit breaker: abort planning after this many consecutive validation failures
-# to prevent infinite retry loops that hang the session.
 from app.services.orchestration.phases.planning_support import (
     MAX_PLANNING_RETRIES,
     TRUNCATED_PLAN_REPAIR_REJECTION_REASON,
@@ -445,145 +307,19 @@ from app.services.orchestration.phases.planning_support import (
     _build_repair_rejection_reasons,
     _classify_planning_timeout_failure,
     _compress_project_context_for_planning,
+    _count_prior_failed_planning_executions,
     _emit_planning_diagnostics_contract_violation,
+    _finalize_planning_terminal_failure,
+    _finalize_planning_timeout_failure,
     _get_targeted_second_repair_reason,
     _is_repairable_malformed_shell_quoting_violation,
+    _last_plan_output_snippet,
     _plan_contract_diagnostics,
     _semantic_codes_for_immediate_repair_issues,
     _should_repair_truncated_single_step_plan,
     _terminal_validation_failure_details,
     _truncated_multistep_collapse_diagnostics,
 )
-
-
-def _finalize_planning_terminal_failure(
-    *,
-    ctx: OrchestrationRunContext,
-    failure_type: str,
-    failure_reason: str,
-    generate_failure_summary: bool = False,
-) -> bool:
-    completed_at = datetime.now(UTC)
-    task_execution = None
-    if ctx.task_execution_id:
-        task_execution = (
-            ctx.db.query(TaskExecution)
-            .filter(TaskExecution.id == ctx.task_execution_id)
-            .first()
-        )
-    mark_task_attempt_failed(
-        task=ctx.task,
-        session_task_link=ctx.session_task_link,
-        task_execution=task_execution,
-        error_message=failure_reason,
-        completed_at=completed_at,
-    )
-    if ctx.session:
-        mark_session_paused(
-            ctx.session,
-            alert_level="error",
-            alert_message=failure_reason[:2000],
-            paused_at=completed_at,
-        )
-    ctx.db.commit()
-    if generate_failure_summary:
-        try:
-            from app.services.session.replan_service import (
-                get_or_generate_failure_summary,
-            )
-
-            get_or_generate_failure_summary(ctx.db, ctx.session_id)
-        except Exception as summary_exc:
-            ctx.logger.debug(
-                "[ORCHESTRATION] Failed to create/update failure summary for session=%s: %s",
-                ctx.session_id,
-                summary_exc,
-            )
-
-    knowledge_recorded = False
-    try:
-        from app.services.orchestration.phases.failure_flow import (
-            record_failure_knowledge_for_stopped_session,
-        )
-
-        knowledge_recorded = bool(
-            record_failure_knowledge_for_stopped_session(
-                db=ctx.db,
-                session_id=ctx.session_id,
-                task_id=ctx.task_id,
-                failure_reason=failure_type,
-                logger=ctx.logger,
-            )
-        )
-    except Exception as knowledge_exc:
-        ctx.logger.warning(
-            "[ORCHESTRATION] session_id=%s task_id=%s failure_type=%s "
-            "handle_task_failure_called=False knowledge_recorded=False error=%s",
-            ctx.session_id,
-            ctx.task_id,
-            failure_type,
-            knowledge_exc,
-        )
-        return False
-
-    ctx.logger.warning(
-        "[ORCHESTRATION] session_id=%s task_id=%s failure_type=%s "
-        "handle_task_failure_called=False knowledge_recorded=%s",
-        ctx.session_id,
-        ctx.task_id,
-        failure_type,
-        knowledge_recorded,
-    )
-    return knowledge_recorded
-
-
-def _finalize_planning_timeout_failure(
-    *,
-    ctx: OrchestrationRunContext,
-    failure_type: str,
-    failure_reason: str,
-) -> bool:
-    return _finalize_planning_terminal_failure(
-        ctx=ctx,
-        failure_type=failure_type,
-        failure_reason=failure_reason,
-        generate_failure_summary=True,
-    )
-
-
-def _last_plan_output_snippet(planning_result: dict, max_chars: int = 400) -> str:
-    """Extract a truncated text snippet from the last planning result for operator context."""
-    output = planning_result.get("output", "")
-    if isinstance(output, dict):
-        text = str(output.get("text", "") or output.get("content", "") or "")
-    else:
-        text = str(output or "")
-    text = text.strip()
-    if len(text) > max_chars:
-        text = text[:max_chars] + "…"
-    return text
-
-
-def _count_prior_failed_planning_executions(ctx: OrchestrationRunContext) -> int:
-    """Count failed TaskExecution rows for this task/session before current execution.
-
-    Used to seed _PlanningRetryState.persisted_failures so the circuit breaker
-    survives worker restarts — F12 (stateless reducer).
-    """
-    if not ctx.db or not ctx.task_id or not ctx.session_id:
-        return 0
-    try:
-        query = ctx.db.query(TaskExecution).filter(
-            TaskExecution.task_id == ctx.task_id,
-            TaskExecution.session_id == ctx.session_id,
-            TaskExecution.status == TaskStatus.FAILED,
-        )
-        if ctx.task_execution_id:
-            query = query.filter(TaskExecution.id < ctx.task_execution_id)
-        count = query.count()
-        return count if isinstance(count, int) else 0
-    except Exception:
-        return 0
 
 
 def execute_planning_phase(
@@ -2809,62 +2545,3 @@ def __strip_markdown_fences(output_text: str) -> str:
 
     markdown_pattern = r"^\s*```(?:json)?\s*|\s*```$"
     return re.sub(markdown_pattern, "", output_text.strip())
-
-
-def _retrieve_knowledge(
-    ctx: OrchestrationRunContext,
-    trigger_phase: str,
-    knowledge_types: list[str],
-    query: str | None = None,
-    failure_signature: str | None = None,
-) -> KnowledgeContext | None:
-    """Retrieve knowledge context; returns None on any error so failures don't break the flow."""
-    try:
-        from app.config import settings
-        from app.services.knowledge.knowledge_service import KnowledgeService
-
-        svc = KnowledgeService(
-            qdrant_url=settings.QDRANT_URL,
-            collection_name=settings.QDRANT_COLLECTION_NAME,
-        )
-        knowledge_ctx = svc.retrieve(
-            query=query or ctx.prompt or "",
-            trigger_phase=trigger_phase,
-            knowledge_types=knowledge_types,
-            failure_signature=failure_signature,
-            db=ctx.db,
-        )
-        ctx.logger.info(
-            "[KNOWLEDGE] Retrieval phase=%s types=%s items=%d reason=%s "
-            "matched_failure_memory=%s recommended_action=%s",
-            trigger_phase,
-            ",".join(knowledge_types),
-            len(knowledge_ctx.retrieved_items),
-            knowledge_ctx.retrieval_reason,
-            knowledge_ctx.matched_failure_memory,
-            knowledge_ctx.recommended_action.value,
-        )
-        return knowledge_ctx
-    except Exception as exc:
-        ctx.logger.debug("[KNOWLEDGE] Retrieval skipped (%s): %s", trigger_phase, exc)
-        return None
-
-
-def _log_knowledge_usage(
-    ctx: OrchestrationRunContext,
-    knowledge_ctx: KnowledgeContext,
-    *,
-    used_in_prompt: bool,
-) -> None:
-    try:
-        from app.services.knowledge import usage_log_service
-
-        usage_log_service.log_usage(
-            context=knowledge_ctx,
-            session_id=ctx.session_id,
-            task_id=ctx.task_id,
-            used_in_prompt=used_in_prompt,
-            db=ctx.db,
-        )
-    except Exception as exc:
-        ctx.logger.debug("[KNOWLEDGE] Usage log skipped: %s", exc)
