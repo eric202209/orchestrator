@@ -70,8 +70,12 @@ def _retrieve_validation_repair_knowledge(
     *,
     query: str,
     failure_signature: str | None = None,
+    retrieve_knowledge=None,
+    log_knowledge_usage=None,
 ) -> KnowledgeContext | None:
-    knowledge_ctx = _retrieve_knowledge(
+    retrieve = retrieve_knowledge or _retrieve_knowledge
+    log_usage = log_knowledge_usage or _log_knowledge_usage
+    knowledge_ctx = retrieve(
         ctx,
         trigger_phase="validation",
         knowledge_types=[
@@ -83,7 +87,7 @@ def _retrieve_validation_repair_knowledge(
         failure_signature=failure_signature,
     )
     if knowledge_ctx:
-        _log_knowledge_usage(ctx, knowledge_ctx, used_in_prompt=True)
+        log_usage(ctx, knowledge_ctx, used_in_prompt=True)
     return knowledge_ctx
 
 

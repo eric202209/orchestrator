@@ -1520,6 +1520,8 @@ def execute_planning_phase(
                         if semantic_violation_codes
                         else "plan_contains_immediate_repair_issues"
                     ),
+                    retrieve_knowledge=_retrieve_knowledge,
+                    log_knowledge_usage=_log_knowledge_usage,
                 )
                 emit_phase_event(
                     ctx.orchestration_state,
@@ -1634,6 +1636,8 @@ def execute_planning_phase(
                         query="Plan immediate repair still failed after repair: "
                         + "; ".join(issue_fragments[:4]),
                         failure_signature=second_repair_reason.semantic_violation_code,
+                        retrieve_knowledge=_retrieve_knowledge,
+                        log_knowledge_usage=_log_knowledge_usage,
                     )
                     retry_state.last_repair_reason = second_repair_reason.event_reason
                     planning_result = __repair_planning_output(
