@@ -80,6 +80,7 @@ from app.services import (
     load_session_checkpoint_payload as _load_session_checkpoint_payload,
     maybe_queue_next_automatic_task as _maybe_queue_next_automatic_task,
     queue_task_for_session as _queue_task_for_session,
+    retry_session_with_stronger_planning_lane as _retry_session_with_stronger_planning_lane,
     replay_session_checkpoint_payload as _replay_session_checkpoint_payload,
     replay_session_checkpoint_counterfactual_payload as _replay_session_checkpoint_counterfactual_payload,
     refresh_session_dispatch_watchdog_alert as _refresh_session_dispatch_watchdog_alert,
@@ -1587,6 +1588,24 @@ def get_session_recovery_context(
     """
     _require_session_access(db, session_id, current_user)
     return _get_session_recovery_context_payload(db, session_id)
+
+
+@router.post("/sessions/{session_id}/retry-planning-lane")
+def retry_session_planning_lane(
+    session_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Operator-controlled retry through the configured stronger planning lane."""
+    enforce_api_rate_limit(request, "retry_planning_lane", current_user=current_user)
+    session = _require_session_access(db, session_id, current_user)
+    result = _retry_session_with_stronger_planning_lane(db, session)
+    return {
+        "status": "queued",
+        "session_id": session.id,
+        **result,
+    }
 
 
 @router.get("/sessions/{session_id}/digest")

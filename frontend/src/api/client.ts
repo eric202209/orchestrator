@@ -715,6 +715,18 @@ export const sessionsAPI = {
   getRecoveryContext: (sessionId: number) =>
     apiClient.get<SessionRecoveryContext>(`/sessions/${sessionId}/recovery-context`),
 
+  retryPlanningLane: (sessionId: number) =>
+    apiClient.post<{
+      status: string;
+      session_id: number;
+      task_id: number;
+      task_name: string;
+      task_execution_id: number;
+      celery_id: string;
+      escalation_backend_id: string;
+      evidence_payload_summary: Record<string, unknown>;
+    }>(`/sessions/${sessionId}/retry-planning-lane`),
+
   getNarrativeTimeline: (sessionId: number) =>
     apiClient.get<SessionNarrativeTimeline>(`/sessions/${sessionId}/timeline`),
 

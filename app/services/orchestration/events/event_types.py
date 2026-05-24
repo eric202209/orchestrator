@@ -35,6 +35,8 @@ class EventType:
     # ── Planning ──────────────────────────────────────────────────────────────
     PLAN_REVISED = "plan_revised"
     REASONING_ARTIFACT_GENERATED = "reasoning_artifact_generated"
+    LANE_ESCALATION_TRIGGERED = "lane_escalation_triggered"
+    LANE_ESCALATION_RESULT = "lane_escalation_result"
 
     # Low-resource execution
     CONTEXT_COMPACTED = "context_compacted"

@@ -16,6 +16,11 @@ def test_default_backend_descriptor_is_local_openclaw():
     assert descriptor.health.status in {"ready", "degraded"}
     assert descriptor.capabilities.supports_planning is True
     assert descriptor.capabilities.supports_checkpoint_resume is True
+    assert descriptor.lane_traits.structured_output_reliability == "variable"
+    assert descriptor.to_dict()["lane_traits"]["configured_available"] in {
+        True,
+        False,
+    }
 
 
 def test_unknown_backend_is_rejected():
@@ -44,6 +49,7 @@ def test_supported_backends_contains_registered_future_metadata():
     assert backend.config.supported_prompt_format == "structured_prompt_envelope"
     assert backend.config.prompt_dialect == "responses_json"
     assert backend.config.tool_call_shape == "responses_tools"
+    assert backend.lane_traits.evidence_following == "strong"
     assert backend.health.status in {"ready", "degraded"}
 
 

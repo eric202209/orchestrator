@@ -842,6 +842,14 @@ export interface SessionRecoveryContext {
   model_lane_label?: string | null;
   model_lane_capability_tier?: string | null;
   stronger_lane_available?: boolean;
+  stronger_lane?: {
+    configured: boolean;
+    available: boolean;
+    backend: string | null;
+    label: string;
+    capability_traits: Record<string, unknown>;
+    reasons: string[];
+  };
   model_lane_rerun_payload?: Record<string, unknown> | null;
 }
 

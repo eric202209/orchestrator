@@ -1332,12 +1332,24 @@ export default function SessionDetail() {
         setCheckpointActionIntent('start');
         break;
       case 'retry_stronger_lane':
-        setActiveTab('timeline');
+        void sessionsAPI.retryPlanningLane(id)
+          .then(() => sessionsAPI.getById(id))
+          .then((r) => setSession(r.data))
+          .then(() => {
+            setActiveTab('timeline');
+            void loadRecoveryContext(id);
+            void loadSessionDigest(id);
+            void loadDecisionTimeline(id);
+          })
+          .catch((error) => {
+            console.error('Failed to retry with stronger planning lane:', error);
+            alert('Failed to retry with stronger planning lane.');
+          });
         break;
       default:
         break;
     }
-  }, [loadRecoveryContext, loadSessionDigest, pendingAgentInterventions.length, session, sessionId]);
+  }, [loadDecisionTimeline, loadRecoveryContext, loadSessionDigest, pendingAgentInterventions.length, session, sessionId]);
 
   const handleSubmitReply = useCallback(async (interventionId: number, reply: string) => {
     if (!sessionId) return;

@@ -10,6 +10,7 @@ DEFAULT_DATABASE_URL = f"sqlite:///{BASE_DIR}/orchestrator.db"
 
 LEGACY_ENV_ALIASES = {
     "ORCHESTRATOR_AGENT_BACKEND": "AGENT_BACKEND",
+    "ORCHESTRATOR_AGENT_SECONDARY_BACKEND": "AGENT_SECONDARY_BACKEND",
     "ORCHESTRATOR_AGENT_MODEL_FAMILY": "AGENT_MODEL",
     "ORCHESTRATOR_PLANNING_REPAIR_DIRECT_ENABLED": "PLANNING_REPAIR_ENABLED",
     "ORCHESTRATOR_PLANNING_REPAIR_DIRECT_BASE_URL": "PLANNING_REPAIR_BASE_URL",
@@ -133,6 +134,7 @@ class Settings(BaseSettings):
     AGENT_BACKEND: str = (
         "local_openclaw"  # BACKEND_COUPLING: default names OpenClaw directly; future backends register here
     )
+    AGENT_SECONDARY_BACKEND: Optional[str] = None
     PLANNING_BACKEND: Optional[str] = None
     EXECUTION_BACKEND: Optional[str] = None
     REPAIR_BACKEND: Optional[str] = None
@@ -164,6 +166,21 @@ class Settings(BaseSettings):
     ALLOW_TEST_KEYPAIR_ENDPOINT: bool = False
     INLINE_PLANNING: bool = False
     WORKSPACE_REVIEW_POLICY: str = "hold_nontrivial"
+
+    @field_validator("AGENT_SECONDARY_BACKEND")
+    @classmethod
+    def validate_agent_secondary_backend(cls, value: Optional[str]) -> Optional[str]:
+        backend = str(value or "").strip()
+        if not backend:
+            return None
+        allowed_chars = set("abcdefghijklmnopqrstuvwxyz0123456789_-")
+        normalized = backend.lower()
+        if normalized != backend or any(ch not in allowed_chars for ch in backend):
+            raise ValueError(
+                "AGENT_SECONDARY_BACKEND must be a registered backend id using "
+                "lowercase letters, numbers, underscores, or hyphens"
+            )
+        return backend
 
     @field_validator("WORKSPACE_REVIEW_POLICY")
     @classmethod

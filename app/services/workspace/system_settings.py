@@ -252,12 +252,30 @@ def classify_model_lane(
         capability_tier = "local_constrained"
         reasons.append("Adaptation profile uses compact/low-resource mode")
 
+    capability_traits: Dict[str, Any] = {
+        "structured_output_reliability": "unknown",
+        "repair_convergence": "unknown",
+        "large_context_stability": "unknown",
+        "tool_discipline": "unknown",
+        "evidence_following": "unknown",
+        "latency_cost_class": "unknown",
+        "configured_available": False,
+    }
+    try:
+        from app.services.agents.agent_backends import get_backend_descriptor
+
+        descriptor = get_backend_descriptor(backend)
+        capability_traits = descriptor.to_dict().get("lane_traits", capability_traits)
+    except Exception:
+        pass
+
     return {
         "label": label,
         "capability_tier": capability_tier,
         "backend": backend,
         "model_family": model_family,
         "adaptation_profile": adaptation_profile,
+        "capability_traits": capability_traits,
         "reasons": reasons,
     }
 

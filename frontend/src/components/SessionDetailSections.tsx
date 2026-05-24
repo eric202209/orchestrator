@@ -2750,6 +2750,7 @@ export function SessionRecoveryCard({
 
   const isModelLaneLimitation = context.stop_category === 'model_lane_limitation';
   const strongerLaneAvailable = context.stronger_lane_available ?? false;
+  const strongerLaneLabel = context.stronger_lane?.label;
 
   return (
     <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] shadow-sm shadow-black/20">
@@ -2813,7 +2814,7 @@ export function SessionRecoveryCard({
             )}
             <p className="mt-2 text-xs text-amber-500">
               {strongerLaneAvailable
-                ? 'A stronger planning lane is configured. Use "Retry with stronger planning lane" to attempt with higher capability.'
+                ? `A stronger planning lane is configured${strongerLaneLabel ? `: ${strongerLaneLabel}` : ''}.`
                 : 'No stronger planning lane is configured. Manual review is required.'}
             </p>
           </div>

@@ -18,8 +18,10 @@ from app.services.orchestration.planning.repair_prompts import (
 from app.services.session.session_inspection_service import (
     _RECOVERY_ACTION_MAP,
     _extract_model_lane_limitation,
+    _stronger_lane_summary,
     _stronger_lane_available,
 )
+from app.config import settings
 
 
 # --- V1: Operator visibility ---
@@ -94,6 +96,27 @@ def test_model_lane_limitation_marker_not_produced_for_non_stale_issues():
 def test_stronger_lane_available_returns_false_by_default():
     # Without AGENT_SECONDARY_BACKEND configured, should return False
     assert _stronger_lane_available() is False
+
+
+def test_stronger_lane_summary_represents_unavailable_lane(monkeypatch):
+    monkeypatch.setattr(settings, "AGENT_SECONDARY_BACKEND", None)
+
+    summary = _stronger_lane_summary()
+
+    assert summary["configured"] is False
+    assert summary["available"] is False
+    assert summary["label"] == "unavailable"
+    assert summary["capability_traits"]["configured_available"] is False
+
+
+def test_stronger_lane_summary_rejects_unknown_backend(monkeypatch):
+    monkeypatch.setattr(settings, "AGENT_SECONDARY_BACKEND", "unknown_backend")
+
+    summary = _stronger_lane_summary()
+
+    assert summary["configured"] is True
+    assert summary["available"] is False
+    assert summary["label"] == "unsupported"
 
 
 # --- V4: No source mutation before safe stop ---

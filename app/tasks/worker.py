@@ -225,6 +225,8 @@ def execute_orchestration_task(
     expected_session_instance_id: Optional[str] = None,
     task_execution_id: Optional[int] = None,
     queued_event_id: Optional[str] = None,
+    planning_backend_override: Optional[str] = None,
+    planning_escalation_metadata: Optional[Dict[str, Any]] = None,
 ):
     """
     Execute an orchestration task with multi-step runtime coordination
@@ -261,6 +263,7 @@ def execute_orchestration_task(
     _backend_slot_backend_id: Optional[str] = None
     _backend_slot_redis = None
     _resolved_execution_backend: str = settings.AGENT_BACKEND
+    planning_runtime_service = None
 
     try:
         # Get session and task
@@ -905,6 +908,34 @@ def execute_orchestration_task(
             if hasattr(runtime_service, "get_backend_metadata")
             else {}
         )
+        planning_runtime_metadata = None
+        if planning_backend_override:
+            planning_runtime_service = create_agent_runtime(
+                db,
+                session_id,
+                task_id,
+                role=BackendRole.PLANNING,
+                backend_override=planning_backend_override,
+            )
+            if hasattr(planning_runtime_service, "task_execution_id"):
+                planning_runtime_service.task_execution_id = task_execution_id
+            planning_runtime_metadata = (
+                planning_runtime_service.get_backend_metadata()
+                if hasattr(planning_runtime_service, "get_backend_metadata")
+                else {}
+            )
+            if session is not None:
+                session.escalation_backend_id = planning_backend_override
+            emit_live(
+                "INFO",
+                "[ORCHESTRATION] Using operator-selected stronger planning lane for this task",
+                metadata={
+                    "event_type": EventType.LANE_ESCALATION_TRIGGERED,
+                    "phase": "planning",
+                    "planning_backend_override": planning_backend_override,
+                    **(planning_escalation_metadata or {}),
+                },
+            )
         trace_context_manager = start_langfuse_observation(
             name="orchestrator-task-run",
             as_type="agent",
@@ -1462,15 +1493,21 @@ def execute_orchestration_task(
                     "phase": "planning",
                 },
             ) as planning_phase_observation:
-                planning_phase_result = execute_planning_phase(
-                    ctx=run_ctx,
-                    workspace_review=workspace_review,
-                    extract_structured_text=_extract_structured_text,
-                    extract_plan_steps=_extract_plan_steps,
-                    looks_like_truncated_multistep_plan=_looks_like_truncated_multistep_plan,
-                    normalize_plan_with_live_logging=_normalize_plan_with_live_logging,
-                    workspace_violation_error_cls=TaskWorkspaceViolationError,
-                )
+                original_runtime_service = run_ctx.runtime_service
+                if planning_runtime_service is not None:
+                    run_ctx.runtime_service = planning_runtime_service
+                try:
+                    planning_phase_result = execute_planning_phase(
+                        ctx=run_ctx,
+                        workspace_review=workspace_review,
+                        extract_structured_text=_extract_structured_text,
+                        extract_plan_steps=_extract_plan_steps,
+                        looks_like_truncated_multistep_plan=_looks_like_truncated_multistep_plan,
+                        normalize_plan_with_live_logging=_normalize_plan_with_live_logging,
+                        workspace_violation_error_cls=TaskWorkspaceViolationError,
+                    )
+                finally:
+                    run_ctx.runtime_service = original_runtime_service
                 update_langfuse_observation(
                     planning_phase_observation,
                     output=planning_phase_result,
@@ -1487,6 +1524,39 @@ def execute_orchestration_task(
                         str(planning_phase_result.get("reason") or "")[:500] or None
                     ),
                 )
+                if planning_backend_override:
+                    escalation_result_metadata = {
+                        "event_type": EventType.LANE_ESCALATION_RESULT,
+                        "phase": "planning",
+                        "planning_backend_override": planning_backend_override,
+                        "planning_runtime": planning_runtime_metadata,
+                        "validation_result": planning_phase_result.get("status"),
+                        "result_reason": planning_phase_result.get("reason"),
+                        "plan_steps": len(orchestration_state.plan or []),
+                        **(planning_escalation_metadata or {}),
+                    }
+                    emit_live(
+                        "INFO",
+                        "[ORCHESTRATION] Stronger planning lane returned to the normal acceptance gate",
+                        metadata=escalation_result_metadata,
+                    )
+                    try:
+                        _append_orchestration_event(
+                            project_dir=orchestration_state.project_dir,
+                            session_id=session_id,
+                            task_id=task_id,
+                            event_type=EventType.LANE_ESCALATION_RESULT,
+                            details=escalation_result_metadata,
+                        )
+                    except Exception as exc:
+                        logger.debug(
+                            "[ORCHESTRATION] Failed to record lane escalation result: %s",
+                            exc,
+                        )
+                    if session is not None:
+                        session.escalation_backend_id = None
+                        db.add(session)
+                        db.commit()
             if planning_phase_result.get("status") != "completed":
                 mark_session_paused(
                     session,
@@ -1696,6 +1766,9 @@ def execute_orchestration_task(
 
     finally:
         try:
+            if planning_backend_override and session is not None:
+                session.escalation_backend_id = None
+                db.add(session)
             if project and task and task_execution_id and orchestration_state:
                 task_service_for_change_set = TaskService(db)
                 task_service_for_change_set.persist_task_execution_change_set(

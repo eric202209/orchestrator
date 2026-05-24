@@ -34,6 +34,22 @@ class BackendCapabilities:
 
 
 @dataclass(frozen=True)
+class BackendLaneTraits:
+    """Provider-neutral planning/repair lane traits for governed escalation."""
+
+    structured_output_reliability: str
+    repair_convergence: str
+    large_context_stability: str
+    tool_discipline: str
+    evidence_following: str
+    latency_cost_class: str
+    configured_available: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class BackendConfigMetadata:
     """Static backend configuration metadata."""
 
@@ -76,6 +92,7 @@ class BackendDescriptor:
     default_model_family: str
     implemented: bool
     capabilities: BackendCapabilities
+    lane_traits: BackendLaneTraits
     config: BackendConfigMetadata
     health: BackendHealth
 
@@ -87,6 +104,10 @@ class BackendDescriptor:
         payload = asdict(self)
         payload["available"] = self.available
         payload["capabilities"] = self.capabilities.to_dict()
+        payload["lane_traits"] = replace(
+            self.lane_traits,
+            configured_available=self.available,
+        ).to_dict()
         payload["config"] = self.config.to_dict()
         payload["health"] = self.health.to_dict()
         return payload
@@ -230,6 +251,7 @@ def _base_descriptor(
     default_model_family: str,
     implemented: bool,
     capabilities: BackendCapabilities,
+    lane_traits: BackendLaneTraits,
     config: BackendConfigMetadata,
 ) -> BackendDescriptor:
     return BackendDescriptor(
@@ -239,6 +261,7 @@ def _base_descriptor(
         default_model_family=default_model_family,
         implemented=implemented,
         capabilities=capabilities,
+        lane_traits=lane_traits,
         config=config,
         health=BackendHealth(
             available=False,
@@ -275,6 +298,14 @@ _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
                 reliability_tier="standard",
                 latency_tier="local",
             ),
+            lane_traits=BackendLaneTraits(
+                structured_output_reliability="variable",
+                repair_convergence="bounded",
+                large_context_stability="strong",
+                tool_discipline="native_tools",
+                evidence_following="standard",
+                latency_cost_class="local",
+            ),
             config=BackendConfigMetadata(
                 auth_mode="local_cli",
                 transport_mode="cli",
@@ -310,6 +341,14 @@ _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
                 reliability_tier="standard",
                 latency_tier="network",
             ),
+            lane_traits=BackendLaneTraits(
+                structured_output_reliability="standard",
+                repair_convergence="bounded",
+                large_context_stability="standard",
+                tool_discipline="gateway_tools",
+                evidence_following="standard",
+                latency_cost_class="network",
+            ),
             config=BackendConfigMetadata(
                 auth_mode="api_key",
                 transport_mode="api",
@@ -344,6 +383,14 @@ _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
                 max_context_tokens=None,
                 reliability_tier="standard",
                 latency_tier="network",
+            ),
+            lane_traits=BackendLaneTraits(
+                structured_output_reliability="high",
+                repair_convergence="strong",
+                large_context_stability="strong",
+                tool_discipline="structured_no_execution",
+                evidence_following="strong",
+                latency_cost_class="network",
             ),
             config=BackendConfigMetadata(
                 auth_mode="api_key",
@@ -382,6 +429,14 @@ _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
                 max_context_tokens=4096,
                 reliability_tier="local",
                 latency_tier="local",
+            ),
+            lane_traits=BackendLaneTraits(
+                structured_output_reliability="variable",
+                repair_convergence="bounded",
+                large_context_stability="bounded",
+                tool_discipline="no_tools",
+                evidence_following="standard",
+                latency_cost_class="local",
             ),
             config=BackendConfigMetadata(
                 auth_mode="none",

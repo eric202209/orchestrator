@@ -10,6 +10,8 @@ def test_model_lane_classifies_hosted_openai_backend():
 
     assert lane["label"] == "hosted_openai"
     assert lane["capability_tier"] == "hosted"
+    assert lane["capability_traits"]["structured_output_reliability"] == "high"
+    assert lane["capability_traits"]["configured_available"] in {True, False}
 
 
 def test_model_lane_marks_small_quantized_local_models_as_constrained():
@@ -21,4 +23,5 @@ def test_model_lane_marks_small_quantized_local_models_as_constrained():
 
     assert lane["label"] == "local_openclaw"
     assert lane["capability_tier"] == "local_constrained"
+    assert "structured_output_reliability" in lane["capability_traits"]
     assert "Model name suggests constrained local capacity" in lane["reasons"]

@@ -24,6 +24,10 @@ from app.models import (
     TaskStatus,
 )
 from app.services.agents.agent_runtime import create_agent_runtime
+from app.services.agents.agent_backends import (
+    UnsupportedAgentBackendError,
+    get_backend_descriptor,
+)
 from app.services.agents.interfaces import AgentRuntimeError
 from app.services.model_adaptation import get_adaptation_profile
 from app.services.orchestration.run_state import mark_task_attempt_pending
@@ -251,8 +255,68 @@ def _extract_model_lane_limitation(error_message: Any) -> Optional[str]:
 
 def _stronger_lane_available() -> bool:
     """Return True if a secondary stronger planning backend is configured."""
-    secondary = str(getattr(settings, "AGENT_SECONDARY_BACKEND", "") or "").strip()
-    return bool(secondary)
+    secondary = str(settings.AGENT_SECONDARY_BACKEND or "").strip()
+    if not secondary:
+        return False
+    try:
+        descriptor = get_backend_descriptor(secondary)
+    except UnsupportedAgentBackendError:
+        return False
+    return bool(
+        descriptor.implemented
+        and descriptor.available
+        and descriptor.capabilities.supports_planning
+    )
+
+
+def _stronger_lane_summary() -> Dict[str, Any]:
+    """Return configured secondary lane state without implying provider prestige."""
+    secondary = str(settings.AGENT_SECONDARY_BACKEND or "").strip()
+    if not secondary:
+        return {
+            "configured": False,
+            "available": False,
+            "backend": None,
+            "label": "unavailable",
+            "capability_traits": {
+                "configured_available": False,
+            },
+            "reasons": ["AGENT_SECONDARY_BACKEND is not configured"],
+        }
+    try:
+        descriptor = get_backend_descriptor(secondary)
+    except UnsupportedAgentBackendError as exc:
+        return {
+            "configured": True,
+            "available": False,
+            "backend": secondary,
+            "label": "unsupported",
+            "capability_traits": {
+                "configured_available": False,
+            },
+            "reasons": [str(exc)],
+        }
+
+    descriptor_payload = descriptor.to_dict()
+    available = bool(
+        descriptor.implemented
+        and descriptor.available
+        and descriptor.capabilities.supports_planning
+    )
+    reasons: List[str] = []
+    if not descriptor.implemented:
+        reasons.append("Backend is registered but not implemented")
+    if not descriptor.capabilities.supports_planning:
+        reasons.append("Backend does not support planning")
+    reasons.extend(descriptor.health.errors)
+    return {
+        "configured": True,
+        "available": available,
+        "backend": descriptor.name,
+        "label": descriptor.display_name,
+        "capability_traits": descriptor_payload.get("lane_traits", {}),
+        "reasons": reasons,
+    }
 
 
 def _find_stale_old_text_in_logs(db: Session, session_id: int) -> List[str]:
@@ -2165,6 +2229,7 @@ def get_session_recovery_context_payload(
         else None
     )
     stronger_lane = _stronger_lane_available()
+    stronger_lane_summary = _stronger_lane_summary()
 
     # Build rerun payload for model-lane limitation stops (operator evidence, not prompt injection)
     model_lane_rerun_payload: Optional[Dict[str, Any]] = None
@@ -2196,6 +2261,7 @@ def get_session_recovery_context_payload(
                 else True
             ),
             "stronger_lane_configured": stronger_lane,
+            "stronger_lane": stronger_lane_summary,
             "note": (
                 "This payload is operator evidence. "
                 "bad_old_text is shown for manual review only and must not be injected into model prompts."
@@ -2230,6 +2296,7 @@ def get_session_recovery_context_payload(
         "model_lane_label": lane_label,
         "model_lane_capability_tier": lane_capability_tier,
         "stronger_lane_available": stronger_lane,
+        "stronger_lane": stronger_lane_summary,
         "model_lane_rerun_payload": model_lane_rerun_payload,
     }
 

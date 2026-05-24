@@ -37,6 +37,10 @@ from app.services.orchestration.state.session_state import (
     mark_session_stopped,
 )
 from app.config import settings
+from app.services.agents.agent_backends import (
+    UnsupportedAgentBackendError,
+    get_backend_descriptor,
+)
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
@@ -445,6 +449,8 @@ def queue_task_for_session(
     session: SessionModel,
     task_id: int,
     timeout_seconds: int = DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
+    planning_backend_override: Optional[str] = None,
+    planning_escalation_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     from app.tasks.worker import execute_orchestration_task
 
@@ -556,6 +562,8 @@ def queue_task_for_session(
             "task_title": task.title,
             "execution_profile": task.execution_profile,
             "workflow_stage": getattr(task, "workflow_stage", None),
+            "planning_backend_override": planning_backend_override,
+            "planning_escalation": planning_escalation_metadata,
             **_runtime_selection_details(db),
         },
     )
@@ -570,6 +578,8 @@ def queue_task_for_session(
             expected_session_instance_id=session.instance_id,
             task_execution_id=task_execution.id,
             queued_event_id=(queued_event or {}).get("event_id"),
+            planning_backend_override=planning_backend_override,
+            planning_escalation_metadata=planning_escalation_metadata,
         )
     except Exception as exc:
         completed_at = datetime.now(timezone.utc)
@@ -638,6 +648,148 @@ def queue_task_for_session(
         "celery_id": result.id,
         "plan_position": getattr(task, "plan_position", None),
     }
+
+
+def retry_session_with_stronger_planning_lane(
+    db: Session,
+    session: SessionModel,
+    *,
+    timeout_seconds: int = DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
+) -> Dict[str, Any]:
+    from app.services.session.session_inspection_service import (
+        get_session_recovery_context_payload,
+    )
+
+    secondary = str(settings.AGENT_SECONDARY_BACKEND or "").strip()
+    if not secondary:
+        raise HTTPException(
+            status_code=409,
+            detail="AGENT_SECONDARY_BACKEND is not configured.",
+        )
+    try:
+        descriptor = get_backend_descriptor(secondary)
+    except UnsupportedAgentBackendError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not descriptor.implemented:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Backend '{descriptor.name}' is registered but not implemented.",
+        )
+    if not descriptor.capabilities.supports_planning:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Backend '{descriptor.name}' does not support planning.",
+        )
+    if not descriptor.available:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Backend '{descriptor.name}' is unavailable: "
+                + "; ".join(descriptor.health.errors or [descriptor.health.status])
+            ),
+        )
+
+    recovery = get_session_recovery_context_payload(db, session.id)
+    if recovery.get("stop_category") != "model_lane_limitation":
+        raise HTTPException(
+            status_code=409,
+            detail="Session is not stopped on a model-lane limitation.",
+        )
+    evidence_payload = recovery.get("model_lane_rerun_payload")
+    if not isinstance(evidence_payload, dict):
+        raise HTTPException(
+            status_code=409,
+            detail="No bounded model-lane rerun evidence is available.",
+        )
+    task_id = evidence_payload.get("task_id")
+    if not isinstance(task_id, int):
+        raise HTTPException(
+            status_code=409,
+            detail="No failed task id is available for stronger-lane retry.",
+        )
+
+    original_lane = {
+        "label": recovery.get("model_lane_label"),
+        "capability_tier": recovery.get("model_lane_capability_tier"),
+        "capability_traits": (
+            (getattr(session, "model_lane_metadata", {}) or {}).get("capability_traits")
+            if isinstance(getattr(session, "model_lane_metadata", None), dict)
+            else {}
+        ),
+    }
+    escalation_lane = {
+        "backend": descriptor.name,
+        "label": descriptor.display_name,
+        "capability_traits": descriptor.to_dict().get("lane_traits", {}),
+    }
+    evidence_summary = {
+        "task_id": task_id,
+        "task_title": evidence_payload.get("task_title"),
+        "model_lane_limitation": evidence_payload.get("model_lane_limitation"),
+        "failure_reason_preview": str(evidence_payload.get("failure_reason") or "")[
+            :240
+        ],
+        "bad_old_text_count": len(evidence_payload.get("bad_old_text") or []),
+        "capsule_available": bool(evidence_payload.get("capsule_available")),
+        "current_file_evidence_available": bool(
+            evidence_payload.get("current_file_evidence_available")
+        ),
+        "source_mutation_confirmed_absent": bool(
+            evidence_payload.get("source_mutation_confirmed_absent")
+        ),
+    }
+    escalation_metadata = {
+        "original_lane": original_lane,
+        "escalation_lane": escalation_lane,
+        "operator_action": "retry_stronger_lane",
+        "evidence_payload_summary": evidence_summary,
+    }
+
+    session.escalation_backend_id = descriptor.name
+    db.add(
+        LogEntry(
+            session_id=session.id,
+            session_instance_id=session.instance_id,
+            task_id=task_id,
+            level="INFO",
+            message="Operator triggered stronger planning lane retry",
+            log_metadata=json.dumps(
+                {
+                    "event_type": EventType.LANE_ESCALATION_TRIGGERED,
+                    **escalation_metadata,
+                }
+            ),
+        )
+    )
+
+    project = db.query(Project).filter(Project.id == session.project_id).first()
+    if project:
+        event_project_dir = resolve_project_workspace_path(
+            project.workspace_path, project.name, db=db
+        )
+        try:
+            append_orchestration_event(
+                project_dir=event_project_dir,
+                session_id=session.id,
+                task_id=task_id,
+                event_type=EventType.LANE_ESCALATION_TRIGGERED,
+                details=escalation_metadata,
+            )
+        except Exception:
+            pass
+
+    db.commit()
+    result = queue_task_for_session(
+        db,
+        session,
+        task_id,
+        timeout_seconds=timeout_seconds,
+        planning_backend_override=descriptor.name,
+        planning_escalation_metadata=escalation_metadata,
+    )
+    result["escalation_backend_id"] = descriptor.name
+    result["evidence_payload_summary"] = evidence_summary
+    return result
 
 
 def reopen_failed_ordered_task_if_needed(

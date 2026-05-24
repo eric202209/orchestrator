@@ -57,10 +57,13 @@ def create_agent_runtime(
     *,
     use_demo_mode: Optional[bool] = None,
     role: Optional[BackendRole] = None,
+    backend_override: Optional[str] = None,
 ) -> AgentRuntime:
     """Instantiate the configured backend runtime for a session/task pair."""
 
-    if role is not None:
+    if backend_override:
+        backend_name = str(backend_override).strip()
+    elif role is not None:
         backend_name = resolve_backend_name_for_role(db, role)
     else:
         backend_name = get_effective_agent_backend(
