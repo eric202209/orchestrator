@@ -49,6 +49,10 @@ from app.services.orchestration.planning.repair_prompts import (
     compact_invalid_output_excerpt as _compact_invalid_output_excerpt,
     render_repair_knowledge_block as _render_repair_knowledge_block,
 )
+from app.services.project.index_service import (
+    build_project_index,
+    render_project_structure_capsule,
+)
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 
 _logger = logging.getLogger(__name__)
@@ -1943,6 +1947,7 @@ class PlannerService:
         workflow_phases: Optional[List[str]] = None,
         workspace_has_existing_files: bool = False,
         knowledge_context: Any = None,
+        project_structure_capsule: Optional[str] = None,
     ) -> str:
         concise_task = " ".join((task_description or "").split())[:1200]
         display_project_dir = render_workspace_path_for_prompt(project_dir)
@@ -1957,6 +1962,11 @@ class PlannerService:
         static_site_verification_contract = _render_static_site_verification_contract()
         test_scaffold_contract = _render_test_scaffold_contract()
         knowledge_block = _render_knowledge_block(knowledge_context)
+        structure_capsule = (
+            project_structure_capsule
+            if project_structure_capsule is not None
+            else PlannerService._build_project_structure_capsule(project_dir)
+        )
         prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 Do not implement anything.
@@ -1965,6 +1975,9 @@ Task:
 {concise_task}
 
 {knowledge_block}
+
+Project structure:
+{structure_capsule or "No structural project index was available for this planning attempt."}
 
 Workflow:
 {workflow_guidance or "No explicit workflow phases. Use the smallest valid sequential plan."}
@@ -2424,8 +2437,9 @@ Return only a JSON array matching this shape. No markdown. No prose.
         message = str(exc).lower()
         return "no output" in message and "openclaw" in message
 
-    @staticmethod
+    @classmethod
     def build_planning_repair_prompt(
+        cls,
         task_description: str,
         malformed_output: str,
         project_dir: Path,
@@ -2445,6 +2459,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
             prompt_profile=prompt_profile,
             apply_prompt_profile=PlannerService.apply_prompt_profile,
             knowledge_context=knowledge_context,
+            project_structure_capsule=cls._build_project_structure_capsule(project_dir),
         )
 
     @staticmethod
@@ -2459,6 +2474,13 @@ Return only a JSON array matching this shape. No markdown. No prose.
             prompt_profile=prompt_profile,
             apply_prompt_profile=PlannerService.apply_prompt_profile,
         )
+
+    @staticmethod
+    def _build_project_structure_capsule(project_dir: Path) -> str:
+        try:
+            return render_project_structure_capsule(build_project_index(project_dir))
+        except Exception:
+            return ""
 
     @classmethod
     def retry_with_minimal_prompt(
@@ -2513,6 +2535,9 @@ Return only a JSON array matching this shape. No markdown. No prose.
             workflow_phases=workflow_phases,
             workspace_has_existing_files=workspace_has_existing_files,
             knowledge_context=knowledge_context,
+            project_structure_capsule=PlannerService._build_project_structure_capsule(
+                project_dir
+            ),
         )
         minimal_prompt_chars = len(minimal_prompt)
         minimal_prompt_estimated_tokens = _estimate_prompt_tokens(minimal_prompt)

@@ -586,6 +586,43 @@ def test_stale_replace_fallback_can_synthesize_single_return_change(tmp_path):
     assert "return String(value).toUpperCase();" in normalized[0]["ops"][0]["content"]
 
 
+def test_stale_replace_fallback_does_not_synthesize_unknown_python_names(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "summary.py").write_text(
+        "from decimal import Decimal\n\n"
+        "def summarize_entries(entries):\n"
+        '    totals = {"reimbursable": Decimal("0")}\n'
+        "    return totals\n",
+        encoding="utf-8",
+    )
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Fix reimbursable summary",
+            "commands": [],
+            "verification": "python -m pytest tests/test_summary.py -q",
+            "rollback": None,
+            "expected_files": ["src/summary.py"],
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "src/summary.py",
+                    "old": "return total_reimbursable",
+                    "new": "return -total_reimbursable",
+                }
+            ],
+        }
+    ]
+
+    normalized, details = normalize_stale_replace_ops_to_small_file_writes(
+        plan,
+        project_dir=tmp_path,
+    )
+
+    assert details["changed"] is False
+    assert normalized[0]["ops"][0]["op"] == "replace_in_file"
+
+
 def test_ops_only_step_ignores_unrelated_tool_failure_logs(tmp_path, monkeypatch):
     (tmp_path / "app").mkdir()
     (tmp_path / "app" / "calculator.py").write_text(

@@ -14,6 +14,10 @@ from typing_extensions import Protocol, runtime_checkable
 from app.services.model_adaptation import render_prompt_for_profile
 from app.services.model_adaptation.schemas import PromptEnvelope
 from app.models import LogEntry
+from app.services.project.index_service import (
+    build_project_index,
+    render_project_structure_capsule,
+)
 from app.services.orchestration.context.hitl_sentinel import (
     render as render_hitl_sentinel,
 )
@@ -477,6 +481,9 @@ def assemble_planning_prompt(
         execution_profile=ctx.execution_profile,
         workflow_profile=ctx.workflow_profile,
         workflow_phases=get_workflow_phases(ctx.workflow_profile),
+        project_structure_capsule=_build_project_structure_capsule(
+            Path(ctx.orchestration_state.project_dir)
+        ),
     )
     knowledge_block = _render_knowledge_block(knowledge_context)
     if knowledge_block:
@@ -497,6 +504,13 @@ def assemble_planning_prompt(
         },
         expected_output="JSON array of orchestration step objects.",
     )
+
+
+def _build_project_structure_capsule(project_dir: Path) -> str:
+    try:
+        return render_project_structure_capsule(build_project_index(project_dir))
+    except Exception:
+        return ""
 
 
 def assemble_execution_prompt(

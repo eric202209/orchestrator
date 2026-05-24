@@ -811,6 +811,12 @@ def test_immediate_stale_replace_repair_uses_validation_knowledge(
         "app.services.orchestration.phases.planning_flow._retrieve_knowledge",
         _retrieve_by_phase,
     )
+    # Also patch the knowledge module directly: _retrieve_validation_repair_knowledge
+    # now lives in planning_knowledge and calls _retrieve_knowledge from that module.
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_knowledge._retrieve_knowledge",
+        _retrieve_by_phase,
+    )
     monkeypatch.setattr(
         "app.services.orchestration.phases.planning_flow.assemble_planning_prompt",
         lambda *a, **kw: "mock planning prompt",

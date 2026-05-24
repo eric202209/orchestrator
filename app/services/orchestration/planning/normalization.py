@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import shlex
@@ -533,6 +534,48 @@ def _single_return_line(lines: list[str]) -> tuple[int, str] | None:
     return matches[0]
 
 
+def _python_name_identifiers(text: str) -> set[str]:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return set()
+    return {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+
+
+def _return_line_uses_only_known_names(
+    *,
+    current_content: str,
+    new_return_line: str,
+) -> bool:
+    new_names = _python_name_identifiers(
+        "def _openclaw_return_probe():\n    " + new_return_line.strip() + "\n"
+    )
+    if not new_names:
+        return True
+    current_names = _python_name_identifiers(current_content)
+    new_names.discard("_openclaw_return_probe")
+    allowed_builtins = {
+        "abs",
+        "all",
+        "any",
+        "bool",
+        "dict",
+        "float",
+        "int",
+        "len",
+        "list",
+        "max",
+        "min",
+        "round",
+        "set",
+        "str",
+        "sum",
+        "tuple",
+    }
+    unknown_names = new_names - current_names - allowed_builtins
+    return not unknown_names
+
+
 def _synthesize_single_return_file_write(
     *,
     path: str,
@@ -559,6 +602,13 @@ def _synthesize_single_return_file_write(
         return None
     current_index, current_line = current_return
     _, new_line = new_return
+    if PurePosixPath(path).suffix.lower() == ".py" and not (
+        _return_line_uses_only_known_names(
+            current_content=current_content,
+            new_return_line=new_line,
+        )
+    ):
+        return None
     indent = current_line[: len(current_line) - len(current_line.lstrip())]
     current_lines[current_index] = indent + new_line.strip()
     trailing_newline = "\n" if current_content.endswith("\n") else ""

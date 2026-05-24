@@ -21,6 +21,10 @@ from app.services.orchestration.planning.prompt_contracts import (
 from app.services.orchestration.planning.repair_strategies import (
     build_specialized_repair_prompt,
 )
+from app.services.project.index_service import (
+    build_project_index,
+    render_project_structure_capsule,
+)
 
 PLANNING_REPAIR_MAX_KNOWLEDGE_ITEMS = 2
 PLANNING_REPAIR_MAX_KNOWLEDGE_ITEM_CHARS = 500
@@ -141,15 +145,21 @@ def build_planning_repair_prompt(
     prompt_profile: str = "default",
     apply_prompt_profile: Any = None,
     knowledge_context: Any = None,
+    project_structure_capsule: str | None = None,
 ) -> str:
     broken_output = compact_invalid_output_excerpt(malformed_output)
     knowledge_block = render_repair_knowledge_block(knowledge_context)
+    structure_capsule = (
+        project_structure_capsule
+        if project_structure_capsule is not None
+        else _build_project_structure_capsule(project_dir)
+    )
     specialized_prompt = build_specialized_repair_prompt(
         task_description=task_description,
         malformed_output=malformed_output,
         project_dir=project_dir,
         rejection_reasons=rejection_reasons,
-        knowledge_block=knowledge_block,
+        knowledge_block=_join_optional_blocks(knowledge_block, structure_capsule),
     )
     if specialized_prompt is not None:
         return _apply_profile(specialized_prompt, prompt_profile, apply_prompt_profile)
@@ -179,6 +189,7 @@ Bad:
 {validation_error or default_validation_error}
 
 {knowledge_block + chr(10) if knowledge_block else ""}
+{structure_capsule + chr(10) if structure_capsule else ""}
 Strict output schema: step_number, description, commands, verification,
 rollback, expected_files; optional ops.
 
@@ -200,6 +211,7 @@ Rules:
 11. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command; no `echo` or `cd /... &&`.
 12. No /root/write_file.py, /tmp helpers, absolute helper scripts, outside files.
 13. If scaffolding is required, run it in the current workspace and use ops for follow-up edits.
+14. For stale replace_in_file old-text failures, use identifiers and function names already present in the current file excerpt. Do not invent helper variables, function names, modules, or paths that are absent from the excerpt or project structure capsule.
 17. Each step is a separate JSON object. Never merge steps.
 """
     return _apply_profile(prompt, prompt_profile, apply_prompt_profile)
@@ -258,3 +270,14 @@ def _apply_profile(prompt: str, prompt_profile: str, apply_prompt_profile: Any) 
     if callable(apply_prompt_profile):
         return apply_prompt_profile(prompt, prompt_profile)
     return prompt
+
+
+def _build_project_structure_capsule(project_dir: Path) -> str:
+    try:
+        return render_project_structure_capsule(build_project_index(project_dir))
+    except Exception:
+        return ""
+
+
+def _join_optional_blocks(*blocks: str) -> str:
+    return "\n\n".join(block.strip() for block in blocks if block and block.strip())

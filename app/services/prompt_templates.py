@@ -280,6 +280,9 @@ Do not implement anything.
 
 **Context:** {project_context}
 
+**Project Structure Capsule:**
+{project_structure_capsule}
+
 **Workspace:**
 - Root: {workspace_root}
 - Project: {project_dir}
@@ -865,6 +868,7 @@ Examples:
         execution_profile: str = "full_lifecycle",
         workflow_profile: str = "default",
         workflow_phases: Optional[List[str]] = None,
+        project_structure_capsule: Optional[str] = None,
     ) -> str:
         """
         Build a prompt for task planning phase.
@@ -897,6 +901,10 @@ Examples:
         compact_project_context = (
             project_context or "No additional context provided."
         )[:2200]
+        compact_project_structure_capsule = (
+            project_structure_capsule
+            or "No structural project index was available for this planning attempt."
+        )[:2200]
         workflow_phases = workflow_phases or []
         workflow_guidance = (
             "No explicit phase structure. Use current default planning behavior."
@@ -920,6 +928,7 @@ Examples:
                 execution_profile
             ),
             "project_context": compact_project_context,
+            "project_structure_capsule": compact_project_structure_capsule,
             "workspace_root": ws_root,
             "project_dir": proj_dir,
             "workflow_guidance": workflow_guidance,
