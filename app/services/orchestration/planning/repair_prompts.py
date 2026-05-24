@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from app.services.orchestration.planning.prompt_contracts import (
+    render_operation_choice_contract,
     render_ops_first_contract,
     render_python_verification_contract,
     render_shell_fallback_limits,
@@ -29,7 +30,7 @@ from app.services.project.index_service import (
 PLANNING_REPAIR_MAX_KNOWLEDGE_ITEMS = 2
 PLANNING_REPAIR_MAX_KNOWLEDGE_ITEM_CHARS = 500
 PLANNING_REPAIR_COMPACT_MALFORMED_OUTPUT_CHARS = 800
-PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS = 1400
+PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS = 700
 PLANNING_REPAIR_MAX_VALIDATION_ERROR_CHARS = 450
 REPAIR_PROMPT_MAX_CHARS = 6000
 PLANNING_REPAIR_PROMPT_MAX_CHARS = REPAIR_PROMPT_MAX_CHARS
@@ -174,6 +175,7 @@ def build_planning_repair_prompt(
         "Validation error:\n- malformed or non-runnable planning output\n"
     )
     ops_contract = render_ops_first_contract()
+    operation_choice_contract = render_operation_choice_contract()
     shell_fallback_limits = render_shell_fallback_limits()
     python_verification_contract = render_python_verification_contract()
     static_site_verification_contract = render_static_site_verification_contract()
@@ -196,6 +198,7 @@ rollback, expected_files; optional ops.
 Rules:
 1. Use 3 to 4 steps, numbered 1..N.
 2. {ops_contract}
+2x. {operation_choice_contract}
 2a. Shell fallback limits: {shell_fallback_limits}
 2b. {python_verification_contract}
 2c. {static_site_verification_contract}
@@ -211,7 +214,7 @@ Rules:
 11. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command; no `echo` or `cd /... &&`.
 12. No /root/write_file.py, /tmp helpers, absolute helper scripts, outside files.
 13. If scaffolding is required, run it in the current workspace and use ops for follow-up edits.
-14. For stale replace_in_file old-text failures, use identifiers and function names already present in the current file excerpt. Do not invent helper variables, function names, modules, or paths that are absent from the excerpt or project structure capsule.
+14. Stale replace fixes: use only identifiers/paths present in current evidence. Do not invent helper variables.
 17. Each step is a separate JSON object. Never merge steps.
 """
     return _apply_profile(prompt, prompt_profile, apply_prompt_profile)
@@ -230,6 +233,7 @@ def build_compact_planning_repair_prompt(
         f"- {reason[:140]}" for reason in (rejection_reasons or [])[:4]
     )
     ops_contract = render_ops_first_contract()
+    operation_choice_contract = render_operation_choice_contract()
     shell_fallback_limits = render_shell_fallback_limits()
     python_verification_contract = render_python_verification_contract()
     static_site_verification_contract = render_static_site_verification_contract()
@@ -251,6 +255,7 @@ step_number, description, commands, verification, rollback, expected_files, opti
 Rules:
 - commands must be short shell strings under 900 characters each.
 - {ops_contract}
+- {operation_choice_contract}
 - shell fallback limits: {shell_fallback_limits}
 - {python_verification_contract}
 - {static_site_verification_contract}

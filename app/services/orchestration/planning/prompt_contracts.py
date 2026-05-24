@@ -15,6 +15,15 @@ def render_ops_first_contract() -> str:
     )
 
 
+def render_operation_choice_contract() -> str:
+    return (
+        "`replace_in_file` is only for exact old text already confirmed from "
+        "current workspace evidence. If the old text is guessed, stale, or not "
+        "shown in the current excerpt, inspect first or use another supported "
+        "operation; do not invent helper identifiers or functions."
+    )
+
+
 def render_shell_fallback_limits() -> str:
     return (
         "Shell is only for installs, builds, tests, inspection, and small commands; "

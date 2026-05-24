@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from app.services.orchestration.phases.planning_flow import (
+    _read_only_stage_fallback_plan,
+    _static_site_validation_fallback_plan,
+)
 from app.services.orchestration.planning.planner import PlannerService
 from app.services.orchestration.planning.repair_prompts import (
     PLANNING_REPAIR_PROMPT_MAX_CHARS,
@@ -80,6 +84,7 @@ def test_planning_prompt_includes_capsule_as_context_not_static_site_rewrite(tmp
     assert "PROJECT STRUCTURE CAPSULE" in prompt
     assert "- frontend/src/App.tsx" in prompt
     assert "Use these paths as workspace facts." in prompt
+    assert "`replace_in_file` is only for exact old text" in prompt
     assert "src/index.js -> index.html" not in prompt
     assert "frontend/src/frontend/src" not in prompt
 
@@ -96,6 +101,7 @@ def test_minimal_planning_prompt_uses_capped_capsule(tmp_path):
 
     assert "PROJECT STRUCTURE CAPSULE" in prompt
     assert "... " in prompt
+    assert "`replace_in_file` is only for exact old text" in prompt
     assert len(prompt) < 12000
 
 
@@ -121,5 +127,84 @@ def test_repair_prompt_includes_capsule_without_exceeding_budget(tmp_path):
     assert "PROJECT STRUCTURE CAPSULE" in prompt
     assert "- src/ledger_app/summary.py" in prompt
     assert "Use these paths as workspace facts." in prompt
+    assert "`replace_in_file` is only for exact old text" in prompt
     assert "Do not invent helper variables" in prompt
     assert len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
+
+
+def _make_medium_ledger_workspace(tmp_path):
+    (tmp_path / "src" / "ledger_app").mkdir(parents=True)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "frontend" / "src").mkdir(parents=True)
+    (tmp_path / "src" / "ledger_app" / "__init__.py").write_text("")
+    (tmp_path / "src" / "ledger_app" / "calculator.py").write_text(
+        "def calculate_totals(entries):\n    return {}\n"
+    )
+    (tmp_path / "tests" / "test_calculator.py").write_text(
+        "def test_totals():\n    pass\n"
+    )
+    (tmp_path / "frontend" / "src" / "App.tsx").write_text("export default null;\n")
+    (tmp_path / "frontend" / "package.json").write_text('{"scripts":{"build":"vite"}}')
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='ledger'\n")
+
+
+def test_review_lane_fallback_plan_fires_for_medium_project(tmp_path):
+    """Review stage always produces a safe read-only inspection plan."""
+    _make_medium_ledger_workspace(tmp_path)
+
+    state = SimpleNamespace(project_dir=str(tmp_path))
+    ctx = SimpleNamespace(
+        workflow_stage="review",
+        prompt="Review the ledger backend for correctness.",
+        orchestration_state=state,
+    )
+
+    fallback = _read_only_stage_fallback_plan(ctx)
+
+    assert fallback is not None
+    assert len(fallback) == 1
+    step = fallback[0]
+    assert step["expected_files"] == []
+    assert not step.get("ops")
+    assert "pathlib" in step["commands"][0]
+    assert "rglob" in step["commands"][0]
+    assert "inspect workspace" in step["description"].lower()
+
+
+def test_validation_lane_no_static_site_fallback_for_python_ledger_project(tmp_path):
+    """Validation lane on a Python/ledger project must not trigger the static-site fallback."""
+    _make_medium_ledger_workspace(tmp_path)
+
+    state = SimpleNamespace(project_dir=str(tmp_path))
+    ctx = SimpleNamespace(
+        workflow_stage="validate",
+        prompt="Validate that the ledger calculator produces correct totals.",
+        orchestration_state=state,
+    )
+
+    # No public/ dir → static-site fallback must not fire
+    fallback = _static_site_validation_fallback_plan(ctx)
+
+    assert fallback is None
+
+
+def test_medium_project_capsule_covers_backend_and_frontend_paths(tmp_path):
+    """Capsule for a medium fullstack ledger project includes both backend and frontend paths."""
+    _make_medium_ledger_workspace(tmp_path)
+
+    capsule = render_project_structure_capsule(build_project_index(tmp_path))
+
+    # Backend paths present
+    assert "src/ledger_app/calculator.py" in capsule
+    assert "tests/test_calculator.py" in capsule
+    assert "pyproject.toml" in capsule
+    assert "src/ledger_app" in capsule
+    # Frontend paths present
+    assert "frontend/src/App.tsx" in capsule
+    assert "frontend/package.json" in capsule
+    # Read-only wording retained
+    assert "Use these paths as workspace facts." in capsule
+    assert "Do not create files outside this structure" in capsule
+    # No static-site rewrite hint
+    assert "src/index.js" not in capsule
+    assert "index.html" not in capsule

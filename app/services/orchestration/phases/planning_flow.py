@@ -314,6 +314,7 @@ from app.services.orchestration.phases.planning_support import (
     _get_targeted_second_repair_reason,
     _is_repairable_malformed_shell_quoting_violation,
     _last_plan_output_snippet,
+    _model_lane_limitation_for_invalid_planning_commands,
     _plan_contract_diagnostics,
     _semantic_codes_for_immediate_repair_issues,
     _should_repair_truncated_single_step_plan,
@@ -1674,6 +1675,33 @@ def execute_planning_phase(
                         for key, value in blocking_repair_issues.items()
                     )
                 )
+                model_lane_limitation = (
+                    _model_lane_limitation_for_invalid_planning_commands(
+                        blocking_repair_issues
+                    )
+                )
+                if model_lane_limitation:
+                    failure_reason = (
+                        failure_reason
+                        + "; model_lane_limitation="
+                        + str(model_lane_limitation["model_lane_limitation"])
+                        + "; runtime_rewrite_added=false"
+                    )
+                    emit_phase_event(
+                        ctx.orchestration_state,
+                        ctx.emit_live,
+                        level="ERROR",
+                        phase="planning",
+                        message=(
+                            "[ORCHESTRATION] Planning repair repeated stale exact "
+                            "patches after bounded repair; recording model-lane limitation"
+                        ),
+                        details={
+                            "reason": "planning_invalid_commands_after_repair",
+                            "blocking_repair_issues": blocking_repair_issues,
+                            **model_lane_limitation,
+                        },
+                    )
                 _finalize_planning_terminal_failure(
                     ctx=ctx,
                     failure_type="planning_invalid_commands_after_repair",

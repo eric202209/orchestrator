@@ -670,6 +670,22 @@ def _semantic_codes_for_immediate_repair_issues(
     return codes
 
 
+def _model_lane_limitation_for_invalid_planning_commands(
+    issues: dict[str, list[int]] | None,
+) -> dict[str, object] | None:
+    if not (issues or {}).get("stale_replace_ops_steps"):
+        return None
+    return {
+        "model_lane_limitation": "repeated_stale_exact_patch_after_capsule",
+        "failure_cause_bucket": "model_lane_repeated_stale_exact_patch",
+        "runtime_rewrite_added": False,
+        "recommended_action": (
+            "Treat as planner/model-lane limitation. Use better planning context "
+            "or scoped prompt guidance; do not add another runtime normalizer."
+        ),
+    }
+
+
 def _is_repairable_malformed_shell_quoting_violation(exc: Exception) -> bool:
     message = str(exc).lower()
     return "malformed shell quoting" in message

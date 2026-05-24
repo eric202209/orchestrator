@@ -239,6 +239,11 @@ def _classify_test_scaffold_failure(error_message: Any) -> Optional[str]:
     if not text:
         return None
     if (
+        "repeated_stale_exact_patch_after_capsule" in text
+        or "model_lane_repeated_stale_exact_patch" in text
+    ):
+        return "model_lane_repeated_stale_exact_patch"
+    if (
         "patch_strategy_fallback_required" in text
         or "post_repair_stale_replace_fallback" in text
         or "exact-text patching is exhausted" in text

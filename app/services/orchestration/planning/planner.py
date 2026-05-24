@@ -33,6 +33,7 @@ from app.services.orchestration.operations.file_ops_contract import (
     operation_has_file_op_path,
 )
 from app.services.orchestration.planning.prompt_contracts import (
+    render_operation_choice_contract as _render_operation_choice_contract,
     render_ops_first_contract as _render_ops_first_contract,
     render_python_verification_contract as _render_python_verification_contract,
     render_shell_fallback_limits as _render_shell_fallback_limits,
@@ -1957,6 +1958,7 @@ class PlannerService:
             workspace_has_existing_files=workspace_has_existing_files,
         )
         ops_contract = _render_ops_first_contract()
+        operation_choice_contract = _render_operation_choice_contract()
         shell_fallback_limits = _render_shell_fallback_limits()
         python_verification_contract = _render_python_verification_contract()
         static_site_verification_contract = _render_static_site_verification_contract()
@@ -1996,6 +1998,7 @@ Rules:
 11. `rollback` must be a single shell string or null
 12. expected_files must be relative file paths or []
 13. {ops_contract}
+13a. {operation_choice_contract}
 14. Shell fallback limits: {shell_fallback_limits}
 15. Do not join separate shell commands with commas
 16. Commands must be runnable shell, not prose. Do not emit pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
@@ -2042,6 +2045,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
             workspace_has_existing_files=workspace_has_existing_files,
         )
         ops_contract = _render_ops_first_contract()
+        operation_choice_contract = _render_operation_choice_contract()
         shell_fallback_limits = _render_shell_fallback_limits()
         python_verification_contract = _render_python_verification_contract()
         static_site_verification_contract = _render_static_site_verification_contract()
@@ -2061,6 +2065,7 @@ Requirements:
 2. Use short relative shell commands only, and keep expected_files relative
 3. If a step will later use file-read or file-write tools, keep that path relative in the plan; execution will expand it under {display_project_dir}
 4. {ops_contract}
+4a. {operation_choice_contract}
 5. Shell fallback limits: {shell_fallback_limits}
 6. {python_verification_contract}
 6a. {static_site_verification_contract}

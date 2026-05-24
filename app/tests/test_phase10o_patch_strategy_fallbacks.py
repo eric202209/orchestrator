@@ -3,6 +3,7 @@ from pathlib import Path
 from app.services.orchestration.phases.planning_support import (
     _PlanningRetryState,
     _get_targeted_second_repair_reason,
+    _model_lane_limitation_for_invalid_planning_commands,
 )
 from app.services.orchestration.planning.planner import PlannerService
 from app.services.session.session_inspection_service import (
@@ -133,6 +134,14 @@ def test_phase10o_assertion_loss_after_repair_gets_preservation_second_pass():
 def test_phase10o_recovery_bucket_classifies_patch_strategy_failures():
     assert (
         _classify_test_scaffold_failure(
+            "Planning repair still produced invalid commands: "
+            "stale_replace_ops_steps=[2]; "
+            "model_lane_limitation=repeated_stale_exact_patch_after_capsule"
+        )
+        == "model_lane_repeated_stale_exact_patch"
+    )
+    assert (
+        _classify_test_scaffold_failure(
             "planning failed: post_repair_stale_replace_fallback; "
             "patch_strategy_fallback_required"
         )
@@ -154,6 +163,28 @@ def test_phase10o_recovery_bucket_classifies_patch_strategy_failures():
     assert (
         _classify_test_scaffold_failure("test_deletion_ops_steps=[4]")
         == "test_preservation_violation"
+    )
+
+
+def test_phase10u_repeated_stale_patch_records_model_lane_limitation():
+    marker = _model_lane_limitation_for_invalid_planning_commands(
+        {"stale_replace_ops_steps": [2]}
+    )
+
+    assert marker == {
+        "model_lane_limitation": "repeated_stale_exact_patch_after_capsule",
+        "failure_cause_bucket": "model_lane_repeated_stale_exact_patch",
+        "runtime_rewrite_added": False,
+        "recommended_action": (
+            "Treat as planner/model-lane limitation. Use better planning context "
+            "or scoped prompt guidance; do not add another runtime normalizer."
+        ),
+    }
+    assert (
+        _model_lane_limitation_for_invalid_planning_commands(
+            {"weak_verification_steps": [1]}
+        )
+        is None
     )
 
 

@@ -24,6 +24,9 @@ from enum import Enum
 from app.services.orchestration.operations.file_ops_contract import (
     render_supported_file_ops,
 )
+from app.services.orchestration.planning.prompt_contracts import (
+    render_operation_choice_contract,
+)
 from app.services.workspace.system_settings import get_effective_workspace_root
 
 # ---------------------------------------------------------------------------
@@ -288,12 +291,9 @@ Do not implement anything.
 - Project: {project_dir}
 
 **Execution Boundary:**
-1. Every command MUST run inside `{project_dir}`
-2. Use relative paths only in shell commands and `expected_files`
-3. Keep any planned file-read/write path relative; execution expands it under `{project_dir}`
-4. Do NOT use `..`, `~`, or absolute paths in planning output
-5. Do NOT create sibling project folders under `{workspace_root}`
-6. Assume the working directory is already `{project_dir}`
+1. Working directory is already `{project_dir}`; every command runs there.
+2. Use relative paths only; no `..`, `~`, absolute paths, or sibling project folders.
+3. Execution expands planned file paths under `{project_dir}`.
 
 **Requirements:**
 1. Create 3 or 4 sequential steps maximum
@@ -309,11 +309,12 @@ Do not implement anything.
 11. `rollback` must always be present and must be one shell string or null
 12. `expected_files` must always be present and must be a JSON array of relative path strings (or [])
 13. Optional `ops` may contain these operations with relative `path` values and required string fields: {supported_file_ops}
+14. {operation_choice_contract}
 
 **Planning Rules:**
 1. Short runnable shell only. `commands` must not be prose or pseudo-commands such as `"create files"` or `"implement component"`.
 2. Incremental: create dirs first, one file at a time, install deps in a separate step from code changes.
-3. Relative paths everywhere — no `..`, `~`, absolute paths, `cd ... && ...`, nested project folders, or `{project_dir}/` prefixes in `expected_files`.
+3. Relative paths everywhere; no `cd ... && ...`, nested project folders, or `{project_dir}/` prefixes in `expected_files`.
 4. No background processes, &, nohup, disown, dev servers, or long commands.
 5. Don't assume files exist; inspect before editing. Each command is a standalone shell command (no comma-joining).
 6. If prior artifacts are mentioned in context, extend them instead of recreating parallel implementations.
@@ -329,11 +330,7 @@ Do not implement anything.
 **Workflow Phases:**
 {workflow_guidance}
 
-**Invalid Output Examples:**
-- Markdown fences around JSON
-- Prose before or after the JSON array
-- Objects like {{"steps": [...]}} instead of a top-level array
-- Fields such as `payloads`, `text`, `finalAssistantVisibleText`, `notes`, `rationale`, or `status`
+Invalid: Objects like {{"steps": [...]}} instead of a top-level array.
 
 **Valid Minimal JSON Example:**
 [
@@ -341,24 +338,24 @@ Do not implement anything.
     "step_number": 1,
     "description": "Inspect the current workspace",
     "commands": ["rg --files . | sort"],
-    "verification": "python -c \\"import pathlib,sys; sys.exit(0 if pathlib.Path('.').exists() else 1)\\"",
+    "verification": "python -m pytest --version",
     "rollback": null,
     "expected_files": []
   }},
   {{
     "step_number": 2,
-    "description": "Create the smallest required implementation files",
+    "description": "Create required files",
     "ops": [
       {{"op": "write_file", "path": "README.md", "content": "# Project Notes\\n\\nInitial implementation notes.\\n"}}
     ],
     "commands": [],
-    "verification": "python -c \\"import pathlib,sys; sys.exit(0 if 'Project Notes' in pathlib.Path('README.md').read_text() else 1)\\"",
+    "verification": "python -c \\"import pathlib; assert pathlib.Path('README.md').exists()\\"",
     "rollback": "rm -f README.md",
     "expected_files": ["README.md"]
   }},
   {{
     "step_number": 3,
-    "description": "Run a one-shot verification",
+    "description": "Run verification",
     "commands": ["npm run build"],
     "verification": "npm run build",
     "rollback": null,
@@ -900,7 +897,7 @@ Examples:
         compact_task_description = " ".join((task_description or "").split())[:1600]
         compact_project_context = (
             project_context or "No additional context provided."
-        )[:2200]
+        )[:850]
         compact_project_structure_capsule = (
             project_structure_capsule
             or "No structural project index was available for this planning attempt."
@@ -933,6 +930,7 @@ Examples:
             "project_dir": proj_dir,
             "workflow_guidance": workflow_guidance,
             "supported_file_ops": render_supported_file_ops(),
+            "operation_choice_contract": render_operation_choice_contract(),
         }
 
         return cls.render("task_planning", **context)
