@@ -7,6 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.models import (
+    LogEntry,
     Project,
     Session as SessionModel,
     SessionTask,
@@ -14,12 +15,16 @@ from app.models import (
     TaskExecution,
     TaskStatus,
 )
+from app.config import settings
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.state.persistence import read_orchestration_events
 from app.services.orchestration.validation.workspace_guard import (
     verify_workspace_contract,
 )
-from app.services.session.session_runtime_service import queue_task_for_session
+from app.services.session.session_runtime_service import (
+    queue_task_for_session,
+    retry_session_with_stronger_planning_lane,
+)
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
@@ -132,6 +137,180 @@ def test_queue_task_for_session_emits_queued_event_and_keeps_task_pending(
     assert events[-1]["event_type"] == EventType.TASK_QUEUED
     assert events[-1]["details"]["session_instance_id"] == session.instance_id
     assert captured_delay_kwargs["queued_event_id"] == events[-1]["event_id"]
+
+
+def test_queue_task_for_session_forwards_planning_lane_override(
+    db_session, monkeypatch, tmp_path
+):
+    captured_delay_kwargs = {}
+
+    class _FakeDelayResult:
+        id = "celery-escalated-queue"
+
+    class _FakeWorkerTask:
+        @staticmethod
+        def delay(**kwargs):
+            captured_delay_kwargs.update(kwargs)
+            return _FakeDelayResult()
+
+    monkeypatch.setattr(
+        "app.tasks.worker.execute_orchestration_task",
+        _FakeWorkerTask,
+    )
+
+    project = Project(
+        name="Queue Escalation",
+        workspace_path=str(tmp_path / "workspace-root"),
+    )
+    session = SessionModel(
+        project_id=1,
+        name="Escalation Queue Session",
+        status="pending",
+        instance_id="session-escalation-queue",
+    )
+    task = Task(
+        project_id=1,
+        title="Escalated Task",
+        description="write a governed plan",
+        status=TaskStatus.PENDING,
+    )
+    db_session.add(project)
+    db_session.flush()
+    session.project_id = project.id
+    task.project_id = project.id
+    db_session.add_all([session, task])
+    db_session.commit()
+    db_session.refresh(session)
+    db_session.refresh(task)
+
+    metadata = {
+        "operator_action": "retry_stronger_lane",
+        "evidence_payload_summary": {"task_id": task.id, "bad_old_text_count": 1},
+    }
+    result = queue_task_for_session(
+        db=db_session,
+        session=session,
+        task_id=task.id,
+        planning_backend_override="direct_ollama",
+        planning_escalation_metadata=metadata,
+    )
+
+    assert result["celery_id"] == "celery-escalated-queue"
+    assert captured_delay_kwargs["planning_backend_override"] == "direct_ollama"
+    assert captured_delay_kwargs["planning_escalation_metadata"] == metadata
+
+    workspace_root = resolve_project_workspace_path(
+        project.workspace_path, project.name
+    )
+    events = read_orchestration_events(Path(workspace_root), session.id, task.id)
+    assert events[-1]["details"]["planning_backend_override"] == "direct_ollama"
+    assert events[-1]["details"]["planning_escalation"] == metadata
+
+
+def test_stronger_planning_retry_records_bounded_evidence_and_queues_override(
+    db_session, monkeypatch, tmp_path
+):
+    captured_delay_kwargs = {}
+
+    class _FakeDelayResult:
+        id = "celery-governed-escalation"
+
+    class _FakeWorkerTask:
+        @staticmethod
+        def delay(**kwargs):
+            captured_delay_kwargs.update(kwargs)
+            return _FakeDelayResult()
+
+    monkeypatch.setattr(settings, "AGENT_SECONDARY_BACKEND", "direct_ollama")
+    monkeypatch.setattr(
+        "app.tasks.worker.execute_orchestration_task",
+        _FakeWorkerTask,
+    )
+
+    project = Project(
+        name="Governed Escalation Gate",
+        workspace_path=str(tmp_path / "workspace-root"),
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    session = SessionModel(
+        project_id=project.id,
+        name="Stopped Model Lane Session",
+        status="stopped",
+        instance_id="session-governed-escalation",
+        model_lane_label="local_openclaw",
+        model_lane_metadata={
+            "capability_traits": {
+                "structured_output_reliability": "variable",
+                "configured_available": True,
+            }
+        },
+    )
+    task = Task(
+        project_id=project.id,
+        title="Recover stale planning",
+        description="Create a valid plan after stale exact-patch repair failed.",
+        status=TaskStatus.FAILED,
+        error_message=(
+            "Planning repair still produced invalid commands; "
+            "model_lane_limitation=repeated_stale_exact_patch_after_capsule"
+        ),
+    )
+    db_session.add_all([session, task])
+    db_session.commit()
+    db_session.refresh(session)
+    db_session.refresh(task)
+    db_session.add(
+        SessionTask(
+            session_id=session.id,
+            task_id=task.id,
+            status=TaskStatus.FAILED,
+            completed_at=datetime.now(timezone.utc),
+        )
+    )
+    db_session.add(
+        LogEntry(
+            session_id=session.id,
+            session_instance_id=session.instance_id,
+            task_id=task.id,
+            level="ERROR",
+            message="Planning stopped on model-lane limitation",
+            log_metadata=(
+                '{"model_lane_limitation":"repeated_stale_exact_patch_after_capsule",'
+                '"failure_cause_bucket":"model_lane_repeated_stale_exact_patch"}'
+            ),
+        )
+    )
+    db_session.commit()
+
+    result = retry_session_with_stronger_planning_lane(db_session, session)
+
+    assert result["celery_id"] == "celery-governed-escalation"
+    assert result["escalation_backend_id"] == "direct_ollama"
+    assert captured_delay_kwargs["planning_backend_override"] == "direct_ollama"
+    metadata = captured_delay_kwargs["planning_escalation_metadata"]
+    assert metadata["operator_action"] == "retry_stronger_lane"
+    assert metadata["original_lane"]["label"] == "local_openclaw"
+    assert metadata["escalation_lane"]["backend"] == "direct_ollama"
+    evidence = metadata["evidence_payload_summary"]
+    assert evidence["task_id"] == task.id
+    assert evidence["model_lane_limitation"] == (
+        "repeated_stale_exact_patch_after_capsule"
+    )
+    assert evidence["source_mutation_confirmed_absent"] is True
+
+    audit_log = (
+        db_session.query(LogEntry)
+        .filter(
+            LogEntry.session_id == session.id,
+            LogEntry.task_id == task.id,
+            LogEntry.message == "Operator triggered stronger planning lane retry",
+        )
+        .one()
+    )
+    assert EventType.LANE_ESCALATION_TRIGGERED in audit_log.log_metadata
 
 
 def test_queue_task_for_session_rejects_active_task_execution(db_session, tmp_path):

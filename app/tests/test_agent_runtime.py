@@ -59,12 +59,72 @@ def test_create_agent_runtime_uses_db_backend_override(db_session, monkeypatch):
 def test_direct_ollama_runtime_uses_operator_selected_model(db_session, monkeypatch):
     from app.services.agents.providers.ollama_adapter import OllamaRuntime
 
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "direct_ollama")
     monkeypatch.setattr(settings, "OLLAMA_AGENT_MODEL", "env-ollama-model")
     set_setting_value(db_session, AGENT_MODEL_FAMILY_KEY, "operator-ollama-model")
 
     runtime = OllamaRuntime(db_session, session_id=None)
 
     assert runtime._model == "operator-ollama-model"
+
+
+def test_direct_ollama_runtime_ignores_primary_model_when_used_as_secondary(
+    db_session, monkeypatch
+):
+    from app.services.agents.providers.ollama_adapter import OllamaRuntime
+
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "openai_responses_api")
+    monkeypatch.setattr(settings, "AGENT_MODEL", "gpt-5")
+    monkeypatch.setattr(settings, "OLLAMA_AGENT_MODEL", "qwen-local")
+    set_setting_value(db_session, AGENT_MODEL_FAMILY_KEY, "gpt-5")
+
+    runtime = OllamaRuntime(db_session, session_id=None)
+
+    assert runtime._model == "qwen-local"
+
+
+def test_direct_ollama_planning_timeout_override_is_planning_only(
+    db_session, monkeypatch
+):
+    from app.services.agents.providers.ollama_adapter import OllamaRuntime
+
+    monkeypatch.setattr(settings, "OLLAMA_PLANNING_TIMEOUT_SECONDS", 300)
+
+    runtime = OllamaRuntime(db_session, session_id=None)
+
+    assert runtime._effective_timeout(120, planning=True) == 300.0
+    assert runtime._effective_timeout(120, planning=False) == 120.0
+    assert runtime._effective_timeout(360, planning=True) == 360.0
+
+
+def test_direct_ollama_execute_task_detects_planning_diagnostic(
+    db_session, monkeypatch
+):
+    from app.services.agents.providers.ollama_adapter import OllamaRuntime
+
+    captured = {}
+
+    async def fake_chat(*, system, user, timeout=None, planning=False):
+        captured.update(
+            {"system": system, "user": user, "timeout": timeout, "planning": planning}
+        )
+        return "[]"
+
+    runtime = OllamaRuntime(db_session, session_id=None)
+    monkeypatch.setattr(runtime, "_chat", fake_chat)
+
+    import asyncio
+
+    asyncio.run(
+        runtime.execute_task(
+            "return a plan",
+            timeout_seconds=120,
+            diagnostic_label="MINIMAL_PLANNING",
+        )
+    )
+
+    assert captured["planning"] is True
+    assert "Output ONLY a valid JSON array" in captured["system"]
 
 
 def test_unsupported_capability_error_is_runtime_neutral():

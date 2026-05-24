@@ -919,6 +919,8 @@ def execute_orchestration_task(
             )
             if hasattr(planning_runtime_service, "task_execution_id"):
                 planning_runtime_service.task_execution_id = task_execution_id
+            if hasattr(planning_runtime_service, "__dict__"):
+                planning_runtime_service._disable_direct_planning = True
             planning_runtime_metadata = (
                 planning_runtime_service.get_backend_metadata()
                 if hasattr(planning_runtime_service, "get_backend_metadata")

@@ -141,7 +141,7 @@ def clamp_planning_timeout(timeout_seconds: int) -> int:
     """Bound planning time so dense tasks fail faster and more predictably."""
 
     max_timeout = PLANNING_TIMEOUT_MAX_SECONDS
-    if settings.RUNTIME_PROFILE in {"low_resource", "medium"}:
+    if settings.RUNTIME_PROFILE in {"low_resource", "compact_local", "medium"}:
         max_timeout = min(max_timeout, int(settings.PLANNING_SYNTHESIS_TIMEOUT_SECONDS))
     min_timeout = min(PLANNING_TIMEOUT_MIN_SECONDS, max_timeout)
     return max(

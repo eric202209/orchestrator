@@ -381,6 +381,21 @@ def test_low_resource_runtime_profile_caps_planning_timeout(monkeypatch):
     assert clamp_planning_timeout(10) == 90
 
 
+def test_compact_local_runtime_profile_caps_planning_timeout(monkeypatch):
+    from app.services.orchestration import policy as policy_module
+
+    monkeypatch.setattr(policy_module.settings, "RUNTIME_PROFILE", "compact_local")
+    monkeypatch.setattr(
+        policy_module.settings,
+        "PLANNING_SYNTHESIS_TIMEOUT_SECONDS",
+        90,
+    )
+
+    assert clamp_planning_timeout(300) == 90
+    assert clamp_planning_timeout(1800) == 90
+    assert clamp_planning_timeout(10) == 90
+
+
 def test_medium_runtime_profile_caps_planning_timeout(monkeypatch):
     from app.services.orchestration import policy as policy_module
 

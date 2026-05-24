@@ -140,6 +140,19 @@ def test_settings_applies_low_resource_runtime_profile_caps():
     assert settings.MAX_PLAN_STEPS == 3
 
 
+def test_settings_applies_compact_local_runtime_profile_caps():
+    from app.config import Settings
+
+    settings = Settings(_env_file=None, RUNTIME_PROFILE="compact_local")
+
+    assert settings.PLANNING_REPAIR_TIMEOUT_SECONDS == 45
+    assert settings.PLANNING_SYNTHESIS_TIMEOUT_SECONDS == 90
+    assert settings.REPLAN_SYNTHESIS_TIMEOUT_SECONDS == 30
+    assert settings.KNOWLEDGE_MAX_ITEMS == 1
+    assert settings.KNOWLEDGE_MAX_TOTAL_CHARS == 800
+    assert settings.MAX_PLAN_STEPS == 3
+
+
 def test_settings_rejects_unknown_runtime_profile():
     from pydantic import ValidationError
 

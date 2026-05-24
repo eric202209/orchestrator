@@ -224,15 +224,20 @@ class Settings(BaseSettings):
     KNOWLEDGE_MAX_ITEMS: int = 3
     KNOWLEDGE_MAX_TOTAL_CHARS: int = 2000
 
-    # Default local Ollama model. Operators can override this with OLLAMA_AGENT_MODEL
-    # or from the Settings page when the direct_ollama backend is selected.
-    OLLAMA_AGENT_MODEL: str = "qwen3:8b-hybrid"
+    # Local Ollama model. Set this per machine to a model actually pulled on
+    # the host Ollama server when direct_ollama is used.
+    OLLAMA_AGENT_MODEL: str = ""
     # Tokens passed as num_ctx to Ollama. Override per deployment when the model
     # and hardware can support a larger context.
     OLLAMA_NUM_CTX: int = 4096
+    # Optional planning-only request timeout for direct_ollama, in seconds.
+    # 0 means use the orchestration profile timeout. Set this in .env for
+    # slower local planning models without changing code between machines.
+    OLLAMA_PLANNING_TIMEOUT_SECONDS: int = 0
 
-    # Execution profile: "standard", "medium", or "low_resource".
+    # Execution profile: "standard", "medium", "low_resource", or "compact_local".
     # Set low_resource for Windows / 16GB RAM / RTX 4050 / Qwen3:8B deployments.
+    # Set compact_local for governed low-end local-lane validation.
     # Set medium for mid-tier machines (e.g. 24GB RAM, 6-core CPU, AMD Ryzen 5xxx).
     RUNTIME_PROFILE: str = "standard"
     MAX_PLAN_STEPS: int = 10
@@ -241,15 +246,16 @@ class Settings(BaseSettings):
     @classmethod
     def validate_runtime_profile(cls, value: str) -> str:
         profile = str(value or "standard").strip()
-        if profile not in {"standard", "medium", "low_resource"}:
+        if profile not in {"standard", "medium", "low_resource", "compact_local"}:
             raise ValueError(
-                "RUNTIME_PROFILE must be 'standard', 'medium', or 'low_resource'"
+                "RUNTIME_PROFILE must be 'standard', 'medium', 'low_resource', "
+                "or 'compact_local'"
             )
         return profile
 
     @model_validator(mode="after")
     def apply_runtime_profile(self) -> "Settings":
-        if self.RUNTIME_PROFILE == "low_resource":
+        if self.RUNTIME_PROFILE in {"low_resource", "compact_local"}:
             if self.PLANNING_REPAIR_TIMEOUT_SECONDS > 45:
                 self.PLANNING_REPAIR_TIMEOUT_SECONDS = 45
             if self.PLANNING_SYNTHESIS_TIMEOUT_SECONDS > 90:

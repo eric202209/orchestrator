@@ -331,6 +331,11 @@ class PlannerService:
     def _should_try_direct_no_thinking_planning(
         runtime_service: Any, prompt_chars: int
     ) -> bool:
+        if bool(getattr(runtime_service, "_disable_direct_planning", False)):
+            _logger.info(
+                "[PLANNING_DIRECT] skip: direct planning disabled for selected runtime"
+            )
+            return False
         if not settings.PLANNING_REPAIR_ENABLED:
             return False
         if not settings.PLANNING_REPAIR_BASE_URL.strip():
@@ -2357,7 +2362,8 @@ Return only a JSON array matching this shape. No markdown. No prose.
             model,
             direct_timeout,
         )
-        try:
+
+        async def _do_request() -> str:
             async with httpx.AsyncClient(timeout=direct_timeout) as client:
                 response = await client.post(
                     f"{base_url}/chat/completions",
@@ -2366,7 +2372,18 @@ Return only a JSON array matching this shape. No markdown. No prose.
                 )
             response.raise_for_status()
             body = response.json()
-            output = PlannerService._extract_chat_completion_content(body)
+            return PlannerService._extract_chat_completion_content(body)
+
+        try:
+            output = await asyncio.wait_for(
+                _do_request(), timeout=float(direct_timeout)
+            )
+        except asyncio.TimeoutError:
+            _logger.warning(
+                "[REPAIR_DIRECT] wall-clock timeout after %ds; falling back to runtime",
+                direct_timeout,
+            )
+            return None
         except Exception as exc:
             _logger.warning(
                 "[REPAIR_DIRECT] failed after %.1fs (%s: %s); falling back to runtime",

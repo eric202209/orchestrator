@@ -17,7 +17,10 @@ from app.services.agents.interfaces import (
     ContextWindowPolicy,
     RetryStrategy,
 )
-from app.services.workspace.system_settings import get_effective_agent_model_family
+from app.services.workspace.system_settings import (
+    AGENT_MODEL_FAMILY_KEY,
+    get_setting_value_runtime,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,20 +90,42 @@ class OllamaRuntime:
         self._base_url = (settings.OLLAMA_BASE_URL or "http://localhost:11434").rstrip(
             "/"
         )
+        persisted_model = get_setting_value_runtime(
+            AGENT_MODEL_FAMILY_KEY, None, db=self.db
+        )
+        if (
+            persisted_model
+            and str(settings.AGENT_BACKEND or "").strip() == "direct_ollama"
+        ):
+            selected_model = persisted_model
+        else:
+            selected_model = settings.OLLAMA_AGENT_MODEL
         self._model = (
-            get_effective_agent_model_family(settings.OLLAMA_AGENT_MODEL, db=self.db)
-            or self.backend_descriptor.default_model_family
+            selected_model or self.backend_descriptor.default_model_family
         ).strip()
         self._num_ctx = int(getattr(settings, "OLLAMA_NUM_CTX", 4096))
         self._timeout = int(settings.PLANNING_REPAIR_TIMEOUT_SECONDS or 120)
+        self._planning_timeout = max(
+            0, int(getattr(settings, "OLLAMA_PLANNING_TIMEOUT_SECONDS", 0) or 0)
+        )
 
     # ── core chat ───────────────────────────────────────────────────────────
+
+    def _effective_timeout(
+        self, timeout: Optional[int], *, planning: bool = False
+    ) -> float:
+        base_timeout = int(timeout or self._timeout)
+        if planning and self._planning_timeout > 0:
+            return float(max(base_timeout, self._planning_timeout))
+        return float(base_timeout)
 
     async def _chat(
         self,
         system: str,
         user: str,
         timeout: Optional[int] = None,
+        *,
+        planning: bool = False,
     ) -> str:
         url = f"{self._base_url}/v1/chat/completions"
         user_content = user + _no_think_suffix()
@@ -117,7 +142,7 @@ class OllamaRuntime:
                 "num_ctx": self._num_ctx,
             },
         }
-        effective_timeout = float(timeout or self._timeout)
+        effective_timeout = self._effective_timeout(timeout, planning=planning)
         try:
             async with httpx.AsyncClient(timeout=effective_timeout) as client:
                 resp = await client.post(url, json=payload)
@@ -164,10 +189,14 @@ class OllamaRuntime:
         diagnostic_metadata: Optional[dict[str, Any]] = None,
         **kwargs,
     ) -> dict[str, Any]:
+        planning = str(diagnostic_label or "").upper().endswith("PLANNING")
+        if isinstance(diagnostic_metadata, dict):
+            planning = planning or bool(diagnostic_metadata.get("planning_attempt"))
         output = await self._chat(
-            system=_STEP_SYSTEM,
+            system=_PLAN_SYSTEM if planning else _STEP_SYSTEM,
             user=prompt,
             timeout=timeout_seconds,
+            planning=planning,
         )
         return {"status": "completed", "output": output}
 
@@ -182,7 +211,12 @@ class OllamaRuntime:
         no_output_timeout_seconds: Optional[int] = None,
     ) -> dict[str, Any]:
         system = _PLAN_SYSTEM if session_prefix == "planning" else _GENERIC_SYSTEM
-        output = await self._chat(system=system, user=prompt, timeout=timeout_seconds)
+        output = await self._chat(
+            system=system,
+            user=prompt,
+            timeout=timeout_seconds,
+            planning=session_prefix == "planning",
+        )
         return {
             "status": "completed",
             "output": output,
@@ -207,7 +241,12 @@ class OllamaRuntime:
         system = _PLAN_SYSTEM if is_planning else _STEP_SYSTEM
         user = f"{project_context}\n\n{prompt}".strip() if project_context else prompt
 
-        output = await self._chat(system=system, user=user, timeout=timeout_seconds)
+        output = await self._chat(
+            system=system,
+            user=user,
+            timeout=timeout_seconds,
+            planning=is_planning,
+        )
         return {"status": "completed", "output": output}
 
     async def pause_session(self) -> None:

@@ -93,7 +93,9 @@ def test_model_lane_limitation_marker_not_produced_for_non_stale_issues():
     assert result is None
 
 
-def test_stronger_lane_available_returns_false_by_default():
+def test_stronger_lane_available_returns_false_when_unconfigured(monkeypatch):
+    monkeypatch.setattr(settings, "AGENT_SECONDARY_BACKEND", None)
+
     # Without AGENT_SECONDARY_BACKEND configured, should return False
     assert _stronger_lane_available() is False
 
@@ -117,6 +119,21 @@ def test_stronger_lane_summary_rejects_unknown_backend(monkeypatch):
     assert summary["configured"] is True
     assert summary["available"] is False
     assert summary["label"] == "unsupported"
+
+
+def test_governed_escalation_can_disable_direct_planning_shortcut():
+    class Runtime:
+        _disable_direct_planning = True
+
+        def get_backend_metadata(self):
+            return {"backend": "direct_ollama"}
+
+    assert (
+        PlannerService._should_try_direct_no_thinking_planning(
+            Runtime(), prompt_chars=100
+        )
+        is False
+    )
 
 
 # --- V4: No source mutation before safe stop ---
