@@ -245,6 +245,20 @@ def _completion_verification_python(project_dir: Path) -> str:
             ]
         )
 
+    # Also search from the process working directory. This covers the case
+    # where the project lives outside the orchestrator tree (e.g. tmp_path in
+    # tests, or a workspace directory mounted separately in Docker) but the
+    # orchestrator itself has a local venv adjacent to its working directory.
+    process_cwd = Path.cwd()
+    project_ancestors = {project_dir, *project_dir.parents}
+    if process_cwd not in project_ancestors:
+        candidates.extend(
+            [
+                process_cwd / "venv" / "bin" / "python",
+                process_cwd / ".venv" / "bin" / "python",
+            ]
+        )
+
     seen: set[Path] = set()
     for candidate in candidates:
         resolved = candidate.resolve()
@@ -301,6 +315,20 @@ def _execute_completion_verification(
                 "returncode": None,
                 "output": "Completion verification command was empty after parsing",
             }
+        env = dict(os.environ)
+        raw_pythonpath = env.get("PYTHONPATH", "")
+        if raw_pythonpath:
+            caller_cwd = Path.cwd()
+            absolute_entries = []
+            for entry in raw_pythonpath.split(os.pathsep):
+                p = Path(entry)
+                resolved = (caller_cwd / p).resolve() if not p.is_absolute() else p
+                if resolved.exists():
+                    absolute_entries.append(str(resolved))
+            if absolute_entries:
+                env["PYTHONPATH"] = os.pathsep.join(absolute_entries)
+            else:
+                env.pop("PYTHONPATH", None)
         completed = subprocess.run(
             argv,
             cwd=str(project_dir),
@@ -308,6 +336,7 @@ def _execute_completion_verification(
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
+            env=env,
         )
         output = "\n".join(
             part

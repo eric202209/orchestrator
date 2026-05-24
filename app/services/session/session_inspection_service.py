@@ -2056,6 +2056,9 @@ def get_session_recovery_context_payload(
     )
     latest_validation_evidence = _latest_validation_evidence(db, session_id=session_id)
 
+    repair_churn_stopped = bool(getattr(session, "repair_churn_stopped", False))
+    repair_churn_trigger = getattr(session, "repair_churn_trigger", None) or None
+
     return {
         "session_id": session_id,
         "session_name": session.name,
@@ -2078,6 +2081,8 @@ def get_session_recovery_context_payload(
         },
         "recommended_actions": actions,
         "validation_evidence": latest_validation_evidence,
+        "repair_churn_stopped": repair_churn_stopped,
+        "repair_churn_trigger": repair_churn_trigger,
         "source_note": source_note,
     }
 
@@ -2232,8 +2237,23 @@ def get_session_digest_payload(
     verification_insufficient = bool(
         validation_evidence.get("verification_insufficient")
     )
+    repair_churn_stopped = bool(recovery.get("repair_churn_stopped"))
+    repair_churn_trigger = recovery.get("repair_churn_trigger") or None
     if verification_insufficient:
         stop_reason_text = "Verification integrity is insufficient; review repair evidence before resuming."
+
+    churn_findings: list[dict] = []
+    if repair_churn_stopped:
+        churn_findings = [
+            {
+                "finding": "repair_churn",
+                "trigger": repair_churn_trigger,
+                "message": (
+                    f"Automatic repair stopped ({repair_churn_trigger}). "
+                    "Operator review required before resuming."
+                ),
+            }
+        ]
 
     payload = {
         "session_id": session_id,
@@ -2254,6 +2274,9 @@ def get_session_digest_payload(
         "command_quality": validation_evidence.get("command_quality"),
         "integrity_findings": integrity_findings[:20],
         "verification_insufficient": verification_insufficient,
+        "repair_churn_stopped": repair_churn_stopped,
+        "repair_churn_trigger": repair_churn_trigger,
+        "repair_churn_findings": churn_findings,
         "enriched": False,
         "enriched_text": None,
         "enrichment_error": None,

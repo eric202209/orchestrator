@@ -40,6 +40,7 @@ from app.services.orchestration.execution.runtime import (
 from app.services.orchestration.execution.step_support import (
     coerce_execution_step_result,
 )
+from app.services.orchestration.execution.repair_governor import check_repair_churn
 from app.services.orchestration.state.persistence import (
     append_orchestration_event,
     attach_failure_envelope,
@@ -322,6 +323,40 @@ def _attempt_completion_repair(
     next_attempt = orchestration_state.completion_repair_attempts + 1
     if next_attempt > ctx.completion_repair_budget:
         return {"status": "skipped", "reason": "repair_attempt_limit_reached"}
+
+    churn_stop, churn_trigger = check_repair_churn(
+        db,
+        session_id=ctx.session_id,
+        task_id=ctx.task_id,
+        completion_repair_attempts=orchestration_state.completion_repair_attempts,
+        model_lane_label=getattr(session, "model_lane_label", None),
+    )
+    if churn_stop:
+        session.repair_churn_stopped = True
+        session.repair_churn_trigger = churn_trigger
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+        emit_live(
+            "ERROR",
+            f"[ORCHESTRATION] Repair churn limit reached ({churn_trigger}); routing to operator review",
+            metadata={
+                "phase": "completion_repair",
+                "repair_churn_trigger": churn_trigger,
+                "completion_repair_attempts": orchestration_state.completion_repair_attempts,
+            },
+        )
+        emit_phase_event(
+            ctx.orchestration_state,
+            ctx.emit_live,
+            level="ERROR",
+            phase="completion_repair",
+            message="Repair churn limit reached — operator review required",
+            details={"repair_churn_trigger": churn_trigger},
+        )
+        return {"status": "failed", "reason": "repair_churn_limit"}
+
     if (
         orchestration_state.completion_repair_attempts > 0
         and _repeats_prior_completion_failure(

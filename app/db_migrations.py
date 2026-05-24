@@ -699,6 +699,24 @@ def _migration_015_session_model_lane(engine: Engine) -> None:
                 connection.execute(text(statement))
 
 
+def _migration_016_session_repair_churn(engine: Engine) -> None:
+    if "sessions" not in _table_names(engine):
+        return
+    statements: list[str] = []
+    if not _has_column(engine, "sessions", "repair_churn_stopped"):
+        statements.append(
+            "ALTER TABLE sessions ADD COLUMN repair_churn_stopped BOOLEAN DEFAULT FALSE"
+        )
+    if not _has_column(engine, "sessions", "repair_churn_trigger"):
+        statements.append(
+            "ALTER TABLE sessions ADD COLUMN repair_churn_trigger VARCHAR(64)"
+        )
+    if statements:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -774,6 +792,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="015_session_model_lane",
         description="Add model-lane reporting metadata to sessions",
         upgrade=_migration_015_session_model_lane,
+    ),
+    Migration(
+        version="016_session_repair_churn",
+        description="Add repair churn stop flag and trigger to sessions",
+        upgrade=_migration_016_session_repair_churn,
     ),
 )
 
