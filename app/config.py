@@ -236,9 +236,9 @@ class Settings(BaseSettings):
     OLLAMA_PLANNING_TIMEOUT_SECONDS: int = 0
 
     # Execution profile: "standard", "medium", "low_resource", or "compact_local".
-    # Set low_resource for Windows / 16GB RAM / RTX 4050 / Qwen3:8B deployments.
+    # Set low_resource for Windows / 16GB RAM / 6GB VRAM / Qwen3:8B deployments.
     # Set compact_local for governed low-end local-lane validation.
-    # Set medium for mid-tier machines (e.g. 24GB RAM, 6-core CPU, AMD Ryzen 5xxx).
+    # Set medium for mid-tier machines.
     RUNTIME_PROFILE: str = "standard"
     MAX_PLAN_STEPS: int = 10
 

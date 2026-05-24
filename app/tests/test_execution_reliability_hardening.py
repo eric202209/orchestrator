@@ -222,6 +222,7 @@ def test_stronger_planning_retry_records_bounded_evidence_and_queues_override(
             return _FakeDelayResult()
 
     monkeypatch.setattr(settings, "AGENT_SECONDARY_BACKEND", "direct_ollama")
+    monkeypatch.setattr(settings, "OLLAMA_AGENT_MODEL", "test-planning-model")
     monkeypatch.setattr(
         "app.tasks.worker.execute_orchestration_task",
         _FakeWorkerTask,
