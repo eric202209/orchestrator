@@ -143,6 +143,8 @@ class Session(Base):
     escalation_backend_id = Column(String(64), nullable=True)
     model_lane_label = Column(String(64), nullable=True)
     model_lane_metadata = Column(JSON, nullable=True)
+    repair_churn_stopped = Column(Boolean, nullable=True, default=False)
+    repair_churn_trigger = Column(String(64), nullable=True)
 
     __table_args__ = (
         Index(
