@@ -1935,7 +1935,14 @@ class ValidatorService:
                     continue
                 seen.add(relative_path)
                 missing.append(relative_path)
-        return missing
+        return [
+            path
+            for path in missing
+            if not any(
+                other != path and other.startswith(f"{path.rstrip('/')}/")
+                for other in missing
+            )
+        ]
 
     @staticmethod
     def _verification_plan_creates_new_source_assets(
@@ -2097,7 +2104,9 @@ class ValidatorService:
                 continue
             path = Path(path_text)
             if path.suffix.lower() not in SOURCE_EXTENSIONS and not (
-                path_text.endswith("/") or "/" in path_text
+                path_text.endswith("/")
+                or "/" in path_text
+                or path_text in {"app", "src", "spec", "test", "tests"}
             ):
                 continue
             if path_text not in seen:
@@ -2463,6 +2472,9 @@ class ValidatorService:
         profile = cls.infer_validation_profile(
             task_prompt, execution_profile, title=title, description=description
         )
+        workflow_stage_was_provided = workflow_stage is not None
+        if workflow_stage is None and execution_profile == "review_only":
+            workflow_stage = "review"
         if workflow_stage in READ_ONLY_WORKFLOW_STAGES:
             profile = "verification"
         warnings: List[str] = []
@@ -2823,7 +2835,10 @@ class ValidatorService:
             missing_workspace_files = cls._verification_plan_missing_workspace_files(
                 plan,
                 project_dir,
-                include_expected_files=workflow_stage not in READ_ONLY_WORKFLOW_STAGES,
+                include_expected_files=(
+                    workflow_stage not in READ_ONLY_WORKFLOW_STAGES
+                    or not workflow_stage_was_provided
+                ),
             )
             if missing_workspace_files:
                 repairable.append(
