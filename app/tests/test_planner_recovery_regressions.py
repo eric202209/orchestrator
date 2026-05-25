@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from app.models import (
+    InterventionRequest,
     LogEntry,
     Project,
     Session as SessionModel,
@@ -17,6 +18,7 @@ from app.services.orchestration.phases.planning_flow import (
     _finalize_planning_timeout_failure,
 )
 from app.services.orchestration.types import OrchestrationRunContext
+from app.schemas.knowledge import KnowledgeContext, KnowledgeItemRef, RecommendedAction
 from app.services.planning.planner_service import PlannerService
 from app.services.session.session_runtime_service import build_task_execution_prompt
 from app.services.workspace.project_mutation_lock import ProjectMutationLockError
@@ -81,6 +83,211 @@ class _UnexpectedRetrySelfTask:
 
     def retry(self, exc):
         raise AssertionError("planning lock timeout should not schedule Celery retry")
+
+
+def _knowledge_context(
+    *,
+    knowledge_type: str = "failure_memory",
+    confidence: float,
+    recommended_action: RecommendedAction,
+) -> KnowledgeContext:
+    return KnowledgeContext(
+        retrieved_items=[
+            KnowledgeItemRef(
+                id="knowledge-item-1",
+                title="Known failure memory",
+                knowledge_type=knowledge_type,
+                content="Known halt guidance.",
+                priority=10,
+                confidence=confidence,
+            )
+        ],
+        query="runtime failure",
+        trigger_phase="failure",
+        retrieval_reason="sqlite_fallback_qdrant_or_embedding_unavailable",
+        confidence=confidence,
+        matched_failure_memory=knowledge_type == "failure_memory",
+        recommended_action=recommended_action,
+    )
+
+
+def _install_fake_knowledge_context(monkeypatch, knowledge_ctx: KnowledgeContext):
+    usage_calls = []
+
+    class _FakeKnowledgeService:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def retrieve(self, **kwargs):
+            return knowledge_ctx
+
+    monkeypatch.setattr(
+        "app.services.knowledge.knowledge_service.KnowledgeService",
+        _FakeKnowledgeService,
+    )
+    monkeypatch.setattr(
+        "app.services.knowledge.usage_log_service.log_usage",
+        lambda **kwargs: usage_calls.append(kwargs),
+    )
+    return usage_calls
+
+
+def _make_knowledge_halt_fixture(db_session):
+    project = Project(name="Knowledge Halt Predicate Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    session = SessionModel(
+        project_id=project.id,
+        name="Knowledge Halt Predicate Session",
+        status="running",
+        execution_mode="automatic",
+        is_active=True,
+    )
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+
+    task = Task(
+        project_id=project.id,
+        title="Retryable task",
+        description="Exercise knowledge halt predicate",
+        status=TaskStatus.RUNNING,
+        execution_profile="full_lifecycle",
+        plan_position=1,
+        workspace_status="isolated",
+        task_subfolder="task-retryable-task",
+    )
+    db_session.add(task)
+    db_session.commit()
+    db_session.refresh(task)
+
+    ctx = type(
+        "KnowledgeHaltCtx",
+        (),
+        {
+            "db": db_session,
+            "project": project,
+            "task": task,
+            "session_task_link": None,
+            "orchestration_state": type("State", (), {"current_phase": "execution"})(),
+        },
+    )()
+    return project, session, task, ctx
+
+
+def test_knowledge_context_low_confidence_failure_memory_cannot_halt():
+    ctx = _knowledge_context(
+        confidence=0.3,
+        recommended_action=RecommendedAction.stop_retry,
+    )
+
+    assert failure_flow._knowledge_context_can_halt(ctx) is False
+
+
+def test_low_confidence_failure_memory_does_not_halt_after_retries(
+    db_session, monkeypatch
+):
+    _project, session, task, ctx = _make_knowledge_halt_fixture(db_session)
+    usage_calls = _install_fake_knowledge_context(
+        monkeypatch,
+        _knowledge_context(
+            confidence=0.3,
+            recommended_action=RecommendedAction.stop_retry,
+        ),
+    )
+
+    halted = failure_flow._apply_knowledge_halt(
+        ctx=ctx,
+        exc=RuntimeError("generic transient backend failure"),
+        retry_count=3,
+        session_id=session.id,
+        task_id=task.id,
+        logger=logging.getLogger(__name__),
+    )
+
+    db_session.refresh(task)
+    assert halted is False
+    assert task.status == TaskStatus.RUNNING
+    assert usage_calls and usage_calls[0]["used_in_prompt"] is False
+    assert db_session.query(InterventionRequest).count() == 0
+
+
+def test_knowledge_context_high_confidence_stop_retry_failure_memory_can_halt():
+    ctx = _knowledge_context(
+        confidence=1.0,
+        recommended_action=RecommendedAction.stop_retry,
+    )
+
+    assert failure_flow._knowledge_context_can_halt(ctx) is True
+
+
+def test_high_confidence_stop_retry_failure_memory_halts_after_retries(
+    db_session, monkeypatch
+):
+    _project, session, task, ctx = _make_knowledge_halt_fixture(db_session)
+    usage_calls = _install_fake_knowledge_context(
+        monkeypatch,
+        _knowledge_context(
+            confidence=1.0,
+            recommended_action=RecommendedAction.stop_retry,
+        ),
+    )
+
+    halted = failure_flow._apply_knowledge_halt(
+        ctx=ctx,
+        exc=RuntimeError("known exact backend failure"),
+        retry_count=3,
+        session_id=session.id,
+        task_id=task.id,
+        logger=logging.getLogger(__name__),
+    )
+
+    db_session.refresh(task)
+    intervention = db_session.query(InterventionRequest).one_or_none()
+    assert halted is True
+    assert task.status == TaskStatus.FAILED
+    assert intervention is not None
+    assert "matched known failure memory" in intervention.prompt
+    assert usage_calls and usage_calls[0]["used_in_prompt"] is False
+
+
+def test_knowledge_context_failure_memory_without_stop_retry_cannot_halt():
+    ctx = _knowledge_context(
+        confidence=1.0,
+        recommended_action=RecommendedAction.review_failure,
+    )
+
+    assert failure_flow._knowledge_context_can_halt(ctx) is False
+
+
+def test_failure_memory_without_stop_retry_does_not_halt_after_retries(
+    db_session, monkeypatch
+):
+    _project, session, task, ctx = _make_knowledge_halt_fixture(db_session)
+    usage_calls = _install_fake_knowledge_context(
+        monkeypatch,
+        _knowledge_context(
+            confidence=1.0,
+            recommended_action=RecommendedAction.review_failure,
+        ),
+    )
+
+    halted = failure_flow._apply_knowledge_halt(
+        ctx=ctx,
+        exc=RuntimeError("known failure that should be reviewed"),
+        retry_count=3,
+        session_id=session.id,
+        task_id=task.id,
+        logger=logging.getLogger(__name__),
+    )
+
+    db_session.refresh(task)
+    assert halted is False
+    assert task.status == TaskStatus.RUNNING
+    assert usage_calls and usage_calls[0]["used_in_prompt"] is False
+    assert db_session.query(InterventionRequest).count() == 0
 
 
 def test_planner_marks_architecture_inspection_as_review_only():

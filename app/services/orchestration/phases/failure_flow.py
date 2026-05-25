@@ -28,6 +28,7 @@ from app.services.workspace.project_mutation_lock import ProjectMutationLockErro
 from app.services.prompt_templates import OrchestrationStatus
 
 DIRTY_RETRY_CHECKPOINT_NAME = "autosave_error"
+_KNOWLEDGE_HALT_MIN_CONFIDENCE = 0.95
 
 
 def _task_execution_for_context(
@@ -158,6 +159,28 @@ def _prepare_retry_workspace(
         retry_kwargs["resume_checkpoint_name"] = DIRTY_RETRY_CHECKPOINT_NAME
         retry_kwargs["queued_event_id"] = None
     return False, retry_kwargs
+
+
+def _knowledge_context_can_halt(knowledge_ctx: Any) -> bool:
+    """Return True only for high-confidence failure memory halt signals."""
+
+    retrieved_items = list(getattr(knowledge_ctx, "retrieved_items", []) or [])
+    if not retrieved_items:
+        return False
+
+    top_item = retrieved_items[0]
+    if str(getattr(top_item, "knowledge_type", "")) != "failure_memory":
+        return False
+
+    recommended_action = getattr(knowledge_ctx, "recommended_action", "")
+    if str(getattr(recommended_action, "value", recommended_action)) != "stop_retry":
+        return False
+
+    try:
+        confidence = float(getattr(top_item, "confidence", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    return confidence >= _KNOWLEDGE_HALT_MIN_CONFIDENCE
 
 
 def handle_task_failure(
@@ -568,7 +591,7 @@ def _apply_knowledge_halt(
             db=db,
         )
 
-        if knowledge_ctx.matched_failure_memory and retry_count >= 2:
+        if _knowledge_context_can_halt(knowledge_ctx) and retry_count >= 2:
             top_title = (
                 knowledge_ctx.retrieved_items[0].title
                 if knowledge_ctx.retrieved_items
