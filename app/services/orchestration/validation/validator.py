@@ -1222,6 +1222,109 @@ class ValidatorService:
                         break
         return sorted(set(bad_paths))
 
+    @classmethod
+    def _plan_writes_import_time_python_parse_args(
+        cls,
+        plan: List[Dict[str, Any]],
+        project_dir: Optional[Path],
+    ) -> List[str]:
+        bad_paths: List[str] = []
+        root = project_dir.resolve() if project_dir is not None else None
+        for step in plan:
+            for operation in step.get("ops", []) or []:
+                if not isinstance(operation, dict):
+                    continue
+                op_name = str(operation.get("op") or "")
+                if op_name not in {"write_file", "append_file"}:
+                    continue
+                path_text = str(operation.get("path") or "").strip().lstrip("./")
+                if Path(path_text).suffix.lower() != ".py":
+                    continue
+                content = str(operation.get("content") or "")
+                if not content.strip():
+                    continue
+                scan_text = content
+                if op_name == "append_file" and project_dir is not None:
+                    existing_path = (project_dir / path_text).resolve()
+                    try:
+                        if root is not None and existing_path.is_relative_to(root):
+                            try:
+                                existing_text = existing_path.read_text(
+                                    encoding="utf-8"
+                                )
+                            except UnicodeDecodeError:
+                                existing_text = existing_path.read_text(
+                                    encoding="utf-8", errors="ignore"
+                                )
+                            except OSError:
+                                existing_text = ""
+                            if existing_text:
+                                scan_text = f"{existing_text.rstrip()}\n{content}"
+                    except ValueError:
+                        pass
+                try:
+                    tree = ast.parse(scan_text)
+                except SyntaxError:
+                    continue
+                if cls._python_module_has_import_time_parse_args(tree):
+                    bad_paths.append(path_text or "(missing path)")
+        return sorted(set(bad_paths))
+
+    @classmethod
+    def _python_module_has_import_time_parse_args(cls, tree: ast.AST) -> bool:
+        for node in getattr(tree, "body", []):
+            if cls._is_main_guard(node):
+                continue
+            for child in ast.walk(node):
+                if child is node and isinstance(
+                    child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                ):
+                    break
+                if isinstance(
+                    child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                ):
+                    continue
+                if cls._is_parse_args_call(child):
+                    return True
+        return False
+
+    @staticmethod
+    def _is_parse_args_call(node: ast.AST) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        return isinstance(func, ast.Attribute) and func.attr == "parse_args"
+
+    @classmethod
+    def _is_main_guard(cls, node: ast.AST) -> bool:
+        if not isinstance(node, ast.If):
+            return False
+        return cls._is_main_guard_compare(node.test)
+
+    @classmethod
+    def _is_main_guard_compare(cls, node: ast.AST) -> bool:
+        if not isinstance(node, ast.Compare):
+            return False
+        if len(node.ops) != 1 or not isinstance(node.ops[0], ast.Eq):
+            return False
+        if len(node.comparators) != 1:
+            return False
+        return (
+            cls._is_dunder_name_name(node.left)
+            and cls._is_main_string(node.comparators[0])
+        ) or (
+            cls._is_main_string(node.left)
+            and cls._is_dunder_name_name(node.comparators[0])
+        )
+
+    @staticmethod
+    def _is_dunder_name_name(node: ast.AST) -> bool:
+        return isinstance(node, ast.Name) and node.id == "__name__"
+
+    @staticmethod
+    def _is_main_string(node: ast.AST) -> bool:
+        return isinstance(node, ast.Constant) and node.value == "__main__"
+
     @staticmethod
     def _python_module_defined_names(tree: ast.AST) -> set[str]:
         names = set(dir(builtins))
@@ -2996,6 +3099,17 @@ class ValidatorService:
                 )
                 details["undefined_python_decorator_materializations"] = (
                     undefined_python_decorator_files[:20]
+                )
+            import_time_parse_args_files = (
+                cls._plan_writes_import_time_python_parse_args(plan, project_dir)
+            )
+            if import_time_parse_args_files:
+                repairable.append(
+                    "Plan writes Python CLI argument parsing that runs at import time "
+                    f"(files: {import_time_parse_args_files[:5]})"
+                )
+                details["import_time_parse_args_materializations"] = (
+                    import_time_parse_args_files[:20]
                 )
         elif profile == "verification":
             mutated_source_assets = cls._verification_plan_mutates_app_source_assets(

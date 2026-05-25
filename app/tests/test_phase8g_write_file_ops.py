@@ -270,6 +270,84 @@ def test_validate_plan_rejects_undefined_python_decorator_without_project_dir():
     ]
 
 
+def test_validate_plan_rejects_python_parse_args_at_import_time(tmp_path):
+    src_dir = tmp_path / "src" / "small_cli"
+    src_dir.mkdir(parents=True)
+    (src_dir / "cli.py").write_text(
+        "import argparse\n\n"
+        "def build_parser():\n"
+        "    return argparse.ArgumentParser()\n",
+        encoding="utf-8",
+    )
+
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Append uppercase CLI parsing",
+                "commands": ['python -c "import src.small_cli.cli"'],
+                "verification": 'python -c "import src.small_cli.cli"',
+                "expected_files": ["src/small_cli/cli.py"],
+                "ops": [
+                    {
+                        "op": "append_file",
+                        "path": "src/small_cli/cli.py",
+                        "content": (
+                            "\nparser = argparse.ArgumentParser()\n"
+                            "parser.add_argument('--uppercase', action='store_true')\n"
+                            "args = parser.parse_args()\n"
+                            "if args.uppercase:\n"
+                            "    print('UPPERCASE MODE')\n"
+                        ),
+                    }
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Implement --uppercase for the small_cli CLI",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.accepted is False
+    assert verdict.details["import_time_parse_args_materializations"] == [
+        "src/small_cli/cli.py"
+    ]
+
+
+def test_validate_plan_allows_parse_args_inside_main_function_without_project_dir():
+    files = ValidatorService._plan_writes_import_time_python_parse_args(
+        [
+            {
+                "step_number": 1,
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "src/small_cli/cli.py",
+                        "content": (
+                            "import argparse\n\n"
+                            "def build_parser():\n"
+                            "    parser = argparse.ArgumentParser()\n"
+                            "    parser.add_argument('message')\n"
+                            "    return parser\n\n"
+                            "def main(argv=None):\n"
+                            "    parser = build_parser()\n"
+                            "    args = parser.parse_args(argv)\n"
+                            "    print(args.message)\n"
+                            "    return 0\n\n"
+                            "if __name__ == '__main__':\n"
+                            "    raise SystemExit(main())\n"
+                        ),
+                    }
+                ],
+            }
+        ],
+        project_dir=None,
+    )
+
+    assert files == []
+
+
 def test_verification_plan_allows_expected_file_created_by_write_op(tmp_path):
     (tmp_path / "index.html").write_text(
         '<link rel="stylesheet" href="css/style.css">', encoding="utf-8"
