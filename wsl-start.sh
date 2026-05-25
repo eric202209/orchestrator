@@ -9,23 +9,26 @@
 #   --skip-ollama     skip Ollama check (if already running)
 #   --ingest-knowledge ingest knowledge/ into the active Docker SQLite/Qdrant runtime
 #
-# This entrypoint also supports the compact Windows laptop Ollama flow. If
-# .env has AGENT_BACKEND=direct_ollama, it dispatches to
-# scripts/wsl-ollama-start.sh. Pass --llama to force the original llama.cpp
-# path on a machine that temporarily has direct_ollama in .env.
+# This entrypoint defaults to the original Windows llama.cpp flow. Pass
+# --ollama on the compact Windows laptop to run the Docker/Ollama flow through
+# scripts/wsl-ollama-start.sh.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DISPATCH_ORCHESTRATOR_DIR="${ORCHESTRATOR_DIR:-"$SCRIPT_DIR"}"
 
-force_llama=false
+use_ollama=false
 show_help=false
 dispatch_args=()
 for arg in "$@"; do
     case "$arg" in
+        --ollama)
+            use_ollama=true
+            ;;
         --llama|--llama-cpp)
-            force_llama=true
+            ;;
+        --skip-ollama)
+            dispatch_args+=("$arg")
             ;;
         -h|--help)
             show_help=true
@@ -39,11 +42,12 @@ done
 
 if [ "$show_help" = true ]; then
     cat <<'EOF'
-Usage: ./wsl-start.sh [--llama] [options]
+Usage: ./wsl-start.sh [--ollama] [options]
 
 Modes:
-  default             auto-select Ollama laptop mode when AGENT_BACKEND=direct_ollama
-  --llama             force the original Windows llama.cpp mode
+  default             original Windows llama.cpp mode
+  --ollama            compact Windows laptop Ollama mode
+  --llama             accepted for compatibility; same as default
 
 Common options:
   --check             validate setup without starting services
@@ -60,19 +64,7 @@ EOF
     exit 0
 fi
 
-env_file_value_for_dispatch() {
-    local key="$1"
-    local env_file="$DISPATCH_ORCHESTRATOR_DIR/.env"
-    [ -f "$env_file" ] || return 0
-    grep -E "^[[:space:]]*${key}=" "$env_file" 2>/dev/null |
-        tail -1 |
-        cut -d= -f2- |
-        tr -d '\r' |
-        sed -e 's/^["'\'']//' -e 's/["'\'']$//'
-}
-
-if [ "$force_llama" = false ] &&
-    [ "$(env_file_value_for_dispatch AGENT_BACKEND)" = "direct_ollama" ]; then
+if [ "$use_ollama" = true ]; then
     exec "$SCRIPT_DIR/scripts/wsl-ollama-start.sh" "${dispatch_args[@]}"
 fi
 set -- "${dispatch_args[@]}"
