@@ -24,6 +24,7 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/1
       - QDRANT_URL=http://qdrant:6333
       - DATABASE_URL=sqlite:////app/orchestrator.db
+      - WORKSPACE_ROOT=/app/projects
       - RUNTIME_PROFILE=${RUNTIME_PROFILE:-medium}
       - AGENT_SECONDARY_BACKEND=${AGENT_SECONDARY_BACKEND:-}
       - OLLAMA_AGENT_MODEL=${OLLAMA_AGENT_MODEL:-}
@@ -39,7 +40,7 @@ services:
       - ./checkpoints:/app/checkpoints
       - ./knowledge:/app/knowledge
       - type: bind
-        source: ${WORKSPACE_ROOT:-${WINDOWS_PROJECTS_DIR:?Set WORKSPACE_ROOT to a WSL2 ext4 path, for example /home/yourname/projects}}
+        source: ${WORKSPACE_ROOT:?Set WORKSPACE_ROOT to a WSL2 ext4 path, for example /home/yourname/projects}
         target: /app/projects
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -55,6 +56,7 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/1
       - QDRANT_URL=http://qdrant:6333
       - DATABASE_URL=sqlite:////app/orchestrator.db
+      - WORKSPACE_ROOT=/app/projects
       - RUNTIME_PROFILE=${RUNTIME_PROFILE:-medium}
       - AGENT_SECONDARY_BACKEND=${AGENT_SECONDARY_BACKEND:-}
       - OLLAMA_AGENT_MODEL=${OLLAMA_AGENT_MODEL:-}
@@ -70,7 +72,7 @@ services:
       - ./checkpoints:/app/checkpoints
       - ./knowledge:/app/knowledge
       - type: bind
-        source: ${WORKSPACE_ROOT:-${WINDOWS_PROJECTS_DIR:?Set WORKSPACE_ROOT to a WSL2 ext4 path, for example /home/yourname/projects}}
+        source: ${WORKSPACE_ROOT:?Set WORKSPACE_ROOT to a WSL2 ext4 path, for example /home/yourname/projects}
         target: /app/projects
     extra_hosts:
       - "host.docker.internal:host-gateway"

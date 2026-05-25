@@ -8,8 +8,74 @@
 #   --backend-only    same as --no-frontend
 #   --skip-ollama     skip Ollama check (if already running)
 #   --ingest-knowledge ingest knowledge/ into the active Docker SQLite/Qdrant runtime
+#
+# This entrypoint also supports the compact Windows laptop Ollama flow. If
+# .env has AGENT_BACKEND=direct_ollama, it dispatches to
+# scripts/wsl-ollama-start.sh. Pass --llama to force the original llama.cpp
+# path on a machine that temporarily has direct_ollama in .env.
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DISPATCH_ORCHESTRATOR_DIR="${ORCHESTRATOR_DIR:-"$SCRIPT_DIR"}"
+
+force_llama=false
+show_help=false
+dispatch_args=()
+for arg in "$@"; do
+    case "$arg" in
+        --llama|--llama-cpp)
+            force_llama=true
+            ;;
+        -h|--help)
+            show_help=true
+            dispatch_args+=("$arg")
+            ;;
+        *)
+            dispatch_args+=("$arg")
+            ;;
+    esac
+done
+
+if [ "$show_help" = true ]; then
+    cat <<'EOF'
+Usage: ./wsl-start.sh [--llama] [options]
+
+Modes:
+  default             auto-select Ollama laptop mode when AGENT_BACKEND=direct_ollama
+  --llama             force the original Windows llama.cpp mode
+
+Common options:
+  --check             validate setup without starting services
+  --no-frontend       skip frontend dev server
+  --backend-only      same as --no-frontend
+  --ingest-knowledge  ingest knowledge/ into the active Docker runtime
+
+Laptop Ollama options:
+  --build             rebuild Docker images before starting
+  --force-recreate    recreate Docker containers
+  --start-ollama      try to start Windows-host Ollama through PowerShell
+  --skip-ollama       skip host Ollama reachability check
+EOF
+    exit 0
+fi
+
+env_file_value_for_dispatch() {
+    local key="$1"
+    local env_file="$DISPATCH_ORCHESTRATOR_DIR/.env"
+    [ -f "$env_file" ] || return 0
+    grep -E "^[[:space:]]*${key}=" "$env_file" 2>/dev/null |
+        tail -1 |
+        cut -d= -f2- |
+        tr -d '\r' |
+        sed -e 's/^["'\'']//' -e 's/["'\'']$//'
+}
+
+if [ "$force_llama" = false ] &&
+    [ "$(env_file_value_for_dispatch AGENT_BACKEND)" = "direct_ollama" ]; then
+    exec "$SCRIPT_DIR/scripts/wsl-ollama-start.sh" "${dispatch_args[@]}"
+fi
+set -- "${dispatch_args[@]}"
 
 CYAN='\033[0;36m'
 GREEN='\033[0;32m'
@@ -168,28 +234,22 @@ env_value() {
     grep -E "^${key}=" "$env_file" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\r' || true
 }
 
-projects_dir_value() {
-    local value
-    value=$(env_value WORKSPACE_ROOT)
-    if [ -n "$value" ]; then
-        printf '%s' "$value"
-        return 0
-    fi
-    env_value WINDOWS_PROJECTS_DIR
+workspace_root_value() {
+    env_value WORKSPACE_ROOT
 }
 
-validate_projects_dir() {
-    local projects_dir="$1"
-    if [ -z "$projects_dir" ]; then
+validate_workspace_root() {
+    local workspace_root="$1"
+    if [ -z "$workspace_root" ]; then
         fail "WORKSPACE_ROOT is unset in $ORCHESTRATOR_DIR/.env. Set it to a WSL2 ext4 path, for example /home/yourname/projects."
     fi
-    if [[ "$projects_dir" == /mnt/* || "$projects_dir" == *:* || "$projects_dir" == *\\* ]]; then
-        fail "WORKSPACE_ROOT must be a WSL2 ext4 path, not '$projects_dir'"
+    if [[ "$workspace_root" == /mnt/* || "$workspace_root" == *:* || "$workspace_root" == *\\* ]]; then
+        fail "WORKSPACE_ROOT must be a WSL2 ext4 path, not '$workspace_root'"
     fi
-    if [[ "$projects_dir" != /* ]]; then
-        fail "WORKSPACE_ROOT must be absolute: $projects_dir"
+    if [[ "$workspace_root" != /* ]]; then
+        fail "WORKSPACE_ROOT must be absolute: $workspace_root"
     fi
-    if [[ "$projects_dir" == /root || "$projects_dir" == /root/* ]]; then
+    if [[ "$workspace_root" == /root || "$workspace_root" == /root/* ]]; then
         fail "WORKSPACE_ROOT must not point under /root. Use your WSL user path, for example /home/yourname/projects."
     fi
 }
@@ -324,32 +384,32 @@ run_preflight_check() {
         check_env_equals EMBEDDING_PROVIDER ollama
         check_env_equals RUNTIME_PROFILE "$EXPECTED_RUNTIME_PROFILE"
 
-        local projects_dir
-        projects_dir=$(projects_dir_value)
-        if [ -z "$projects_dir" ]; then
+        local workspace_root
+        workspace_root=$(workspace_root_value)
+        if [ -z "$workspace_root" ]; then
             check_fail "WORKSPACE_ROOT is unset"
-        elif [[ "$projects_dir" == /mnt/* || "$projects_dir" == *:* || "$projects_dir" == *\\* ]]; then
-            check_fail "WORKSPACE_ROOT must be a WSL2 ext4 path, not '$projects_dir'"
-        elif [[ "$projects_dir" == /* ]]; then
-            check_ok "WORKSPACE_ROOT=$projects_dir"
-            if [ -d "$projects_dir" ]; then
+        elif [[ "$workspace_root" == /mnt/* || "$workspace_root" == *:* || "$workspace_root" == *\\* ]]; then
+            check_fail "WORKSPACE_ROOT must be a WSL2 ext4 path, not '$workspace_root'"
+        elif [[ "$workspace_root" == /* ]]; then
+            check_ok "WORKSPACE_ROOT=$workspace_root"
+            if [ -d "$workspace_root" ]; then
                 check_ok "WORKSPACE_ROOT exists"
             else
                 check_warn "WORKSPACE_ROOT does not exist yet; startup will create it"
             fi
         else
-            check_fail "WORKSPACE_ROOT must be absolute: $projects_dir"
+            check_fail "WORKSPACE_ROOT must be absolute: $workspace_root"
         fi
     fi
 
     step "Docker compose"
     if command_exists docker && [ -f "$ORCHESTRATOR_DIR/.env" ]; then
-        local projects_dir
-        projects_dir=$(projects_dir_value)
-        if [ -n "$projects_dir" ]; then
+        local workspace_root
+        workspace_root=$(workspace_root_value)
+        if [ -n "$workspace_root" ]; then
             (
                 cd "$ORCHESTRATOR_DIR"
-                WORKSPACE_ROOT="$projects_dir" docker compose -f "$COMPOSE_FILE" config --quiet
+                WORKSPACE_ROOT="$workspace_root" docker compose -f "$COMPOSE_FILE" config --quiet
             ) >/dev/null 2>&1 && check_ok "docker compose config valid" || check_fail "docker compose config failed"
         fi
     fi
@@ -458,16 +518,12 @@ step "Starting Docker backend"
 
 [ -f "$ORCHESTRATOR_DIR/.env" ] || fail ".env not found at $ORCHESTRATOR_DIR/.env"
 
-PROJECTS_DIR=$(env_file_value WORKSPACE_ROOT)
-if [ -z "$PROJECTS_DIR" ]; then
-    PROJECTS_DIR=$(env_file_value WINDOWS_PROJECTS_DIR)
-fi
-validate_projects_dir "$PROJECTS_DIR"
-mkdir -p "$PROJECTS_DIR"
+WORKSPACE_ROOT_VALUE=$(env_file_value WORKSPACE_ROOT)
+validate_workspace_root "$WORKSPACE_ROOT_VALUE"
+mkdir -p "$WORKSPACE_ROOT_VALUE"
 
 cd "$ORCHESTRATOR_DIR"
-export WORKSPACE_ROOT="$PROJECTS_DIR"
-export WINDOWS_PROJECTS_DIR="$PROJECTS_DIR"
+export WORKSPACE_ROOT="$WORKSPACE_ROOT_VALUE"
 docker compose -f "$COMPOSE_FILE" up -d 2>&1 | tail -5
 
 if wait_port $BACKEND_PORT "orchestrator backend" 60; then

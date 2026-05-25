@@ -18,7 +18,6 @@
 #   EXPECT_OLLAMA_ABSENT=true               or EXPECT_OLLAMA_ABSENT from .env
 #   LLAMA_CTX=4096                          or LLAMA_CTX from .env
 #   VRAM_LIMIT_MB=7500                      or VRAM_LIMIT_MB from .env
-#   PROJECTS_DIR=<wsl-path>   mirrors WINDOWS_PROJECTS_DIR from .env (e.g. /home/user/projects)
 #   ORCHESTRATOR_DIR=<path>   defaults to $HOME/orchestrator
 
 set -euo pipefail
@@ -69,7 +68,7 @@ env_file_value() {
     fi
 }
 
-PROJECTS_DIR="${PROJECTS_DIR:-$(env_file_value WINDOWS_PROJECTS_DIR "")}"
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$(env_file_value WORKSPACE_ROOT "")}"
 SMOKE_LABEL="${SMOKE_LABEL:-Phase 10G AMD LlamaCpp}"
 SMOKE_STRING="${SMOKE_LABEL}: Ready"
 PROJECT_PREFIX="${PROJECT_PREFIX:-phase-10g-amd-llamacpp-smoke}"
@@ -429,10 +428,10 @@ done
 # ─── WSL artifact verification ──────────────────────────────────────────────────
 step "WSL artifact verification"
 ARTIFACT_PASS=true
-if [ -n "$PROJECTS_DIR" ] && [ -n "$WORKSPACE_PATH" ]; then
-    # Map container path (/app/projects/foo) → WSL path ($PROJECTS_DIR/foo)
+if [ -n "$WORKSPACE_ROOT" ] && [ -n "$WORKSPACE_PATH" ]; then
+    # Map container path (/app/projects/foo) → WSL path ($WORKSPACE_ROOT/foo)
     WORKSPACE_LEAF="${WORKSPACE_PATH##*/app/projects/}"
-    WSL_WORKSPACE="${PROJECTS_DIR}/${WORKSPACE_LEAF}"
+    WSL_WORKSPACE="${WORKSPACE_ROOT}/${WORKSPACE_LEAF}"
     info "Checking: ${WSL_WORKSPACE}"
     for artifact in "README.md" "scripts/smoke_status.py" "tests/test_smoke_status.py"; do
         if [ -f "${WSL_WORKSPACE}/${artifact}" ]; then
@@ -472,8 +471,8 @@ if [ -n "$PROJECTS_DIR" ] && [ -n "$WORKSPACE_PATH" ]; then
         fi
     fi
 else
-    warn "PROJECTS_DIR not set — skipping file verification"
-    warn "Set PROJECTS_DIR to the WSL path matching WINDOWS_PROJECTS_DIR in .env"
+    warn "WORKSPACE_ROOT not set — skipping file verification"
+    warn "Set WORKSPACE_ROOT to the WSL project path in .env"
     ARTIFACT_PASS="skipped"
 fi
 # ──────────────────────────────────────────────────────────────────────────────

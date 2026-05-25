@@ -219,6 +219,9 @@ class PlanningSessionService:
         try:
             project = session.project
             self._advance_or_finalize(session, project)
+            if self._was_cancelled_during_processing(session.id):
+                self.db.rollback()
+                return self.get_session(session.id)
             self._clear_processing_lease(session)
             self.db.commit()
             self.db.refresh(session)
@@ -228,6 +231,9 @@ class PlanningSessionService:
             self.db.commit()
             raise
         except Exception as exc:
+            if self._was_cancelled_during_processing(session.id):
+                self.db.rollback()
+                return self.get_session(session.id)
             session.status = "failed"
             session.last_error = str(exc)
             session.current_prompt_id = None
@@ -427,6 +433,16 @@ class PlanningSessionService:
         session.processing_token = None
         session.processing_started_at = None
         session.updated_at = datetime.now(timezone.utc)
+
+    def _was_cancelled_during_processing(self, session_id: int) -> bool:
+        with self.db.no_autoflush:
+            status = (
+                self.db.query(PlanningSession.status)
+                .populate_existing()
+                .filter(PlanningSession.id == session_id)
+                .scalar()
+            )
+        return status == "cancelled"
 
     @staticmethod
     def _should_process_inline() -> bool:

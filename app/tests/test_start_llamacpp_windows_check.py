@@ -64,7 +64,7 @@ esac
             "PLANNING_REPAIR_MODEL=local\r\n"
             "EMBEDDING_PROVIDER=ollama\r\n"
             "RUNTIME_PROFILE=low_resource\r\n"
-            f"WINDOWS_PROJECTS_DIR={projects_dir}\r\n"
+            f"WORKSPACE_ROOT={projects_dir}\r\n"
         ).encode("utf-8")
     )
 
@@ -145,7 +145,7 @@ exit 0
             "PLANNING_REPAIR_MODEL=local\r\n"
             "EMBEDDING_PROVIDER=ollama\r\n"
             "RUNTIME_PROFILE=low_resource\r\n"
-            f"WINDOWS_PROJECTS_DIR={projects_dir}\r\n"
+            f"WORKSPACE_ROOT={projects_dir}\r\n"
         ).encode("utf-8")
     )
 

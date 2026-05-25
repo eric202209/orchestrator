@@ -3,8 +3,8 @@
 Three paths depending on your machine:
 
 - [Linux / Ubuntu (with OpenClaw)](#linux--ubuntu-with-openclaw) — native processes, `start.sh`
-- [Windows (Ollama, no OpenClaw)](#windows-Nvidia-gpu--ollama-no-openclaw) — `start.ps1`
-- [Windows (llama.cpp, no OpenClaw)](#windows-llamacpp-no-openclaw) — `./wsl-start.sh`
+- [Windows WSL2 (Ollama, no OpenClaw)](#windows-Nvidia-gpu--ollama-no-openclaw) — `./wsl-start.sh`
+- [Windows WSL2 (llama.cpp, no OpenClaw)](#windows-llamacpp-no-openclaw) — `./wsl-start.sh --llama`
 
 ---
 
@@ -154,12 +154,6 @@ so ingest targets the active container runtime rather than a host-side database:
 ./wsl-start.sh --ingest-knowledge
 ```
 
-On Windows PowerShell:
-
-```powershell
-.\start.ps1 -IngestKnowledge
-```
-
 ## Alpha Operator Verification Path
 
 Use this path after setup to verify the current alpha baseline. The goal is not
@@ -169,8 +163,8 @@ without manual database cleanup.
 1. Clone the repo and create `.env` from `.env.example`.
 2. Start the real platform entrypoint:
    - Linux: `./start.sh`
-   - WSL/llama.cpp: `./wsl-start.sh`
-   - Windows Docker/Ollama: `.\start.ps1`
+   - Windows WSL2 / Ollama: `./wsl-start.sh`
+   - Windows WSL2 / llama.cpp: `./wsl-start.sh --llama --backend-only`
 3. Confirm service health:
 
 ```bash
@@ -212,11 +206,11 @@ PYTHONPATH=. venv/bin/python -m pytest app/tests -q
 
 ## Windows (Nvidia GPU + Ollama, no OpenClaw)
 
-Uses `docker-compose.windows.yml` for the backend stack. Ollama runs natively on Windows for GPU access.
+Uses `docker-compose.windows.yml` for the backend stack from WSL2. Ollama runs natively on Windows for GPU access.
 
 > **Note:** This path is tested on NVIDIA GPU with CUDA. For GGUF/llama.cpp endpoints, see the [Windows llama.cpp](#windows-llamacpp-no-openclaw) path below.
 > For users with less than 8 GB VRAM, start here. Ollama/direct_ollama is the
-> easier supported path for constrained NVIDIA machines; use `RUNTIME_PROFILE=low_resource`
+> easier supported path for constrained NVIDIA machines; use `RUNTIME_PROFILE=compact_local`
 > and `OLLAMA_NUM_CTX=4096`.
 
 Windows process layout:
@@ -281,7 +275,7 @@ ollama pull nomic-embed-text
 **3.5. Pre-create bind-mount paths (in WSL2)**
 
 ```bash
-mkdir -p data logs checkpoints knowledge projects
+mkdir -p data logs checkpoints knowledge
 touch orchestrator.db
 ```
 
@@ -325,19 +319,21 @@ Set the runtime profile in your private `.env`, not in
 to the containers and falls back to `medium` only if it is unset:
 
 ```ini
-RUNTIME_PROFILE=low_resource
+RUNTIME_PROFILE=compact_local
 ```
 
 ```bash
-export WORKSPACE_ROOT=/home/yourname/projects
-docker compose -f docker-compose.windows.yml up --build
+./wsl-start.sh --check
+./wsl-start.sh --build
 ```
+
+For backend-only validation, add `--no-frontend`.
 
 To ingest local `knowledge/` into the active Docker runtime during startup,
 use:
 
-```powershell
-.\start.ps1 -IngestKnowledge
+```bash
+./wsl-start.sh --ingest-knowledge
 ```
 
 **6. Open the API**
@@ -721,7 +717,7 @@ cd ~/orchestrator
 LLAMA_CTX=4096 \
 LLAMA_MODEL_PATH="D:\\AI\\models\\Qwen2.5-Coder-7B-Instruct-Q5_K_M.gguf" \
 LLAMA_EXE_WIN="/mnt/d/AI/llama.cpp/llama-server.exe" \
-./wsl-start.sh --check --backend-only
+./wsl-start.sh --llama --check --backend-only
 ```
 
 `--check` reads `RUNTIME_PROFILE` and `LLAMA_CTX` from private `.env` when
@@ -732,19 +728,20 @@ It also expects Ollama to be absent by default for the third-machine path. For
 current-machine validation where Ollama is intentionally installed, add
 `EXPECTED_OLLAMA_ABSENT=false`.
 
-Start the backend stack through `wsl-start.sh`:
+Start the backend stack through `wsl-start.sh`. `--llama` forces the original
+llama.cpp path even if a local `.env` is temporarily configured for Ollama:
 
 ```bash
 LLAMA_CTX=4096 \
 LLAMA_MODEL_PATH="D:\\AI\\models\\Qwen2.5-Coder-7B-Instruct-Q5_K_M.gguf" \
 LLAMA_EXE_WIN="/mnt/d/AI/llama.cpp/llama-server.exe" \
-./wsl-start.sh --backend-only
+./wsl-start.sh --llama --backend-only
 ```
 
 To ingest `knowledge/` into the active Docker runtime while starting, run:
 
 ```bash
-./wsl-start.sh --ingest-knowledge --backend-only
+./wsl-start.sh --llama --ingest-knowledge --backend-only
 ```
 
 First build takes several minutes. Verify all containers are up:
@@ -899,4 +896,3 @@ Kill llama-server: `Ctrl+C` in the PowerShell window running it.
 | `RUNTIME_PROFILE` | `standard` | `standard`, `medium`, or `low_resource`. Use `low_resource` for 8 GB llama.cpp or constrained local backends; use `medium` only after a 12-16 GB VRAM llama.cpp setup is stable. |
 | `MOBILE_GATEWAY_API_KEY` | — | Shared key for `/api/v1/mobile/*`. |
 | `LANGFUSE_ENABLED` | `false` | Enable Langfuse tracing. |
-| `WINDOWS_PROJECTS_DIR` | — | Legacy alias for `WORKSPACE_ROOT` in older Windows Docker `.env` files. Prefer `WORKSPACE_ROOT`. |

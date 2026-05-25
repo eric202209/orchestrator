@@ -939,21 +939,24 @@ async def execute_task_with_runtime(
             timeout_seconds=actual_timeout,
         )
 
+        completed_at = datetime.now(timezone.utc)
         if result["status"] == "completed":
             mark_execution_done(
                 task=task,
                 session_task_link=session_task,
                 task_execution=task_execution,
-                completed_at=datetime.now(timezone.utc),
+                completed_at=completed_at,
             )
+            mark_session_stopped(new_session, stopped_at=completed_at)
         else:
             mark_execution_failed(
                 task=task,
                 session_task_link=session_task,
                 task_execution=task_execution,
                 error_message=result.get("error", "Unknown error"),
-                completed_at=datetime.now(timezone.utc),
+                completed_at=completed_at,
             )
+            mark_session_stopped(new_session, stopped_at=completed_at)
 
         db.commit()
         db.refresh(task)

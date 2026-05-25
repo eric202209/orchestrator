@@ -279,8 +279,8 @@ export default function SettingsPage() {
             <p className="mt-2 text-xs text-slate-400">
               Path visible to the backend process. Linux native users can use a
               real Linux path such as /home/user/projects. Windows Docker users
-              should use /app/projects here; the Windows host folder is
-              configured with WINDOWS_PROJECTS_DIR in .env.
+              should use /app/projects here; the host project folder is bound
+              from WORKSPACE_ROOT in .env.
             </p>
           </div>
           <div className="grid gap-4 md:grid-cols-2">

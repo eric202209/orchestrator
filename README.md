@@ -48,7 +48,7 @@ See the [Setup Guide](SETUP.md) for step-by-step instructions:
 - **Linux / Ubuntu** (with OpenClaw) → [Linux setup](SETUP.md#linux--ubuntu-with-openclaw)
 - **Windows** (native Ollama, no OpenClaw) → [Windows setup](SETUP.md#windows-native-ollama-no-openclaw)
 
-Linux `start.sh` runs the API, worker, Qdrant, and React dashboard as native processes. Windows/WSL Docker setup uses `docker-compose.windows.yml` for the API, worker, Redis, and Qdrant. Use the ingest command for the runtime you are actually running: native Linux uses `venv/bin/python scripts/ingest_knowledge.py --source-dir . --qdrant-url http://localhost:6333`; Docker/WSL uses `wsl-start.sh --ingest-knowledge` or `start.ps1 -IngestKnowledge`.
+Linux `start.sh` runs the API, worker, Qdrant, and React dashboard as native processes. Windows/WSL Docker setup uses `docker-compose.windows.yml` for the API, worker, Redis, and Qdrant, and `./wsl-start.sh` starts the dashboard unless `--no-frontend` is passed. Use the ingest command for the runtime you are actually running: native Linux uses `venv/bin/python scripts/ingest_knowledge.py --source-dir . --qdrant-url http://localhost:6333`; Docker/WSL uses `./wsl-start.sh --ingest-knowledge`.
 
 ## Stack
 
@@ -127,8 +127,9 @@ Projects store `workspace_path` as a root-relative slug. API responses also incl
 | Script | Purpose |
 |---|---|
 | `./start.sh` | Start full stack (Linux native) |
+| `./wsl-start.sh` | Start WSL Docker backend and dashboard for Windows-host Ollama |
+| `./wsl-start.sh --no-frontend` | Start WSL Docker backend only |
 | `./wsl-start.sh --ingest-knowledge` | Start WSL runtime and ingest `knowledge/` into Docker runtime |
-| `start.ps1 -IngestKnowledge` | Start Windows runtime and ingest `knowledge/` |
 | `./stop_all.sh` | Stop all processes |
 | `./scripts/orchestrator-mobile-api.sh` | Query mobile API from shell |
 | `./scripts/security_check.sh` | Run security audit |

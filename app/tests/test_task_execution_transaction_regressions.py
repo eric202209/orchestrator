@@ -562,6 +562,10 @@ async def test_task_execute_endpoint_uses_runtime_factory(db_session, monkeypatc
 
     db_session.refresh(task)
     assert task.status == TaskStatus.DONE
+    session = db_session.query(SessionModel).one()
+    assert session.status == "stopped"
+    assert session.is_active is False
+    assert session.stopped_at is not None
     task_execution = db_session.query(TaskExecution).one()
     assert task_execution.session_id is not None
     assert task_execution.task_id == task.id

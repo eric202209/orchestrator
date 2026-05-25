@@ -112,6 +112,63 @@ def test_process_session_sets_waiting_and_releases_processing_lease(
     assert updated.messages[-1].content == "Which rollout constraints matter most?"
 
 
+def test_process_session_preserves_operator_cancel_during_runtime_failure(
+    db_session, monkeypatch
+):
+    project = _create_project(db_session, name="Cancelled During Runtime Project")
+    session = PlanningSession(
+        project_id=project.id,
+        title="Cancel during runtime",
+        prompt="Generate an intentionally overlarge plan",
+        status="active",
+        source_brain="local",
+    )
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+
+    service = PlanningSessionService(db_session)
+    service._add_message(
+        session,
+        "user",
+        session.prompt,
+        metadata={"kind": "prompt", "skip_clarification": True},
+    )
+    db_session.commit()
+
+    monkeypatch.setattr(
+        PlanningSessionService,
+        "_decide_clarification",
+        lambda self, current_session, current_project: {
+            "needs_clarification": False,
+            "question": None,
+        },
+    )
+
+    def fake_run_openclaw(self, prompt, *, source_brain="local", timeout_seconds=None):
+        db_session.query(PlanningSession).filter(
+            PlanningSession.id == session.id
+        ).update(
+            {
+                "status": "cancelled",
+                "processing_token": None,
+                "processing_started_at": None,
+            }
+        )
+        db_session.commit()
+        raise RuntimeError("Ollama timed out after 90.0s")
+
+    monkeypatch.setattr(PlanningSessionService, "_run_openclaw", fake_run_openclaw)
+
+    updated = service.process_session(session.id)
+
+    assert updated is not None
+    assert updated.status == "cancelled"
+    assert updated.last_error is None
+    assert updated.processing_token is None
+    assert db_session.query(PlanningArtifact).count() == 0
+
+
 def test_replan_recovery_uses_short_timeout_and_deterministic_fallback(
     db_session, monkeypatch
 ):
