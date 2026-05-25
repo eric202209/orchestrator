@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from app.models import LogEntry, Session as SessionModel, TaskCheckpoint
+from app.services.workspace.permissions import ensure_shared_permissions
 from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.prompt_templates import OrchestrationState, StepResult
 
@@ -227,6 +228,7 @@ def _normalize_path_ownership_to_parent(path: Path) -> None:
 
 def _write_json_payload_atomic(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_shared_permissions(path.parent)
     with tempfile.NamedTemporaryFile(
         "w",
         encoding="utf-8",
@@ -240,17 +242,21 @@ def _write_json_payload_atomic(path: Path, payload: Dict[str, Any]) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     _normalize_path_ownership_to_parent(temp_path)
+    ensure_shared_permissions(temp_path)
     temp_path.replace(path)
     _normalize_path_ownership_to_parent(path)
+    ensure_shared_permissions(path)
 
 
 def _append_jsonl_line(log_path: Path, payload: Dict[str, Any]) -> None:
     from app.services.file_lock import fcntl
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_shared_permissions(log_path.parent)
     lock_path = log_path.with_suffix(f"{log_path.suffix}.lock")
     with lock_path.open("a+", encoding="utf-8") as lock_handle:
         _normalize_path_ownership_to_parent(lock_path)
+        ensure_shared_permissions(lock_path)
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         try:
             with log_path.open("a", encoding="utf-8") as handle:
@@ -258,6 +264,7 @@ def _append_jsonl_line(log_path: Path, payload: Dict[str, Any]) -> None:
                 handle.flush()
                 os.fsync(handle.fileno())
             _normalize_path_ownership_to_parent(log_path)
+            ensure_shared_permissions(log_path)
         finally:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 

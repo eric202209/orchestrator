@@ -388,8 +388,36 @@ def patch_python_verification_imports(command: str) -> str:
         return command
     script = tokens[2]
     imports_sys = bool(re.search(r"(^|;)\s*import\s+[^;]*\bsys\b", script))
-    if "sys." in script and not imports_sys:
-        script = "import sys; " + script
+    needs_sys = "sys." in script and not imports_sys
+    stdlib_imports = {
+        "json",
+        "os",
+        "pathlib",
+        "re",
+        "shlex",
+        "subprocess",
+        "sys",
+        "typing",
+        "unittest",
+    }
+    imported_modules: set[str] = set()
+    for match in re.finditer(r"(^|;)\s*import\s+([^;]+)", script):
+        for raw_name in match.group(2).split(","):
+            name = raw_name.strip().split()[0].split(".")[0]
+            if name:
+                imported_modules.add(name)
+    for match in re.finditer(r"(^|;)\s*from\s+([A-Za-z_][A-Za-z0-9_]*)\b", script):
+        imported_modules.add(match.group(2))
+    may_import_backend_module = bool(imported_modules - stdlib_imports) and (
+        "backend" not in script
+    )
+    if needs_sys or may_import_backend_module:
+        prefix = ""
+        if needs_sys or may_import_backend_module:
+            prefix += "import sys; "
+        if may_import_backend_module:
+            prefix += "'backend' in sys.path or sys.path.append('backend'); "
+        script = prefix + script
         return f"{tokens[0]} -c {shlex.quote(script)}"
     return command
 

@@ -363,6 +363,24 @@ def test_executor_write_file_ops_create_parent_directory(tmp_path):
     )
 
 
+def test_executor_write_file_ops_create_shared_workspace_permissions(tmp_path):
+    result = ExecutorService.execute_file_ops(
+        Path(tmp_path),
+        [
+            {
+                "op": "write_file",
+                "path": "src/nested/main.ts",
+                "content": "export const ok = true;\n",
+            }
+        ],
+    )
+
+    assert result["success"] is True
+    assert ((tmp_path / "src").stat().st_mode & 0o777) == 0o777
+    assert ((tmp_path / "src" / "nested").stat().st_mode & 0o777) == 0o777
+    assert ((tmp_path / "src" / "nested" / "main.ts").stat().st_mode & 0o666) == 0o666
+
+
 def test_phase8k_plan_schema_accepts_expanded_file_ops():
     step = _ops_only_step()
     step["ops"] = [

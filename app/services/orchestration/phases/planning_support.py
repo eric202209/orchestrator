@@ -282,7 +282,9 @@ def _build_repair_rejection_reasons(
             "missing_commands_steps: steps "
             f"{missing_commands_steps} have no runnable command or file op; "
             "add a bounded shell command such as python -c, python -m, node -e, "
-            "npm run, pytest, or an ops write_file/replace_in_file operation."
+            "npm run, pytest, or an ops write_file/replace_in_file operation. "
+            "If the step already has a valid verification command, copy that "
+            "same command into commands instead of leaving commands empty."
         )
 
     truncated_subcodes = details.get("truncated_multistep_subcodes") or []

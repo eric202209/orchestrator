@@ -13,6 +13,7 @@ from app.models import Project, Session as SessionModel, Task, TaskStatus
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
+from app.services.workspace.permissions import ensure_shared_permissions
 from app.services.task_service import TaskService
 
 
@@ -118,8 +119,10 @@ def write_project_state_snapshot(
     project_root = resolve_project_workspace_path(project.workspace_path, project.name)
     state_path = get_state_manager_path(project_root)
     state_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_shared_permissions(state_path.parent)
     payload = build_project_state_snapshot(db, project, current_task, session_id)
     state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    ensure_shared_permissions(state_path)
 
 
 def workspace_snapshot_key(

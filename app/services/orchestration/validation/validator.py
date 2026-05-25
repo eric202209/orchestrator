@@ -437,6 +437,12 @@ class ValidatorService:
         text = str(command or "").strip().lower()
         if not text:
             return True
+        if (
+            re.search(r"\bpython(?:3)?\s+-c\b", text)
+            and "unittest.main" in text
+            and "discover" not in text
+        ):
+            return True
         meaningful_markers = (
             "pytest",
             "python3 -m",
@@ -880,6 +886,60 @@ class ValidatorService:
         return files
 
     @staticmethod
+    def _step_uses_fake_verification_artifact(step: Dict[str, Any]) -> bool:
+        """Detect invented test-output artifacts used instead of test exit codes."""
+
+        fake_artifact_pattern = re.compile(
+            r"(?<![A-Za-z0-9_.~/-])"
+            r"((?:tests?|spec)/[A-Za-z0-9_./-]*\.(?:out|log|txt))"
+            r"(?![A-Za-z0-9_.-])",
+            re.IGNORECASE,
+        )
+        step_text_parts = [
+            str(step.get("verification") or ""),
+            str(step.get("rollback") or ""),
+        ]
+        step_text_parts.extend(
+            str(command or "") for command in step.get("commands", []) or []
+        )
+        step_text_parts.extend(
+            str(path or "") for path in step.get("expected_files", []) or []
+        )
+        mentioned = {
+            match.group(1).strip().lstrip("./")
+            for text in step_text_parts
+            for match in fake_artifact_pattern.finditer(text)
+        }
+        if not mentioned:
+            return False
+
+        materialized: set[str] = set()
+        for operation in step.get("ops", []) or []:
+            if not isinstance(operation, dict):
+                continue
+            if str(operation.get("op") or "") in {"write_file", "append_file"}:
+                path = str(operation.get("path") or "").strip().lstrip("./")
+                if path:
+                    materialized.add(path)
+        for command in step.get("commands", []) or []:
+            for target in ValidatorService._command_write_targets(str(command or "")):
+                path = str(target or "").strip().lstrip("./")
+                if path:
+                    materialized.add(path)
+
+        return bool(mentioned.difference(materialized))
+
+    @classmethod
+    def _plan_fake_verification_artifact_steps(
+        cls, plan: List[Dict[str, Any]]
+    ) -> List[int]:
+        steps: List[int] = []
+        for index, step in enumerate(plan, start=1):
+            if cls._step_uses_fake_verification_artifact(step):
+                steps.append(int(step.get("step_number", index)))
+        return sorted(set(steps))
+
+    @staticmethod
     def _existing_static_site_roots(project_dir: Optional[Path]) -> List[str]:
         if project_dir is None or not Path(project_dir).exists():
             return []
@@ -1028,14 +1088,19 @@ class ValidatorService:
                 )
                 for return_match in re.finditer(r"\breturn\s+([^;\n]+)", body):
                     return_expression = return_match.group(1)
+                    identifier_expression = re.sub(
+                        r"(['\"])(?:\\.|(?!\1).)*\1",
+                        "",
+                        return_expression,
+                    )
                     identifiers = [
                         match.group(1)
                         for match in re.finditer(
                             r"\b([A-Za-z_$][A-Za-z0-9_$]*)\b",
-                            return_expression,
+                            identifier_expression,
                         )
                         if match.start() == 0
-                        or return_expression[match.start() - 1] != "."
+                        or identifier_expression[match.start() - 1] != "."
                     ]
                     if any(
                         identifier not in declared
@@ -2194,12 +2259,20 @@ class ValidatorService:
         findings: List[int] = []
         for index, step in enumerate(plan, start=1):
             step_number = int(step.get("step_number", index))
-            if any(
-                isinstance(operation, dict)
-                and str(operation.get("op") or "").strip() in mutating_ops
-                for operation in (step.get("ops") or [])
-            ):
+            for operation in step.get("ops") or []:
+                if not isinstance(operation, dict):
+                    continue
+                op_name = str(operation.get("op") or "").strip()
+                if op_name not in mutating_ops:
+                    continue
+                path_text = str(operation.get("path") or "").strip().lstrip("./")
+                if ValidatorService._read_only_stage_allows_report_write(
+                    workflow_stage, op_name, path_text
+                ):
+                    continue
                 findings.append(step_number)
+                break
+            if step_number in findings:
                 continue
             commands = [
                 str(command or "") for command in step.get("commands", []) or []
@@ -2217,6 +2290,23 @@ class ValidatorService:
                     findings.append(step_number)
                     break
         return findings
+
+    @staticmethod
+    def _read_only_stage_allows_report_write(
+        workflow_stage: Optional[str], op_name: str, path_text: str
+    ) -> bool:
+        """Allow read-only stages to materialize their own report artifact only."""
+
+        if op_name not in {"write_file", "append_file"}:
+            return False
+        normalized_path = str(path_text or "").strip().rstrip("/").lstrip("./")
+        allowed_by_stage = {
+            "review": {"docs/review.md"},
+            "validate": {"docs/validation.md"},
+            "validation": {"docs/validation.md"},
+            "complete": {"docs/completion.md", "docs/report.md"},
+        }
+        return normalized_path in allowed_by_stage.get(str(workflow_stage or ""), set())
 
     @staticmethod
     def _plan_failable_review_probe_steps(
@@ -2427,6 +2517,40 @@ class ValidatorService:
                     static_site_off_root_mutations[:20]
                 )
 
+        fake_verification_artifact_steps = cls._plan_fake_verification_artifact_steps(
+            plan
+        )
+        if fake_verification_artifact_steps:
+            repairable.append(
+                "Plan uses invented test output artifacts for verification instead "
+                "of relying on pytest/unittest exit codes "
+                f"(steps: {fake_verification_artifact_steps[:5]})"
+            )
+            details["fake_verification_artifact_steps"] = (
+                fake_verification_artifact_steps
+            )
+
+        declared_expected_files = cls._plan_declared_expected_files(plan)
+        materialized_targets = cls._plan_materialized_file_targets(plan)
+        existing_expected_files = {
+            path
+            for path in declared_expected_files
+            if project_dir is not None and (Path(project_dir) / path).exists()
+        }
+        unmaterialized_expected_files = sorted(
+            declared_expected_files.difference(
+                materialized_targets | existing_expected_files
+            )
+        )
+        if declared_expected_files and unmaterialized_expected_files:
+            repairable.append(
+                "Plan declares expected files without materializing them through "
+                "file operations or shell writes"
+            )
+            details["unmaterialized_expected_files"] = unmaterialized_expected_files[
+                :20
+            ]
+
         command_budget = cls._plan_command_budget_diagnostics(plan, output_text)
         details["step_count"] = command_budget["step_count"]
         details["max_command_length"] = command_budget["max_command_length"]
@@ -2597,31 +2721,11 @@ class ValidatorService:
                 )
                 and stage_allows_materialization
             ):
-                declared_expected_files = cls._plan_declared_expected_files(plan)
-                materialized_targets = cls._plan_materialized_file_targets(plan)
-                existing_expected_files = {
-                    path
-                    for path in declared_expected_files
-                    if project_dir is not None and (Path(project_dir) / path).exists()
-                }
-                unmaterialized_expected_files = sorted(
-                    declared_expected_files.difference(
-                        materialized_targets | existing_expected_files
-                    )
-                )
                 if not materialized_targets:
                     repairable.append(
                         "Implementation task plan does not materialize any source changes"
                     )
                     details["missing_materialization_for_implementation"] = True
-                if declared_expected_files and unmaterialized_expected_files:
-                    repairable.append(
-                        "Plan declares expected files without materializing them "
-                        "through file operations or shell writes"
-                    )
-                    details["unmaterialized_expected_files"] = (
-                        unmaterialized_expected_files[:20]
-                    )
 
             missing_verification_steps = cls._plan_missing_verification_steps(plan)
             if missing_verification_steps:
@@ -2786,6 +2890,10 @@ class ValidatorService:
             semantic_violation_codes.append("malformed_shell_quoting")
         if details.get("verification_profile_mutated_source_assets"):
             semantic_violation_codes.append("verification_mutates_source_assets")
+        if details.get("fake_verification_artifact_steps"):
+            semantic_violation_codes.append("fake_verification_artifact")
+        if details.get("unmaterialized_expected_files"):
+            semantic_violation_codes.append("unmaterialized_expected_files")
         if semantic_violation_codes:
             details["semantic_violation_codes"] = semantic_violation_codes
 
@@ -3139,7 +3247,23 @@ class ValidatorService:
             )
             details["missing_core_files"] = missing_core[:20]
 
-        if reported_changed_files and candidate_files:
+        if reported_changed_files:
+            materialized_reported_files = [
+                cls._normalize_reported_changed_file(path_text)
+                for path_text in reported_changed_files
+                if (project_dir / cls._normalize_reported_changed_file(path_text))
+                .resolve()
+                .is_file()
+            ]
+            details["materialized_reported_files"] = materialized_reported_files[:20]
+        else:
+            materialized_reported_files = []
+
+        if (
+            reported_changed_files
+            and candidate_files
+            and not materialized_reported_files
+        ):
             materialized_files = [
                 str(path.relative_to(project_dir)) for path in candidate_files
             ]

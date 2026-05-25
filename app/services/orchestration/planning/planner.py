@@ -1566,6 +1566,7 @@ class PlannerService:
             "stale_replace_ops_steps": [],
             "test_assertion_loss_ops_steps": [],
             "test_deletion_ops_steps": [],
+            "fake_verification_artifact_steps": [],
         }
         for index, step in enumerate(plan or [], start=1):
             step_number = int(step.get("step_number") or index)
@@ -1602,9 +1603,9 @@ class PlannerService:
                     )
                 ):
                     issues["placeholder_only_steps"].append(step_number)
-                if not ops_only and ValidatorService._verification_is_weak(
-                    step.get("verification")
-                ):
+                if (
+                    not ops_only or step.get("verification") is not None
+                ) and ValidatorService._verification_is_weak(step.get("verification")):
                     issues["weak_verification_steps"].append(step_number)
             # Flag commands that use python -c to write file content alongside
             # expected_files — these should use ops.write_file instead.
@@ -1625,6 +1626,8 @@ class PlannerService:
                 step, Path(project_dir)
             ):
                 issues["test_deletion_ops_steps"].append(step_number)
+            if ValidatorService._step_uses_fake_verification_artifact(step):
+                issues["fake_verification_artifact_steps"].append(step_number)
         return {key: sorted(set(value)) for key, value in issues.items() if value}
 
     @staticmethod

@@ -31,6 +31,8 @@ def project_mutation_lock(
     operation: str,
     owner: Optional[str] = None,
     stale_after_seconds: int = 60 * 60 * 6,
+    wait_timeout_seconds: float = 2.0,
+    poll_interval_seconds: float = 0.1,
 ) -> Iterator[Path]:
     lock_dir = project_root / ".openclaw" / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
@@ -62,17 +64,26 @@ def project_mutation_lock(
         "created_at_epoch": now,
     }
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-    try:
-        fd = os.open(lock_path, flags, 0o666)
-    except FileExistsError as exc:
-        raise ProjectMutationLockError(
-            project_id=project_id,
-            operation=operation,
-            lock_path=lock_path,
-        ) from exc
+    deadline = time.monotonic() + max(0.0, wait_timeout_seconds)
+    while True:
+        try:
+            fd = os.open(lock_path, flags, 0o666)
+            break
+        except FileExistsError as exc:
+            if time.monotonic() >= deadline:
+                raise ProjectMutationLockError(
+                    project_id=project_id,
+                    operation=operation,
+                    lock_path=lock_path,
+                ) from exc
+            time.sleep(max(0.01, poll_interval_seconds))
 
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         json.dump(metadata, handle)
+    try:
+        lock_path.chmod(0o666)
+    except OSError:
+        pass
 
     try:
         yield lock_path

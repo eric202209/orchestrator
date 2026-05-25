@@ -78,6 +78,7 @@ from app.services.orchestration.validation.integrity import (
     capture_baseline_result,
     compare_baseline,
 )
+from app.services.workspace.permissions import ensure_shared_permissions
 from app.services.workspace.system_settings import get_effective_workspace_review_policy
 from app.services.prompt_templates import OrchestrationStatus, StepResult
 from app.services.orchestration.phases.completion_repair import (
@@ -118,6 +119,55 @@ _VISIBLE_TEXT_KEYS = {
     "output_text",
     "content_text",
 }
+
+
+_PYTHON_SUFFIXES = {".py"}
+_NODE_SUFFIXES = {".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs"}
+
+
+def _stack_set_for_paths(paths: list[str]) -> set[str]:
+    stacks: set[str] = set()
+    for raw_path in paths or []:
+        suffix = Path(str(raw_path or "").strip()).suffix.lower()
+        if suffix in _PYTHON_SUFFIXES:
+            stacks.add("python")
+        elif suffix in _NODE_SUFFIXES:
+            stacks.add("node")
+    return stacks
+
+
+def _completion_expected_paths(plan: list[dict[str, Any]]) -> list[str]:
+    paths: list[str] = []
+    for step in plan or []:
+        paths.extend(str(path or "") for path in step.get("expected_files", []) or [])
+        for op in step.get("ops", []) or []:
+            if isinstance(op, dict):
+                paths.append(str(op.get("path") or ""))
+    return [path for path in paths if path.strip()]
+
+
+def _scope_workspace_consistency_to_task_changes(
+    workspace_consistency: dict[str, Any],
+    *,
+    plan: list[dict[str, Any]],
+    reported_changed_files: list[str],
+) -> dict[str, Any]:
+    """Do not fail backend-only work because the project already has frontend files."""
+
+    if not workspace_consistency.get("mixed_stack"):
+        return workspace_consistency
+
+    task_paths = list(reported_changed_files or []) + _completion_expected_paths(plan)
+    task_stacks = _stack_set_for_paths(task_paths)
+    if len(task_stacks) != 1:
+        return workspace_consistency
+
+    scoped = dict(workspace_consistency)
+    scoped["workspace_mixed_stack"] = True
+    scoped["mixed_stack"] = False
+    scoped["task_scoped_stack"] = next(iter(task_stacks))
+    scoped["mixed_stack_scope"] = "preexisting_workspace_ignored"
+    return scoped
 
 
 def _resolve_template_review_policy(task: Any) -> Optional[dict]:
@@ -992,6 +1042,7 @@ def _write_progress_notes(
             return
         notes_dir = Path(project_dir) / ".openclaw"
         notes_dir.mkdir(parents=True, exist_ok=True)
+        ensure_shared_permissions(notes_dir)
         notes_path = notes_dir / "progress_notes.md"
 
         completed_steps = [
@@ -1021,9 +1072,25 @@ def _write_progress_notes(
 
         with open(notes_path, "a", encoding="utf-8") as fh:
             fh.write("\n".join(entry_lines))
+        ensure_shared_permissions(notes_path)
         logger.info("[PROGRESS] Progress notes written to %s", notes_path)
     except Exception as e:
         logger.warning("[PROGRESS] Failed to write progress notes: %s", e)
+
+
+def _session_failed_task_links(db: Any, session_id: int) -> list[SessionTask]:
+    """Return failed task links that should keep a session out of completed state."""
+    if not session_id:
+        return []
+    return (
+        db.query(SessionTask)
+        .filter(
+            SessionTask.session_id == session_id,
+            SessionTask.status == TaskStatus.FAILED,
+        )
+        .order_by(SessionTask.id.asc())
+        .all()
+    )
 
 
 def finalize_successful_task(
@@ -1087,6 +1154,11 @@ def finalize_successful_task(
     )
     workspace_consistency = task_service.analyze_workspace_consistency(
         orchestration_state.project_dir
+    )
+    workspace_consistency = _scope_workspace_consistency_to_task_changes(
+        workspace_consistency,
+        plan=orchestration_state.plan,
+        reported_changed_files=reported_changed_files,
     )
 
     completion_validation = ValidatorService.validate_task_completion(
@@ -2026,8 +2098,30 @@ def finalize_successful_task(
             )
 
     if session:
+        failed_task_links = _session_failed_task_links(db, session_id)
         if next_task:
             mark_session_running(session)
+        elif failed_task_links:
+            failed_task_ids = [link.task_id for link in failed_task_links[:5]]
+            failed_tasks = (
+                db.query(Task)
+                .filter(Task.id.in_(failed_task_ids))
+                .order_by(Task.id.asc())
+                .all()
+                if failed_task_ids
+                else []
+            )
+            failed_summary = ", ".join(
+                f"#{item.id} {item.title}" for item in failed_tasks[:3]
+            )
+            mark_session_paused(
+                session,
+                alert_level="error",
+                alert_message=(
+                    "Session has failed task(s) that must be repaired or retried "
+                    f"before completion: {failed_summary or len(failed_task_links)} failed task(s)"
+                )[:2000],
+            )
         elif blocked_pending_task:
             mark_session_paused(session)
             blockers = type(task_service)(db).get_blocking_prior_tasks(

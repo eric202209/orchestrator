@@ -93,6 +93,7 @@ from app.services.orchestration.validation.workspace_guard import (
 from app.services.orchestration.context.hitl_sentinel import (
     parse as _parse_hitl_sentinel,
 )
+from app.services.workspace.permissions import ensure_shared_permissions
 from app.services.prompt_templates import OrchestrationStatus, StepResult
 
 
@@ -532,6 +533,11 @@ def _execute_local_shell_commands_step(
         for root, _, files in _os.walk(project_dir)
         for f in files
     )
+    dirs_before = set(
+        _os.path.relpath(root, project_dir)
+        for root, _, _ in _os.walk(project_dir)
+        if _os.path.relpath(root, project_dir) != "."
+    )
     outputs: list[str] = []
     for cmd in normalized_cmds:
         try:
@@ -569,9 +575,26 @@ def _execute_local_shell_commands_step(
         for root, _, files in _os.walk(project_dir)
         for f in files
     )
+    dirs_after = set(
+        _os.path.relpath(root, project_dir)
+        for root, _, _ in _os.walk(project_dir)
+        if _os.path.relpath(root, project_dir) != "."
+    )
     files_changed = [
         f for f in files_after - files_before if not f.startswith(".openclaw")
     ]
+    for relative_path in files_changed:
+        try:
+            ensure_shared_permissions(project_dir / relative_path)
+        except Exception:
+            pass
+    for relative_path in dirs_after - dirs_before:
+        if str(relative_path).startswith(".openclaw"):
+            continue
+        try:
+            ensure_shared_permissions(project_dir / relative_path)
+        except Exception:
+            pass
 
     # Run verification if provided
     verification = _patch_python_verification_cmd(

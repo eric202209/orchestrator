@@ -11,7 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = REPO_ROOT / "app" / "services" / "orchestration" / "stuck_diagnostics.py"
+MODULE_PATH = (
+    REPO_ROOT
+    / "app"
+    / "services"
+    / "orchestration"
+    / "diagnostics"
+    / "stuck_diagnostics.py"
+)
 SPEC = importlib.util.spec_from_file_location("stuck_diagnostics", MODULE_PATH)
 if SPEC is None or SPEC.loader is None:
     raise SystemExit(f"Unable to load diagnosis module from {MODULE_PATH}")

@@ -10,6 +10,10 @@ from sqlalchemy.orm import Session
 
 from app.models import Project, Task
 from app.services.workspace.canonical_mutation_service import CanonicalMutationService
+from app.services.workspace.permissions import (
+    ensure_shared_path_to_root,
+    ensure_shared_permissions,
+)
 from app.services.workspace.workspace_paths import (
     AUTO_SNAPSHOT_DIR_NAME,
     AUTO_SNAPSHOT_ROOT,
@@ -61,6 +65,7 @@ class WorkspaceSnapshotService:
         if snapshot_dir.exists():
             shutil.rmtree(snapshot_dir)
         snapshot_dir.mkdir(parents=True, exist_ok=True)
+        ensure_shared_path_to_root(snapshot_dir, project_root)
 
         if not source_dir.exists():
             return {
@@ -89,7 +94,9 @@ class WorkspaceSnapshotService:
                 continue
             destination = snapshot_dir / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
+            ensure_shared_path_to_root(destination.parent, project_root)
             shutil.copy2(source_path, destination)
+            ensure_shared_permissions(destination)
             files_copied += 1
 
         return {
@@ -146,6 +153,7 @@ class WorkspaceSnapshotService:
             }
 
         target_dir.mkdir(parents=True, exist_ok=True)
+        ensure_shared_path_to_root(target_dir, project_root)
         snapshot_files = [
             path
             for path in snapshot_dir.rglob("*")
@@ -190,7 +198,9 @@ class WorkspaceSnapshotService:
             relative = snapshot_path.relative_to(snapshot_dir)
             destination = target_dir / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
+            ensure_shared_path_to_root(destination.parent, project_root)
             shutil.copy2(snapshot_path, destination)
+            ensure_shared_permissions(destination)
             files_restored += 1
 
         return {

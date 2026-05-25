@@ -188,6 +188,8 @@ def classify_verification_command(command: Optional[str]) -> CommandQuality:
     if re.search(r"(?:^|[;&|()\n])\s*test\s+-\w\b", text):
         return "smoke_only"
     if re.search(r"\bpy_compile\b|\bpython(?:3)?\s+-c\s+['\"]\s*import\b", text):
+        if "unittest.main" in text and "discover" not in text:
+            return "insufficient"
         return "smoke_only"
     if "python -m unittest" in text or "python3 -m unittest" in text:
         return "regression_test"

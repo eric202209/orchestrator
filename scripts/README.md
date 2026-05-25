@@ -7,7 +7,6 @@ handled by `../start.sh`; service logs are written directly to `../logs/`.
 
 - `capture_replay_report.py` - capture semantic replay reports from event journals.
 - `capture_task_evidence_bundle.py` - capture a stable per-TaskExecution evidence bundle.
-- `phase6b_evidence_report.py` - collect session/task evidence across logs, replay, and endpoints.
 - `inspect_session_state.py` - inspect one session in SQLite.
 - `inspect_task_execution_attempts.py` - inspect task execution attempts.
 - `inspect_event_journal.py` - inspect orchestration event journals.
@@ -15,13 +14,14 @@ handled by `../start.sh`; service logs are written directly to `../logs/`.
 - `inspect_checkpoints.py` - inspect checkpoint contents.
 - `diagnose_planning_stuck.py` - diagnose planning/session stalls.
 - `session_outcome_report.py` - summarize recent session outcomes.
+- `workspace_evidence_report.py` - summarize workspace/change-set evidence for recent task executions.
+- `planning_contract_report.py` - summarize recent planning contract violations.
+- `failure_taxonomy.py` - classify recent failures into reusable failure buckets.
 
 ## Planning And Knowledge
 
 - `validate_plan_json.py` - validate planner JSON against the deterministic plan contract.
 - `planning_floor_check.py` - run an OpenClaw planning-floor diagnostic.
-- `phase8a_shadow_probe.py` - offline direct-vs-OpenClaw repair prompt probe
-  for Phase 8A runtime boundary diagnostics.
 - `ingest_knowledge.py` - ingest knowledge documents into SQLite and Qdrant.
   For the compact laptop Ollama Docker runtime, prefer
   `./wsl-start.sh --ollama --ingest-knowledge`, or:
@@ -29,6 +29,8 @@ handled by `../start.sh`; service logs are written directly to `../logs/`.
 
 ## Developer Utilities
 
+- `wsl-ollama-start.sh` - compact WSL2 Docker/Ollama startup helper.
+- `windows_health_check.ps1` - Windows-side Docker/Ollama/backend health checks.
 - `format-python.sh` - format backend Python files with Black.
 - `security_check.sh` - scan tracked source-like files for likely secret exposure.
 - `orchestrator-mobile-api.sh` - call mobile API endpoints using local env credentials.

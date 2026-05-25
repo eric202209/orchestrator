@@ -77,6 +77,58 @@ def _read_only_stage_fallback_plan(
     )
     command = "python -c " + json.dumps(script)
     stage_label = str(ctx.workflow_stage or "review").replace("_", " ")
+    report_path_by_stage = {
+        "review": "docs/review.md",
+        "validate": "docs/validation.md",
+        "validation": "docs/validation.md",
+    }
+    report_path = report_path_by_stage.get(str(ctx.workflow_stage or ""))
+    if report_path:
+        report_title = (
+            "Review Report" if ctx.workflow_stage == "review" else "Validation Report"
+        )
+        report_content = (
+            f"# {report_title}\n\n"
+            "## Findings\n\n"
+            "- Workspace inspected with a deterministic file inventory.\n\n"
+            "## Evidence\n\n"
+            f"- Command: `{script}`\n\n"
+            "## Verdict\n\n"
+            "- Further task-specific checks are required before promotion.\n"
+        )
+        report_check = (
+            "import pathlib,sys; "
+            f"path=pathlib.Path({json.dumps(report_path)}); "
+            "sys.exit(0 if path.is_file() and "
+            f"{json.dumps(report_title)} in "
+            "path.read_text(encoding='utf-8') else 1)"
+        )
+        report_verification = "python -c " + json.dumps(report_check)
+        return [
+            {
+                "step_number": 1,
+                "description": f"Inspect workspace for {stage_label} stage",
+                "commands": [command],
+                "verification": command,
+                "rollback": None,
+                "expected_files": [],
+            },
+            {
+                "step_number": 2,
+                "description": f"Write {stage_label} report artifact",
+                "commands": [],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": report_path,
+                        "content": report_content,
+                    }
+                ],
+                "verification": report_verification,
+                "rollback": f"rm -f {report_path}",
+                "expected_files": [report_path],
+            },
+        ]
     return [
         {
             "step_number": 1,
@@ -266,6 +318,27 @@ def _prune_unmaterialized_expected_files(
     if not concrete_op_paths:
         return plan, {"changed": False, "reason": "no_concrete_file_ops"}
 
+    referenced_paths: set[str] = set()
+    for step in plan:
+        if not isinstance(step, dict):
+            continue
+        step_text = "\n".join(
+            [str(step.get("verification") or "")]
+            + [str(command or "") for command in (step.get("commands") or [])]
+        )
+        normalized_step_text = step_text.replace("\\", "/")
+        for path in stale_paths:
+            if not path:
+                continue
+            if path in normalized_step_text:
+                referenced_paths.add(path)
+                continue
+            if path.startswith("tests/") and "tests" in normalized_step_text:
+                referenced_paths.add(path)
+                continue
+            if path == "tests" and "tests" in normalized_step_text:
+                referenced_paths.add(path)
+
     changed = False
     removed: list[str] = []
     normalized: list[dict[str, Any]] = []
@@ -279,7 +352,11 @@ def _prune_unmaterialized_expected_files(
             path = str(raw_path or "").strip().rstrip("/").lstrip("./")
             if not path:
                 continue
-            if path in stale_paths and path not in concrete_op_paths:
+            if (
+                path in stale_paths
+                and path not in concrete_op_paths
+                and path not in referenced_paths
+            ):
                 removed.append(path)
                 changed = True
                 continue
@@ -296,6 +373,7 @@ def _prune_unmaterialized_expected_files(
         ),
         "removed_expected_files": sorted(set(removed)),
         "concrete_op_paths": sorted(concrete_op_paths),
+        "preserved_referenced_expected_files": sorted(referenced_paths),
     }
 
 
@@ -1768,9 +1846,11 @@ def execute_planning_phase(
             if not plan_verdict.accepted and (
                 (plan_verdict.details or {}).get("read_only_stage_mutation_steps")
                 or (plan_verdict.details or {}).get("missing_workspace_expected_files")
+                or (plan_verdict.details or {}).get("unmaterialized_expected_files")
                 or (plan_verdict.details or {}).get(
                     "read_only_stage_failable_probe_steps"
                 )
+                or (plan_verdict.details or {}).get("weak_verification_steps")
             ):
                 fallback_plan = _read_only_stage_fallback_plan(ctx)
                 if fallback_plan:
@@ -1793,8 +1873,14 @@ def execute_planning_phase(
                             "missing_workspace_expected_files": verdict_details.get(
                                 "missing_workspace_expected_files"
                             ),
+                            "unmaterialized_expected_files": verdict_details.get(
+                                "unmaterialized_expected_files"
+                            ),
                             "failable_probe_steps": verdict_details.get(
                                 "read_only_stage_failable_probe_steps"
+                            ),
+                            "weak_verification_steps": verdict_details.get(
+                                "weak_verification_steps"
                             ),
                         },
                     )

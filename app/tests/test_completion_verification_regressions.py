@@ -25,9 +25,13 @@ from app.services.orchestration.phases.completion_flow import (
     _classify_completion_verification_failure,
     _detect_completion_verification_command,
     _execute_completion_verification,
+    _scope_workspace_consistency_to_task_changes,
     finalize_successful_task,
 )
 from app.services.orchestration.execution.runtime import workspace_snapshot_key
+from app.services.orchestration.execution.execution_flow import (
+    patch_python_verification_imports,
+)
 from app.services.orchestration.types import OrchestrationRunContext, ValidationVerdict
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.prompt_templates import OrchestrationState, StepResult
@@ -79,6 +83,111 @@ class _CountingTaskService(_FakeTaskService):
     def analyze_workspace_consistency(self, project_dir):
         self.analyze_calls += 1
         return {"calls": self.analyze_calls}
+
+
+def test_completion_mixed_stack_check_ignores_preexisting_unrelated_stack():
+    scoped = _scope_workspace_consistency_to_task_changes(
+        {
+            "mixed_stack": True,
+            "python_files": ["backend/module.py", "tests/test_module.py"],
+            "node_files": ["frontend/src/App.tsx"],
+        },
+        plan=[
+            {
+                "expected_files": ["backend/module.py", "tests/test_module.py"],
+                "ops": [{"op": "write_file", "path": "backend/module.py"}],
+            }
+        ],
+        reported_changed_files=["backend/module.py", "tests/test_module.py"],
+    )
+
+    assert scoped["mixed_stack"] is False
+    assert scoped["workspace_mixed_stack"] is True
+    assert scoped["task_scoped_stack"] == "python"
+
+
+def test_completion_mixed_stack_check_keeps_task_level_mixed_stack():
+    scoped = _scope_workspace_consistency_to_task_changes(
+        {"mixed_stack": True},
+        plan=[
+            {
+                "expected_files": ["backend/module.py", "frontend/src/App.tsx"],
+                "ops": [],
+            }
+        ],
+        reported_changed_files=["backend/module.py", "frontend/src/App.tsx"],
+    )
+
+    assert scoped["mixed_stack"] is True
+
+
+def test_review_report_artifact_materialization_is_accepted(tmp_path):
+    backend_dir = tmp_path / "backend"
+    tests_dir = tmp_path / "tests"
+    docs_dir = tmp_path / "docs"
+    backend_dir.mkdir()
+    tests_dir.mkdir()
+    docs_dir.mkdir()
+    (backend_dir / "module.py").write_text("def get_items():\n    return []\n")
+    (tests_dir / "test_module.py").write_text("def test_smoke():\n    assert True\n")
+    (docs_dir / "review.md").write_text("# Review\n\nNo blockers found.\n")
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=tmp_path,
+        plan=[
+            {
+                "step_number": 1,
+                "ops": [{"op": "write_file", "path": "docs/review.md"}],
+                "expected_files": ["docs/review.md"],
+                "verification": "python -c \"from pathlib import Path; assert Path('docs/review.md').exists()\"",
+            }
+        ],
+        task_prompt="Review backend/module.py and tests/test_module.py and write docs/review.md.",
+        execution_profile="validation",
+        title="Workspace Review pass",
+        description="Review the project artifacts and record findings.",
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": ["docs/review.md"],
+        },
+        workflow_stage="review",
+    )
+
+    assert (
+        "Completion evidence reported changed files, but none materialized in the canonical workspace"
+        not in verdict.reasons
+    )
+    assert verdict.details["materialized_reported_files"] == ["docs/review.md"]
+    assert verdict.accepted
+
+
+def test_python_verification_imports_add_backend_to_sys_path():
+    command = (
+        'python -c "import module, sys; '
+        'sys.exit(0 if callable(module.get_items) else 1)"'
+    )
+
+    patched = patch_python_verification_imports(command)
+
+    assert "sys.path.append" in patched
+    assert "backend" in patched
+    assert "import module" in patched
+
+
+def test_python_verification_imports_leave_stdlib_checks_alone():
+    command = (
+        'python -c "import pathlib, sys; '
+        "sys.exit(0 if pathlib.Path('tests/test_module.py').exists() else 1)\""
+    )
+
+    assert patch_python_verification_imports(command) == command
+
+
+def test_python_verification_imports_leave_unittest_checks_alone():
+    command = "python -c \"import unittest; unittest.main(argv=[''], exit=False)\""
+
+    assert patch_python_verification_imports(command) == command
 
 
 def test_missing_jest_binary_is_treated_as_repairable_completion_verification():
@@ -1540,6 +1649,55 @@ def test_evaluator_needs_review_holds_before_auto_publish(
     payload = json.loads(review_log.log_metadata)
     assert payload["auto_publish_skipped"] is True
     assert payload["reason"] == "evaluator_needs_review"
+
+
+def test_successful_later_task_does_not_complete_session_with_failed_link(
+    db_session, tmp_path, monkeypatch
+):
+    ctx, execution = _seed_finalize_ctx(db_session, tmp_path)
+    failed_task = Task(
+        project_id=ctx.project.id,
+        title="Earlier failed task",
+        status=TaskStatus.FAILED,
+        error_message="prior failure",
+    )
+    db_session.add(failed_task)
+    db_session.flush()
+    db_session.add(
+        SessionTask(
+            session_id=ctx.session_id,
+            task_id=failed_task.id,
+            status=TaskStatus.FAILED,
+        )
+    )
+    db_session.commit()
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.ValidatorService.validate_task_completion",
+        lambda **kwargs: ValidationVerdict(
+            stage="task_completion",
+            status="accepted",
+            profile="implementation",
+            reasons=[],
+            details={"expected_core_files": ["calc_smoke.py"]},
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow._detect_completion_verification_command",
+        lambda project_dir: (None, None),
+    )
+
+    result = finalize_successful_task(
+        ctx=ctx,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "completed", result
+    assert ctx.task.status == TaskStatus.DONE
+    assert ctx.session.status == "paused"
+    assert ctx.session.last_alert_level == "error"
+    assert "failed task" in ctx.session.last_alert_message.lower()
 
 
 def test_hold_all_policy_holds_trivial_change_set_for_manual_review(

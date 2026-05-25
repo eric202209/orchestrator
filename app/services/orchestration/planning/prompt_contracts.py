@@ -35,8 +35,8 @@ def render_shell_fallback_limits() -> str:
 
 def render_python_verification_contract() -> str:
     return (
-        "For Python verify with `python -m py_compile`, unittest, or pytest; "
-        "if pytest config/tests exist, prefer final `python -m pytest tests/ -q`. "
+        "Python verify: py_compile, unittest, or pytest exit codes; "
+        "prefer `python -m pytest tests/ -q`. "
         "For Python app import assertions, create a tiny test file with `ops` "
         "instead of inline `python -c` snippets."
     )

@@ -265,8 +265,8 @@ def _completion_verification_python(project_dir: Path) -> str:
         if resolved in seen:
             continue
         seen.add(resolved)
-        if resolved.exists() and os.access(resolved, os.X_OK):
-            return str(resolved)
+        if candidate.exists() and os.access(candidate, os.X_OK):
+            return str(candidate)
 
     return sys.executable or "python3"
 
@@ -329,6 +329,10 @@ def _execute_completion_verification(
                 env["PYTHONPATH"] = os.pathsep.join(absolute_entries)
             else:
                 env.pop("PYTHONPATH", None)
+        pythonpath_entries = [str(project_dir.resolve())]
+        if env.get("PYTHONPATH"):
+            pythonpath_entries.append(env["PYTHONPATH"])
+        env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
         completed = subprocess.run(
             argv,
             cwd=str(project_dir),

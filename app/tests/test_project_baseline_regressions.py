@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 
 from app.models import (
@@ -938,6 +940,7 @@ def test_manual_promote_rejects_active_project_mutation_lock(
         project_root=project_root,
         operation="test_conflict",
         owner="test",
+        wait_timeout_seconds=0,
     ):
         response = authenticated_client.post(
             f"/api/v1/tasks/{task.id}/accept",
@@ -949,6 +952,39 @@ def test_manual_promote_rejects_active_project_mutation_lock(
     db_session.refresh(task)
     assert task.workspace_status == "ready"
     assert task_dir.exists()
+
+
+def test_project_mutation_lock_waits_for_short_lived_writer(tmp_path: Path):
+    project_root = tmp_path / "mutation-lock-wait"
+    project_root.mkdir(parents=True)
+    release = threading.Event()
+
+    def hold_lock() -> None:
+        with project_mutation_lock(
+            project_id=123,
+            project_root=project_root,
+            operation="holder",
+            owner="test-holder",
+            wait_timeout_seconds=0,
+        ):
+            release.wait(timeout=1)
+
+    thread = threading.Thread(target=hold_lock)
+    thread.start()
+    time.sleep(0.05)
+    release.set()
+
+    with project_mutation_lock(
+        project_id=123,
+        project_root=project_root,
+        operation="waiter",
+        owner="test-waiter",
+        wait_timeout_seconds=1,
+        poll_interval_seconds=0.01,
+    ):
+        assert True
+
+    thread.join(timeout=1)
 
 
 def test_manual_promote_clears_terminal_execution_mutation_lock(

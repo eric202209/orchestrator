@@ -16,6 +16,10 @@ from app.services.orchestration.operations.file_ops_contract import (
     SUPPORTED_FILE_OPS,
 )
 from app.services.orchestration.operations.patch_python import try_deterministic_patch
+from app.services.workspace.permissions import (
+    ensure_shared_path_to_root,
+    ensure_shared_permissions,
+)
 
 
 class ExecutorService:
@@ -380,6 +384,7 @@ class ExecutorService:
 
             if op_name == "mkdir":
                 target.mkdir(parents=True, exist_ok=True)
+                ensure_shared_path_to_root(target, normalized_project_dir)
                 output_lines.append(f"mkdir {relative}")
                 continue
 
@@ -396,6 +401,7 @@ class ExecutorService:
                 target.unlink()
                 files_changed.append(relative)
                 output_lines.append(f"delete_file {relative}")
+                ensure_shared_permissions(target.parent)
                 continue
 
             if op_name in CONTENT_FILE_OPS:
@@ -408,7 +414,9 @@ class ExecutorService:
                     }
                 if op_name == "write_file":
                     target.parent.mkdir(parents=True, exist_ok=True)
+                    ensure_shared_path_to_root(target.parent, normalized_project_dir)
                     target.write_text(content, encoding="utf-8")
+                    ensure_shared_permissions(target)
                     output_lines.append(f"write_file {relative} ({len(content)} chars)")
                 else:
                     if not target.parent.exists():
@@ -425,6 +433,7 @@ class ExecutorService:
                         }
                     with target.open("a", encoding="utf-8") as handle:
                         handle.write(content)
+                    ensure_shared_permissions(target)
                     output_lines.append(
                         f"append_file {relative} ({len(content)} chars)"
                     )
@@ -485,6 +494,7 @@ class ExecutorService:
                         re.sub(old, lambda _match: new, original, count=1),
                         encoding="utf-8",
                     )
+                    ensure_shared_permissions(target)
                     files_changed.append(relative)
                     output_lines.append(
                         f"replace_in_file {relative} (1 regex replacement)"
@@ -501,6 +511,7 @@ class ExecutorService:
                 )
                 if patch_result is not None:
                     if patch_result.success:
+                        ensure_shared_permissions(target)
                         files_changed.append(relative)
                         output_lines.append(
                             f"replace_in_file {relative} (patch_helper: {patch_result.evidence})"
@@ -526,6 +537,7 @@ class ExecutorService:
                     "output": f"replace_in_file old text is ambiguous in {relative}: {occurrence_count} occurrences",
                 }
             target.write_text(original.replace(old, new, 1), encoding="utf-8")
+            ensure_shared_permissions(target)
             files_changed.append(relative)
             output_lines.append(f"replace_in_file {relative} (1 replacement)")
 
