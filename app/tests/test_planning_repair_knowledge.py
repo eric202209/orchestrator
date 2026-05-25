@@ -9,6 +9,7 @@ from app.schemas.knowledge import (
     RecommendedAction,
 )
 from app.services.orchestration.planning.planner import (
+    PLANNING_REPAIR_PROMPT_MAX_CHARS,
     PlannerService,
     _render_repair_knowledge_block,
 )
@@ -69,3 +70,59 @@ def test_planning_repair_prompt_includes_bounded_knowledge_context():
     assert "Planning repair produced non-runnable step" in prompt
     assert "commands: []" in prompt
     assert len(prompt) <= 6000
+
+
+def test_planning_repair_prompt_preserves_knowledge_when_structure_is_large(
+    tmp_path,
+):
+    (tmp_path / "src" / "ledger_app").mkdir(parents=True)
+    (tmp_path / "tests").mkdir()
+    for idx in range(120):
+        (tmp_path / "src" / "ledger_app" / f"module_{idx}.py").write_text("")
+    (tmp_path / "tests" / "test_calc.py").write_text("")
+
+    prompt = PlannerService.build_planning_repair_prompt(
+        task_description="Fix the ledger calculator refund handling.",
+        malformed_output=(
+            '[{"step_number":2,"ops":[{"op":"replace_in_file",'
+            '"path":"src/ledger_app/calculator.py","old":"x","new":"y"}]}]'
+        ),
+        project_dir=tmp_path,
+        rejection_reasons=[
+            "replace_in_file old text not found in src/ledger_app/calculator.py",
+            "stale_replace_ops_steps: use identifiers from current file excerpt",
+        ],
+        knowledge_context=_knowledge_ctx(),
+    )
+
+    assert len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
+    assert "REPAIR KNOWLEDGE REFERENCES" in prompt
+    assert "Planning repair produced non-runnable step" in prompt
+    assert "PROJECT STRUCTURE CAPSULE" in prompt
+
+
+def test_specialized_repair_prompt_preserves_knowledge_when_structure_is_large(
+    tmp_path,
+):
+    (tmp_path / "src" / "ledger_app").mkdir(parents=True)
+    for idx in range(120):
+        (tmp_path / "src" / "ledger_app" / f"module_{idx}.py").write_text("")
+
+    prompt = PlannerService.build_planning_repair_prompt(
+        task_description="Verify existing app source paths only.",
+        malformed_output=(
+            '[{"step_number":1,"commands":["cat missing.css"],'
+            '"verification":"test -f missing.css"}]'
+        ),
+        project_dir=tmp_path,
+        rejection_reasons=[
+            "verification/review plan references source files that do not exist"
+        ],
+        knowledge_context=_knowledge_ctx(),
+    )
+
+    assert len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
+    assert "Verification-only repair mode." in prompt
+    assert "REPAIR KNOWLEDGE REFERENCES" in prompt
+    assert "Planning repair produced non-runnable step" in prompt
+    assert "PROJECT STRUCTURE CAPSULE" in prompt

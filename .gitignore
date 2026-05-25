@@ -121,3 +121,7 @@ skills-lock.json
 # graphify
 .graphify-venv/
 graphify-out/
+
+# understand-anything
+.understand-anything/
+.understandignore

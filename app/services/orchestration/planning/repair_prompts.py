@@ -31,6 +31,9 @@ PLANNING_REPAIR_MAX_KNOWLEDGE_ITEM_CHARS = 500
 PLANNING_REPAIR_COMPACT_MALFORMED_OUTPUT_CHARS = 800
 PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS = 700
 PLANNING_REPAIR_MAX_VALIDATION_ERROR_CHARS = 450
+PLANNING_REPAIR_STRUCTURE_TRUNCATION_MARKER = (
+    "\n- ... project structure capsule truncated to fit repair prompt budget"
+)
 REPAIR_PROMPT_MAX_CHARS = 6000
 PLANNING_REPAIR_PROMPT_MAX_CHARS = REPAIR_PROMPT_MAX_CHARS
 PLANNING_REPAIR_ALLOWED_KNOWLEDGE_TYPES = {
@@ -162,6 +165,21 @@ def build_planning_repair_prompt(
         knowledge_block=_join_optional_blocks(knowledge_block, structure_capsule),
     )
     if specialized_prompt is not None:
+        if len(specialized_prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS:
+            overflow = len(specialized_prompt) - PLANNING_REPAIR_PROMPT_MAX_CHARS
+            reduced_structure_capsule = _truncate_repair_structure_capsule(
+                structure_capsule,
+                max_chars=len(structure_capsule) - overflow - 80,
+            )
+            specialized_prompt = build_specialized_repair_prompt(
+                task_description=task_description,
+                malformed_output=malformed_output,
+                project_dir=project_dir,
+                rejection_reasons=rejection_reasons,
+                knowledge_block=_join_optional_blocks(
+                    knowledge_block, reduced_structure_capsule
+                ),
+            )
         return _apply_profile(specialized_prompt, prompt_profile, apply_prompt_profile)
     validation_error = ""
     if rejection_reasons:
@@ -178,7 +196,9 @@ def build_planning_repair_prompt(
     shell_fallback_limits = render_shell_fallback_limits()
     verification_contract = render_verification_contract()
     test_scaffold_contract = render_test_scaffold_contract()
-    prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
+
+    def _compose_prompt(current_structure_capsule: str) -> str:
+        return f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 Do not create, edit, read, or write files during planning repair; return the JSON array as message text only.
 Repair the plan, not the task. Preserve valid steps.
@@ -189,7 +209,7 @@ Bad:
 {validation_error or default_validation_error}
 
 {knowledge_block + chr(10) if knowledge_block else ""}
-{structure_capsule + chr(10) if structure_capsule else ""}
+{current_structure_capsule + chr(10) if current_structure_capsule else ""}
 Strict output schema: step_number, description, commands, verification,
 rollback, expected_files; optional ops.
 
@@ -214,6 +234,15 @@ Rules:
 14. Stale replace fixes: use only identifiers/paths present in current evidence. Do not invent helper variables.
 17. Each step is a separate JSON object. Never merge steps.
 """
+
+    prompt = _compose_prompt(structure_capsule)
+    if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS and structure_capsule:
+        overflow = len(prompt) - PLANNING_REPAIR_PROMPT_MAX_CHARS
+        reduced_structure_capsule = _truncate_repair_structure_capsule(
+            structure_capsule,
+            max_chars=len(structure_capsule) - overflow - 80,
+        )
+        prompt = _compose_prompt(reduced_structure_capsule)
     return _apply_profile(prompt, prompt_profile, apply_prompt_profile)
 
 
@@ -277,6 +306,17 @@ def _build_project_structure_capsule(project_dir: Path) -> str:
         return render_project_structure_capsule(build_project_index(project_dir))
     except Exception:
         return ""
+
+
+def _truncate_repair_structure_capsule(structure_capsule: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ""
+    if len(structure_capsule) <= max_chars:
+        return structure_capsule
+    marker = PLANNING_REPAIR_STRUCTURE_TRUNCATION_MARKER
+    if max_chars <= len(marker):
+        return ""
+    return structure_capsule[: max_chars - len(marker)].rstrip() + marker
 
 
 def _join_optional_blocks(*blocks: str) -> str:

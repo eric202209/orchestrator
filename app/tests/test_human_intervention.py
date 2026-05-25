@@ -39,9 +39,17 @@ _REVOKE_PATH = (
     "app.services.session.session_runtime_service.revoke_session_celery_tasks"
 )
 _CHECKPOINT_PATH = "app.services.workspace.checkpoint_service.CheckpointService"
+_AI_ANSWER_DELAY_PATH = "app.tasks.worker.answer_human_intervention_query.delay"
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def stub_ai_intervention_answer_task():
+    """Keep HITL API tests from opening a real Celery broker connection."""
+    with patch(_AI_ANSWER_DELAY_PATH) as mock_delay:
+        yield mock_delay
 
 
 @pytest.fixture()
