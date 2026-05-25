@@ -12,6 +12,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from app.services.project.source_imports import (
+    imported_source_excerpts_from_tests,
+)
+
 _TOTAL_BUDGET = 1500
 _PER_CMD_CHARS = 350
 _PER_CMD_TIMEOUT = 5
@@ -142,6 +146,23 @@ def _commands_for_failure_class(
     return cmds
 
 
+def _looks_like_argparse_unrecognized_failure(failure_context: str) -> bool:
+    lowered = str(failure_context or "").lower()
+    return "unrecognized arguments" in lowered and (
+        "argparse" in lowered or "usage:" in lowered or "pytest" in lowered
+    )
+
+
+def _imported_source_excerpts_for_argparse_failure(project_dir: Path) -> dict[str, str]:
+    """Return compact source excerpts imported by tests for argparse failures."""
+
+    return imported_source_excerpts_from_tests(
+        project_dir,
+        truncate=_truncate,
+        max_chars=_PER_CMD_CHARS,
+    )
+
+
 def collect_workspace_evidence(
     failure_class: str,
     project_dir: Path,
@@ -180,6 +201,24 @@ def collect_workspace_evidence(
                 if p.suffix in (".py", ".txt", ".json", ".toml", ".cfg", ".ini"):
                     capsule.files_inspected.append(stripped)
                     capsule.matched_line_count += 1
+
+    if (
+        failure_class == "pytest_failure"
+        and total_chars < _TOTAL_BUDGET
+        and _looks_like_argparse_unrecognized_failure(failure_context)
+    ):
+        for rel_path, excerpt in _imported_source_excerpts_for_argparse_failure(
+            project_dir
+        ).items():
+            if total_chars >= _TOTAL_BUDGET:
+                break
+            remaining = _TOTAL_BUDGET - total_chars
+            capped = _truncate(excerpt, min(_PER_CMD_CHARS, remaining))
+            key = f"source excerpt imported by failing tests: {rel_path}"
+            capsule.results[key] = capped
+            capsule.files_inspected.append(f"./{rel_path}")
+            capsule.matched_line_count += 1
+            total_chars += len(capped)
 
     capsule.total_chars = total_chars
     return capsule

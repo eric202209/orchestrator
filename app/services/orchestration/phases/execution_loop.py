@@ -1775,7 +1775,10 @@ def execute_step_loop(
                     except Exception:
                         pass
                 debug_data = (
-                    normalize_bounded_debug_repair_payload(parsed_repair)
+                    normalize_bounded_debug_repair_payload(
+                        parsed_repair,
+                        envelope=debug_feedback_envelope,
+                    )
                     if success
                     else None
                 )

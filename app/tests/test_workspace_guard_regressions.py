@@ -253,6 +253,28 @@ PY"""
     assert normalized == command
 
 
+def test_normalize_command_allows_quoted_sed_address_literals(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir(parents=True)
+    command = (
+        "sed -i '/--uppercase/d' src/small_cli/cli.py; "
+        "sed -i '/if uppercase:/d' src/small_cli/cli.py; "
+        "sed -i '/message = message.upper()/d' src/small_cli/cli.py"
+    )
+
+    normalized = normalize_command(command, project_dir)
+
+    assert normalized == command
+
+
+def test_normalize_command_still_rejects_sed_absolute_file_operand(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir(parents=True)
+
+    with pytest.raises(TaskWorkspaceViolationError, match="Path escapes"):
+        normalize_command("sed -i 's/a/b/' '/tmp/outside.py'", project_dir)
+
+
 def test_normalize_command_allows_tilde_inside_jsx_content(tmp_path):
     project_dir = tmp_path / "project"
     project_dir.mkdir(parents=True)

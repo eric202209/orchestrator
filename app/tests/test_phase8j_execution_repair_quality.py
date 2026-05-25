@@ -84,6 +84,78 @@ def test_normalize_real_shell_command_stays_command_fix():
     assert result["fix"] == "python -m pytest app/tests/ -q"
 
 
+def test_normalize_rejects_pure_sed_command_fix_for_semantic_pytest_failure():
+    envelope = DebugFeedbackEnvelope(
+        task_execution_id=1,
+        task_id=1,
+        step_index=0,
+        failure_phase="execution",
+        failed_command="pytest -q",
+        return_code=1,
+        workspace_path=".",
+        failure_class="pytest_failure",
+        pytest_excerpt="pytest: error: unrecognized arguments: --uppercase",
+    )
+    payload = [
+        {
+            "title": "patch option spelling",
+            "command": "sed -i 's/--uppercase/--uppercase /' src/small_cli/cli.py",
+            "verification_command": "pytest -q",
+        }
+    ]
+
+    assert normalize_bounded_debug_repair_payload(payload, envelope=envelope) is None
+
+
+def test_normalize_rejects_pure_sed_command_fix_for_semantic_validation_failure():
+    envelope = DebugFeedbackEnvelope(
+        task_execution_id=1,
+        task_id=1,
+        step_index=0,
+        failure_phase="execution",
+        failed_command='python -c "import src.small_cli.cli"',
+        return_code=1,
+        workspace_path=".",
+        failure_class="completion_validation_failed",
+        stderr_excerpt="NameError: name 'cli' is not defined",
+    )
+    payload = [
+        {
+            "title": "patch typer name",
+            "command": "sed -i 's/^cli = typer.Typer()/cli = typer.Typer(name=\"cli\")/' src/small_cli/cli.py",
+            "verification_command": 'python -c "import src.small_cli.cli"',
+        }
+    ]
+
+    assert normalize_bounded_debug_repair_payload(payload, envelope=envelope) is None
+
+
+def test_normalize_allows_command_fix_that_runs_verifier_for_pytest_failure():
+    envelope = DebugFeedbackEnvelope(
+        task_execution_id=1,
+        task_id=1,
+        step_index=0,
+        failure_phase="execution",
+        failed_command="pytest -q",
+        return_code=1,
+        workspace_path=".",
+        failure_class="pytest_failure",
+        pytest_excerpt="pytest: error: unrecognized arguments: --uppercase",
+    )
+    payload = [
+        {
+            "title": "run focused verification",
+            "command": "python -m pytest tests/test_cli.py -q",
+            "verification_command": "python -m pytest tests/test_cli.py -q",
+        }
+    ]
+
+    result = normalize_bounded_debug_repair_payload(payload, envelope=envelope)
+
+    assert result is not None
+    assert result["fix_type"] == "command_fix"
+
+
 def test_normalize_rejects_missing_command():
     payload = [{"title": "no command", "verification_command": "pytest"}]
     assert normalize_bounded_debug_repair_payload(payload) is None

@@ -64,10 +64,8 @@ coverage/
 
 # Development files
 .notes/
-.tests/
-app/tests/fixtures/*
 *.note
-*.test
+scripts/evals/*
 
 # Database files
 *.db
@@ -89,7 +87,6 @@ docs/*
 
 # Scripts to stop services (should be run locally)
 stop_all.sh
-start_all.sh
 
 # Configuration files in config/ directory (tracked)
 config/*.conf

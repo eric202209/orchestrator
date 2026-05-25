@@ -68,6 +68,208 @@ def test_validate_plan_allows_empty_commands_when_write_file_ops_present(tmp_pat
     assert "missing_commands_steps" not in result.details
 
 
+def test_validate_step_success_rejects_undefined_python_test_names(tmp_path):
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_cli.py").write_text(
+        "def test_uppercase():\n"
+        "    result = runner.invoke(cli, ['--uppercase'])\n"
+        "    assert result.exit_code == 0\n",
+        encoding="utf-8",
+    )
+
+    verdict = ValidatorService.validate_step_success(
+        project_dir=tmp_path,
+        step={
+            "step_number": 1,
+            "description": "Append CLI regression test",
+            "expected_files": ["tests/test_cli.py"],
+            "verification": (
+                "python -c \"assert 'test_uppercase' in "
+                "open('tests/test_cli.py').read()\""
+            ),
+        },
+        step_output="ok",
+        missing_expected_files=[],
+        tool_failures=[],
+        validation_profile="implementation",
+        reported_changed_files=["tests/test_cli.py"],
+    )
+
+    assert verdict.accepted is False
+    assert "test_integrity_findings" in verdict.details
+    assert {
+        finding["code"] for finding in verdict.details["test_integrity_findings"]
+    } == {"undefined_test_name"}
+    assert any("runner" in reason for reason in verdict.reasons)
+    assert any("cli" in reason for reason in verdict.reasons)
+
+
+def test_validate_plan_rejects_append_test_with_undefined_python_names(tmp_path):
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_cli.py").write_text(
+        "from small_cli.cli import main\n\n"
+        "def test_existing(capsys):\n"
+        "    assert main(['hello']) == 0\n",
+        encoding="utf-8",
+    )
+
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Append uppercase regression test",
+                "commands": [
+                    "python -c \"assert 'test_uppercase' in "
+                    "open('tests/test_cli.py').read()\""
+                ],
+                "verification": (
+                    "python -c \"assert 'test_uppercase' in "
+                    "open('tests/test_cli.py').read()\""
+                ),
+                "expected_files": ["tests/test_cli.py"],
+                "ops": [
+                    {
+                        "op": "append_file",
+                        "path": "tests/test_cli.py",
+                        "content": (
+                            "\ndef test_uppercase():\n"
+                            "    result = runner.invoke(cli, ['--uppercase'])\n"
+                            "    assert result.exit_code == 0\n"
+                        ),
+                    }
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Implement --uppercase for the small_cli CLI",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.accepted is False
+    assert verdict.details["undefined_python_test_name_materializations"] == [
+        "tests/test_cli.py"
+    ]
+
+
+def test_validate_plan_rejects_undefined_python_test_names_without_project_dir():
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Write uppercase regression test",
+                "commands": [
+                    "python -m pytest tests/test_cli.py -q",
+                ],
+                "verification": "python -m pytest tests/test_cli.py -q",
+                "expected_files": ["tests/test_cli.py"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "tests/test_cli.py",
+                        "content": (
+                            "def test_uppercase():\n"
+                            "    result = runner.invoke(cli, ['--uppercase'])\n"
+                            "    assert result.exit_code == 0\n"
+                        ),
+                    }
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Implement --uppercase for the small_cli CLI",
+        execution_profile="implementation",
+        project_dir=None,
+    )
+
+    assert verdict.accepted is False
+    assert verdict.details["undefined_python_test_name_materializations"] == [
+        "tests/test_cli.py"
+    ]
+
+
+def test_validate_plan_rejects_append_source_with_undefined_decorator_root(tmp_path):
+    src_dir = tmp_path / "src" / "small_cli"
+    src_dir.mkdir(parents=True)
+    (src_dir / "cli.py").write_text(
+        "import argparse\n\n"
+        "def main(argv=None):\n"
+        "    parser = argparse.ArgumentParser()\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Append uppercase command",
+                "commands": [
+                    'python -c "import src.small_cli.cli"',
+                ],
+                "verification": 'python -c "import src.small_cli.cli"',
+                "expected_files": ["src/small_cli/cli.py"],
+                "ops": [
+                    {
+                        "op": "append_file",
+                        "path": "src/small_cli/cli.py",
+                        "content": (
+                            "\n@cli.command()\n"
+                            "def uppercase(message: str):\n"
+                            "    print(message.upper())\n"
+                        ),
+                    }
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Implement --uppercase for the small_cli CLI",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.accepted is False
+    assert verdict.details["undefined_python_decorator_materializations"] == [
+        "src/small_cli/cli.py"
+    ]
+
+
+def test_validate_plan_rejects_undefined_python_decorator_without_project_dir():
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Write CLI command",
+                "commands": ['python -c "import src.small_cli.cli"'],
+                "verification": 'python -c "import src.small_cli.cli"',
+                "expected_files": ["src/small_cli/cli.py"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "src/small_cli/cli.py",
+                        "content": (
+                            "@cli.command()\n"
+                            "def uppercase(message: str):\n"
+                            "    print(message.upper())\n"
+                        ),
+                    }
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Implement --uppercase for the small_cli CLI",
+        execution_profile="implementation",
+        project_dir=None,
+    )
+
+    assert verdict.accepted is False
+    assert verdict.details["undefined_python_decorator_materializations"] == [
+        "src/small_cli/cli.py"
+    ]
+
+
 def test_verification_plan_allows_expected_file_created_by_write_op(tmp_path):
     (tmp_path / "index.html").write_text(
         '<link rel="stylesheet" href="css/style.css">', encoding="utf-8"
