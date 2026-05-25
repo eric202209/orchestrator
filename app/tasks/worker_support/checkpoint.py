@@ -76,6 +76,36 @@ def _apply_checkpoint_payload(
             "execution_results", checkpoint_payload.get("step_results", [])
         )
     ]
+    restored_result_count = len(orchestration_state.execution_results)
+    restored_cursor = int(orchestration_state.current_step_index or 0)
+    plan_length = len(orchestration_state.plan or [])
+    reconciled_cursor = max(0, min(restored_result_count, plan_length))
+    if restored_cursor != reconciled_cursor:
+        orchestration_state.current_step_index = reconciled_cursor
+        reconciliation_details = {
+            "checkpoint_name": checkpoint_payload.get("_resolved_checkpoint_name")
+            or checkpoint_payload.get("checkpoint_name"),
+            "requested_checkpoint_name": checkpoint_payload.get(
+                "_requested_checkpoint_name"
+            ),
+            "original_current_step_index": restored_cursor,
+            "reconciled_current_step_index": reconciled_cursor,
+            "execution_results_count": restored_result_count,
+            "plan_length": plan_length,
+            "reason": "checkpoint_cursor_execution_results_mismatch",
+        }
+        _append_orchestration_event(
+            project_dir=orchestration_state.project_dir,
+            session_id=session_id,
+            task_id=task_id,
+            event_type=EventType.CHECKPOINT_CURSOR_RECONCILED,
+            details=reconciliation_details,
+        )
+        emit_live(
+            "WARN",
+            "[ORCHESTRATION] Resume checkpoint cursor did not match saved execution results; reconciled to the durable result boundary",
+            metadata={"phase": "resume", **reconciliation_details},
+        )
     raw_status = checkpoint_state.get("status", "")
     if raw_status in ("executing", "debugging", "revising_plan"):
         try:

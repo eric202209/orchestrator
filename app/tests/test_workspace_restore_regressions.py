@@ -6,10 +6,67 @@ from pathlib import Path
 
 from app.models import Project, Session as SessionModel, SessionTask, Task, TaskStatus
 from app.services.workspace.checkpoint_service import CheckpointService
+from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.policy import should_restore_workspace_on_failure
+import app.tasks.worker_support.checkpoint as checkpoint_support
 import app.services.session.session_lifecycle_service as session_lifecycle_service
 from app.services.session.session_lifecycle_service import stop_session_lifecycle
 from app.services.task_service import TaskService
+
+
+class _CheckpointApplyState:
+    def __init__(self, project_dir: Path):
+        self.project_dir = project_dir
+        self.project_name = "checkpoint-project"
+        self.project_context = ""
+        self._task_subfolder_override = None
+        self.plan = []
+        self.reasoning_artifact = None
+        self.current_step_index = 0
+        self.debug_attempts = []
+        self.changed_files = []
+        self.validation_history = []
+        self.phase_history = []
+        self.last_plan_validation = None
+        self.last_completion_validation = None
+        self.relaxed_mode = False
+        self.completion_repair_attempts = 0
+        self.debug_repair_task_execution_ids = []
+        self.execution_results = []
+        self.status = None
+
+
+class _CheckpointApplyTask:
+    steps = None
+
+
+def _checkpoint_payload(*, current_step_index: int, execution_result_count: int):
+    return {
+        "checkpoint_name": "autosave_latest",
+        "context": {
+            "task_description": "resume task",
+            "project_name": "checkpoint-project",
+            "task_subfolder": "task-checkpoint",
+        },
+        "orchestration_state": {
+            "status": "executing",
+            "plan": [
+                {"description": "step 1"},
+                {"description": "step 2"},
+                {"description": "step 3"},
+            ],
+            "current_step_index": current_step_index,
+            "execution_results": [
+                {
+                    "step_number": index + 1,
+                    "status": "success",
+                    "output": "ok",
+                    "files_changed": [f"file-{index + 1}.txt"],
+                }
+                for index in range(execution_result_count)
+            ],
+        },
+    }
 
 
 def test_workspace_restore_policy_only_allows_isolation_failures():
@@ -180,6 +237,93 @@ def test_resume_prefers_richer_checkpoint_over_empty_requested_one(
         item["name"] == "autosave_latest" and item["recommended"] is True
         for item in listed
     )
+
+
+def test_checkpoint_apply_reconciles_cursor_ahead_of_execution_results(
+    tmp_path: Path, monkeypatch
+):
+    captured_events = []
+    live_logs = []
+
+    monkeypatch.setattr(
+        checkpoint_support,
+        "_append_orchestration_event",
+        lambda **kwargs: captured_events.append(kwargs) or {"event_id": "event-1"},
+    )
+    monkeypatch.setattr(
+        checkpoint_support.ValidatorService,
+        "assess_plan_workspace_compatibility",
+        staticmethod(lambda **_kwargs: {"compatible": True}),
+    )
+
+    state = _CheckpointApplyState(tmp_path)
+    checkpoint_support._apply_checkpoint_payload(
+        _checkpoint_payload(current_step_index=2, execution_result_count=1),
+        orchestration_state=state,
+        task=_CheckpointApplyTask(),
+        session_id=123,
+        task_id=456,
+        prompt="original",
+        emit_live=lambda *args, **kwargs: live_logs.append((args, kwargs)),
+    )
+
+    assert state.current_step_index == 1
+    assert len(state.execution_results) == 1
+    reconciliation_events = [
+        event
+        for event in captured_events
+        if event["event_type"] == EventType.CHECKPOINT_CURSOR_RECONCILED
+    ]
+    assert reconciliation_events
+    assert (
+        reconciliation_events[0]["details"]["reason"]
+        == "checkpoint_cursor_execution_results_mismatch"
+    )
+    assert reconciliation_events[0]["details"]["original_current_step_index"] == 2
+    assert reconciliation_events[0]["details"]["reconciled_current_step_index"] == 1
+    assert any(
+        kwargs["metadata"]["reason"] == "checkpoint_cursor_execution_results_mismatch"
+        for _args, kwargs in live_logs
+    )
+
+
+def test_checkpoint_apply_reconciles_execution_results_ahead_of_cursor(
+    tmp_path: Path, monkeypatch
+):
+    captured_events = []
+
+    monkeypatch.setattr(
+        checkpoint_support,
+        "_append_orchestration_event",
+        lambda **kwargs: captured_events.append(kwargs) or {"event_id": "event-1"},
+    )
+    monkeypatch.setattr(
+        checkpoint_support.ValidatorService,
+        "assess_plan_workspace_compatibility",
+        staticmethod(lambda **_kwargs: {"compatible": True}),
+    )
+
+    state = _CheckpointApplyState(tmp_path)
+    checkpoint_support._apply_checkpoint_payload(
+        _checkpoint_payload(current_step_index=0, execution_result_count=2),
+        orchestration_state=state,
+        task=_CheckpointApplyTask(),
+        session_id=123,
+        task_id=456,
+        prompt="original",
+        emit_live=lambda *_args, **_kwargs: None,
+    )
+
+    assert state.current_step_index == 2
+    assert len(state.execution_results) == 2
+    reconciliation_events = [
+        event
+        for event in captured_events
+        if event["event_type"] == EventType.CHECKPOINT_CURSOR_RECONCILED
+    ]
+    assert reconciliation_events
+    assert reconciliation_events[0]["details"]["original_current_step_index"] == 0
+    assert reconciliation_events[0]["details"]["reconciled_current_step_index"] == 2
 
 
 def test_checkpoint_api_exposes_recommended_resume_checkpoint(

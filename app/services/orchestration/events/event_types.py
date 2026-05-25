@@ -53,6 +53,7 @@ class EventType:
     # ── Checkpoints ──────────────────────────────────────────────────────────
     CHECKPOINT_SAVED = "checkpoint_saved"
     CHECKPOINT_LOADED = "checkpoint_loaded"
+    CHECKPOINT_CURSOR_RECONCILED = "checkpoint_cursor_reconciled"
     CHECKPOINT_REDIRECTED = "checkpoint_redirected"
     HEALTH_SCORE_UPDATED = "health_score_updated"
     DIVERGENCE_DETECTED = "divergence_detected"
