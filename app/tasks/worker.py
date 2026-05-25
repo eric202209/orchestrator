@@ -693,7 +693,7 @@ def execute_orchestration_task(
                 )
 
         restore_workspace_snapshot_if_needed = (
-            lambda reason: _restore_workspace_snapshot_if_needed(
+            lambda reason, force_restore=False: _restore_workspace_snapshot_if_needed(
                 reason,
                 project=project,
                 session_id=session_id,
@@ -704,6 +704,7 @@ def execute_orchestration_task(
                 runs_in_canonical_baseline=runs_in_canonical_baseline,
                 task_service=task_service,
                 emit_live=emit_live,
+                force_restore=force_restore,
             )
         )
 

@@ -27,13 +27,14 @@ def _restore_workspace_snapshot_if_needed(
     runs_in_canonical_baseline: bool,
     task_service: Any,
     emit_live: Any,
+    force_restore: bool = False,
 ) -> Optional[Dict[str, Any]]:
     if not project:
         return None
     should_restore = should_restore_workspace_on_failure(
         reason, policy_profile=policy_profile_name
     )
-    if not should_restore:
+    if not should_restore and not force_restore:
         logger.warning(
             "[ORCHESTRATION] Preserved workspace for task %s after %s; automatic restore is limited to isolation-violation failures",
             task_id,
@@ -96,6 +97,17 @@ def _restore_workspace_snapshot_if_needed(
                 "target_path": restore_result.get("target_path"),
             },
         )
+        _append_orchestration_event(
+            project_dir=orchestration_state.project_dir,
+            session_id=session_id,
+            task_id=task_id,
+            event_type=EventType.WORKSPACE_PRESERVED,
+            details={
+                "reason": reason,
+                "restored_files": restore_result.get("files_restored", 0),
+                "force_restore": force_restore,
+            },
+        )
     elif (
         restore_result
         and restore_result.get("reason")
@@ -132,17 +144,6 @@ def _restore_workspace_snapshot_if_needed(
             details={
                 "reason": reason,
                 "policy": "empty_snapshot_preserved_existing_workspace",
-            },
-        )
-    elif restore_result and restore_result.get("restored"):
-        _append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
-            session_id=session_id,
-            task_id=task_id,
-            event_type=EventType.WORKSPACE_PRESERVED,
-            details={
-                "reason": reason,
-                "restored_files": restore_result.get("files_restored", 0),
             },
         )
     return restore_result

@@ -11,6 +11,8 @@ from app.models import (
     TaskStatus,
 )
 from app.services.orchestration.phases.failure_flow import handle_task_failure
+from app.services.orchestration.events.event_types import EventType
+import app.services.orchestration.phases.failure_flow as failure_flow
 from app.services.orchestration.phases.planning_flow import (
     _finalize_planning_timeout_failure,
 )
@@ -43,8 +45,32 @@ class _RetryCapableSelfTask:
     class _RetrySignal(Exception):
         pass
 
-    def retry(self, exc):
+    def retry(self, exc, **kwargs):
+        self.retry_kwargs = kwargs
         raise self._RetrySignal(exc)
+
+
+class _RetryRequestWithKwargsSelfTask(_RetryCapableSelfTask):
+    class request:
+        retries = 0
+        kwargs = {
+            "session_id": 1,
+            "task_id": 1,
+            "prompt": "original prompt",
+            "timeout_seconds": 300,
+            "resume_checkpoint_name": None,
+            "expected_session_instance_id": "instance-1",
+            "task_execution_id": 1,
+            "queued_event_id": "queued-1",
+        }
+
+
+class _FakeOrchestrationState:
+    def __init__(self, project_dir):
+        self.project_dir = project_dir
+        self.status = None
+        self.abort_reason = ""
+        self.phase_history = []
 
 
 class _UnexpectedRetrySelfTask:
@@ -499,6 +525,211 @@ def test_celery_retry_leaves_task_pending_so_claim_can_succeed(db_session):
     ), f"task.status={task.status!r} — retry will fail with task_not_claimable:running"
     assert session.status == "running"
     assert session.is_active is True
+
+
+def test_retryable_failure_restores_workspace_before_celery_retry(db_session, tmp_path):
+    project = Project(name="Retry Restore Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    session = SessionModel(
+        project_id=project.id,
+        name="Retry Restore Session",
+        status="running",
+        execution_mode="automatic",
+        is_active=True,
+        instance_id="instance-1",
+    )
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+
+    task = Task(
+        project_id=project.id,
+        title="Mutating task",
+        description="Mutates a file then hits a retryable runtime error",
+        status=TaskStatus.RUNNING,
+        task_subfolder="task-mutating",
+    )
+    db_session.add(task)
+    db_session.commit()
+    db_session.refresh(task)
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.RUNNING,
+    )
+    db_session.add(execution)
+    db_session.commit()
+    db_session.refresh(task)
+    db_session.refresh(execution)
+
+    mutated_file = tmp_path / "dirty.txt"
+    mutated_file.write_text("partial mutation", encoding="utf-8")
+    restore_calls = []
+    live_logs = []
+
+    def restore_workspace(reason, *, force_restore=False):
+        restore_calls.append((reason, force_restore))
+        mutated_file.unlink()
+        return {"restored": True, "files_restored": 1}
+
+    ctx = OrchestrationRunContext(
+        db=db_session,
+        session=session,
+        project=project,
+        task=task,
+        session_task_link=None,
+        session_id=session.id,
+        task_id=task.id,
+        prompt=task.description,
+        timeout_seconds=300,
+        execution_profile="full_lifecycle",
+        validation_profile="implementation",
+        runs_in_canonical_baseline=False,
+        orchestration_state=_FakeOrchestrationState(tmp_path),
+        runtime_service=None,
+        task_service=None,
+        logger=logging.getLogger(__name__),
+        emit_live=lambda *_args, **_kwargs: None,
+        error_handler=type(
+            "StubErrorHandler",
+            (),
+            {"should_retry": staticmethod(lambda _exc, _context: True)},
+        )(),
+        restore_workspace_snapshot_if_needed=restore_workspace,
+        task_execution_id=execution.id,
+    )
+
+    retry_task = _RetryCapableSelfTask()
+    try:
+        handle_task_failure(
+            self_task=retry_task,
+            ctx=ctx,
+            exc=RuntimeError("retryable failure after file mutation"),
+            get_latest_session_task_link_fn=lambda *_args, **_kwargs: None,
+            write_project_state_snapshot_fn=lambda *_args, **_kwargs: None,
+            save_orchestration_checkpoint_fn=lambda *_args, **_kwargs: None,
+            record_live_log_fn=lambda *args, **kwargs: live_logs.append((args, kwargs)),
+        )
+    except _RetryCapableSelfTask._RetrySignal:
+        pass
+
+    assert not mutated_file.exists()
+    assert restore_calls == [("retryable task failure", True)]
+    assert any(
+        "Restored workspace snapshot before retrying failed task" in args[4]
+        for args, _kwargs in live_logs
+    )
+    assert getattr(retry_task, "retry_kwargs", {}) == {}
+
+
+def test_retryable_failure_marks_dirty_checkpoint_resume_when_restore_unavailable(
+    db_session, tmp_path, monkeypatch
+):
+    project = Project(name="Retry Dirty Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    session = SessionModel(
+        project_id=project.id,
+        name="Retry Dirty Session",
+        status="running",
+        execution_mode="automatic",
+        is_active=True,
+        instance_id="instance-1",
+    )
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+
+    task = Task(
+        project_id=project.id,
+        title="Dirty retry task",
+        description="Fails after mutating the workspace",
+        status=TaskStatus.RUNNING,
+        task_subfolder="task-dirty-retry",
+    )
+    db_session.add(task)
+    db_session.commit()
+    db_session.refresh(task)
+
+    captured_events = []
+    live_logs = []
+
+    def capture_event(**kwargs):
+        captured_events.append(kwargs)
+        return {"event_id": "event-1"}
+
+    monkeypatch.setattr(failure_flow, "append_orchestration_event", capture_event)
+
+    ctx = OrchestrationRunContext(
+        db=db_session,
+        session=session,
+        project=project,
+        task=task,
+        session_task_link=None,
+        session_id=session.id,
+        task_id=task.id,
+        prompt=task.description,
+        timeout_seconds=300,
+        execution_profile="full_lifecycle",
+        validation_profile="implementation",
+        runs_in_canonical_baseline=False,
+        orchestration_state=_FakeOrchestrationState(tmp_path),
+        runtime_service=None,
+        task_service=None,
+        logger=logging.getLogger(__name__),
+        emit_live=lambda *_args, **_kwargs: None,
+        error_handler=type(
+            "StubErrorHandler",
+            (),
+            {"should_retry": staticmethod(lambda _exc, _context: True)},
+        )(),
+        restore_workspace_snapshot_if_needed=lambda _reason, **_kwargs: {
+            "restored": False,
+            "reason": "snapshot_missing",
+        },
+    )
+
+    retry_task = _RetryRequestWithKwargsSelfTask()
+    retry_task.request.kwargs = {
+        **retry_task.request.kwargs,
+        "session_id": session.id,
+        "task_id": task.id,
+    }
+
+    try:
+        handle_task_failure(
+            self_task=retry_task,
+            ctx=ctx,
+            exc=RuntimeError("retryable failure after dirty mutation"),
+            get_latest_session_task_link_fn=lambda *_args, **_kwargs: None,
+            write_project_state_snapshot_fn=lambda *_args, **_kwargs: None,
+            save_orchestration_checkpoint_fn=lambda *_args, **_kwargs: None,
+            record_live_log_fn=lambda *args, **kwargs: live_logs.append((args, kwargs)),
+        )
+    except _RetryCapableSelfTask._RetrySignal:
+        pass
+
+    retry_kwargs = retry_task.retry_kwargs["kwargs"]
+    assert retry_kwargs["resume_checkpoint_name"] == "autosave_error"
+    assert retry_kwargs["queued_event_id"] is None
+    assert any(
+        event["event_type"] == EventType.WORKSPACE_RETRY_DIRTY
+        for event in captured_events
+    )
+    assert any(
+        kwargs.get("metadata", {}).get("retry_mode") == "checkpoint_resume_required"
+        for _args, kwargs in live_logs
+    )
+
+    db_session.refresh(task)
+    assert task.status == TaskStatus.PENDING
+    assert "checkpoint resume" in (task.error_message or "")
 
 
 def test_planning_lock_wait_timeout_terminalizes_execution_without_retry(db_session):

@@ -27,6 +27,8 @@ from app.services.orchestration.types import OrchestrationRunContext
 from app.services.workspace.project_mutation_lock import ProjectMutationLockError
 from app.services.prompt_templates import OrchestrationStatus
 
+DIRTY_RETRY_CHECKPOINT_NAME = "autosave_error"
+
 
 def _task_execution_for_context(
     db: Any,
@@ -53,6 +55,109 @@ def _session_has_other_active_execution(
     if current_task_execution_id is not None:
         query = query.filter(TaskExecution.id != current_task_execution_id)
     return query.first() is not None
+
+
+def _retry_request_kwargs(self_task: Any) -> Optional[dict[str, Any]]:
+    request = getattr(self_task, "request", None)
+    kwargs = getattr(request, "kwargs", None)
+    if not isinstance(kwargs, dict):
+        return None
+    return dict(kwargs)
+
+
+def _prepare_retry_workspace(
+    *,
+    ctx: OrchestrationRunContext,
+    exc: Exception,
+    restore_workspace_snapshot_if_needed: Optional[Callable[..., Any]],
+    record_live_log_fn: Callable[..., None],
+    logger: logging.Logger,
+    self_task: Any,
+) -> tuple[bool, Optional[dict[str, Any]]]:
+    """Prepare workspace before Celery retry.
+
+    Returns (workspace_restored, retry_kwargs). retry_kwargs is populated only
+    when the workspace could not be restored and the retried task should resume
+    from the error checkpoint instead of blindly starting clean.
+    """
+
+    db = ctx.db
+    session = ctx.session
+    session_id = ctx.session_id
+    task_id = ctx.task_id
+    orchestration_state = ctx.orchestration_state
+    retry_details = {
+        "phase": "failure",
+        "reason": "retryable_task_failure",
+        "error": str(exc)[:500],
+        "checkpoint_name": DIRTY_RETRY_CHECKPOINT_NAME,
+    }
+    restore_result = None
+
+    if restore_workspace_snapshot_if_needed:
+        try:
+            restore_result = restore_workspace_snapshot_if_needed(
+                "retryable task failure",
+                force_restore=True,
+            )
+        except TypeError:
+            restore_result = restore_workspace_snapshot_if_needed(
+                "retryable task failure"
+            )
+        except Exception as restore_exc:
+            restore_result = {
+                "restored": False,
+                "reason": f"restore_failed:{str(restore_exc)[:200]}",
+            }
+            logger.warning(
+                "[ORCHESTRATION] Workspace restore before retry failed for task %s: %s",
+                task_id,
+                restore_exc,
+            )
+
+    if restore_result and restore_result.get("restored"):
+        record_live_log_fn(
+            db,
+            session_id,
+            task_id,
+            "WARN",
+            "[ORCHESTRATION] Restored workspace snapshot before retrying failed task",
+            session_instance_id=session.instance_id if session else None,
+            metadata={**retry_details, "restore_result": restore_result},
+        )
+        return True, None
+
+    dirty_details = {
+        **retry_details,
+        "restore_result": restore_result,
+        "retry_mode": "checkpoint_resume_required",
+    }
+    if orchestration_state is not None:
+        try:
+            append_orchestration_event(
+                project_dir=orchestration_state.project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                event_type=EventType.WORKSPACE_RETRY_DIRTY,
+                details=dirty_details,
+            )
+        except Exception:
+            pass
+    record_live_log_fn(
+        db,
+        session_id,
+        task_id,
+        "WARN",
+        "[ORCHESTRATION] Retryable failure left workspace un-restored; retry will resume from autosave_error checkpoint",
+        session_instance_id=session.instance_id if session else None,
+        metadata=dirty_details,
+    )
+
+    retry_kwargs = _retry_request_kwargs(self_task)
+    if retry_kwargs is not None:
+        retry_kwargs["resume_checkpoint_name"] = DIRTY_RETRY_CHECKPOINT_NAME
+        retry_kwargs["queued_event_id"] = None
+    return False, retry_kwargs
 
 
 def handle_task_failure(
@@ -244,10 +349,29 @@ def handle_task_failure(
     )
 
     if not knowledge_halted and has_retry_capacity and session and task:
+        retry_workspace_restored = False
+        retry_kwargs = None
+        if ctx is not None:
+            retry_workspace_restored, retry_kwargs = _prepare_retry_workspace(
+                ctx=ctx,
+                exc=exc,
+                restore_workspace_snapshot_if_needed=restore_workspace_snapshot_if_needed,
+                record_live_log_fn=record_live_log_fn,
+                logger=logger,
+                self_task=self_task,
+            )
         mark_task_attempt_pending(
             task=task,
             session_task_link=session_task_link,
             workspace_status=("in_progress" if task.task_subfolder else "not_created"),
+            error_message=(
+                None
+                if retry_workspace_restored
+                else (
+                    "Retry requires checkpoint resume because the workspace could "
+                    "not be restored cleanly after failure."
+                )
+            ),
         )
         mark_session_running(
             session,
@@ -258,6 +382,8 @@ def handle_task_failure(
             )[:2000],
         )
         db.commit()
+        if retry_kwargs is not None:
+            raise self_task.retry(exc=exc, kwargs=retry_kwargs)
         raise self_task.retry(exc=exc)
 
     if (

@@ -234,7 +234,7 @@ class OrchestrationRunContext:
     workflow_profile: str = "default"
     workflow_stage: Optional[str] = None
     task_execution_id: Optional[int] = None
-    restore_workspace_snapshot_if_needed: Optional[Callable[[str], Any]] = None
+    restore_workspace_snapshot_if_needed: Optional[Callable[..., Any]] = None
 
     @property
     def policy_profile(self) -> PolicyProfile:

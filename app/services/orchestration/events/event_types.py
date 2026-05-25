@@ -72,6 +72,7 @@ class EventType:
     # ── Workspace ─────────────────────────────────────────────────────────────
     WORKSPACE_RESTORE_SKIPPED = "workspace_restore_skipped"
     WORKSPACE_PRESERVED = "workspace_preserved"
+    WORKSPACE_RETRY_DIRTY = "workspace_retry_dirty"
     RESUME_WORKSPACE_DRIFT = "resume_workspace_drift"
     WORKSPACE_CONTRACT_FAILED = "workspace_contract_failed"
 
