@@ -1900,7 +1900,11 @@ class ValidatorService:
                 elif op_name == "delete_file":
                     known_paths.discard(relative_path)
 
-            step_source_paths: List[str] = []
+            step_source_paths: List[str] = [
+                str(path or "")
+                for path in step.get("expected_files", []) or []
+                if str(path or "").strip()
+            ]
             for command in step.get("commands", []) or []:
                 step_source_paths.extend(
                     ValidatorService._command_source_read_targets(str(command or ""))
