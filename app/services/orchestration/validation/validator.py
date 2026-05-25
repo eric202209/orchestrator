@@ -1865,7 +1865,10 @@ class ValidatorService:
 
     @staticmethod
     def _verification_plan_missing_workspace_files(
-        plan: List[Dict[str, Any]], project_dir: Optional[Path]
+        plan: List[Dict[str, Any]],
+        project_dir: Optional[Path],
+        *,
+        include_expected_files: bool = True,
     ) -> List[str]:
         """Return expected source files in verification plans that do not exist yet."""
 
@@ -1900,11 +1903,13 @@ class ValidatorService:
                 elif op_name == "delete_file":
                     known_paths.discard(relative_path)
 
-            step_source_paths: List[str] = [
-                str(path or "")
-                for path in step.get("expected_files", []) or []
-                if str(path or "").strip()
-            ]
+            step_source_paths: List[str] = []
+            if include_expected_files:
+                step_source_paths.extend(
+                    str(path or "")
+                    for path in step.get("expected_files", []) or []
+                    if str(path or "").strip()
+                )
             for command in step.get("commands", []) or []:
                 step_source_paths.extend(
                     ValidatorService._command_source_read_targets(str(command or ""))
@@ -2816,7 +2821,9 @@ class ValidatorService:
                     mutated_source_assets[:20]
                 )
             missing_workspace_files = cls._verification_plan_missing_workspace_files(
-                plan, project_dir
+                plan,
+                project_dir,
+                include_expected_files=workflow_stage not in READ_ONLY_WORKFLOW_STAGES,
             )
             if missing_workspace_files:
                 repairable.append(
