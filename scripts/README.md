@@ -23,8 +23,8 @@ handled by `../start.sh`; service logs are written directly to `../logs/`.
 - `phase8a_shadow_probe.py` - offline direct-vs-OpenClaw repair prompt probe
   for Phase 8A runtime boundary diagnostics.
 - `ingest_knowledge.py` - ingest knowledge documents into SQLite and Qdrant.
-  For the active Docker runtime, prefer `./wsl-start.sh --ingest-knowledge`,
-  or:
+  For the compact laptop Ollama Docker runtime, prefer
+  `./wsl-start.sh --ollama --ingest-knowledge`, or:
   `docker compose -f docker-compose.windows.yml exec -T orchestrator python scripts/ingest_knowledge.py --source-dir /app --qdrant-url http://qdrant:6333`.
 
 ## Developer Utilities

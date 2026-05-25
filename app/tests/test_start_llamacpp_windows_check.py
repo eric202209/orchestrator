@@ -74,6 +74,7 @@ esac
         "ORCHESTRATOR_DIR": str(orchestrator_dir),
         "LLAMA_EXE_WIN": str(llama_exe),
         "LLAMA_CTX": "4096",
+        "ALLOW_ROOT_WSL_START": "true",
     }
     result = subprocess.run(
         [str(repo_root / "wsl-start.sh"), "--check", "--backend-only"],
@@ -156,6 +157,7 @@ exit 0
         "LLAMA_EXE_WIN": str(llama_exe),
         "LLAMA_CTX": "4096",
         "EXPECTED_OLLAMA_ABSENT": "true",
+        "ALLOW_ROOT_WSL_START": "true",
     }
     result = subprocess.run(
         [str(repo_root / "wsl-start.sh"), "--backend-only"],

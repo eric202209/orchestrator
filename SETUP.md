@@ -3,8 +3,8 @@
 Three paths depending on your machine:
 
 - [Linux / Ubuntu (with OpenClaw)](#linux--ubuntu-with-openclaw) — native processes, `start.sh`
-- [Windows WSL2 (Ollama, no OpenClaw)](#windows-Nvidia-gpu--ollama-no-openclaw) — `./wsl-start.sh`
-- [Windows WSL2 (llama.cpp, no OpenClaw)](#windows-llamacpp-no-openclaw) — `./wsl-start.sh --llama`
+- [Windows WSL2 (Ollama, no OpenClaw)](#windows-Nvidia-gpu--ollama-no-openclaw) — `./wsl-start.sh --ollama`
+- [Windows WSL2 (llama.cpp, no OpenClaw)](#windows-llamacpp-no-openclaw) — `./wsl-start.sh`
 
 ---
 
@@ -151,7 +151,8 @@ For Docker/WSL installs, use the Docker-specific startup flags below instead
 so ingest targets the active container runtime rather than a host-side database:
 
 ```bash
-./wsl-start.sh --ingest-knowledge
+./wsl-start.sh --ollama --ingest-knowledge   # compact Ollama laptop
+./wsl-start.sh --ingest-knowledge            # llama.cpp Windows device
 ```
 
 ## Alpha Operator Verification Path
@@ -163,8 +164,8 @@ without manual database cleanup.
 1. Clone the repo and create `.env` from `.env.example`.
 2. Start the real platform entrypoint:
    - Linux: `./start.sh`
-   - Windows WSL2 / Ollama: `./wsl-start.sh`
-   - Windows WSL2 / llama.cpp: `./wsl-start.sh --llama --backend-only`
+   - Windows WSL2 / Ollama: `./wsl-start.sh --ollama`
+   - Windows WSL2 / llama.cpp: `./wsl-start.sh --backend-only`
 3. Confirm service health:
 
 ```bash
@@ -323,8 +324,8 @@ RUNTIME_PROFILE=compact_local
 ```
 
 ```bash
-./wsl-start.sh --check
-./wsl-start.sh --build
+./wsl-start.sh --ollama --check
+./wsl-start.sh --ollama --build
 ```
 
 For backend-only validation, add `--no-frontend`.
@@ -333,7 +334,7 @@ To ingest local `knowledge/` into the active Docker runtime during startup,
 use:
 
 ```bash
-./wsl-start.sh --ingest-knowledge
+./wsl-start.sh --ollama --ingest-knowledge
 ```
 
 **6. Open the API**
@@ -717,7 +718,7 @@ cd ~/orchestrator
 LLAMA_CTX=4096 \
 LLAMA_MODEL_PATH="D:\\AI\\models\\Qwen2.5-Coder-7B-Instruct-Q5_K_M.gguf" \
 LLAMA_EXE_WIN="/mnt/d/AI/llama.cpp/llama-server.exe" \
-./wsl-start.sh --llama --check --backend-only
+./wsl-start.sh --check --backend-only
 ```
 
 `--check` reads `RUNTIME_PROFILE` and `LLAMA_CTX` from private `.env` when
@@ -728,20 +729,20 @@ It also expects Ollama to be absent by default for the third-machine path. For
 current-machine validation where Ollama is intentionally installed, add
 `EXPECTED_OLLAMA_ABSENT=false`.
 
-Start the backend stack through `wsl-start.sh`. `--llama` forces the original
-llama.cpp path even if a local `.env` is temporarily configured for Ollama:
+Start the backend stack through plain `wsl-start.sh`. `--ollama` is reserved
+for the compact Windows laptop Ollama path:
 
 ```bash
 LLAMA_CTX=4096 \
 LLAMA_MODEL_PATH="D:\\AI\\models\\Qwen2.5-Coder-7B-Instruct-Q5_K_M.gguf" \
 LLAMA_EXE_WIN="/mnt/d/AI/llama.cpp/llama-server.exe" \
-./wsl-start.sh --llama --backend-only
+./wsl-start.sh --backend-only
 ```
 
 To ingest `knowledge/` into the active Docker runtime while starting, run:
 
 ```bash
-./wsl-start.sh --llama --ingest-knowledge --backend-only
+./wsl-start.sh --ingest-knowledge --backend-only
 ```
 
 First build takes several minutes. Verify all containers are up:

@@ -230,7 +230,7 @@ maybe_ingest_knowledge() {
     readiness="$(curl -sf --connect-timeout 5 "http://localhost:${BACKEND_PORT}/api/v1/admin/knowledge-readiness?probe_embedding=false" 2>/dev/null || true)"
     if [[ "$readiness" == *"knowledge_files_exist_but_sqlite_empty"* || "$readiness" == *"knowledge_files_exist_but_qdrant_empty"* ]]; then
         warn "Knowledge files exist, but the active Docker runtime is not fully ingested."
-        warn "Run: ./wsl-start.sh --ingest-knowledge --no-frontend"
+        warn "Run: ./wsl-start.sh --ollama --ingest-knowledge --no-frontend"
         info "Equivalent command: $ingest_cmd"
     fi
 }
