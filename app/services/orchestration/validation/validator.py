@@ -1271,6 +1271,124 @@ class ValidatorService:
         return sorted(set(bad_paths))
 
     @classmethod
+    def _plan_writes_physical_src_python_imports(
+        cls,
+        plan: List[Dict[str, Any]],
+        project_dir: Optional[Path],
+    ) -> List[str]:
+        if project_dir is None or not cls._project_has_python_src_layout(project_dir):
+            return []
+
+        bad_paths: List[str] = []
+        package_names = cls._python_src_layout_package_names(project_dir)
+        for step in plan:
+            for operation in step.get("ops", []) or []:
+                if not isinstance(operation, dict):
+                    continue
+                op_name = str(operation.get("op") or "")
+                if op_name not in {"write_file", "append_file", "replace_in_file"}:
+                    continue
+                path_text = str(operation.get("path") or "").strip().lstrip("./")
+                if Path(path_text).suffix.lower() != ".py":
+                    continue
+                raw_content = (
+                    operation.get("new")
+                    if op_name == "replace_in_file"
+                    else operation.get("content")
+                )
+                content = str(raw_content or "")
+                if not content.strip():
+                    continue
+                if cls._python_text_uses_physical_src_import_prefix(
+                    content,
+                    package_names=package_names,
+                ):
+                    bad_paths.append(path_text or "(missing path)")
+        return sorted(set(bad_paths))
+
+    @classmethod
+    def _project_has_python_src_layout(cls, project_dir: Path) -> bool:
+        root = project_dir.resolve()
+        src_dir = root / "src"
+        if not src_dir.is_dir():
+            return False
+
+        for config_name in ("pyproject.toml", "setup.cfg", "setup.py"):
+            config_path = root / config_name
+            try:
+                config_text = config_path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                config_text = config_path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                config_text = ""
+            lowered = config_text.lower()
+            if any(
+                marker in lowered
+                for marker in (
+                    'where = ["src"]',
+                    "where = ['src']",
+                    "package_dir",
+                    'pythonpath = ["src"]',
+                    "pythonpath = ['src']",
+                )
+            ):
+                return True
+
+        return any(
+            candidate.is_dir() and (candidate / "__init__.py").exists()
+            for candidate in src_dir.iterdir()
+        )
+
+    @staticmethod
+    def _python_src_layout_package_names(project_dir: Path) -> set[str]:
+        src_dir = project_dir.resolve() / "src"
+        if not src_dir.is_dir():
+            return set()
+        try:
+            return {
+                candidate.name
+                for candidate in src_dir.iterdir()
+                if candidate.is_dir()
+                and candidate.name.isidentifier()
+                and (candidate / "__init__.py").exists()
+            }
+        except OSError:
+            return set()
+
+    @classmethod
+    def _python_text_uses_physical_src_import_prefix(
+        cls,
+        text: str,
+        *,
+        package_names: set[str],
+    ) -> bool:
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            pattern = r"(?m)^\s*(?:from\s+src\.([A-Za-z_][A-Za-z0-9_]*)\b|import\s+src\.([A-Za-z_][A-Za-z0-9_]*)\b)"
+            for match in re.finditer(pattern, text):
+                package = match.group(1) or match.group(2) or ""
+                if not package_names or package in package_names:
+                    return True
+            return False
+
+        for node in ast.walk(tree):
+            package = ""
+            if isinstance(node, ast.ImportFrom) and str(node.module or "").startswith(
+                "src."
+            ):
+                package = str(node.module or "").split(".", 2)[1]
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    name = str(alias.name or "")
+                    if name.startswith("src."):
+                        package = name.split(".", 2)[1]
+                        break
+            if package and (not package_names or package in package_names):
+                return True
+        return False
+
+    @classmethod
     def _python_module_has_import_time_parse_args(cls, tree: ast.AST) -> bool:
         for node in getattr(tree, "body", []):
             if cls._is_main_guard(node):
@@ -3111,6 +3229,18 @@ class ValidatorService:
                 details["import_time_parse_args_materializations"] = (
                     import_time_parse_args_files[:20]
                 )
+            physical_src_import_files = cls._plan_writes_physical_src_python_imports(
+                plan, project_dir
+            )
+            if physical_src_import_files:
+                repairable.append(
+                    "Plan writes Python imports using the physical `src.` prefix in "
+                    "a src-layout project; use the package import, not the physical "
+                    f"src prefix (files: {physical_src_import_files[:5]})"
+                )
+                details["physical_src_import_materializations"] = (
+                    physical_src_import_files[:20]
+                )
         elif profile == "verification":
             mutated_source_assets = cls._verification_plan_mutates_app_source_assets(
                 plan, project_dir
@@ -3222,6 +3352,8 @@ class ValidatorService:
             semantic_violation_codes.append("fake_verification_artifact")
         if details.get("unmaterialized_expected_files"):
             semantic_violation_codes.append("unmaterialized_expected_files")
+        if details.get("physical_src_import_materializations"):
+            semantic_violation_codes.append("physical_src_import")
         if semantic_violation_codes:
             details["semantic_violation_codes"] = semantic_violation_codes
 

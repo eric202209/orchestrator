@@ -335,6 +335,7 @@ def execute_verification_command(
         env = os.environ.copy()
         python_dir = str(Path(sys.executable).parent)
         env["PATH"] = python_dir + os.pathsep + env.get("PATH", "")
+        env = workspace_python_command_env(project_dir, raw_command, base_env=env)
         completed = subprocess.run(
             command_to_run,
             cwd=str(project_dir),
@@ -375,6 +376,79 @@ def execute_verification_command(
         }
 
 
+def workspace_python_command_env(
+    project_dir: Path,
+    command: str,
+    *,
+    base_env: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    env = dict(base_env or os.environ)
+    if not _is_inline_python_command(command):
+        return env
+    pythonpath_entries = _python_src_layout_pythonpath_entries(project_dir)
+    if not pythonpath_entries:
+        return env
+    existing = env.get("PYTHONPATH", "")
+    if existing:
+        pythonpath_entries.extend(
+            entry for entry in existing.split(os.pathsep) if entry
+        )
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
+    return env
+
+
+def _is_inline_python_command(command: str) -> bool:
+    try:
+        tokens = shlex.split(str(command or "").strip(), posix=True)
+    except ValueError:
+        return False
+    if len(tokens) < 3:
+        return False
+    executable = Path(tokens[0]).name
+    return executable.startswith("python") and "-c" in tokens[1:]
+
+
+def _python_src_layout_pythonpath_entries(project_dir: Path) -> List[str]:
+    root = project_dir.resolve()
+    src_dir = root / "src"
+    if not _has_python_src_layout(root):
+        return []
+    return [str(src_dir), str(root)]
+
+
+def _has_python_src_layout(project_dir: Path) -> bool:
+    src_dir = project_dir / "src"
+    if not src_dir.is_dir():
+        return False
+    for config_name in ("pyproject.toml", "setup.cfg", "setup.py"):
+        config_path = project_dir / config_name
+        try:
+            config_text = config_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            config_text = config_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            config_text = ""
+        lowered = config_text.lower()
+        if any(
+            marker in lowered
+            for marker in (
+                'where = ["src"]',
+                "where = ['src']",
+                "package_dir",
+                'pythonpath = ["src"]',
+                "pythonpath = ['src']",
+            )
+        ):
+            return True
+    try:
+        return any(
+            candidate.is_dir() and (candidate / "__init__.py").exists()
+            for candidate in src_dir.iterdir()
+        )
+    except OSError:
+        return False
+
+
 def patch_python_verification_imports(command: str) -> str:
     """Patch common model-generated python -c verification import omissions."""
     normalized = " ".join(str(command or "").strip().split())
@@ -408,15 +482,11 @@ def patch_python_verification_imports(command: str) -> str:
                 imported_modules.add(name)
     for match in re.finditer(r"(^|;)\s*from\s+([A-Za-z_][A-Za-z0-9_]*)\b", script):
         imported_modules.add(match.group(2))
-    may_import_backend_module = bool(imported_modules - stdlib_imports) and (
-        "backend" not in script
-    )
-    if needs_sys or may_import_backend_module:
+    may_import_project_module = bool(imported_modules - stdlib_imports)
+    if needs_sys or may_import_project_module:
         prefix = ""
-        if needs_sys or may_import_backend_module:
+        if needs_sys or may_import_project_module:
             prefix += "import sys; "
-        if may_import_backend_module:
-            prefix += "'backend' in sys.path or sys.path.append('backend'); "
         script = prefix + script
         return f"{tokens[0]} -c {shlex.quote(script)}"
     return command

@@ -190,6 +190,118 @@ def test_validate_plan_rejects_undefined_python_test_names_without_project_dir()
     ]
 
 
+def test_validate_plan_rejects_physical_src_import_in_src_layout(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\npythonpath = ["src"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "pkg").mkdir(parents=True)
+    (tmp_path / "src" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Write test",
+                "commands": ["python3 -m pytest -q"],
+                "verification": "python3 -m pytest -q",
+                "rollback": "rm -f tests/test_pkg.py",
+                "expected_files": ["tests/test_pkg.py"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "tests/test_pkg.py",
+                        "content": (
+                            "from src.pkg import value\n\n"
+                            "def test_value():\n"
+                            "    assert value == 1\n"
+                        ),
+                    }
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Add package test",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.accepted is False
+    assert "use the package import" in " ".join(verdict.reasons)
+    assert verdict.details["physical_src_import_materializations"] == [
+        "tests/test_pkg.py"
+    ]
+
+
+def test_validate_plan_accepts_package_import_in_src_layout(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\npythonpath = ["src"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "pkg").mkdir(parents=True)
+    (tmp_path / "src" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Write test",
+                "commands": ["python3 -m pytest -q"],
+                "verification": "python3 -m pytest -q",
+                "rollback": "rm -f tests/test_pkg.py",
+                "expected_files": ["tests/test_pkg.py"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "tests/test_pkg.py",
+                        "content": (
+                            "from pkg import value\n\n"
+                            "def test_value():\n"
+                            "    assert value == 1\n"
+                        ),
+                    }
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Add package test",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.accepted is True
+    assert "physical_src_import_materializations" not in verdict.details
+
+
+def test_validate_plan_allows_src_import_outside_src_layout(tmp_path):
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Write script",
+                "commands": ["python3 script.py"],
+                "verification": "python3 script.py",
+                "rollback": "rm -f script.py",
+                "expected_files": ["script.py"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "script.py",
+                        "content": "from src.pkg import value\nprint(value)\n",
+                    }
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Write a script",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.accepted is True
+    assert "physical_src_import_materializations" not in verdict.details
+
+
 def test_validate_plan_rejects_append_source_with_undefined_decorator_root(tmp_path):
     src_dir = tmp_path / "src" / "small_cli"
     src_dir.mkdir(parents=True)

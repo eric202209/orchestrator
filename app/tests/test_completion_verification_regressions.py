@@ -30,6 +30,7 @@ from app.services.orchestration.phases.completion_flow import (
 )
 from app.services.orchestration.execution.runtime import workspace_snapshot_key
 from app.services.orchestration.execution.execution_flow import (
+    execute_verification_command,
     patch_python_verification_imports,
 )
 from app.services.orchestration.types import OrchestrationRunContext, ValidationVerdict
@@ -162,7 +163,7 @@ def test_review_report_artifact_materialization_is_accepted(tmp_path):
     assert verdict.accepted
 
 
-def test_python_verification_imports_add_backend_to_sys_path():
+def test_python_verification_imports_adds_sys_without_backend_path():
     command = (
         'python -c "import module, sys; '
         'sys.exit(0 if callable(module.get_items) else 1)"'
@@ -170,9 +171,28 @@ def test_python_verification_imports_add_backend_to_sys_path():
 
     patched = patch_python_verification_imports(command)
 
-    assert "sys.path.append" in patched
-    assert "backend" in patched
+    assert "import sys" in patched
+    assert "sys.path.append" not in patched
+    assert "backend" not in patched
     assert "import module" in patched
+
+
+def test_python_inline_verification_env_resolves_src_layout_package(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\npythonpath = ["src"]\n',
+        encoding="utf-8",
+    )
+    package_dir = tmp_path / "src" / "pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("VALUE = 42\n", encoding="utf-8")
+
+    result = execute_verification_command(
+        project_dir=tmp_path,
+        command='python -c "from pkg import VALUE; raise SystemExit(0 if VALUE == 42 else 1)"',
+    )
+
+    assert result["success"] is True
+    assert result["returncode"] == 0
 
 
 def test_python_verification_imports_leave_stdlib_checks_alone():

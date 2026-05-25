@@ -11,6 +11,7 @@ from typing import Any
 
 from app.services.orchestration.execution.execution_flow import (
     execute_verification_command,
+    workspace_python_command_env,
 )
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.orchestration.validation.workspace_guard import (
@@ -398,6 +399,7 @@ def _execute_local_shell_commands_step(
     outputs: list[str] = []
     for cmd in normalized_cmds:
         try:
+            env = workspace_python_command_env(project_dir, cmd)
             result = subprocess.run(
                 cmd,
                 cwd=str(project_dir),
@@ -405,6 +407,7 @@ def _execute_local_shell_commands_step(
                 capture_output=True,
                 text=True,
                 timeout=30,
+                env=env,
             )
         except subprocess.TimeoutExpired:
             return {
