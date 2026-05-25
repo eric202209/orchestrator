@@ -89,6 +89,18 @@ def is_quoted_route_literal(
     return f"'{token}'" in original_command or f'"{token}"' in original_command
 
 
+def is_quoted_sed_address_literal(
+    token: str, original_command: str, segment_command: Optional[str]
+) -> bool:
+    """Treat quoted sed address scripts like '/pattern/d' as scripts, not paths."""
+
+    if segment_command != "sed":
+        return False
+    if not re.fullmatch(r"/[^/\n]+/[A-Za-z]", token):
+        return False
+    return f"'{token}'" in original_command or f'"{token}"' in original_command
+
+
 def normalize_path_reference(path_text: str, project_dir: Path) -> str:
     raw = (path_text or "").strip().strip("\"'")
     if not raw:
@@ -487,6 +499,8 @@ def normalize_command(command: str, project_dir: Path) -> str:
         if any(char in token for char in "<>"):
             continue
         if is_quoted_route_literal(token, current, segment_command):
+            continue
+        if is_quoted_sed_address_literal(token, current, segment_command):
             continue
         if not re.fullmatch(r"/[A-Za-z0-9._/@:+-]+(?:/[A-Za-z0-9._@:+-]+)*/*", token):
             continue

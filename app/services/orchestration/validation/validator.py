@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shlex
 import ast
+import builtins
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from ..policy import apply_validation_policy
@@ -47,7 +48,9 @@ from .workspace_guard import (
 from .integrity import (
     check_test_preservation,
     classify_verification_command,
+    is_python_test_path,
     pre_existing_python_test_files,
+    scan_python_test_text,
     scan_test_file_changes,
 )
 
@@ -1111,6 +1114,159 @@ class ValidatorService:
                         bad_paths.append(path_text)
                         break
         return sorted(set(bad_paths))
+
+    @classmethod
+    def _plan_writes_obvious_undefined_python_test_names(
+        cls,
+        plan: List[Dict[str, Any]],
+        project_dir: Optional[Path],
+    ) -> List[str]:
+        bad_paths: List[str] = []
+        root = project_dir.resolve() if project_dir is not None else None
+        for step in plan:
+            for operation in step.get("ops", []) or []:
+                if not isinstance(operation, dict):
+                    continue
+                op_name = str(operation.get("op") or "")
+                if op_name not in {"write_file", "append_file"}:
+                    continue
+                path_text = str(operation.get("path") or "").strip().lstrip("./")
+                if not is_python_test_path(path_text):
+                    continue
+                content = str(operation.get("content") or "")
+                if not content.strip():
+                    continue
+                scan_text = content
+                if op_name == "append_file" and project_dir is not None:
+                    existing_path = (project_dir / path_text).resolve()
+                    try:
+                        if root is not None and existing_path.is_relative_to(root):
+                            try:
+                                existing_text = existing_path.read_text(
+                                    encoding="utf-8"
+                                )
+                            except UnicodeDecodeError:
+                                existing_text = existing_path.read_text(
+                                    encoding="utf-8", errors="ignore"
+                                )
+                            except OSError:
+                                existing_text = ""
+                            if existing_text:
+                                scan_text = f"{existing_text.rstrip()}\n{content}"
+                    except ValueError:
+                        pass
+                findings = scan_python_test_text(scan_text, path_text)
+                if any(
+                    finding.code == "undefined_test_name"
+                    and finding.severity == "error"
+                    for finding in findings
+                ):
+                    bad_paths.append(path_text or "(missing path)")
+        return sorted(set(bad_paths))
+
+    @classmethod
+    def _plan_writes_obvious_undefined_python_decorators(
+        cls,
+        plan: List[Dict[str, Any]],
+        project_dir: Optional[Path],
+    ) -> List[str]:
+        bad_paths: List[str] = []
+        root = project_dir.resolve() if project_dir is not None else None
+        for step in plan:
+            for operation in step.get("ops", []) or []:
+                if not isinstance(operation, dict):
+                    continue
+                op_name = str(operation.get("op") or "")
+                if op_name not in {"write_file", "append_file"}:
+                    continue
+                path_text = str(operation.get("path") or "").strip().lstrip("./")
+                if Path(path_text).suffix.lower() != ".py":
+                    continue
+                content = str(operation.get("content") or "")
+                if not content.strip():
+                    continue
+                scan_text = content
+                if op_name == "append_file" and project_dir is not None:
+                    existing_path = (project_dir / path_text).resolve()
+                    try:
+                        if root is not None and existing_path.is_relative_to(root):
+                            try:
+                                existing_text = existing_path.read_text(
+                                    encoding="utf-8"
+                                )
+                            except UnicodeDecodeError:
+                                existing_text = existing_path.read_text(
+                                    encoding="utf-8", errors="ignore"
+                                )
+                            except OSError:
+                                existing_text = ""
+                            if existing_text:
+                                scan_text = f"{existing_text.rstrip()}\n{content}"
+                    except ValueError:
+                        pass
+                try:
+                    tree = ast.parse(scan_text)
+                except SyntaxError:
+                    continue
+                defined = cls._python_module_defined_names(tree)
+                for node in ast.walk(tree):
+                    decorators = getattr(node, "decorator_list", None)
+                    if not decorators:
+                        continue
+                    for decorator in decorators:
+                        root_name = cls._python_expression_root_name(decorator)
+                        if root_name and root_name not in defined:
+                            bad_paths.append(path_text or "(missing path)")
+                            break
+                    if bad_paths and bad_paths[-1] == (path_text or "(missing path)"):
+                        break
+        return sorted(set(bad_paths))
+
+    @staticmethod
+    def _python_module_defined_names(tree: ast.AST) -> set[str]:
+        names = set(dir(builtins))
+        for node in getattr(tree, "body", []):
+            if isinstance(node, ast.Import):
+                names.update(
+                    alias.asname or alias.name.split(".")[0] for alias in node.names
+                )
+            elif isinstance(node, ast.ImportFrom):
+                names.update(alias.asname or alias.name for alias in node.names)
+            elif isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ):
+                names.add(node.name)
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    names.update(ValidatorService._python_bound_names(target))
+            elif isinstance(node, ast.AnnAssign):
+                names.update(ValidatorService._python_bound_names(node.target))
+        return names
+
+    @staticmethod
+    def _python_bound_names(node: ast.AST) -> set[str]:
+        if isinstance(node, ast.Name):
+            return {node.id}
+        if isinstance(node, (ast.Tuple, ast.List)):
+            names: set[str] = set()
+            for child in node.elts:
+                names.update(ValidatorService._python_bound_names(child))
+            return names
+        return set()
+
+    @staticmethod
+    def _python_expression_root_name(node: ast.AST) -> Optional[str]:
+        current = node
+        while isinstance(current, (ast.Call, ast.Attribute, ast.Subscript)):
+            if isinstance(current, ast.Call):
+                current = current.func
+            elif isinstance(current, ast.Attribute):
+                current = current.value
+            else:
+                current = current.value
+        if isinstance(current, ast.Name):
+            return current.id
+        return None
 
     @staticmethod
     def _task_allows_multiple_stacks(
@@ -2819,6 +2975,28 @@ class ValidatorService:
                 details["undefined_js_identifier_materializations"] = (
                     undefined_js_identifier_files[:20]
                 )
+            undefined_python_test_name_files = (
+                cls._plan_writes_obvious_undefined_python_test_names(plan, project_dir)
+            )
+            if undefined_python_test_name_files:
+                repairable.append(
+                    "Plan writes Python tests with obvious undefined names "
+                    f"(files: {undefined_python_test_name_files[:5]})"
+                )
+                details["undefined_python_test_name_materializations"] = (
+                    undefined_python_test_name_files[:20]
+                )
+            undefined_python_decorator_files = (
+                cls._plan_writes_obvious_undefined_python_decorators(plan, project_dir)
+            )
+            if undefined_python_decorator_files:
+                repairable.append(
+                    "Plan writes Python decorators whose root name is undefined "
+                    f"(files: {undefined_python_decorator_files[:5]})"
+                )
+                details["undefined_python_decorator_materializations"] = (
+                    undefined_python_decorator_files[:20]
+                )
         elif profile == "verification":
             mutated_source_assets = cls._verification_plan_mutates_app_source_assets(
                 plan, project_dir
@@ -3046,6 +3224,21 @@ class ValidatorService:
             repairable.extend(repairable_placeholder_reasons[:6])
             rejected.extend(rejected_placeholder_reasons[:6])
             details["placeholder_reasons"] = placeholder_reasons[:20]
+
+        integrity_findings = scan_test_file_changes(materialized_files, project_dir)
+        if integrity_findings:
+            serialized_findings = [
+                finding.to_dict() for finding in integrity_findings[:20]
+            ]
+            details["test_integrity_findings"] = serialized_findings
+            for finding in integrity_findings:
+                message = finding.message
+                if finding.path:
+                    message = f"{message} ({finding.path})"
+                if finding.severity == "error":
+                    repairable.append(message)
+                else:
+                    warnings.append(message)
 
         return ValidationVerdict(
             stage="step_completion",

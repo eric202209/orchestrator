@@ -731,6 +731,7 @@ class _PlanningRetryState:
         self.minimal_prompt_used = False
         self.repair_prompt_used = False
         self.post_repair_blocking_second_repair_used = False
+        self.post_repair_stale_replace_second_repair_used = False
         self.post_repair_validation_second_repair_used = False
         self.post_repair_malformed_shell_second_repair_used = False
         self.last_repair_reason = ""
@@ -800,14 +801,14 @@ _SECOND_REPAIR_BLOCKING_POLICIES: dict[str, _SecondRepairPolicy] = {
         retry_reason="post_repair_stale_replace_fallback",
         event_reason="post_repair_stale_replace_fallback_pass",
         semantic_violation_code="patch_strategy_fallback_required",
-        cap_attribute="post_repair_blocking_second_repair_used",
+        cap_attribute="post_repair_stale_replace_second_repair_used",
         rejection_template=(
             "stale_replace_ops_steps: steps {steps} still use replace_in_file "
             "with old text that is absent from the current workspace. Exact-text "
             "patching is exhausted for these targets; do not emit another "
-            "replace_in_file for the same missing old text. Use a targeted "
-            "structured rewrite grounded in current file content, or ops.write_file "
-            "with complete preserved file content as a last resort"
+            "replace_in_file for the same missing old text or same target. Use "
+            "ops.write_file with complete preserved file content grounded in the "
+            "current file excerpt"
         ),
     ),
     "test_assertion_loss_ops_steps": _SecondRepairPolicy(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import builtins
 import hashlib
 import re
 from dataclasses import asdict, dataclass, field
@@ -23,6 +24,18 @@ ASSERT_TEXT_PATTERN = re.compile(
 FILE_EXISTENCE_PATTERN = re.compile(
     r"\b(?:os\.path\.)?(?:exists|isfile|isdir)\(|\.exists\(\)"
 )
+_PYTEST_KNOWN_GLOBALS = {
+    "capsys",
+    "capfd",
+    "caplog",
+    "monkeypatch",
+    "tmp_path",
+    "tmpdir",
+    "pytestconfig",
+    "request",
+    "mocker",
+}
+_BUILTIN_NAMES = set(dir(builtins))
 
 
 @dataclass(frozen=True)
@@ -239,6 +252,14 @@ def scan_test_file_changes(
     return findings
 
 
+def scan_python_test_text(text: str, rel_path: str) -> list[IntegrityFinding]:
+    """Scan supplied Python test text without reading it from disk."""
+
+    if not is_python_test_path(rel_path):
+        return []
+    return _scan_test_text(text, rel_path)
+
+
 def check_test_preservation(
     change_set: Optional[dict[str, Any]],
     project_dir: str | Path,
@@ -350,7 +371,101 @@ def _scan_test_text(text: str, rel_path: str) -> list[IntegrityFinding]:
                         confidence="high",
                     )
                 )
+    findings.extend(_undefined_test_name_findings(tree, rel_path))
     return findings
+
+
+def _undefined_test_name_findings(
+    tree: ast.AST,
+    rel_path: str,
+) -> list[IntegrityFinding]:
+    imported: set[str] = set()
+    module_defined: set[str] = set()
+    for node in getattr(tree, "body", []):
+        if isinstance(node, ast.Import):
+            imported.update(
+                alias.asname or alias.name.split(".")[0] for alias in node.names
+            )
+        elif isinstance(node, ast.ImportFrom):
+            imported.update(alias.asname or alias.name for alias in node.names)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            module_defined.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                module_defined.update(_bound_names(target))
+        elif isinstance(node, ast.AnnAssign):
+            module_defined.update(_bound_names(node.target))
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.With, ast.AsyncWith)):
+            module_defined.update(_statement_bound_names(node))
+
+    findings: list[IntegrityFinding] = []
+    module_scope = imported | module_defined | _BUILTIN_NAMES | _PYTEST_KNOWN_GLOBALS
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not node.name.startswith("test"):
+            continue
+        local_defined = set(module_scope)
+        local_defined.update(arg.arg for arg in node.args.args)
+        local_defined.update(arg.arg for arg in node.args.kwonlyargs)
+        if node.args.vararg:
+            local_defined.add(node.args.vararg.arg)
+        if node.args.kwarg:
+            local_defined.add(node.args.kwarg.arg)
+
+        loaded_before_store: list[ast.Name] = []
+        for child in ast.walk(node):
+            if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
+                if child.id not in local_defined and child.id not in {"self", "cls"}:
+                    loaded_before_store.append(child)
+            elif isinstance(child, ast.Name) and isinstance(
+                child.ctx, (ast.Store, ast.Param)
+            ):
+                local_defined.add(child.id)
+            elif isinstance(child, (ast.For, ast.AsyncFor, ast.With, ast.AsyncWith)):
+                local_defined.update(_statement_bound_names(child))
+
+        seen: set[str] = set()
+        for name in loaded_before_store:
+            if name.id in seen:
+                continue
+            seen.add(name.id)
+            findings.append(
+                IntegrityFinding(
+                    code="undefined_test_name",
+                    message=(
+                        "Python test references an obvious undefined name: "
+                        f"{name.id}"
+                    ),
+                    path=rel_path,
+                    line=getattr(name, "lineno", None),
+                    severity="error",
+                    confidence="high",
+                )
+            )
+    return findings
+
+
+def _statement_bound_names(node: ast.AST) -> set[str]:
+    names: set[str] = set()
+    if isinstance(node, (ast.For, ast.AsyncFor)):
+        names.update(_bound_names(node.target))
+    elif isinstance(node, (ast.With, ast.AsyncWith)):
+        for item in node.items:
+            if item.optional_vars is not None:
+                names.update(_bound_names(item.optional_vars))
+    return names
+
+
+def _bound_names(node: ast.AST) -> set[str]:
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, (ast.Tuple, ast.List)):
+        names: set[str] = set()
+        for elt in node.elts:
+            names.update(_bound_names(elt))
+        return names
+    return set()
 
 
 def _scan_assertion_drops(

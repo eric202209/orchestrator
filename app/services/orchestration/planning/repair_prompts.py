@@ -21,6 +21,9 @@ from app.services.orchestration.planning.prompt_contracts import (
 from app.services.orchestration.planning.repair_strategies import (
     build_specialized_repair_prompt,
 )
+from app.services.project.source_imports import (
+    imported_source_excerpts_from_tests,
+)
 from app.services.project.index_service import (
     build_project_index,
     render_project_structure_capsule,
@@ -31,6 +34,8 @@ PLANNING_REPAIR_MAX_KNOWLEDGE_ITEM_CHARS = 500
 PLANNING_REPAIR_COMPACT_MALFORMED_OUTPUT_CHARS = 800
 PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS = 700
 PLANNING_REPAIR_MAX_VALIDATION_ERROR_CHARS = 450
+PLANNING_REPAIR_MAX_STALE_FALLBACK_VALIDATION_ERROR_CHARS = 1600
+PLANNING_REPAIR_MAX_SOURCE_CONTEXT_CHARS = 1400
 PLANNING_REPAIR_STRUCTURE_TRUNCATION_MARKER = (
     "\n- ... project structure capsule truncated to fit repair prompt budget"
 )
@@ -152,6 +157,11 @@ def build_planning_repair_prompt(
 ) -> str:
     broken_output = compact_invalid_output_excerpt(malformed_output)
     knowledge_block = render_repair_knowledge_block(knowledge_context)
+    source_context_block = build_python_test_source_context_block(
+        project_dir=project_dir,
+        malformed_output=malformed_output,
+        rejection_reasons=rejection_reasons,
+    )
     structure_capsule = (
         project_structure_capsule
         if project_structure_capsule is not None
@@ -162,7 +172,9 @@ def build_planning_repair_prompt(
         malformed_output=malformed_output,
         project_dir=project_dir,
         rejection_reasons=rejection_reasons,
-        knowledge_block=_join_optional_blocks(knowledge_block, structure_capsule),
+        knowledge_block=_join_optional_blocks(
+            knowledge_block, source_context_block, structure_capsule
+        ),
     )
     if specialized_prompt is not None:
         if len(specialized_prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS:
@@ -177,17 +189,29 @@ def build_planning_repair_prompt(
                 project_dir=project_dir,
                 rejection_reasons=rejection_reasons,
                 knowledge_block=_join_optional_blocks(
-                    knowledge_block, reduced_structure_capsule
+                    knowledge_block, source_context_block, reduced_structure_capsule
                 ),
             )
         return _apply_profile(specialized_prompt, prompt_profile, apply_prompt_profile)
     validation_error = ""
+    validation_char_limit = PLANNING_REPAIR_MAX_VALIDATION_ERROR_CHARS
     if rejection_reasons:
+        stale_fallback_repair = any(
+            "patch_strategy_fallback_required" in str(reason or "")
+            or "Current file excerpt:" in str(reason or "")
+            for reason in rejection_reasons
+        )
+        reason_char_limit = 1200 if stale_fallback_repair else 180
+        validation_char_limit = (
+            PLANNING_REPAIR_MAX_STALE_FALLBACK_VALIDATION_ERROR_CHARS
+            if stale_fallback_repair
+            else PLANNING_REPAIR_MAX_VALIDATION_ERROR_CHARS
+        )
         reason_lines = "\n".join(
-            f"- {reason[:180]}" for reason in rejection_reasons[:5]
+            f"- {reason[:reason_char_limit]}" for reason in rejection_reasons[:5]
         )
         validation_error = "Validation error:\n" f"{reason_lines}\n"
-    validation_error = validation_error[:PLANNING_REPAIR_MAX_VALIDATION_ERROR_CHARS]
+    validation_error = validation_error[:validation_char_limit]
     default_validation_error = (
         "Validation error:\n- malformed or non-runnable planning output\n"
     )
@@ -209,6 +233,7 @@ Bad:
 {validation_error or default_validation_error}
 
 {knowledge_block + chr(10) if knowledge_block else ""}
+{source_context_block + chr(10) if source_context_block else ""}
 {current_structure_capsule + chr(10) if current_structure_capsule else ""}
 Strict output schema: step_number, description, commands, verification,
 rollback, expected_files; optional ops.
@@ -244,6 +269,80 @@ Rules:
         )
         prompt = _compose_prompt(reduced_structure_capsule)
     return _apply_profile(prompt, prompt_profile, apply_prompt_profile)
+
+
+def build_python_test_source_context_block(
+    *,
+    project_dir: Path,
+    malformed_output: str,
+    rejection_reasons: Optional[list[str]] = None,
+) -> str:
+    if not _is_python_test_file_repair_case(malformed_output, rejection_reasons):
+        return ""
+
+    try:
+        excerpts = imported_source_excerpts_from_tests(
+            project_dir,
+            truncate=lambda text, max_chars: (
+                text.strip()
+                if len(text.strip()) <= max_chars
+                else text.strip()[: max_chars - 3].rstrip() + "..."
+            ),
+            max_chars=700,
+        )
+    except Exception:
+        return ""
+    if not excerpts:
+        return ""
+
+    lines = [
+        "## PYTHON TEST SOURCE CONTEXT",
+        "Tests import the source files below. Preserve the existing source API "
+        "and CLI framework while repairing the plan.",
+        "- Preserve public functions called by tests, such as main(argv) and build_parser().",
+        "- Do not switch argparse to Click or Typer unless the project already uses that framework.",
+        "- Implement behavior in source code, not by docstring-only or string-only edits.",
+        "",
+    ]
+    total_chars = sum(len(line) + 1 for line in lines)
+    for rel_path, excerpt in excerpts.items():
+        header = f"source excerpt imported by tests: {rel_path}"
+        remaining = PLANNING_REPAIR_MAX_SOURCE_CONTEXT_CHARS - total_chars
+        if remaining <= len(header) + 12:
+            break
+        snippet = str(excerpt or "").strip()
+        if len(snippet) > remaining - len(header) - 8:
+            snippet = snippet[: remaining - len(header) - 11].rstrip() + "..."
+        lines.extend([header, snippet, ""])
+        total_chars += len(header) + len(snippet) + 2
+        if total_chars >= PLANNING_REPAIR_MAX_SOURCE_CONTEXT_CHARS:
+            break
+    return "\n".join(lines).strip()[:PLANNING_REPAIR_MAX_SOURCE_CONTEXT_CHARS]
+
+
+def _is_python_test_file_repair_case(
+    malformed_output: str,
+    rejection_reasons: Optional[list[str]] = None,
+) -> bool:
+    text = "\n".join(
+        [
+            str(malformed_output or ""),
+            *(str(reason or "") for reason in (rejection_reasons or [])),
+        ]
+    ).lower()
+    if not (
+        "test_assertion_loss_ops_steps" in text
+        or "stale_replace" in text
+        or "current file excerpt:" in text
+        or "undefined python test" in text
+        or "tests/" in text
+    ):
+        return False
+    return bool(
+        re.search(r"(^|[\"'\\s:/])tests?/[^\"'\\s,;\]]*test[^\"'\\s,;\]]*\.py", text)
+        or re.search(r"(^|[\"'\\s:/])test_[^\"'\\s,;\]]*\.py", text)
+        or re.search(r"(^|[\"'\\s:/])[^\"'\\s,;\]]*_test\.py", text)
+    )
 
 
 def build_compact_planning_repair_prompt(

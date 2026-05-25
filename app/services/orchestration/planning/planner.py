@@ -1878,9 +1878,8 @@ class PlannerService:
                     f"step {index} replace_in_file old text is still absent in "
                     f"{rel_path}. Exact-text patching is exhausted for this target; "
                     "do not emit another replace_in_file for the same missing old "
-                    "text. Prefer a targeted structured rewrite grounded in the "
-                    "current excerpt, or use ops.write_file with complete preserved "
-                    "file content as a last resort."
+                    "text or same target. Use ops.write_file with complete preserved "
+                    "file content grounded in the current excerpt."
                     f"{test_preservation} Current file excerpt: {excerpt}"
                 )
         return hints

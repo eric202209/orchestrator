@@ -329,6 +329,8 @@ def build_bounded_debug_repair_prompt(
 
 def normalize_bounded_debug_repair_payload(
     parsed_data: Any,
+    *,
+    envelope: Optional[DebugFeedbackEnvelope] = None,
 ) -> Optional[dict[str, Any]]:
     """Convert a Phase 7F repair array into the legacy debug action shape."""
 
@@ -359,6 +361,11 @@ def normalize_bounded_debug_repair_payload(
             normalized["fix"]
         ):
             return None
+        if fix_type == "command_fix" and _semantic_pytest_string_edit_repair(
+            normalized["fix"],
+            envelope=envelope,
+        ):
+            return None
         if fix_type in {"code_fix", "ops_fix"} and not any(
             key in normalized for key in ("expected_files", "verification", "ops")
         ):
@@ -384,6 +391,8 @@ def normalize_bounded_debug_repair_payload(
 
     if not is_runnable_shell_command_fix(command):
         return None
+    if _semantic_pytest_string_edit_repair(command, envelope=envelope):
+        return None
 
     return {
         "fix_type": "command_fix",
@@ -395,3 +404,44 @@ def normalize_bounded_debug_repair_payload(
             str(path).strip() for path in expected_files if str(path).strip()
         ],
     }
+
+
+def _semantic_pytest_string_edit_repair(
+    command: str,
+    *,
+    envelope: Optional[DebugFeedbackEnvelope],
+) -> bool:
+    if envelope is None or envelope.failure_class not in {
+        "pytest_failure",
+        "completion_validation_failed",
+    }:
+        return False
+    context = " ".join(
+        str(part or "")
+        for part in (
+            envelope.stderr_excerpt,
+            envelope.pytest_excerpt,
+            envelope.stdout_excerpt,
+            " ".join(envelope.validator_reasons or []),
+        )
+    ).lower()
+    if not any(
+        marker in context
+        for marker in (
+            "unrecognized arguments",
+            "nameerror",
+            "assertionerror",
+            "typeerror",
+        )
+    ):
+        return False
+    lowered_command = str(command or "").strip().lower()
+    if re.search(r"\b(?:pytest|unittest|python3?\s+-m\s+pytest)\b", lowered_command):
+        return False
+    return bool(
+        re.search(
+            r"(^|[;&|]\s*)(?:sed|perl)\b|"
+            r"\bpython3?\s+-c\s+['\"][^'\"]*(?:replace|write_text|sed)",
+            lowered_command,
+        )
+    )

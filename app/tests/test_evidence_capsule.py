@@ -185,6 +185,44 @@ def test_collect_pytest_failure_does_not_mutate_workspace(tmp_path):
     assert after == before
 
 
+def test_collect_pytest_argparse_failure_includes_imported_source(tmp_path):
+    src_dir = tmp_path / "src" / "small_cli"
+    src_dir.mkdir(parents=True)
+    (src_dir / "__init__.py").write_text("", encoding="utf-8")
+    (src_dir / "cli.py").write_text(
+        "import argparse\n"
+        "\n"
+        "def build_parser():\n"
+        "    parser = argparse.ArgumentParser()\n"
+        "    parser.add_argument('message')\n"
+        "    return parser\n",
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_cli.py").write_text(
+        "from small_cli.cli import build_parser\n"
+        "\n"
+        "def test_uppercase():\n"
+        "    assert build_parser().parse_args(['--uppercase', 'hello'])\n",
+        encoding="utf-8",
+    )
+
+    capsule = collect_workspace_evidence(
+        "pytest_failure",
+        tmp_path,
+        failure_context=(
+            "pytest: error: unrecognized arguments: --uppercase\n"
+            "usage: pytest [-h] message"
+        ),
+    )
+
+    rendered = render_evidence_section(capsule)
+    assert "source excerpt imported by failing tests: src/small_cli/cli.py" in rendered
+    assert "def build_parser" in rendered
+    assert "./src/small_cli/cli.py" in capsule.files_inspected
+
+
 def test_commands_use_portable_find_and_grep_only():
     failure_classes = [
         "module_not_found",
