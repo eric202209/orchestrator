@@ -51,52 +51,6 @@ RULE_REGISTRY: dict[str, RuntimeRule] = {
     r.rule_id: r
     for r in [
         # ------------------------------------------------------------------ #
-        # deprecated_artifact — do not expand, mark for future removal       #
-        # ------------------------------------------------------------------ #
-        RuntimeRule(
-            rule_id="static_site_path_rewrite",
-            owner_layer="deprecated_artifact",
-            scope=(
-                "Static-site workloads where the workspace root already has "
-                "index.html + css/style.css and the planner drifts toward a "
-                "React/Vite stack (src/index.js, npm run build)."
-            ),
-            source_location="app/services/orchestration/planning/normalization.py:656 (normalize_existing_static_site_plan)",
-            negative_tests=[
-                "test_static_site_normalization_does_not_fire_for_backend_task",
-                "test_static_site_normalization_does_not_fire_for_review_task",
-                "test_phase10r_mixed_workload_gate.py::test_static_site_normalizer_not_triggered_for_backend_bug_fix",
-            ],
-            exit_condition=(
-                "Replace with a scoped workload_contract for the plain-static-site "
-                "task family. Remove once planner-side path-drift handling is "
-                "reliable enough that the runtime rewrite is unnecessary. "
-                "Do not add new path mappings or asset-detection heuristics."
-            ),
-            allowed_to_expand=False,
-        ),
-        RuntimeRule(
-            rule_id="static_site_validation_fallback",
-            owner_layer="deprecated_artifact",
-            scope=(
-                "workflow_stage == 'validate' AND workspace has a "
-                "public/<name>/index.html + css/style.css directory shape. "
-                "Originally written for the Garden/status-site benchmark."
-            ),
-            source_location="app/services/orchestration/phases/planning_flow.py:168 (_static_site_validation_fallback_plan)",
-            negative_tests=[
-                "test_static_validation_fallback_does_not_fire_outside_validate_stage",
-                "test_static_validation_fallback_does_not_fire_for_backend_workspace",
-            ],
-            exit_condition=(
-                "Remove when status-site verification is moved to a workload "
-                "contract or knowledge-guided verification prompt. "
-                "Do not add new needle patterns (API, Queue, Knowledge, skip link, "
-                "alt text) or new directory shape matches."
-            ),
-            allowed_to_expand=False,
-        ),
-        # ------------------------------------------------------------------ #
         # workload_contract — reusable across matching task families         #
         # ------------------------------------------------------------------ #
         RuntimeRule(
@@ -139,28 +93,6 @@ RULE_REGISTRY: dict[str, RuntimeRule] = {
                 "Deprecate when planner-side stale-patch repair is reliable "
                 "enough that a runtime safety net is no longer needed. "
                 "Do not extend the line-count threshold or multi-function cases."
-            ),
-            allowed_to_expand=False,
-        ),
-        RuntimeRule(
-            rule_id="static_site_contract_completion",
-            owner_layer="workload_contract",
-            scope=(
-                "Plans that contain html/css/svg write ops, or whose task prompt "
-                "mentions 'html', 'css', 'svg', or 'static site'. Fills missing "
-                "parent-dir mkdir ops, expected_files entries, and verification "
-                "commands for static-site shaped plans."
-            ),
-            source_location="app/services/orchestration/planning/normalization.py:842 (complete_repaired_plan_contract)",
-            negative_tests=[
-                "test_contract_completion_does_not_fire_for_backend_task",
-                "test_contract_completion_does_not_fire_for_review_only_task",
-                "test_phase10r_mixed_workload_gate.py::test_backend_task_plan_contract_not_completed_as_static_site",
-            ],
-            exit_condition=(
-                "Split into per-family contract modules when a second non-static-site "
-                "task family needs contract completion. Do not add new file type "
-                "triggers or content inference beyond the current html/css/svg shape."
             ),
             allowed_to_expand=False,
         ),

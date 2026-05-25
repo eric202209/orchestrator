@@ -14,10 +14,9 @@ from typing import Any, Optional
 from app.services.orchestration.planning.prompt_contracts import (
     render_operation_choice_contract,
     render_ops_first_contract,
-    render_python_verification_contract,
     render_shell_fallback_limits,
-    render_static_site_verification_contract,
     render_test_scaffold_contract,
+    render_verification_contract,
 )
 from app.services.orchestration.planning.repair_strategies import (
     build_specialized_repair_prompt,
@@ -177,8 +176,7 @@ def build_planning_repair_prompt(
     ops_contract = render_ops_first_contract()
     operation_choice_contract = render_operation_choice_contract()
     shell_fallback_limits = render_shell_fallback_limits()
-    python_verification_contract = render_python_verification_contract()
-    static_site_verification_contract = render_static_site_verification_contract()
+    verification_contract = render_verification_contract()
     test_scaffold_contract = render_test_scaffold_contract()
     prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
@@ -200,9 +198,8 @@ Rules:
 2. {ops_contract}
 2x. {operation_choice_contract}
 2a. Shell fallback limits: {shell_fallback_limits}
-2b. {python_verification_contract}
-2c. {static_site_verification_contract}
-2d. {test_scaffold_contract}
+2b. {verification_contract}
+2c. {test_scaffold_contract}
 3. verification/rollback: one shell string or null.
 4. expected_files: relative path array.
 5. Relative paths only; no absolute paths, .., ~, frontend/src/frontend/src, or backend/src/backend/src; rooted exactly once.
@@ -235,8 +232,7 @@ def build_compact_planning_repair_prompt(
     ops_contract = render_ops_first_contract()
     operation_choice_contract = render_operation_choice_contract()
     shell_fallback_limits = render_shell_fallback_limits()
-    python_verification_contract = render_python_verification_contract()
-    static_site_verification_contract = render_static_site_verification_contract()
+    verification_contract = render_verification_contract()
     test_scaffold_contract = render_test_scaffold_contract()
     prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
@@ -257,8 +253,7 @@ Rules:
 - {ops_contract}
 - {operation_choice_contract}
 - shell fallback limits: {shell_fallback_limits}
-- {python_verification_contract}
-- {static_site_verification_contract}
+- {verification_contract}
 - {test_scaffold_contract}
 - verification must be one real command using `python -c`, `python -m`, `node -e`, `npm run build`, or a project test command.
 - expected_files must be relative paths only.

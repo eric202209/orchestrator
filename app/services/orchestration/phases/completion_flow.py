@@ -49,7 +49,6 @@ from app.services.orchestration.state.persistence import (
 )
 from app.services.orchestration.policy import (
     COMPLETION_REPAIR_TIMEOUT_SECONDS,
-    SUMMARY_TIMEOUT_SECONDS,
 )
 from app.services.orchestration.review_policy import decide_change_set_review
 from app.services.orchestration.run_state import (
@@ -92,6 +91,15 @@ from app.services.orchestration.phases.completion_repair import (
     _extract_reported_changed_files,
     _repeats_prior_completion_failure,
 )
+from app.services.orchestration.phases.completion_summary import (
+    _deterministic_task_summary,
+    _generate_task_summary_with_fallback,
+)
+from app.services.orchestration.phases.completion_workspace import (
+    _completion_expected_paths,
+    _scope_workspace_consistency_to_task_changes,
+    _stack_set_for_paths,
+)
 
 __all__ = [
     "_attempt_completion_repair",
@@ -121,55 +129,6 @@ _VISIBLE_TEXT_KEYS = {
 }
 
 
-_PYTHON_SUFFIXES = {".py"}
-_NODE_SUFFIXES = {".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs"}
-
-
-def _stack_set_for_paths(paths: list[str]) -> set[str]:
-    stacks: set[str] = set()
-    for raw_path in paths or []:
-        suffix = Path(str(raw_path or "").strip()).suffix.lower()
-        if suffix in _PYTHON_SUFFIXES:
-            stacks.add("python")
-        elif suffix in _NODE_SUFFIXES:
-            stacks.add("node")
-    return stacks
-
-
-def _completion_expected_paths(plan: list[dict[str, Any]]) -> list[str]:
-    paths: list[str] = []
-    for step in plan or []:
-        paths.extend(str(path or "") for path in step.get("expected_files", []) or [])
-        for op in step.get("ops", []) or []:
-            if isinstance(op, dict):
-                paths.append(str(op.get("path") or ""))
-    return [path for path in paths if path.strip()]
-
-
-def _scope_workspace_consistency_to_task_changes(
-    workspace_consistency: dict[str, Any],
-    *,
-    plan: list[dict[str, Any]],
-    reported_changed_files: list[str],
-) -> dict[str, Any]:
-    """Do not fail backend-only work because the project already has frontend files."""
-
-    if not workspace_consistency.get("mixed_stack"):
-        return workspace_consistency
-
-    task_paths = list(reported_changed_files or []) + _completion_expected_paths(plan)
-    task_stacks = _stack_set_for_paths(task_paths)
-    if len(task_stacks) != 1:
-        return workspace_consistency
-
-    scoped = dict(workspace_consistency)
-    scoped["workspace_mixed_stack"] = True
-    scoped["mixed_stack"] = False
-    scoped["task_scoped_stack"] = next(iter(task_stacks))
-    scoped["mixed_stack_scope"] = "preexisting_workspace_ignored"
-    return scoped
-
-
 def _resolve_template_review_policy(task: Any) -> Optional[dict]:
     template_id = getattr(task, "template_id", None)
     if not template_id:
@@ -186,86 +145,6 @@ def _resolve_template_review_policy(task: Any) -> Optional[dict]:
         return policy
     except Exception:
         return None
-
-
-def _deterministic_task_summary(orchestration_state: Any) -> str:
-    changed_files = list(
-        dict.fromkeys(
-            path
-            for result in (getattr(orchestration_state, "execution_results", []) or [])
-            for path in (getattr(result, "files_changed", []) or [])
-            if str(path).strip()
-        )
-    )
-    completed_steps = sum(
-        1
-        for result in (getattr(orchestration_state, "execution_results", []) or [])
-        if getattr(result, "status", "") == "completed"
-    )
-    total_steps = len(getattr(orchestration_state, "plan", []) or [])
-    file_summary = ", ".join(changed_files[:10]) if changed_files else "none recorded"
-    return (
-        "Task completed with verified execution evidence. "
-        f"Completed steps: {completed_steps}/{total_steps}. "
-        f"Changed files: {file_summary}."
-    )
-
-
-def _generate_task_summary_with_fallback(
-    *,
-    ctx: OrchestrationRunContext,
-    summary_prompt: str,
-) -> Dict[str, Any]:
-    if os.getenv("ORCHESTRATOR_GENERATE_LLM_TASK_SUMMARY", "").lower() not in {
-        "1",
-        "true",
-        "yes",
-    }:
-        return {
-            "status": "completed",
-            "output": _deterministic_task_summary(ctx.orchestration_state),
-            "fallback": True,
-            "source": "deterministic",
-        }
-
-    try:
-        summary_result = asyncio.run(
-            ctx.runtime_service.execute_task(
-                summary_prompt, timeout_seconds=SUMMARY_TIMEOUT_SECONDS
-            )
-        )
-    except Exception as exc:
-        fallback_summary = _deterministic_task_summary(ctx.orchestration_state)
-        ctx.emit_live(
-            "WARN",
-            "[ORCHESTRATION] Task summary generation failed; using deterministic completion summary",
-            metadata={
-                "phase": "task_summary",
-                "reason": "summary_generation_failed",
-                "error": str(exc)[:500],
-                "timeout_seconds": SUMMARY_TIMEOUT_SECONDS,
-            },
-        )
-        return {
-            "status": "completed",
-            "output": fallback_summary,
-            "fallback": True,
-            "error": str(exc)[:500],
-        }
-
-    if not isinstance(summary_result, dict):
-        return {
-            "status": "completed",
-            "output": _deterministic_task_summary(ctx.orchestration_state),
-            "fallback": True,
-            "error": "summary_result_not_dict",
-        }
-    if not str(summary_result.get("output") or "").strip():
-        summary_result = dict(summary_result)
-        summary_result["output"] = _deterministic_task_summary(ctx.orchestration_state)
-        summary_result["fallback"] = True
-        summary_result.setdefault("status", "completed")
-    return summary_result
 
 
 def _extract_completion_repair_json_text(value: Any) -> str:
@@ -775,21 +654,7 @@ def _attempt_completion_repair(
     )
     if reported_changed_files:
         repair_exec_result["files_changed"] = reported_changed_files
-        adjusted_expected_files = [
-            path
-            for path in reported_changed_files
-            if path.startswith(("src/", "tests/"))
-            or path
-            in {
-                "vitest.config.ts",
-                "jest.config.js",
-                "package.json",
-                "tsconfig.json",
-                ".env.example",
-            }
-        ]
-        if adjusted_expected_files:
-            repair_step["expected_files"] = adjusted_expected_files
+        repair_step["expected_files"] = reported_changed_files
     assessment = assess_step_execution(
         db=db,
         session_id=ctx.session_id,

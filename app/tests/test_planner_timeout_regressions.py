@@ -505,7 +505,7 @@ def test_initial_planning_prompt_contains_valid_json_contract_example():
         "Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command"
         in prompt
     )
-    assert "For static HTML, prefer Python file/content assertions over Node" in prompt
+    assert "must prove behavior or content using current workspace evidence" in prompt
     assert "If a scaffold command is genuinely required" in prompt
     assert "use `ops` for any follow-up source edits" in prompt
     assert "Never use heredoc syntax" in prompt
@@ -1445,16 +1445,15 @@ def test_minimal_planning_prompt_requires_real_content_and_strong_verification()
     assert "fallback limits" in prompt
     assert "If content needs quoting, move that content into `ops`" in prompt
     assert (
-        "For Python app import assertions, create a tiny test file with `ops`" in prompt
+        "Verification must be a real project check with a nonzero failure mode"
+        in prompt
     )
-    assert "For static HTML/CSS without package.json, prefer `python -c`" in prompt
-    assert "instead of inline `python -c` snippets" in prompt
     assert "No heredocs, background processes, absolute helpers" in prompt
     assert (
         "Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command"
         in prompt
     )
-    assert "For static HTML, prefer Python file/content assertions over Node" in prompt
+    assert "must prove behavior or content using current workspace evidence" in prompt
     assert "If a scaffold command is genuinely required" in prompt
     assert "use `ops` for any follow-up source edits" in prompt
     assert (

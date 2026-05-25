@@ -3,7 +3,6 @@ from datetime import datetime, timezone
 from app.services.orchestration.execution.execution_flow import assess_step_execution
 from app.services.orchestration.execution.executor import ExecutorService
 from app.services.orchestration.planning.normalization import (
-    complete_repaired_plan_contract,
     normalize_existing_file_target_plan,
     normalize_stale_replace_ops_to_small_file_writes,
 )
@@ -413,35 +412,6 @@ def test_frontend_python_content_probe_does_not_create_stack_conflict(tmp_path):
 
     assert "stack_conflict" not in verdict.details
     assert not any("inconsistent implementation stacks" in r for r in verdict.reasons)
-
-
-def test_static_site_contract_completion_does_not_treat_js_as_static_site():
-    plan = [
-        {
-            "step_number": 1,
-            "description": "Update JavaScript utility",
-            "commands": [],
-            "verification": "",
-            "rollback": None,
-            "expected_files": ["src/formatStatus.js"],
-            "ops": [
-                {
-                    "op": "write_file",
-                    "path": "src/formatStatus.js",
-                    "content": "export function formatStatus(status) { return status.toUpperCase(); }\n",
-                }
-            ],
-        }
-    ]
-
-    normalized, details = complete_repaired_plan_contract(
-        plan,
-        task_prompt="Update one existing frontend utility.",
-        repaired=True,
-    )
-
-    assert details["changed"] is False
-    assert normalized == plan
 
 
 def test_stale_replace_fallback_converts_small_python_function_to_write_file(

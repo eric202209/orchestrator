@@ -42,7 +42,7 @@ def test_phase10n_test_scaffold_guidance_is_in_planning_and_repair_prompts(
         assert "fixtures, factories, and domain constructors" in prompt
         assert "raw dicts" in prompt
         assert "Compile changed Python tests" in prompt
-        assert "python -m pytest tests/ -q" in prompt
+        assert "real project check with a nonzero failure mode" in prompt
 
     assert len(compact) < PLANNING_REPAIR_PROMPT_MAX_CHARS
 

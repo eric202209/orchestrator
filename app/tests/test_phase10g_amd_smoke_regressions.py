@@ -950,7 +950,7 @@ class TestUnittestPlanMaterialization:
         assert assessment.step_status == "success"
         assert "NameError" not in assessment.verification_output
 
-    def test_module_assert_verification_runs_as_simple_local_check(
+    def test_module_assert_verification_is_not_hardcoded_as_simple_local_check(
         self, tmp_path: Path
     ):
         from app.services.orchestration.phases.execution_loop import (
@@ -968,8 +968,7 @@ class TestUnittestPlanMaterialization:
             verification_command=command,
         )
 
-        assert result is not None
-        assert result["status"] == "completed"
+        assert result is None
 
 
 # ---------------------------------------------------------------------------

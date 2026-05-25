@@ -35,10 +35,9 @@ from app.services.orchestration.operations.file_ops_contract import (
 from app.services.orchestration.planning.prompt_contracts import (
     render_operation_choice_contract as _render_operation_choice_contract,
     render_ops_first_contract as _render_ops_first_contract,
-    render_python_verification_contract as _render_python_verification_contract,
     render_shell_fallback_limits as _render_shell_fallback_limits,
-    render_static_site_verification_contract as _render_static_site_verification_contract,
     render_test_scaffold_contract as _render_test_scaffold_contract,
+    render_verification_contract as _render_verification_contract,
 )
 from app.services.orchestration.planning.repair_prompts import (
     PLANNING_REPAIR_COMPACT_MALFORMED_OUTPUT_CHARS,
@@ -1968,8 +1967,7 @@ class PlannerService:
         ops_contract = _render_ops_first_contract()
         operation_choice_contract = _render_operation_choice_contract()
         shell_fallback_limits = _render_shell_fallback_limits()
-        python_verification_contract = _render_python_verification_contract()
-        static_site_verification_contract = _render_static_site_verification_contract()
+        verification_contract = _render_verification_contract()
         test_scaffold_contract = _render_test_scaffold_contract()
         knowledge_block = _render_knowledge_block(knowledge_context)
         structure_capsule = (
@@ -2010,18 +2008,17 @@ Rules:
 14. Shell fallback limits: {shell_fallback_limits}
 15. Do not join separate shell commands with commas
 16. Commands must be runnable shell, not prose. Do not emit pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
-17. {python_verification_contract}
-18. {static_site_verification_contract}
-19. {test_scaffold_contract}
-20. Do not create or cd into a nested project folder; run directly from {display_project_dir}
-21. Include exactly one final meaningful verification/build step such as `npm run build`, `pytest`, or `python -m pytest`
-22. Prefer package-manager/editor-friendly commands and one-file-at-a-time edits
-23. Preserve the JSON-only output mode from the first instruction.
-24. If the workspace already has files, start by inspecting or extending them before re-scaffolding
-25. For implementation steps that list expected_files, at least one command or file-mutating `ops` entry must materially write or edit file contents; do not use touch-only or placeholder-only steps
-26. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command. For implementation-heavy steps, verification must prove behavior or content. For static HTML, prefer Python file/content assertions over Node unless package.json already exists.
-27. Prefer an inspect -> edit -> verify sequence grounded in the current workspace
-28. If a scaffold command is genuinely required, run it in the current workspace and use `ops` for any follow-up source edits.
+17. {verification_contract}
+18. {test_scaffold_contract}
+19. Do not create or cd into a nested project folder; run directly from {display_project_dir}
+20. Include exactly one final meaningful verification/build step such as `npm run build`, `pytest`, or `python -m pytest`
+21. Prefer package-manager/editor-friendly commands and one-file-at-a-time edits
+22. Preserve the JSON-only output mode from the first instruction.
+23. If the workspace already has files, start by inspecting or extending them before re-scaffolding
+24. For implementation steps with expected_files, include at least one command or file-mutating `ops` entry with actions that materially write or edit file contents, not just mkdir/touch.
+25. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command. For implementation-heavy steps, verification must prove behavior or content using current workspace evidence.
+26. Prefer an inspect -> edit -> verify sequence grounded in the current workspace
+27. If a scaffold command is genuinely required, run it in the current workspace and use `ops` for any follow-up source edits.
 
 Invalid outputs:
 - Markdown fences around JSON
@@ -2055,8 +2052,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
         ops_contract = _render_ops_first_contract()
         operation_choice_contract = _render_operation_choice_contract()
         shell_fallback_limits = _render_shell_fallback_limits()
-        python_verification_contract = _render_python_verification_contract()
-        static_site_verification_contract = _render_static_site_verification_contract()
+        verification_contract = _render_verification_contract()
         test_scaffold_contract = _render_test_scaffold_contract()
         prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
@@ -2075,9 +2071,8 @@ Requirements:
 4. {ops_contract}
 4a. {operation_choice_contract}
 5. Shell fallback limits: {shell_fallback_limits}
-6. {python_verification_contract}
-6a. {static_site_verification_contract}
-6b. {test_scaffold_contract}
+6. {verification_contract}
+6a. {test_scaffold_contract}
 7. Each step must contain exactly these required keys, plus optional `ops`, and no other keys:
    step_number, description, commands, verification, rollback, expected_files
 8. step_number values must be unique integers and exactly 1, 2, 3... in order
@@ -2087,7 +2082,7 @@ Requirements:
 12. Keep each command short and machine-runnable
 13. If the workspace already has files, inspect or extend them before re-scaffolding
 14. For implementation steps with expected_files, include at least one command or file-mutating `ops` entry that writes real file content, not just mkdir/touch
-15. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command. For static HTML, prefer Python file/content assertions over Node unless package.json already exists.
+15. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command, and must prove behavior or content using current workspace evidence.
 16. Commands must be runnable shell, not pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
 17. Do not create or cd into a nested project folder; run directly from {display_project_dir}
 18. Include exactly one final meaningful verification/build step

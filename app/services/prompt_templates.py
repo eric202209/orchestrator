@@ -321,7 +321,7 @@ Do not implement anything.
 7. For routine file changes, prefer `ops`: `[{{"op":"write_file","path":"relative/path","content":"file contents"}}]`; do not shell-quote file bodies. Use append_file for appends, replace_in_file for exact literal edits, mkdir for directories, and delete_file for file deletion.
 8. Keep `commands` for shell tasks such as installs, builds, tests, inspection, and verification. Never use heredoc syntax. Use `ops` for file bodies and deterministic file mutations.
 9. Include exactly one final meaningful verification/build step such as `npm run build`, `pytest`, or `python -m pytest`.
-10. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command. For static HTML, prefer Python file/content assertions over Node unless package.json already exists.
+10. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command, and must prove behavior or content using current workspace evidence.
 11. If a scaffold command is genuinely required, run it in the current workspace and use `ops` for any follow-up source edits.
 
 **Execution Profile Rules:**

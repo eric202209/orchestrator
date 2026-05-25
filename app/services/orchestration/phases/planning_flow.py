@@ -28,9 +28,7 @@ from app.services.orchestration.planning.planner import (
     PlanningRepairOutputContractViolation,
 )
 from app.services.orchestration.planning.normalization import (
-    complete_repaired_plan_contract,
     normalize_existing_file_target_plan,
-    normalize_existing_static_site_plan,
     normalize_stale_replace_ops_to_small_file_writes,
 )
 from app.services.orchestration.policy import clamp_planning_timeout
@@ -41,7 +39,6 @@ from app.services.orchestration.validation.parsing import (
     extract_plan_steps_from_summary_text,
 )
 from app.services.orchestration.validation.validator import (
-    READ_ONLY_WORKFLOW_STAGES,
     ValidatorService,
 )
 from app.services.orchestration.validation.workspace_guard import (
@@ -61,147 +58,9 @@ from app.services.orchestration.phases.planning_knowledge import (
     _retrieve_knowledge,
     _retrieve_validation_repair_knowledge,
 )
-
-
-def _read_only_stage_fallback_plan(
-    ctx: OrchestrationRunContext,
-) -> list[dict[str, Any]] | None:
-    if ctx.workflow_stage not in READ_ONLY_WORKFLOW_STAGES:
-        return None
-
-    script = (
-        "import pathlib; "
-        "files=[p for p in pathlib.Path('.').rglob('*') "
-        "if p.is_file() and '.openclaw' not in p.parts]; "
-        "print('\\n'.join(str(p) for p in files[:200]))"
-    )
-    command = "python -c " + json.dumps(script)
-    stage_label = str(ctx.workflow_stage or "review").replace("_", " ")
-    report_path_by_stage = {
-        "review": "docs/review.md",
-        "validate": "docs/validation.md",
-        "validation": "docs/validation.md",
-    }
-    report_path = report_path_by_stage.get(str(ctx.workflow_stage or ""))
-    if report_path:
-        report_title = (
-            "Review Report" if ctx.workflow_stage == "review" else "Validation Report"
-        )
-        report_content = (
-            f"# {report_title}\n\n"
-            "## Findings\n\n"
-            "- Workspace inspected with a deterministic file inventory.\n\n"
-            "## Evidence\n\n"
-            f"- Command: `{script}`\n\n"
-            "## Verdict\n\n"
-            "- Further task-specific checks are required before promotion.\n"
-        )
-        report_check = (
-            "import pathlib,sys; "
-            f"path=pathlib.Path({json.dumps(report_path)}); "
-            "sys.exit(0 if path.is_file() and "
-            f"{json.dumps(report_title)} in "
-            "path.read_text(encoding='utf-8') else 1)"
-        )
-        report_verification = "python -c " + json.dumps(report_check)
-        return [
-            {
-                "step_number": 1,
-                "description": f"Inspect workspace for {stage_label} stage",
-                "commands": [command],
-                "verification": command,
-                "rollback": None,
-                "expected_files": [],
-            },
-            {
-                "step_number": 2,
-                "description": f"Write {stage_label} report artifact",
-                "commands": [],
-                "ops": [
-                    {
-                        "op": "write_file",
-                        "path": report_path,
-                        "content": report_content,
-                    }
-                ],
-                "verification": report_verification,
-                "rollback": f"rm -f {report_path}",
-                "expected_files": [report_path],
-            },
-        ]
-    return [
-        {
-            "step_number": 1,
-            "description": f"Inspect workspace for {stage_label} stage",
-            "commands": [command],
-            "verification": command,
-            "rollback": "true",
-            "expected_files": [],
-        }
-    ]
-
-
-def _static_site_validation_fallback_plan(
-    ctx: OrchestrationRunContext,
-) -> list[dict[str, Any]] | None:
-    if ctx.workflow_stage not in {"validate", "validation"}:
-        return None
-
-    prompt = str(ctx.prompt or "")
-    lowered = prompt.lower()
-    project_dir = Path(ctx.orchestration_state.project_dir)
-    root = "public/status-site" if "public/status-site" in lowered else ""
-    if not root:
-        public_dir = project_dir / "public"
-        if not public_dir.is_dir():
-            return None
-        for child in sorted(public_dir.iterdir()):
-            if not child.is_dir():
-                continue
-            if (child / "index.html").is_file() and (
-                child / "css" / "style.css"
-            ).is_file():
-                root = f"public/{child.name}"
-                break
-    if not root:
-        return None
-
-    files = [
-        f"{root}/index.html",
-        f"{root}/css/style.css",
-        f"{root}/images/status-badge.svg",
-    ]
-    needles = ["css/style.css", "images/status-badge.svg"]
-    for label in ("API", "Queue", "Knowledge"):
-        if label.lower() in lowered:
-            needles.append(label)
-    if "skip link" in lowered or "skip-link" in lowered:
-        needles.append("skip")
-    if "alt text" in lowered or "alt=" in lowered:
-        needles.append("alt=")
-
-    script = (
-        "import pathlib,sys; "
-        f"files={json.dumps(files)}; "
-        f"index={json.dumps(files[0])}; "
-        f"needles={json.dumps(list(dict.fromkeys(needles)))}; "
-        "ok=all(pathlib.Path(p).is_file() and pathlib.Path(p).stat().st_size > 0 for p in files); "
-        "content=pathlib.Path(index).read_text(encoding='utf-8') if pathlib.Path(index).is_file() else ''; "
-        "ok=ok and all(needle in content for needle in needles); "
-        "sys.exit(0 if ok else 1)"
-    )
-    command = "python -c " + json.dumps(script)
-    return [
-        {
-            "step_number": 1,
-            "description": f"Validate static site contract under {root}",
-            "commands": [command],
-            "verification": command,
-            "rollback": "true",
-            "expected_files": [],
-            "ops": [],
-        }
-    ]
+from app.services.orchestration.phases.read_only_fallbacks import (
+    _read_only_stage_fallback_plan,
+)
 
 
 def _split_repaired_single_step_full_lifecycle_plan(
@@ -1359,25 +1218,6 @@ def execute_planning_phase(
             sanitized_plan = _strengthen_weak_expected_file_verifications(
                 sanitized_plan
             )
-            sanitized_plan, static_site_normalization = (
-                normalize_existing_static_site_plan(
-                    sanitized_plan,
-                    project_dir=ctx.orchestration_state.project_dir,
-                )
-            )
-            if static_site_normalization.get("changed"):
-                ctx.logger.info(
-                    "[ORCHESTRATION] Normalized existing static-site plan paths: %s",
-                    static_site_normalization,
-                )
-                emit_phase_event(
-                    ctx.orchestration_state,
-                    ctx.emit_live,
-                    level="INFO",
-                    phase="planning",
-                    message="[ORCHESTRATION] Normalized existing static-site plan paths",
-                    details=static_site_normalization,
-                )
             sanitized_plan, file_target_normalization = (
                 normalize_existing_file_target_plan(
                     sanitized_plan,
@@ -1415,39 +1255,6 @@ def execute_planning_phase(
                     phase="planning",
                     message="[ORCHESTRATION] Converted stale replace ops to guarded small-file writes",
                     details=stale_replace_normalization,
-                )
-            sanitized_plan, completion_details = complete_repaired_plan_contract(
-                sanitized_plan,
-                task_prompt=ctx.prompt,
-                repaired=retry_state.repair_prompt_used,
-            )
-            if completion_details.get("changed"):
-                ctx.logger.info(
-                    "[ORCHESTRATION] Completed deterministic plan contract gaps: %s",
-                    completion_details,
-                )
-                emit_phase_event(
-                    ctx.orchestration_state,
-                    ctx.emit_live,
-                    level="INFO",
-                    phase="planning",
-                    message="[ORCHESTRATION] Completed deterministic plan contract gaps",
-                    details=completion_details,
-                )
-            static_validation_plan = _static_site_validation_fallback_plan(ctx)
-            if static_validation_plan:
-                sanitized_plan = static_validation_plan
-                output_text = json.dumps(static_validation_plan)
-                emit_phase_event(
-                    ctx.orchestration_state,
-                    ctx.emit_live,
-                    level="INFO",
-                    phase="planning",
-                    message="[ORCHESTRATION] Replaced static-site validation plan with deterministic read-only checks",
-                    details={
-                        "reason": "static_site_validation_contract",
-                        "workflow_stage": ctx.workflow_stage,
-                    },
                 )
             try:
                 ctx.orchestration_state.plan = normalize_plan_with_live_logging(

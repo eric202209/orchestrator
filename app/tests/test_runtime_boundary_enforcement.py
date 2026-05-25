@@ -1,24 +1,12 @@
-"""Phase 10S: Runtime boundary enforcement tests.
-
-Verifies that:
-- Every public normalizer function and every _static_site_* function in
-  planning_flow.py has a registry entry.
-- All deprecated_artifact entries have allowed_to_expand=False.
-- The two deprecated artifacts are not imported outside planning_flow.py.
-- The repair_churn_stopped column exists in the Session model.
-- The repair governor fires correctly for each trigger.
-- The repair governor does not fire below threshold.
-"""
+"""Phase 10S: Runtime boundary enforcement tests."""
 
 from __future__ import annotations
 
-import ast
 import inspect
 from pathlib import Path
 from unittest.mock import MagicMock
 
-REPO_ROOT = Path(__file__).resolve().parents[2]  # orchestrator/
-APP_ROOT = REPO_ROOT / "app"
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 # --------------------------------------------------------------------------- #
@@ -36,26 +24,10 @@ def _public_normalizer_function_names() -> list[str]:
     ]
 
 
-def _static_site_function_names_in_planning_flow() -> list[str]:
-    source = (
-        APP_ROOT / "services" / "orchestration" / "phases" / "planning_flow.py"
-    ).read_text()
-    tree = ast.parse(source)
-    return [
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name.startswith("_static_site_")
-    ]
-
-
 def test_rule_registry_has_no_unlabeled_normalizer():
     from app.services.orchestration.rule_registry import RULE_REGISTRY
 
     public_normalizers = _public_normalizer_function_names()
-    static_site_fns = _static_site_function_names_in_planning_flow()
-
-    # Map source_location prefixes to rule_ids for lookup
-    registered_locations = {r.source_location for r in RULE_REGISTRY.values()}
 
     for fn_name in public_normalizers:
         matching = [r for r in RULE_REGISTRY.values() if fn_name in r.source_location]
@@ -64,64 +36,14 @@ def test_rule_registry_has_no_unlabeled_normalizer():
             "Add an entry before modifying this function."
         )
 
-    for fn_name in static_site_fns:
-        matching = [r for r in RULE_REGISTRY.values() if fn_name in r.source_location]
-        assert matching, (
-            f"_static_site_* function '{fn_name}' in planning_flow.py has no "
-            "entry in RULE_REGISTRY. Add an entry before modifying this function."
-        )
 
-
-def test_deprecated_artifacts_have_allowed_to_expand_false():
+def test_runtime_registry_has_no_deprecated_planning_artifacts():
     from app.services.orchestration.rule_registry import RULE_REGISTRY
 
     deprecated = [
         r for r in RULE_REGISTRY.values() if r.owner_layer == "deprecated_artifact"
     ]
-    assert deprecated, "Expected at least one deprecated_artifact in the registry."
-
-    for rule in deprecated:
-        assert rule.allowed_to_expand is False, (
-            f"Rule '{rule.rule_id}' is a deprecated_artifact but has "
-            f"allowed_to_expand={rule.allowed_to_expand}. "
-            "deprecated_artifact rules must have allowed_to_expand=False."
-        )
-
-
-def test_deprecated_artifacts_only_called_from_planning_flow():
-    """Verify that deprecated normalizers are not imported outside planning_flow.py."""
-    deprecated_function_names = {
-        "normalize_existing_static_site_plan",
-        "_static_site_validation_fallback_plan",
-    }
-
-    py_files = list(APP_ROOT.rglob("*.py"))
-    violations: list[str] = []
-
-    for py_file in py_files:
-        relative = py_file.relative_to(APP_ROOT)
-        # Skip definition sites, the registry (names them in strings), and tests
-        if "planning_flow" in py_file.name:
-            continue
-        if "normalization" in py_file.name:
-            continue
-        if "rule_registry" in py_file.name:
-            continue
-        if "test_" in py_file.name:
-            continue
-        try:
-            source = py_file.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        for fn_name in deprecated_function_names:
-            if fn_name in source:
-                violations.append(f"{relative}: references '{fn_name}'")
-
-    assert (
-        not violations
-    ), "Deprecated artifact(s) referenced outside their expected files:\n" + "\n".join(
-        violations
-    )
+    assert deprecated == []
 
 
 # --------------------------------------------------------------------------- #

@@ -33,15 +33,6 @@ def render_shell_fallback_limits() -> str:
     )
 
 
-def render_python_verification_contract() -> str:
-    return (
-        "Python verify: py_compile, unittest, or pytest exit codes; "
-        "prefer `python -m pytest tests/ -q`. "
-        "For Python app import assertions, create a tiny test file with `ops` "
-        "instead of inline `python -c` snippets."
-    )
-
-
 def render_test_scaffold_contract() -> str:
     return (
         "For new/changed tests: inspect nearby tests first; match their imports, "
@@ -51,8 +42,9 @@ def render_test_scaffold_contract() -> str:
     )
 
 
-def render_static_site_verification_contract() -> str:
+def render_verification_contract() -> str:
     return (
-        "For static HTML/CSS without package.json, prefer `python -c` "
-        "file/content checks; use Node only for Node projects."
+        "Verification must be a real project check with a nonzero failure mode, "
+        "such as a test command, build command, compile command, import check, "
+        "or content assertion grounded in current workspace files."
     )

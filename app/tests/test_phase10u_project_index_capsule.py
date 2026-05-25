@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 from app.services.orchestration.phases.planning_flow import (
     _read_only_stage_fallback_plan,
-    _static_site_validation_fallback_plan,
 )
 from app.services.orchestration.planning.planner import PlannerService
 from app.services.orchestration.planning.repair_prompts import (
@@ -169,23 +168,6 @@ def test_review_lane_fallback_plan_fires_for_medium_project(tmp_path):
     assert "pathlib" in step["commands"][0]
     assert "rglob" in step["commands"][0]
     assert "inspect workspace" in step["description"].lower()
-
-
-def test_validation_lane_no_static_site_fallback_for_python_ledger_project(tmp_path):
-    """Validation lane on a Python/ledger project must not trigger the static-site fallback."""
-    _make_medium_ledger_workspace(tmp_path)
-
-    state = SimpleNamespace(project_dir=str(tmp_path))
-    ctx = SimpleNamespace(
-        workflow_stage="validate",
-        prompt="Validate that the ledger calculator produces correct totals.",
-        orchestration_state=state,
-    )
-
-    # No public/ dir → static-site fallback must not fire
-    fallback = _static_site_validation_fallback_plan(ctx)
-
-    assert fallback is None
 
 
 def test_medium_project_capsule_covers_backend_and_frontend_paths(tmp_path):

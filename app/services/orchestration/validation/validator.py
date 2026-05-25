@@ -1900,7 +1900,7 @@ class ValidatorService:
                 elif op_name == "delete_file":
                     known_paths.discard(relative_path)
 
-            step_source_paths = ValidatorService._core_expected_files([step])
+            step_source_paths: List[str] = []
             for command in step.get("commands", []) or []:
                 step_source_paths.extend(
                     ValidatorService._command_source_read_targets(str(command or ""))
@@ -2064,6 +2064,12 @@ class ValidatorService:
                     if token == ".":
                         continue
                     targets.append(token)
+            elif command_name in {"test", "["}:
+                for index, token in enumerate(tokens[1:], start=1):
+                    if token in {"|", "||", "&&", ";", "]"}:
+                        break
+                    if token in {"-f", "-d", "-e", "-s"} and index + 1 < len(tokens):
+                        targets.append(tokens[index + 1])
             elif command_name in {"node", "python", "python3"} and len(tokens) > 1:
                 script = tokens[1]
                 if script not in {"-e", "-c"}:
@@ -2542,7 +2548,11 @@ class ValidatorService:
                 materialized_targets | existing_expected_files
             )
         )
-        if declared_expected_files and unmaterialized_expected_files:
+        if (
+            declared_expected_files
+            and unmaterialized_expected_files
+            and workflow_stage not in READ_ONLY_WORKFLOW_STAGES
+        ):
             repairable.append(
                 "Plan declares expected files without materializing them through "
                 "file operations or shell writes"
