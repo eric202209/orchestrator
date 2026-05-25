@@ -13,7 +13,13 @@ from app.services.orchestration.context.assembly import (
     collect_workspace_inventory_paths,
     sanitize_progress_notes_for_workspace,
 )
+import app.services.orchestration.phases.execution_loop as execution_loop
 from app.models import LogEntry
+from app.schemas.knowledge import (
+    KnowledgeContext,
+    KnowledgeItemRef,
+    RecommendedAction,
+)
 from app.services.prompt_templates import OrchestrationState, StepResult
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 
@@ -75,6 +81,53 @@ def _make_ctx(tmp_path):
         execution_profile="full_lifecycle",
         workflow_profile="default",
         orchestration_state=state,
+    )
+
+
+def _knowledge_ctx_for_debug_prompt() -> KnowledgeContext:
+    return KnowledgeContext(
+        retrieved_items=[
+            KnowledgeItemRef(
+                id="debug-case-1",
+                title="Pytest assertion repair",
+                knowledge_type="debug_case",
+                content="Inspect the failing assertion before changing implementation.",
+                priority=10,
+                confidence=0.92,
+            )
+        ],
+        query="assertion failed",
+        trigger_phase="failure",
+        retrieval_reason="semantic_retrieval",
+        confidence=0.92,
+        matched_failure_memory=False,
+        recommended_action=RecommendedAction.review_failure,
+    )
+
+
+def _debug_knowledge_ctx(
+    *,
+    knowledge_type: str = "debug_case",
+    confidence: float = 0.92,
+    retrieval_reason: str = "semantic_retrieval",
+) -> KnowledgeContext:
+    return KnowledgeContext(
+        retrieved_items=[
+            KnowledgeItemRef(
+                id="debug-knowledge-1",
+                title="Debug repair memory",
+                knowledge_type=knowledge_type,
+                content="Use the failure output to target the repair.",
+                priority=10,
+                confidence=confidence,
+            )
+        ],
+        query="debug failure",
+        trigger_phase="failure",
+        retrieval_reason=retrieval_reason,
+        confidence=confidence,
+        matched_failure_memory=knowledge_type == "failure_memory",
+        recommended_action=RecommendedAction.review_failure,
     )
 
 
@@ -225,6 +278,89 @@ def test_operator_guidance_reaches_next_runtime_boundaries(tmp_path, db_session)
     assert "Prefer the smaller fix." in debugging_prompt
     assert "Prefer the smaller fix." in revision_prompt
     assert "Prefer the smaller fix." in completion_inputs["project_context"]
+
+
+def test_debugging_prompt_includes_injected_knowledge_context(tmp_path):
+    ctx = _make_ctx(tmp_path)
+
+    debugging_prompt = assemble_debugging_prompt(
+        ctx,
+        DebugPromptInputs(
+            step_description="Run tests",
+            error_message="failed",
+            command_output="FAILED tests/test_main.py::test_value",
+            verification_output="",
+            attempt_number=1,
+            max_attempts=2,
+            knowledge_context=_knowledge_ctx_for_debug_prompt(),
+        ),
+    )
+
+    assert "## KNOWLEDGE REFERENCES" in debugging_prompt
+    assert "Pytest assertion repair" in debugging_prompt
+    assert (
+        "Inspect the failing assertion before changing implementation."
+        in debugging_prompt
+    )
+
+
+def test_low_confidence_generic_failure_memory_is_not_debug_injected():
+    filtered = execution_loop._filter_debug_knowledge_context_for_prompt(
+        _debug_knowledge_ctx(
+            knowledge_type="failure_memory",
+            confidence=0.3,
+            retrieval_reason="sqlite_fallback_qdrant_or_embedding_unavailable",
+        )
+    )
+
+    assert filtered is None
+
+
+def test_debug_knowledge_usage_logged_only_for_filtered_injected_context(monkeypatch):
+    retrieved_ctx = _debug_knowledge_ctx(
+        knowledge_type="debug_case",
+        confidence=0.91,
+    )
+    usage_calls = []
+
+    class _FakeKnowledgeService:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def retrieve(self, **kwargs):
+            return retrieved_ctx
+
+    monkeypatch.setattr(
+        "app.services.knowledge.knowledge_service.KnowledgeService",
+        _FakeKnowledgeService,
+    )
+    monkeypatch.setattr(
+        "app.services.knowledge.usage_log_service.log_usage",
+        lambda **kwargs: usage_calls.append(kwargs),
+    )
+
+    ctx = SimpleNamespace(db=object(), session_id=11, task_id=22)
+    debug_inputs = DebugPromptInputs(
+        step_description="Run tests",
+        error_message="AssertionError: expected true",
+        command_output="FAILED tests/test_main.py::test_value",
+        verification_output="",
+        attempt_number=1,
+        max_attempts=2,
+    )
+
+    filtered = execution_loop._retrieve_debug_repair_knowledge(
+        ctx, debug_inputs, logger=SimpleNamespace(debug=lambda *_args, **_kwargs: None)
+    )
+    execution_loop._log_debug_repair_knowledge_usage(
+        ctx, filtered, logger=SimpleNamespace(debug=lambda *_args, **_kwargs: None)
+    )
+
+    assert filtered is not None
+    assert [item.id for item in filtered.retrieved_items] == ["debug-knowledge-1"]
+    assert usage_calls
+    assert usage_calls[0]["used_in_prompt"] is True
+    assert usage_calls[0]["context"].retrieved_items == filtered.retrieved_items
 
 
 def test_progress_notes_filter_stale_file_references_against_live_workspace(tmp_path):

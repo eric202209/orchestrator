@@ -131,6 +131,7 @@ class TestDebugPromptInputs:
         )
         assert d.compact is False
         assert d.failure_envelope is None
+        assert d.knowledge_context is None
 
     def test_compact_flag(self):
         d = DebugPromptInputs(

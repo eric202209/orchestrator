@@ -66,6 +66,7 @@ class DebugPromptInputs:
     max_attempts: int
     compact: bool = False
     failure_envelope: Any = None
+    knowledge_context: Any = None
 
 
 def _trim_text(text: Any, max_chars: int) -> str:
@@ -396,7 +397,7 @@ def _state_session_id(orchestration_state: Any) -> Any:
     return getattr(orchestration_state, "session_id", None)
 
 
-def _render_knowledge_block(knowledge_context: Any) -> str:
+def render_knowledge_references_block(knowledge_context: Any) -> str:
     """Render KNOWLEDGE REFERENCES block from a KnowledgeContext.
 
     Returns empty string when context is None or has no items.
@@ -414,6 +415,10 @@ def _render_knowledge_block(knowledge_context: Any) -> str:
         lines.append(item.content)
         lines.append("")
     return "\n".join(lines)
+
+
+def _render_knowledge_block(knowledge_context: Any) -> str:
+    return render_knowledge_references_block(knowledge_context)
 
 
 def render_adapted_runtime_prompt(
@@ -638,6 +643,9 @@ def assemble_debugging_prompt(
         project_dir=prompt_project_dir,
         compact=inputs.compact,
     )
+    knowledge_block = render_knowledge_references_block(inputs.knowledge_context)
+    if knowledge_block:
+        raw_prompt = knowledge_block + "\n" + raw_prompt
     if inputs.failure_envelope is not None and hasattr(
         inputs.failure_envelope, "to_prompt_block"
     ):

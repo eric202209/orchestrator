@@ -18,6 +18,7 @@ from app.services.orchestration.context.assembly import (
     assemble_debugging_prompt,
     assemble_execution_prompt,
     assemble_plan_revision_prompt,
+    render_knowledge_references_block,
 )
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.events.telemetry import emit_phase_event
@@ -98,6 +99,9 @@ from app.services.orchestration.phases.execution_local_steps import (
     _verification_can_replace_stale_commands,
 )
 from app.services.prompt_templates import OrchestrationStatus, StepResult
+from app.schemas.knowledge import KnowledgeContext
+
+_DEBUG_KNOWLEDGE_MIN_CONFIDENCE = 0.85
 
 
 def _run_coroutine(coro: Any) -> Any:
@@ -149,6 +153,131 @@ def _persist_runtime_backend_result(
     if not result.success and result.failure_category:
         task_execution.failure_category = result.failure_category
     db.flush()
+
+
+def _debug_knowledge_ref_allowed(item: Any, retrieval_reason: str) -> bool:
+    knowledge_type = str(getattr(item, "knowledge_type", "") or "")
+    if knowledge_type not in {"failure_memory", "debug_case"}:
+        return False
+    if retrieval_reason == "failure_signature_match":
+        return True
+    try:
+        confidence = float(getattr(item, "confidence", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    return confidence >= _DEBUG_KNOWLEDGE_MIN_CONFIDENCE
+
+
+def _filter_debug_knowledge_context_for_prompt(
+    knowledge_ctx: Any,
+) -> Optional[KnowledgeContext]:
+    retrieved_items = list(getattr(knowledge_ctx, "retrieved_items", []) or [])
+    if not retrieved_items:
+        return None
+
+    retrieval_reason = str(getattr(knowledge_ctx, "retrieval_reason", "") or "")
+    filtered_items = [
+        item
+        for item in retrieved_items
+        if _debug_knowledge_ref_allowed(item, retrieval_reason)
+    ]
+    if not filtered_items:
+        return None
+
+    confidence = round(
+        sum(float(getattr(item, "confidence", 0.0) or 0.0) for item in filtered_items)
+        / len(filtered_items),
+        4,
+    )
+    return KnowledgeContext(
+        retrieved_items=filtered_items,
+        query=getattr(knowledge_ctx, "query", None),
+        trigger_phase=getattr(knowledge_ctx, "trigger_phase", "failure"),
+        retrieval_reason=retrieval_reason,
+        confidence=confidence,
+        matched_failure_memory=any(
+            str(getattr(item, "knowledge_type", "") or "") == "failure_memory"
+            for item in filtered_items
+        ),
+        recommended_action=getattr(knowledge_ctx, "recommended_action", "none"),
+    )
+
+
+def _retrieve_debug_repair_knowledge(
+    ctx: OrchestrationRunContext,
+    debug_inputs: DebugPromptInputs,
+    logger: logging.Logger,
+) -> Optional[KnowledgeContext]:
+    db = getattr(ctx, "db", None)
+    if db is None:
+        return None
+
+    try:
+        from app.config import settings
+        from app.services.knowledge import failure_signature_service
+        from app.services.knowledge.knowledge_service import KnowledgeService
+
+        failure_text = "\n".join(
+            str(item or "")
+            for item in (
+                debug_inputs.error_message,
+                debug_inputs.command_output,
+                debug_inputs.verification_output,
+            )
+            if str(item or "").strip()
+        )[:4000]
+        if not failure_text:
+            failure_text = debug_inputs.step_description
+        sig = failure_signature_service.extract(
+            exc=RuntimeError(failure_text),
+            phase="execution",
+            tool_name=None,
+            retry_count=debug_inputs.attempt_number,
+        )
+        knowledge_ctx = KnowledgeService(
+            qdrant_url=settings.QDRANT_URL,
+            collection_name=settings.QDRANT_COLLECTION_NAME,
+        ).retrieve(
+            query=sig.normalized_message or failure_text,
+            trigger_phase="failure",
+            knowledge_types=["failure_memory", "debug_case"],
+            failure_signature=sig.signature_hash(),
+            db=db,
+        )
+        return _filter_debug_knowledge_context_for_prompt(knowledge_ctx)
+    except Exception as exc:
+        logger.debug("[KNOWLEDGE] Debug repair knowledge retrieval skipped: %s", exc)
+        return None
+
+
+def _log_debug_repair_knowledge_usage(
+    ctx: OrchestrationRunContext,
+    knowledge_ctx: Optional[KnowledgeContext],
+    logger: logging.Logger,
+) -> None:
+    if knowledge_ctx is None or not knowledge_ctx.retrieved_items:
+        return
+    try:
+        from app.services.knowledge import usage_log_service
+
+        usage_log_service.log_usage(
+            context=knowledge_ctx,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            used_in_prompt=True,
+            db=ctx.db,
+        )
+    except Exception as exc:
+        logger.debug("[KNOWLEDGE] Debug repair knowledge usage log skipped: %s", exc)
+
+
+def _prepend_debug_knowledge_block(
+    prompt: str, knowledge_ctx: Optional[KnowledgeContext]
+) -> str:
+    knowledge_block = render_knowledge_references_block(knowledge_ctx)
+    if not knowledge_block:
+        return prompt
+    return knowledge_block + "\n" + prompt
 
 
 def execute_step_loop(
@@ -1309,6 +1438,9 @@ def execute_step_loop(
             max_attempts=max_attempts,
             failure_envelope=failure_envelope,
         )
+        debug_knowledge_ctx = _retrieve_debug_repair_knowledge(
+            ctx, debug_inputs, logger
+        )
         task_execution_id = ctx.task_execution_id
         debug_repair_used_ids = set(
             int(item)
@@ -1444,6 +1576,10 @@ def execute_step_loop(
                     diff_repair_fallback_reason = "ineligible_failure_class"
                 else:
                     diff_repair_fallback_reason = "diff_capsule_unavailable"
+            debug_prompt = _prepend_debug_knowledge_block(
+                debug_prompt, debug_knowledge_ctx
+            )
+            _log_debug_repair_knowledge_usage(ctx, debug_knowledge_ctx, logger)
             orchestration_state.debug_repair_task_execution_ids = sorted(
                 {*debug_repair_used_ids, int(task_execution_id)}
             )
@@ -1454,7 +1590,9 @@ def execute_step_loop(
         else:
             diff_capsule = None
             diff_repair_fallback_reason = None
+            debug_inputs.knowledge_context = debug_knowledge_ctx
             debug_prompt = assemble_debugging_prompt(ctx, debug_inputs)
+            _log_debug_repair_knowledge_usage(ctx, debug_knowledge_ctx, logger)
             debug_prompt_mode = "legacy_debugging"
             if debug_feedback_envelope is not None:
                 persist_debug_feedback_envelope(
@@ -1552,6 +1690,7 @@ def execute_step_loop(
                     max_attempts=max_attempts,
                     compact=True,
                     failure_envelope=failure_envelope,
+                    knowledge_context=debug_knowledge_ctx,
                 ),
             )
             debug_result = _run_coroutine(
