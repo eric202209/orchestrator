@@ -22,6 +22,11 @@ from app.services.orchestration.diagnostics.debug_feedback import (
     normalize_bounded_debug_repair_payload,
     persist_debug_feedback_envelope,
 )
+from app.services.orchestration.diagnostics.diff_capsule import build_diff_capsule
+from app.services.orchestration.diagnostics.evidence_capsule import (
+    collect_workspace_evidence,
+    infer_missing_python_module_target,
+)
 from app.services.orchestration.reporting.decision_timeline import (
     get_session_decision_timeline_payload,
 )
@@ -401,6 +406,74 @@ def test_bounded_debug_repair_prompt_requires_json_array(tmp_path):
     )
     assert "full session history" not in prompt.lower()
     assert "task_execution_id" not in prompt
+
+
+def test_import_error_evidence_infers_missing_submodule_target(tmp_path):
+    package_dir = tmp_path / "src" / "math_tools"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("__all__ = ['calculator']\n")
+    (package_dir / "calculator.py").write_text(
+        "def add(a: int, b: int) -> int:\n    return a + b\n",
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_operations_import.py").write_text(
+        "from math_tools.operations import add\n",
+        encoding="utf-8",
+    )
+    failure_context = (
+        "Step verification command failed (`python -c 'import sys; "
+        "from math_tools import operations'`):\n"
+        "ImportError: cannot import name 'operations' from 'math_tools' "
+        f"({package_dir / '__init__.py'})"
+    )
+
+    assert (
+        infer_missing_python_module_target(failure_context, tmp_path)
+        == "src/math_tools/operations.py"
+    )
+
+    capsule = collect_workspace_evidence(
+        "import_error",
+        tmp_path,
+        failure_context=failure_context,
+    )
+
+    assert "src/math_tools/operations.py" in "\n".join(capsule.results.values())
+    assert any("from math_tools" in command for command in capsule.commands_run)
+    assert not any("from sys" in command for command in capsule.commands_run)
+
+
+def test_diff_capsule_skips_changed_init_when_missing_submodule_target_is_elsewhere(
+    tmp_path,
+):
+    package_dir = tmp_path / "src" / "math_tools"
+    package_dir.mkdir(parents=True)
+    init_path = package_dir / "__init__.py"
+    init_path.write_text("__all__ = ['calculator', 'operations']\n", encoding="utf-8")
+    envelope = build_debug_feedback_envelope(
+        task_execution_id=123,
+        task_id=45,
+        step_index=2,
+        failure_phase="execution",
+        failed_command='python -c "from math_tools import operations"',
+        stderr=(
+            "ImportError: cannot import name 'operations' from 'math_tools' "
+            f"({init_path})"
+        ),
+        changed_files=["src/math_tools/__init__.py"],
+        workspace_path=tmp_path,
+    )
+
+    capsule = build_diff_capsule(
+        pre_checksum={"src/math_tools/__init__.py": "__all__ = ['calculator']\n"},
+        project_dir=tmp_path,
+        changed_files=["src/math_tools/__init__.py"],
+        envelope=envelope,
+    )
+
+    assert capsule is None
 
 
 def test_bounded_debug_repair_payload_requires_single_json_array():

@@ -22,6 +22,11 @@ _PER_CMD_TIMEOUT = 5
 _TOTAL_TIMEOUT = 15
 
 _MODULE_RE = re.compile(r"No module named '([A-Za-z0-9_. ]+)'")
+_CANNOT_IMPORT_RE = re.compile(
+    r"cannot import name '([A-Za-z0-9_]+)' from '([A-Za-z0-9_.]+)'"
+    r"(?: \(([^)]+)\))?",
+    flags=re.IGNORECASE,
+)
 _IMPORT_RE = re.compile(r"(?:from|import)\s+([A-Za-z0-9_.]+)")
 _SENSITIVE_MARKERS = (
     ".env",
@@ -85,9 +90,56 @@ def _extract_module_name(failure_context: str) -> Optional[str]:
     m = _MODULE_RE.search(failure_context)
     if m:
         return m.group(1).split(".")[0].strip()
+    m = _CANNOT_IMPORT_RE.search(failure_context)
+    if m:
+        return m.group(2).split(".")[0].strip()
     m = _IMPORT_RE.search(failure_context)
     if m:
         return m.group(1).split(".")[0].strip()
+    return None
+
+
+def infer_missing_python_module_target(
+    failure_context: str,
+    project_dir: Path,
+) -> Optional[str]:
+    """Infer the file path that should satisfy a missing Python submodule import."""
+
+    context = str(failure_context or "")
+    no_module = _MODULE_RE.search(context)
+    if no_module:
+        dotted = no_module.group(1).strip()
+        parts = [part for part in dotted.split(".") if part]
+        if len(parts) >= 2:
+            rel_path = Path(*parts).with_suffix(".py")
+            if parts[0] != "src":
+                src_candidate = Path("src") / rel_path
+                if (project_dir / src_candidate.parent).exists():
+                    return src_candidate.as_posix()
+            return rel_path.as_posix()
+
+    cannot_import = _CANNOT_IMPORT_RE.search(context)
+    if cannot_import:
+        symbol = cannot_import.group(1).strip()
+        package = cannot_import.group(2).strip()
+        source_path = cannot_import.group(3)
+        if source_path:
+            try:
+                path = Path(source_path)
+                if path.is_absolute():
+                    path = path.resolve().relative_to(project_dir.resolve())
+                if path.name == "__init__.py":
+                    return (path.parent / f"{symbol}.py").as_posix()
+            except (OSError, ValueError):
+                pass
+        package_parts = [part for part in package.split(".") if part]
+        if package_parts:
+            rel_path = Path(*package_parts) / f"{symbol}.py"
+            src_candidate = Path("src") / rel_path
+            if (project_dir / src_candidate.parent).exists():
+                return src_candidate.as_posix()
+            return rel_path.as_posix()
+
     return None
 
 
@@ -177,6 +229,19 @@ def collect_workspace_evidence(
     capsule = WorkspaceEvidenceCapsule(failure_class=failure_class)
     cmds = _commands_for_failure_class(failure_class, project_dir, failure_context)
     total_chars = 0
+
+    missing_target = infer_missing_python_module_target(failure_context, project_dir)
+    if missing_target:
+        target_text = (
+            "Missing Python module target: "
+            f"{missing_target}\n"
+            "If tests import this module and no existing file satisfies it, create "
+            "this module file rather than editing only the package __init__.py."
+        )
+        capsule.results["missing Python module target"] = target_text
+        capsule.files_inspected.append(f"./{missing_target}")
+        capsule.matched_line_count += 1
+        total_chars += len(target_text)
 
     for args in cmds:
         if total_chars >= _TOTAL_BUDGET:

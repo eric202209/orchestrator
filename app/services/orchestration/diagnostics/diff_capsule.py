@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.services.orchestration.diagnostics.debug_feedback import DebugFeedbackEnvelope
+from app.services.orchestration.diagnostics.evidence_capsule import (
+    infer_missing_python_module_target,
+)
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 
 DIFF_LINE_LIMIT = 120
@@ -127,6 +130,21 @@ def build_diff_capsule(
         return None
     if not changed_files:
         return None
+
+    missing_module_target = infer_missing_python_module_target(
+        "\n".join(
+            part for part in [envelope.stderr_excerpt, envelope.pytest_excerpt] if part
+        ),
+        project_dir,
+    )
+    if missing_module_target:
+        normalized_changed = {
+            str(path or "").strip().lstrip("./")
+            for path in changed_files
+            if str(path or "").strip()
+        }
+        if missing_module_target not in normalized_changed:
+            return None
 
     failure_line = _failure_line(envelope)
     primary_file = _select_primary_file(changed_files, failure_line)

@@ -324,6 +324,7 @@ def build_bounded_debug_repair_prompt(
         f"7. Commands execute from the workspace root ({workspace}). Do not cd into the workspace root or any path containing vault/projects; you are already there.\n"
         "8. Do not bypass validators, workspace boundaries, or verification.\n"
         "9. Do not request additional retries or describe policy.\n"
+        "10. If workspace evidence names a missing Python module target, prefer creating that module file instead of editing only a package __init__.py.\n"
     )
 
 
