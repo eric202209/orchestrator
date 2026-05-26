@@ -411,6 +411,122 @@ def test_bounded_debug_repair_prompt_requires_json_array(tmp_path):
     assert "task_execution_id" not in prompt
 
 
+def test_phase11b_debug_prompt_names_cli_source_target_for_uppercase_failure(
+    tmp_path,
+):
+    source_dir = tmp_path / "src" / "small_cli"
+    source_dir.mkdir(parents=True)
+    (source_dir / "__init__.py").write_text("", encoding="utf-8")
+    (source_dir / "cli.py").write_text(
+        "import argparse\n"
+        "\n"
+        "def build_parser():\n"
+        "    parser = argparse.ArgumentParser(description='Print a message.')\n"
+        "    parser.add_argument('message')\n"
+        "    return parser\n"
+        "\n"
+        "def main(argv=None):\n"
+        "    args = build_parser().parse_args(argv)\n"
+        "    print(args.message)\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_cli.py").write_text(
+        "from small_cli.cli import build_parser, main\n"
+        "\n"
+        "def test_uppercase_option_prints_uppercase_message(capsys):\n"
+        "    assert main(['--uppercase', 'hello']) == 0\n"
+        "    assert capsys.readouterr().out.strip() == 'HELLO'\n",
+        encoding="utf-8",
+    )
+    failure = (
+        "FAILED tests/test_cli.py::test_uppercase_option_prints_uppercase_message\n"
+        'assert main(["--uppercase", "hello"]) == 0\n'
+        "src/small_cli/cli.py:20: in main\n"
+        "args = parser.parse_args(argv)\n"
+        "SystemExit: 2\n"
+        "usage: __main__.py [-h] message\n"
+        "__main__.py: error: unrecognized arguments: --uppercase\n"
+    )
+    envelope = build_debug_feedback_envelope(
+        task_execution_id=123,
+        task_id=45,
+        step_index=2,
+        failure_phase="execution",
+        failed_command="python -m pytest -q",
+        stdout=failure,
+        workspace_path=tmp_path,
+    )
+    capsule = collect_workspace_evidence(
+        envelope.failure_class,
+        tmp_path,
+        failure_context=failure,
+    )
+
+    prompt = build_bounded_debug_repair_prompt(envelope, capsule)
+
+    assert "Debug source contract:" in prompt
+    assert "Existing tests are the failing contract." in prompt
+    assert "Do not edit tests or verifier commands." in prompt
+    assert "Repair source code under the required target." in prompt
+    assert "src/small_cli/cli.py" in prompt
+    assert 'main(["--uppercase", "hello"]) exits 0 and prints HELLO.' in prompt
+    assert "No placeholder/pass/TODO/export-only fixes." in prompt
+
+
+def test_phase11b_debug_prompt_names_import_repair_target_and_symbol(tmp_path):
+    source_dir = tmp_path / "src" / "import_repair"
+    source_dir.mkdir(parents=True)
+    (source_dir / "__init__.py").write_text(
+        "from import_repair.formatters import normalize_greeting\n",
+        encoding="utf-8",
+    )
+    (source_dir / "formatters.py").write_text("# TODO\n", encoding="utf-8")
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_formatter.py").write_text(
+        "from import_repair import normalize_greeting\n"
+        "\n"
+        "def test_normalize_greeting_trims_and_title_cases_name():\n"
+        "    assert normalize_greeting('  ada   lovelace ') == 'Hello, Ada Lovelace!'\n",
+        encoding="utf-8",
+    )
+    failure = (
+        "ImportError while importing test module 'tests/test_formatter.py'.\n"
+        "from import_repair import normalize_greeting\n"
+        "src/import_repair/__init__.py:3: in <module>\n"
+        "from import_repair.formatters import normalize_greeting\n"
+        "ImportError: cannot import name 'normalize_greeting' from "
+        f"'import_repair.formatters' ({source_dir / 'formatters.py'})\n"
+    )
+    envelope = build_debug_feedback_envelope(
+        task_execution_id=123,
+        task_id=45,
+        step_index=2,
+        failure_phase="execution",
+        failed_command="python -m pytest -q",
+        stderr=failure,
+        workspace_path=tmp_path,
+    )
+    capsule = collect_workspace_evidence(
+        envelope.failure_class,
+        tmp_path,
+        failure_context=failure,
+    )
+
+    prompt = build_bounded_debug_repair_prompt(envelope, capsule)
+
+    assert "Debug source contract:" in prompt
+    assert "src/import_repair/formatters.py" in prompt
+    assert "normalize_greeting" in prompt
+    assert "Define normalize_greeting in the target module." in prompt
+    assert "Hello, Ada Lovelace!" in prompt
+    assert "Do not edit tests or verifier commands." in prompt
+    assert "No placeholder/pass/TODO/export-only fixes." in prompt
+
+
 def test_import_error_evidence_infers_missing_submodule_target(tmp_path):
     package_dir = tmp_path / "src" / "math_tools"
     package_dir.mkdir(parents=True)
