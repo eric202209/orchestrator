@@ -383,10 +383,13 @@ def get_mobile_connection_info(
             f"{mobile_base_url}/projects/{{project_id}}/tasks",
             f"{mobile_base_url}/sessions",
             f"{mobile_base_url}/sessions/{{session_id}}/summary",
+            f"{mobile_base_url}/sessions/{{session_id}}/recovery-context",
+            f"{mobile_base_url}/sessions/{{session_id}}/timeline",
             f"{mobile_base_url}/sessions/{{session_id}}/knowledge-usage",
             f"{mobile_base_url}/sessions/{{session_id}}/checkpoints",
             f"{mobile_base_url}/sessions/{{session_id}}/resume",
             f"{mobile_base_url}/sessions/{{session_id}}/stop",
+            f"{mobile_base_url}/sessions/{{session_id}}/pause",
             f"{mobile_base_url}/tasks/{{task_id}}/retry",
         ],
     }
@@ -669,6 +672,32 @@ def get_session_summary(
             for log in reversed(recent_logs)
         ],
     }
+
+
+@router.get("/mobile/sessions/{session_id}/recovery-context")
+def get_mobile_session_recovery_context(
+    session_id: int, request: Request, db: Session = Depends(get_db)
+):
+    """Return structured recovery context for mobile — failed task, preserved state, recommended actions."""
+    _log_mobile_request(request, "session_recovery_context", session_id=session_id)
+    from app.services.session.session_inspection_service import (
+        get_session_recovery_context_payload,
+    )
+
+    return get_session_recovery_context_payload(db, session_id)
+
+
+@router.get("/mobile/sessions/{session_id}/timeline")
+def get_mobile_session_timeline(
+    session_id: int, request: Request, db: Session = Depends(get_db)
+):
+    """Return narrative timeline for mobile — phases and grouped events only."""
+    _log_mobile_request(request, "session_timeline", session_id=session_id)
+    from app.services.session.session_inspection_service import (
+        get_session_timeline_payload,
+    )
+
+    return get_session_timeline_payload(db, session_id)
 
 
 @router.get("/mobile/sessions/{session_id}/knowledge-usage")

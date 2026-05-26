@@ -26,9 +26,7 @@ import { Alert, LoadingSpinner } from '@/components/ui';
 import {
   FailureSummaryPanel,
   HumanInterventionPanel,
-  KnowledgeUsagePanel,
   SessionConnectionNotice,
-  SessionDiagnosticsPanel,
   SessionDigestPanel,
   SessionHeader,
   SessionLogsPanel,
@@ -37,6 +35,7 @@ import {
   SessionStats,
   SessionTabs,
   SessionTasksPanel,
+  SessionAdvancedPanel,
   SessionTimelinePanel,
   type SessionDetailTab,
   type OffTrackMoment,
@@ -220,7 +219,11 @@ export default function SessionDetail() {
   useEffect(() => {
     if (!session || defaultTabSessionRef.current === session.id) return;
     defaultTabSessionRef.current = session.id;
-    setActiveTab(TERMINAL_SESSION_STATUSES.has(session.status) ? 'timeline' : 'logs');
+    setActiveTab(
+      (TERMINAL_SESSION_STATUSES.has(session.status) || session.status === 'paused' || session.status === 'awaiting_input')
+        ? 'summary'
+        : 'logs'
+    );
   }, [session]);
 
   const dismissInterventionToast = useCallback(() => {
@@ -2511,45 +2514,6 @@ export default function SessionDetail() {
         </div>
       )}
 
-      {(session.status === 'awaiting_input' || pendingInterventions.length > 0) && (
-        <HumanInterventionPanel
-          interventions={interventions}
-          onApprove={handleApproveIntervention}
-          onDeny={handleDenyIntervention}
-          onReply={handleSubmitReply}
-        />
-      )}
-
-      {(recoveryContext || recoveryContextLoading) && (
-        <SessionRecoveryCard
-          context={recoveryContext}
-          loading={recoveryContextLoading}
-          onAction={handleRecoveryAction}
-        />
-      )}
-
-      {(recoveryContext || sessionDigest || sessionDigestLoading) && (
-        <SessionDigestPanel
-          digest={sessionDigest}
-          loading={sessionDigestLoading}
-          onGenerate={(enrich) => loadSessionDigest(session.id, Boolean(enrich))}
-        />
-      )}
-
-      {TERMINAL_SESSION_STATUSES.has(session.status) && (
-        <FailureSummaryPanel
-          summary={failureSummary}
-          loading={failureSummaryLoading}
-          onFeedbackSubmit={handleFeedbackSubmit}
-          onOpenProjectArchitect={() => {
-            if (project) {
-              navigate(`/projects/${project.id}?tab=planner`);
-            }
-          }}
-          onReplan={handleReplan}
-        />
-      )}
-
       <SessionStats
         formatDateTime={formatDateTime}
         session={session}
@@ -2563,6 +2527,42 @@ export default function SessionDetail() {
       />
 
       <div className="min-h-[400px] min-w-0 overflow-x-hidden">
+        {activeTab === 'summary' && (
+          <div className="space-y-4">
+            {(session.status === 'awaiting_input' || pendingInterventions.length > 0) && (
+              <HumanInterventionPanel
+                interventions={interventions}
+                onApprove={handleApproveIntervention}
+                onDeny={handleDenyIntervention}
+                onReply={handleSubmitReply}
+              />
+            )}
+            <SessionRecoveryCard
+              context={recoveryContext}
+              loading={recoveryContextLoading}
+              onAction={handleRecoveryAction}
+            />
+            <SessionDigestPanel
+              digest={sessionDigest}
+              loading={sessionDigestLoading}
+              onGenerate={(enrich) => loadSessionDigest(session.id, Boolean(enrich))}
+            />
+            {TERMINAL_SESSION_STATUSES.has(session.status) && (
+              <FailureSummaryPanel
+                summary={failureSummary}
+                loading={failureSummaryLoading}
+                onFeedbackSubmit={handleFeedbackSubmit}
+                onOpenProjectArchitect={() => {
+                  if (project) {
+                    navigate(`/projects/${project.id}?tab=planner`);
+                  }
+                }}
+                onReplan={handleReplan}
+              />
+            )}
+          </div>
+        )}
+
         {activeTab === 'logs' && (
           <SessionLogsPanel
             displayLogs={displayLogs}
@@ -2581,24 +2581,24 @@ export default function SessionDetail() {
         {activeTab === 'timeline' && (
           <div className="space-y-4">
             <SessionTimelinePanel
-              decisionEvents={decisionEvents}
               formatDateTime={formatDateTime}
               narrativeTimeline={narrativeTimeline}
               offTrackMoment={offTrackMoment}
               repairGenealogy={repairGenealogy}
-              timelineEvents={timelineEvents}
-              timelineSpans={timelineSpans}
             />
-            <SessionDiagnosticsPanel
+            <SessionAdvancedPanel
               anomalyEvents={anomalyEvents}
               compareMatches={compareMatches}
+              decisionEvents={decisionEvents}
               dispatchWatchdog={dispatchWatchdog}
               formatDateTime={formatDateTime}
               healthEvents={healthEvents}
+              knowledgePhases={knowledgeUsage}
               replayInvestigation={replayInvestigation}
               stateDiff={stateDiff}
+              timelineEvents={timelineEvents}
+              timelineSpans={timelineSpans}
             />
-            <KnowledgeUsagePanel phases={knowledgeUsage} />
           </div>
         )}
 

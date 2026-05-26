@@ -683,7 +683,7 @@ export function SessionStats({
   );
 }
 
-export type SessionDetailTab = 'timeline' | 'tasks' | 'logs' | 'settings';
+export type SessionDetailTab = 'summary' | 'timeline' | 'tasks' | 'logs' | 'settings';
 
 interface SessionTabsProps {
   activeTab: SessionDetailTab;
@@ -699,6 +699,17 @@ export function SessionTabs({
   return (
     <div className="border-b border-[color:var(--oc-border-soft)]">
       <nav className="flex gap-0">
+        <button
+          onClick={() => onChange('summary')}
+          className={cn(
+            'px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors',
+            activeTab === 'summary'
+              ? 'border-primary-500 text-white'
+              : 'border-transparent text-slate-500 hover:text-slate-300'
+          )}
+        >
+          Summary
+        </button>
         <button
           onClick={() => onChange('timeline')}
           className={cn(
@@ -762,11 +773,8 @@ interface SessionLogsPanelProps {
 }
 
 interface SessionTimelinePanelProps {
-  decisionEvents?: SessionDecisionEvent[];
   formatDateTime: (value?: string | null) => string;
   narrativeTimeline?: SessionNarrativeTimeline | null;
-  timelineSpans?: TimelineSpan[];
-  timelineEvents: TimelineEvent[];
   offTrackMoment?: OffTrackMoment | null;
   repairGenealogy?: RepairGenealogyNode[];
 }
@@ -1175,111 +1183,15 @@ export function SessionDiagnosticsPanel({
 }
 
 export function SessionTimelinePanel({
-  decisionEvents = [],
   formatDateTime,
   narrativeTimeline = null,
-  timelineSpans = [],
-  timelineEvents,
   offTrackMoment = null,
   repairGenealogy = [],
 }: SessionTimelinePanelProps) {
-  const [showAllDecision, setShowAllDecision] = useState(false);
-  const getTimelineImportance = (event: TimelineEvent): TimelineEventImportance => {
-    if (event.importance) return event.importance;
-    const text = `${event.title} ${event.detail}`.toLowerCase();
-    if (
-      event.type === 'error' ||
-      text.includes('failed') ||
-      text.includes('waiting for input') ||
-      text.includes('off-track') ||
-      text.includes('divergence') ||
-      text.includes('intent gap') ||
-      text.includes('plan revised') ||
-      text.includes('retry entered')
-    ) {
-      return 'primary';
-    }
-    if (
-      event.type === 'task' ||
-      event.type === 'planning' ||
-      event.type === 'summarizing' ||
-      text.includes('phase started') ||
-      text.includes('phase finished')
-    ) {
-      return 'primary';
-    }
-    if (
-      text.includes('tool invoked') ||
-      text.includes('checkpoint saved') ||
-      text.includes('health score') ||
-      text.includes('evaluator result') ||
-      text.includes('reasoning artifact') ||
-      text.includes('workspace preserved') ||
-      text.includes('workspace restore skipped') ||
-      event.type === 'info'
-    ) {
-      return 'secondary';
-    }
-    return 'secondary';
-  };
-
-  const orderedTimelineEvents = timelineEvents.slice().reverse();
-  const primaryTimelineEvents = orderedTimelineEvents
-    .filter((event) => getTimelineImportance(event) === 'primary')
-    .slice(0, 12);
-  const secondaryTimelineEvents = orderedTimelineEvents
-    .filter((event) => getTimelineImportance(event) === 'secondary')
-    .slice(0, 16);
-  const renderTimelineEvent = (
-    event: TimelineEvent,
-    density: 'normal' | 'compact' = 'normal'
-  ) => (
-    <div
-      key={event.id}
-      className={cn(
-        'min-w-0 overflow-hidden rounded-md border border-[color:var(--oc-border-soft)]',
-        density === 'compact' ? 'p-2' : 'p-3'
-      )}
-    >
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <span
-          className={cn(
-            'break-words text-xs font-medium uppercase',
-            event.type === 'error' && 'text-red-400',
-            event.type === 'planning' && 'text-violet-400',
-            event.type === 'executing' && 'text-blue-400',
-            event.type === 'debugging' && 'text-amber-400',
-            event.type === 'revising_plan' && 'text-fuchsia-400',
-            event.type === 'summarizing' && 'text-teal-400',
-            event.type === 'checkpoint' && 'text-emerald-400',
-            event.type === 'validation' && 'text-lime-400',
-            event.type === 'repair' && 'text-orange-400',
-            event.type === 'task' && 'text-primary-300',
-            event.type === 'status' && 'text-cyan-400',
-            event.type === 'info' && 'text-slate-300'
-          )}
-        >
-          {event.title}
-        </span>
-        <span className="text-xs text-slate-400">
-          {formatDateTime(event.at)}
-        </span>
-      </div>
-      <p
-        className={cn(
-          'mt-1 break-words text-slate-200',
-          density === 'compact' && 'text-xs text-slate-300'
-        )}
-      >
-        {event.detail}
-      </p>
-    </div>
-  );
-
   return (
     <div className="min-w-0 space-y-4 overflow-x-hidden">
-      <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4 shadow-sm shadow-black/20">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+      <details open className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] shadow-sm shadow-black/20">
+        <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-3 p-4 [&::-webkit-details-marker]:hidden">
           <div>
             <h3 className="text-sm font-semibold text-slate-100">Narrative Timeline</h3>
             <p className="mt-1 text-xs text-slate-500">
@@ -1293,7 +1205,8 @@ export function SessionTimelinePanel({
               {narrativeTimeline.session_status}
             </span>
           )}
-        </div>
+        </summary>
+        <div className="border-t border-[color:var(--oc-border-soft)] p-4 pt-4">
         {!narrativeTimeline || narrativeTimeline.phases.length === 0 ? (
           <p className="text-sm text-slate-400">
             Start or resume a session to build a grouped timeline from status, tasks, logs, and checkpoints.
@@ -1355,7 +1268,8 @@ export function SessionTimelinePanel({
             <p className="text-xs text-slate-500">{narrativeTimeline.source_note}</p>
           </div>
         )}
-      </div>
+        </div>
+      </details>
 
       {(offTrackMoment || repairGenealogy.length > 0) && (
         <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
@@ -1482,237 +1396,285 @@ export function SessionTimelinePanel({
         </div>
       )}
 
-      <div className="min-w-0 overflow-hidden rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-surface)] p-4">
-        <div className="mb-3 flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-white">Decision Timeline</h3>
-          <span className="text-xs text-slate-400">{decisionEvents.length} events</span>
-        </div>
-        {(() => {
-          const allDecision = decisionEvents.slice().reverse();
-          const visibleDecision = showAllDecision ? allDecision : allDecision.slice(0, 6);
-          return (
-            <div className="space-y-2 text-sm">
-              {allDecision.length === 0 ? (
-                <p className="text-slate-500">No decision timeline events yet.</p>
-              ) : (
-                <>
-                  {visibleDecision.map((event) => {
-                    const diagnosticBadges = getDiagnosticBadges(event.details);
-                    const diagnosticReasons = getDiagnosticReasons(event.details);
-                    const operatorEvidence = getDecisionEventEvidence(event);
+    </div>
+  );
+}
 
-                    return (
-                      <div key={event.id} className="min-w-0 overflow-hidden rounded-md border border-[color:var(--oc-border-soft)] p-3">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span
-                              className={cn(
-                                'text-xs font-medium uppercase',
+// ── SessionAdvancedPanel ──────────────────────────────────────────────────────
+
+interface SessionAdvancedPanelProps {
+  anomalyEvents?: Array<{ title: string; detail: string; at: string }>;
+  compareMatches?: SessionDivergenceCompareResponse | null;
+  decisionEvents?: SessionDecisionEvent[];
+  dispatchWatchdog?: SessionDispatchWatchdogResponse | null;
+  formatDateTime: (value?: string | null) => string;
+  healthEvents?: Array<{ timestamp: string; score: number; slope?: number | null }>;
+  knowledgePhases?: Record<string, KnowledgeUsageEntry[]>;
+  replayInvestigation?: SessionReplayResponse | null;
+  stateDiff?: SessionStateDiffResponse | null;
+  timelineEvents?: TimelineEvent[];
+  timelineSpans?: TimelineSpan[];
+}
+
+export function SessionAdvancedPanel({
+  anomalyEvents = [],
+  compareMatches,
+  decisionEvents = [],
+  dispatchWatchdog,
+  formatDateTime,
+  healthEvents = [],
+  knowledgePhases = {},
+  replayInvestigation,
+  stateDiff,
+  timelineEvents = [],
+  timelineSpans = [],
+}: SessionAdvancedPanelProps) {
+  const [showAllDecision, setShowAllDecision] = useState(false);
+
+  const getTimelineImportance = (event: TimelineEvent): TimelineEventImportance => {
+    if (event.importance) return event.importance;
+    const text = `${event.title} ${event.detail}`.toLowerCase();
+    if (
+      event.type === 'error' ||
+      text.includes('failed') ||
+      text.includes('waiting for input') ||
+      text.includes('off-track') ||
+      text.includes('divergence') ||
+      text.includes('intent gap') ||
+      text.includes('plan revised') ||
+      text.includes('retry entered')
+    ) return 'primary';
+    if (
+      event.type === 'task' ||
+      event.type === 'planning' ||
+      event.type === 'summarizing' ||
+      text.includes('phase started') ||
+      text.includes('phase finished')
+    ) return 'primary';
+    return 'secondary';
+  };
+
+  const orderedTimelineEvents = timelineEvents.slice().reverse();
+  const primaryTimelineEvents = orderedTimelineEvents.filter((e) => getTimelineImportance(e) === 'primary').slice(0, 12);
+  const secondaryTimelineEvents = orderedTimelineEvents.filter((e) => getTimelineImportance(e) === 'secondary').slice(0, 16);
+
+  const renderTimelineEvent = (event: TimelineEvent, density: 'normal' | 'compact' = 'normal') => (
+    <div key={event.id} className={cn('min-w-0 overflow-hidden rounded-md border border-[color:var(--oc-border-soft)]', density === 'compact' ? 'p-2' : 'p-3')}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className={cn('break-words text-xs font-medium uppercase',
+          event.type === 'error' && 'text-red-400',
+          event.type === 'planning' && 'text-violet-400',
+          event.type === 'executing' && 'text-blue-400',
+          event.type === 'debugging' && 'text-amber-400',
+          event.type === 'revising_plan' && 'text-fuchsia-400',
+          event.type === 'summarizing' && 'text-teal-400',
+          event.type === 'checkpoint' && 'text-emerald-400',
+          event.type === 'validation' && 'text-lime-400',
+          event.type === 'repair' && 'text-orange-400',
+          event.type === 'task' && 'text-primary-300',
+          event.type === 'status' && 'text-cyan-400',
+          event.type === 'info' && 'text-slate-300'
+        )}>
+          {event.title}
+        </span>
+        <span className="text-xs text-slate-400">{formatDateTime(event.at)}</span>
+      </div>
+      <p className={cn('mt-1 break-words text-slate-200', density === 'compact' && 'text-xs text-slate-300')}>
+        {event.detail}
+      </p>
+    </div>
+  );
+
+  const latestHealth = healthEvents[healthEvents.length - 1] || null;
+  const staleDispatch = dispatchWatchdog?.stale_tasks?.[0] || null;
+  const queuedDispatches = dispatchWatchdog?.tasks?.filter((t) => t.dispatch_state === 'queued') || [];
+  const visibleMatches = (compareMatches?.matches || []).filter((m) => m.similarity_score > 0);
+
+  return (
+    <div className="min-w-0 space-y-4">
+
+      {/* ── Useful Diagnostics ─────────────────────────────────────────── */}
+
+      {/* Knowledge References */}
+      {Object.keys(knowledgePhases).length > 0 && (
+        <KnowledgeUsagePanel phases={knowledgePhases} />
+      )}
+
+      {/* Decision Timeline */}
+      <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-slate-200">Decision Timeline</h3>
+            <span className="text-xs text-slate-400">{decisionEvents.length} events</span>
+          </div>
+          {(() => {
+            const allDecision = decisionEvents.slice().reverse();
+            const visibleDecision = showAllDecision ? allDecision : allDecision.slice(0, 6);
+            return (
+              <div className="space-y-2 text-sm">
+                {allDecision.length === 0 ? (
+                  <p className="text-slate-500">No decision timeline events yet.</p>
+                ) : (
+                  <>
+                    {visibleDecision.map((event) => {
+                      const diagnosticBadges = getDiagnosticBadges(event.details);
+                      const diagnosticReasons = getDiagnosticReasons(event.details);
+                      const operatorEvidence = getDecisionEventEvidence(event);
+                      return (
+                        <div key={event.id} className="min-w-0 overflow-hidden rounded-md border border-[color:var(--oc-border-soft)] p-3">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className={cn('text-xs font-medium uppercase',
                                 event.severity === 'error' && 'text-red-400',
                                 event.severity === 'warning' && 'text-amber-400',
-                                event.severity !== 'error' &&
-                                  event.severity !== 'warning' &&
-                                  'text-primary-300'
+                                event.severity !== 'error' && event.severity !== 'warning' && 'text-primary-300'
+                              )}>
+                                {event.title}
+                              </span>
+                              <span className="rounded-sm border border-[color:var(--oc-border-soft)] px-1.5 py-0.5 text-xs uppercase text-slate-400">{event.phase}</span>
+                              {event.task_id !== null && event.task_id !== undefined && (
+                                <span className="text-xs text-slate-500">Task {event.task_id}</span>
                               )}
-                            >
-                              {event.title}
-                            </span>
-                            <span className="rounded-sm border border-[color:var(--oc-border-soft)] px-1.5 py-0.5 text-xs uppercase text-slate-400">
-                              {event.phase}
-                            </span>
-                            {event.task_id !== null && event.task_id !== undefined && (
-                              <span className="text-xs text-slate-500">
-                                Task {event.task_id}
-                              </span>
-                            )}
+                            </div>
+                            <span className="text-xs text-slate-400">{formatDateTime(event.timestamp)}</span>
                           </div>
-                          <span className="text-xs text-slate-400">
-                            {formatDateTime(event.timestamp)}
-                          </span>
+                          <p className="mt-1 break-words text-slate-200">{event.summary}</p>
+                          {operatorEvidence && (
+                            <div className="mt-2 grid gap-2 rounded-md border border-orange-400/25 bg-orange-400/10 p-2 text-xs sm:grid-cols-2">
+                              <p className="break-words text-slate-300"><span className="text-slate-500">Boundary:</span> <span className="font-medium text-slate-100">{operatorEvidence.boundary}</span></p>
+                              <p className="break-words text-slate-300"><span className="text-slate-500">Outcome:</span> <span className="font-medium text-slate-100">{operatorEvidence.outcome}</span></p>
+                              {operatorEvidence.operation && <p className="break-words font-mono text-slate-200">{operatorEvidence.operation}</p>}
+                              {operatorEvidence.targetPath && <p className="break-words font-mono text-slate-200">{operatorEvidence.targetPath}</p>}
+                              <p className="break-words text-orange-200 sm:col-span-2">{operatorEvidence.nextAction}</p>
+                              {operatorEvidence.operations.length > 0 && (
+                                <div className="flex flex-wrap gap-1.5 sm:col-span-2">
+                                  {operatorEvidence.operations.map((op, idx) => (
+                                    <span key={`${op.op}-${op.path || 'no-path'}-${idx}`} className="rounded-sm border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-1.5 py-0.5 font-mono text-xs text-slate-200">
+                                      {op.op}{op.path ? ` ${op.path}` : ''}{op.outcome ? ` (${humanizeEvidenceValue(op.outcome)})` : ''}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          {diagnosticBadges.length > 0 && (
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                              {diagnosticBadges.map((badge) => (
+                                <span key={badge} className="rounded-sm border border-red-600/60 bg-red-950/40 px-1.5 py-0.5 text-xs text-red-300">{badge}</span>
+                              ))}
+                            </div>
+                          )}
+                          {diagnosticReasons.length > 0 && (
+                            <div className="mt-2 space-y-1">
+                              {diagnosticReasons.map((reason) => (
+                                <p key={reason} className="break-words text-xs text-slate-400">{reason}</p>
+                              ))}
+                            </div>
+                          )}
+                          {(event.knowledge_usage_ids.length > 0 || event.intervention_id) && (
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              {event.knowledge_usage_ids.length > 0 && (
+                                <span className="rounded-sm border border-violet-900/70 bg-violet-950/30 px-1.5 py-0.5 text-xs text-violet-300">Knowledge phase context</span>
+                              )}
+                              {event.intervention_id && (
+                                <span className="rounded-sm border border-amber-900/70 bg-amber-950/30 px-1.5 py-0.5 text-xs text-amber-300">Intervention #{event.intervention_id}</span>
+                              )}
+                            </div>
+                          )}
                         </div>
-                        <p className="mt-1 break-words text-slate-200">{event.summary}</p>
-                        {operatorEvidence && (
-                          <div className="mt-2 grid gap-2 rounded-md border border-orange-400/25 bg-orange-400/10 p-2 text-xs sm:grid-cols-2">
-                            <p className="break-words text-slate-300">
-                              <span className="text-slate-500">Boundary:</span>{' '}
-                              <span className="font-medium text-slate-100">{operatorEvidence.boundary}</span>
-                            </p>
-                            <p className="break-words text-slate-300">
-                              <span className="text-slate-500">Outcome:</span>{' '}
-                              <span className="font-medium text-slate-100">{operatorEvidence.outcome}</span>
-                            </p>
-                            {operatorEvidence.operation && (
-                              <p className="break-words font-mono text-slate-200">
-                                {operatorEvidence.operation}
-                              </p>
-                            )}
-                            {operatorEvidence.targetPath && (
-                              <p className="break-words font-mono text-slate-200">
-                                {operatorEvidence.targetPath}
-                              </p>
-                            )}
-                            <p className="break-words text-orange-200 sm:col-span-2">
-                              {operatorEvidence.nextAction}
-                            </p>
-                            {operatorEvidence.operations.length > 0 && (
-                              <div className="flex flex-wrap gap-1.5 sm:col-span-2">
-                                {operatorEvidence.operations.map((operation, index) => (
-                                  <span
-                                    key={`${operation.op}-${operation.path || 'no-path'}-${index}`}
-                                    className="rounded-sm border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] px-1.5 py-0.5 font-mono text-xs text-slate-200"
-                                  >
-                                    {operation.op}
-                                    {operation.path ? ` ${operation.path}` : ''}
-                                    {operation.outcome ? ` (${humanizeEvidenceValue(operation.outcome)})` : ''}
-                                  </span>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        )}
-                        {diagnosticBadges.length > 0 && (
-                          <div className="mt-2 flex flex-wrap gap-1.5">
-                            {diagnosticBadges.map((badge) => (
-                              <span
-                                key={badge}
-                                className="rounded-sm border border-red-600/60 bg-red-950/40 px-1.5 py-0.5 text-xs text-red-300"
-                              >
-                                {badge}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                        {diagnosticReasons.length > 0 && (
-                          <div className="mt-2 space-y-1">
-                            {diagnosticReasons.map((reason) => (
-                              <p key={reason} className="break-words text-xs text-slate-400">
-                                {reason}
-                              </p>
-                            ))}
-                          </div>
-                        )}
-                        {(event.knowledge_usage_ids.length > 0 || event.intervention_id) && (
-                          <div className="mt-2 flex flex-wrap gap-2">
-                            {event.knowledge_usage_ids.length > 0 && (
-                              <span className="rounded-sm border border-violet-900/70 bg-violet-950/30 px-1.5 py-0.5 text-xs text-violet-300">
-                                Knowledge phase context
-                              </span>
-                            )}
-                            {event.intervention_id && (
-                              <span className="rounded-sm border border-amber-900/70 bg-amber-950/30 px-1.5 py-0.5 text-xs text-amber-300">
-                                Intervention #{event.intervention_id}
-                              </span>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                  {allDecision.length > 6 && (
-                    <button
-                      onClick={() => setShowAllDecision((v) => !v)}
-                      className="w-full rounded-md border border-[color:var(--oc-border-soft)] py-2 text-xs text-slate-400 transition-colors hover:border-[color:var(--oc-border)] hover:text-slate-200"
-                    >
-                      {showAllDecision
-                        ? 'Show fewer'
-                        : `Show all ${allDecision.length} events`}
-                    </button>
-                  )}
-                </>
-              )}
-            </div>
-          );
-        })()}
-      </div>
-
-      <div className="min-w-0 overflow-hidden rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-surface)] p-4">
-        <div className="mb-3 flex items-start justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-semibold text-white">Execution Timeline</h3>
-            <p className="mt-0.5 text-xs text-slate-400">
-              Major milestones first, work details second.
-            </p>
-          </div>
-          <span className="text-xs text-slate-400">{timelineEvents.length} events</span>
-        </div>
-        <div className="space-y-4 text-sm">
-          {timelineEvents.length === 0 ? (
-            <p className="text-slate-500">
-              No timeline events yet. Start/execute a task to see progress milestones.
-            </p>
-          ) : (
-            <>
-              <div>
-                <div className="mb-2 flex items-center justify-between">
-                  <h4 className="text-xs font-semibold uppercase text-slate-300">Milestones</h4>
-                  <span className="text-xs text-slate-500">{primaryTimelineEvents.length}</span>
-                </div>
-                <div className="max-h-72 space-y-2 overflow-y-auto">
-                  {primaryTimelineEvents.length === 0 ? (
-                    <p className="text-xs text-slate-500">No major milestone events yet.</p>
-                  ) : (
-                    primaryTimelineEvents.map((event) => renderTimelineEvent(event))
-                  )}
-                </div>
+                      );
+                    })}
+                    {allDecision.length > 6 && (
+                      <button onClick={() => setShowAllDecision((v) => !v)} className="w-full rounded-md border border-[color:var(--oc-border-soft)] py-2 text-xs text-slate-400 transition-colors hover:border-[color:var(--oc-border)] hover:text-slate-200">
+                        {showAllDecision ? 'Show fewer' : `Show all ${allDecision.length} events`}
+                      </button>
+                    )}
+                  </>
+                )}
               </div>
-
-              <details className="group">
-                <summary className="mb-2 flex cursor-pointer list-none items-center justify-between">
-                  <h4 className="text-xs font-semibold uppercase text-slate-400 group-open:text-slate-300">Work Details</h4>
-                  <span className="text-xs text-slate-500">{secondaryTimelineEvents.length}</span>
-                </summary>
-                <div className="max-h-64 space-y-2 overflow-y-auto">
-                  {secondaryTimelineEvents.length === 0 ? (
-                    <p className="text-xs text-slate-500">No secondary work details yet.</p>
-                  ) : (
-                    secondaryTimelineEvents.map((event) =>
-                      renderTimelineEvent(event, 'compact')
-                    )
-                  )}
-                </div>
-              </details>
-            </>
-          )}
+            );
+          })()}
         </div>
-      </div>
 
-      <details className="min-w-0 overflow-hidden rounded-lg border border-[color:var(--oc-border)] bg-[color:var(--oc-surface)] p-4">
-        <summary className="cursor-pointer text-sm font-semibold text-white hover:text-slate-200">
-          Causal Spans <span className="text-xs font-normal text-slate-400">({timelineSpans.length})</span>
+      {/* ── Engineering Diagnostics ────────────────────────────────────── */}
+      <details className="min-w-0 overflow-hidden rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)]">
+        <summary className="flex cursor-pointer items-center justify-between px-4 py-3 text-sm font-semibold text-slate-400 hover:text-slate-200">
+          <span>Engineering Diagnostics</span>
+          <span className="text-xs font-normal text-slate-500">execution spans · watchdog · health · replay</span>
         </summary>
-        <div className="mt-3">
+
+        <div className="space-y-4 border-t border-[color:var(--oc-border-soft)] px-4 pb-4 pt-4">
+
+        {/* Execution Timeline */}
+        <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-4">
+          <div className="mb-3 flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-200">Execution Timeline</h3>
+              <p className="mt-0.5 text-xs text-slate-400">Major milestones first, work details second.</p>
+            </div>
+            <span className="text-xs text-slate-400">{timelineEvents.length} events</span>
+          </div>
+          <div className="space-y-4 text-sm">
+            {timelineEvents.length === 0 ? (
+              <p className="text-slate-500">No timeline events yet. Start/execute a task to see progress milestones.</p>
+            ) : (
+              <>
+                <div>
+                  <div className="mb-2 flex items-center justify-between">
+                    <h4 className="text-xs font-semibold uppercase text-slate-300">Milestones</h4>
+                    <span className="text-xs text-slate-500">{primaryTimelineEvents.length}</span>
+                  </div>
+                  <div className="max-h-72 space-y-2 overflow-y-auto">
+                    {primaryTimelineEvents.length === 0 ? (
+                      <p className="text-xs text-slate-500">No major milestone events yet.</p>
+                    ) : (
+                      primaryTimelineEvents.map((event) => renderTimelineEvent(event))
+                    )}
+                  </div>
+                </div>
+                <details className="group">
+                  <summary className="mb-2 flex cursor-pointer list-none items-center justify-between">
+                    <h4 className="text-xs font-semibold uppercase text-slate-400 group-open:text-slate-300">Work Details</h4>
+                    <span className="text-xs text-slate-500">{secondaryTimelineEvents.length}</span>
+                  </summary>
+                  <div className="max-h-64 space-y-2 overflow-y-auto">
+                    {secondaryTimelineEvents.length === 0 ? (
+                      <p className="text-xs text-slate-500">No secondary work details yet.</p>
+                    ) : (
+                      secondaryTimelineEvents.map((event) => renderTimelineEvent(event, 'compact'))
+                    )}
+                  </div>
+                </details>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* Causal Spans */}
+        <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-slate-200">Causal Spans</h3>
+            <span className="text-xs text-slate-400">{timelineSpans.length}</span>
+          </div>
           {timelineSpans.length === 0 ? (
-            <p className="text-sm text-slate-400">
-              Span grouping appears when parent-linked orchestration events are present.
-            </p>
+            <p className="text-sm text-slate-400">Span grouping appears when parent-linked orchestration events are present.</p>
           ) : (
             <div className="max-h-56 space-y-2 overflow-y-auto">
               {timelineSpans.slice().reverse().map((span) => (
                 <div key={span.id} className="min-w-0 overflow-hidden rounded-md border border-[color:var(--oc-border-soft)] p-3">
                   <div className="flex items-center justify-between gap-3">
                     <div className="flex items-center gap-2">
-                      <span
-                        className={cn(
-                          'text-xs font-medium uppercase',
-                          span.lane === 'reasoning' && 'text-violet-400',
-                          span.lane === 'tool' && 'text-primary-300',
-                          span.lane === 'workspace' && 'text-emerald-400',
-                          span.lane === 'validation' && 'text-lime-400',
-                          span.lane === 'system' && 'text-cyan-400'
-                        )}
-                      >
-                        {span.lane}
-                      </span>
-                      <span
-                        className={cn(
-                          'text-xs font-medium',
-                          span.status === 'healthy' && 'text-emerald-400',
-                          span.status === 'warning' && 'text-amber-400',
-                          span.status === 'error' && 'text-red-400'
-                        )}
-                      >
-                        {span.status}
-                      </span>
+                      <span className={cn('text-xs font-medium uppercase',
+                        span.lane === 'reasoning' && 'text-violet-400',
+                        span.lane === 'tool' && 'text-primary-300',
+                        span.lane === 'workspace' && 'text-emerald-400',
+                        span.lane === 'validation' && 'text-lime-400',
+                        span.lane === 'system' && 'text-cyan-400'
+                      )}>{span.lane}</span>
+                      <span className={cn('text-xs font-medium',
+                        span.status === 'healthy' && 'text-emerald-400',
+                        span.status === 'warning' && 'text-amber-400',
+                        span.status === 'error' && 'text-red-400'
+                      )}>{span.status}</span>
                     </div>
                     <span className="text-xs text-slate-400">{formatDateTime(span.started_at)}</span>
                   </div>
@@ -1724,7 +1686,172 @@ export function SessionTimelinePanel({
             </div>
           )}
         </div>
+
+        {/* Diagnostics */}
+        <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] p-4">
+          <h3 className="mb-3 text-sm font-semibold text-slate-200">Diagnostics</h3>
+          <div className="space-y-4">
+            <div className="grid gap-3 lg:grid-cols-2">
+              <div className={cn('rounded-lg border p-4', staleDispatch ? 'border-amber-800/60 bg-amber-950/20' : 'border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)]')}>
+                <div className="mb-3 flex items-center justify-between">
+                  <h4 className="text-sm font-medium text-slate-200">Dispatch Watchdog</h4>
+                  <span className={cn('text-xs font-medium', staleDispatch ? 'text-amber-300' : 'text-emerald-400')}>
+                    {dispatchWatchdog ? (staleDispatch ? `${dispatchWatchdog.stale_task_count} stale` : 'healthy') : 'Unavailable'}
+                  </span>
+                </div>
+                {!dispatchWatchdog ? (
+                  <p className="text-sm text-slate-400">Queue/claim watchdog data appears after session events are indexed.</p>
+                ) : (
+                  <div className="space-y-2 text-sm">
+                    <p className="text-slate-300">SLA: <span className="font-medium text-white">{dispatchWatchdog.sla_seconds}s</span></p>
+                    <p className="text-slate-300">Queued now: <span className="font-medium text-white">{queuedDispatches.length}</span></p>
+                    {staleDispatch ? (
+                      <>
+                        <p className="text-amber-200">Stalled: <span className="font-medium">{staleDispatch.task_title}</span></p>
+                        <p className="text-slate-300">Queue age: <span className="font-medium text-white">{(staleDispatch.queue_age_seconds || 0).toFixed(1)}s</span></p>
+                        {staleDispatch.failure_root_cause && (
+                          <p className="text-slate-300">Last root cause: <span className="font-medium text-white">{staleDispatch.failure_root_cause}</span></p>
+                        )}
+                      </>
+                    ) : (
+                      <p className="text-sm text-slate-400">No queued dispatch has exceeded the watchdog SLA.</p>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <h4 className="text-sm font-medium text-slate-200">Health Score</h4>
+                  {latestHealth ? (
+                    <span className={cn('text-xs font-medium',
+                      latestHealth.score >= 80 ? 'text-emerald-400' : latestHealth.score >= 50 ? 'text-amber-400' : 'text-red-400'
+                    )}>{latestHealth.score}/100</span>
+                  ) : (
+                    <span className="text-xs text-slate-400">No score yet</span>
+                  )}
+                </div>
+                {healthEvents.length === 0 ? (
+                  <p className="text-sm text-slate-400">Health history appears after orchestration events start landing.</p>
+                ) : (
+                  <div className="max-h-56 space-y-2 overflow-y-auto">
+                    {healthEvents.slice(-5).reverse().map((event) => (
+                      <div key={`${event.timestamp}-${event.score}`} className="flex items-center justify-between rounded-md border border-[color:var(--oc-border-soft)] px-3 py-2 text-sm">
+                        <div>
+                          <p className="font-medium text-slate-200">{event.score}/100</p>
+                          <p className="text-xs text-slate-400">{formatDateTime(event.timestamp)}</p>
+                        </div>
+                        <span className={cn('text-xs font-medium',
+                          typeof event.slope !== 'number' || event.slope === 0 ? 'text-slate-400' : event.slope > 0 ? 'text-emerald-400' : 'text-red-400'
+                        )}>
+                          {typeof event.slope === 'number' ? `${event.slope > 0 ? '+' : ''}${event.slope}` : 'stable'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <h4 className="text-sm font-medium text-slate-200">Latest State Diff</h4>
+                  <span className="text-xs text-slate-400">
+                    {stateDiff ? `Snapshots ${stateDiff.from_checkpoint} → ${stateDiff.to_checkpoint}` : 'Unavailable'}
+                  </span>
+                </div>
+                {!stateDiff || !stateDiff.delta ? (
+                  <p className="text-sm text-slate-400">Diff data appears after at least two state snapshots exist.</p>
+                ) : (
+                  <div className="space-y-2 text-sm">
+                    <p className="text-slate-300">Step index change: <span className="font-medium text-white">{stateDiff.delta.current_step_index?.change ?? 'N/A'}</span></p>
+                    <p className="text-slate-300">Retry budget: <span className="font-medium text-white">{stateDiff.delta.retry_budget_remaining.from}</span> → <span className="font-medium text-white">{stateDiff.delta.retry_budget_remaining.to}</span></p>
+                    <p className="text-slate-300">Files added: <span className="font-medium text-white">{stateDiff.delta.files_touched.added.length}</span>{stateDiff.delta.files_touched.added.length > 0 ? ` • ${stateDiff.delta.files_touched.added.slice(0, 3).join(', ')}` : ''}</p>
+                    <p className="text-slate-300">New validations: <span className="font-medium text-white">{stateDiff.delta.validation_verdicts.new_entries.length}</span></p>
+                    <p className="text-slate-300">Workspace hash changed: <span className={cn('font-medium', stateDiff.delta.workspace_hash_changed ? 'text-amber-300' : 'text-emerald-400')}>{stateDiff.delta.workspace_hash_changed ? 'yes' : 'no'}</span></p>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {anomalyEvents.length > 0 && (
+              <div className="rounded-lg border border-amber-800/70 bg-amber-950/20 p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <h4 className="text-sm font-semibold text-amber-200">Anomaly Pins</h4>
+                  <span className="text-xs text-amber-300">{anomalyEvents.length}</span>
+                </div>
+                <div className="space-y-2">
+                  {anomalyEvents.slice(-3).reverse().map((event) => (
+                    <div key={`${event.at}-${event.title}`} className="rounded-md border border-amber-900/60 px-3 py-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-xs font-medium uppercase text-amber-300">{event.title}</span>
+                        <span className="text-xs text-slate-400">{formatDateTime(event.at)}</span>
+                      </div>
+                      <p className="mt-1 text-sm text-slate-200">{event.detail}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <h4 className="text-sm font-medium text-slate-200">Replay Investigation</h4>
+                <span className="text-xs text-slate-400">{replayInvestigation ? replayInvestigation.compatibility_version : 'Unavailable'}</span>
+              </div>
+              {!replayInvestigation ? (
+                <p className="text-sm text-slate-400">Replay reconstruction appears after orchestration evidence exists.</p>
+              ) : (
+                <div className="space-y-3 text-sm">
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    <div>
+                      <p className="text-xs text-slate-500">Integrity</p>
+                      <p className={cn('font-medium capitalize',
+                        replayInvestigation.integrity.confidence === 'high' && 'text-emerald-400',
+                        replayInvestigation.integrity.confidence === 'medium' && 'text-amber-300',
+                        replayInvestigation.integrity.confidence !== 'high' && replayInvestigation.integrity.confidence !== 'medium' && 'text-red-400'
+                      )}>{replayInvestigation.integrity.confidence}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-slate-500">Determinism</p>
+                      <p className="font-medium capitalize text-slate-200">{replayInvestigation.determinism.level}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-slate-500">Boundary</p>
+                      <p className="font-medium text-slate-200">{String(replayInvestigation.boundary.mode || 'full')}</p>
+                    </div>
+                  </div>
+                  <p className="text-xs text-slate-400">
+                    Events applied: {replayInvestigation.integrity.event_count_applied} / {replayInvestigation.integrity.event_count_read} • Workspace: {replayInvestigation.workspace_evidence.status}
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {visibleMatches.length > 0 && (
+              <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <h4 className="text-sm font-medium text-slate-300">Similar Failed Runs</h4>
+                  <span className="text-xs text-slate-400">{visibleMatches.length} matches</span>
+                </div>
+                <div className="space-y-2">
+                  {visibleMatches.slice(0, 3).map((match) => (
+                    <div key={match.session_id} className="rounded-md border border-[color:var(--oc-border-soft)] p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-sm font-medium text-slate-200">#{match.session_id} {match.session_name}</p>
+                        <span className="text-xs text-primary-300">{(match.similarity_score * 100).toFixed(0)}% similar</span>
+                      </div>
+                      <p className="mt-1 text-xs text-slate-400">Retries {match.retry_count} • Tool failures {match.tool_failure_count} • Intent gaps {match.intent_gap_count}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        </div>
       </details>
+
     </div>
   );
 }
