@@ -6,6 +6,7 @@ import asyncio
 import concurrent.futures
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -102,6 +103,80 @@ from app.services.prompt_templates import OrchestrationStatus, StepResult
 from app.schemas.knowledge import KnowledgeContext
 
 _DEBUG_KNOWLEDGE_MIN_CONFIDENCE = 0.85
+
+
+def _is_source_or_test_path(path: Any) -> bool:
+    normalized = str(path or "").strip().replace("\\", "/").lstrip("./")
+    return normalized.startswith(("src/", "tests/", "test/")) or "/tests/" in normalized
+
+
+def _is_weak_completion_verifier_failure(envelope: Any) -> bool:
+    if envelope is None or getattr(envelope, "failure_class", None) != (
+        "completion_validation_failed"
+    ):
+        return False
+    command = str(getattr(envelope, "failed_command", "") or "").strip().lower()
+    if not command:
+        return False
+    if not re.search(r"\b(?:python3?|node)\s+-(?:c|e)\b", command):
+        return False
+    return bool(
+        ("sys.argv" in command or "process.argv" in command)
+        and re.search(r"['\"]--[a-z0-9][a-z0-9-]*['\"]", command)
+    )
+
+
+def _command_fix_materially_targets_source_or_tests(command: str) -> bool:
+    lowered = str(command or "").strip().lower().replace("\\", "/")
+    if not any(marker in lowered for marker in ("src/", "tests/", "test/")):
+        return False
+    return bool(
+        re.search(
+            r"\b(?:sed|perl)\b|>>?|write_text|replace\(|open\(|path\(",
+            lowered,
+        )
+    )
+
+
+def _debug_repair_materially_changes_source_or_tests(
+    debug_data: dict[str, Any]
+) -> bool:
+    fix_type = str((debug_data or {}).get("fix_type") or "").strip()
+    if fix_type == "ops_fix":
+        return any(
+            isinstance(op, dict) and _is_source_or_test_path(op.get("path"))
+            for op in (debug_data.get("ops") or [])
+        )
+    if fix_type == "code_fix":
+        return any(
+            _is_source_or_test_path(path)
+            for path in (debug_data.get("expected_files") or [])
+        )
+    if fix_type == "command_fix":
+        return _command_fix_materially_targets_source_or_tests(
+            str(debug_data.get("fix") or "")
+        )
+    return fix_type == "revise_plan"
+
+
+def _is_low_value_weak_verifier_command_fix(
+    envelope: Any, debug_data: dict[str, Any]
+) -> bool:
+    if not _is_weak_completion_verifier_failure(envelope):
+        return False
+    if str((debug_data or {}).get("fix_type") or "") != "command_fix":
+        return False
+    if _debug_repair_materially_changes_source_or_tests(debug_data):
+        return False
+    command = str((debug_data or {}).get("fix") or "").strip().lower()
+    if re.match(r"^echo\s+['\"]?--[a-z0-9][a-z0-9-]*['\"]?", command):
+        return True
+    verification = str((debug_data or {}).get("verification") or "").strip().lower()
+    failed_command = str(getattr(envelope, "failed_command", "") or "").strip().lower()
+    return bool(
+        ("sys.argv" in failed_command or "process.argv" in failed_command)
+        and re.search(r"['\"]--[a-z0-9][a-z0-9-]*['\"]", verification)
+    )
 
 
 def _run_coroutine(coro: Any) -> Any:
@@ -1580,9 +1655,6 @@ def execute_step_loop(
                 debug_prompt, debug_knowledge_ctx
             )
             _log_debug_repair_knowledge_usage(ctx, debug_knowledge_ctx, logger)
-            orchestration_state.debug_repair_task_execution_ids = sorted(
-                {*debug_repair_used_ids, int(task_execution_id)}
-            )
             save_orchestration_checkpoint(
                 db, session_id, task_id, prompt, orchestration_state
             )
@@ -1783,6 +1855,16 @@ def execute_step_loop(
                     else None
                 )
                 if not success or debug_data is None:
+                    if (
+                        phase7f_debug_repair_allowed
+                        and task_execution_id is not None
+                        and not _is_weak_completion_verifier_failure(
+                            debug_feedback_envelope
+                        )
+                    ):
+                        orchestration_state.debug_repair_task_execution_ids = sorted(
+                            {*debug_repair_used_ids, int(task_execution_id)}
+                        )
                     append_orchestration_event(
                         project_dir=orchestration_state.project_dir,
                         session_id=session_id,
@@ -1823,6 +1905,103 @@ def execute_step_loop(
 
             fix_type = debug_data.get("fix_type", "code_fix")
             logger.info("[DEBUG-PARSE] Using strategy: %s", strategy_info)
+
+            if (
+                phase7f_debug_repair_allowed
+                and _is_low_value_weak_verifier_command_fix(
+                    debug_feedback_envelope, debug_data
+                )
+            ):
+                reason = "weak_verifier_command_fix_rejected"
+                logger.warning(
+                    "[ORCHESTRATION] Rejecting low-value command_fix for weak verifier failure before preserving semantic debug budget"
+                )
+                emit_live(
+                    "WARN",
+                    "[ORCHESTRATION] Ignored low-value verifier-only debug repair and preserved semantic debug budget",
+                    metadata={
+                        "phase": "debugging",
+                        "step_index": step_index + 1,
+                        "reason": reason,
+                        "fix_type": fix_type,
+                    },
+                )
+                try:
+                    append_orchestration_event(
+                        project_dir=orchestration_state.project_dir,
+                        session_id=session_id,
+                        task_id=task_id,
+                        event_type=EventType.REPAIR_REJECTED,
+                        parent_event_id=(debugging_phase_event or {}).get("event_id"),
+                        details={
+                            "phase": "execution",
+                            "reason": reason,
+                            "debug_repair_attempted": True,
+                            "debug_repair_used": False,
+                            "debug_failure_class": (
+                                debug_feedback_envelope.failure_class
+                                if debug_feedback_envelope
+                                else None
+                            ),
+                            "task_execution_id": ctx.task_execution_id,
+                            "step_index": step_index + 1,
+                            "fix_type": fix_type,
+                        },
+                    )
+                except Exception:
+                    pass
+                orchestration_state.record_success(
+                    StepResult(
+                        step_number=step_index + 1,
+                        status="success",
+                        output=step_record.output,
+                        verification_output=step_record.verification_output,
+                        files_changed=step_record.files_changed,
+                        error_message="",
+                        attempt=current_attempt,
+                    )
+                )
+                save_orchestration_checkpoint(
+                    db, session_id, task_id, prompt, orchestration_state
+                )
+                db.commit()
+                try:
+                    phase_finished_event = append_orchestration_event(
+                        project_dir=orchestration_state.project_dir,
+                        session_id=session_id,
+                        task_id=task_id,
+                        event_type=EventType.PHASE_FINISHED,
+                        parent_event_id=(debugging_phase_event or {}).get("event_id"),
+                        details={
+                            "phase": "debugging",
+                            "status": "skipped_weak_verifier_repair",
+                            "step_index": step_index + 1,
+                            "fix_type": fix_type,
+                        },
+                    )
+                    write_orchestration_state_snapshot(
+                        project_dir=orchestration_state.project_dir,
+                        session_id=session_id,
+                        task_id=task_id,
+                        orchestration_state=orchestration_state,
+                        trigger="phase_finished",
+                        related_event_id=phase_finished_event.get("event_id"),
+                    )
+                except Exception:
+                    pass
+                continue
+
+            if (
+                phase7f_debug_repair_allowed
+                and task_execution_id is not None
+                and (
+                    not _is_weak_completion_verifier_failure(debug_feedback_envelope)
+                    or _debug_repair_materially_changes_source_or_tests(debug_data)
+                )
+            ):
+                orchestration_state.debug_repair_task_execution_ids = sorted(
+                    {*debug_repair_used_ids, int(task_execution_id)}
+                )
 
             max_plan_revisions = ctx.policy_profile.max_plan_revisions
             if fix_type == "revise_plan" and plan_revision_count >= max_plan_revisions:

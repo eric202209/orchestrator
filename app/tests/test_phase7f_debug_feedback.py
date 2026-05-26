@@ -32,8 +32,11 @@ from app.services.orchestration.reporting.decision_timeline import (
 )
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.phases.execution_loop import (
+    _debug_repair_materially_changes_source_or_tests,
     _execute_simple_verification_step,
     _is_simple_verification_command,
+    _is_low_value_weak_verifier_command_fix,
+    _is_weak_completion_verifier_failure,
     _is_read_only_inspection_command,
     _same_simple_verification_command,
     execute_step_loop,
@@ -240,7 +243,7 @@ def test_simple_verification_executes_stronger_single_command(tmp_path):
     )
 
     assert result is not None
-    assert result["status"] == "completed"
+    assert result["status"] == "completed", result
 
 
 def test_phase7f_classifies_runtime_failures():
@@ -538,7 +541,7 @@ def test_phase7f_valid_bounded_repair_is_retried_and_succeeds(db_session, tmp_pa
         record_live_log_fn=lambda *args, **kwargs: None,
     )
 
-    assert result["status"] == "completed"
+    assert result["status"] == "completed", result
     assert len(runtime.prompts) == 3
     assert "Return a bare JSON array" in runtime.prompts[1]
     assert ctx.orchestration_state.debug_repair_task_execution_ids == [execution.id]
@@ -546,6 +549,73 @@ def test_phase7f_valid_bounded_repair_is_retried_and_succeeds(db_session, tmp_pa
         "python3 -c \"print('fixed')\""
     ]
     assert ctx.orchestration_state.current_step_index == 1
+
+
+def test_weak_verifier_command_fix_is_low_value_marker_repair():
+    envelope = build_debug_feedback_envelope(
+        task_execution_id=1,
+        task_id=1,
+        step_index=1,
+        failure_phase="execution",
+        failed_command=(
+            'python -c "import sys; '
+            "sys.exit(0 if '--uppercase' in sys.argv else 1)\""
+        ),
+        stderr="Step verification command failed",
+        changed_files=["src/small_cli/cli.py"],
+        workspace_path=".",
+    )
+    debug_data = {
+        "fix_type": "command_fix",
+        "fix": "echo '--uppercase' >> validate_seed.py",
+        "verification": (
+            'python -c "import sys; '
+            "sys.exit(0 if '--uppercase' in sys.argv else 1)\" --uppercase"
+        ),
+    }
+
+    assert envelope.failure_class == "completion_validation_failed"
+    assert _is_low_value_weak_verifier_command_fix(envelope, debug_data)
+
+
+def test_weak_verifier_repair_preserves_budget_for_later_pytest_failure():
+    weak_envelope = build_debug_feedback_envelope(
+        task_execution_id=1,
+        task_id=1,
+        step_index=1,
+        failure_phase="execution",
+        failed_command=(
+            'python -c "import sys; '
+            "sys.exit(0 if '--uppercase' in sys.argv else 1)\""
+        ),
+        stderr="Step verification command failed",
+        changed_files=["src/small_cli/cli.py"],
+        workspace_path=".",
+    )
+    weak_debug_data = {
+        "fix_type": "command_fix",
+        "fix": "echo '--uppercase' >> validate_seed.py",
+        "verification": (
+            'python -c "import sys; '
+            "sys.exit(0 if '--uppercase' in sys.argv else 1)\" --uppercase"
+        ),
+    }
+    pytest_envelope = build_debug_feedback_envelope(
+        task_execution_id=1,
+        task_id=1,
+        step_index=2,
+        failure_phase="execution",
+        failed_command="python -m pytest tests/test_cli.py -q",
+        stdout="FAILED tests/test_cli.py::test_uppercase - AssertionError",
+        changed_files=["src/small_cli/cli.py"],
+        workspace_path=".",
+    )
+
+    assert _is_weak_completion_verifier_failure(weak_envelope)
+    assert _is_low_value_weak_verifier_command_fix(weak_envelope, weak_debug_data)
+    assert not _debug_repair_materially_changes_source_or_tests(weak_debug_data)
+    assert pytest_envelope.failure_class == "pytest_failure"
+    assert pytest_envelope.eligible_for_debug_repair
 
 
 def test_command_fix_replaces_failed_structured_ops_before_retry(db_session, tmp_path):
