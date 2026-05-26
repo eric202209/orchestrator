@@ -1768,6 +1768,7 @@ class PlannerService:
         max_excerpt_chars: int = 900,
     ) -> List[str]:
         hints: List[str] = []
+        seen_targets: set[str] = set()
         root = Path(project_dir).resolve()
         for index, step in enumerate(plan or [], start=1):
             if len(hints) >= max_hints or not isinstance(step, dict):
@@ -1781,6 +1782,9 @@ class PlannerService:
                 old_text = operation.get("old")
                 if not rel_path or not isinstance(old_text, str) or not old_text:
                     continue
+                if rel_path in seen_targets:
+                    continue
+                seen_targets.add(rel_path)
                 path = (root / rel_path).resolve()
                 try:
                     path.relative_to(root)
