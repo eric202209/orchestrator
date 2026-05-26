@@ -8,7 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from app.services.orchestration.diagnostics.debug_feedback import DebugFeedbackEnvelope
+from app.services.orchestration.diagnostics.debug_feedback import (
+    DebugFeedbackEnvelope,
+    build_debug_source_contract,
+)
 from app.services.orchestration.diagnostics.evidence_capsule import (
     infer_missing_python_module_target,
 )
@@ -182,6 +185,7 @@ def build_diff_capsule(
 def build_bounded_diff_repair_prompt(
     capsule: DiffCapsule,
     evidence_capsule: Optional[Any] = None,
+    envelope: Optional[DebugFeedbackEnvelope] = None,
 ) -> str:
     workspace = render_workspace_path_for_prompt(Path(capsule.workspace_path or "."))
     evidence_section = ""
@@ -193,6 +197,10 @@ def build_bounded_diff_repair_prompt(
         rendered = render_evidence_section(evidence_capsule)
         if rendered:
             evidence_section = f"\n{rendered}\n"
+    source_contract = (
+        build_debug_source_contract(envelope, evidence_capsule) if envelope else ""
+    )
+    source_contract_section = f"\n{source_contract}\n" if source_contract else ""
     return (
         "Return a bare JSON array of one minimal debug repair step. "
         "Do not return prose, markdown, comments, explanations, or fenced code.\n\n"
@@ -203,6 +211,7 @@ def build_bounded_diff_repair_prompt(
         "Unified diff capsule:\n"
         f"{capsule.diff_text}\n"
         f"{evidence_section}\n"
+        f"{source_contract_section}"
         "Rules:\n"
         "1. Output exactly one JSON array containing one step object.\n"
         "2. The step object must include title, command, and verification_command.\n"

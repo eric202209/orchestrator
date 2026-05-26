@@ -1631,7 +1631,9 @@ def execute_step_loop(
             )
             if diff_capsule is not None:
                 debug_prompt = build_bounded_diff_repair_prompt(
-                    diff_capsule, _evidence_capsule
+                    diff_capsule,
+                    _evidence_capsule,
+                    envelope=debug_feedback_envelope,
                 )
                 debug_prompt_mode = "phase7g_diff_repair"
                 diff_repair_fallback_reason = None

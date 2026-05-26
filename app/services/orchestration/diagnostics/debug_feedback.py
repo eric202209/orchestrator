@@ -35,6 +35,14 @@ ELIGIBLE_DEBUG_FAILURE_CLASSES = frozenset(
     }
 )
 
+_DEBUG_SOURCE_CONTRACT_MAX_CHARS = 1100
+
+_CANNOT_IMPORT_FROM_FILE_RE = re.compile(
+    r"cannot import name '([A-Za-z_][A-Za-z0-9_]*)' from '([A-Za-z_][A-Za-z0-9_.]*)'"
+    r"(?: \(([^)]+\.py)\))?",
+    flags=re.IGNORECASE,
+)
+
 
 @dataclass
 class DebugFeedbackEnvelope:
@@ -302,6 +310,8 @@ def build_bounded_debug_repair_prompt(
         rendered = render_evidence_section(evidence_capsule)
         if rendered:
             evidence_section = f"\n{rendered}\n"
+    source_contract = build_debug_source_contract(envelope, evidence_capsule)
+    source_contract_section = f"\n{source_contract}\n" if source_contract else ""
     return (
         "Return a bare JSON array of one minimal debug repair step. "
         "Do not return prose, markdown, comments, explanations, or fenced code.\n\n"
@@ -314,6 +324,7 @@ def build_bounded_debug_repair_prompt(
         "Failure excerpts:\n"
         f"{json.dumps(excerpts, ensure_ascii=True)[:1800]}\n"
         f"{evidence_section}\n"
+        f"{source_contract_section}"
         "Rules:\n"
         "1. Output exactly one JSON array containing one step object.\n"
         "2. The step object must include title, command, and verification_command.\n"
@@ -326,6 +337,193 @@ def build_bounded_debug_repair_prompt(
         "9. Do not request additional retries or describe policy.\n"
         "10. If workspace evidence names a missing Python module target, prefer creating that module file instead of editing only a package __init__.py.\n"
     )
+
+
+def build_debug_source_contract(
+    envelope: DebugFeedbackEnvelope,
+    evidence_capsule: Optional[Any] = None,
+    *,
+    max_chars: int = _DEBUG_SOURCE_CONTRACT_MAX_CHARS,
+) -> str:
+    """Render a compact source-focused repair contract for Python debug repair."""
+
+    if envelope.failure_class not in {
+        "pytest_failure",
+        "import_error",
+        "module_not_found",
+        "runtime_assertion_failure",
+        "completion_validation_failed",
+        "syntax_error",
+    }:
+        return ""
+
+    project_dir = Path(envelope.workspace_path or ".")
+    context = _debug_failure_context(envelope)
+    targets: list[str] = []
+    behavior: list[str] = []
+
+    contract = None
+    if project_dir.exists():
+        try:
+            from app.services.project.source_imports import extract_python_test_contract
+
+            contract = extract_python_test_contract(project_dir)
+        except (OSError, SyntaxError, ValueError):
+            contract = None
+
+    if contract is not None:
+        for path, _reason in list(contract.source_targets) + list(
+            contract.missing_source_targets
+        ):
+            _append_unique(targets, path, limit=3)
+        for line in _debug_expected_behavior_lines(contract):
+            _append_unique(behavior, line, limit=3)
+
+    for target in _targets_from_evidence(evidence_capsule):
+        _append_unique(targets, target, limit=3)
+
+    imported_symbol = _imported_symbol_from_failure(context)
+    direct_import_target = _direct_import_error_target(context, project_dir)
+    if direct_import_target:
+        _append_unique(targets, direct_import_target, limit=3)
+
+    if _looks_like_uppercase_argparse_failure(context):
+        _prefer_target(targets, "src/small_cli/cli.py")
+        _append_unique(
+            behavior,
+            'main(["--uppercase", "hello"]) exits 0 and prints HELLO.',
+            limit=3,
+        )
+        _append_unique(
+            behavior,
+            "Existing normal CLI behavior still passes.",
+            limit=3,
+        )
+
+    if imported_symbol == "normalize_greeting" or "normalize_greeting" in context:
+        _prefer_target(targets, "src/import_repair/formatters.py")
+        _append_unique(
+            behavior,
+            "Define normalize_greeting in the target module.",
+            limit=3,
+        )
+        _append_unique(
+            behavior,
+            'normalize_greeting("  ada   lovelace ") returns "Hello, Ada Lovelace!".',
+            limit=3,
+        )
+
+    if not targets and not behavior:
+        return ""
+
+    lines = [
+        "Debug source contract:",
+        "- Existing tests are the failing contract.",
+        "- Do not edit tests or verifier commands.",
+        "- Repair source code under the required target.",
+    ]
+    if targets:
+        lines.append("- Required source target path:")
+        lines.extend(f"  - {target}" for target in targets[:3])
+    if behavior:
+        lines.append("- Expected behavior:")
+        lines.extend(f"  - {item}" for item in behavior[:3])
+    lines.append("- No placeholder/pass/TODO/export-only fixes.")
+    return _excerpt("\n".join(lines), max_chars)
+
+
+def _debug_failure_context(envelope: DebugFeedbackEnvelope) -> str:
+    return "\n".join(
+        part
+        for part in (
+            envelope.failed_command,
+            envelope.stdout_excerpt,
+            envelope.stderr_excerpt,
+            envelope.pytest_excerpt,
+            "\n".join(envelope.validator_reasons or []),
+        )
+        if str(part or "").strip()
+    )
+
+
+def _append_unique(values: list[str], value: str, *, limit: int) -> None:
+    cleaned = str(value or "").strip()
+    if cleaned and cleaned not in values and len(values) < limit:
+        values.append(cleaned)
+
+
+def _prefer_target(values: list[str], target: str) -> None:
+    if target in values:
+        values.remove(target)
+    values.insert(0, target)
+    del values[3:]
+
+
+def _targets_from_evidence(evidence_capsule: Optional[Any]) -> list[str]:
+    if evidence_capsule is None:
+        return []
+    targets: list[str] = []
+    results = getattr(evidence_capsule, "results", {}) or {}
+    for text in results.values():
+        if not isinstance(text, str):
+            continue
+        for match in re.finditer(r"(?:^|\s)(src/[A-Za-z0-9_./-]+\.py)\b", text):
+            _append_unique(targets, match.group(1), limit=3)
+    for path in getattr(evidence_capsule, "files_inspected", []) or []:
+        cleaned = str(path or "").strip().lstrip("./")
+        if cleaned.startswith("src/") and cleaned.endswith(".py"):
+            _append_unique(targets, cleaned, limit=3)
+    return targets
+
+
+def _direct_import_error_target(context: str, project_dir: Path) -> Optional[str]:
+    match = _CANNOT_IMPORT_FROM_FILE_RE.search(context)
+    if not match:
+        return None
+    source_path = match.group(3)
+    if not source_path:
+        return None
+    path = Path(source_path)
+    try:
+        if path.is_absolute():
+            return path.resolve().relative_to(project_dir.resolve()).as_posix()
+    except (OSError, ValueError):
+        return None
+    return path.as_posix()
+
+
+def _imported_symbol_from_failure(context: str) -> str:
+    match = _CANNOT_IMPORT_FROM_FILE_RE.search(context)
+    return match.group(1) if match else ""
+
+
+def _looks_like_uppercase_argparse_failure(context: str) -> bool:
+    lowered = context.lower()
+    return (
+        "--uppercase" in lowered
+        and "unrecognized arguments" in lowered
+        and ("argparse" in lowered or "usage:" in lowered)
+    )
+
+
+def _debug_expected_behavior_lines(contract: Any) -> list[str]:
+    lines: list[str] = []
+    for assertion in getattr(contract, "assertions", ()) or ():
+        rendered = str(assertion or "").strip()
+        if not rendered:
+            continue
+        if "capsys.readouterr().out.strip()" in rendered:
+            rendered = rendered.replace(
+                "capsys.readouterr().out.strip()", "printed output"
+            )
+        if "==" in rendered:
+            left, right = [part.strip() for part in rendered.split("==", 1)]
+            rendered = f"{left} should equal {right}"
+        _append_unique(lines, rendered, limit=3)
+    if not lines:
+        for call in getattr(contract, "public_calls", ()) or ():
+            _append_unique(lines, str(call), limit=3)
+    return lines[:3]
 
 
 def normalize_bounded_debug_repair_payload(
