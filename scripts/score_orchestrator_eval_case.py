@@ -13,6 +13,7 @@ from collections import Counter
 from datetime import UTC, datetime
 import json
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 from typing import Any
@@ -176,11 +177,50 @@ def _touch_scope(touched_files: list[str], case: dict[str, Any]) -> dict[str, An
     }
 
 
-def _run_verifier(project_dir: Path, case: dict[str, Any]) -> dict[str, Any]:
+def _active_python_executable() -> str:
+    """Return the Python executable used to run the scorer."""
+
+    return sys.executable or "python3"
+
+
+def _resolve_verifier_command(command: str, python_executable: str | None) -> str:
+    """Replace a leading python/python3 token with the configured interpreter."""
+
+    selected_python = (python_executable or _active_python_executable()).strip()
+    if not selected_python:
+        return command
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return command
+    if not tokens or tokens[0] not in {"python", "python3"}:
+        return command
+    tokens[0] = selected_python
+    return shlex.join(tokens)
+
+
+def _verifier_python_executable(
+    *,
+    command: str,
+    original_command: str,
+    python_executable: str | None,
+) -> str | None:
+    if command == original_command:
+        return None
+    return python_executable or _active_python_executable()
+
+
+def _run_verifier(
+    project_dir: Path,
+    case: dict[str, Any],
+    *,
+    python_executable: str | None = None,
+) -> dict[str, Any]:
     verifier = case.get("verifier") or {}
     if not isinstance(verifier, dict) or not verifier.get("command"):
         return {"available": False, "reason": "verifier_missing"}
-    command = str(verifier["command"])
+    original_command = str(verifier["command"])
+    command = _resolve_verifier_command(original_command, python_executable)
     timeout = int(verifier.get("timeout_seconds") or 60)
     started = datetime.now(UTC)
     try:
@@ -197,6 +237,12 @@ def _run_verifier(project_dir: Path, case: dict[str, Any]) -> dict[str, Any]:
         return {
             "available": True,
             "command": command,
+            "original_command": original_command,
+            "python_executable": _verifier_python_executable(
+                command=command,
+                original_command=original_command,
+                python_executable=python_executable,
+            ),
             "timeout_seconds": timeout,
             "exit_code": completed.returncode,
             "passed": completed.returncode == 0,
@@ -210,6 +256,12 @@ def _run_verifier(project_dir: Path, case: dict[str, Any]) -> dict[str, Any]:
         return {
             "available": True,
             "command": command,
+            "original_command": original_command,
+            "python_executable": _verifier_python_executable(
+                command=command,
+                original_command=original_command,
+                python_executable=python_executable,
+            ),
             "timeout_seconds": timeout,
             "exit_code": None,
             "passed": False,
@@ -301,11 +353,14 @@ def _required_event_results(
 ) -> dict[str, Any]:
     required_events = _as_list(case.get("required_events"))
     present = {event: counts.get(event, 0) > 0 for event in required_events}
+    missing = [event for event, found in present.items() if not found]
     return {
         "required_events": present,
-        "missing_required_events": [
-            event for event, found in present.items() if not found
-        ],
+        "missing_required_events": missing,
+        "expected_signals": present,
+        "missing_expected_signals": missing,
+        "expected_signals_met": not missing,
+        "path_observed": not missing,
     }
 
 
@@ -315,7 +370,6 @@ def _derive_clean_success(
     verifier: dict[str, Any],
     files: dict[str, Any],
     scope: dict[str, Any],
-    required_events: dict[str, Any],
     event_summary: dict[str, Any],
     snapshot_summary: dict[str, Any],
 ) -> tuple[bool, list[str]]:
@@ -328,8 +382,6 @@ def _derive_clean_success(
         blockers.append("forbidden_files_present")
     if scope["forbidden_touched_files"]:
         blockers.append("forbidden_files_touched")
-    if required_events["missing_required_events"]:
-        blockers.append("required_events_missing")
     if not event_summary["task_completed"]:
         blockers.append("task_completed_event_missing")
     if "state_snapshot_present" in _as_list(case.get("success_criteria")) and not (
@@ -347,6 +399,7 @@ def _score_case(
     project_dir: Path,
     session_id: int,
     task_id: int,
+    python_executable: str | None = None,
 ) -> dict[str, Any]:
     events_path = _event_path(project_dir, session_id, task_id)
     snapshots_path = _state_snapshot_path(project_dir, session_id, task_id)
@@ -357,14 +410,17 @@ def _score_case(
     touched_files = _collect_touched_files(events, snapshots)
     scope = _touch_scope(touched_files, case)
     files = _file_checks(project_dir, case)
-    verifier = _run_verifier(project_dir, case)
+    verifier = _run_verifier(
+        project_dir,
+        case,
+        python_executable=python_executable,
+    )
     required_events = _required_event_results(case, event_summary["event_type_counts"])
     clean_success, blockers = _derive_clean_success(
         case=case,
         verifier=verifier,
         files=files,
         scope=scope,
-        required_events=required_events,
         event_summary=event_summary,
         snapshot_summary=snapshot_summary,
     )
@@ -404,11 +460,19 @@ def _score_case(
             "verifier_passed": bool(verifier.get("passed")),
             "task_completed_event_present": event_summary["task_completed"],
             "task_failed_event_present": event_summary["task_failed"],
+            "expected_signals_met": required_events["expected_signals_met"],
+            "path_observed": required_events["path_observed"],
         },
         "verifier": verifier,
         "files": files,
         "touch_scope": scope,
         "required_events": required_events,
+        "expected_signals": {
+            "signals": required_events["expected_signals"],
+            "missing": required_events["missing_expected_signals"],
+            "expected_signals_met": required_events["expected_signals_met"],
+            "path_observed": required_events["path_observed"],
+        },
         "events": {
             **event_summary,
             "malformed": malformed_events,
@@ -457,6 +521,15 @@ def main() -> int:
     parser.add_argument("--session-id", type=int, required=True)
     parser.add_argument("--task-id", type=int, required=True)
     parser.add_argument(
+        "--python",
+        "--venv-python",
+        dest="python_executable",
+        help=(
+            "Python executable for verifier commands that start with python/python3. "
+            "Defaults to the interpreter running this scorer."
+        ),
+    )
+    parser.add_argument(
         "--output",
         help="Optional report output path. If omitted, JSON is printed to stdout.",
     )
@@ -475,6 +548,7 @@ def main() -> int:
         project_dir=project_dir,
         session_id=args.session_id,
         task_id=args.task_id,
+        python_executable=args.python_executable,
     )
     if args.output:
         output_path = Path(args.output)
