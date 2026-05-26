@@ -160,6 +160,7 @@ export default function SessionDetail() {
   const [project, setProject] = useState<Project | null>(null);
   const [displayLogs, setDisplayLogs] = useState<TerminalLogEntry[]>([]);
   const [activeTab, setActiveTab] = useState<SessionDetailTab>('logs');
+  const [advancedDiagnosticsOpen, setAdvancedDiagnosticsOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
@@ -1323,6 +1324,7 @@ export default function SessionDetail() {
         break;
       case 'diagnostics':
         setActiveTab('timeline');
+        setAdvancedDiagnosticsOpen(true);
         break;
       case 'submit_guidance':
         if (pendingAgentInterventions.length > 0) {
@@ -2594,6 +2596,8 @@ export default function SessionDetail() {
               formatDateTime={formatDateTime}
               healthEvents={healthEvents}
               knowledgePhases={knowledgeUsage}
+              onOpenChange={setAdvancedDiagnosticsOpen}
+              open={advancedDiagnosticsOpen}
               replayInvestigation={replayInvestigation}
               stateDiff={stateDiff}
               timelineEvents={timelineEvents}

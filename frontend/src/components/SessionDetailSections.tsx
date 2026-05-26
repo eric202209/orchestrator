@@ -1410,6 +1410,8 @@ interface SessionAdvancedPanelProps {
   formatDateTime: (value?: string | null) => string;
   healthEvents?: Array<{ timestamp: string; score: number; slope?: number | null }>;
   knowledgePhases?: Record<string, KnowledgeUsageEntry[]>;
+  onOpenChange?: (open: boolean) => void;
+  open?: boolean;
   replayInvestigation?: SessionReplayResponse | null;
   stateDiff?: SessionStateDiffResponse | null;
   timelineEvents?: TimelineEvent[];
@@ -1424,6 +1426,8 @@ export function SessionAdvancedPanel({
   formatDateTime,
   healthEvents = [],
   knowledgePhases = {},
+  onOpenChange,
+  open,
   replayInvestigation,
   stateDiff,
   timelineEvents = [],
@@ -1491,8 +1495,19 @@ export function SessionAdvancedPanel({
   const visibleMatches = (compareMatches?.matches || []).filter((m) => m.similarity_score > 0);
 
   return (
-    <div className="min-w-0 space-y-4">
+    <details
+      className="min-w-0 overflow-hidden rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)]"
+      onToggle={(event) => onOpenChange?.(event.currentTarget.open)}
+      open={open}
+    >
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-sm font-semibold text-slate-300 hover:text-slate-100 [&::-webkit-details-marker]:hidden">
+        <span>Advanced · Diagnostics</span>
+        <span className="text-xs font-normal text-slate-500">
+          decisions · execution · replay
+        </span>
+      </summary>
 
+      <div className="min-w-0 space-y-4 border-t border-[color:var(--oc-border-soft)] p-4">
       {/* ── Useful Diagnostics ─────────────────────────────────────────── */}
 
       {/* Knowledge References */}
@@ -1852,7 +1867,8 @@ export function SessionAdvancedPanel({
         </div>
       </details>
 
-    </div>
+      </div>
+    </details>
   );
 }
 

@@ -2,7 +2,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { FailureSummaryPanel, SessionTimelinePanel } from '../SessionDetailSections'
+import { FailureSummaryPanel, SessionAdvancedPanel } from '../SessionDetailSections'
 
 import type { ExecutionFailureSummary, SessionDecisionEvent } from '@/types/api'
 
@@ -190,7 +190,7 @@ describe('FailureSummaryPanel', () => {
   })
 })
 
-describe('SessionTimelinePanel operator evidence', () => {
+describe('SessionAdvancedPanel operator evidence', () => {
   let container: HTMLDivElement
   let root: Root
 
@@ -210,9 +210,10 @@ describe('SessionTimelinePanel operator evidence', () => {
   const renderTimeline = (event: SessionDecisionEvent) => {
     act(() => {
       root.render(
-        <SessionTimelinePanel
+        <SessionAdvancedPanel
           decisionEvents={[event]}
           formatDateTime={(value) => value || ''}
+          open
           timelineEvents={[]}
         />
       )
