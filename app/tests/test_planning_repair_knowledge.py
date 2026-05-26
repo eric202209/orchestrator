@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from app.schemas.knowledge import (
@@ -99,6 +100,109 @@ def test_planning_repair_prompt_preserves_knowledge_when_structure_is_large(
     assert "REPAIR KNOWLEDGE REFERENCES" in prompt
     assert "Planning repair produced non-runnable step" in prompt
     assert "PROJECT STRUCTURE CAPSULE" in prompt
+
+
+def test_planning_repair_prompt_fits_duplicate_stale_replace_source_context(
+    tmp_path,
+):
+    (tmp_path / "src" / "small_cli").mkdir(parents=True)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "small_cli" / "cli.py").write_text(
+        '"""Tiny message-printing CLI used by the orchestrator eval fixture."""\n'
+        "\n"
+        "from __future__ import annotations\n"
+        "\n"
+        "import argparse\n"
+        "\n"
+        "\n"
+        "def format_message(message: str) -> str:\n"
+        "    return message\n"
+        "\n"
+        "\n"
+        "def build_parser() -> argparse.ArgumentParser:\n"
+        '    parser = argparse.ArgumentParser(description="Print a message.")\n'
+        '    parser.add_argument("message", help="Message to print")\n'
+        "    return parser\n"
+        "\n"
+        "\n"
+        "def main(argv: list[str] | None = None) -> int:\n"
+        "    parser = build_parser()\n"
+        "    args = parser.parse_args(argv)\n"
+        "    print(format_message(args.message))\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_cli.py").write_text(
+        "from small_cli.cli import build_parser, format_message, main\n"
+        "\n"
+        "\n"
+        "def test_format_message_returns_message_by_default():\n"
+        '    assert format_message("hello") == "hello"\n'
+        "\n"
+        "\n"
+        "def test_parser_accepts_message():\n"
+        '    args = build_parser().parse_args(["hello"])\n'
+        '    assert args.message == "hello"\n'
+        "\n"
+        "\n"
+        "def test_cli_prints_message(capsys):\n"
+        '    assert main(["hello"]) == 0\n'
+        '    assert capsys.readouterr().out.strip() == "hello"\n'
+        "\n"
+        "\n"
+        "def test_uppercase_option_prints_uppercase_message(capsys):\n"
+        '    assert main(["--uppercase", "hello"]) == 0\n'
+        '    assert capsys.readouterr().out.strip() == "HELLO"\n',
+        encoding="utf-8",
+    )
+    plan = [
+        {
+            "step_number": 2,
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "src/small_cli/cli.py",
+                    "old": "parser.add_argument('--uppercase')",
+                    "new": "parser.add_argument('--uppercase', action='store_true')",
+                }
+            ],
+        },
+        {
+            "step_number": 3,
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "src/small_cli/cli.py",
+                    "old": "print(args.message.upper())",
+                    "new": "print(format_message(args.message))",
+                }
+            ],
+        },
+        {
+            "step_number": 4,
+            "commands": ["python -m pytest -q tests/test_cli.py"],
+            "verification": "python -m pytest -q tests/test_cli.py",
+        },
+    ]
+    stale_hints = PlannerService.stale_replace_repair_hints(plan, tmp_path)
+
+    prompt = PlannerService.build_planning_repair_prompt(
+        task_description="Add --uppercase to the existing small_cli argparse CLI.",
+        malformed_output=json.dumps(plan),
+        project_dir=tmp_path,
+        rejection_reasons=[
+            "replace_in_file old text not found in workspace in steps [2, 3]",
+            *stale_hints,
+        ],
+        knowledge_context=_knowledge_ctx(),
+    )
+
+    assert len(stale_hints) == 1
+    assert len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
+    assert "REPAIR KNOWLEDGE REFERENCES" in prompt
+    assert "Planning repair produced non-runnable step" in prompt
+    assert "Stale replace fixes" in prompt
+    assert "Current file excerpt:" in prompt
 
 
 def test_specialized_repair_prompt_preserves_knowledge_when_structure_is_large(

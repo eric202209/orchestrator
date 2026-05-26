@@ -192,6 +192,24 @@ def build_planning_repair_prompt(
                     knowledge_block, source_context_block, reduced_structure_capsule
                 ),
             )
+        if (
+            len(specialized_prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS
+            and source_context_block
+        ):
+            specialized_prompt = build_specialized_repair_prompt(
+                task_description=task_description,
+                malformed_output=malformed_output,
+                project_dir=project_dir,
+                rejection_reasons=rejection_reasons,
+                knowledge_block=_join_optional_blocks(knowledge_block),
+            )
+        if len(specialized_prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS:
+            specialized_prompt = build_compact_planning_repair_prompt(
+                malformed_output,
+                rejection_reasons=rejection_reasons,
+                prompt_profile=prompt_profile,
+                apply_prompt_profile=None,
+            )
         return _apply_profile(specialized_prompt, prompt_profile, apply_prompt_profile)
     validation_error = ""
     validation_char_limit = PLANNING_REPAIR_MAX_VALIDATION_ERROR_CHARS
@@ -221,7 +239,10 @@ def build_planning_repair_prompt(
     verification_contract = render_verification_contract()
     test_scaffold_contract = render_test_scaffold_contract()
 
-    def _compose_prompt(current_structure_capsule: str) -> str:
+    def _compose_prompt(
+        current_structure_capsule: str,
+        current_source_context_block: str,
+    ) -> str:
         return f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 Do not create, edit, read, or write files during planning repair; return the JSON array as message text only.
@@ -233,7 +254,7 @@ Bad:
 {validation_error or default_validation_error}
 
 {knowledge_block + chr(10) if knowledge_block else ""}
-{source_context_block + chr(10) if source_context_block else ""}
+{current_source_context_block + chr(10) if current_source_context_block else ""}
 {current_structure_capsule + chr(10) if current_structure_capsule else ""}
 Strict output schema: step_number, description, commands, verification,
 rollback, expected_files; optional ops.
@@ -260,14 +281,23 @@ Rules:
 17. Each step is a separate JSON object. Never merge steps.
 """
 
-    prompt = _compose_prompt(structure_capsule)
+    prompt = _compose_prompt(structure_capsule, source_context_block)
     if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS and structure_capsule:
         overflow = len(prompt) - PLANNING_REPAIR_PROMPT_MAX_CHARS
         reduced_structure_capsule = _truncate_repair_structure_capsule(
             structure_capsule,
             max_chars=len(structure_capsule) - overflow - 80,
         )
-        prompt = _compose_prompt(reduced_structure_capsule)
+        prompt = _compose_prompt(reduced_structure_capsule, source_context_block)
+    if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS and source_context_block:
+        prompt = _compose_prompt("", "")
+    if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS:
+        prompt = build_compact_planning_repair_prompt(
+            malformed_output,
+            rejection_reasons=rejection_reasons,
+            prompt_profile=prompt_profile,
+            apply_prompt_profile=None,
+        )
     return _apply_profile(prompt, prompt_profile, apply_prompt_profile)
 
 

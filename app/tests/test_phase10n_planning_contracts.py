@@ -193,3 +193,51 @@ def test_phase10n_plan_flags_replace_ops_when_old_text_is_absent(tmp_path: Path)
 
     assert "old text not found" in hints[0]
     assert "def test_existing" in hints[0]
+
+
+def test_phase10n_stale_replace_hints_dedupe_current_file_excerpt_by_path(
+    tmp_path: Path,
+):
+    source_file = tmp_path / "src" / "small_cli" / "cli.py"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_text(
+        "def build_parser():\n"
+        "    parser = object()\n"
+        "    return parser\n"
+        "\n"
+        "def main(argv=None):\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+
+    hints = PlannerService.stale_replace_repair_hints(
+        [
+            {
+                "step_number": 2,
+                "ops": [
+                    {
+                        "op": "replace_in_file",
+                        "path": "src/small_cli/cli.py",
+                        "old": "parser.add_argument('--uppercase')",
+                        "new": "parser.add_argument('--uppercase', action='store_true')",
+                    }
+                ],
+            },
+            {
+                "step_number": 3,
+                "ops": [
+                    {
+                        "op": "replace_in_file",
+                        "path": "src/small_cli/cli.py",
+                        "old": "print(args.message.upper())",
+                        "new": "print(format_message(args.message))",
+                    }
+                ],
+            },
+        ],
+        tmp_path,
+    )
+
+    assert len(hints) == 1
+    assert hints[0].count("Current file excerpt:") == 1
+    assert "src/small_cli/cli.py" in hints[0]
