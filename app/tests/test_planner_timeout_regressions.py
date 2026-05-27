@@ -2568,6 +2568,25 @@ def test_physical_src_import_repair_reasons_include_invalid_line_and_guidance():
     assert "src/math_tools/operations.py" in rendered
 
 
+def test_undefined_python_test_repair_reasons_preserve_existing_tests():
+    reasons = _build_repair_rejection_reasons(
+        ["Plan writes Python tests with obvious undefined names"],
+        {
+            "undefined_python_test_name_materializations": [
+                "tests/test_cli_uppercase.py"
+            ],
+        },
+    )
+
+    rendered = "\n".join(reasons)
+    assert "undefined_python_test_names" in rendered
+    assert "Repair the source behavior instead of adding broken tests" in rendered
+    assert "Preserve existing tests as the contract" in rendered
+    assert "undefined helper names" in rendered
+    assert "`src.`-prefixed imports" in rendered
+    assert "tests/test_cli_uppercase.py" in rendered
+
+
 def test_repeated_physical_src_import_repair_details_reports_clear_reason():
     plan_verdict = type(
         "PlanVerdict",

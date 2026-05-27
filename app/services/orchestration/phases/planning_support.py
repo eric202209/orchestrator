@@ -331,6 +331,21 @@ def _build_repair_rejection_reasons(
             "`from src.math_tools import ...`." + invalid_clause
         )
 
+    undefined_python_test_files = [
+        str(path or "").strip()
+        for path in (details.get("undefined_python_test_name_materializations") or [])
+        if str(path or "").strip()
+    ]
+    if undefined_python_test_files:
+        targeted_reasons.append(
+            "undefined_python_test_names: Repair the source behavior instead of "
+            "adding broken tests. Preserve existing tests as the contract; do not "
+            "write tests with undefined helper names, undeclared fixtures, or "
+            "`src.`-prefixed imports. If a test file must be touched, every name "
+            "must be imported, defined, or provided by pytest fixtures. Offending "
+            f"test file(s): {undefined_python_test_files[:5]}"
+        )
+
     truncated_subcodes = details.get("truncated_multistep_subcodes") or []
     if truncated_subcodes:
         original_step_count = details.get("truncated_multistep_original_step_count")
