@@ -472,6 +472,18 @@ def test_phase11b_debug_prompt_names_cli_source_target_for_uppercase_failure(
     assert "Do not edit tests or verifier commands." in prompt
     assert "Repair source code under the required target." in prompt
     assert "src/small_cli/cli.py" in prompt
+    assert "Required argparse wiring:" in prompt
+    assert (
+        'In build_parser, add parser.add_argument("--uppercase", action="store_true", ...).'
+        in prompt
+    )
+    assert "In main(argv), read args.uppercase after parse_args(argv)." in prompt
+    assert 'Preserve default behavior: format_message("hello") == "hello".' in prompt
+    assert "Uppercase only when the --uppercase flag is set." in prompt
+    assert (
+        "Do not satisfy this by changing tests or making all output uppercase."
+        in prompt
+    )
     assert 'main(["--uppercase", "hello"]) exits 0 and prints HELLO.' in prompt
     assert "No placeholder/pass/TODO/export-only fixes." in prompt
 

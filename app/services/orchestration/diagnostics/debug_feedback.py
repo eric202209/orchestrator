@@ -361,6 +361,7 @@ def build_debug_source_contract(
     context = _debug_failure_context(envelope)
     targets: list[str] = []
     behavior: list[str] = []
+    argparse_wiring: list[str] = []
 
     contract = None
     if project_dir.exists():
@@ -389,6 +390,41 @@ def build_debug_source_contract(
 
     if _looks_like_uppercase_argparse_failure(context):
         _prefer_target(targets, "src/small_cli/cli.py")
+        parser_name = (
+            "build_parser"
+            if _contract_or_context_mentions_symbol(contract, context, "build_parser")
+            else "the argparse parser"
+        )
+        main_name = (
+            "main(argv)"
+            if _contract_or_context_mentions_symbol(contract, context, "main")
+            else "the CLI entrypoint"
+        )
+        _append_unique(
+            argparse_wiring,
+            f'In {parser_name}, add parser.add_argument("--uppercase", action="store_true", ...).',
+            limit=6,
+        )
+        _append_unique(
+            argparse_wiring,
+            f"In {main_name}, read args.uppercase after parse_args(argv).",
+            limit=6,
+        )
+        _append_unique(
+            argparse_wiring,
+            'Preserve default behavior: format_message("hello") == "hello".',
+            limit=6,
+        )
+        _append_unique(
+            argparse_wiring,
+            "Uppercase only when the --uppercase flag is set.",
+            limit=6,
+        )
+        _append_unique(
+            argparse_wiring,
+            "Do not satisfy this by changing tests or making all output uppercase.",
+            limit=6,
+        )
         _append_unique(
             behavior,
             'main(["--uppercase", "hello"]) exits 0 and prints HELLO.',
@@ -425,6 +461,9 @@ def build_debug_source_contract(
     if targets:
         lines.append("- Required source target path:")
         lines.extend(f"  - {target}" for target in targets[:3])
+    if argparse_wiring:
+        lines.append("- Required argparse wiring:")
+        lines.extend(f"  - {item}" for item in argparse_wiring[:6])
     if behavior:
         lines.append("- Expected behavior:")
         lines.extend(f"  - {item}" for item in behavior[:3])
@@ -504,6 +543,25 @@ def _looks_like_uppercase_argparse_failure(context: str) -> bool:
         and "unrecognized arguments" in lowered
         and ("argparse" in lowered or "usage:" in lowered)
     )
+
+
+def _contract_or_context_mentions_symbol(
+    contract: Any,
+    context: str,
+    symbol: str,
+) -> bool:
+    if re.search(rf"\b{re.escape(symbol)}\b", context):
+        return True
+    if contract is None:
+        return False
+    for value in (
+        list(getattr(contract, "imports", ()) or ())
+        + list(getattr(contract, "public_calls", ()) or ())
+        + list(getattr(contract, "assertions", ()) or ())
+    ):
+        if re.search(rf"\b{re.escape(symbol)}\b", str(value or "")):
+            return True
+    return False
 
 
 def _debug_expected_behavior_lines(contract: Any) -> list[str]:

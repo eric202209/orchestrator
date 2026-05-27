@@ -14,7 +14,7 @@ services:
   orchestrator:
     build: .
     command: >
-      sh -c "uvicorn app.main:app --host 0.0.0.0 --port 8080 2>&1 | tee /app/logs/orchestrator.log"
+      sh -c "uvicorn app.main:app --host 0.0.0.0 --port 8080 2>&1 | tee /app/logs/backend.log"
     user: root
     ports:
       - "8080:8080"
@@ -49,7 +49,7 @@ services:
     build: .
     user: root
     command: >
-      sh -c "chmod -R 777 /app/checkpoints /app/logs && (celery -A app.celery_app worker --loglevel=info --concurrency=1 2>&1 | tee /app/logs/celery_worker.log)"
+      sh -c "chmod -R 777 /app/checkpoints /app/logs && (celery -A app.celery_app worker --loglevel=info --concurrency=1 2>&1 | tee /app/logs/worker.log)"
     env_file: .env
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/0

@@ -209,3 +209,86 @@ def test_phase11b_diff_repair_prompt_includes_debug_source_contract(tmp_path):
     assert 'main(["--uppercase", "hello"]) should equal 0' in prompt
     assert 'printed output should equal "HELLO"' in prompt
     assert "No placeholder/pass/TODO/export-only fixes." in prompt
+
+
+def test_phase11b_diff_repair_prompt_includes_argparse_wiring_contract(tmp_path):
+    project_dir = tmp_path / "project"
+    source_dir = project_dir / "src" / "small_cli"
+    source_dir.mkdir(parents=True)
+    (source_dir / "__init__.py").write_text("", encoding="utf-8")
+    source = source_dir / "cli.py"
+    source.write_text(
+        "from __future__ import annotations\n"
+        "\n"
+        "import argparse\n"
+        "\n"
+        "def format_message(message: str) -> str:\n"
+        "    return message.upper()\n"
+        "\n"
+        "def build_parser() -> argparse.ArgumentParser:\n"
+        "    parser = argparse.ArgumentParser(description='Print a message.')\n"
+        "    parser.add_argument('message')\n"
+        "    return parser\n"
+        "\n"
+        "def main(argv: list[str] | None = None) -> int:\n"
+        "    args = build_parser().parse_args(argv)\n"
+        "    print(format_message(args.message))\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+    tests_dir = project_dir / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_cli.py").write_text(
+        "from small_cli.cli import build_parser, format_message, main\n"
+        "\n"
+        "def test_format_message_returns_message_by_default():\n"
+        '    assert format_message("hello") == "hello"\n'
+        "\n"
+        "def test_uppercase_option_prints_uppercase_message(capsys):\n"
+        '    assert main(["--uppercase", "hello"]) == 0\n'
+        '    assert capsys.readouterr().out.strip() == "HELLO"\n',
+        encoding="utf-8",
+    )
+    snapshot = snapshot_file_contents(project_dir, ["src/small_cli/cli.py"])
+    source.write_text(source.read_text(encoding="utf-8") + "\n# attempted repair\n")
+    failure = (
+        "FAILED tests/test_cli.py::test_uppercase_option_prints_uppercase_message\n"
+        'assert main(["--uppercase", "hello"]) == 0\n'
+        "src/small_cli/cli.py:16: in main\n"
+        "args = build_parser().parse_args(argv)\n"
+        "SystemExit: 2\n"
+        "usage: __main__.py [-h] message\n"
+        "__main__.py: error: unrecognized arguments: --uppercase\n"
+    )
+    envelope = _envelope(
+        failed_command="python -m pytest -q",
+        stdout=failure,
+        stderr="",
+        validator_reasons=["completion_validation_failed"],
+        changed_files=["src/small_cli/cli.py"],
+        workspace_path=project_dir,
+    )
+    capsule = build_diff_capsule(
+        pre_checksum=snapshot,
+        project_dir=project_dir,
+        changed_files=["src/small_cli/cli.py"],
+        envelope=envelope,
+    )
+
+    assert capsule is not None
+
+    prompt = build_bounded_diff_repair_prompt(capsule, envelope=envelope)
+
+    assert "Debug source contract:" in prompt
+    assert "Required argparse wiring:" in prompt
+    assert (
+        'In build_parser, add parser.add_argument("--uppercase", action="store_true", ...).'
+        in prompt
+    )
+    assert "In main(argv), read args.uppercase after parse_args(argv)." in prompt
+    assert 'Preserve default behavior: format_message("hello") == "hello".' in prompt
+    assert "Uppercase only when the --uppercase flag is set." in prompt
+    assert (
+        "Do not satisfy this by changing tests or making all output uppercase."
+        in prompt
+    )
