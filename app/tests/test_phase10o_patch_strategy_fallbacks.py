@@ -44,6 +44,11 @@ def test_phase10o_stale_replace_fallback_hints_preserve_test_assertions(
     assert "patch_strategy_fallback_required" in hints[0]
     assert "do not emit another replace_in_file" in hints[0]
     assert "ops.write_file with complete preserved file content" in hints[0]
+    assert "write_file.content must be a JSON string" in hints[0]
+    assert "escape newline characters as \\n" in hints[0]
+    assert "do not use raw triple-quoted Python blocks" in hints[0]
+    assert "do not place bare multiline code outside JSON string quotes" in hints[0]
+    assert "valid JSON array" in hints[0]
     assert "preserve existing tests and assertion intent" in hints[0]
     assert "assert summary['total'] == 3" in hints[0]
 
@@ -111,6 +116,11 @@ def test_phase10o_stale_replace_fallback_repair_prompt_keeps_file_excerpt(
     assert "def main(argv: list[str] | None = None) -> int:" in prompt
     assert 'parser.add_argument("message", help="Message to print")' in prompt
     assert "do not emit another replace_in_file" in prompt
+    assert "write_file.content must be a JSON string" in prompt
+    assert "escape newline characters as \\n" in prompt
+    assert "do not use raw triple-quoted Python blocks" in prompt
+    assert "do not place bare multiline code outside JSON string quotes" in prompt
+    assert "valid JSON array" in prompt
 
 
 def test_phase10o_python_test_repair_prompt_includes_imported_source_excerpt(
@@ -251,6 +261,10 @@ def test_phase10o_stale_replace_after_repair_gets_fallback_second_pass():
     assert reason.event_reason == "post_repair_stale_replace_fallback_pass"
     assert reason.semantic_violation_code == "patch_strategy_fallback_required"
     assert "Exact-text patching is exhausted" in reason.rejection_text
+    assert "write_file.content must be a JSON string" in reason.rejection_text
+    assert "escape newline characters as \\n" in reason.rejection_text
+    assert "do not use raw triple-quoted Python blocks" in reason.rejection_text
+    assert "valid JSON array" in reason.rejection_text
     assert not reason.cap_used
     assert reason.cap_attribute == "post_repair_stale_replace_second_repair_used"
 

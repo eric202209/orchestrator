@@ -2487,6 +2487,11 @@ def test_planning_repair_prompt_bans_external_helpers_and_heredoc():
     assert "Use `ops` for file writes" in prompt
     assert "fallback limits" in prompt
     assert "write_file" in prompt
+    assert "write_file.content and append_file.content must be JSON strings" in prompt
+    assert "newline characters must be escaped as \\n" in prompt
+    assert "do not use raw triple-quoted Python blocks" in prompt
+    assert "do not place bare multiline code outside JSON quotes" in prompt
+    assert "output must remain a valid JSON array" in prompt
     assert "exactly ONE heredoc across ENTIRE plan, all steps combined" not in prompt
     assert "use double quotes or heredoc" not in prompt
     assert "Each step is a separate JSON object" in prompt
@@ -2628,6 +2633,11 @@ def test_compact_planning_repair_prompt_preserves_phase7k_contract_rules():
     assert "no duplicated path roots" in prompt
     assert "Use `ops` for file writes" in prompt
     assert "fallback limits" in prompt
+    assert "write_file.content and append_file.content must be JSON strings" in prompt
+    assert "newline characters must be escaped as \\n" in prompt
+    assert "do not use raw triple-quoted Python blocks" in prompt
+    assert "do not place bare multiline code outside JSON quotes" in prompt
+    assert "output must remain a valid JSON array" in prompt
     assert "each step is a separate complete JSON object in the array" in prompt
     assert "never merge content from multiple steps into one step" in prompt
     assert "placeholder-only implementation" in prompt
