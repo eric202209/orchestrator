@@ -22,6 +22,7 @@ from app.services.orchestration.planning.repair_strategies import (
     build_specialized_repair_prompt,
 )
 from app.services.project.source_imports import (
+    extract_python_test_contract,
     imported_source_excerpts_from_tests,
 )
 from app.services.project.index_service import (
@@ -159,6 +160,7 @@ def build_planning_repair_prompt(
     knowledge_block = render_repair_knowledge_block(knowledge_context)
     source_context_block = build_python_test_source_context_block(
         project_dir=project_dir,
+        task_description=task_description,
         malformed_output=malformed_output,
         rejection_reasons=rejection_reasons,
     )
@@ -310,6 +312,7 @@ Rules:
 def build_python_test_source_context_block(
     *,
     project_dir: Path,
+    task_description: str = "",
     malformed_output: str,
     rejection_reasons: Optional[list[str]] = None,
 ) -> str:
@@ -340,6 +343,15 @@ def build_python_test_source_context_block(
         "- Implement behavior in source code, not by docstring-only or string-only edits.",
         "",
     ]
+    existing_contract_guidance = _build_existing_test_contract_repair_guidance(
+        project_dir=project_dir,
+        task_description=task_description,
+        malformed_output=malformed_output,
+        rejection_reasons=rejection_reasons,
+    )
+    if existing_contract_guidance:
+        lines.extend(existing_contract_guidance)
+        lines.append("")
     total_chars = sum(len(line) + 1 for line in lines)
     for rel_path, excerpt in excerpts.items():
         header = f"source excerpt imported by tests: {rel_path}"
@@ -354,6 +366,73 @@ def build_python_test_source_context_block(
         if total_chars >= PLANNING_REPAIR_MAX_SOURCE_CONTEXT_CHARS:
             break
     return "\n".join(lines).strip()[:PLANNING_REPAIR_MAX_SOURCE_CONTEXT_CHARS]
+
+
+def _build_existing_test_contract_repair_guidance(
+    *,
+    project_dir: Path,
+    task_description: str,
+    malformed_output: str,
+    rejection_reasons: Optional[list[str]],
+) -> list[str]:
+    text = "\n".join(
+        [
+            str(malformed_output or ""),
+            *(str(reason or "") for reason in (rejection_reasons or [])),
+        ]
+    ).lower()
+    if "undefined_python_test_name_materializations" not in text and (
+        "undefined python test" not in text and "obvious undefined names" not in text
+    ):
+        return []
+    if _task_explicitly_requests_test_changes(task_description):
+        return []
+    try:
+        contract = extract_python_test_contract(project_dir)
+    except Exception:
+        return []
+    if contract is None:
+        return []
+    if not (
+        contract.src_layout_detected
+        and contract.source_targets
+        and contract.imports
+        and contract.public_calls
+        and contract.assertions
+    ):
+        return []
+
+    source_paths = ", ".join(path for path, _reason in contract.source_targets[:4])
+    assertion_lines = list(contract.assertions[:3])
+    lines = [
+        "Existing-test contract repair:",
+        "- Existing tests already import/call project code and define expected behavior; preserve existing tests as the contract.",
+        "- Remove tests/ ops from the repaired plan unless the user explicitly requested test changes.",
+        f"- Repair source files under src/ only; expected source targets: {source_paths}.",
+        "- Do not append Python tests with undefined helper names, missing fixtures, or `src.`-prefixed imports.",
+    ]
+    if assertion_lines:
+        lines.append("- Preserve these existing assertions first:")
+        lines.extend(f"  - {assertion}" for assertion in assertion_lines)
+    return lines
+
+
+def _task_explicitly_requests_test_changes(task_description: str) -> bool:
+    text = str(task_description or "").lower()
+    if not re.search(r"\b(test|tests|testing|coverage|pytest|unit test)\b", text):
+        return False
+    return bool(
+        re.search(
+            r"\b(add|write|create|extend|update|modify|change|rewrite)\b.{0,80}"
+            r"\b(test|tests|testing|coverage|pytest|unit test)\b",
+            text,
+        )
+        or re.search(
+            r"\b(test|tests|testing|coverage|pytest|unit test)\b.{0,80}"
+            r"\b(add|write|create|extend|update|modify|change|rewrite)\b",
+            text,
+        )
+    )
 
 
 def _is_python_test_file_repair_case(

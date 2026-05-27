@@ -2592,6 +2592,98 @@ def test_undefined_python_test_repair_reasons_preserve_existing_tests():
     assert "tests/test_cli_uppercase.py" in rendered
 
 
+def test_planning_repair_prompt_existing_tests_contract_removes_test_ops(tmp_path):
+    (tmp_path / "src" / "small_cli").mkdir(parents=True)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "small_cli" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src" / "small_cli" / "cli.py").write_text(
+        "def build_parser():\n"
+        "    return None\n"
+        "\n"
+        "def main(argv=None):\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_cli.py").write_text(
+        "from small_cli.cli import build_parser, main\n"
+        "\n"
+        "def test_uppercase_option_prints_uppercase_message(capsys):\n"
+        "    assert main(['--uppercase', 'hello']) == 0\n"
+        "    assert capsys.readouterr().out.strip() == 'HELLO'\n",
+        encoding="utf-8",
+    )
+
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Add the --uppercase option to this small Python CLI.",
+        malformed_output=json.dumps(
+            [
+                {
+                    "step_number": 2,
+                    "description": "Append tests",
+                    "commands": [],
+                    "verification": "python -m pytest",
+                    "rollback": None,
+                    "expected_files": ["tests/test_cli.py"],
+                    "ops": [
+                        {
+                            "append_file": {
+                                "path": "tests/test_cli.py",
+                                "content": "def test_uppercase_option():\n"
+                                "    assert cli.main(['--uppercase', 'hello']) == 0\n",
+                            }
+                        }
+                    ],
+                }
+            ]
+        ),
+        project_dir=tmp_path,
+        rejection_reasons=[
+            "Plan writes Python tests with obvious undefined names",
+            "undefined_python_test_name_materializations: tests/test_cli.py",
+        ],
+    )
+
+    assert "Existing-test contract repair:" in prompt
+    assert "Remove tests/ ops from the repaired plan" in prompt
+    assert "Repair source files under src/ only" in prompt
+    assert "src/small_cli/cli.py" in prompt
+    assert "undefined helper names" in prompt
+    assert "main(['--uppercase', 'hello']) == 0" in prompt
+    assert "capsys.readouterr().out.strip() == 'HELLO'" in prompt
+
+
+def test_planning_repair_prompt_allows_explicit_test_change_request(tmp_path):
+    (tmp_path / "src" / "small_cli").mkdir(parents=True)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "small_cli" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src" / "small_cli" / "cli.py").write_text(
+        "def main(argv=None):\n    return 0\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_cli.py").write_text(
+        "from small_cli.cli import main\n"
+        "\n"
+        "def test_uppercase_option_prints_uppercase_message(capsys):\n"
+        "    assert main(['--uppercase', 'hello']) == 0\n"
+        "    assert capsys.readouterr().out.strip() == 'HELLO'\n",
+        encoding="utf-8",
+    )
+
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Add the --uppercase option and add tests for edge cases.",
+        malformed_output='[{"step_number":2,"expected_files":["tests/test_cli.py"]}]',
+        project_dir=tmp_path,
+        rejection_reasons=[
+            "Plan writes Python tests with obvious undefined names",
+            "undefined_python_test_name_materializations: tests/test_cli.py",
+        ],
+    )
+
+    assert "Existing-test contract repair:" not in prompt
+    assert "Remove tests/ ops from the repaired plan" not in prompt
+    assert "## PYTHON TEST SOURCE CONTEXT" in prompt
+
+
 def test_repeated_physical_src_import_repair_details_reports_clear_reason():
     plan_verdict = type(
         "PlanVerdict",
