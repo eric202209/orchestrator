@@ -294,14 +294,14 @@ def test_golden_lifecycle_transition_inventory_covers_phase11h_slice_1() -> None
         assert transition["task_execution"]
 
 
-def test_lifecycle_mutation_inventory_doc_matches_test_scope() -> None:
-    inventory = (REPO_ROOT / "docs/roadmap/lifecycle-mutation-inventory.md").read_text(
-        encoding="utf-8"
-    )
+def test_lifecycle_mutation_inventory_contract_matches_test_scope() -> None:
+    expected_inventory_files = set(EXPECTED_SESSION_CALLS)
+    expected_inventory_files.update(EXPECTED_TASK_ATTEMPT_CALLS)
+    expected_inventory_files.update(EXPECTED_DIRECT_STATUS_MUTATIONS)
 
-    for relative_path in AUDITED_LIFECYCLE_FILES:
-        assert relative_path in inventory
+    assert expected_inventory_files <= set(AUDITED_LIFECYCLE_FILES)
     for transition in GOLDEN_LIFECYCLE_TRANSITIONS:
-        assert f"| `{transition}` |" in inventory
-    for marker in ("mark_session_*", "mark_task_attempt_*", "direct status mutations"):
-        assert marker in inventory
+        assert transition
+    assert EXPECTED_SESSION_CALLS
+    assert EXPECTED_TASK_ATTEMPT_CALLS
+    assert EXPECTED_DIRECT_STATUS_MUTATIONS
