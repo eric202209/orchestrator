@@ -238,6 +238,12 @@ def build_planning_repair_prompt(
     shell_fallback_limits = render_shell_fallback_limits()
     verification_contract = render_verification_contract()
     test_scaffold_contract = render_test_scaffold_contract()
+    json_content_contract = (
+        "write_file.content and append_file.content must be JSON strings; "
+        "newline characters must be escaped as \\n; do not use raw "
+        "triple-quoted Python blocks; do not place bare multiline code outside "
+        "JSON quotes; output must remain a valid JSON array."
+    )
 
     def _compose_prompt(
         current_structure_capsule: str,
@@ -266,13 +272,13 @@ Rules:
 2a. Shell fallback limits: {shell_fallback_limits}
 2b. {verification_contract}
 2c. {test_scaffold_contract}
+2d. {json_content_contract}
 3. verification/rollback: one shell string or null.
 4. expected_files: relative path array.
-5. Relative paths only; no absolute paths, .., ~, frontend/src/frontend/src, or backend/src/backend/src; rooted exactly once.
-6. No nested project folder; work in task workspace.
+5. Relative paths only; no absolute, .., ~, frontend/src/frontend/src, backend/src/backend/src; rooted exactly once.
+6. No nested project folder; use workspace.
 7. No background processes, &, nohup, disown, or dev servers.
 8. No prose, markdown, payloads, logs, session history, or extra keys.
-9. Replace source dumps with short commands.
 10. expected_files steps must write real content; no touch-only scaffold step.
 11. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command; no `echo` or `cd /... &&`.
 12. No /root/write_file.py, /tmp helpers, absolute helper scripts, outside files.
@@ -392,6 +398,12 @@ def build_compact_planning_repair_prompt(
     shell_fallback_limits = render_shell_fallback_limits()
     verification_contract = render_verification_contract()
     test_scaffold_contract = render_test_scaffold_contract()
+    json_content_contract = (
+        "write_file.content and append_file.content must be JSON strings; "
+        "newline characters must be escaped as \\n; do not use raw "
+        "triple-quoted Python blocks; do not place bare multiline code outside "
+        "JSON quotes; output must remain a valid JSON array."
+    )
     prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 
@@ -413,6 +425,7 @@ Rules:
 - shell fallback limits: {shell_fallback_limits}
 - {verification_contract}
 - {test_scaffold_contract}
+- {json_content_contract}
 - verification must be one real command using `python -c`, `python -m`, `node -e`, `npm run build`, or a project test command.
 - expected_files must be relative paths only.
 - expected_files steps must write real content; no touch-only, TODO, pass, stub, or placeholder-only implementation.

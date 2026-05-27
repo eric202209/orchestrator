@@ -947,7 +947,10 @@ _SECOND_REPAIR_BLOCKING_POLICIES: dict[str, _SecondRepairPolicy] = {
             "patching is exhausted for these targets; do not emit another "
             "replace_in_file for the same missing old text or same target. Use "
             "ops.write_file with complete preserved file content grounded in the "
-            "current file excerpt"
+            "current file excerpt. write_file.content must be a JSON string; "
+            "escape newline characters as \\n; do not use raw triple-quoted Python "
+            "blocks; do not place bare multiline code outside JSON string quotes; "
+            "the output must remain a valid JSON array"
         ),
     ),
     "test_assertion_loss_ops_steps": _SecondRepairPolicy(
