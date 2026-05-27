@@ -231,6 +231,54 @@ def test_source_edit_context_accepts_structured_ops_fix():
     assert result["ops"][0]["path"] == "src/small_cli/cli.py"
 
 
+def test_source_edit_context_accepts_wrapped_structured_ops_fix():
+    envelope = DebugFeedbackEnvelope(
+        task_execution_id=1,
+        task_id=1,
+        step_index=0,
+        failure_phase="execution",
+        failed_command="python -m pytest -q",
+        return_code=1,
+        workspace_path=".",
+        failure_class="pytest_failure",
+        changed_files=["src/small_cli/cli.py"],
+    )
+    payload = [
+        {
+            "title": "Wire uppercase flag durably",
+            "command": "echo bad >> src/small_cli/cli.py",
+            "verification_command": "python -m pytest -q",
+            "ops": [
+                {
+                    "replace_in_file": {
+                        "path": "src/small_cli/cli.py",
+                        "old": "print(format_message(args.message))",
+                        "new": "message = args.message.upper() if args.uppercase else args.message\n    print(format_message(message))",
+                    }
+                }
+            ],
+        }
+    ]
+
+    result = normalize_bounded_debug_repair_payload(
+        payload,
+        envelope=envelope,
+        source_edit_context=True,
+    )
+
+    assert result is not None
+    assert result["fix_type"] == "ops_fix"
+    assert result["fix"] == ""
+    assert result["ops"] == [
+        {
+            "op": "replace_in_file",
+            "path": "src/small_cli/cli.py",
+            "old": "print(format_message(args.message))",
+            "new": "message = args.message.upper() if args.uppercase else args.message\n    print(format_message(message))",
+        }
+    ]
+
+
 def test_normalize_allows_command_fix_that_runs_verifier_for_pytest_failure():
     envelope = DebugFeedbackEnvelope(
         task_execution_id=1,
