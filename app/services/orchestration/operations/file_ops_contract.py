@@ -68,6 +68,13 @@ def expected_file_op_keys(op_name: str) -> Set[str]:
 
 
 def normalize_file_op_shape(operation: Mapping[str, Any]) -> Dict[str, Any]:
+    if "op" not in operation and len(operation) == 1:
+        wrapped_op_name, wrapped_payload = next(iter(operation.items()))
+        if is_supported_file_op_name(wrapped_op_name) and isinstance(
+            wrapped_payload, Mapping
+        ):
+            operation = {"op": wrapped_op_name, **dict(wrapped_payload)}
+
     op_name = str(operation.get("op") or "")
     if op_name == "replace_in_file":
         return normalize_replace_in_file_aliases(operation)

@@ -17,6 +17,9 @@ from sqlalchemy.orm import Session
 
 from app.models import LogEntry
 from app.services.orchestration.events.event_types import EventType
+from app.services.orchestration.execution.structured_op_repair import (
+    normalize_replacement_ops,
+)
 from app.services.orchestration.execution.step_support import (
     is_runnable_shell_command_fix,
 )
@@ -637,7 +640,7 @@ def normalize_bounded_debug_repair_payload_detailed(
                 parsed_data, "unsupported_fix_type"
             )
 
-        ops = parsed_data.get("ops") if isinstance(parsed_data.get("ops"), list) else []
+        ops = _normalize_durable_source_ops(parsed_data.get("ops"))
         if source_edit_context and _ops_touch_source_files(ops):
             fix_type = "ops_fix"
 
@@ -656,7 +659,7 @@ def normalize_bounded_debug_repair_payload_detailed(
         if isinstance(parsed_data.get("verification"), str):
             normalized["verification"] = str(parsed_data.get("verification") or "")
         if isinstance(parsed_data.get("ops"), list):
-            normalized["ops"] = parsed_data.get("ops", [])
+            normalized["ops"] = ops
         if isinstance(parsed_data.get("revised_plan"), list):
             normalized["revised_plan"] = parsed_data.get("revised_plan", [])
         if source_edit_context and fix_type == "command_fix":
@@ -708,7 +711,7 @@ def normalize_bounded_debug_repair_payload_detailed(
 
     command = str(item.get("command") or "").strip()
     verification = str(item.get("verification_command") or "").strip()
-    ops = item.get("ops") if isinstance(item.get("ops"), list) else []
+    ops = _normalize_durable_source_ops(item.get("ops"))
     if source_edit_context and _ops_touch_source_files(ops):
         if not verification:
             return _debug_repair_normalization_rejected(
@@ -779,6 +782,7 @@ def _expected_files_from_item(item: dict[str, Any]) -> list[Any]:
 
 
 def _ops_touch_source_files(ops: Any) -> bool:
+    ops = _normalize_durable_source_ops(ops)
     if not isinstance(ops, list):
         return False
     durable_ops = {"replace_in_file", "write_file", "append_file"}
@@ -790,6 +794,12 @@ def _ops_touch_source_files(ops: Any) -> bool:
         if op_name in durable_ops and path.startswith("src/"):
             return True
     return False
+
+
+def _normalize_durable_source_ops(ops: Any) -> list[dict[str, Any]]:
+    if not isinstance(ops, list):
+        return []
+    return normalize_replacement_ops({"ops": ops})
 
 
 def _is_verifier_only_command_fix(command: str, verification: Any) -> bool:
