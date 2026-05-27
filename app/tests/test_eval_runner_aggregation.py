@@ -4,13 +4,17 @@ import importlib.util
 from pathlib import Path
 
 
+def _repo_script_path() -> Path:
+    relative = Path("scripts/evals/run_orchestrator_eval_slice.py")
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / relative
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(f"Could not locate {relative}")
+
+
 def _load_runner_module():
-    path = (
-        Path(__file__).resolve().parents[2]
-        / "scripts"
-        / "evals"
-        / "run_orchestrator_eval_slice.py"
-    )
+    path = _repo_script_path()
     spec = importlib.util.spec_from_file_location("run_orchestrator_eval_slice", path)
     assert spec is not None
     assert spec.loader is not None

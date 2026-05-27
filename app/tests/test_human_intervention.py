@@ -23,6 +23,9 @@ from app.models import (
     LogEntry,
     Project,
     Session as SessionModel,
+    SessionTask,
+    Task,
+    TaskExecution,
     TaskStatus,
 )
 from app.services.session.intervention_service import (
@@ -40,6 +43,7 @@ _REVOKE_PATH = (
 )
 _CHECKPOINT_PATH = "app.services.workspace.checkpoint_service.CheckpointService"
 _AI_ANSWER_DELAY_PATH = "app.tasks.worker.answer_human_intervention_query.delay"
+_DISPATCH_RESUME_PATH = "app.services.session.intervention_service._dispatch_resume"
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
@@ -366,6 +370,147 @@ class TestApproveIntervention:
 
         assert result.status == "approved"
         assert result.operator_id == "admin@example.com"
+
+    def test_approve_synthesizes_checkpoint_and_clears_old_running_execution(
+        self,
+        db_session: Session,
+        running_session: SessionModel,
+        project: Project,
+    ):
+        task = Task(
+            project_id=project.id,
+            title="Update CLI",
+            description="Add --uppercase",
+            status=TaskStatus.RUNNING,
+            steps=json.dumps(
+                [
+                    {"step_number": 1, "description": "Inspect"},
+                    {"step_number": 2, "description": "Patch"},
+                ]
+            ),
+            current_step=1,
+        )
+        db_session.add(task)
+        db_session.commit()
+        db_session.refresh(task)
+        link = SessionTask(
+            session_id=running_session.id,
+            task_id=task.id,
+            status=TaskStatus.RUNNING,
+        )
+        old_execution = TaskExecution(
+            session_id=running_session.id,
+            task_id=task.id,
+            attempt_number=1,
+            status=TaskStatus.RUNNING,
+        )
+        db_session.add_all([link, old_execution])
+        db_session.commit()
+
+        with (
+            patch(_REVOKE_PATH),
+            patch(_CHECKPOINT_PATH) as mock_cs,
+        ):
+            mock_cs.return_value.load_checkpoint.return_value = None
+            req = create_intervention_request(
+                db_session,
+                session_id=running_session.id,
+                project_id=project.id,
+                task_id=task.id,
+                intervention_type="approval",
+                prompt="Proceed?",
+                revoke_running_tasks=False,
+            )
+
+        with (
+            patch(_CHECKPOINT_PATH) as mock_cs,
+            patch(_DISPATCH_RESUME_PATH) as mock_dispatch_resume,
+        ):
+            mock_cs.return_value.load_checkpoint.return_value = None
+            result = approve_intervention(
+                db_session,
+                intervention_id=req.id,
+                operator_id="admin@example.com",
+            )
+
+        assert result.status == "approved"
+        assert mock_cs.return_value.save_checkpoint.called
+        _, save_kwargs = mock_cs.return_value.save_checkpoint.call_args
+        assert save_kwargs["checkpoint_name"].startswith("intervention_reply_")
+        assert "Operator approved" in save_kwargs["context_data"]["human_guidance"]
+        assert save_kwargs["orchestration_state"]["plan"]
+        mock_dispatch_resume.assert_called_once()
+        assert mock_dispatch_resume.call_args.args[3] == save_kwargs["checkpoint_name"]
+
+        assert old_execution.status == TaskStatus.RUNNING
+
+    def test_approve_without_checkpoint_fallback_does_not_leave_running_execution(
+        self,
+        db_session: Session,
+        running_session: SessionModel,
+        project: Project,
+    ):
+        task = Task(
+            project_id=project.id,
+            title="Task without resumable plan",
+            description="No checkpoint fallback",
+            status=TaskStatus.RUNNING,
+            current_step=0,
+        )
+        db_session.add(task)
+        db_session.commit()
+        db_session.refresh(task)
+        link = SessionTask(
+            session_id=running_session.id,
+            task_id=task.id,
+            status=TaskStatus.RUNNING,
+        )
+        old_execution = TaskExecution(
+            session_id=running_session.id,
+            task_id=task.id,
+            attempt_number=1,
+            status=TaskStatus.RUNNING,
+        )
+        db_session.add_all([link, old_execution])
+        db_session.commit()
+
+        with (
+            patch(_REVOKE_PATH),
+            patch(_CHECKPOINT_PATH) as mock_cs,
+        ):
+            mock_cs.return_value.load_checkpoint.return_value = None
+            req = create_intervention_request(
+                db_session,
+                session_id=running_session.id,
+                project_id=project.id,
+                task_id=task.id,
+                intervention_type="approval",
+                prompt="Proceed?",
+                revoke_running_tasks=False,
+            )
+
+        with (
+            patch(_CHECKPOINT_PATH) as mock_cs,
+            patch(_DISPATCH_RESUME_PATH) as mock_dispatch_resume,
+        ):
+            mock_cs.return_value.load_checkpoint.return_value = None
+            result = approve_intervention(
+                db_session,
+                intervention_id=req.id,
+                operator_id="admin@example.com",
+            )
+
+        assert result.status == "approved"
+        assert not mock_cs.return_value.save_checkpoint.called
+        assert not mock_dispatch_resume.called
+        db_session.refresh(old_execution)
+        db_session.refresh(running_session)
+        db_session.refresh(task)
+        db_session.refresh(link)
+        assert old_execution.status == TaskStatus.CANCELLED
+        assert running_session.status == "paused"
+        assert task.status == TaskStatus.PENDING
+        assert link.status == TaskStatus.PENDING
 
     def test_approve_rejects_non_approval_type(
         self,

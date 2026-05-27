@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
@@ -25,16 +26,23 @@ from sqlalchemy.orm import Session as DBSession
 from app.models import (
     InterventionRequest,
     LogEntry,
+    Project,
     Session as SessionModel,
     SessionTask,
     Task,
     TaskStatus,
 )
-from app.services.orchestration.run_state import mark_task_attempt_pending
+from app.services.orchestration.run_state import (
+    mark_task_attempt_pending,
+    reset_active_attempts_for_session_stop,
+)
 from app.services.orchestration.state.session_state import (
     mark_session_awaiting_input,
     mark_session_paused,
     mark_session_running,
+)
+from app.services.workspace.project_isolation_service import (
+    resolve_project_workspace_path,
 )
 from .session_lookup import get_session_or_404
 
@@ -252,6 +260,119 @@ def _inject_reply_into_checkpoint(
     )
 
 
+def _append_guidance(context: Dict[str, Any], entry: str) -> Dict[str, Any]:
+    updated = dict(context)
+    existing = str(updated.get("human_guidance") or "").strip()
+    updated["human_guidance"] = f"{existing}\n{entry}".strip() if existing else entry
+    return updated
+
+
+def _decode_task_steps(task: Task) -> List[Dict[str, Any]]:
+    raw_steps = task.steps
+    if not raw_steps:
+        return []
+    if isinstance(raw_steps, list):
+        return [step for step in raw_steps if isinstance(step, dict)]
+    if not isinstance(raw_steps, str):
+        return []
+    try:
+        decoded = json.loads(raw_steps)
+    except Exception:
+        return []
+    if not isinstance(decoded, list):
+        return []
+    return [step for step in decoded if isinstance(step, dict)]
+
+
+def _fallback_checkpoint_payload_from_session_state(
+    db: DBSession,
+    session_id: int,
+) -> Optional[Dict[str, Any]]:
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        return None
+
+    latest_link = (
+        db.query(SessionTask)
+        .filter(SessionTask.session_id == session_id)
+        .order_by(SessionTask.started_at.desc().nullslast(), SessionTask.id.desc())
+        .first()
+    )
+    if not latest_link:
+        return None
+
+    task = db.query(Task).filter(Task.id == latest_link.task_id).first()
+    if not task:
+        return None
+
+    project = (
+        db.query(Project).filter(Project.id == session.project_id).first()
+        if session.project_id
+        else None
+    )
+    plan = _decode_task_steps(task)
+    current_step_index = int(task.current_step or 0)
+    orchestration_status = (
+        task.status.value if hasattr(task.status, "value") else str(task.status)
+    )
+    workspace_path_override = None
+    project_dir_override = None
+    if project and project.workspace_path:
+        try:
+            workspace_root = resolve_project_workspace_path(
+                project.workspace_path,
+                project.name,
+                db=db,
+            )
+            workspace_path_override = str(workspace_root)
+            project_dir_override = str(
+                workspace_root / task.task_subfolder
+                if task.task_subfolder
+                else workspace_root
+            )
+        except Exception:
+            workspace_path_override = project.workspace_path
+            project_dir_override = (
+                str(Path(project.workspace_path) / task.task_subfolder)
+                if task.task_subfolder
+                else project.workspace_path
+            )
+
+    context = {
+        "task_id": task.id,
+        "task_description": task.description or task.title,
+        "project_name": project.name if project else None,
+        "project_context": project.description if project else None,
+        "project_rules": project.project_rules if project else None,
+        "task_subfolder": task.task_subfolder,
+        "workspace_path_override": workspace_path_override,
+        "project_dir_override": project_dir_override,
+    }
+    payload = {
+        "context": context,
+        "orchestration_state": {
+            "status": orchestration_status,
+            "plan": plan,
+            "current_step_index": current_step_index,
+            "execution_results": [],
+            "debug_attempts": [],
+            "changed_files": [],
+            "validation_history": [],
+            "phase_history": [],
+            "last_plan_validation": None,
+            "last_completion_validation": None,
+            "relaxed_mode": False,
+            "completion_repair_attempts": 0,
+            "debug_repair_task_execution_ids": [],
+        },
+        "current_step_index": current_step_index,
+        "step_results": [],
+    }
+    if not plan and current_step_index <= 0:
+        return None
+    return payload
+
+
 def _append_guidance_to_checkpoint(
     db: DBSession,
     session_id: int,
@@ -266,27 +387,88 @@ def _append_guidance_to_checkpoint(
     try:
         checkpoint_service = CheckpointService(db)
         raw = checkpoint_service.load_checkpoint(session_id)
-        if not raw:
-            return None
-        data = CheckpointData.from_dict(raw)
-        data.context.human_guidance = (
-            (data.context.human_guidance + "\n" + entry).strip()
-            if data.context.human_guidance
-            else entry
-        )
+        if raw:
+            data = CheckpointData.from_dict(raw)
+            context_data = _append_guidance(data.context.to_dict(), entry)
+            orchestration_state = data.orchestration_state
+            current_step_index = data.current_step_index
+            step_results = data.step_results
+        else:
+            fallback = _fallback_checkpoint_payload_from_session_state(db, session_id)
+            if not fallback:
+                return None
+            context_data = _append_guidance(fallback.get("context", {}) or {}, entry)
+            orchestration_state = fallback.get("orchestration_state", {}) or {}
+            current_step_index = int(fallback.get("current_step_index") or 0)
+            step_results = fallback.get("step_results", []) or []
+            logger.warning(
+                "Synthesizing intervention checkpoint for session %s from persisted task state",
+                session_id,
+            )
         reply_checkpoint_name = f"{checkpoint_prefix}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
         checkpoint_service.save_checkpoint(
             session_id=session_id,
             checkpoint_name=reply_checkpoint_name,
-            context_data=data.context.to_dict(),
-            orchestration_state=data.orchestration_state,
-            current_step_index=data.current_step_index,
-            step_results=data.step_results,
+            context_data=context_data,
+            orchestration_state=orchestration_state,
+            current_step_index=current_step_index,
+            step_results=step_results,
         )
         return reply_checkpoint_name
     except Exception as exc:
         logger.warning("Could not inject operator guidance into checkpoint: %s", exc)
-        return None
+        fallback = _fallback_checkpoint_payload_from_session_state(db, session_id)
+        if not fallback:
+            return None
+        try:
+            checkpoint_service = CheckpointService(db)
+            reply_checkpoint_name = f"{checkpoint_prefix}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+            checkpoint_service.save_checkpoint(
+                session_id=session_id,
+                checkpoint_name=reply_checkpoint_name,
+                context_data=_append_guidance(
+                    fallback.get("context", {}) or {},
+                    entry,
+                ),
+                orchestration_state=fallback.get("orchestration_state", {}) or {},
+                current_step_index=int(fallback.get("current_step_index") or 0),
+                step_results=fallback.get("step_results", []) or [],
+            )
+            return reply_checkpoint_name
+        except Exception as fallback_exc:
+            logger.warning(
+                "Could not synthesize intervention checkpoint for session %s: %s",
+                session_id,
+                fallback_exc,
+            )
+            return None
+
+
+def _suspend_active_attempts_after_intervention_response(
+    db: DBSession,
+    *,
+    session_id: int,
+    reason: str,
+) -> int:
+    updated = reset_active_attempts_for_session_stop(
+        db,
+        session_id=session_id,
+        next_status=TaskStatus.PENDING,
+    )
+    if updated:
+        session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+        db.add(
+            LogEntry(
+                session_id=session_id,
+                session_instance_id=session.instance_id if session else None,
+                level="WARN",
+                message=(
+                    "Suspended active task attempt after intervention response "
+                    f"without resume dispatch: {reason}"
+                ),
+            )
+        )
+    return updated
 
 
 def add_operator_guidance(
@@ -428,6 +610,11 @@ def _dispatch_resume(
             .order_by(SessionTask.id.desc())
             .first()
         )
+        reset_active_attempts_for_session_stop(
+            db,
+            session_id=session.id,
+            next_status=TaskStatus.PENDING,
+        )
         mark_task_attempt_pending(
             task=task,
             session_task_link=session_task_link,
@@ -512,6 +699,13 @@ def submit_intervention_reply(
 
     if reply_checkpoint and session:
         _dispatch_resume(db, session, req.task_id, reply_checkpoint)
+    elif session:
+        _suspend_active_attempts_after_intervention_response(
+            db,
+            session_id=req.session_id,
+            reason="reply_checkpoint_unavailable",
+        )
+        db.commit()
 
     logger.info(
         "Intervention %s replied by %s; session %s → auto-resuming",
@@ -578,6 +772,13 @@ def approve_intervention(
 
     if reply_checkpoint and session:
         _dispatch_resume(db, session, req.task_id, reply_checkpoint)
+    elif session:
+        _suspend_active_attempts_after_intervention_response(
+            db,
+            session_id=req.session_id,
+            reason="approval_checkpoint_unavailable",
+        )
+        db.commit()
 
     db.refresh(req)
     return req
@@ -645,6 +846,13 @@ def deny_intervention(
     # adjusts its approach (e.g. proposes an alternative).
     if reply_checkpoint and session:
         _dispatch_resume(db, session, req.task_id, reply_checkpoint)
+    elif session:
+        _suspend_active_attempts_after_intervention_response(
+            db,
+            session_id=req.session_id,
+            reason="denial_checkpoint_unavailable",
+        )
+        db.commit()
 
     db.refresh(req)
     return req
