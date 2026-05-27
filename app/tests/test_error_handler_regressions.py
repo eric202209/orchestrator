@@ -160,6 +160,42 @@ def test_attempt_json_parsing_does_not_return_nested_content_object_for_plan_sou
     assert parsed[0]["step_number"] == 1
 
 
+def test_attempt_json_parsing_rejects_nested_step_from_malformed_plan_array():
+    handler = EnhancedErrorHandler()
+    broken = """[
+      {
+        "step_number": 1,
+        "description": "Inspect the current workspace",
+        "commands": ["rg --files . | sort"],
+        "verification": "python -c \\"import sys; sys.exit(0)\\"",
+        "rollback": null,
+        "expected_files": []
+      },
+      {
+        "step_number": 2,
+        "description": "Add the --uppercase option",
+        "ops": [
+          {
+            "op": "replace_in_file",
+            "path": "src/small_cli/cli.py",
+            "old": "def main(argv=None):",
+            "new": "def main(argv=None):\\n    parser.add_argument("--uppercase", action="store_true")"
+          }
+        ],
+        "commands": [],
+        "verification": "python -m pytest -q",
+        "rollback": null,
+        "expected_files": ["src/small_cli/cli.py"]
+      }
+    ]"""
+
+    success, parsed, strategy = handler.attempt_json_parsing(broken, context="planning")
+
+    assert success is False
+    assert parsed is None
+    assert strategy == "Failed to parse planning"
+
+
 def test_attempt_json_parsing_recovers_final_fenced_plan_from_prose_response():
     handler = EnhancedErrorHandler()
     response = """To fulfill the requirement, use these steps:
