@@ -17,6 +17,7 @@ from app.services.orchestration.diagnostics.debug_feedback import (
     DebugFeedbackEnvelope,
     build_bounded_debug_repair_prompt,
     normalize_bounded_debug_repair_payload,
+    normalize_bounded_debug_repair_payload_detailed,
 )
 from app.services.prompt_templates import PromptTemplates
 
@@ -159,6 +160,54 @@ def test_normalize_allows_command_fix_that_runs_verifier_for_pytest_failure():
 def test_normalize_rejects_missing_command():
     payload = [{"title": "no command", "verification_command": "pytest"}]
     assert normalize_bounded_debug_repair_payload(payload) is None
+
+
+def test_normalize_detailed_records_unsupported_shape():
+    result = normalize_bounded_debug_repair_payload_detailed([])
+
+    assert result.payload is None
+    assert result.rejection_reason == "unsupported_shape"
+    assert result.parsed_shape == {"type": "list", "length": 0}
+
+
+def test_normalize_detailed_records_missing_command():
+    result = normalize_bounded_debug_repair_payload_detailed(
+        [{"title": "no command", "verification_command": "pytest"}]
+    )
+
+    assert result.payload is None
+    assert result.rejection_reason == "missing_command"
+    assert result.parsed_shape["type"] == "list"
+    assert result.parsed_shape["first_item_keys"] == [
+        "title",
+        "verification_command",
+    ]
+
+
+def test_normalize_detailed_records_semantic_string_edit_rejection():
+    envelope = DebugFeedbackEnvelope(
+        task_execution_id=1,
+        task_id=1,
+        step_index=0,
+        failure_phase="execution",
+        failed_command="pytest -q",
+        return_code=1,
+        workspace_path=".",
+        failure_class="pytest_failure",
+        pytest_excerpt="pytest: error: unrecognized arguments: --uppercase",
+    )
+    payload = [
+        {
+            "title": "patch option spelling",
+            "command": "sed -i 's/--uppercase/--uppercase /' src/small_cli/cli.py",
+            "verification_command": "pytest -q",
+        }
+    ]
+
+    result = normalize_bounded_debug_repair_payload_detailed(payload, envelope=envelope)
+
+    assert result.payload is None
+    assert result.rejection_reason == "semantic_string_edit_rejected"
 
 
 def test_normalize_rejects_missing_verification():

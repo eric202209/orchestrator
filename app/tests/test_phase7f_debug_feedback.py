@@ -1250,7 +1250,7 @@ def test_phase7f_invalid_bounded_repair_terminalizes(db_session, tmp_path):
                 "error": "AssertionError: missing import",
                 "returncode": 1,
             },
-            {"output": "not json"},
+            {"output": "```json\n[]\n```"},
         ]
     )
     ctx, execution = _make_run_context(db_session, tmp_path, runtime=runtime)
@@ -1277,6 +1277,12 @@ def test_phase7f_invalid_bounded_repair_terminalizes(db_session, tmp_path):
     assert rejected[-1]["details"]["debug_repair_terminal_reason"] == (
         "invalid_debug_repair_output"
     )
+    assert rejected[-1]["details"]["phase7f_rejection_reason"] == ("unsupported_shape")
+    assert rejected[-1]["details"]["phase7f_parsed_shape"] == {
+        "type": "list",
+        "length": 0,
+    }
+    assert rejected[-1]["details"]["phase7f_raw_output_excerpt"] == "[]"
 
 
 def test_phase7f_second_debug_repair_for_task_execution_is_blocked(

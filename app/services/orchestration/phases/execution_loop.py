@@ -26,7 +26,7 @@ from app.services.orchestration.events.telemetry import emit_phase_event
 from app.services.orchestration.diagnostics.debug_feedback import (
     build_bounded_debug_repair_prompt,
     build_debug_feedback_envelope,
-    normalize_bounded_debug_repair_payload,
+    normalize_bounded_debug_repair_payload_detailed,
     persist_debug_feedback_envelope,
 )
 from app.services.orchestration.diagnostics.diff_capsule import (
@@ -177,6 +177,21 @@ def _is_low_value_weak_verifier_command_fix(
         ("sys.argv" in failed_command or "process.argv" in failed_command)
         and re.search(r"['\"]--[a-z0-9][a-z0-9-]*['\"]", verification)
     )
+
+
+def _phase7f_repair_output_excerpt(value: Any, max_chars: int = 500) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"```(?:json|javascript|js|python|bash|sh|shell)?", "", text)
+    text = text.replace("```", "").strip()
+    text = re.sub(
+        r"(?i)(api[_-]?key|access[_-]?token|secret|password|bearer)\s*[:=]\s*"
+        r"['\"]?[^'\"\\s,}]+",
+        r"\1=<redacted>",
+        text,
+    )
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3].rstrip() + "..."
 
 
 def _run_coroutine(coro: Any) -> Any:
@@ -1848,15 +1863,28 @@ def execute_step_loop(
                         )
                     except Exception:
                         pass
-                debug_data = (
-                    normalize_bounded_debug_repair_payload(
+                normalization_result = (
+                    normalize_bounded_debug_repair_payload_detailed(
                         parsed_repair,
                         envelope=debug_feedback_envelope,
                     )
                     if success
                     else None
                 )
+                debug_data = (
+                    normalization_result.payload if normalization_result else None
+                )
                 if not success or debug_data is None:
+                    phase7f_rejection_reason = (
+                        normalization_result.rejection_reason
+                        if normalization_result
+                        else "json_parse_failed"
+                    )
+                    phase7f_parsed_shape = (
+                        normalization_result.parsed_shape
+                        if normalization_result
+                        else {"type": type(parsed_repair).__name__}
+                    )
                     if (
                         phase7f_debug_repair_allowed
                         and task_execution_id is not None
@@ -1890,6 +1918,11 @@ def execute_step_loop(
                             "strategy": strategy_info,
                             "compliance_retry_attempted": (compliance_retry_attempted),
                             "compliance_retry_succeeded": (compliance_retry_succeeded),
+                            "phase7f_rejection_reason": phase7f_rejection_reason,
+                            "phase7f_parsed_shape": phase7f_parsed_shape,
+                            "phase7f_raw_output_excerpt": (
+                                _phase7f_repair_output_excerpt(repair_output)
+                            ),
                         },
                     )
                     raise ValueError(
