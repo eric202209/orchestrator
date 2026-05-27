@@ -289,6 +289,10 @@ def test_phase11b_diff_repair_prompt_includes_argparse_wiring_contract(tmp_path)
     assert 'Preserve default behavior: format_message("hello") == "hello".' in prompt
     assert "Uppercase only when the --uppercase flag is set." in prompt
     assert (
+        "Do not inspect raw sys.argv for --uppercase; use parse_args(argv) and args.uppercase."
+        in prompt
+    )
+    assert (
         "Do not satisfy this by changing tests or making all output uppercase."
         in prompt
     )

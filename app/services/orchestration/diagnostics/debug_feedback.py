@@ -390,16 +390,12 @@ def build_debug_source_contract(
 
     if _looks_like_uppercase_argparse_failure(context):
         _prefer_target(targets, "src/small_cli/cli.py")
-        parser_name = (
-            "build_parser"
-            if _contract_or_context_mentions_symbol(contract, context, "build_parser")
-            else "the argparse parser"
+        has_build_parser = _contract_or_context_mentions_symbol(
+            contract, context, "build_parser"
         )
-        main_name = (
-            "main(argv)"
-            if _contract_or_context_mentions_symbol(contract, context, "main")
-            else "the CLI entrypoint"
-        )
+        has_main = _contract_or_context_mentions_symbol(contract, context, "main")
+        parser_name = "build_parser" if has_build_parser else "the argparse parser"
+        main_name = "main(argv)" if has_main else "the CLI entrypoint"
         _append_unique(
             argparse_wiring,
             f'In {parser_name}, add parser.add_argument("--uppercase", action="store_true", ...).',
@@ -420,6 +416,12 @@ def build_debug_source_contract(
             "Uppercase only when the --uppercase flag is set.",
             limit=6,
         )
+        if has_build_parser and has_main:
+            _append_unique(
+                argparse_wiring,
+                "Do not inspect raw sys.argv for --uppercase; use parse_args(argv) and args.uppercase.",
+                limit=6,
+            )
         _append_unique(
             argparse_wiring,
             "Do not satisfy this by changing tests or making all output uppercase.",

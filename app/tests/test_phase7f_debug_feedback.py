@@ -481,6 +481,10 @@ def test_phase11b_debug_prompt_names_cli_source_target_for_uppercase_failure(
     assert 'Preserve default behavior: format_message("hello") == "hello".' in prompt
     assert "Uppercase only when the --uppercase flag is set." in prompt
     assert (
+        "Do not inspect raw sys.argv for --uppercase; use parse_args(argv) and args.uppercase."
+        in prompt
+    )
+    assert (
         "Do not satisfy this by changing tests or making all output uppercase."
         in prompt
     )
