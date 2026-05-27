@@ -1285,6 +1285,50 @@ def test_phase7f_invalid_bounded_repair_terminalizes(db_session, tmp_path):
     assert rejected[-1]["details"]["phase7f_raw_output_excerpt"] == "[]"
 
 
+def test_phase7f_compliance_retry_parse_failure_records_diagnostics(
+    db_session, tmp_path
+):
+    runtime = _FakeRuntime(
+        [
+            {
+                "status": "failed",
+                "output": "FAILED tests/test_demo.py::test_import - AssertionError",
+                "error": "AssertionError: missing import",
+                "returncode": 1,
+            },
+            {"output": "not json first"},
+            {"output": "```json\nnot json final\n```"},
+        ]
+    )
+    ctx, _execution = _make_run_context(db_session, tmp_path, runtime=runtime)
+
+    result = execute_step_loop(
+        ctx=ctx,
+        extract_structured_text=_extract_structured_text,
+        normalize_step=_normalize_step,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: [],
+        workspace_violation_error_cls=RuntimeError,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        record_live_log_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "debug_parse_error"
+    events = read_orchestration_events(
+        ctx.orchestration_state.project_dir, ctx.session_id, ctx.task_id
+    )
+    rejected = [
+        event for event in events if event["event_type"] == EventType.REPAIR_REJECTED
+    ]
+    details = rejected[-1]["details"]
+    assert details["debug_repair_terminal_reason"] == "invalid_debug_repair_output"
+    assert details["phase7f_rejection_reason"] == "compliance_retry_parse_failed"
+    assert details["phase7f_parsed_shape"] is None
+    assert details["phase7f_raw_output_excerpt"] == "not json final"
+    assert details["compliance_retry_attempted"] is True
+    assert details["compliance_retry_succeeded"] is False
+
+
 def test_phase7f_second_debug_repair_for_task_execution_is_blocked(
     db_session, tmp_path
 ):

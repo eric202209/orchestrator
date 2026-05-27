@@ -1800,6 +1800,7 @@ def execute_step_loop(
                 repair_output = extract_structured_text(
                     debug_result.get("output", "{}")
                 )
+                final_repair_output = repair_output
                 success, parsed_repair, strategy_info = (
                     error_handler.attempt_json_parsing(
                         repair_output, context="phase7f_debug_repair"
@@ -1823,6 +1824,7 @@ def execute_step_loop(
                         compliance_output = extract_structured_text(
                             compliance_result.get("output", "{}")
                         )
+                        final_repair_output = compliance_output
                         success, parsed_repair, strategy_info = (
                             error_handler.attempt_json_parsing(
                                 compliance_output,
@@ -1875,16 +1877,16 @@ def execute_step_loop(
                     normalization_result.payload if normalization_result else None
                 )
                 if not success or debug_data is None:
-                    phase7f_rejection_reason = (
-                        normalization_result.rejection_reason
-                        if normalization_result
-                        else "json_parse_failed"
-                    )
-                    phase7f_parsed_shape = (
-                        normalization_result.parsed_shape
-                        if normalization_result
-                        else {"type": type(parsed_repair).__name__}
-                    )
+                    if normalization_result:
+                        phase7f_rejection_reason = normalization_result.rejection_reason
+                        phase7f_parsed_shape = normalization_result.parsed_shape
+                    else:
+                        phase7f_rejection_reason = (
+                            "compliance_retry_parse_failed"
+                            if compliance_retry_attempted
+                            else "json_parse_failed"
+                        )
+                        phase7f_parsed_shape = None
                     if (
                         phase7f_debug_repair_allowed
                         and task_execution_id is not None
@@ -1921,7 +1923,7 @@ def execute_step_loop(
                             "phase7f_rejection_reason": phase7f_rejection_reason,
                             "phase7f_parsed_shape": phase7f_parsed_shape,
                             "phase7f_raw_output_excerpt": (
-                                _phase7f_repair_output_excerpt(repair_output)
+                                _phase7f_repair_output_excerpt(final_repair_output)
                             ),
                         },
                     )
