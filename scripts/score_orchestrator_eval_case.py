@@ -348,6 +348,186 @@ def _snapshot_summary(snapshots: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _details_text(value: Any) -> str:
+    try:
+        return json.dumps(value, sort_keys=True, default=_json_default).lower()
+    except TypeError:
+        return str(value).lower()
+
+
+def _event_details(event: dict[str, Any]) -> dict[str, Any]:
+    details = event.get("details") or {}
+    return details if isinstance(details, dict) else {}
+
+
+def _phase_started(events: list[dict[str, Any]], phase: str) -> bool:
+    for event in events:
+        if event.get("event_type") != "phase_started":
+            continue
+        if str(_event_details(event).get("phase") or "").lower() == phase:
+            return True
+    return False
+
+
+def _planning_validation_blocked(events: list[dict[str, Any]]) -> bool:
+    blocked_statuses = {"failed", "failure", "repair_required", "rejected"}
+    for event in events:
+        if event.get("event_type") != "validation_result":
+            continue
+        details = _event_details(event)
+        if str(details.get("stage") or "").lower() != "plan":
+            continue
+        if str(details.get("status") or "").lower() in blocked_statuses:
+            return True
+    return False
+
+
+def _phase7g_used(events: list[dict[str, Any]]) -> bool:
+    for event in events:
+        details = _event_details(event)
+        text = _details_text(details)
+        mode = str(details.get("debug_prompt_mode") or "").lower()
+        if "phase7g" in mode:
+            return True
+        if isinstance(details.get("diff_capsule_line_count"), int) and (
+            details["diff_capsule_line_count"] > 0
+        ):
+            return True
+        if details.get("diff_capsule_primary_file"):
+            return True
+        if "phase7g" in text:
+            return True
+    return False
+
+
+def _case_intended_path_observed(
+    *,
+    case: dict[str, Any],
+    existing_path_observed: bool,
+    execution_reached: bool,
+    debug_repair_reached: bool,
+    checkpoint_loaded: bool,
+) -> bool:
+    category = str(case.get("category") or "").lower()
+    case_id = str(case.get("case_id") or "").lower()
+    required_events = set(_as_list(case.get("required_events")))
+    success_criteria = set(_as_list(case.get("success_criteria")))
+    expected = required_events | success_criteria
+
+    if "checkpoint" in category or "checkpoint_loaded" in expected:
+        return checkpoint_loaded
+    if "debug" in category or {
+        "debug_feedback_captured",
+        "debug_repair_attempted",
+    } & expected:
+        return debug_repair_reached
+    if case_id == "python_cli_small_feature" or category == "baseline_success":
+        return execution_reached
+    return existing_path_observed
+
+
+def _primary_failure_phase(
+    *,
+    case: dict[str, Any],
+    events: list[dict[str, Any]],
+    verifier: dict[str, Any],
+    clean_success: bool,
+    planning_reached: bool,
+    execution_reached: bool,
+    debug_repair_reached: bool,
+    checkpoint_loaded: bool,
+    intended_path_observed: bool,
+) -> str | None:
+    if clean_success:
+        return None
+    category = str(case.get("category") or "").lower()
+    if (
+        "checkpoint" in category
+        or "checkpoint_loaded" in _as_list(case.get("required_events"))
+    ) and not checkpoint_loaded:
+        return "checkpoint_resume"
+    if _planning_validation_blocked(events) and not execution_reached:
+        return "planning_validation"
+    if debug_repair_reached:
+        return "debug_repair"
+    if execution_reached:
+        return "execution"
+    if planning_reached:
+        return "planning"
+    if not intended_path_observed:
+        return "checkpoint_resume" if "checkpoint" in category else "planning"
+    if verifier.get("available") and not verifier.get("passed"):
+        return "verifier"
+    return "unknown"
+
+
+def _path_observability(
+    *,
+    case: dict[str, Any],
+    events: list[dict[str, Any]],
+    snapshots: list[dict[str, Any]],
+    event_summary: dict[str, Any],
+    verifier: dict[str, Any],
+    clean_success: bool,
+    required_events: dict[str, Any],
+) -> dict[str, Any]:
+    counts = event_summary["event_type_counts"]
+    repair_events = event_summary["repair_events"]
+    checkpoint_events = event_summary["checkpoint_events"]
+    details_text = "\n".join(_details_text(_event_details(event)) for event in events)
+    final_statuses = {
+        str(snapshot.get("status") or "").lower() for snapshot in snapshots
+    }
+
+    planning_reached = (
+        _phase_started(events, "planning")
+        or _planning_validation_blocked(events)
+        or "planning" in final_statuses
+    )
+    step_started_count = int(counts.get("step_started", 0))
+    execution_reached = (
+        _phase_started(events, "execution")
+        or step_started_count > 0
+        or counts.get("step_finished", 0) > 0
+        or repair_events["debug_feedback_captured"] > 0
+        or any(status in {"executing", "execution"} for status in final_statuses)
+    )
+    debug_repair_reached = any(value > 0 for value in repair_events.values())
+    phase7f_used = "phase7f" in details_text or "bounded_debug_repair" in details_text
+    phase7g_used = _phase7g_used(events)
+    checkpoint_loaded = checkpoint_events["checkpoint_loaded"] > 0
+    intended_path_observed = _case_intended_path_observed(
+        case=case,
+        existing_path_observed=bool(required_events["path_observed"]),
+        execution_reached=execution_reached,
+        debug_repair_reached=debug_repair_reached,
+        checkpoint_loaded=checkpoint_loaded,
+    )
+    primary_failure_phase = _primary_failure_phase(
+        case=case,
+        events=events,
+        verifier=verifier,
+        clean_success=clean_success,
+        planning_reached=planning_reached,
+        execution_reached=execution_reached,
+        debug_repair_reached=debug_repair_reached,
+        checkpoint_loaded=checkpoint_loaded,
+        intended_path_observed=intended_path_observed,
+    )
+    return {
+        "planning_reached": planning_reached,
+        "execution_reached": execution_reached,
+        "step_started_count": step_started_count,
+        "debug_repair_reached": debug_repair_reached,
+        "phase7f_used": phase7f_used,
+        "phase7g_used": phase7g_used,
+        "repair_rejected_count": repair_events["repair_rejected"],
+        "checkpoint_loaded": checkpoint_loaded,
+        "intended_path_observed": intended_path_observed,
+        "primary_failure_phase": primary_failure_phase,
+    }
+
+
 def _required_event_results(
     case: dict[str, Any], counts: dict[str, int]
 ) -> dict[str, Any]:
@@ -424,6 +604,15 @@ def _score_case(
         event_summary=event_summary,
         snapshot_summary=snapshot_summary,
     )
+    path_observability = _path_observability(
+        case=case,
+        events=events,
+        snapshots=snapshots,
+        event_summary=event_summary,
+        verifier=verifier,
+        clean_success=clean_success,
+        required_events=required_events,
+    )
     hallucination_signals = {
         "unexpected_touched_files": scope["unexpected_touched_files"],
         "intent_outcome_mismatch_count": event_summary["intent_outcome_mismatch_count"],
@@ -463,6 +652,7 @@ def _score_case(
             "expected_signals_met": required_events["expected_signals_met"],
             "path_observed": required_events["path_observed"],
         },
+        "path_observability": path_observability,
         "verifier": verifier,
         "files": files,
         "touch_scope": scope,
