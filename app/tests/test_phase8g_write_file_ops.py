@@ -1461,6 +1461,60 @@ def test_python_c_pathlib_content_assertion_is_simple_local_verification():
     assert _is_simple_verification_command(command) is True
 
 
+def test_python_c_open_read_content_assertion_is_simple_local_verification(tmp_path):
+    (tmp_path / "src" / "small_cli").mkdir(parents=True)
+    (tmp_path / "src" / "small_cli" / "cli.py").write_text(
+        "import argparse\n", encoding="utf-8"
+    )
+    command = (
+        "python -c \"import sys; sys.exit(0 if 'import argparse' in "
+        "open('src/small_cli/cli.py').read() else 1)\""
+    )
+
+    assert _is_simple_verification_command(command, project_dir=tmp_path) is True
+
+
+def test_python_c_open_read_absolute_path_is_not_simple_local_verification(tmp_path):
+    command = (
+        "python -c \"import sys; sys.exit(0 if 'secret' in "
+        "open('/etc/passwd').read() else 1)\""
+    )
+
+    assert _is_simple_verification_command(command, project_dir=tmp_path) is False
+
+
+def test_python_c_open_read_traversal_is_not_simple_local_verification(tmp_path):
+    command = (
+        "python -c \"import sys; sys.exit(0 if 'secret' in "
+        "open('../outside.txt').read() else 1)\""
+    )
+
+    assert _is_simple_verification_command(command, project_dir=tmp_path) is False
+
+
+def test_python_c_open_write_mode_is_not_simple_local_verification(tmp_path):
+    command = (
+        "python -c \"import sys; sys.exit(0 if 'x' in "
+        "open('src/small_cli/cli.py', 'w').read() else 1)\""
+    )
+
+    assert _is_simple_verification_command(command, project_dir=tmp_path) is False
+
+
+def test_python_c_open_read_with_dangerous_calls_is_not_simple_verification(tmp_path):
+    commands = [
+        "python -c \"import os; os.system('true')\"",
+        "python -c \"import subprocess; subprocess.run(['true'])\"",
+        "python -c \"eval('1 + 1')\"",
+        "python -c \"exec('print(1)')\"",
+    ]
+
+    assert all(
+        _is_simple_verification_command(command, project_dir=tmp_path) is False
+        for command in commands
+    )
+
+
 def test_python_c_mutating_pathlib_script_is_not_simple_local_verification():
     command = (
         'python -c "import pathlib; '

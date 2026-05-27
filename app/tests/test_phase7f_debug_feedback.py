@@ -246,6 +246,48 @@ def test_simple_verification_executes_stronger_single_command(tmp_path):
     assert result["status"] == "completed", result
 
 
+def test_structured_write_file_safe_open_read_verification_runs_locally(
+    db_session, tmp_path
+):
+    command = (
+        "python -c \"import sys; sys.exit(0 if 'import argparse' in "
+        "open('src/small_cli/cli.py').read() else 1)\""
+    )
+    runtime = _FakeRuntime([])
+    ctx, _execution = _make_run_context(
+        db_session,
+        tmp_path,
+        runtime=runtime,
+        expected_files=["src/small_cli/cli.py"],
+        step_overrides={
+            "description": "Add the --uppercase option to the CLI",
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/small_cli/cli.py",
+                    "content": "import argparse\n",
+                }
+            ],
+            "commands": [command],
+            "verification": command,
+        },
+    )
+
+    result = execute_step_loop(
+        ctx=ctx,
+        extract_structured_text=_extract_structured_text,
+        normalize_step=_normalize_step,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: [],
+        workspace_violation_error_cls=RuntimeError,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        record_live_log_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "completed", result
+    assert runtime.prompts == []
+    assert ctx.orchestration_state.current_step_index == 1
+
+
 def test_phase7f_classifies_runtime_failures():
     assert (
         classify_debug_failure(stderr="ModuleNotFoundError: No module named 'main'")

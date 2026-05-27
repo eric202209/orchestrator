@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import shlex
@@ -98,12 +99,17 @@ def _debug_ops_have_placeholder_content(ops: Any) -> bool:
     return False
 
 
-def _is_simple_verification_command(command: str) -> bool:
+def _is_simple_verification_command(
+    command: str, *, project_dir: Path | None = None
+) -> bool:
     normalized = " ".join(str(command or "").strip().split())
     if not normalized:
         return False
     if normalized.startswith(("python -c ", "python3 -c ")):
-        return _python_inline_verification_script(normalized) is not None
+        return (
+            _python_inline_verification_script(normalized, project_dir=project_dir)
+            is not None
+        )
     if normalized.startswith("node -e "):
         return _node_eval_script(normalized) is not None
     allowed_prefixes = (
@@ -123,7 +129,77 @@ def _is_simple_verification_command(command: str) -> bool:
     )
 
 
-def _python_inline_verification_script(command: str) -> str | None:
+def _open_read_path_is_safe(path_value: str, project_dir: Path | None) -> bool:
+    raw = str(path_value or "").strip()
+    if not raw:
+        return False
+    if raw.startswith(("~", "/", "\\\\")) or re.match(r"^[A-Za-z]:[\\/]", raw):
+        return False
+    if ".." in Path(raw).parts:
+        return False
+    if project_dir is None:
+        return True
+    try:
+        normalize_path_reference(raw, project_dir)
+    except TaskWorkspaceViolationError:
+        return False
+    return True
+
+
+def _open_read_calls_are_safe(script: str, project_dir: Path | None) -> bool:
+    try:
+        tree = ast.parse(script)
+    except SyntaxError:
+        return False
+
+    open_calls: list[ast.Call] = []
+    read_open_calls: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id == "open":
+                open_calls.append(node)
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "read"
+                and isinstance(node.func.value, ast.Call)
+                and isinstance(node.func.value.func, ast.Name)
+                and node.func.value.func.id == "open"
+            ):
+                read_open_calls.add(id(node.func.value))
+
+    if not open_calls or len(read_open_calls) != len(open_calls):
+        return False
+
+    for open_call in open_calls:
+        if id(open_call) not in read_open_calls:
+            return False
+        if not open_call.args or not isinstance(open_call.args[0], ast.Constant):
+            return False
+        path_value = open_call.args[0].value
+        if not isinstance(path_value, str) or not _open_read_path_is_safe(
+            path_value, project_dir
+        ):
+            return False
+
+        mode_value = "r"
+        if len(open_call.args) >= 2:
+            if not isinstance(open_call.args[1], ast.Constant):
+                return False
+            mode_value = open_call.args[1].value
+        for keyword in open_call.keywords:
+            if keyword.arg == "mode":
+                if not isinstance(keyword.value, ast.Constant):
+                    return False
+                mode_value = keyword.value.value
+        if not isinstance(mode_value, str) or mode_value not in {"r", "rt"}:
+            return False
+
+    return True
+
+
+def _python_inline_verification_script(
+    command: str, *, project_dir: Path | None = None
+) -> str | None:
     normalized = " ".join(str(command or "").strip().split())
     try:
         tokens = shlex.split(normalized, posix=True)
@@ -136,7 +212,6 @@ def _python_inline_verification_script(command: str) -> str | None:
     lowered = script.lower()
     blocked_fragments = (
         "__",
-        "open(",
         ".write(",
         ".unlink(",
         ".rename(",
@@ -161,8 +236,11 @@ def _python_inline_verification_script(command: str) -> str | None:
     path_check = "pathlib.path(" in lowered and any(
         fragment in lowered for fragment in (".read_text(", ".exists(")
     )
+    open_read_check = "open(" in lowered and _open_read_calls_are_safe(
+        script, project_dir
+    )
     config_check = "configparser" in lowered and ".read(" in lowered
-    if not (path_check or config_check):
+    if not (path_check or open_read_check or config_check):
         return None
     if not any(fragment in lowered for fragment in ("sys.exit(", "print(")):
         return None
@@ -493,8 +571,12 @@ def _execute_simple_verification_step(
     if len(normalized_commands) != 1 or not verification:
         return None
     command = normalized_commands[0]
-    command_is_simple_verification = _is_simple_verification_command(command)
-    verification_is_simple = _is_simple_verification_command(verification)
+    command_is_simple_verification = _is_simple_verification_command(
+        command, project_dir=project_dir
+    )
+    verification_is_simple = _is_simple_verification_command(
+        verification, project_dir=project_dir
+    )
     if _same_simple_verification_command(command, verification):
         command_to_run = verification
     elif (
@@ -509,7 +591,7 @@ def _execute_simple_verification_step(
     else:
         return None
     command_to_run = _patch_python_verification_cmd(command_to_run)
-    if not _is_simple_verification_command(command_to_run):
+    if not _is_simple_verification_command(command_to_run, project_dir=project_dir):
         return None
 
     result = execute_verification_command(
