@@ -87,6 +87,15 @@ class DebugFeedbackEnvelope:
         }
 
 
+@dataclass(frozen=True)
+class DebugRepairNormalizationResult:
+    """Phase 7F repair normalization outcome with rejection observability."""
+
+    payload: Optional[dict[str, Any]]
+    rejection_reason: Optional[str]
+    parsed_shape: dict[str, Any]
+
+
 def _excerpt(value: Any, max_chars: int = 1200) -> str:
     text = str(value or "").strip()
     if len(text) <= max_chars:
@@ -592,11 +601,25 @@ def normalize_bounded_debug_repair_payload(
     envelope: Optional[DebugFeedbackEnvelope] = None,
 ) -> Optional[dict[str, Any]]:
     """Convert a Phase 7F repair array into the legacy debug action shape."""
+    return normalize_bounded_debug_repair_payload_detailed(
+        parsed_data,
+        envelope=envelope,
+    ).payload
+
+
+def normalize_bounded_debug_repair_payload_detailed(
+    parsed_data: Any,
+    *,
+    envelope: Optional[DebugFeedbackEnvelope] = None,
+) -> DebugRepairNormalizationResult:
+    """Convert Phase 7F repair output while preserving invalid-branch details."""
 
     if isinstance(parsed_data, dict):
         fix_type = str(parsed_data.get("fix_type") or "code_fix").strip()
         if fix_type not in {"code_fix", "command_fix", "ops_fix", "revise_plan"}:
-            return None
+            return _debug_repair_normalization_rejected(
+                parsed_data, "unsupported_fix_type"
+            )
 
         normalized: dict[str, Any] = {
             "fix_type": fix_type,
@@ -619,28 +642,43 @@ def normalize_bounded_debug_repair_payload(
         if fix_type == "command_fix" and not is_runnable_shell_command_fix(
             normalized["fix"]
         ):
-            return None
+            reason = (
+                "missing_command" if not normalized["fix"] else "non_runnable_command"
+            )
+            return _debug_repair_normalization_rejected(parsed_data, reason)
         if fix_type == "command_fix" and _semantic_pytest_string_edit_repair(
             normalized["fix"],
             envelope=envelope,
         ):
-            return None
+            return _debug_repair_normalization_rejected(
+                parsed_data, "semantic_string_edit_rejected"
+            )
         if fix_type in {"code_fix", "ops_fix"} and not any(
             key in normalized for key in ("expected_files", "verification", "ops")
         ):
-            return None
-        return normalized
+            return _debug_repair_normalization_rejected(
+                parsed_data, "missing_ops_or_expected_files"
+            )
+        return DebugRepairNormalizationResult(
+            payload=normalized,
+            rejection_reason=None,
+            parsed_shape=_debug_repair_parsed_shape(parsed_data),
+        )
 
     if not isinstance(parsed_data, list) or len(parsed_data) != 1:
-        return None
+        return _debug_repair_normalization_rejected(parsed_data, "unsupported_shape")
     item = parsed_data[0]
     if not isinstance(item, dict):
-        return None
+        return _debug_repair_normalization_rejected(parsed_data, "unsupported_shape")
 
     command = str(item.get("command") or "").strip()
     verification = str(item.get("verification_command") or "").strip()
-    if not command or not verification:
-        return None
+    if not command:
+        return _debug_repair_normalization_rejected(parsed_data, "missing_command")
+    if not verification:
+        return _debug_repair_normalization_rejected(
+            parsed_data, "missing_verification_command"
+        )
 
     expected_files = item.get("expected_files", [])
     if isinstance(expected_files, str):
@@ -649,20 +687,64 @@ def normalize_bounded_debug_repair_payload(
         expected_files = []
 
     if not is_runnable_shell_command_fix(command):
-        return None
+        return _debug_repair_normalization_rejected(parsed_data, "non_runnable_command")
     if _semantic_pytest_string_edit_repair(command, envelope=envelope):
-        return None
+        return _debug_repair_normalization_rejected(
+            parsed_data, "semantic_string_edit_rejected"
+        )
 
-    return {
-        "fix_type": "command_fix",
-        "fix": command,
-        "analysis": str(item.get("title") or "Apply bounded debug repair")[:1200],
-        "confidence": "MEDIUM",
-        "verification": verification,
-        "expected_files": [
-            str(path).strip() for path in expected_files if str(path).strip()
-        ],
-    }
+    return DebugRepairNormalizationResult(
+        payload={
+            "fix_type": "command_fix",
+            "fix": command,
+            "analysis": str(item.get("title") or "Apply bounded debug repair")[:1200],
+            "confidence": "MEDIUM",
+            "verification": verification,
+            "expected_files": [
+                str(path).strip() for path in expected_files if str(path).strip()
+            ],
+        },
+        rejection_reason=None,
+        parsed_shape=_debug_repair_parsed_shape(parsed_data),
+    )
+
+
+def _debug_repair_normalization_rejected(
+    parsed_data: Any,
+    reason: str,
+) -> DebugRepairNormalizationResult:
+    return DebugRepairNormalizationResult(
+        payload=None,
+        rejection_reason=reason,
+        parsed_shape=_debug_repair_parsed_shape(parsed_data),
+    )
+
+
+def _debug_repair_parsed_shape(parsed_data: Any) -> dict[str, Any]:
+    shape: dict[str, Any] = {"type": type(parsed_data).__name__}
+    if isinstance(parsed_data, dict):
+        shape["keys"] = sorted(str(key) for key in parsed_data.keys())[:20]
+        fix_type = parsed_data.get("fix_type")
+        if fix_type is not None:
+            shape["fix_type"] = str(fix_type)
+        if "ops" in parsed_data:
+            shape["ops_type"] = type(parsed_data.get("ops")).__name__
+            if isinstance(parsed_data.get("ops"), list):
+                shape["ops_count"] = len(parsed_data.get("ops") or [])
+        if "expected_files" in parsed_data:
+            shape["expected_files_type"] = type(
+                parsed_data.get("expected_files")
+            ).__name__
+        return shape
+    if isinstance(parsed_data, list):
+        shape["length"] = len(parsed_data)
+        if parsed_data:
+            first = parsed_data[0]
+            shape["first_item_type"] = type(first).__name__
+            if isinstance(first, dict):
+                shape["first_item_keys"] = sorted(str(key) for key in first.keys())[:20]
+        return shape
+    return shape
 
 
 def _semantic_pytest_string_edit_repair(
