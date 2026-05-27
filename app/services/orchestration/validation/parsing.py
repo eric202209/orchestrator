@@ -77,9 +77,7 @@ def _should_skip_nested_non_plan_candidate(
     if not source.startswith("[") or candidate == source:
         return False
     if candidate.startswith("{"):
-        return isinstance(parsed_candidate, dict) and not _has_step_shape(
-            parsed_candidate
-        )
+        return isinstance(parsed_candidate, dict)
     if candidate.startswith("["):
         return not (
             isinstance(parsed_candidate, list)

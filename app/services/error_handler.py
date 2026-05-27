@@ -109,7 +109,9 @@ class EnhancedErrorHandler:
             # Try direct parsing first
             try:
                 parsed_found = json.loads(found)
-                if not self._should_skip_non_plan_candidate_for_planning(
+                if not _should_skip_nested_non_plan_candidate(
+                    text, found, parsed_found
+                ) and not self._should_skip_non_plan_candidate_for_planning(
                     context, text, found, parsed_found
                 ):
                     return True, parsed_found, "Found JSON in text"
@@ -121,7 +123,9 @@ class EnhancedErrorHandler:
             if fixed != found:
                 try:
                     parsed_fixed_found = json.loads(fixed)
-                    if not self._should_skip_non_plan_candidate_for_planning(
+                    if not _should_skip_nested_non_plan_candidate(
+                        text, fixed, parsed_fixed_found
+                    ) and not self._should_skip_non_plan_candidate_for_planning(
                         context, text, fixed, parsed_fixed_found
                     ):
                         return (
