@@ -337,6 +337,7 @@ def build_bounded_debug_repair_prompt(
         "Rules:\n"
         "1. Output exactly one JSON array containing one step object.\n"
         "2. The step object must include title, command, and verification_command.\n"
+        "   For source-code repairs, also include an ops array with replace_in_file, write_file, or append_file operations.\n"
         "3. command and verification_command must be runnable shell strings, not prose instructions.\n"
         "4. Keep the fix atomic; do not rewrite unrelated files.\n"
         "5. Do not use heredoc rewrites; keep file changes minimal and command-driven.\n"
@@ -397,7 +398,7 @@ def build_debug_source_contract(
     if direct_import_target:
         _append_unique(targets, direct_import_target, limit=3)
 
-    if _looks_like_uppercase_argparse_failure(context):
+    if _looks_like_uppercase_repair_context(context):
         _prefer_target(targets, "src/small_cli/cli.py")
         has_build_parser = _contract_or_context_mentions_symbol(
             contract, context, "build_parser"
@@ -417,11 +418,6 @@ def build_debug_source_contract(
         )
         _append_unique(
             argparse_wiring,
-            'Preserve default behavior: format_message("hello") == "hello".',
-            limit=6,
-        )
-        _append_unique(
-            argparse_wiring,
             "Uppercase only when the --uppercase flag is set.",
             limit=6,
         )
@@ -436,16 +432,17 @@ def build_debug_source_contract(
             "Do not satisfy this by changing tests or making all output uppercase.",
             limit=6,
         )
-        _append_unique(
-            behavior,
+        priority_behavior = [
             'main(["--uppercase", "hello"]) exits 0 and prints HELLO.',
-            limit=3,
-        )
-        _append_unique(
-            behavior,
+            'Preserve default behavior: format_message("hello") == "hello".',
             "Existing normal CLI behavior still passes.",
-            limit=3,
-        )
+        ]
+        behavior = priority_behavior + [
+            line for line in behavior if line not in priority_behavior
+        ]
+
+    for line in _debug_expected_behavior_lines(contract, context):
+        _append_unique(behavior, line, limit=3)
 
     if imported_symbol == "normalize_greeting" or "normalize_greeting" in context:
         _prefer_target(targets, "src/import_repair/formatters.py")
@@ -472,12 +469,12 @@ def build_debug_source_contract(
     if targets:
         lines.append("- Required source target path:")
         lines.extend(f"  - {target}" for target in targets[:3])
+    if behavior:
+        lines.append("- Expected behavior:")
+        lines.extend(f"  - {item}" for item in behavior[:4])
     if argparse_wiring:
         lines.append("- Required argparse wiring:")
         lines.extend(f"  - {item}" for item in argparse_wiring[:6])
-    if behavior:
-        lines.append("- Expected behavior:")
-        lines.extend(f"  - {item}" for item in behavior[:3])
     lines.append("- No placeholder/pass/TODO/export-only fixes.")
     return _excerpt("\n".join(lines), max_chars)
 
@@ -556,6 +553,16 @@ def _looks_like_uppercase_argparse_failure(context: str) -> bool:
     )
 
 
+def _looks_like_uppercase_repair_context(context: str) -> bool:
+    lowered = context.lower()
+    return (
+        _looks_like_uppercase_argparse_failure(context)
+        or "--uppercase" in lowered
+        or "test_uppercase" in lowered
+        or ("hello" in lowered and "uppercase" in lowered)
+    )
+
+
 def _contract_or_context_mentions_symbol(
     contract: Any,
     context: str,
@@ -575,8 +582,14 @@ def _contract_or_context_mentions_symbol(
     return False
 
 
-def _debug_expected_behavior_lines(contract: Any) -> list[str]:
+def _debug_expected_behavior_lines(contract: Any, context: str = "") -> list[str]:
     lines: list[str] = []
+    for assertion in getattr(contract, "assertions", ()) or ():
+        rendered = str(assertion or "").strip()
+        if not rendered:
+            continue
+        if context and rendered in context:
+            _append_unique(lines, rendered, limit=3)
     for assertion in getattr(contract, "assertions", ()) or ():
         rendered = str(assertion or "").strip()
         if not rendered:
@@ -599,11 +612,13 @@ def normalize_bounded_debug_repair_payload(
     parsed_data: Any,
     *,
     envelope: Optional[DebugFeedbackEnvelope] = None,
+    source_edit_context: bool = False,
 ) -> Optional[dict[str, Any]]:
     """Convert a Phase 7F repair array into the legacy debug action shape."""
     return normalize_bounded_debug_repair_payload_detailed(
         parsed_data,
         envelope=envelope,
+        source_edit_context=source_edit_context,
     ).payload
 
 
@@ -611,6 +626,7 @@ def normalize_bounded_debug_repair_payload_detailed(
     parsed_data: Any,
     *,
     envelope: Optional[DebugFeedbackEnvelope] = None,
+    source_edit_context: bool = False,
 ) -> DebugRepairNormalizationResult:
     """Convert Phase 7F repair output while preserving invalid-branch details."""
 
@@ -620,6 +636,10 @@ def normalize_bounded_debug_repair_payload_detailed(
             return _debug_repair_normalization_rejected(
                 parsed_data, "unsupported_fix_type"
             )
+
+        ops = parsed_data.get("ops") if isinstance(parsed_data.get("ops"), list) else []
+        if source_edit_context and _ops_touch_source_files(ops):
+            fix_type = "ops_fix"
 
         normalized: dict[str, Any] = {
             "fix_type": fix_type,
@@ -639,6 +659,21 @@ def normalize_bounded_debug_repair_payload_detailed(
             normalized["ops"] = parsed_data.get("ops", [])
         if isinstance(parsed_data.get("revised_plan"), list):
             normalized["revised_plan"] = parsed_data.get("revised_plan", [])
+        if source_edit_context and fix_type == "command_fix":
+            if _ops_touch_source_files(normalized.get("ops")):
+                normalized["fix_type"] = "ops_fix"
+                normalized["fix"] = ""
+                return DebugRepairNormalizationResult(
+                    payload=normalized,
+                    rejection_reason=None,
+                    parsed_shape=_debug_repair_parsed_shape(parsed_data),
+                )
+            if not _is_verifier_only_command_fix(
+                normalized["fix"], normalized.get("verification")
+            ):
+                return _debug_repair_normalization_rejected(
+                    parsed_data, "source_context_command_fix_rejected"
+                )
         if fix_type == "command_fix" and not is_runnable_shell_command_fix(
             normalized["fix"]
         ):
@@ -673,6 +708,31 @@ def normalize_bounded_debug_repair_payload_detailed(
 
     command = str(item.get("command") or "").strip()
     verification = str(item.get("verification_command") or "").strip()
+    ops = item.get("ops") if isinstance(item.get("ops"), list) else []
+    if source_edit_context and _ops_touch_source_files(ops):
+        if not verification:
+            return _debug_repair_normalization_rejected(
+                parsed_data, "missing_verification_command"
+            )
+        return DebugRepairNormalizationResult(
+            payload={
+                "fix_type": "ops_fix",
+                "fix": "",
+                "analysis": str(item.get("title") or "Apply bounded debug repair")[
+                    :1200
+                ],
+                "confidence": "MEDIUM",
+                "verification": verification,
+                "expected_files": [
+                    str(path).strip()
+                    for path in _expected_files_from_item(item)
+                    if str(path).strip()
+                ],
+                "ops": ops,
+            },
+            rejection_reason=None,
+            parsed_shape=_debug_repair_parsed_shape(parsed_data),
+        )
     if not command:
         return _debug_repair_normalization_rejected(parsed_data, "missing_command")
     if not verification:
@@ -680,14 +740,14 @@ def normalize_bounded_debug_repair_payload_detailed(
             parsed_data, "missing_verification_command"
         )
 
-    expected_files = item.get("expected_files", [])
-    if isinstance(expected_files, str):
-        expected_files = [expected_files]
-    if not isinstance(expected_files, list):
-        expected_files = []
+    expected_files = _expected_files_from_item(item)
 
     if not is_runnable_shell_command_fix(command):
         return _debug_repair_normalization_rejected(parsed_data, "non_runnable_command")
+    if source_edit_context and not _is_verifier_only_command_fix(command, verification):
+        return _debug_repair_normalization_rejected(
+            parsed_data, "source_context_command_fix_rejected"
+        )
     if _semantic_pytest_string_edit_repair(command, envelope=envelope):
         return _debug_repair_normalization_rejected(
             parsed_data, "semantic_string_edit_rejected"
@@ -706,6 +766,47 @@ def normalize_bounded_debug_repair_payload_detailed(
         },
         rejection_reason=None,
         parsed_shape=_debug_repair_parsed_shape(parsed_data),
+    )
+
+
+def _expected_files_from_item(item: dict[str, Any]) -> list[Any]:
+    expected_files = item.get("expected_files", [])
+    if isinstance(expected_files, str):
+        expected_files = [expected_files]
+    if not isinstance(expected_files, list):
+        return []
+    return expected_files
+
+
+def _ops_touch_source_files(ops: Any) -> bool:
+    if not isinstance(ops, list):
+        return False
+    durable_ops = {"replace_in_file", "write_file", "append_file"}
+    for op in ops:
+        if not isinstance(op, dict):
+            continue
+        op_name = str(op.get("op") or "").strip()
+        path = str(op.get("path") or "").strip().replace("\\", "/").lstrip("./")
+        if op_name in durable_ops and path.startswith("src/"):
+            return True
+    return False
+
+
+def _is_verifier_only_command_fix(command: str, verification: Any) -> bool:
+    normalized_command = str(command or "").strip()
+    normalized_verification = str(verification or "").strip()
+    if not normalized_command or normalized_command != normalized_verification:
+        return False
+    lowered = normalized_command.lower()
+    if re.search(
+        r"\b(?:sed|perl|tee|cat\s*>|>>?|write_text|replace\(|open\()", lowered
+    ):
+        return False
+    return bool(
+        re.search(
+            r"\b(?:pytest|python3?\s+-m\s+pytest|npm\s+test|npm\s+run\s+test|make\s+test)\b",
+            lowered,
+        )
     )
 
 

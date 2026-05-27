@@ -131,6 +131,106 @@ def test_normalize_rejects_pure_sed_command_fix_for_semantic_validation_failure(
     assert normalize_bounded_debug_repair_payload(payload, envelope=envelope) is None
 
 
+def test_source_edit_context_rejects_transient_python_command_fix():
+    envelope = DebugFeedbackEnvelope(
+        task_execution_id=1,
+        task_id=1,
+        step_index=0,
+        failure_phase="execution",
+        failed_command='python -c "import src.small_cli.cli"',
+        return_code=1,
+        workspace_path=".",
+        failure_class="completion_validation_failed",
+        changed_files=["src/small_cli/cli.py"],
+    )
+    payload = [
+        {
+            "title": "Mutate parser in memory",
+            "command": 'python -c \'import src.small_cli.cli; src.small_cli.cli.build_parser().add_argument("--uppercase", action="store_true")\'',
+            "verification_command": "python -m pytest -q",
+        }
+    ]
+
+    result = normalize_bounded_debug_repair_payload_detailed(
+        payload,
+        envelope=envelope,
+        source_edit_context=True,
+    )
+
+    assert result.payload is None
+    assert result.rejection_reason == "source_context_command_fix_rejected"
+
+
+def test_source_edit_context_rejects_sed_command_fix_before_retry():
+    envelope = DebugFeedbackEnvelope(
+        task_execution_id=1,
+        task_id=1,
+        step_index=0,
+        failure_phase="execution",
+        failed_command='grep --quiet "--uppercase" src/small_cli/cli.py',
+        return_code=1,
+        workspace_path=".",
+        failure_class="completion_validation_failed",
+        changed_files=["src/small_cli/cli.py"],
+    )
+    payload = [
+        {
+            "title": "Patch flag spelling",
+            "command": "sed -i 's/--uppercase/ -i /' src/small_cli/cli.py",
+            "verification_command": "grep --quiet '-i' src/small_cli/cli.py",
+        }
+    ]
+
+    result = normalize_bounded_debug_repair_payload_detailed(
+        payload,
+        envelope=envelope,
+        source_edit_context=True,
+    )
+
+    assert result.payload is None
+    assert result.rejection_reason == "source_context_command_fix_rejected"
+
+
+def test_source_edit_context_accepts_structured_ops_fix():
+    envelope = DebugFeedbackEnvelope(
+        task_execution_id=1,
+        task_id=1,
+        step_index=0,
+        failure_phase="execution",
+        failed_command="python -m pytest -q",
+        return_code=1,
+        workspace_path=".",
+        failure_class="pytest_failure",
+        changed_files=["src/small_cli/cli.py"],
+    )
+    payload = [
+        {
+            "title": "Wire uppercase flag durably",
+            "command": "python -m pytest -q",
+            "verification_command": "python -m pytest -q",
+            "expected_files": ["src/small_cli/cli.py"],
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "src/small_cli/cli.py",
+                    "old": "print(format_message(args.message))",
+                    "new": "message = args.message.upper() if args.uppercase else args.message\n    print(format_message(message))",
+                }
+            ],
+        }
+    ]
+
+    result = normalize_bounded_debug_repair_payload(
+        payload,
+        envelope=envelope,
+        source_edit_context=True,
+    )
+
+    assert result is not None
+    assert result["fix_type"] == "ops_fix"
+    assert result["ops"][0]["path"] == "src/small_cli/cli.py"
+
+
 def test_normalize_allows_command_fix_that_runs_verifier_for_pytest_failure():
     envelope = DebugFeedbackEnvelope(
         task_execution_id=1,
@@ -152,6 +252,35 @@ def test_normalize_allows_command_fix_that_runs_verifier_for_pytest_failure():
     ]
 
     result = normalize_bounded_debug_repair_payload(payload, envelope=envelope)
+
+    assert result is not None
+    assert result["fix_type"] == "command_fix"
+
+
+def test_non_source_command_failure_still_allows_command_fix():
+    envelope = DebugFeedbackEnvelope(
+        task_execution_id=1,
+        task_id=1,
+        step_index=0,
+        failure_phase="execution",
+        failed_command="pytest -q",
+        return_code=1,
+        workspace_path=".",
+        failure_class="missing_dependency",
+    )
+    payload = [
+        {
+            "title": "Install missing test dependency",
+            "command": "pip install pytest",
+            "verification_command": "pytest -q",
+        }
+    ]
+
+    result = normalize_bounded_debug_repair_payload(
+        payload,
+        envelope=envelope,
+        source_edit_context=False,
+    )
 
     assert result is not None
     assert result["fix_type"] == "command_fix"

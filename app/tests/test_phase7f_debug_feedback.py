@@ -532,6 +532,9 @@ def test_phase11b_debug_prompt_names_cli_source_target_for_uppercase_failure(
     )
     assert 'main(["--uppercase", "hello"]) exits 0 and prints HELLO.' in prompt
     assert "No placeholder/pass/TODO/export-only fixes." in prompt
+    assert prompt.index('main(["--uppercase", "hello"]) exits 0 and prints HELLO.') < (
+        prompt.index('Preserve default behavior: format_message("hello") == "hello".')
+    )
 
 
 def test_phase11b_debug_prompt_names_import_repair_target_and_symbol(tmp_path):

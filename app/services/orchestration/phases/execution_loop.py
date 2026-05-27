@@ -159,6 +159,30 @@ def _debug_repair_materially_changes_source_or_tests(
     return fix_type == "revise_plan"
 
 
+def _phase7f_source_edit_context(step: dict[str, Any], envelope: Any) -> bool:
+    ops = step.get("ops") if isinstance(step, dict) else []
+    if isinstance(ops, list) and any(
+        isinstance(op, dict)
+        and _is_source_or_test_path(op.get("path"))
+        and str(op.get("path") or "").replace("\\", "/").lstrip("./").startswith("src/")
+        for op in ops
+    ):
+        return True
+    expected_files = step.get("expected_files") if isinstance(step, dict) else []
+    if isinstance(expected_files, list) and any(
+        str(path or "").replace("\\", "/").lstrip("./").startswith("src/")
+        for path in expected_files
+    ):
+        return True
+    changed_files = (
+        getattr(envelope, "changed_files", []) if envelope is not None else []
+    )
+    return any(
+        str(path or "").replace("\\", "/").lstrip("./").startswith("src/")
+        for path in changed_files
+    )
+
+
 def _is_low_value_weak_verifier_command_fix(
     envelope: Any, debug_data: dict[str, Any]
 ) -> bool:
@@ -1869,6 +1893,12 @@ def execute_step_loop(
                     normalize_bounded_debug_repair_payload_detailed(
                         parsed_repair,
                         envelope=debug_feedback_envelope,
+                        source_edit_context=(
+                            debug_prompt_mode == "phase7f_bounded_debug_repair"
+                            and _phase7f_source_edit_context(
+                                step, debug_feedback_envelope
+                            )
+                        ),
                     )
                     if success
                     else None
