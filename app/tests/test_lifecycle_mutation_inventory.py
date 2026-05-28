@@ -25,6 +25,7 @@ AUDITED_LIFECYCLE_FILES = [
     "app/services/session/resume_service.py",
     "app/services/orchestration/run_state/transitions.py",
     "app/services/orchestration/state/session_state.py",
+    "app/services/orchestration/lifecycle/completion.py",
     "app/services/orchestration/phases/planning_flow.py",
     "app/services/orchestration/phases/execution_loop.py",
     "app/services/orchestration/phases/completion_flow.py",
@@ -60,10 +61,13 @@ EXPECTED_SESSION_CALLS = {
     "app/services/orchestration/phases/execution_loop.py": {
         "mark_session_paused": 4,
     },
-    "app/services/orchestration/phases/completion_flow.py": {
+    "app/services/orchestration/lifecycle/completion.py": {
         "mark_session_completed": 1,
-        "mark_session_paused": 10,
+        "mark_session_paused": 3,
         "mark_session_running": 1,
+    },
+    "app/services/orchestration/phases/completion_flow.py": {
+        "mark_session_paused": 7,
     },
     "app/services/orchestration/phases/failure_flow.py": {
         "mark_session_paused": 2,
@@ -104,10 +108,12 @@ EXPECTED_TASK_ATTEMPT_CALLS = {
         "mark_task_attempt_cancelled": 1,
         "mark_task_attempt_failed": 12,
     },
-    "app/services/orchestration/phases/completion_flow.py": {
+    "app/services/orchestration/lifecycle/completion.py": {
         "mark_task_attempt_done": 1,
-        "mark_task_attempt_failed": 6,
         "mark_task_attempt_pending": 2,
+    },
+    "app/services/orchestration/phases/completion_flow.py": {
+        "mark_task_attempt_failed": 6,
     },
     "app/services/orchestration/phases/failure_flow.py": {
         "mark_task_attempt_failed": 3,
@@ -159,7 +165,7 @@ GOLDEN_LIFECYCLE_TRANSITIONS = {
         "task_execution": "failed",
     },
     "completion_success": {
-        "owner": "app/services/orchestration/phases/completion_flow.py",
+        "owner": "app/services/orchestration/lifecycle/completion.py",
         "session": "completed or kept running for follow-up work",
         "task": "done",
         "task_execution": "done",

@@ -1449,6 +1449,14 @@ def test_auto_completion_marks_session_completed_when_no_work_remains(
     assert ctx.task.status == TaskStatus.DONE
     assert ctx.session.status == "completed"
     assert ctx.session.is_active is False
+    events = read_orchestration_events(
+        ctx.orchestration_state.project_dir, ctx.session_id, ctx.task_id
+    )
+    event_types = [event["event_type"] for event in events]
+    assert EventType.TASK_COMPLETED in event_types
+    assert event_types.index(EventType.TASK_COMPLETED) < event_types.index(
+        EventType.PHASE_FINISHED
+    )
 
 
 def test_auto_completion_holds_nontrivial_change_set_for_manual_review(
