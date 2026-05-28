@@ -33,6 +33,8 @@ from app.services.project.index_service import (
 PLANNING_REPAIR_MAX_KNOWLEDGE_ITEMS = 2
 PLANNING_REPAIR_MAX_KNOWLEDGE_ITEM_CHARS = 500
 PLANNING_REPAIR_COMPACT_MALFORMED_OUTPUT_CHARS = 800
+PLANNING_REPAIR_COMPACT_STALE_OUTPUT_CHARS = 500
+PLANNING_REPAIR_COMPACT_STALE_EXCERPT_CHARS = 900
 PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS = 700
 PLANNING_REPAIR_MAX_VALIDATION_ERROR_CHARS = 450
 PLANNING_REPAIR_MAX_STALE_FALLBACK_VALIDATION_ERROR_CHARS = 1600
@@ -206,14 +208,18 @@ def build_planning_repair_prompt(
                 knowledge_block=_join_optional_blocks(knowledge_block),
             )
         if len(specialized_prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS:
-            specialized_prompt = build_compact_planning_repair_prompt(
-                malformed_output,
+            specialized_prompt = _build_over_budget_compact_repair_prompt(
+                task_description=task_description,
+                malformed_output=malformed_output,
+                project_dir=project_dir,
                 rejection_reasons=rejection_reasons,
                 prompt_profile=prompt_profile,
                 apply_prompt_profile=None,
             )
         return _apply_profile_or_compact_fallback(
             specialized_prompt,
+            task_description=task_description,
+            project_dir=project_dir,
             malformed_output=malformed_output,
             rejection_reasons=rejection_reasons,
             prompt_profile=prompt_profile,
@@ -306,14 +312,18 @@ Rules:
     if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS and source_context_block:
         prompt = _compose_prompt("", "")
     if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS:
-        prompt = build_compact_planning_repair_prompt(
-            malformed_output,
+        prompt = _build_over_budget_compact_repair_prompt(
+            task_description=task_description,
+            malformed_output=malformed_output,
+            project_dir=project_dir,
             rejection_reasons=rejection_reasons,
             prompt_profile=prompt_profile,
             apply_prompt_profile=None,
         )
     return _apply_profile_or_compact_fallback(
         prompt,
+        task_description=task_description,
+        project_dir=project_dir,
         malformed_output=malformed_output,
         rejection_reasons=rejection_reasons,
         prompt_profile=prompt_profile,
@@ -528,6 +538,105 @@ Rules:
     return _apply_profile(prompt, prompt_profile, apply_prompt_profile)
 
 
+def build_compact_stale_replace_repair_prompt(
+    *,
+    task_description: str,
+    malformed_output: str,
+    project_dir: Path,
+    rejection_reasons: Optional[list[str]] = None,
+    prompt_profile: str = "default",
+    apply_prompt_profile: Any = None,
+) -> str:
+    """Build a bounded repair prompt for stale replace_in_file plans.
+
+    This prompt intentionally omits validation-repair knowledge context. Stale
+    replace failures need current target-file evidence more than retrieved
+    memory, and the evidence must fit under the hard repair prompt cap.
+    """
+
+    target_path = _extract_stale_replace_target_path(
+        malformed_output=malformed_output,
+        rejection_reasons=rejection_reasons,
+    )
+    file_excerpt = _extract_current_file_excerpt(
+        project_dir=project_dir,
+        target_path=target_path,
+        rejection_reasons=rejection_reasons,
+    )
+    clean_reasons = _compact_stale_replace_rejection_reasons(rejection_reasons)
+    task = " ".join(str(task_description or "").split())[:500]
+    json_content_contract = (
+        "write_file.content and append_file.content must be JSON strings; "
+        "newline characters must be escaped as \\n; do not use raw triple-quoted "
+        "blocks; output must remain a valid JSON array."
+    )
+
+    def _compose(output_chars: int, excerpt_chars: int, reason_chars: int) -> str:
+        broken_output = compact_invalid_output_excerpt(malformed_output)[:output_chars]
+        reason_lines = "\n".join(
+            f"- {reason[:reason_chars]}" for reason in clean_reasons[:4]
+        )
+        excerpt = _truncate_text(file_excerpt, excerpt_chars)
+        target_line = target_path or "target path from invalid plan"
+        excerpt_block = (
+            f"Current file excerpt for {target_line}:\n{excerpt}\n"
+            if excerpt
+            else f"Current target path: {target_line}\n"
+        )
+        return f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
+No prose. No markdown fences. No plan.json. No explanation.
+
+Stale replace repair mode.
+Task: {task}
+
+Validation errors:
+{reason_lines or "- replace_in_file old text was not found in the current workspace"}
+
+Invalid plan excerpt:
+{broken_output}
+
+{excerpt_block}
+Required repair:
+- Do not use replace_in_file for the stale target.
+- Use a write_file op for `{target_line}` with the full corrected file content.
+- Preserve existing imports, public functions, and CLI shape from the current file excerpt.
+- Make only the requested behavior change, then verify with a real project test command.
+- Return 3 steps: inspect current workspace, write the corrected file, run verification.
+- Each step must contain: step_number, description, commands, verification, rollback, expected_files; optional ops.
+- {json_content_contract}
+- Relative paths only. No absolute paths, parent traversal, background processes, prose commands, markdown, or extra keys.
+"""
+
+    for output_chars, excerpt_chars, reason_chars in (
+        (
+            PLANNING_REPAIR_COMPACT_STALE_OUTPUT_CHARS,
+            PLANNING_REPAIR_COMPACT_STALE_EXCERPT_CHARS,
+            180,
+        ),
+        (360, 700, 150),
+        (260, 520, 130),
+        (180, 360, 110),
+        (120, 220, 90),
+        (80, 120, 70),
+    ):
+        prompt = _apply_profile(
+            _compose(output_chars, excerpt_chars, reason_chars),
+            prompt_profile,
+            apply_prompt_profile,
+        )
+        if len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS:
+            return prompt
+
+    target_line = target_path or "target path from invalid plan"
+    prompt = f"""Return ONLY a valid JSON array.
+Repair stale replace_in_file output. Target: {target_line}.
+Use write_file for the target with full corrected file content. Do not use replace_in_file.
+Preserve current imports and public functions. Use JSON string content with escaped newlines.
+Return inspect, write_file implementation, and verification steps only.
+"""
+    return _apply_profile(prompt, prompt_profile, apply_prompt_profile)
+
+
 def _apply_profile(prompt: str, prompt_profile: str, apply_prompt_profile: Any) -> str:
     if callable(apply_prompt_profile):
         return apply_prompt_profile(prompt, prompt_profile)
@@ -537,6 +646,8 @@ def _apply_profile(prompt: str, prompt_profile: str, apply_prompt_profile: Any) 
 def _apply_profile_or_compact_fallback(
     prompt: str,
     *,
+    task_description: str,
+    project_dir: Path,
     malformed_output: str,
     rejection_reasons: Optional[list[str]],
     prompt_profile: str,
@@ -545,12 +656,146 @@ def _apply_profile_or_compact_fallback(
     profiled_prompt = _apply_profile(prompt, prompt_profile, apply_prompt_profile)
     if len(profiled_prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS:
         return profiled_prompt
+    return _build_over_budget_compact_repair_prompt(
+        task_description=task_description,
+        malformed_output=malformed_output,
+        project_dir=project_dir,
+        rejection_reasons=rejection_reasons,
+        prompt_profile=prompt_profile,
+        apply_prompt_profile=apply_prompt_profile,
+    )
+
+
+def _build_over_budget_compact_repair_prompt(
+    *,
+    task_description: str,
+    malformed_output: str,
+    project_dir: Path,
+    rejection_reasons: Optional[list[str]],
+    prompt_profile: str,
+    apply_prompt_profile: Any,
+) -> str:
+    if _is_stale_replace_repair(malformed_output, rejection_reasons):
+        return build_compact_stale_replace_repair_prompt(
+            task_description=task_description,
+            malformed_output=malformed_output,
+            project_dir=project_dir,
+            rejection_reasons=rejection_reasons,
+            prompt_profile=prompt_profile,
+            apply_prompt_profile=apply_prompt_profile,
+        )
     return build_compact_planning_repair_prompt(
         malformed_output,
         rejection_reasons=rejection_reasons,
         prompt_profile=prompt_profile,
         apply_prompt_profile=apply_prompt_profile,
     )
+
+
+def _is_stale_replace_repair(
+    malformed_output: str,
+    rejection_reasons: Optional[list[str]],
+) -> bool:
+    text = "\n".join(
+        [
+            str(malformed_output or ""),
+            *(str(reason or "") for reason in (rejection_reasons or [])),
+        ]
+    ).lower()
+    return (
+        "stale_replace_ops_steps" in text
+        or "replace_in_file old text not found" in text
+        or "current file excerpt:" in text
+    )
+
+
+def _extract_stale_replace_target_path(
+    *,
+    malformed_output: str,
+    rejection_reasons: Optional[list[str]],
+) -> str:
+    try:
+        parsed = json.loads(str(malformed_output or ""))
+    except Exception:
+        parsed = None
+    paths: list[str] = []
+    if isinstance(parsed, list):
+        for step in parsed:
+            if not isinstance(step, dict):
+                continue
+            for operation in step.get("ops") or []:
+                if not isinstance(operation, dict):
+                    continue
+                if str(operation.get("op") or "") != "replace_in_file":
+                    continue
+                path = str(operation.get("path") or "").strip().lstrip("./")
+                if path and path not in paths:
+                    paths.append(path)
+    if paths:
+        return paths[0]
+
+    combined = "\n".join(str(reason or "") for reason in (rejection_reasons or []))
+    match = re.search(
+        r"(?:old text not found in|target missing:)\s+([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)",
+        combined,
+    )
+    if match:
+        return match.group(1).strip().lstrip("./")
+    return ""
+
+
+def _extract_current_file_excerpt(
+    *,
+    project_dir: Path,
+    target_path: str,
+    rejection_reasons: Optional[list[str]],
+) -> str:
+    marker = "Current file excerpt:"
+    for reason in rejection_reasons or []:
+        text = str(reason or "")
+        marker_index = text.find(marker)
+        if marker_index >= 0:
+            return text[marker_index + len(marker) :].strip()
+
+    if not target_path:
+        return ""
+    try:
+        root = Path(project_dir).resolve()
+        target = (root / target_path).resolve()
+        target.relative_to(root)
+        if target.is_file():
+            return target.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    return ""
+
+
+def _compact_stale_replace_rejection_reasons(
+    rejection_reasons: Optional[list[str]],
+) -> list[str]:
+    compacted: list[str] = []
+    for reason in rejection_reasons or []:
+        text = str(reason or "").strip()
+        if not text:
+            continue
+        marker_index = text.find("Current file excerpt:")
+        if marker_index >= 0:
+            text = text[:marker_index].rstrip() + " Current file excerpt omitted below."
+        compacted.append(text)
+    return compacted
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    cleaned = str(text or "").strip()
+    if max_chars <= 0 or not cleaned:
+        return ""
+    if len(cleaned) <= max_chars:
+        return cleaned
+    marker = "\n...<truncated current file excerpt>..."
+    if max_chars <= len(marker) + 20:
+        return cleaned[:max_chars].rstrip()
+    head_chars = max_chars - len(marker)
+    return cleaned[:head_chars].rstrip() + marker
 
 
 def _build_project_structure_capsule(project_dir: Path) -> str:

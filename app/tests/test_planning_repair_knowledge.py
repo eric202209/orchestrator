@@ -205,6 +205,185 @@ def test_planning_repair_prompt_fits_duplicate_stale_replace_source_context(
     assert "Current file excerpt:" in prompt
 
 
+def test_stale_replace_repair_over_budget_uses_compact_stale_prompt(
+    tmp_path, monkeypatch
+):
+    from app.services.orchestration.planning import repair_prompts
+
+    (tmp_path / "src" / "small_cli").mkdir(parents=True)
+    (tmp_path / "src" / "small_cli" / "cli.py").write_text(
+        '"""Tiny message-printing CLI used by the orchestrator eval fixture."""\n'
+        "\n"
+        "from __future__ import annotations\n"
+        "\n"
+        "import argparse\n"
+        "\n"
+        "\n"
+        "def format_message(message: str) -> str:\n"
+        "    return message\n"
+        "\n"
+        "\n"
+        "def build_parser() -> argparse.ArgumentParser:\n"
+        '    parser = argparse.ArgumentParser(description="Print a message.")\n'
+        '    parser.add_argument("message", help="Message to print")\n'
+        "    return parser\n"
+        "\n"
+        "\n"
+        "def main(argv: list[str] | None = None) -> int:\n"
+        "    parser = build_parser()\n"
+        "    args = parser.parse_args(argv)\n"
+        "    print(format_message(args.message))\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+    plan = [
+        {
+            "step_number": 2,
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "src/small_cli/cli.py",
+                    "old": "parser.add_argument('--uppercase')",
+                    "new": "parser.add_argument('--uppercase', action='store_true')",
+                }
+            ],
+        }
+    ]
+    current_excerpt = (tmp_path / "src" / "small_cli" / "cli.py").read_text(
+        encoding="utf-8"
+    )
+
+    compact_prompt = repair_prompts.build_compact_stale_replace_repair_prompt(
+        task_description="Add --uppercase to the existing small_cli argparse CLI.",
+        malformed_output=json.dumps(plan),
+        project_dir=tmp_path,
+        rejection_reasons=[
+            "replace_in_file old text not found in workspace in steps [2]",
+            (
+                "step 2 replace_in_file old text not found in src/small_cli/cli.py. "
+                "Use exact text from current file excerpt or choose a different "
+                f"operation. Current file excerpt: {current_excerpt}"
+            ),
+            "stale_replace_ops_steps: use identifiers from current file excerpt "
+            + ("extra validation context " * 80),
+        ],
+        prompt_profile="local_qwen_json_array",
+    )
+    prompt_cap = len(compact_prompt) + 20
+    monkeypatch.setattr(
+        repair_prompts,
+        "PLANNING_REPAIR_PROMPT_MAX_CHARS",
+        prompt_cap,
+    )
+
+    prompt = PlannerService.build_planning_repair_prompt(
+        task_description="Add --uppercase to the existing small_cli argparse CLI.",
+        malformed_output=json.dumps(plan),
+        project_dir=tmp_path,
+        rejection_reasons=[
+            "replace_in_file old text not found in workspace in steps [2]",
+            (
+                "step 2 replace_in_file old text not found in src/small_cli/cli.py. "
+                "Use exact text from current file excerpt or choose a different "
+                f"operation. Current file excerpt: {current_excerpt}"
+            ),
+            "stale_replace_ops_steps: use identifiers from current file excerpt "
+            + ("extra validation context " * 80),
+        ],
+        prompt_profile="local_qwen_json_array",
+        knowledge_context=_knowledge_ctx(),
+    )
+
+    assert len(prompt) <= prompt_cap
+    assert len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
+    assert "Stale replace repair mode." in prompt
+    assert "REPAIR KNOWLEDGE REFERENCES" not in prompt
+    assert "Planning repair produced non-runnable step" not in prompt
+    assert "src/small_cli/cli.py" in prompt
+    assert "Current file excerpt for src/small_cli/cli.py" in prompt
+    assert "def format_message(message: str) -> str" in prompt
+    assert "Use a write_file op for `src/small_cli/cli.py`" in prompt
+    assert "write_file.content and append_file.content must be JSON strings" in prompt
+
+
+def test_compact_stale_replace_prompt_caps_current_file_excerpt(tmp_path):
+    from app.services.orchestration.planning import repair_prompts
+
+    (tmp_path / "src").mkdir()
+    long_file = "\n".join(f"line_{index} = {index}" for index in range(400))
+    (tmp_path / "src" / "cli.py").write_text(long_file, encoding="utf-8")
+    plan = [
+        {
+            "step_number": 2,
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "src/cli.py",
+                    "old": "missing old text",
+                    "new": "replacement",
+                }
+            ],
+        }
+    ]
+
+    prompt = repair_prompts.build_compact_stale_replace_repair_prompt(
+        task_description="Update the CLI.",
+        malformed_output=json.dumps(plan),
+        project_dir=tmp_path,
+        rejection_reasons=[
+            "stale_replace_ops_steps: step 2 replace_in_file old text not found in src/cli.py",
+            f"Current file excerpt: {long_file}",
+        ],
+        prompt_profile="local_qwen_json_array",
+    )
+
+    assert len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
+    assert "...<truncated current file excerpt>..." in prompt
+    assert "line_0 = 0" in prompt
+    assert "line_399 = 399" not in prompt
+
+
+def test_non_stale_over_budget_behavior_uses_generic_compact_prompt(
+    tmp_path, monkeypatch
+):
+    from app.services.orchestration.planning import repair_prompts
+
+    malformed_output = json.dumps(
+        {
+            "payloads": [{"text": "remove me"}],
+            "finalAssistantVisibleText": "x" * 12000,
+            "projectContext": "project context must be stripped",
+        }
+    )
+    rejection_reasons = ["schema rejected " + ("z" * 1000)] * 20
+    compact_prompt = PlannerService.build_compact_planning_repair_prompt(
+        malformed_output,
+        rejection_reasons=rejection_reasons,
+        prompt_profile="local_qwen_json_array",
+    )
+    prompt_cap = len(compact_prompt) + 20
+    monkeypatch.setattr(
+        repair_prompts,
+        "PLANNING_REPAIR_PROMPT_MAX_CHARS",
+        prompt_cap,
+    )
+
+    prompt = PlannerService.build_planning_repair_prompt(
+        task_description="Build a page",
+        malformed_output=malformed_output,
+        project_dir=tmp_path,
+        rejection_reasons=rejection_reasons,
+        prompt_profile="local_qwen_json_array",
+        knowledge_context=_knowledge_ctx(),
+    )
+
+    assert len(prompt) <= prompt_cap
+    assert len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
+    assert "Repair this invalid plan into 3 to 4 executable steps." in prompt
+    assert "Stale replace repair mode." not in prompt
+    assert "Use a write_file op for" not in prompt
+
+
 def test_specialized_repair_prompt_preserves_knowledge_when_structure_is_large(
     tmp_path,
 ):
