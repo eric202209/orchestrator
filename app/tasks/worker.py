@@ -117,6 +117,21 @@ MAX_SUBFOLDER_COLLISION_ATTEMPTS = 999
 BACKEND_CAPACITY_RETRY_MAX_RETRIES = 5
 
 
+def should_use_configured_planning_runtime(
+    *,
+    planning_backend_override: Optional[str],
+    resolved_planning_backend: str,
+    resolved_execution_backend: str,
+) -> bool:
+    """Return whether planning needs its own configured runtime instance."""
+
+    if planning_backend_override:
+        return True
+    planning_backend = str(resolved_planning_backend or "").strip()
+    execution_backend = str(resolved_execution_backend or "").strip()
+    return bool(planning_backend and planning_backend != execution_backend)
+
+
 def backend_capacity_retry_state(
     request, max_retries: int | None = None
 ) -> tuple[int, bool]:
@@ -275,6 +290,9 @@ def execute_orchestration_task(
 
         _resolved_execution_backend = resolve_backend_name_for_role(
             db, BackendRole.EXECUTION
+        )
+        resolved_planning_backend = resolve_backend_name_for_role(
+            db, BackendRole.PLANNING
         )
 
         if task_execution_id is None:
@@ -910,7 +928,12 @@ def execute_orchestration_task(
             else {}
         )
         planning_runtime_metadata = None
-        if planning_backend_override:
+        use_configured_planning_runtime = should_use_configured_planning_runtime(
+            planning_backend_override=planning_backend_override,
+            resolved_planning_backend=resolved_planning_backend,
+            resolved_execution_backend=_resolved_execution_backend,
+        )
+        if use_configured_planning_runtime:
             planning_runtime_service = create_agent_runtime(
                 db,
                 session_id,
@@ -927,18 +950,30 @@ def execute_orchestration_task(
                 if hasattr(planning_runtime_service, "get_backend_metadata")
                 else {}
             )
-            if session is not None:
+            if planning_backend_override and session is not None:
                 session.escalation_backend_id = planning_backend_override
-            emit_live(
-                "INFO",
-                "[ORCHESTRATION] Using operator-selected stronger planning lane for this task",
-                metadata={
-                    "event_type": EventType.LANE_ESCALATION_TRIGGERED,
-                    "phase": "planning",
-                    "planning_backend_override": planning_backend_override,
-                    **(planning_escalation_metadata or {}),
-                },
-            )
+            if planning_backend_override:
+                emit_live(
+                    "INFO",
+                    "[ORCHESTRATION] Using operator-selected stronger planning lane for this task",
+                    metadata={
+                        "event_type": EventType.LANE_ESCALATION_TRIGGERED,
+                        "phase": "planning",
+                        "planning_backend_override": planning_backend_override,
+                        **(planning_escalation_metadata or {}),
+                    },
+                )
+            else:
+                emit_live(
+                    "INFO",
+                    "[ORCHESTRATION] Using configured planning backend for this task",
+                    metadata={
+                        "phase": "planning",
+                        "planning_backend": resolved_planning_backend,
+                        "execution_backend": _resolved_execution_backend,
+                        "planning_runtime": planning_runtime_metadata,
+                    },
+                )
         trace_context_manager = start_langfuse_observation(
             name="orchestrator-task-run",
             as_type="agent",

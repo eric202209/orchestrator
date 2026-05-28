@@ -136,6 +136,64 @@ def test_governed_escalation_can_disable_direct_planning_shortcut():
     )
 
 
+def test_direct_ollama_skips_direct_no_thinking_planning_by_default(monkeypatch):
+    monkeypatch.setattr(settings, "PLANNING_REPAIR_ENABLED", True)
+    monkeypatch.setattr(settings, "PLANNING_REPAIR_BASE_URL", "http://localhost/v1")
+    monkeypatch.setattr(settings, "PLANNING_REPAIR_MODEL", "qwen3-coder:30b")
+    monkeypatch.setattr(
+        settings, "PLANNING_DIRECT_NO_THINKING_FOR_DIRECT_OLLAMA", False
+    )
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {"backend": "direct_ollama"}
+
+    assert (
+        PlannerService._should_try_direct_no_thinking_planning(
+            Runtime(), prompt_chars=100
+        )
+        is False
+    )
+
+
+def test_direct_ollama_direct_no_thinking_planning_is_config_gated(monkeypatch):
+    monkeypatch.setattr(settings, "PLANNING_REPAIR_ENABLED", True)
+    monkeypatch.setattr(settings, "PLANNING_REPAIR_BASE_URL", "http://localhost/v1")
+    monkeypatch.setattr(settings, "PLANNING_REPAIR_MODEL", "qwen3-coder:30b")
+    monkeypatch.setattr(settings, "PLANNING_DIRECT_NO_THINKING_FOR_DIRECT_OLLAMA", True)
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {"backend": "direct_ollama"}
+
+    assert (
+        PlannerService._should_try_direct_no_thinking_planning(
+            Runtime(), prompt_chars=100
+        )
+        is True
+    )
+
+
+def test_local_openclaw_still_uses_direct_no_thinking_planning(monkeypatch):
+    monkeypatch.setattr(settings, "PLANNING_REPAIR_ENABLED", True)
+    monkeypatch.setattr(settings, "PLANNING_REPAIR_BASE_URL", "http://localhost/v1")
+    monkeypatch.setattr(settings, "PLANNING_REPAIR_MODEL", "qwen-local")
+    monkeypatch.setattr(
+        settings, "PLANNING_DIRECT_NO_THINKING_FOR_DIRECT_OLLAMA", False
+    )
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {"backend": "local_openclaw"}
+
+    assert (
+        PlannerService._should_try_direct_no_thinking_planning(
+            Runtime(), prompt_chars=100
+        )
+        is True
+    )
+
+
 # --- V4: No source mutation before safe stop ---
 
 

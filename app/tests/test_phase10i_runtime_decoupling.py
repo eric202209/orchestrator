@@ -749,6 +749,45 @@ def test_worker_module_has_settings_and_resolve_backend():
     ), "resolve_backend_name_for_role not imported in worker.py"
 
 
+def test_worker_uses_configured_planning_runtime_when_backend_differs():
+    import app.tasks.worker as worker_module
+
+    assert (
+        worker_module.should_use_configured_planning_runtime(
+            planning_backend_override=None,
+            resolved_planning_backend="direct_ollama",
+            resolved_execution_backend="local_openclaw",
+        )
+        is True
+    )
+
+
+def test_worker_reuses_execution_runtime_when_planning_backend_matches():
+    import app.tasks.worker as worker_module
+
+    assert (
+        worker_module.should_use_configured_planning_runtime(
+            planning_backend_override=None,
+            resolved_planning_backend="local_openclaw",
+            resolved_execution_backend="local_openclaw",
+        )
+        is False
+    )
+
+
+def test_worker_operator_planning_override_still_forces_planning_runtime():
+    import app.tasks.worker as worker_module
+
+    assert (
+        worker_module.should_use_configured_planning_runtime(
+            planning_backend_override="direct_ollama",
+            resolved_planning_backend="local_openclaw",
+            resolved_execution_backend="local_openclaw",
+        )
+        is True
+    )
+
+
 def test_backend_capacity_retry_state_marks_exhaustion():
     import app.tasks.worker as worker_module
 

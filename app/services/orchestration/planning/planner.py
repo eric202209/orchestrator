@@ -357,6 +357,15 @@ class PlannerService:
             except Exception:
                 backend_metadata = {}
         backend_name = str(backend_metadata.get("backend") or "").strip()
+        if (
+            backend_name == "direct_ollama"
+            and not settings.PLANNING_DIRECT_NO_THINKING_FOR_DIRECT_OLLAMA
+        ):
+            _logger.info(
+                "[PLANNING_DIRECT] skip: direct no-thinking planning disabled "
+                "for direct_ollama"
+            )
+            return False
         if backend_name not in {"local_openclaw", "direct_ollama"}:
             _logger.info(
                 "[PLANNING_DIRECT] skip: backend_name=%r (not direct-capable)",
