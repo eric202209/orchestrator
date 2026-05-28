@@ -952,6 +952,10 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
         mark_session_stopped(session)
         db.commit()
 
+    start_transition = resolve_session_transition(session.status, "start")
+    if not start_transition.allowed:
+        raise HTTPException(status_code=400, detail="Session is not startable")
+
     try:
         session_instance_id = str(uuid.uuid4())
         session.instance_id = session_instance_id
@@ -1224,6 +1228,12 @@ async def stop_session_lifecycle(
         raise HTTPException(status_code=404, detail="Session not found")
     if session.status not in ["running", "paused", "active"]:
         raise HTTPException(status_code=400, detail="Session is not running")
+    stop_transition = resolve_session_transition(
+        "running" if session.status == "active" else session.status,
+        "stop",
+    )
+    if not stop_transition.allowed:
+        raise HTTPException(status_code=400, detail="Session is not stoppable")
 
     try:
         checkpoint_name = None
@@ -1500,7 +1510,8 @@ async def resume_session_lifecycle(
     if session.status == "running":
         _recover_orphaned_running_session_if_needed(db, session=session)
         db.refresh(session)
-    if session.status not in ["paused", "stopped", "awaiting_input"]:
+    resume_transition = resolve_session_transition(session.status, "resume")
+    if not resume_transition.allowed:
         raise HTTPException(status_code=400, detail="Session is not resumable")
 
     try:

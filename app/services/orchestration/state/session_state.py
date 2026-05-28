@@ -24,6 +24,12 @@ _SESSION_TRANSITION_POLICY: dict[tuple[str, str], SessionTransition] = {
         is_active=True,
         timestamp_policy="started_at",
     ),
+    ("stopped", "start"): SessionTransition(
+        allowed=True,
+        result_status="running",
+        is_active=True,
+        timestamp_policy="started_at",
+    ),
     ("running", "pause"): SessionTransition(
         allowed=True,
         result_status="paused",
@@ -36,12 +42,24 @@ _SESSION_TRANSITION_POLICY: dict[tuple[str, str], SessionTransition] = {
         is_active=True,
         timestamp_policy="resumed_at",
     ),
+    ("awaiting_input", "resume"): SessionTransition(
+        allowed=True,
+        result_status="running",
+        is_active=True,
+        timestamp_policy="resumed_at",
+    ),
     ("running", "await_input"): SessionTransition(
         allowed=True,
         result_status="awaiting_input",
         is_active=True,
     ),
     ("running", "stop"): SessionTransition(
+        allowed=True,
+        result_status="stopped",
+        is_active=False,
+        timestamp_policy="stopped_at",
+    ),
+    ("paused", "stop"): SessionTransition(
         allowed=True,
         result_status="stopped",
         is_active=False,

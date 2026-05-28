@@ -9,10 +9,13 @@ from app.services.orchestration.state.session_state import resolve_session_trans
     ("current_status", "action", "result_status", "is_active", "timestamp_policy"),
     [
         ("pending", "start", "running", True, "started_at"),
+        ("stopped", "start", "running", True, "started_at"),
         ("running", "pause", "paused", False, "paused_at"),
         ("paused", "resume", "running", True, "resumed_at"),
+        ("awaiting_input", "resume", "running", True, "resumed_at"),
         ("running", "await_input", "awaiting_input", True, None),
         ("running", "stop", "stopped", False, "stopped_at"),
+        ("paused", "stop", "stopped", False, "stopped_at"),
         ("running", "complete", "completed", False, "stopped_at"),
     ],
 )

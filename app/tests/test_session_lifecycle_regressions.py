@@ -1427,6 +1427,17 @@ def test_resume_session_requeues_fresh_when_checkpoint_has_no_execution_progress
     assert session_task.status == TaskStatus.PENDING
 
 
+def test_resume_stopped_session_returns_400(db_session):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="stopped", is_active=False)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(resume_session_lifecycle(db_session, session.id))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Session is not resumable"
+
+
 def test_resume_session_without_explicit_checkpoint_skips_hollow_checkpoint_replay(
     db_session, monkeypatch
 ):
@@ -1567,21 +1578,18 @@ def test_resume_recovers_orphaned_planning_run_before_fresh_requeue(
         _fake_queue_task_for_session,
     )
 
-    result = asyncio.run(resume_session_lifecycle(db_session, session.id))
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(resume_session_lifecycle(db_session, session.id))
 
     db_session.refresh(session)
     db_session.refresh(task)
-    assert result["status"] == "resumed"
-    assert result["resolved_checkpoint_name"] is None
-    assert session.status == "running"
-    assert session.is_active is True
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Session is not resumable"
+    assert session.status == "stopped"
+    assert session.is_active is False
     assert task.status == TaskStatus.PENDING
-    assert captured["queued_task"]["task_id"] == task.id
-    assert captured["load_resume_checkpoint_calls"] == [
-        "autosave_latest",
-        "autosave_error",
-        None,
-    ]
+    assert "queued_task" not in captured
+    assert captured["load_resume_checkpoint_calls"] == []
 
 
 def test_resume_does_not_recover_inflight_planning_request(db_session, monkeypatch):
