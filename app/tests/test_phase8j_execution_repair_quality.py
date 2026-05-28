@@ -305,6 +305,42 @@ def test_normalize_allows_command_fix_that_runs_verifier_for_pytest_failure():
     assert result["fix_type"] == "command_fix"
 
 
+def test_source_repair_rejects_touch_command_for_import_symbol_failure(tmp_path):
+    source_dir = tmp_path / "src" / "small_cli"
+    source_dir.mkdir(parents=True)
+    source_path = source_dir / "cli.py"
+    source_path.write_text("def main():\n    return 0\n", encoding="utf-8")
+    envelope = DebugFeedbackEnvelope(
+        task_execution_id=1,
+        task_id=1,
+        step_index=4,
+        failure_phase="execution",
+        failed_command="python -m pytest -q",
+        return_code=2,
+        workspace_path=str(tmp_path),
+        failure_class="import_error",
+        stderr_excerpt=(
+            "ImportError: cannot import name 'build_parser' from "
+            f"'small_cli.cli' ({source_path})"
+        ),
+    )
+    payload = [
+        {
+            "title": "Create missing parser file",
+            "command": "touch src/small_cli/cli/build_parser.py",
+            "verification_command": "python -m pytest -q",
+        }
+    ]
+
+    result = normalize_bounded_debug_repair_payload_detailed(
+        payload,
+        envelope=envelope,
+    )
+
+    assert result.payload is None
+    assert result.rejection_reason == "source_repair_command_fix_rejected"
+
+
 def test_non_source_command_failure_still_allows_command_fix():
     envelope = DebugFeedbackEnvelope(
         task_execution_id=1,

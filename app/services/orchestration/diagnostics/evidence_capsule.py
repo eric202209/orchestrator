@@ -130,6 +130,7 @@ def infer_missing_python_module_target(
                     path = path.resolve().relative_to(project_dir.resolve())
                 if path.name == "__init__.py":
                     return (path.parent / f"{symbol}.py").as_posix()
+                return None
             except (OSError, ValueError):
                 pass
         package_parts = [part for part in package.split(".") if part]

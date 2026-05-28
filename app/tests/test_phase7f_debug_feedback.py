@@ -625,6 +625,33 @@ def test_import_error_evidence_infers_missing_submodule_target(tmp_path):
     assert not any("from sys" in command for command in capsule.commands_run)
 
 
+def test_import_error_evidence_does_not_invent_symbol_file_under_module(tmp_path):
+    package_dir = tmp_path / "src" / "small_cli"
+    package_dir.mkdir(parents=True)
+    source_path = package_dir / "cli.py"
+    source_path.write_text(
+        "def main(argv=None):\n    return 0\n",
+        encoding="utf-8",
+    )
+    failure_context = (
+        "ImportError: cannot import name 'build_parser' from "
+        f"'small_cli.cli' ({source_path})"
+    )
+
+    assert infer_missing_python_module_target(failure_context, tmp_path) is None
+
+    capsule = collect_workspace_evidence(
+        "import_error",
+        tmp_path,
+        failure_context=failure_context,
+    )
+
+    rendered = "\n".join(capsule.results.values())
+    assert "src/small_cli/cli/build_parser.py" not in rendered
+    assert "./src/small_cli/cli/build_parser.py" not in capsule.files_inspected
+    assert "./src/small_cli/cli.py" in capsule.files_inspected
+
+
 def test_diff_capsule_skips_changed_init_when_missing_submodule_target_is_elsewhere(
     tmp_path,
 ):
