@@ -65,7 +65,6 @@ coverage/
 # Development files
 .notes/
 *.note
-scripts/evals/*
 
 # Database files
 *.db

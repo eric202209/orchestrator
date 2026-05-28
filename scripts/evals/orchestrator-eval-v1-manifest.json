@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "orchestrator_backend_resilience_v1",
+  "baseline_label": "backend-resilience-stable-ab06b22",
+  "description": "Small deterministic evaluation slice for backend orchestrator resilience. This manifest defines cases only; it does not run sessions.",
+  "case_defaults": {
+    "verifier_timeout_seconds": 60,
+    "terminal_success_events": [
+      "task_completed"
+    ],
+    "failure_events": [
+      "task_failed",
+      "workspace_contract_failed",
+      "completion_evidence_failed"
+    ]
+  },
+  "cases": [
+    {
+      "case_id": "python_cli_small_feature",
+      "category": "baseline_success",
+      "purpose": "Control case for normal autonomous implementation with behavioral verification.",
+      "operator_prompt": "Add one small Python CLI feature with pytest coverage. Keep the implementation self-contained and runnable with python3 -m pytest.",
+      "verifier": {
+        "command": "python3 -m pytest -q",
+        "timeout_seconds": 90
+      },
+      "required_files": [
+        "pyproject.toml",
+        "tests"
+      ],
+      "expected_touched_files": [],
+      "allowed_touched_prefixes": [
+        "src/",
+        "tests/",
+        "README",
+        "pyproject.toml",
+        "requirements"
+      ],
+      "forbidden_touched_prefixes": [
+        ".openclaw/",
+        "frontend/",
+        "backend/"
+      ],
+      "required_events": [
+        "task_started"
+      ],
+      "success_criteria": [
+        "verifier_exit_code_zero",
+        "task_completed_event_present",
+        "required_files_present",
+        "no_forbidden_touched_files"
+      ]
+    },
+    {
+      "case_id": "debug_import_error_repair",
+      "category": "debug_repair",
+      "purpose": "Measure whether a deterministic import/runtime failure is captured and repaired into a verified completion.",
+      "operator_prompt": "Fix the failing Python test suite caused by an import or module path error without weakening tests.",
+      "verifier": {
+        "command": "python3 -m pytest -q",
+        "timeout_seconds": 90
+      },
+      "required_files": [
+        "tests"
+      ],
+      "expected_touched_files": [],
+      "allowed_touched_prefixes": [
+        "src/",
+        "tests/",
+        "README",
+        "pyproject.toml",
+        "requirements"
+      ],
+      "forbidden_touched_prefixes": [
+        ".openclaw/",
+        "frontend/"
+      ],
+      "required_events": [
+        "debug_feedback_captured",
+        "debug_repair_attempted"
+      ],
+      "success_criteria": [
+        "verifier_exit_code_zero",
+        "debug_feedback_captured",
+        "debug_repair_attempted",
+        "task_completed_event_present",
+        "no_forbidden_touched_files"
+      ]
+    },
+    {
+      "case_id": "checkpoint_resume_mid_task",
+      "category": "checkpoint_recovery",
+      "purpose": "Measure whether checkpoint resume restores the correct execution boundary and completes without destructive replay.",
+      "operator_prompt": "Resume a partially completed multi-step task from checkpoint and finish without replaying completed work destructively.",
+      "verifier": {
+        "command": "python3 -m pytest -q",
+        "timeout_seconds": 90
+      },
+      "required_files": [
+        ".openclaw/events"
+      ],
+      "expected_touched_files": [],
+      "allowed_touched_prefixes": [
+        "src/",
+        "tests/",
+        "docs/",
+        "README",
+        "pyproject.toml",
+        "requirements"
+      ],
+      "forbidden_touched_prefixes": [
+        "frontend/"
+      ],
+      "required_events": [
+        "checkpoint_loaded"
+      ],
+      "allowed_events": [
+        "checkpoint_cursor_reconciled",
+        "resume_workspace_drift",
+        "workspace_retry_dirty"
+      ],
+      "success_criteria": [
+        "verifier_exit_code_zero",
+        "checkpoint_loaded",
+        "task_completed_event_present",
+        "state_snapshot_present",
+        "no_forbidden_touched_files"
+      ]
+    }
+  ]
+}
