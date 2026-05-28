@@ -86,6 +86,11 @@ EXPECTED_TASK_ATTEMPT_CALLS = {
         "mark_task_attempt_pending": 4,
         "mark_task_attempt_running": 2,
     },
+    "app/services/orchestration/run_state/transitions.py": {
+        "mark_task_attempt_cancelled": 1,
+        "mark_task_attempt_done": 1,
+        "mark_task_attempt_failed": 3,
+    },
     "app/services/session/session_lifecycle_service.py": {
         "mark_task_attempt_cancelled": 1,
         "mark_task_attempt_pending": 5,
@@ -109,7 +114,6 @@ EXPECTED_TASK_ATTEMPT_CALLS = {
         "mark_task_attempt_failed": 12,
     },
     "app/services/orchestration/lifecycle/completion.py": {
-        "mark_task_attempt_done": 1,
         "mark_task_attempt_pending": 2,
     },
     "app/services/orchestration/phases/completion_flow.py": {

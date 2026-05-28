@@ -11,6 +11,11 @@ from app.models import (
     TaskStatus,
 )
 from app.services.orchestration.run_state import (
+    cancel_attempt_for_session_pause_stop,
+    finalize_attempt_completion_validation_failure,
+    finalize_attempt_execution_failure,
+    finalize_attempt_planning_failure,
+    finalize_attempt_successful_completion,
     mark_task_attempt_cancelled,
     mark_task_attempt_done,
     mark_task_attempt_failed,
@@ -187,6 +192,115 @@ def test_mark_task_attempt_done_updates_task_link_and_execution(db_session):
         completed_at=completed_at,
     )
 
+    assert task.status == TaskStatus.DONE
+    assert task.error_message is None
+    assert task.completed_at == completed_at
+    assert link.status == TaskStatus.DONE
+    assert link.completed_at == completed_at
+    assert execution.status == TaskStatus.DONE
+    assert execution.completed_at == completed_at
+
+
+def test_attempt_planning_failure_wrapper_preserves_failed_semantics(db_session):
+    task, link, execution = _make_task_attempt(db_session)
+    completed_at = datetime(2026, 5, 14, 5, 6, 7, tzinfo=UTC)
+
+    result = finalize_attempt_planning_failure(
+        task=task,
+        session_task_link=link,
+        task_execution=execution,
+        error_message="planning validation failed",
+        completed_at=completed_at,
+    )
+
+    assert result == completed_at
+    assert task.status == TaskStatus.FAILED
+    assert task.error_message == "planning validation failed"
+    assert task.completed_at == completed_at
+    assert task.workspace_status == "blocked"
+    assert link.status == TaskStatus.FAILED
+    assert link.completed_at == completed_at
+    assert execution.status == TaskStatus.FAILED
+    assert execution.completed_at == completed_at
+
+
+def test_attempt_execution_failure_wrapper_preserves_failed_semantics(db_session):
+    task, link, execution = _make_task_attempt(db_session)
+    completed_at = datetime(2026, 5, 14, 6, 7, 8, tzinfo=UTC)
+
+    result = finalize_attempt_execution_failure(
+        task=task,
+        session_task_link=link,
+        task_execution=execution,
+        error_message="verification failed",
+        completed_at=completed_at,
+    )
+
+    assert result == completed_at
+    assert task.status == TaskStatus.FAILED
+    assert task.error_message == "verification failed"
+    assert task.workspace_status == "blocked"
+    assert link.status == TaskStatus.FAILED
+    assert execution.status == TaskStatus.FAILED
+
+
+def test_attempt_completion_validation_failure_wrapper_preserves_failed_semantics(
+    db_session,
+):
+    task, link, execution = _make_task_attempt(db_session)
+    completed_at = datetime(2026, 5, 14, 7, 8, 9, tzinfo=UTC)
+
+    result = finalize_attempt_completion_validation_failure(
+        task=task,
+        session_task_link=link,
+        task_execution=execution,
+        error_message="completion validation failed",
+        completed_at=completed_at,
+    )
+
+    assert result == completed_at
+    assert task.status == TaskStatus.FAILED
+    assert task.error_message == "completion validation failed"
+    assert task.workspace_status == "blocked"
+    assert link.status == TaskStatus.FAILED
+    assert execution.status == TaskStatus.FAILED
+
+
+def test_attempt_pause_stop_cancellation_wrapper_preserves_cancelled_semantics(
+    db_session,
+):
+    task, link, execution = _make_task_attempt(db_session)
+    completed_at = datetime(2026, 5, 14, 8, 9, 10, tzinfo=UTC)
+
+    result = cancel_attempt_for_session_pause_stop(
+        task=task,
+        session_task_link=link,
+        task_execution=execution,
+        completed_at=completed_at,
+    )
+
+    assert result == completed_at
+    assert task.status == TaskStatus.CANCELLED
+    assert task.completed_at == completed_at
+    assert link.status == TaskStatus.CANCELLED
+    assert link.completed_at == completed_at
+    assert execution.status == TaskStatus.CANCELLED
+    assert execution.completed_at == completed_at
+
+
+def test_attempt_successful_completion_wrapper_preserves_done_semantics(db_session):
+    task, link, execution = _make_task_attempt(db_session)
+    task.error_message = "old error"
+    completed_at = datetime(2026, 5, 14, 9, 10, 11, tzinfo=UTC)
+
+    result = finalize_attempt_successful_completion(
+        task=task,
+        session_task_link=link,
+        task_execution=execution,
+        completed_at=completed_at,
+    )
+
+    assert result == completed_at
     assert task.status == TaskStatus.DONE
     assert task.error_message is None
     assert task.completed_at == completed_at

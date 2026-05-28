@@ -1,6 +1,11 @@
 """Run-state transition helpers for orchestration."""
 
 from .transitions import (
+    cancel_attempt_for_session_pause_stop,
+    finalize_attempt_completion_validation_failure,
+    finalize_attempt_execution_failure,
+    finalize_attempt_planning_failure,
+    finalize_attempt_successful_completion,
     mark_task_attempt_cancelled,
     mark_task_attempt_done,
     mark_task_attempt_failed,
@@ -13,6 +18,11 @@ from .snapshot import RunStateSnapshot, read_run_state_snapshot
 
 __all__ = [
     "RunStateSnapshot",
+    "cancel_attempt_for_session_pause_stop",
+    "finalize_attempt_completion_validation_failure",
+    "finalize_attempt_execution_failure",
+    "finalize_attempt_planning_failure",
+    "finalize_attempt_successful_completion",
     "mark_task_attempt_cancelled",
     "mark_task_attempt_done",
     "mark_task_attempt_failed",
