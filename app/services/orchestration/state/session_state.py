@@ -2,10 +2,73 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 from app.services.orchestration.state.persistence import set_session_alert
+
+
+@dataclass(frozen=True)
+class SessionTransition:
+    allowed: bool
+    result_status: str
+    is_active: bool
+    timestamp_policy: str | None = None
+
+
+_SESSION_TRANSITION_POLICY: dict[tuple[str, str], SessionTransition] = {
+    ("pending", "start"): SessionTransition(
+        allowed=True,
+        result_status="running",
+        is_active=True,
+        timestamp_policy="started_at",
+    ),
+    ("running", "pause"): SessionTransition(
+        allowed=True,
+        result_status="paused",
+        is_active=False,
+        timestamp_policy="paused_at",
+    ),
+    ("paused", "resume"): SessionTransition(
+        allowed=True,
+        result_status="running",
+        is_active=True,
+        timestamp_policy="resumed_at",
+    ),
+    ("running", "await_input"): SessionTransition(
+        allowed=True,
+        result_status="awaiting_input",
+        is_active=True,
+    ),
+    ("running", "stop"): SessionTransition(
+        allowed=True,
+        result_status="stopped",
+        is_active=False,
+        timestamp_policy="stopped_at",
+    ),
+    ("running", "complete"): SessionTransition(
+        allowed=True,
+        result_status="completed",
+        is_active=False,
+        timestamp_policy="stopped_at",
+    ),
+}
+
+
+def resolve_session_transition(current_status: str, action: str) -> SessionTransition:
+    """Resolve session transition policy without mutating a session row."""
+
+    normalized_status = str(current_status or "").strip().lower()
+    normalized_action = str(action or "").strip().lower()
+    transition = _SESSION_TRANSITION_POLICY.get((normalized_status, normalized_action))
+    if transition:
+        return transition
+    return SessionTransition(
+        allowed=False,
+        result_status=normalized_status,
+        is_active=normalized_status in {"running", "awaiting_input"},
+    )
 
 
 def mark_session_running(
