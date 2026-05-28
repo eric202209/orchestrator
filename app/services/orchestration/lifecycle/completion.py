@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict, Optional
 from app.models import LogEntry, SessionTask, Task, TaskExecution, TaskStatus
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.run_state import (
-    mark_task_attempt_done,
+    finalize_attempt_successful_completion,
     mark_task_attempt_pending,
 )
 from app.services.orchestration.state.persistence import append_orchestration_event
@@ -58,7 +58,7 @@ class TaskCompletionFinalizer:
             if ctx.task_execution_id
             else None
         )
-        completed_at = mark_task_attempt_done(
+        completed_at = finalize_attempt_successful_completion(
             task=task,
             session_task_link=ctx.session_task_link,
             task_execution=task_execution,

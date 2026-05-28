@@ -164,6 +164,103 @@ def mark_task_attempt_done(
     return completed_at
 
 
+def finalize_attempt_planning_failure(
+    *,
+    task: Task | None,
+    session_task_link: SessionTask | None = None,
+    task_execution: TaskExecution | None = None,
+    error_message: str | None = None,
+    completed_at: datetime | None = None,
+    workspace_status: str = "blocked",
+) -> datetime:
+    """Finalize an attempt that failed before execution due to planning."""
+
+    return mark_task_attempt_failed(
+        task=task,
+        session_task_link=session_task_link,
+        task_execution=task_execution,
+        error_message=error_message,
+        completed_at=completed_at,
+        workspace_status=workspace_status,
+    )
+
+
+def finalize_attempt_execution_failure(
+    *,
+    task: Task | None,
+    session_task_link: SessionTask | None = None,
+    task_execution: TaskExecution | None = None,
+    error_message: str | None = None,
+    completed_at: datetime | None = None,
+    workspace_status: str = "blocked",
+) -> datetime:
+    """Finalize an attempt that failed while executing or verifying steps."""
+
+    return mark_task_attempt_failed(
+        task=task,
+        session_task_link=session_task_link,
+        task_execution=task_execution,
+        error_message=error_message,
+        completed_at=completed_at,
+        workspace_status=workspace_status,
+    )
+
+
+def finalize_attempt_completion_validation_failure(
+    *,
+    task: Task | None,
+    session_task_link: SessionTask | None = None,
+    task_execution: TaskExecution | None = None,
+    error_message: str | None = None,
+    completed_at: datetime | None = None,
+    workspace_status: str = "blocked",
+) -> datetime:
+    """Finalize an attempt whose final completion validation failed."""
+
+    return mark_task_attempt_failed(
+        task=task,
+        session_task_link=session_task_link,
+        task_execution=task_execution,
+        error_message=error_message,
+        completed_at=completed_at,
+        workspace_status=workspace_status,
+    )
+
+
+def cancel_attempt_for_session_pause_stop(
+    *,
+    task: Task | None,
+    session_task_link: SessionTask | None = None,
+    task_execution: TaskExecution | None = None,
+    completed_at: datetime | None = None,
+) -> datetime:
+    """Finalize an active attempt that is cancelled by pause or stop."""
+
+    return mark_task_attempt_cancelled(
+        task=task,
+        session_task_link=session_task_link,
+        task_execution=task_execution,
+        completed_at=completed_at,
+    )
+
+
+def finalize_attempt_successful_completion(
+    *,
+    task: Task | None,
+    session_task_link: SessionTask | None = None,
+    task_execution: TaskExecution | None = None,
+    completed_at: datetime | None = None,
+) -> datetime:
+    """Finalize a successfully completed attempt."""
+
+    return mark_task_attempt_done(
+        task=task,
+        session_task_link=session_task_link,
+        task_execution=task_execution,
+        completed_at=completed_at,
+    )
+
+
 def reset_active_attempts_for_session_stop(
     db: Session,
     *,
