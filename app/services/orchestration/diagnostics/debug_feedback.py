@@ -684,6 +684,15 @@ def normalize_bounded_debug_repair_payload_detailed(
                 "missing_command" if not normalized["fix"] else "non_runnable_command"
             )
             return _debug_repair_normalization_rejected(parsed_data, reason)
+        if fix_type == "command_fix" and _source_repair_command_fix_requires_ops(
+            normalized["fix"],
+            normalized.get("verification"),
+            envelope=envelope,
+            source_edit_context=source_edit_context,
+        ):
+            return _debug_repair_normalization_rejected(
+                parsed_data, "source_repair_command_fix_rejected"
+            )
         if fix_type == "command_fix" and _semantic_pytest_string_edit_repair(
             normalized["fix"],
             envelope=envelope,
@@ -751,6 +760,15 @@ def normalize_bounded_debug_repair_payload_detailed(
         return _debug_repair_normalization_rejected(
             parsed_data, "source_context_command_fix_rejected"
         )
+    if _source_repair_command_fix_requires_ops(
+        command,
+        verification,
+        envelope=envelope,
+        source_edit_context=source_edit_context,
+    ):
+        return _debug_repair_normalization_rejected(
+            parsed_data, "source_repair_command_fix_rejected"
+        )
     if _semantic_pytest_string_edit_repair(command, envelope=envelope):
         return _debug_repair_normalization_rejected(
             parsed_data, "semantic_string_edit_rejected"
@@ -817,6 +835,55 @@ def _is_verifier_only_command_fix(command: str, verification: Any) -> bool:
             r"\b(?:pytest|python3?\s+-m\s+pytest|npm\s+test|npm\s+run\s+test|make\s+test)\b",
             lowered,
         )
+    )
+
+
+def _source_repair_command_fix_requires_ops(
+    command: str,
+    verification: Any,
+    *,
+    envelope: Optional[DebugFeedbackEnvelope],
+    source_edit_context: bool,
+) -> bool:
+    if _is_verifier_only_command_fix(command, verification):
+        return False
+    if not _command_fix_mutates_source_or_tests(command):
+        return False
+    return source_edit_context or _debug_envelope_points_to_source_repair(envelope)
+
+
+def _command_fix_mutates_source_or_tests(command: str) -> bool:
+    lowered = str(command or "").strip().lower().replace("\\", "/")
+    if not any(marker in lowered for marker in ("src/", "tests/", "test/")):
+        return False
+    return bool(
+        re.search(
+            r"\b(?:sed|perl|touch|mkdir|rm|mv|cp|tee)\b|"
+            r">>?|write_text|replace\(|open\(|path\(",
+            lowered,
+        )
+    )
+
+
+def _debug_envelope_points_to_source_repair(
+    envelope: Optional[DebugFeedbackEnvelope],
+) -> bool:
+    if envelope is None:
+        return False
+    if envelope.failure_class not in {
+        "pytest_failure",
+        "import_error",
+        "module_not_found",
+        "runtime_assertion_failure",
+        "completion_validation_failed",
+        "syntax_error",
+    }:
+        return False
+    context = _debug_failure_context(envelope)
+    if re.search(r"\bsrc/[A-Za-z0-9_./-]+\.py\b", context):
+        return True
+    return bool(
+        _direct_import_error_target(context, Path(envelope.workspace_path or "."))
     )
 
 
