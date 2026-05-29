@@ -1102,6 +1102,107 @@ def test_planning_repair_uses_direct_no_thinking_chat_path(monkeypatch):
     assert captured["payload"]["think"] is False
 
 
+def test_stale_replace_planning_repair_captures_prompt_and_gateway_result(
+    monkeypatch, tmp_path
+):
+    from app.services.orchestration.planning import planner as planner_module
+
+    monkeypatch.setattr(
+        planner_module,
+        "STALE_REPLACE_REPAIR_DIAGNOSTIC_DIR",
+        tmp_path / "planning-stale-replace-repair",
+    )
+    monkeypatch.setattr(planner_module.settings, "PLANNING_REPAIR_ENABLED", True)
+    monkeypatch.setattr(
+        planner_module.settings,
+        "PLANNING_REPAIR_BASE_URL",
+        "http://localhost:8000/v1",
+    )
+    monkeypatch.setattr(planner_module.settings, "PLANNING_REPAIR_MODEL", "qwen-local")
+    monkeypatch.setattr(
+        planner_module.settings,
+        "PLANNING_REPAIR_DISABLE_THINKING",
+        True,
+    )
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": '[{"step_number":1}]'},
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 4},
+            }
+
+    class Client:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers, json):
+            return Response()
+
+    class Runtime:
+        db = object()
+
+        def get_backend_metadata(self):
+            return {"backend": "local_openclaw", "model_family": "qwen3.6:27B"}
+
+    monkeypatch.setattr(planner_module.httpx, "AsyncClient", Client)
+    prompt = "repair stale replace"
+    captured = PlannerService._capture_stale_replace_repair_prompt(
+        repair_prompt=prompt,
+        reason="post_repair_stale_replace_fallback: stale_replace_ops_steps",
+        session_id=1,
+        task_id=2,
+        repair_attempt_number=1,
+        repair_prompt_build_seconds=0.123,
+        malformed_output_chars=12,
+        validation_error_chars=34,
+        knowledge_context_chars=56,
+        includes_project_context=True,
+        includes_non_project_context=True,
+    )
+
+    result = asyncio.run(
+        PlannerService._invoke_repair_prompt(
+            Runtime(),
+            prompt,
+            repair_timeout=60,
+            diagnostic_context={
+                **captured,
+                "stale_replace_repair_diagnostic": True,
+            },
+        )
+    )
+
+    diagnostic_dir = (
+        tmp_path / "planning-stale-replace-repair" / captured["prompt_sha256_12"]
+    )
+    metadata = json.loads((diagnostic_dir / "prompt_metadata.json").read_text())
+    gateway = json.loads(
+        (diagnostic_dir / "direct_no_thinking_result.json").read_text()
+    )
+    assert result["backend"] == "direct_chat_completions"
+    assert metadata["prompt_chars"] == len(prompt)
+    assert metadata["repair_reason"].startswith("post_repair_stale_replace_fallback")
+    assert gateway["status"] == "completed"
+    assert gateway["finish_reason"] == "stop"
+    assert gateway["content_null"] is False
+    assert gateway["content_chars"] == len('[{"step_number":1}]')
+
+
 def test_direct_planning_uses_runtime_ollama_model_for_hyphen_alias(monkeypatch):
     from app.services.orchestration.planning import planner as planner_module
 
@@ -1173,6 +1274,177 @@ def test_direct_planning_uses_runtime_ollama_model_for_hyphen_alias(monkeypatch)
     assert result["planning_direct"] is True
     assert captured["url"] == "http://localhost:11434/v1/chat/completions"
     assert captured["payload"]["model"] == "qwen3:8b-hybrid"
+
+
+def test_local_openclaw_direct_planning_timeout_override_is_config_gated(monkeypatch):
+    from app.services.orchestration.planning import planner as planner_module
+
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '[{"step_number":1,"description":"ok","commands":[],"verification":null,"rollback":null,"expected_files":[]}]'
+                        }
+                    }
+                ]
+            }
+
+    class Client:
+        def __init__(self, timeout):
+            captured["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json, headers):
+            return Response()
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {"backend": "local_openclaw"}
+
+    monkeypatch.setattr(planner_module.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(planner_module.settings, "PLANNING_REPAIR_TIMEOUT_SECONDS", 90)
+    monkeypatch.setattr(
+        planner_module.settings,
+        "PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS",
+        120,
+    )
+
+    result = asyncio.run(
+        PlannerService._invoke_direct_no_thinking_planning(
+            Runtime(),
+            "plan me",
+            timeout_budget_seconds=300,
+        )
+    )
+
+    assert captured["timeout"] == 120
+    assert result["direct_planning_timeout_seconds"] == 120
+
+
+def test_default_direct_planning_timeout_remains_repair_timeout(monkeypatch):
+    from app.services.orchestration.planning import planner as planner_module
+
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '[{"step_number":1,"description":"ok","commands":[],"verification":null,"rollback":null,"expected_files":[]}]'
+                        }
+                    }
+                ]
+            }
+
+    class Client:
+        def __init__(self, timeout):
+            captured["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json, headers):
+            return Response()
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {"backend": "local_openclaw"}
+
+    monkeypatch.setattr(planner_module.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(planner_module.settings, "PLANNING_REPAIR_TIMEOUT_SECONDS", 90)
+    monkeypatch.setattr(
+        planner_module.settings,
+        "PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS",
+        0,
+    )
+
+    result = asyncio.run(
+        PlannerService._invoke_direct_no_thinking_planning(
+            Runtime(),
+            "plan me",
+            timeout_budget_seconds=300,
+        )
+    )
+
+    assert captured["timeout"] == 90
+    assert result["direct_planning_timeout_seconds"] == 90
+
+
+def test_direct_ollama_ignores_local_openclaw_direct_timeout_override(monkeypatch):
+    from app.services.orchestration.planning import planner as planner_module
+
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '[{"step_number":1,"description":"ok","commands":[],"verification":null,"rollback":null,"expected_files":[]}]'
+                        }
+                    }
+                ]
+            }
+
+    class Client:
+        def __init__(self, timeout):
+            captured["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json, headers):
+            return Response()
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {"backend": "direct_ollama", "model_family": "qwen3-coder:30b"}
+
+    monkeypatch.setattr(planner_module.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(planner_module.settings, "PLANNING_REPAIR_TIMEOUT_SECONDS", 90)
+    monkeypatch.setattr(
+        planner_module.settings,
+        "PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS",
+        120,
+    )
+
+    result = asyncio.run(
+        PlannerService._invoke_direct_no_thinking_planning(
+            Runtime(),
+            "plan me",
+            timeout_budget_seconds=300,
+        )
+    )
+
+    assert captured["timeout"] == 90
+    assert result["direct_planning_timeout_seconds"] == 90
 
 
 def test_direct_repair_uses_runtime_ollama_model_for_hyphen_alias(monkeypatch):
@@ -3449,6 +3721,178 @@ def test_planning_repair_timeout_uses_effective_runtime_profile_timeout(monkeypa
     assert captured["timeout_seconds"] == 45
     assert captured["no_output_timeout_seconds"] == 45
     assert captured["timeout_seconds"] < MINIMAL_PLANNING_TIMEOUT_SECONDS
+
+
+def test_stale_replace_planning_repair_uses_extended_timeout_margin(
+    monkeypatch, tmp_path
+):
+    from app.services.orchestration.planning import planner as planner_module
+
+    monkeypatch.setattr(planner_module.settings, "PLANNING_REPAIR_ENABLED", False)
+    monkeypatch.setattr(
+        planner_module,
+        "STALE_REPLACE_REPAIR_DIAGNOSTIC_DIR",
+        tmp_path / "planning-stale-replace-repair",
+    )
+    captured = {}
+    events = []
+
+    class Runtime:
+        async def invoke_prompt(self, prompt, **kwargs):
+            captured["timeout_seconds"] = kwargs["timeout_seconds"]
+            captured["no_output_timeout_seconds"] = kwargs["no_output_timeout_seconds"]
+            return {"output": '[{"step_number":1}]'}
+
+    PlannerService.repair_output(
+        runtime_service=Runtime(),
+        task_description="Build a page",
+        malformed_output='[{"step_number":1,"commands":["touch index.html"]}]',
+        project_dir=tmp_path,
+        timeout_seconds=300,
+        logger=logging.getLogger("test.stale_replace_timeout_margin"),
+        emit_live=lambda level, message, metadata=None: events.append(
+            (level, message, metadata or {})
+        ),
+        reason="post_repair_stale_replace_fallback: stale_replace_ops_steps",
+        rejection_reasons=["replace_in_file old text not found in workspace"],
+        knowledge_context=None,
+        session_id=1,
+        task_id=2,
+    )
+
+    assert captured["timeout_seconds"] == 120.0
+    assert captured["no_output_timeout_seconds"] == 120
+    running_events = [
+        metadata
+        for _level, message, metadata in events
+        if "Planning repair attempt is now running" in message
+    ]
+    assert running_events[-1]["timeout_seconds"] == 120.0
+    assert running_events[-1]["stale_replace_timeout_margin"] is True
+    assert (
+        running_events[-1]["repair_timeout_margin_reason"]
+        == "post_repair_stale_replace_fallback"
+    )
+
+
+def test_first_pass_stale_replace_repair_uses_extended_timeout_margin(
+    monkeypatch, tmp_path
+):
+    from app.services.orchestration.planning import planner as planner_module
+
+    monkeypatch.setattr(planner_module.settings, "PLANNING_REPAIR_ENABLED", False)
+    captured = {}
+    events = []
+
+    class Runtime:
+        async def invoke_prompt(self, prompt, **kwargs):
+            captured["timeout_seconds"] = kwargs["timeout_seconds"]
+            captured["no_output_timeout_seconds"] = kwargs["no_output_timeout_seconds"]
+            return {"output": '[{"step_number":1}]'}
+
+    PlannerService.repair_output(
+        runtime_service=Runtime(),
+        task_description="Build a page",
+        malformed_output='[{"step_number":1,"commands":["touch index.html"]}]',
+        project_dir=tmp_path,
+        timeout_seconds=300,
+        logger=logging.getLogger("test.first_pass_stale_replace_timeout_margin"),
+        emit_live=lambda level, message, metadata=None: events.append(
+            (level, message, metadata or {})
+        ),
+        reason=(
+            "plan_contains_immediate_repair_issues: replace_in_file old text "
+            "not found in workspace in steps [3]"
+        ),
+        rejection_reasons=["replace_in_file old text not found in workspace"],
+        knowledge_context=None,
+        session_id=1,
+        task_id=2,
+    )
+
+    assert captured["timeout_seconds"] == 120.0
+    assert captured["no_output_timeout_seconds"] == 120
+    running_events = [
+        metadata
+        for _level, message, metadata in events
+        if "Planning repair attempt is now running" in message
+    ]
+    assert running_events[-1]["timeout_seconds"] == 120.0
+    assert running_events[-1]["stale_replace_timeout_margin"] is True
+    assert (
+        running_events[-1]["repair_timeout_margin_reason"]
+        == "first_pass_stale_replace_old_text"
+    )
+
+
+def test_normal_planning_repair_timeout_remains_default(monkeypatch):
+    from app.services.orchestration.planning import planner as planner_module
+
+    monkeypatch.setattr(planner_module.settings, "PLANNING_REPAIR_ENABLED", False)
+    monkeypatch.setattr(planner_module.settings, "PLANNING_REPAIR_TIMEOUT_SECONDS", 90)
+    captured = {}
+
+    class Runtime:
+        async def invoke_prompt(self, prompt, **kwargs):
+            captured["timeout_seconds"] = kwargs["timeout_seconds"]
+            return {"output": '[{"step_number":1}]'}
+
+    PlannerService.repair_output(
+        runtime_service=Runtime(),
+        task_description="Build a page",
+        malformed_output='[{"step_number":1,"commands":["touch index.html"]}]',
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+        timeout_seconds=300,
+        logger=logging.getLogger("test.normal_repair_timeout"),
+        emit_live=lambda *a, **kw: None,
+        reason="plan_validation_failed",
+        rejection_reasons=["Plan contains brittle heredoc-heavy commands"],
+        knowledge_context=None,
+        session_id=1,
+        task_id=2,
+    )
+
+    assert captured["timeout_seconds"] == 90
+
+
+def test_first_pass_non_stale_repair_timeout_remains_default(monkeypatch):
+    from app.services.orchestration.planning import planner as planner_module
+
+    monkeypatch.setattr(planner_module.settings, "PLANNING_REPAIR_ENABLED", False)
+    monkeypatch.setattr(planner_module.settings, "PLANNING_REPAIR_TIMEOUT_SECONDS", 90)
+    captured = {}
+    events = []
+
+    class Runtime:
+        async def invoke_prompt(self, prompt, **kwargs):
+            captured["timeout_seconds"] = kwargs["timeout_seconds"]
+            return {"output": '[{"step_number":1}]'}
+
+    PlannerService.repair_output(
+        runtime_service=Runtime(),
+        task_description="Build a page",
+        malformed_output='[{"step_number":1,"commands":["touch index.html"]}]',
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+        timeout_seconds=300,
+        logger=logging.getLogger("test.first_pass_non_stale_repair_timeout"),
+        emit_live=lambda level, message, metadata=None: events.append(
+            (level, message, metadata or {})
+        ),
+        reason="plan_contains_immediate_repair_issues: brittle_inline_python",
+        rejection_reasons=["Plan contains brittle heredoc-heavy commands"],
+        knowledge_context=None,
+        session_id=1,
+        task_id=2,
+    )
+
+    assert captured["timeout_seconds"] == 90
+    running_events = [
+        metadata
+        for _level, message, metadata in events
+        if "Planning repair attempt is now running" in message
+    ]
+    assert running_events[-1]["stale_replace_timeout_margin"] is False
+    assert running_events[-1]["repair_timeout_margin_reason"] is None
 
 
 def test_planning_repair_logs_duration(caplog):

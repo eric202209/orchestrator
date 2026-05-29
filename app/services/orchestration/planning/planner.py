@@ -6,6 +6,7 @@ import asyncio
 import ast
 from contextlib import asynccontextmanager, contextmanager
 import errno
+import hashlib
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ import re
 import tempfile
 import threading
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -77,6 +79,10 @@ OPENCLAW_PLANNING_LOCK_ACQUIRE_TIMEOUT_SECONDS = float(
 OPENCLAW_PLANNING_LOCK_POLL_SECONDS = float(
     os.environ.get("ORCHESTRATOR_OPENCLAW_PLANNING_LOCK_POLL_SECONDS", "0.05")
 )
+STALE_REPLACE_REPAIR_DIAGNOSTIC_DIR = Path(
+    "docs/roadmap/reports/runtime/planning-stale-replace-repair"
+)
+STALE_REPLACE_REPAIR_TIMEOUT_SECONDS = 120.0
 WORKSPACE_PLAN_REFERENCE_RE = re.compile(
     r"(?i)(?:^|[\s`'\"(])(?:[A-Za-z0-9_./-]*/)?plan\.json(?:$|[\s`'\":,.)])"
 )
@@ -424,6 +430,19 @@ class PlannerService:
         model = cls._direct_no_thinking_model(runtime_service)
         api_key = settings.PLANNING_REPAIR_API_KEY
         configured_direct_timeout = settings.PLANNING_REPAIR_TIMEOUT_SECONDS
+        backend_metadata: Dict[str, Any] = {}
+        get_backend_metadata = getattr(runtime_service, "get_backend_metadata", None)
+        if callable(get_backend_metadata):
+            try:
+                backend_metadata = get_backend_metadata() or {}
+            except Exception:
+                backend_metadata = {}
+        backend_name = str(backend_metadata.get("backend") or "").strip()
+        local_openclaw_timeout = int(
+            getattr(settings, "PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS", 0) or 0
+        )
+        if backend_name == "local_openclaw" and local_openclaw_timeout > 0:
+            configured_direct_timeout = local_openclaw_timeout
         direct_timeout = configured_direct_timeout
         if timeout_budget_seconds is not None:
             direct_timeout = max(1, min(direct_timeout, int(timeout_budget_seconds)))
@@ -2232,6 +2251,97 @@ Return only a JSON array matching this shape. No markdown. No prose.
         )
 
     @staticmethod
+    def _is_stale_replace_repair_reason(reason: str) -> bool:
+        return str(reason or "").startswith("post_repair_stale_replace_fallback")
+
+    @staticmethod
+    def _is_first_pass_stale_replace_repair_reason(reason: str) -> bool:
+        reason_text = str(reason or "")
+        return (
+            reason_text.startswith("plan_contains_immediate_repair_issues")
+            and "replace_in_file old text not found" in reason_text
+        )
+
+    @classmethod
+    def _planning_repair_timeout_margin_reason(cls, reason: str) -> Optional[str]:
+        if cls._is_stale_replace_repair_reason(reason):
+            return "post_repair_stale_replace_fallback"
+        if cls._is_first_pass_stale_replace_repair_reason(reason):
+            return "first_pass_stale_replace_old_text"
+        return None
+
+    @staticmethod
+    def _stale_replace_repair_diagnostic_path(prompt_hash: str) -> Path:
+        return STALE_REPLACE_REPAIR_DIAGNOSTIC_DIR / prompt_hash
+
+    @classmethod
+    def _capture_stale_replace_repair_prompt(
+        cls,
+        *,
+        repair_prompt: str,
+        reason: str,
+        session_id: Optional[int],
+        task_id: Optional[int],
+        repair_attempt_number: int,
+        repair_prompt_build_seconds: float,
+        malformed_output_chars: int,
+        validation_error_chars: int,
+        knowledge_context_chars: int,
+        includes_project_context: bool,
+        includes_non_project_context: bool,
+    ) -> Dict[str, Any]:
+        prompt_hash = hashlib.sha256(
+            str(repair_prompt or "").encode("utf-8")
+        ).hexdigest()[:12]
+        diagnostic_dir = cls._stale_replace_repair_diagnostic_path(prompt_hash)
+        diagnostic_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(diagnostic_dir, 0o777)
+
+        prompt_path = diagnostic_dir / f"planning_repair_prompt_{prompt_hash}.txt"
+        metadata_path = diagnostic_dir / "prompt_metadata.json"
+        prompt_path.write_text(repair_prompt, encoding="utf-8")
+        metadata = {
+            "kind": "planning_stale_replace_repair_prompt",
+            "prompt_sha256_12": prompt_hash,
+            "prompt_chars": len(repair_prompt or ""),
+            "session_id": session_id,
+            "task_id": task_id,
+            "repair_attempt_number": repair_attempt_number,
+            "repair_reason": str(reason or "")[:1000],
+            "repair_prompt_build_seconds": round(repair_prompt_build_seconds, 3),
+            "malformed_output_chars": malformed_output_chars,
+            "validation_error_chars": validation_error_chars,
+            "knowledge_context_chars": knowledge_context_chars,
+            "includes_project_context": includes_project_context,
+            "includes_non_project_context": includes_non_project_context,
+            "captured_at": datetime.now(UTC).isoformat(),
+            "prompt_path": str(prompt_path),
+        }
+        metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        os.chmod(prompt_path, 0o666)
+        os.chmod(metadata_path, 0o666)
+        return {
+            "prompt_sha256_12": prompt_hash,
+            "diagnostic_dir": str(diagnostic_dir),
+            "prompt_path": str(prompt_path),
+            "metadata_path": str(metadata_path),
+        }
+
+    @classmethod
+    def _write_stale_replace_repair_gateway_diagnostic(
+        cls,
+        prompt_hash: str,
+        filename: str,
+        payload: Dict[str, Any],
+    ) -> None:
+        diagnostic_dir = cls._stale_replace_repair_diagnostic_path(prompt_hash)
+        diagnostic_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(diagnostic_dir, 0o777)
+        path = diagnostic_dir / filename
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.chmod(path, 0o666)
+
+    @staticmethod
     def _normalize_repair_json_array_output(output_text: str) -> Optional[str]:
         """Normalize fenced JSON arrays before the main planning parser runs."""
         stripped = str(output_text or "").strip()
@@ -2264,11 +2374,13 @@ Return only a JSON array matching this shape. No markdown. No prose.
         repair_prompt: str,
         repair_timeout: int,
         lock_diagnostics_out: Optional[Dict[str, Any]] = None,
+        diagnostic_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         direct_result = await PlannerService._invoke_direct_no_thinking_repair(
             runtime_service,
             repair_prompt,
             repair_timeout,
+            diagnostic_context=diagnostic_context,
         )
         if direct_result is not None:
             return direct_result
@@ -2319,6 +2431,14 @@ Return only a JSON array matching this shape. No markdown. No prose.
                 float(PLANNING_REPAIR_TIMEOUT_SECONDS),
             ),
         )
+
+    @classmethod
+    def _effective_planning_repair_timeout_for_reason(
+        cls, timeout_seconds: int, reason: str
+    ) -> float:
+        if cls._planning_repair_timeout_margin_reason(reason):
+            return STALE_REPLACE_REPAIR_TIMEOUT_SECONDS
+        return cls._effective_planning_repair_timeout(timeout_seconds)
 
     @staticmethod
     def _effective_planning_repair_no_output_timeout(repair_timeout: int) -> int:
@@ -2385,6 +2505,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
         runtime_service: Any,
         repair_prompt: str,
         repair_timeout: int,
+        diagnostic_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         if not PlannerService._should_try_direct_no_thinking_repair(runtime_service):
             return None
@@ -2409,7 +2530,13 @@ Return only a JSON array matching this shape. No markdown. No prose.
             headers["Authorization"] = f"Bearer {api_key}"
 
         started_at = time.monotonic()
+        started_wall = datetime.now(UTC)
         direct_timeout = max(1, repair_timeout)
+        prompt_hash = str((diagnostic_context or {}).get("prompt_sha256_12") or "")
+        stale_replace_diagnostic = bool(
+            (diagnostic_context or {}).get("stale_replace_repair_diagnostic")
+            and prompt_hash
+        )
         _logger.info(
             "[REPAIR_DIRECT] attempting direct no-thinking repair "
             "url=%s model=%s timeout=%ds",
@@ -2418,7 +2545,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
             direct_timeout,
         )
 
-        async def _do_request() -> str:
+        async def _do_request() -> tuple[str, Dict[str, Any]]:
             async with httpx.AsyncClient(timeout=direct_timeout) as client:
                 response = await client.post(
                     f"{base_url}/chat/completions",
@@ -2427,19 +2554,67 @@ Return only a JSON array matching this shape. No markdown. No prose.
                 )
             response.raise_for_status()
             body = response.json()
-            return PlannerService._extract_chat_completion_content(body)
+            return PlannerService._extract_chat_completion_content(body), body
 
         try:
-            output = await asyncio.wait_for(
+            output, response_body = await asyncio.wait_for(
                 _do_request(), timeout=float(direct_timeout)
             )
         except asyncio.TimeoutError:
+            duration_seconds = time.monotonic() - started_at
+            if stale_replace_diagnostic:
+                PlannerService._write_stale_replace_repair_gateway_diagnostic(
+                    prompt_hash,
+                    "direct_no_thinking_result.json",
+                    {
+                        "kind": "planning_stale_replace_direct_no_thinking_result",
+                        "status": "timeout",
+                        "prompt_sha256_12": prompt_hash,
+                        "prompt_chars": len(repair_prompt or ""),
+                        "request_started_at": started_wall.isoformat(),
+                        "request_finished_at": datetime.now(UTC).isoformat(),
+                        "duration_seconds": round(duration_seconds, 3),
+                        "timeout_seconds": direct_timeout,
+                        "model": model,
+                        "base_url": base_url,
+                        "disable_thinking": settings.PLANNING_REPAIR_DISABLE_THINKING,
+                        "content_chars": 0,
+                        "content_null": True,
+                        "finish_reason": None,
+                        "gateway_error": "asyncio_timeout",
+                        **(diagnostic_context or {}),
+                    },
+                )
             _logger.warning(
                 "[REPAIR_DIRECT] wall-clock timeout after %ds; falling back to runtime",
                 direct_timeout,
             )
             return None
         except Exception as exc:
+            duration_seconds = time.monotonic() - started_at
+            if stale_replace_diagnostic:
+                PlannerService._write_stale_replace_repair_gateway_diagnostic(
+                    prompt_hash,
+                    "direct_no_thinking_result.json",
+                    {
+                        "kind": "planning_stale_replace_direct_no_thinking_result",
+                        "status": "error",
+                        "prompt_sha256_12": prompt_hash,
+                        "prompt_chars": len(repair_prompt or ""),
+                        "request_started_at": started_wall.isoformat(),
+                        "request_finished_at": datetime.now(UTC).isoformat(),
+                        "duration_seconds": round(duration_seconds, 3),
+                        "timeout_seconds": direct_timeout,
+                        "model": model,
+                        "base_url": base_url,
+                        "disable_thinking": settings.PLANNING_REPAIR_DISABLE_THINKING,
+                        "content_chars": 0,
+                        "content_null": True,
+                        "finish_reason": None,
+                        "gateway_error": f"{type(exc).__name__}: {str(exc)[:500]}",
+                        **(diagnostic_context or {}),
+                    },
+                )
             _logger.warning(
                 "[REPAIR_DIRECT] failed after %.1fs (%s: %s); falling back to runtime",
                 time.monotonic() - started_at,
@@ -2448,7 +2623,48 @@ Return only a JSON array matching this shape. No markdown. No prose.
             )
             return None
 
+        choices = (
+            response_body.get("choices") if isinstance(response_body, dict) else None
+        )
+        first_choice = choices[0] if isinstance(choices, list) and choices else {}
+        message = first_choice.get("message") if isinstance(first_choice, dict) else {}
+        content_value = message.get("content") if isinstance(message, dict) else None
+        finish_reason = (
+            first_choice.get("finish_reason")
+            if isinstance(first_choice, dict)
+            else None
+        )
+
         if not output.strip():
+            duration_seconds = time.monotonic() - started_at
+            if stale_replace_diagnostic:
+                PlannerService._write_stale_replace_repair_gateway_diagnostic(
+                    prompt_hash,
+                    "direct_no_thinking_result.json",
+                    {
+                        "kind": "planning_stale_replace_direct_no_thinking_result",
+                        "status": "empty_content",
+                        "prompt_sha256_12": prompt_hash,
+                        "prompt_chars": len(repair_prompt or ""),
+                        "request_started_at": started_wall.isoformat(),
+                        "request_finished_at": datetime.now(UTC).isoformat(),
+                        "duration_seconds": round(duration_seconds, 3),
+                        "timeout_seconds": direct_timeout,
+                        "model": model,
+                        "base_url": base_url,
+                        "disable_thinking": settings.PLANNING_REPAIR_DISABLE_THINKING,
+                        "content_chars": 0,
+                        "content_null": content_value is None,
+                        "finish_reason": finish_reason,
+                        "usage": (
+                            response_body.get("usage")
+                            if isinstance(response_body, dict)
+                            else None
+                        ),
+                        "gateway_error": None,
+                        **(diagnostic_context or {}),
+                    },
+                )
             _logger.warning(
                 "[REPAIR_DIRECT] empty output from direct call; "
                 "falling back to runtime"
@@ -2456,6 +2672,34 @@ Return only a JSON array matching this shape. No markdown. No prose.
             return None
 
         duration_seconds = time.monotonic() - started_at
+        if stale_replace_diagnostic:
+            PlannerService._write_stale_replace_repair_gateway_diagnostic(
+                prompt_hash,
+                "direct_no_thinking_result.json",
+                {
+                    "kind": "planning_stale_replace_direct_no_thinking_result",
+                    "status": "completed",
+                    "prompt_sha256_12": prompt_hash,
+                    "prompt_chars": len(repair_prompt or ""),
+                    "request_started_at": started_wall.isoformat(),
+                    "request_finished_at": datetime.now(UTC).isoformat(),
+                    "duration_seconds": round(duration_seconds, 3),
+                    "timeout_seconds": direct_timeout,
+                    "model": model,
+                    "base_url": base_url,
+                    "disable_thinking": settings.PLANNING_REPAIR_DISABLE_THINKING,
+                    "content_chars": len(output),
+                    "content_null": content_value is None,
+                    "finish_reason": finish_reason,
+                    "usage": (
+                        response_body.get("usage")
+                        if isinstance(response_body, dict)
+                        else None
+                    ),
+                    "gateway_error": None,
+                    **(diagnostic_context or {}),
+                },
+            )
         _logger.info(
             "[REPAIR_DIRECT] success planning_repair_direct=True "
             "backend=direct_chat_completions duration=%.1fs output_chars=%s",
@@ -2797,7 +3041,10 @@ Return only a JSON array matching this shape. No markdown. No prose.
             "[ORCHESTRATION] Planning output was malformed but salvageable; "
             f"attempting repair ({reason})"
         )
-        repair_timeout = cls._effective_planning_repair_timeout(timeout_seconds)
+        timeout_margin_reason = cls._planning_repair_timeout_margin_reason(reason)
+        repair_timeout = cls._effective_planning_repair_timeout_for_reason(
+            timeout_seconds, reason
+        )
         if _compact_no_output_retry:
             repair_prompt = cls.build_compact_planning_repair_prompt(
                 malformed_output,
@@ -2834,12 +3081,28 @@ Return only a JSON array matching this shape. No markdown. No prose.
                 r"\b(knowledge|memory|retrieved)\b", repair_prompt, re.IGNORECASE
             )
         )
+        stale_replace_diagnostic_context: Optional[Dict[str, Any]] = None
+        if cls._is_stale_replace_repair_reason(reason):
+            stale_replace_diagnostic_context = cls._capture_stale_replace_repair_prompt(
+                repair_prompt=repair_prompt,
+                reason=reason,
+                session_id=session_id,
+                task_id=task_id,
+                repair_attempt_number=_repair_attempt_number,
+                repair_prompt_build_seconds=repair_prompt_build_seconds,
+                malformed_output_chars=compact_malformed_output_chars,
+                validation_error_chars=validation_error_chars,
+                knowledge_context_chars=knowledge_context_chars,
+                includes_project_context=includes_project_context,
+                includes_non_project_context=includes_non_project_context,
+            )
+            stale_replace_diagnostic_context["stale_replace_repair_diagnostic"] = True
         logger.warning(
             "[ORCHESTRATION] session_id=%s task_id=%s repair_prompt_chars=%s "
             "malformed_output_chars=%s validation_error_chars=%s knowledge_context_chars=%s "
             "includes_project_context=%s includes_non_project_context=%s "
             "repair_reason=%s repair_prompt_build_seconds=%.3f repair_attempts=%s "
-            "compact_no_output_retry=%s",
+            "compact_no_output_retry=%s stale_replace_prompt_hash=%s",
             session_id,
             task_id,
             len(repair_prompt),
@@ -2852,6 +3115,11 @@ Return only a JSON array matching this shape. No markdown. No prose.
             repair_prompt_build_seconds,
             _repair_attempt_number,
             _compact_no_output_retry,
+            (
+                stale_replace_diagnostic_context.get("prompt_sha256_12")
+                if stale_replace_diagnostic_context
+                else None
+            ),
         )
         if len(repair_prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS:
             budget_error = cls._build_repair_prompt_budget_error(
@@ -2896,6 +3164,8 @@ Return only a JSON array matching this shape. No markdown. No prose.
                 "retry": "repair_prompt",
                 "reason": reason[:240],
                 "timeout_seconds": repair_timeout,
+                "stale_replace_timeout_margin": timeout_margin_reason is not None,
+                "repair_timeout_margin_reason": timeout_margin_reason,
                 "repair_prompt_chars": len(repair_prompt),
                 "malformed_output_chars": compact_malformed_output_chars,
                 "repair_prompt_build_seconds": round(repair_prompt_build_seconds, 3),
@@ -2914,6 +3184,8 @@ Return only a JSON array matching this shape. No markdown. No prose.
                 "strategy": "repair_prompt",
                 "compact_no_output_retry": _compact_no_output_retry,
                 "timeout_seconds": repair_timeout,
+                "stale_replace_timeout_margin": timeout_margin_reason is not None,
+                "repair_timeout_margin_reason": timeout_margin_reason,
                 "repair_prompt_chars": len(repair_prompt),
                 "malformed_output_chars": compact_malformed_output_chars,
                 "repair_prompt_build_seconds": round(repair_prompt_build_seconds, 3),
@@ -2933,6 +3205,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
                         repair_prompt,
                         repair_timeout,
                         lock_diagnostics_out=repair_lock_diagnostics,
+                        diagnostic_context=stale_replace_diagnostic_context,
                     ),
                     timeout=repair_timeout,
                 )

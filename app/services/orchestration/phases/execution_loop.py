@@ -218,6 +218,94 @@ def _phase7f_repair_output_excerpt(value: Any, max_chars: int = 500) -> str:
     return text[: max_chars - 3].rstrip() + "..."
 
 
+def _safe_relative_op_path(path_value: Any) -> Optional[str]:
+    raw_path = str(path_value or "").strip().replace("\\", "/")
+    if not raw_path:
+        return None
+    relative = raw_path.lstrip("./")
+    path = Path(relative)
+    if path.is_absolute() or ".." in path.parts:
+        return None
+    return relative
+
+
+def _phase7f_stale_replace_issues(
+    ops: Any,
+    project_dir: Path,
+) -> list[dict[str, Any]]:
+    if not isinstance(ops, list):
+        return []
+    issues: list[dict[str, Any]] = []
+    for index, op in enumerate(ops):
+        if not isinstance(op, dict):
+            continue
+        if str(op.get("op") or "").strip() != "replace_in_file":
+            continue
+        relative = _safe_relative_op_path(op.get("path"))
+        old_text = str(op.get("old") or "")
+        if not relative:
+            issues.append(
+                {
+                    "index": index,
+                    "path": str(op.get("path") or ""),
+                    "old": old_text,
+                    "reason": "invalid_path",
+                    "current_excerpt": "",
+                }
+            )
+            continue
+        target = project_dir / relative
+        if not target.exists() or not target.is_file():
+            issues.append(
+                {
+                    "index": index,
+                    "path": relative,
+                    "old": old_text,
+                    "reason": "target_missing",
+                    "current_excerpt": "",
+                }
+            )
+            continue
+        try:
+            current_text = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            current_text = target.read_text(encoding="utf-8", errors="replace")
+        if old_text not in current_text:
+            issues.append(
+                {
+                    "index": index,
+                    "path": relative,
+                    "old": old_text,
+                    "reason": "old_text_not_found",
+                    "current_excerpt": current_text[:6000],
+                }
+            )
+    return issues
+
+
+def _build_phase7f_stale_replace_correction_prompt(
+    *,
+    debug_data: dict[str, Any],
+    stale_issues: list[dict[str, Any]],
+) -> str:
+    return (
+        "Return only a bare JSON array containing one source repair object. "
+        "No markdown. No prose.\n"
+        "The prior Phase 7F ops_fix used stale replace_in_file.old text. "
+        "Correct only the stale operation(s); preserve valid source intent.\n"
+        "For each failed target, use either:\n"
+        "1. replace_in_file with old copied exactly from the current file excerpt; or\n"
+        "2. write_file with complete grounded file content preserving imports and public signatures.\n"
+        "Do not infer old signatures from tests. Do not use shell commands, cat, sed, heredocs, or python -c to mutate files.\n"
+        "Schema example:\n"
+        '[{"repair_type":"ops_fix","ops":[{"op":"replace_in_file","path":"src/...","old":"exact current text","new":"replacement"}],"verification_command":"python3 -m pytest -q"}]\n\n'
+        "Prior normalized repair object:\n"
+        f"{json.dumps(debug_data, indent=2, sort_keys=True)}\n\n"
+        "Failed replace_in_file targets with exact current file excerpts:\n"
+        f"{json.dumps(stale_issues, indent=2, sort_keys=True)}\n"
+    )
+
+
 def _mark_phase7f_bounded_debug_timeout_if_applicable(
     debug_error: Exception,
     *,
@@ -2122,6 +2210,152 @@ def execute_step_loop(
                 except Exception:
                     pass
                 continue
+
+            if phase7f_debug_repair_allowed and fix_type == "ops_fix":
+                stale_replace_issues = _phase7f_stale_replace_issues(
+                    debug_data.get("ops"), Path(orchestration_state.project_dir)
+                )
+                if stale_replace_issues:
+                    correction_prompt = _build_phase7f_stale_replace_correction_prompt(
+                        debug_data=debug_data,
+                        stale_issues=stale_replace_issues,
+                    )
+                    emit_live(
+                        "WARN",
+                        "[ORCHESTRATION] Phase 7F ops_fix contained stale replace_in_file old text; requesting one bounded correction",
+                        metadata={
+                            "phase": "debugging",
+                            "step_index": step_index + 1,
+                            "reason": "phase7f_ops_fix_stale_replace",
+                            "stale_replace_targets": [
+                                issue.get("path") for issue in stale_replace_issues[:10]
+                            ],
+                        },
+                    )
+                    correction_kwargs = dict(debug_runtime_kwargs)
+                    if correction_kwargs.get("diagnostic_metadata"):
+                        correction_kwargs["diagnostic_metadata"] = {
+                            **correction_kwargs["diagnostic_metadata"],
+                            "phase7f_ops_fix_correction": True,
+                            "stale_replace_targets": [
+                                issue.get("path") for issue in stale_replace_issues[:10]
+                            ],
+                        }
+                    correction_result = _run_coroutine(
+                        runtime_service.execute_task(
+                            correction_prompt,
+                            timeout_seconds=DEBUG_TIMEOUT_SECONDS,
+                            **correction_kwargs,
+                        )
+                    )
+                    correction_output = extract_structured_text(
+                        correction_result.get("output", "{}")
+                    )
+                    correction_success, correction_parsed, correction_strategy = (
+                        error_handler.attempt_json_parsing(
+                            correction_output,
+                            context="phase7f_ops_fix_stale_replace_correction",
+                        )
+                    )
+                    correction_normalized = (
+                        normalize_bounded_debug_repair_payload_detailed(
+                            correction_parsed,
+                            envelope=debug_feedback_envelope,
+                            source_edit_context=True,
+                        )
+                        if correction_success
+                        else None
+                    )
+                    corrected_debug_data = (
+                        correction_normalized.payload
+                        if correction_normalized is not None
+                        else None
+                    )
+                    corrected_stale_issues = (
+                        _phase7f_stale_replace_issues(
+                            corrected_debug_data.get("ops"),
+                            Path(orchestration_state.project_dir),
+                        )
+                        if corrected_debug_data
+                        and corrected_debug_data.get("fix_type") == "ops_fix"
+                        else []
+                    )
+                    correction_rejection_reason = None
+                    if not correction_success:
+                        correction_rejection_reason = "json_parse_failed"
+                    elif corrected_debug_data is None:
+                        correction_rejection_reason = (
+                            correction_normalized.rejection_reason
+                            if correction_normalized is not None
+                            else "unsupported_shape"
+                        )
+                    elif corrected_debug_data.get("fix_type") != "ops_fix":
+                        correction_rejection_reason = "non_ops_fix_correction"
+                    elif _debug_ops_have_placeholder_content(
+                        corrected_debug_data.get("ops")
+                    ):
+                        correction_rejection_reason = "placeholder_debug_ops_rejected"
+                    elif corrected_stale_issues:
+                        correction_rejection_reason = "stale_replace_after_correction"
+
+                    if correction_rejection_reason:
+                        if task_execution_id is not None:
+                            orchestration_state.debug_repair_task_execution_ids = (
+                                sorted({*debug_repair_used_ids, int(task_execution_id)})
+                            )
+                        try:
+                            append_orchestration_event(
+                                project_dir=orchestration_state.project_dir,
+                                session_id=session_id,
+                                task_id=task_id,
+                                event_type=EventType.REPAIR_REJECTED,
+                                parent_event_id=(debugging_phase_event or {}).get(
+                                    "event_id"
+                                ),
+                                details={
+                                    "phase": "execution",
+                                    "reason": "phase7f_ops_fix_stale_replace",
+                                    "debug_repair_terminal_reason": (
+                                        "phase7f_ops_fix_stale_replace"
+                                    ),
+                                    "debug_repair_attempted": True,
+                                    "debug_repair_used": True,
+                                    "debug_failure_class": (
+                                        debug_feedback_envelope.failure_class
+                                        if debug_feedback_envelope
+                                        else None
+                                    ),
+                                    "task_execution_id": ctx.task_execution_id,
+                                    "step_index": step_index + 1,
+                                    "phase7f_rejection_reason": (
+                                        correction_rejection_reason
+                                    ),
+                                    "phase7f_parsed_shape": (
+                                        correction_normalized.parsed_shape
+                                        if correction_normalized is not None
+                                        else None
+                                    ),
+                                    "phase7f_raw_output_excerpt": (
+                                        _phase7f_repair_output_excerpt(
+                                            correction_output
+                                        )
+                                    ),
+                                    "stale_replace_targets": [
+                                        issue.get("path")
+                                        for issue in stale_replace_issues[:10]
+                                    ],
+                                    "correction_strategy": correction_strategy,
+                                },
+                            )
+                        except Exception:
+                            pass
+                        raise ValueError(
+                            "Phase 7F ops_fix stale replace correction failed: "
+                            f"{correction_rejection_reason}"
+                        )
+
+                    debug_data = corrected_debug_data
+                    fix_type = "ops_fix"
 
             if (
                 phase7f_debug_repair_allowed

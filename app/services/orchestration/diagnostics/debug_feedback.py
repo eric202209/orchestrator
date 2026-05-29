@@ -340,6 +340,49 @@ def build_bounded_debug_repair_prompt(
             evidence_section = f"\n{rendered}\n"
     source_contract = build_debug_source_contract(envelope, evidence_capsule)
     source_contract_section = f"\n{source_contract}\n" if source_contract else ""
+    source_ops_contract_section = ""
+    if source_contract:
+        source_ops_contract_section = (
+            "\nSource-context structured repair contract:\n"
+            "- For this source-context failure, return repair_type/fix_type ops_fix with an ops array.\n"
+            "- Use structured write_file or replace_in_file operations for source changes.\n"
+            "- For source_step_validation, prefer write_file with complete grounded file content when replacing function bodies or when exact current old text is not visible.\n"
+            "- Use replace_in_file only when old is copied exactly from a visible current source excerpt.\n"
+            "- Never infer replace_in_file.old signatures from tests; tests describe expected behavior, not current source text.\n"
+            "- Preserve imports and existing public function/class signatures from source excerpts.\n"
+            "- Do not use command_fix for source file changes; command_fix is only for verifier/command-only repairs.\n"
+            "- Do not use shell commands, heredocs, cat > file, sed, or python -c to mutate files.\n"
+            "- Minimal valid source repair example:\n"
+            '  {"repair_type":"ops_fix","ops":[{"op":"replace_in_file","path":"src/...","old":"...","new":"..."}],"verification_command":"python3 -m pytest -q"}\n'
+        )
+    if source_contract:
+        rules_section = (
+            "Rules:\n"
+            "1. Output exactly one JSON array containing one source repair object.\n"
+            "2. The repair object must include repair_type or fix_type set to ops_fix, an ops array, and verification_command.\n"
+            "3. ops must contain structured replace_in_file, write_file, or append_file operations.\n"
+            "4. verification_command must be a runnable verification shell string, not a mutation command.\n"
+            "5. Keep the fix atomic; do not rewrite unrelated files.\n"
+            "6. Use relative paths only; no absolute paths, `..`, or `~`.\n"
+            f"7. Commands execute from the workspace root ({workspace}). Do not cd into the workspace root or any path containing vault/projects; you are already there.\n"
+            "8. Do not bypass validators, workspace boundaries, or verification.\n"
+            "9. Do not request additional retries or describe policy.\n"
+            "10. If workspace evidence names a missing Python module target, prefer creating that module file instead of editing only a package __init__.py.\n"
+        )
+    else:
+        rules_section = (
+            "Rules:\n"
+            "1. Output exactly one JSON array containing one command_fix step object.\n"
+            "2. The step object must include title, command, and verification_command.\n"
+            "3. command and verification_command must be runnable shell strings, not prose instructions.\n"
+            "4. Keep the fix atomic; do not rewrite unrelated files.\n"
+            "5. Do not use heredoc rewrites; keep file changes minimal and command-driven.\n"
+            "6. Use relative paths only; no absolute paths, `..`, or `~`.\n"
+            f"7. Commands execute from the workspace root ({workspace}). Do not cd into the workspace root or any path containing vault/projects; you are already there.\n"
+            "8. Do not bypass validators, workspace boundaries, or verification.\n"
+            "9. Do not request additional retries or describe policy.\n"
+            "10. If workspace evidence names a missing Python module target, prefer creating that module file instead of editing only a package __init__.py.\n"
+        )
     return (
         "Return a bare JSON array of one minimal debug repair step. "
         "Do not return prose, markdown, comments, explanations, or fenced code.\n\n"
@@ -353,18 +396,8 @@ def build_bounded_debug_repair_prompt(
         f"{json.dumps(excerpts, ensure_ascii=True)[:1800]}\n"
         f"{evidence_section}\n"
         f"{source_contract_section}"
-        "Rules:\n"
-        "1. Output exactly one JSON array containing one step object.\n"
-        "2. The step object must include title, command, and verification_command.\n"
-        "   For source-code repairs, also include an ops array with replace_in_file, write_file, or append_file operations.\n"
-        "3. command and verification_command must be runnable shell strings, not prose instructions.\n"
-        "4. Keep the fix atomic; do not rewrite unrelated files.\n"
-        "5. Do not use heredoc rewrites; keep file changes minimal and command-driven.\n"
-        "6. Use relative paths only; no absolute paths, `..`, or `~`.\n"
-        f"7. Commands execute from the workspace root ({workspace}). Do not cd into the workspace root or any path containing vault/projects; you are already there.\n"
-        "8. Do not bypass validators, workspace boundaries, or verification.\n"
-        "9. Do not request additional retries or describe policy.\n"
-        "10. If workspace evidence names a missing Python module target, prefer creating that module file instead of editing only a package __init__.py.\n"
+        f"{source_ops_contract_section}"
+        f"{rules_section}"
     )
 
 

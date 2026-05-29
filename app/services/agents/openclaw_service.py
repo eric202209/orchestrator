@@ -28,6 +28,7 @@ import tempfile
 from typing import Optional, Dict, Any, List, Callable
 from datetime import UTC, datetime
 from pathlib import Path
+import httpx
 from sqlalchemy.orm import Session
 from app.models import Session as SessionModel, Task, LogEntry, Project
 from app.config import settings
@@ -435,6 +436,189 @@ class OpenClawSessionService:
             tail,
         )
         return tail
+
+    def _should_use_phase7f_direct_repair(
+        self, diagnostic_label: Optional[str]
+    ) -> bool:
+        """Route only Phase 7F structured repair through direct no-thinking chat."""
+
+        if diagnostic_label != "PHASE7F_DEBUG_REPAIR":
+            return False
+        if not settings.PHASE7F_REPAIR_DIRECT_ENABLED:
+            return False
+        return self.backend_descriptor.name == "local_openclaw"
+
+    @staticmethod
+    def _phase7f_repair_direct_config() -> Dict[str, str]:
+        """Resolve Phase 7F direct repair settings with planning-repair fallbacks."""
+
+        return {
+            "base_url": (
+                settings.PHASE7F_REPAIR_BASE_URL
+                or settings.PLANNING_REPAIR_BASE_URL
+                or ""
+            ).rstrip("/"),
+            "model": settings.PHASE7F_REPAIR_MODEL or settings.PLANNING_REPAIR_MODEL,
+            "api_key": settings.PHASE7F_REPAIR_API_KEY
+            or settings.PLANNING_REPAIR_API_KEY,
+        }
+
+    @staticmethod
+    def _phase7f_repair_direct_payload(prompt: str, model: str) -> Dict[str, Any]:
+        """Build the direct structured-repair payload for qwen/vLLM no-thinking mode."""
+
+        payload: Dict[str, Any] = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "max_tokens": 2048,
+            "stream": False,
+        }
+        if settings.PHASE7F_REPAIR_DISABLE_THINKING:
+            payload["think"] = False
+            payload["enable_thinking"] = False
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
+        return payload
+
+    @staticmethod
+    def _extract_chat_completion_content(body: Any) -> str:
+        """Extract assistant content from an OpenAI-compatible chat response."""
+
+        if not isinstance(body, dict):
+            return ""
+        choices = body.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return ""
+        first = choices[0]
+        if not isinstance(first, dict):
+            return ""
+        message = first.get("message")
+        if not isinstance(message, dict):
+            return ""
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(
+                item["text"]
+                for item in content
+                if isinstance(item, dict) and isinstance(item.get("text"), str)
+            )
+        return ""
+
+    async def _execute_phase7f_direct_repair(
+        self,
+        prompt: str,
+        *,
+        timeout_seconds: int,
+        diagnostic_metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        config = self._phase7f_repair_direct_config()
+        base_url = config["base_url"]
+        model = config["model"]
+        if not base_url or not model:
+            raise OpenClawSessionError(
+                "Phase 7F direct repair is enabled but base URL or model is not configured"
+            )
+
+        payload = self._phase7f_repair_direct_payload(prompt, model)
+        headers = {"Content-Type": "application/json"}
+        api_key = config["api_key"].strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        started_at = time.monotonic()
+        url = f"{base_url}/chat/completions"
+        self._log_entry(
+            "INFO",
+            "[PHASE7F_DIRECT_REPAIR] attempting direct no-thinking structured repair "
+            f"model={model} timeout={timeout_seconds}s prompt_chars={len(prompt or '')}",
+            metadata=json.dumps(
+                {
+                    "diagnostic_label": "PHASE7F_DEBUG_REPAIR",
+                    "invocation_kind": "phase7f_debug_repair",
+                    "timeout_boundary": "phase7f_debug_repair_direct_chat",
+                    "prompt_chars": len(prompt or ""),
+                    "prompt_sha256_12": hashlib.sha256(
+                        (prompt or "").encode("utf-8")
+                    ).hexdigest()[:12],
+                    "disable_thinking": settings.PHASE7F_REPAIR_DISABLE_THINKING,
+                    **(diagnostic_metadata or {}),
+                }
+            ),
+        )
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+                response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            body = response.json()
+        except Exception as exc:
+            duration_seconds = time.monotonic() - started_at
+            error = OpenClawSessionError(
+                f"Phase 7F direct repair failed: {type(exc).__name__}: {str(exc)[:200]}"
+            )
+            error.runtime_diagnostics = {
+                "diagnostic_label": "PHASE7F_DEBUG_REPAIR",
+                "invocation_kind": "phase7f_debug_repair",
+                "timeout_boundary": "phase7f_debug_repair_direct_chat",
+                "direct_chat_completions": True,
+                "disable_thinking": settings.PHASE7F_REPAIR_DISABLE_THINKING,
+                "duration_seconds": round(duration_seconds, 3),
+                "timed_out": isinstance(
+                    exc, (httpx.TimeoutException, asyncio.TimeoutError)
+                ),
+            }
+            raise error
+
+        output = self._extract_chat_completion_content(body)
+        duration_seconds = time.monotonic() - started_at
+        choices = body.get("choices") if isinstance(body, dict) else None
+        first_choice = choices[0] if isinstance(choices, list) and choices else {}
+        message = first_choice.get("message") if isinstance(first_choice, dict) else {}
+        reasoning = message.get("reasoning") if isinstance(message, dict) else None
+        finish_reason = (
+            first_choice.get("finish_reason")
+            if isinstance(first_choice, dict)
+            else None
+        )
+
+        diagnostics = {
+            "diagnostic_label": "PHASE7F_DEBUG_REPAIR",
+            "invocation_kind": "phase7f_debug_repair",
+            "timeout_boundary": "phase7f_debug_repair_direct_chat",
+            "direct_chat_completions": True,
+            "disable_thinking": settings.PHASE7F_REPAIR_DISABLE_THINKING,
+            "duration_seconds": round(duration_seconds, 3),
+            "timeout_seconds": timeout_seconds,
+            "finish_reason": finish_reason,
+            "content_chars": len(output or ""),
+            "reasoning_chars": len(reasoning) if isinstance(reasoning, str) else 0,
+            "usage": body.get("usage") if isinstance(body, dict) else None,
+        }
+        self._log_entry(
+            "INFO",
+            "[PHASE7F_DIRECT_REPAIR] completed direct structured repair "
+            f"duration={duration_seconds:.1f}s output_chars={len(output or '')} "
+            f"reasoning_chars={diagnostics['reasoning_chars']}",
+            metadata=json.dumps(diagnostics),
+        )
+
+        if not output.strip():
+            error = OpenClawSessionError(
+                "Phase 7F direct repair returned empty content"
+            )
+            error.runtime_diagnostics = diagnostics
+            raise error
+
+        return {
+            "status": "completed",
+            "output": output,
+            "logs": [],
+            "backend": "phase7f_direct_chat_completions",
+            "model_family": model,
+            "diagnostics": diagnostics,
+        }
 
     async def _run_cli_prompt_with_diagnostics(
         self,
@@ -946,6 +1130,16 @@ class OpenClawSessionService:
                     result = await self._execute_demo_mode(optimized_prompt)
                     # Demo mode always completes successfully (by design)
                     result["status"] = "completed"
+                elif self._should_use_phase7f_direct_repair(diagnostic_label):
+                    result = await self._execute_phase7f_direct_repair(
+                        optimized_prompt,
+                        timeout_seconds=timeout_seconds,
+                        diagnostic_metadata={
+                            **(diagnostic_metadata or {}),
+                            "original_prompt_size": len(prompt or ""),
+                            "optimized_prompt_size": len(optimized_prompt or ""),
+                        },
+                    )
                 else:
                     # REAL MODE: Execute task via OpenClaw HTTP API
                     diagnostics_kwargs: Dict[str, Any] = {}

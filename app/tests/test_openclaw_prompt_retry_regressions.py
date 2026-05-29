@@ -129,3 +129,111 @@ def test_execute_task_preserves_timeout_runtime_diagnostics(db_session, monkeypa
         return
 
     raise AssertionError("Expected timeout error")
+
+
+def test_phase7f_debug_repair_uses_direct_no_thinking_chat(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "local_openclaw")
+    monkeypatch.setattr(settings, "AGENT_MODEL", "local")
+    session, task = _seed_service_models(db_session)
+    service = OpenClawSessionService(
+        db_session, session.id, task.id, use_demo_mode=False
+    )
+
+    seen: dict[str, object] = {}
+
+    async def fake_direct_repair(prompt, *, timeout_seconds, diagnostic_metadata=None):
+        seen["prompt"] = prompt
+        seen["timeout_seconds"] = timeout_seconds
+        seen["diagnostic_metadata"] = diagnostic_metadata
+        return {
+            "status": "completed",
+            "output": '{"ops":[]}',
+            "logs": [],
+            "backend": "phase7f_direct_chat_completions",
+            "model_family": "qwen-local",
+        }
+
+    async def fake_execute_task_with_streaming(*args, **kwargs):
+        raise AssertionError("Phase 7F should not use OpenClaw CLI streaming")
+
+    monkeypatch.setattr(service, "_execute_phase7f_direct_repair", fake_direct_repair)
+    monkeypatch.setattr(
+        service, "execute_task_with_streaming", fake_execute_task_with_streaming
+    )
+    monkeypatch.setattr(service, "_log_entry", lambda *args, **kwargs: None)
+
+    result = asyncio.run(
+        service.execute_task(
+            "Return bounded JSON repair",
+            timeout_seconds=180,
+            diagnostic_label="PHASE7F_DEBUG_REPAIR",
+            diagnostic_metadata={"debug_failure_class": "source_step_validation"},
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert result["backend"] == "phase7f_direct_chat_completions"
+    assert seen["prompt"] == "Return bounded JSON repair"
+    assert seen["timeout_seconds"] == 180
+    assert seen["diagnostic_metadata"]["debug_failure_class"] == (
+        "source_step_validation"
+    )
+
+
+def test_phase7f_direct_repair_payload_disables_thinking(monkeypatch):
+    monkeypatch.setattr(settings, "PHASE7F_REPAIR_DISABLE_THINKING", True)
+
+    payload = OpenClawSessionService._phase7f_repair_direct_payload(
+        "Return JSON", "qwen-local"
+    )
+
+    assert payload["model"] == "qwen-local"
+    assert payload["messages"] == [{"role": "user", "content": "Return JSON"}]
+    assert payload["think"] is False
+    assert payload["enable_thinking"] is False
+    assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_non_phase7f_debug_repair_keeps_openclaw_streaming_path(
+    db_session, monkeypatch
+):
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "local_openclaw")
+    monkeypatch.setattr(settings, "AGENT_MODEL", "local")
+    session, task = _seed_service_models(db_session)
+    service = OpenClawSessionService(
+        db_session, session.id, task.id, use_demo_mode=False
+    )
+
+    calls: list[str] = []
+
+    async def fake_direct_repair(*args, **kwargs):
+        raise AssertionError("Non-Phase 7F calls must not use direct repair")
+
+    async def fake_execute_task_with_streaming(
+        prompt, timeout_seconds, log_callback, *, reuse_task_session=True, **kwargs
+    ):
+        calls.append(prompt)
+        return {
+            "status": "completed",
+            "mode": "real",
+            "output": "ok",
+            "error": "",
+            "logs": [],
+        }
+
+    monkeypatch.setattr(service, "_execute_phase7f_direct_repair", fake_direct_repair)
+    monkeypatch.setattr(
+        service, "execute_task_with_streaming", fake_execute_task_with_streaming
+    )
+    monkeypatch.setattr(service, "_log_entry", lambda *args, **kwargs: None)
+
+    result = asyncio.run(
+        service.execute_task(
+            "Return a normal answer",
+            timeout_seconds=30,
+            diagnostic_label="PLANNING",
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert calls == ["Return a normal answer"]

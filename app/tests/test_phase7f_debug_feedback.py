@@ -20,6 +20,7 @@ from app.services.orchestration.diagnostics.debug_feedback import (
     build_debug_feedback_envelope,
     classify_debug_failure,
     normalize_bounded_debug_repair_payload,
+    normalize_bounded_debug_repair_payload_detailed,
     persist_debug_feedback_envelope,
 )
 from app.services.orchestration.diagnostics.diff_capsule import build_diff_capsule
@@ -968,6 +969,79 @@ def test_source_step_validation_prompt_includes_medium_test_contract(tmp_path):
     assert "src/medium_cli/store.py" in prompt
     assert "store.summary() should equal (3, 2)" in prompt
     assert "Do not edit tests or verifier commands." in prompt
+    assert "Source-context structured repair contract:" in prompt
+    assert "ops_fix" in prompt
+    assert "write_file or replace_in_file" in prompt
+    assert "prefer write_file with complete grounded file content" in prompt
+    assert "exact current old text is not visible" in prompt
+    assert (
+        "replace_in_file only when old is copied exactly from a visible current source excerpt"
+        in prompt
+    )
+    assert "Never infer replace_in_file.old signatures from tests" in prompt
+    assert "Preserve imports and existing public function/class signatures" in prompt
+    assert "Do not use command_fix for source file changes" in prompt
+    assert "command_fix is only for verifier/command-only repairs" in prompt
+    assert (
+        "Do not use shell commands, heredocs, cat > file, sed, or python -c" in prompt
+    )
+    assert '{"repair_type":"ops_fix","ops":[{"op":"replace_in_file"' in prompt
+    assert (
+        "step object must include title, command, and verification_command"
+        not in prompt
+    )
+    assert "command-driven" not in prompt
+
+
+def test_phase7f_non_source_prompt_does_not_force_ops_fix(tmp_path):
+    envelope = build_debug_feedback_envelope(
+        task_execution_id=123,
+        task_id=45,
+        step_index=1,
+        failure_phase="execution",
+        failed_command="python3 -m pytest -q",
+        stderr="pytest command failed because --maxfail was missing",
+        validator_reasons=["completion_validation_failed"],
+        workspace_path=tmp_path,
+    )
+
+    prompt = build_bounded_debug_repair_prompt(envelope)
+
+    assert "Source-context structured repair contract:" not in prompt
+    assert "command_fix is only for verifier/command-only repairs" not in prompt
+    assert "prefer write_file with complete grounded file content" not in prompt
+    assert "Never infer replace_in_file.old signatures from tests" not in prompt
+    assert "command_fix step object" in prompt
+    assert "step object must include title, command, and verification_command" in prompt
+    assert "command-driven" in prompt
+
+
+def test_source_context_command_fix_rejected_remains_enforced(tmp_path):
+    envelope = build_debug_feedback_envelope(
+        task_execution_id=123,
+        task_id=45,
+        step_index=1,
+        failure_phase="step_validation",
+        failed_command="ls src/medium_cli tests",
+        stderr="store.py still contains not-implemented markers",
+        validator_reasons=["store.py still contains not-implemented markers"],
+        workspace_path=tmp_path,
+    )
+
+    result = normalize_bounded_debug_repair_payload_detailed(
+        [
+            {
+                "title": "Rewrite source with shell",
+                "command": "cat > src/medium_cli/store.py << 'EOF'\npass\nEOF",
+                "verification_command": "python3 -m pytest -q",
+            }
+        ],
+        envelope=envelope,
+        source_edit_context=True,
+    )
+
+    assert result.payload is None
+    assert result.rejection_reason == "source_context_command_fix_rejected"
 
 
 def test_unrelated_unknown_failure_stays_legacy_ineligible(tmp_path):
@@ -1115,6 +1189,12 @@ def test_code_fix_verification_replaces_stale_commands_before_retry(
 def test_non_actionable_code_fix_for_structured_ops_is_rejected(db_session, tmp_path):
     runtime = _FakeRuntime(
         [
+            {
+                "status": "failed",
+                "output": "FAILED tests/test_demo.py::test_value",
+                "error": "AssertionError: value missing",
+                "returncode": 1,
+            },
             {
                 "output": json.dumps(
                     {
@@ -1402,6 +1482,299 @@ def test_wrapped_typed_ops_fix_applies_to_repeated_structured_op_failures(
     ]
     assert "1.1.0" in (ctx.orchestration_state.project_dir / "README.md").read_text(
         encoding="utf-8"
+    )
+
+
+def test_phase7f_ops_fix_stale_replace_correction_prevents_partial_mutation(
+    db_session, tmp_path
+):
+    runtime = _FakeRuntime(
+        [
+            {
+                "status": "failed",
+                "output": "FAILED tests/test_demo.py::test_value",
+                "error": "AssertionError: value missing",
+                "returncode": 1,
+            },
+            {
+                "output": json.dumps(
+                    [
+                        {
+                            "repair_type": "ops_fix",
+                            "ops": [
+                                {
+                                    "op": "replace_in_file",
+                                    "path": "src/demo.py",
+                                    "old": "def implemented() -> bool:\n    return False\n",
+                                    "new": "def implemented() -> bool:\n    return True\n",
+                                },
+                                {
+                                    "op": "replace_in_file",
+                                    "path": "src/demo.py",
+                                    "old": 'def value(store: Store) -> int:\n    raise NotImplementedError("value missing")\n',
+                                    "new": "def value() -> int:\n    return 1\n",
+                                },
+                            ],
+                            "verification_command": "python3 -m py_compile src/demo.py",
+                        }
+                    ]
+                )
+            },
+            {
+                "output": json.dumps(
+                    [
+                        {
+                            "repair_type": "ops_fix",
+                            "ops": [
+                                {
+                                    "op": "replace_in_file",
+                                    "path": "src/demo.py",
+                                    "old": "def implemented() -> bool:\n    return False\n",
+                                    "new": "def implemented() -> bool:\n    return True\n",
+                                },
+                                {
+                                    "op": "replace_in_file",
+                                    "path": "src/demo.py",
+                                    "old": 'def value(total: int) -> int:\n    raise NotImplementedError("value missing")\n',
+                                    "new": "def value(total: int) -> int:\n    return total\n",
+                                },
+                            ],
+                            "verification_command": "python3 -m py_compile src/demo.py",
+                        }
+                    ]
+                )
+            },
+        ]
+    )
+    ctx, _execution = _make_run_context(
+        db_session,
+        tmp_path,
+        runtime=runtime,
+        expected_files=["src/demo.py"],
+        step_overrides={
+            "description": "Run project tests before implementation",
+            "commands": ["custom-test-command"],
+            "verification": "",
+            "ops": [],
+        },
+    )
+    source_dir = ctx.orchestration_state.project_dir / "src"
+    source_dir.mkdir(parents=True)
+    source_path = source_dir / "demo.py"
+    source_path.write_text(
+        "def implemented() -> bool:\n"
+        "    return False\n"
+        "\n"
+        "def value(total: int) -> int:\n"
+        '    raise NotImplementedError("value missing")\n',
+        encoding="utf-8",
+    )
+
+    result = execute_step_loop(
+        ctx=ctx,
+        extract_structured_text=_extract_structured_text,
+        normalize_step=_normalize_step,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: [],
+        workspace_violation_error_cls=RuntimeError,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        record_live_log_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "completed", result
+    assert len(runtime.prompts) == 3
+    assert "Failed replace_in_file targets with exact current file excerpts" in (
+        runtime.prompts[2]
+    )
+    assert "def value(total: int) -> int:" in runtime.prompts[2]
+    assert source_path.read_text(encoding="utf-8") == (
+        "def implemented() -> bool:\n"
+        "    return True\n"
+        "\n"
+        "def value(total: int) -> int:\n"
+        "    return total\n"
+    )
+
+
+def test_phase7f_ops_fix_stale_replace_correction_accepts_write_file(
+    db_session, tmp_path
+):
+    runtime = _FakeRuntime(
+        [
+            {
+                "status": "failed",
+                "output": "FAILED tests/test_demo.py::test_value",
+                "error": "AssertionError: value missing",
+                "returncode": 1,
+            },
+            {
+                "output": json.dumps(
+                    [
+                        {
+                            "repair_type": "ops_fix",
+                            "ops": [
+                                {
+                                    "op": "replace_in_file",
+                                    "path": "src/demo.py",
+                                    "old": 'def value(store: Store) -> int:\n    raise NotImplementedError("value missing")\n',
+                                    "new": "def value() -> int:\n    return 1\n",
+                                }
+                            ],
+                            "verification_command": "python3 -m py_compile src/demo.py",
+                        }
+                    ]
+                )
+            },
+            {
+                "output": json.dumps(
+                    [
+                        {
+                            "repair_type": "ops_fix",
+                            "ops": [
+                                {
+                                    "op": "write_file",
+                                    "path": "src/demo.py",
+                                    "content": "def value(total: int) -> int:\n    return total\n",
+                                }
+                            ],
+                            "verification_command": "python3 -m py_compile src/demo.py",
+                        }
+                    ]
+                )
+            },
+        ]
+    )
+    ctx, _execution = _make_run_context(
+        db_session,
+        tmp_path,
+        runtime=runtime,
+        expected_files=["src/demo.py"],
+        step_overrides={
+            "description": "Run project tests before implementation",
+            "commands": ["custom-test-command"],
+            "verification": "",
+            "ops": [],
+        },
+    )
+    source_dir = ctx.orchestration_state.project_dir / "src"
+    source_dir.mkdir(parents=True)
+    source_path = source_dir / "demo.py"
+    source_path.write_text(
+        "def value(total: int) -> int:\n"
+        '    raise NotImplementedError("value missing")\n',
+        encoding="utf-8",
+    )
+
+    result = execute_step_loop(
+        ctx=ctx,
+        extract_structured_text=_extract_structured_text,
+        normalize_step=_normalize_step,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: [],
+        workspace_violation_error_cls=RuntimeError,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        record_live_log_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "completed", result
+    assert source_path.read_text(encoding="utf-8") == (
+        "def value(total: int) -> int:\n    return total\n"
+    )
+
+
+def test_phase7f_ops_fix_stale_replace_failed_correction_is_rejected(
+    db_session, tmp_path
+):
+    runtime = _FakeRuntime(
+        [
+            {
+                "status": "failed",
+                "output": "FAILED tests/test_demo.py::test_value",
+                "error": "AssertionError: value missing",
+                "returncode": 1,
+            },
+            {
+                "output": json.dumps(
+                    [
+                        {
+                            "repair_type": "ops_fix",
+                            "ops": [
+                                {
+                                    "op": "replace_in_file",
+                                    "path": "src/demo.py",
+                                    "old": 'def value(store: Store) -> int:\n    raise NotImplementedError("value missing")\n',
+                                    "new": "def value() -> int:\n    return 1\n",
+                                }
+                            ],
+                            "verification_command": "python3 -m py_compile src/demo.py",
+                        }
+                    ]
+                )
+            },
+            {
+                "output": json.dumps(
+                    [
+                        {
+                            "repair_type": "ops_fix",
+                            "ops": [
+                                {
+                                    "op": "replace_in_file",
+                                    "path": "src/demo.py",
+                                    "old": 'def value(store: Store) -> int:\n    raise NotImplementedError("value missing")\n',
+                                    "new": "def value() -> int:\n    return 1\n",
+                                }
+                            ],
+                            "verification_command": "python3 -m py_compile src/demo.py",
+                        }
+                    ]
+                )
+            },
+        ]
+    )
+    ctx, _execution = _make_run_context(
+        db_session,
+        tmp_path,
+        runtime=runtime,
+        expected_files=["src/demo.py"],
+        step_overrides={
+            "description": "Run project tests before implementation",
+            "commands": ["custom-test-command"],
+            "verification": "",
+            "ops": [],
+        },
+    )
+    source_dir = ctx.orchestration_state.project_dir / "src"
+    source_dir.mkdir(parents=True)
+    source_path = source_dir / "demo.py"
+    original_source = (
+        "def value(total: int) -> int:\n"
+        '    raise NotImplementedError("value missing")\n'
+    )
+    source_path.write_text(original_source, encoding="utf-8")
+
+    result = execute_step_loop(
+        ctx=ctx,
+        extract_structured_text=_extract_structured_text,
+        normalize_step=_normalize_step,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: [],
+        workspace_violation_error_cls=RuntimeError,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        record_live_log_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "failed"
+    assert source_path.read_text(encoding="utf-8") == original_source
+    events = read_orchestration_events(
+        ctx.orchestration_state.project_dir,
+        ctx.session_id,
+        ctx.task_id,
+    )
+    rejected = [
+        event
+        for event in events
+        if event.get("event_type") == EventType.REPAIR_REJECTED
+    ]
+    assert rejected[-1]["details"]["reason"] == "phase7f_ops_fix_stale_replace"
+    assert rejected[-1]["details"]["phase7f_rejection_reason"] == (
+        "stale_replace_after_correction"
     )
 
 
