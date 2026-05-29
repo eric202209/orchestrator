@@ -123,6 +123,102 @@ def test_phase10o_stale_replace_fallback_repair_prompt_keeps_file_excerpt(
     assert "valid JSON array" in prompt
 
 
+def test_phase10o_empty_replace_old_text_repair_prompt_guidance(tmp_path: Path):
+    source = tmp_path / "src" / "medium_cli" / "formatting.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "def format_summary(total, completed):\n" "    raise NotImplementedError\n",
+        encoding="utf-8",
+    )
+
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Implement summary formatting",
+        malformed_output=(
+            '[{"step_number":1,"commands":[],"verification":"python3 -m pytest -q",'
+            '"rollback":null,"expected_files":["src/medium_cli/formatting.py"],'
+            '"ops":[{"op":"replace_in_file","path":"src/medium_cli/formatting.py",'
+            '"old":"","new":"def format_summary(total, completed):\\n    return '
+            'f\\"{total} tasks, {completed} complete\\"\\n"}]}]'
+        ),
+        project_dir=tmp_path,
+        rejection_reasons=[
+            "empty_replace_old_text_steps: replace_in_file old text is empty "
+            "or missing in steps [1]"
+        ],
+    )
+
+    assert "Empty replace_in_file old-text repair:" in prompt
+    assert "Do not use `replace_in_file` as a create or overwrite operation" in prompt
+    assert "Do not use empty `old` text" in prompt
+    assert "copy exact current file text" in prompt
+    assert "use `ops.write_file` with complete grounded file content" in prompt
+
+
+def test_phase10o_stale_replace_second_pass_preserves_source_targets(
+    tmp_path: Path,
+):
+    package = tmp_path / "src" / "medium_cli"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "formatting.py").write_text(
+        "def format_summary(total: int, completed: int) -> str:\n"
+        "    raise NotImplementedError\n",
+        encoding="utf-8",
+    )
+    (package / "store.py").write_text(
+        "class TaskStore:\n"
+        "    def summary(self):\n"
+        "        raise NotImplementedError\n",
+        encoding="utf-8",
+    )
+    (package / "cli.py").write_text(
+        "def main(argv=None):\n" "    return 0\n",
+        encoding="utf-8",
+    )
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_summary.py").write_text(
+        "from medium_cli.cli import main\n"
+        "from medium_cli.formatting import format_summary\n"
+        "from medium_cli.store import TaskStore\n"
+        "\n"
+        "def test_summary_contract():\n"
+        "    store = TaskStore()\n"
+        "    assert store.summary() == (3, 2)\n"
+        "    assert format_summary(3, 2) == '3 tasks, 2 complete'\n"
+        "    assert main(['summary']) == 0\n",
+        encoding="utf-8",
+    )
+
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Add summary command to the medium_cli CLI",
+        malformed_output=(
+            '[{"step_number":1,"ops":[{"op":"replace_in_file",'
+            '"path":"src/medium_cli/formatting.py","old":"missing","new":"done"}]},'
+            '{"step_number":2,"ops":[{"op":"replace_in_file",'
+            '"path":"src/medium_cli/store.py","old":"missing","new":"done"}]},'
+            '{"step_number":3,"ops":[{"op":"replace_in_file",'
+            '"path":"src/medium_cli/cli.py","old":"missing","new":"done"}]}]'
+        ),
+        project_dir=tmp_path,
+        rejection_reasons=[
+            "stale_replace_ops_steps: steps [1, 2, 3] still use replace_in_file "
+            "with old text that is absent from the current workspace",
+            "patch_strategy_fallback_required: Exact-text patching is exhausted",
+        ],
+    )
+
+    assert "Stale replace second-pass target preservation:" in prompt
+    assert "Preserve existing valid source ops" in prompt
+    assert "do not drop unrelated src edits" in prompt
+    assert "Only convert stale replace_in_file ops for the same target" in prompt
+    assert "src/medium_cli/formatting.py" in prompt
+    assert "src/medium_cli/store.py" in prompt
+    assert "src/medium_cli/cli.py" in prompt
+    assert "Do not invent unseen test files" in prompt
+    assert "Keep simple scalar verification on final pytest/test steps" in prompt
+
+
 def test_phase10o_python_test_repair_prompt_includes_imported_source_excerpt(
     tmp_path: Path,
 ):

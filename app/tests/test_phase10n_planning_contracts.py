@@ -286,3 +286,37 @@ def test_phase10n_stale_replace_hints_dedupe_current_file_excerpt_by_path(
     assert len(hints) == 1
     assert hints[0].count("Current file excerpt:") == 1
     assert "src/small_cli/cli.py" in hints[0]
+
+
+def test_phase10n_immediate_repair_flags_empty_replace_old_text(tmp_path: Path):
+    source_file = tmp_path / "src" / "medium_cli" / "formatting.py"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_text(
+        "def format_summary(total, completed):\n" "    raise NotImplementedError\n",
+        encoding="utf-8",
+    )
+
+    issues = PlannerService.find_immediate_repair_step_issues(
+        [
+            {
+                "step_number": 2,
+                "description": "Patch formatting",
+                "commands": [],
+                "verification": "python3 -m pytest -q",
+                "rollback": None,
+                "expected_files": ["src/medium_cli/formatting.py"],
+                "ops": [
+                    {
+                        "op": "replace_in_file",
+                        "path": "src/medium_cli/formatting.py",
+                        "old": "",
+                        "new": "def format_summary(total, completed):\n"
+                        "    return f'{total} tasks, {completed} complete'\n",
+                    }
+                ],
+            }
+        ],
+        project_dir=tmp_path,
+    )
+
+    assert issues["empty_replace_old_text_steps"] == [2]

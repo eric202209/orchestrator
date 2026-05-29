@@ -161,6 +161,22 @@ def _prepare_retry_workspace(
     return False, retry_kwargs
 
 
+def _is_phase7f_bounded_debug_timeout(
+    exc: Exception, runtime_diagnostics: dict[str, Any]
+) -> bool:
+    """Return true only for Phase 7F source-step debug repair timeouts."""
+
+    if runtime_diagnostics.get("debug_prompt_mode") != "phase7f_bounded_debug_repair":
+        return False
+    if runtime_diagnostics.get("failure_phase") != "debug_repair":
+        return False
+    if runtime_diagnostics.get("debug_failure_class") != "source_step_validation":
+        return False
+    if runtime_diagnostics.get("timed_out") is True:
+        return True
+    return "timed out" in str(exc).lower() or "timeout" in str(exc).lower()
+
+
 def _knowledge_context_can_halt(knowledge_ctx: Any) -> bool:
     """Return True only for high-confidence failure memory halt signals."""
 
@@ -217,6 +233,9 @@ def handle_task_failure(
     retry_count = int(getattr(getattr(self_task, "request", None), "retries", 0) or 0)
     max_retries = int(getattr(self_task, "max_retries", 0) or 0)
     runtime_diagnostics = getattr(exc, "runtime_diagnostics", None) or {}
+    is_phase7f_bounded_debug_timeout = _is_phase7f_bounded_debug_timeout(
+        exc, runtime_diagnostics
+    )
     is_planning_lock_wait_timeout = runtime_diagnostics.get(
         "timeout_boundary"
     ) == "planning_lock_wait" or "OpenClaw planning lock wait timed out" in str(exc)
@@ -224,6 +243,7 @@ def handle_task_failure(
     has_retry_capacity = (
         should_retry
         and retry_count < max_retries
+        and not is_phase7f_bounded_debug_timeout
         and not is_planning_lock_wait_timeout
         and not is_project_mutation_lock_conflict
     )
@@ -235,6 +255,8 @@ def handle_task_failure(
     diagnostic_reason = None
     if is_project_mutation_lock_conflict:
         diagnostic_reason = "project_mutation_lock_conflict"
+    elif is_phase7f_bounded_debug_timeout:
+        diagnostic_reason = "phase7f_bounded_debug_timeout"
     elif is_planning_lock_wait_timeout:
         diagnostic_reason = "planning_openclaw_lock_contention"
     elif is_timeout:
@@ -246,8 +268,9 @@ def handle_task_failure(
         "baseline publish validation failed",
         "completion repair failed",
     )
-    should_restore_workspace = not any(
-        marker in str(exc).lower() for marker in non_restoring_failure_markers
+    should_restore_workspace = (
+        not any(marker in str(exc).lower() for marker in non_restoring_failure_markers)
+        and not is_phase7f_bounded_debug_timeout
     )
 
     auto_recovery_eligible = bool(
@@ -333,6 +356,7 @@ def handle_task_failure(
                     "retryable": has_retry_capacity,
                     "error_handler_retryable": should_retry,
                     "is_timeout": is_timeout,
+                    "phase7f_bounded_debug_timeout": (is_phase7f_bounded_debug_timeout),
                     "planning_lock_wait_timeout": is_planning_lock_wait_timeout,
                     "project_mutation_lock_conflict": is_project_mutation_lock_conflict,
                     "reason": diagnostic_reason,

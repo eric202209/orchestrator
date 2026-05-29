@@ -802,6 +802,7 @@ def _semantic_codes_for_immediate_repair_issues(
         "weak_verification_steps": "weak_verification",
         "missing_verification_steps": "missing_verification_command",
         "stale_replace_ops_steps": "stale_replace_in_file_old_text",
+        "empty_replace_old_text_steps": "empty_replace_old_text",
         "test_assertion_loss_ops_steps": "test_assertion_preservation_failed",
         "test_deletion_ops_steps": "test_preservation_violation",
     }

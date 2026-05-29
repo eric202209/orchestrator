@@ -6879,6 +6879,167 @@ def test_repair_prompt_includes_injected_weak_verification_rejection_line():
     assert "python -c file/content assertion is also valid" in prompt
 
 
+def test_no_materialization_repair_prompt_requires_grounded_source_edits(tmp_path):
+    (tmp_path / "src" / "medium_cli").mkdir(parents=True)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "medium_cli" / "cli.py").write_text(
+        "def main(argv=None):\n    return 0\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_summary.py").write_text(
+        "from medium_cli.cli import main\n"
+        "\n"
+        "def test_summary_command(capsys):\n"
+        "    assert main(['summary']) == 0\n",
+        encoding="utf-8",
+    )
+
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Add a summary command to the Python CLI.",
+        malformed_output=json.dumps(
+            [
+                {
+                    "step_number": 1,
+                    "commands": ["cat tests/test_summary.py src/medium_cli/cli.py"],
+                    "expected_files": [
+                        "tests/test_summary.py",
+                        "src/medium_cli/cli.py",
+                    ],
+                },
+                {
+                    "step_number": 2,
+                    "description": "Implement summary command",
+                    "commands": [],
+                    "expected_files": ["src/medium_cli/cli.py"],
+                },
+            ]
+        ),
+        project_dir=tmp_path,
+        rejection_reasons=[
+            "Implementation task plan does not materialize any source changes",
+        ],
+    )
+
+    assert "Grounded source-edit repair required:" in prompt
+    assert "Preserve existing tests as the behavior contract" in prompt
+    assert "Edit real source behavior using the provided test/source context" in prompt
+    assert (
+        "Prefer concrete ops for src/ files named by the test/source context" in prompt
+    )
+    assert "src/medium_cli/cli.py" in prompt
+
+
+def test_placeholder_repair_prompt_rejects_stubs_and_noop_commands(tmp_path):
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Add a summary command to the Python CLI.",
+        malformed_output=json.dumps(
+            [
+                {
+                    "step_number": 2,
+                    "commands": ['python -c "import sys; sys.exit(0)"'],
+                    "expected_files": [
+                        "src/medium_cli/cli.py",
+                        "src/medium_cli/formatting.py",
+                    ],
+                    "ops": [
+                        {
+                            "op": "write_file",
+                            "path": "src/medium_cli/cli.py",
+                            "content": "# CLI implementation\npass",
+                        }
+                    ],
+                }
+            ]
+        ),
+        project_dir=tmp_path,
+        rejection_reasons=[
+            "Plan appears to generate placeholder or stub implementations",
+        ],
+    )
+
+    assert "Grounded source-edit repair required:" in prompt
+    assert "Do not use `pass`, TODOs, placeholder comments" in prompt
+    assert "no-op commands such as" in prompt
+    assert "Do not generic-rewrite whole files" in prompt
+
+
+def test_unrelated_repair_prompt_omits_grounded_source_edit_guidance(tmp_path):
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Build a FastAPI health endpoint",
+        malformed_output='[{"step_number":1,"verification":null}]',
+        project_dir=tmp_path,
+        rejection_reasons=[
+            "Plan uses weak verification for implementation-heavy work (steps: [1])",
+        ],
+    )
+
+    assert "Grounded source-edit repair required:" not in prompt
+    assert "Preserve existing tests as the behavior contract" not in prompt
+    assert "no-op commands such as" not in prompt
+
+
+def test_brittle_inline_python_repair_prompt_preserves_source_ops(tmp_path):
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Add a summary command to the Python CLI.",
+        malformed_output=json.dumps(
+            [
+                {
+                    "step_number": 1,
+                    "commands": [
+                        'python3 -c "from medium_cli.formatting import '
+                        "format_summary; assert format_summary(3, 2) == "
+                        "'3 tasks, 2 complete'\""
+                    ],
+                    "verification": (
+                        'python3 -c "from medium_cli.formatting import '
+                        "format_summary; assert format_summary(3, 2) == "
+                        "'3 tasks, 2 complete'\""
+                    ),
+                    "expected_files": ["src/medium_cli/formatting.py"],
+                    "ops": [
+                        {
+                            "op": "write_file",
+                            "path": "src/medium_cli/formatting.py",
+                            "content": (
+                                "def format_summary(total, completed):\n"
+                                '    return f"{total} tasks, {completed} complete"'
+                            ),
+                        }
+                    ],
+                }
+            ]
+        ),
+        project_dir=tmp_path,
+        rejection_reasons=[
+            "Step [1]: command uses brittle inline Python "
+            "(brittle_inline_python). Replace nested python -c snippets.",
+            "Plan contains brittle heredoc-heavy or malformed commands",
+        ],
+    )
+
+    assert "Brittle inline Python command repair:" in prompt
+    assert "Preserve existing source ops exactly" in prompt
+    assert "Do not regenerate unrelated source files" in prompt
+    assert "python3 -m pytest -q" in prompt
+    assert "python3 -m py_compile <changed source file>" in prompt
+    assert "Do not use heredocs, shell assertion one-liners" in prompt
+
+
+def test_unrelated_repair_prompt_omits_brittle_inline_python_guidance(tmp_path):
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Build a FastAPI health endpoint",
+        malformed_output='[{"step_number":1,"verification":null}]',
+        project_dir=tmp_path,
+        rejection_reasons=[
+            "Plan uses weak verification for implementation-heavy work (steps: [1])",
+        ],
+    )
+
+    assert "Brittle inline Python command repair:" not in prompt
+    assert "Preserve existing source ops exactly" not in prompt
+    assert "python3 -m py_compile <changed source file>" not in prompt
+
+
 def test_repair_prompt_includes_injected_truncated_multistep_subcodes():
     malformed_output = (
         '[{"step_number":1,"description":"Create files",'

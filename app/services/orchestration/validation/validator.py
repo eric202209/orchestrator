@@ -189,7 +189,11 @@ class ValidatorService:
                     invalid_ops.append(index)
                 else:
                     for operation in ops:
-                        if not validate_file_op_shape(operation):
+                        if not validate_file_op_shape(
+                            operation
+                        ) and not ValidatorService._replace_in_file_has_repairable_old_text_issue(
+                            operation
+                        ):
                             invalid_ops.append(index)
                             break
 
@@ -283,6 +287,49 @@ class ValidatorService:
 
         return {
             step: sorted(set(paths)) for step, paths in missing_by_step.items() if paths
+        }
+
+    @staticmethod
+    def _replace_in_file_has_repairable_old_text_issue(operation: Any) -> bool:
+        if not isinstance(operation, dict):
+            return False
+        if str(operation.get("op") or "").strip() != "replace_in_file":
+            return False
+        path = operation.get("path")
+        if not isinstance(path, str) or not path.strip():
+            return False
+        normalized = normalize_file_op_shape(operation)
+        new_value = normalized.get("new")
+        if not isinstance(new_value, str):
+            new_value = operation.get("new_text")
+        if not isinstance(new_value, str):
+            return False
+        old_present = "old" in operation or "old_text" in operation
+        old_value = (
+            operation.get("old") if "old" in operation else operation.get("old_text")
+        )
+        return not old_present or not isinstance(old_value, str) or not old_value
+
+    @classmethod
+    def _plan_empty_replace_old_text_steps(
+        cls, plan: List[Dict[str, Any]]
+    ) -> Dict[int, List[str]]:
+        empty_by_step: Dict[int, List[str]] = {}
+        for index, step in enumerate(plan, start=1):
+            if not isinstance(step, dict):
+                continue
+            step_number = int(step.get("step_number") or index)
+            for raw_operation in step.get("ops", []) or []:
+                if not cls._replace_in_file_has_repairable_old_text_issue(
+                    raw_operation
+                ):
+                    continue
+                rel_path = str(raw_operation.get("path") or "").strip().lstrip("./")
+                empty_by_step.setdefault(step_number, []).append(
+                    rel_path or "<missing path>"
+                )
+        return {
+            step: sorted(set(paths)) for step, paths in empty_by_step.items() if paths
         }
 
     @classmethod
@@ -3010,6 +3057,17 @@ class ValidatorService:
                 )
                 details["missing_replace_in_file_targets"] = missing_replace_targets
 
+            empty_replace_old_text_steps = cls._plan_empty_replace_old_text_steps(plan)
+            if empty_replace_old_text_steps:
+                bad_steps = sorted(empty_replace_old_text_steps.keys())
+                repairable.append(
+                    "`replace_in_file` operations must provide exact non-empty "
+                    "`old` text from the current file, or use `write_file` with "
+                    "complete grounded file content "
+                    f"(empty_replace_old_text_steps: {bad_steps[:5]})"
+                )
+                details["empty_replace_old_text_steps"] = empty_replace_old_text_steps
+
             static_site_off_root_mutations = cls._plan_static_site_off_root_mutations(
                 plan,
                 Path(project_dir),
@@ -3488,6 +3546,8 @@ class ValidatorService:
             semantic_violation_codes.append("expected_source_file_not_materialized")
         if details.get("physical_src_import_materializations"):
             semantic_violation_codes.append("physical_src_import")
+        if details.get("empty_replace_old_text_steps"):
+            semantic_violation_codes.append("empty_replace_old_text")
         if semantic_violation_codes:
             details["semantic_violation_codes"] = semantic_violation_codes
 

@@ -218,6 +218,33 @@ def _phase7f_repair_output_excerpt(value: Any, max_chars: int = 500) -> str:
     return text[: max_chars - 3].rstrip() + "..."
 
 
+def _mark_phase7f_bounded_debug_timeout_if_applicable(
+    debug_error: Exception,
+    *,
+    debug_prompt_mode: str,
+    debug_failure_class: Optional[str],
+) -> None:
+    diagnostics = dict(getattr(debug_error, "runtime_diagnostics", None) or {})
+    is_timeout = bool(diagnostics.get("timed_out")) or (
+        "timed out" in str(debug_error).lower() or "timeout" in str(debug_error).lower()
+    )
+    if (
+        is_timeout
+        and debug_prompt_mode == "phase7f_bounded_debug_repair"
+        and debug_failure_class == "source_step_validation"
+    ):
+        diagnostics.update(
+            {
+                "failure_phase": "debug_repair",
+                "debug_prompt_mode": debug_prompt_mode,
+                "debug_failure_class": debug_failure_class,
+                "phase7f_bounded_debug_timeout": True,
+                "timed_out": True,
+            }
+        )
+        setattr(debug_error, "runtime_diagnostics", diagnostics)
+
+
 def _run_coroutine(coro: Any) -> Any:
     # asyncio.run() deadlocks inside a Celery ForkPoolWorker because os.fork()
     # inherits Python's asyncio internal mutexes in a locked state from the
@@ -1771,11 +1798,23 @@ def execute_step_loop(
         except Exception:
             pass
 
-        debug_result = _run_coroutine(
-            runtime_service.execute_task(
-                debug_prompt, timeout_seconds=DEBUG_TIMEOUT_SECONDS
+        try:
+            debug_result = _run_coroutine(
+                runtime_service.execute_task(
+                    debug_prompt, timeout_seconds=DEBUG_TIMEOUT_SECONDS
+                )
             )
-        )
+        except Exception as debug_error:
+            _mark_phase7f_bounded_debug_timeout_if_applicable(
+                debug_error,
+                debug_prompt_mode=debug_prompt_mode,
+                debug_failure_class=(
+                    debug_feedback_envelope.failure_class
+                    if debug_feedback_envelope is not None
+                    else None
+                ),
+            )
+            raise
 
         if debug_result.get("error") == "Context window exceeded":
             logger.warning(

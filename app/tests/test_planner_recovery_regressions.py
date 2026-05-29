@@ -7,6 +7,7 @@ from app.models import (
     LogEntry,
     Project,
     Session as SessionModel,
+    SessionTask,
     Task,
     TaskExecution,
     TaskStatus,
@@ -1036,6 +1037,223 @@ def test_planning_lock_wait_timeout_terminalizes_execution_without_retry(db_sess
     assert session.is_active is False
     assert task_execution.status == TaskStatus.FAILED
     assert task_execution.completed_at is not None
+
+
+def test_phase7f_bounded_debug_timeout_terminalizes_without_retry_or_restore(
+    db_session, tmp_path
+):
+    project = Project(name="Phase 7F Timeout Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    session = SessionModel(
+        project_id=project.id,
+        name="Phase 7F Timeout Session",
+        status="running",
+        execution_mode="automatic",
+        is_active=True,
+        instance_id="phase7f-timeout",
+    )
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+
+    task = Task(
+        project_id=project.id,
+        title="Medium source repair",
+        description="Repair medium fixture source validation",
+        status=TaskStatus.RUNNING,
+        task_subfolder="task-medium-source-repair",
+    )
+    db_session.add(task)
+    db_session.commit()
+    db_session.refresh(task)
+
+    link = SessionTask(
+        session_id=session.id,
+        task_id=task.id,
+        status=TaskStatus.RUNNING,
+    )
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.RUNNING,
+    )
+    db_session.add_all([link, execution])
+    db_session.commit()
+    db_session.refresh(link)
+    db_session.refresh(execution)
+
+    timeout = TimeoutError("Task timed out after 180s")
+    timeout.runtime_diagnostics = {
+        "failure_phase": "debug_repair",
+        "debug_prompt_mode": "phase7f_bounded_debug_repair",
+        "debug_failure_class": "source_step_validation",
+        "timed_out": True,
+        "timeout_seconds": 180,
+    }
+    restore_calls = []
+
+    ctx = OrchestrationRunContext(
+        db=db_session,
+        session=session,
+        project=project,
+        task=task,
+        session_task_link=link,
+        session_id=session.id,
+        task_id=task.id,
+        prompt=task.description,
+        timeout_seconds=300,
+        execution_profile="full_lifecycle",
+        validation_profile="implementation",
+        runs_in_canonical_baseline=True,
+        orchestration_state=_FakeOrchestrationState(tmp_path),
+        runtime_service=None,
+        task_service=None,
+        logger=logging.getLogger(__name__),
+        emit_live=lambda *_args, **_kwargs: None,
+        error_handler=type(
+            "StubErrorHandler",
+            (),
+            {"should_retry": staticmethod(lambda _exc, _context: True)},
+        )(),
+        task_execution_id=execution.id,
+        restore_workspace_snapshot_if_needed=lambda *args, **kwargs: restore_calls.append(
+            (args, kwargs)
+        ),
+    )
+
+    try:
+        handle_task_failure(
+            self_task=_UnexpectedRetrySelfTask(),
+            ctx=ctx,
+            exc=timeout,
+            get_latest_session_task_link_fn=lambda *_args, **_kwargs: link,
+            write_project_state_snapshot_fn=lambda *_args, **_kwargs: None,
+            save_orchestration_checkpoint_fn=lambda *_args, **_kwargs: None,
+            record_live_log_fn=lambda *_args, **_kwargs: None,
+        )
+    except TimeoutError:
+        pass
+
+    db_session.refresh(task)
+    db_session.refresh(link)
+    db_session.refresh(session)
+    db_session.refresh(execution)
+
+    assert restore_calls == []
+    assert task.status == TaskStatus.FAILED
+    assert link.status == TaskStatus.FAILED
+    assert execution.status == TaskStatus.FAILED
+    assert task.completed_at is not None
+    assert link.completed_at is not None
+    assert execution.completed_at is not None
+    assert session.status == "paused"
+    assert session.is_active is False
+
+
+def test_ordinary_backend_timeout_still_retries_and_restores_workspace(
+    db_session, tmp_path
+):
+    project = Project(name="Ordinary Timeout Retry Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    session = SessionModel(
+        project_id=project.id,
+        name="Ordinary Timeout Retry Session",
+        status="running",
+        execution_mode="automatic",
+        is_active=True,
+        instance_id="ordinary-timeout",
+    )
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+
+    task = Task(
+        project_id=project.id,
+        title="Ordinary timeout task",
+        description="Ordinary backend timeout",
+        status=TaskStatus.RUNNING,
+        task_subfolder="task-ordinary-timeout",
+    )
+    db_session.add(task)
+    db_session.commit()
+    db_session.refresh(task)
+
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.RUNNING,
+    )
+    db_session.add(execution)
+    db_session.commit()
+    db_session.refresh(execution)
+
+    timeout = TimeoutError("Task timed out after 180s")
+    timeout.runtime_diagnostics = {
+        "timed_out": True,
+        "timeout_seconds": 180,
+    }
+    restore_calls = []
+
+    ctx = OrchestrationRunContext(
+        db=db_session,
+        session=session,
+        project=project,
+        task=task,
+        session_task_link=None,
+        session_id=session.id,
+        task_id=task.id,
+        prompt=task.description,
+        timeout_seconds=300,
+        execution_profile="full_lifecycle",
+        validation_profile="implementation",
+        runs_in_canonical_baseline=True,
+        orchestration_state=_FakeOrchestrationState(tmp_path),
+        runtime_service=None,
+        task_service=None,
+        logger=logging.getLogger(__name__),
+        emit_live=lambda *_args, **_kwargs: None,
+        error_handler=type(
+            "StubErrorHandler",
+            (),
+            {"should_retry": staticmethod(lambda _exc, _context: True)},
+        )(),
+        task_execution_id=execution.id,
+        restore_workspace_snapshot_if_needed=lambda reason, **kwargs: restore_calls.append(
+            (reason, kwargs)
+        )
+        or {"restored": True},
+    )
+
+    retry_task = _RetryCapableSelfTask()
+    try:
+        handle_task_failure(
+            self_task=retry_task,
+            ctx=ctx,
+            exc=timeout,
+            get_latest_session_task_link_fn=lambda *_args, **_kwargs: None,
+            write_project_state_snapshot_fn=lambda *_args, **_kwargs: None,
+            save_orchestration_checkpoint_fn=lambda *_args, **_kwargs: None,
+            record_live_log_fn=lambda *_args, **_kwargs: None,
+        )
+    except _RetryCapableSelfTask._RetrySignal:
+        pass
+
+    db_session.refresh(task)
+    db_session.refresh(session)
+    db_session.refresh(execution)
+
+    assert restore_calls == [("retryable task failure", {"force_restore": True})]
+    assert task.status == TaskStatus.PENDING
+    assert session.status == "running"
+    assert execution.status == TaskStatus.FAILED
 
 
 def test_project_mutation_lock_conflict_terminalizes_without_pausing_active_session(
