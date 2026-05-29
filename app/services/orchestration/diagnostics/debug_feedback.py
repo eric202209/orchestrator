@@ -352,6 +352,8 @@ def build_bounded_debug_repair_prompt(
             "- Preserve imports and existing public function/class signatures from source excerpts.\n"
             "- Do not use command_fix for source file changes; command_fix is only for verifier/command-only repairs.\n"
             "- Do not use shell commands, heredocs, cat > file, sed, or python -c to mutate files.\n"
+            "- Any shell strings must be runnable shell strings, not prose instructions.\n"
+            "- Do not use heredoc rewrites.\n"
             "- Minimal valid source repair example:\n"
             '  {"repair_type":"ops_fix","ops":[{"op":"replace_in_file","path":"src/...","old":"...","new":"..."}],"verification_command":"python3 -m pytest -q"}\n'
         )
