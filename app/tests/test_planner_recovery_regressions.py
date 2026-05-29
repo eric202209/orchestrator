@@ -53,21 +53,6 @@ class _RetryCapableSelfTask:
         raise self._RetrySignal(exc)
 
 
-class _RetryRequestWithKwargsSelfTask(_RetryCapableSelfTask):
-    class request:
-        retries = 0
-        kwargs = {
-            "session_id": 1,
-            "task_id": 1,
-            "prompt": "original prompt",
-            "timeout_seconds": 300,
-            "resume_checkpoint_name": None,
-            "expected_session_instance_id": "instance-1",
-            "task_execution_id": 1,
-            "queued_event_id": "queued-1",
-        }
-
-
 class _FakeOrchestrationState:
     def __init__(self, project_dir):
         self.project_dir = project_dir
@@ -834,7 +819,7 @@ def test_retryable_failure_restores_workspace_before_celery_retry(db_session, tm
     assert getattr(retry_task, "retry_kwargs", {}) == {}
 
 
-def test_retryable_failure_marks_dirty_checkpoint_resume_when_restore_unavailable(
+def test_retryable_failure_terminalizes_when_retry_restore_reports_dirty_workspace(
     db_session, tmp_path, monkeypatch
 ):
     project = Project(name="Retry Dirty Project")
@@ -865,6 +850,22 @@ def test_retryable_failure_marks_dirty_checkpoint_resume_when_restore_unavailabl
     db_session.commit()
     db_session.refresh(task)
 
+    link = SessionTask(
+        session_id=session.id,
+        task_id=task.id,
+        status=TaskStatus.RUNNING,
+    )
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.RUNNING,
+    )
+    db_session.add_all([link, execution])
+    db_session.commit()
+    db_session.refresh(link)
+    db_session.refresh(execution)
+
     captured_events = []
     live_logs = []
 
@@ -879,7 +880,7 @@ def test_retryable_failure_marks_dirty_checkpoint_resume_when_restore_unavailabl
         session=session,
         project=project,
         task=task,
-        session_task_link=None,
+        session_task_link=link,
         session_id=session.id,
         task_id=task.id,
         prompt=task.description,
@@ -899,33 +900,21 @@ def test_retryable_failure_marks_dirty_checkpoint_resume_when_restore_unavailabl
         )(),
         restore_workspace_snapshot_if_needed=lambda _reason, **_kwargs: {
             "restored": False,
-            "reason": "snapshot_missing",
+            "reason": "restore_failed:Project already has active canonical-root writer/execution in progress",
         },
+        task_execution_id=execution.id,
     )
 
-    retry_task = _RetryRequestWithKwargsSelfTask()
-    retry_task.request.kwargs = {
-        **retry_task.request.kwargs,
-        "session_id": session.id,
-        "task_id": task.id,
-    }
+    handle_task_failure(
+        self_task=_UnexpectedRetrySelfTask(),
+        ctx=ctx,
+        exc=RuntimeError("retryable failure after dirty mutation"),
+        get_latest_session_task_link_fn=lambda *_args, **_kwargs: link,
+        write_project_state_snapshot_fn=lambda *_args, **_kwargs: None,
+        save_orchestration_checkpoint_fn=lambda *_args, **_kwargs: None,
+        record_live_log_fn=lambda *args, **kwargs: live_logs.append((args, kwargs)),
+    )
 
-    try:
-        handle_task_failure(
-            self_task=retry_task,
-            ctx=ctx,
-            exc=RuntimeError("retryable failure after dirty mutation"),
-            get_latest_session_task_link_fn=lambda *_args, **_kwargs: None,
-            write_project_state_snapshot_fn=lambda *_args, **_kwargs: None,
-            save_orchestration_checkpoint_fn=lambda *_args, **_kwargs: None,
-            record_live_log_fn=lambda *args, **kwargs: live_logs.append((args, kwargs)),
-        )
-    except _RetryCapableSelfTask._RetrySignal:
-        pass
-
-    retry_kwargs = retry_task.retry_kwargs["kwargs"]
-    assert retry_kwargs["resume_checkpoint_name"] == "autosave_error"
-    assert retry_kwargs["queued_event_id"] is None
     assert any(
         event["event_type"] == EventType.WORKSPACE_RETRY_DIRTY
         for event in captured_events
@@ -936,7 +925,15 @@ def test_retryable_failure_marks_dirty_checkpoint_resume_when_restore_unavailabl
     )
 
     db_session.refresh(task)
-    assert task.status == TaskStatus.PENDING
+    db_session.refresh(link)
+    db_session.refresh(execution)
+    db_session.refresh(session)
+    assert task.status == TaskStatus.FAILED
+    assert link.status == TaskStatus.FAILED
+    assert execution.status == TaskStatus.FAILED
+    assert session.status == "paused"
+    assert session.is_active is False
+    assert "workspace restore failed" in (task.error_message or "")
     assert "checkpoint resume" in (task.error_message or "")
 
 
