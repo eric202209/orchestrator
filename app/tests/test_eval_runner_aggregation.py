@@ -223,6 +223,63 @@ def test_aggregate_case_reports_marks_stable_phase_at_eighty_percent_threshold()
     assert aggregate["stable_primary_failure_phase"] is True
 
 
+def test_aggregate_case_reports_marks_all_runs_scoreable_when_ready():
+    reports = [
+        _report(
+            clean_success=True,
+            primary_failure_phase=None,
+            path_observed=True,
+            intended_path_observed=True,
+            execution_reached=True,
+            debug_repair_reached=False,
+            phase7f_used=False,
+            phase7g_used=False,
+            blockers=[],
+        )
+        for _ in range(3)
+    ]
+
+    aggregate = runner._aggregate_case_reports(
+        case_id="python_cli_small_feature",
+        reports=reports,
+        report_paths=[Path(f"run{index}.json") for index in range(3)],
+        run_context={
+            "git_sha": "abc123",
+            "model": "qwen-local",
+            "backend": "local_openclaw",
+            "runtime_profile": "standard",
+            "repeat_seed": "seed-1",
+        },
+        score_readiness=[
+            {
+                "event_journal_path": f"workspace-r0{index}/.openclaw/events/log.jsonl",
+                "required_terminal_event": "task_completed",
+                "observed_terminal_event": "task_completed",
+                "stabilized": True,
+            }
+            for index in range(1, 4)
+        ],
+    )
+
+    assert aggregate["score_readiness_summary"] == {
+        "all_runs_scoreable": True,
+        "readiness_recorded_count": 3,
+        "stabilized_count": 3,
+        "stabilization_missing_count": 0,
+        "required_terminal_event_count": 3,
+        "required_terminal_event_observed_count": 3,
+        "terminal_event_observed_count": 3,
+        "terminal_event_missing_count": 0,
+        "observed_terminal_event_distribution": {"task_completed": 3},
+        "journal_paths": [
+            "workspace-r01/.openclaw/events/log.jsonl",
+            "workspace-r02/.openclaw/events/log.jsonl",
+            "workspace-r03/.openclaw/events/log.jsonl",
+        ],
+        "journal_path_count": 3,
+    }
+
+
 def test_request_json_raises_auth_expired_on_401(monkeypatch):
     def raise_unauthorized(_request, timeout):
         raise HTTPError(
