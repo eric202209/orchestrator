@@ -34,6 +34,7 @@ from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.phases.execution_loop import (
     _debug_repair_materially_changes_source_or_tests,
     _execute_simple_verification_step,
+    _mark_phase7f_bounded_debug_timeout_if_applicable,
     _is_simple_verification_command,
     _is_low_value_weak_verifier_command_fix,
     _is_weak_completion_verifier_failure,
@@ -90,6 +91,35 @@ def _seed_execution(db_session, tmp_path):
     db_session.refresh(task)
     db_session.refresh(execution)
     return project_dir, project, session, task, execution
+
+
+def test_phase7f_source_step_timeout_gets_non_retry_marker():
+    error = TimeoutError("Task timed out after 180s")
+
+    _mark_phase7f_bounded_debug_timeout_if_applicable(
+        error,
+        debug_prompt_mode="phase7f_bounded_debug_repair",
+        debug_failure_class="source_step_validation",
+    )
+
+    diagnostics = error.runtime_diagnostics
+    assert diagnostics["failure_phase"] == "debug_repair"
+    assert diagnostics["debug_prompt_mode"] == "phase7f_bounded_debug_repair"
+    assert diagnostics["debug_failure_class"] == "source_step_validation"
+    assert diagnostics["phase7f_bounded_debug_timeout"] is True
+    assert diagnostics["timed_out"] is True
+
+
+def test_non_phase7f_timeout_does_not_get_non_retry_marker():
+    error = TimeoutError("Task timed out after 180s")
+
+    _mark_phase7f_bounded_debug_timeout_if_applicable(
+        error,
+        debug_prompt_mode="legacy_debugging",
+        debug_failure_class="source_step_validation",
+    )
+
+    assert not hasattr(error, "runtime_diagnostics")
 
 
 class _FakeRuntime:
@@ -820,6 +850,131 @@ def test_weak_verifier_repair_preserves_budget_for_later_pytest_failure():
     assert not _debug_repair_materially_changes_source_or_tests(weak_debug_data)
     assert pytest_envelope.failure_class == "pytest_failure"
     assert pytest_envelope.eligible_for_debug_repair
+
+
+def test_source_step_validation_not_implemented_is_bounded_debug_eligible(tmp_path):
+    envelope = build_debug_feedback_envelope(
+        task_execution_id=123,
+        task_id=45,
+        step_index=1,
+        failure_phase="step_validation",
+        failed_command="test -f src/medium_cli/store.py",
+        stdout='raise NotImplementedError("summary counts are not implemented yet")',
+        stderr=(
+            "Step failed implementation validation: store.py still contains "
+            "not-implemented markers"
+        ),
+        validator_reasons=["store.py still contains not-implemented markers"],
+        workspace_path=tmp_path,
+    )
+
+    assert envelope.failure_class == "source_step_validation"
+    assert envelope.eligible_for_debug_repair
+
+
+def test_source_step_validation_weak_verification_is_bounded_debug_eligible(tmp_path):
+    envelope = build_debug_feedback_envelope(
+        task_execution_id=123,
+        task_id=45,
+        step_index=1,
+        failure_phase="step_validation",
+        failed_command="test -f src/medium_cli/store.py",
+        stderr="Step verification is too weak for implementation-heavy work",
+        validator_reasons=[
+            "Step verification is too weak for implementation-heavy work"
+        ],
+        workspace_path=tmp_path,
+    )
+
+    assert envelope.failure_class == "source_step_validation"
+    assert envelope.eligible_for_debug_repair
+
+
+def test_source_step_validation_prompt_includes_medium_test_contract(tmp_path):
+    source_dir = tmp_path / "src" / "medium_cli"
+    source_dir.mkdir(parents=True)
+    (source_dir / "__init__.py").write_text("", encoding="utf-8")
+    (source_dir / "store.py").write_text(
+        "from dataclasses import dataclass\n"
+        "\n"
+        "@dataclass(frozen=True)\n"
+        "class Task:\n"
+        "    title: str\n"
+        "    completed: bool = False\n"
+        "\n"
+        "class TaskStore:\n"
+        "    def __init__(self) -> None:\n"
+        "        self._tasks = []\n"
+        "\n"
+        "    def add(self, title: str, *, completed: bool = False) -> Task:\n"
+        "        task = Task(title, completed)\n"
+        "        self._tasks.append(task)\n"
+        "        return task\n"
+        "\n"
+        "    def summary(self) -> tuple[int, int]:\n"
+        "        raise NotImplementedError('summary counts are not implemented yet')\n",
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_summary.py").write_text(
+        "from medium_cli.store import TaskStore\n"
+        "\n"
+        "def test_store_summary_counts_total_and_completed():\n"
+        "    store = TaskStore()\n"
+        "    store.add('write docs', completed=True)\n"
+        "    store.add('ship feature', completed=False)\n"
+        "    store.add('close ticket', completed=True)\n"
+        "\n"
+        "    assert store.summary() == (3, 2)\n",
+        encoding="utf-8",
+    )
+    envelope = build_debug_feedback_envelope(
+        task_execution_id=123,
+        task_id=45,
+        step_index=1,
+        failure_phase="step_validation",
+        failed_command="test -f src/medium_cli/store.py",
+        stdout=(
+            "$ cat src/medium_cli/store.py\n"
+            "raise NotImplementedError('summary counts are not implemented yet')"
+        ),
+        stderr=(
+            "Step failed implementation validation: store.py still contains "
+            "not-implemented markers | Step verification is too weak for "
+            "implementation-heavy work"
+        ),
+        validator_reasons=[
+            "store.py still contains not-implemented markers",
+            "Step verification is too weak for implementation-heavy work",
+        ],
+        workspace_path=tmp_path,
+    )
+
+    prompt = build_bounded_debug_repair_prompt(envelope)
+
+    assert envelope.failure_class == "source_step_validation"
+    assert "Debug source contract:" in prompt
+    assert "Existing tests are the failing contract." in prompt
+    assert "src/medium_cli/store.py" in prompt
+    assert "store.summary() should equal (3, 2)" in prompt
+    assert "Do not edit tests or verifier commands." in prompt
+
+
+def test_unrelated_unknown_failure_stays_legacy_ineligible(tmp_path):
+    envelope = build_debug_feedback_envelope(
+        task_execution_id=123,
+        task_id=45,
+        step_index=1,
+        failure_phase="execution",
+        failed_command="cat README.md",
+        stderr="Unexpected empty output",
+        validator_reasons=["read-only inspection did not produce useful output"],
+        workspace_path=tmp_path,
+    )
+
+    assert envelope.failure_class == "unknown"
+    assert not envelope.eligible_for_debug_repair
 
 
 def test_command_fix_replaces_failed_structured_ops_before_retry(db_session, tmp_path):

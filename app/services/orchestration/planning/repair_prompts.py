@@ -258,6 +258,26 @@ def build_planning_repair_prompt(
         "triple-quoted Python blocks; do not place bare multiline code outside "
         "JSON quotes; output must remain a valid JSON array."
     )
+    grounded_source_edit_guidance = _build_grounded_source_edit_repair_guidance(
+        rejection_reasons
+    )
+    brittle_inline_python_guidance = _build_brittle_inline_python_repair_guidance(
+        rejection_reasons
+    )
+    empty_replace_old_text_guidance = _build_empty_replace_old_text_repair_guidance(
+        rejection_reasons
+    )
+    stale_replace_target_guidance = _build_stale_replace_target_preservation_guidance(
+        project_dir=project_dir,
+        malformed_output=malformed_output,
+        rejection_reasons=rejection_reasons,
+    )
+    validation_guidance_block = _join_optional_blocks(
+        grounded_source_edit_guidance,
+        brittle_inline_python_guidance,
+        empty_replace_old_text_guidance,
+        stale_replace_target_guidance,
+    )
 
     def _compose_prompt(
         current_structure_capsule: str,
@@ -276,6 +296,7 @@ Bad:
 {knowledge_block + chr(10) if knowledge_block else ""}
 {current_source_context_block + chr(10) if current_source_context_block else ""}
 {current_structure_capsule + chr(10) if current_structure_capsule else ""}
+{validation_guidance_block + chr(10) if validation_guidance_block else ""}
 Strict output schema: step_number, description, commands, verification,
 rollback, expected_files; optional ops.
 
@@ -388,6 +409,128 @@ def build_python_test_source_context_block(
         if total_chars >= PLANNING_REPAIR_MAX_SOURCE_CONTEXT_CHARS:
             break
     return "\n".join(lines).strip()[:PLANNING_REPAIR_MAX_SOURCE_CONTEXT_CHARS]
+
+
+def _build_grounded_source_edit_repair_guidance(
+    rejection_reasons: Optional[list[str]],
+) -> str:
+    text = "\n".join(str(reason or "") for reason in (rejection_reasons or []))
+    lowered = text.lower()
+    if not (
+        "does not materialize any source changes" in lowered
+        or "placeholder or stub implementations" in lowered
+        or "placeholder_only_implementation" in lowered
+    ):
+        return ""
+
+    return "\n".join(
+        [
+            "Grounded source-edit repair required:",
+            "- Preserve existing tests as the behavior contract; do not replace them with new expectations.",
+            "- Edit real source behavior using the provided test/source context and project structure.",
+            '- Do not use `pass`, TODOs, placeholder comments, stub-only functions, or no-op commands such as `python -c "import sys; sys.exit(0)"`.',
+            "- Do not generic-rewrite whole files unless the content is complete, behavior-specific, and grounded in the existing source/tests.",
+            "- Prefer concrete ops for src/ files named by the test/source context, followed by a real project test command.",
+        ]
+    )
+
+
+def _build_brittle_inline_python_repair_guidance(
+    rejection_reasons: Optional[list[str]],
+) -> str:
+    text = "\n".join(str(reason or "") for reason in (rejection_reasons or []))
+    if "brittle_inline_python" not in text.lower():
+        return ""
+
+    return "\n".join(
+        [
+            "Brittle inline Python command repair:",
+            "- Preserve existing source ops exactly unless an op itself is invalid; this repair is for command validation only.",
+            "- Do not regenerate unrelated source files while fixing brittle command validation.",
+            "- Replace nested quote-heavy `python -c` assertion commands with simple verification commands.",
+            "- Prefer `python3 -m pytest -q` for project verification or `python3 -m py_compile <changed source file>` for a changed Python source file.",
+            "- Do not use heredocs, shell assertion one-liners, or nested quote-heavy inline Python.",
+        ]
+    )
+
+
+def _build_empty_replace_old_text_repair_guidance(
+    rejection_reasons: Optional[list[str]],
+) -> str:
+    text = "\n".join(str(reason or "") for reason in (rejection_reasons or []))
+    lowered = text.lower()
+    if not (
+        "empty_replace_old_text_steps" in lowered
+        or "replace_in_file old text is empty" in lowered
+        or "replace_in_file old text is empty or missing" in lowered
+    ):
+        return ""
+
+    return "\n".join(
+        [
+            "Empty replace_in_file old-text repair:",
+            "- Do not use `replace_in_file` as a create or overwrite operation.",
+            "- Do not use empty `old` text.",
+            "- For `replace_in_file.old`, copy exact current file text from the workspace context.",
+            "- If replacing broad file content, use `ops.write_file` with complete grounded file content instead.",
+            "- Preserve existing valid source edits and verify with a real project test command.",
+        ]
+    )
+
+
+def _build_stale_replace_target_preservation_guidance(
+    *,
+    project_dir: Path,
+    malformed_output: str,
+    rejection_reasons: Optional[list[str]],
+) -> str:
+    if not _is_stale_replace_repair(malformed_output, rejection_reasons):
+        return ""
+
+    existing_source_paths: list[str] = []
+    try:
+        parsed = json.loads(str(malformed_output or ""))
+    except Exception:
+        parsed = None
+    if isinstance(parsed, list):
+        for step in parsed:
+            if not isinstance(step, dict):
+                continue
+            for operation in step.get("ops") or []:
+                if not isinstance(operation, dict):
+                    continue
+                path = str(operation.get("path") or "").strip().lstrip("./")
+                if path.startswith("src/") and path not in existing_source_paths:
+                    existing_source_paths.append(path)
+
+    required_source_paths: list[str] = []
+    try:
+        contract = extract_python_test_contract(project_dir)
+    except Exception:
+        contract = None
+    if contract is not None:
+        for rel_path, _reason in contract.source_targets:
+            if rel_path.startswith("src/") and rel_path not in required_source_paths:
+                required_source_paths.append(rel_path)
+
+    def _format_paths(paths: list[str]) -> str:
+        return (
+            ", ".join(paths[:6])
+            if paths
+            else "all source files named by tests/source context"
+        )
+
+    return "\n".join(
+        [
+            "Stale replace second-pass target preservation:",
+            "- Preserve existing valid source ops from the invalid plan; do not drop unrelated src edits while converting stale replace_in_file ops.",
+            "- Only convert stale replace_in_file ops for the same target into grounded write_file or valid ops for that same target.",
+            f"- Existing source targets from the current plan: {_format_paths(existing_source_paths)}.",
+            f"- Required source targets from test/source contract: {_format_paths(required_source_paths)}.",
+            "- Do not invent unseen test files or add expected_files entries for files not present in workspace evidence.",
+            "- Keep simple scalar verification on final pytest/test steps, for example `python3 -m pytest -q`.",
+        ]
+    )
 
 
 def _build_existing_test_contract_repair_guidance(
@@ -505,6 +648,20 @@ def build_compact_planning_repair_prompt(
         "triple-quoted Python blocks; do not place bare multiline code outside "
         "JSON quotes; output must remain a valid JSON array."
     )
+    grounded_source_edit_guidance = _build_grounded_source_edit_repair_guidance(
+        rejection_reasons
+    )
+    brittle_inline_python_guidance = _build_brittle_inline_python_repair_guidance(
+        rejection_reasons
+    )
+    empty_replace_old_text_guidance = _build_empty_replace_old_text_repair_guidance(
+        rejection_reasons
+    )
+    validation_guidance_block = _join_optional_blocks(
+        grounded_source_edit_guidance,
+        brittle_inline_python_guidance,
+        empty_replace_old_text_guidance,
+    )
     prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 
@@ -516,6 +673,7 @@ Validation errors:
 Invalid output excerpt:
 {broken_output}
 
+{validation_guidance_block + chr(10) if validation_guidance_block else ""}
 Schema per step:
 step_number, description, commands, verification, rollback, expected_files, optional ops.
 
@@ -600,6 +758,11 @@ Required repair:
 - Do not use replace_in_file for the stale target.
 - Use a write_file op for `{target_line}` with the full corrected file content.
 - Preserve existing imports, public functions, and CLI shape from the current file excerpt.
+- Preserve existing valid source ops from the invalid plan; do not drop unrelated src edits while fixing this stale target.
+- Only convert stale replace_in_file ops for the same target into grounded write_file or valid ops for that same target.
+- Preserve all required source targets named by tests/source context.
+- Do not invent unseen test files or add expected_files entries for files not present in workspace evidence.
+- Keep simple scalar verification on final pytest/test steps, for example `python3 -m pytest -q`.
 - Make only the requested behavior change, then verify with a real project test command.
 - Return 3 steps: inspect current workspace, write the corrected file, run verification.
 - Each step must contain: step_number, description, commands, verification, rollback, expected_files; optional ops.

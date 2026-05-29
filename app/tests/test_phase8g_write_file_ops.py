@@ -786,6 +786,87 @@ def test_validate_plan_requires_replace_in_file_target_to_exist(tmp_path):
     assert result.details["missing_replace_in_file_targets"] == {1: ["src/App.jsx"]}
 
 
+def test_validate_plan_rejects_empty_replace_old_text_as_repairable(tmp_path):
+    source = tmp_path / "src" / "medium_cli" / "formatting.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "def format_summary(total, completed):\n" "    raise NotImplementedError\n",
+        encoding="utf-8",
+    )
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Patch formatting",
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "src/medium_cli/formatting.py",
+                    "old": "",
+                    "new": "def format_summary(total, completed):\n"
+                    "    return f'{total} tasks, {completed} complete'\n",
+                }
+            ],
+            "commands": [],
+            "verification": "python3 -m pytest -q",
+            "rollback": None,
+            "expected_files": ["src/medium_cli/formatting.py"],
+        }
+    ]
+
+    result = ValidatorService.validate_plan(
+        plan,
+        output_text="[]",
+        task_prompt="Implement a Python CLI summary feature",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert result.repairable
+    assert not result.accepted
+    assert result.details["empty_replace_old_text_steps"] == {
+        1: ["src/medium_cli/formatting.py"]
+    }
+    assert "empty_replace_old_text" in result.details["semantic_violation_codes"]
+    assert "empty_replace_old_text_steps" in " ".join(result.reasons)
+
+
+def test_validate_plan_rejects_missing_replace_old_text_as_repairable(tmp_path):
+    source = tmp_path / "src" / "medium_cli" / "cli.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("def main(argv=None):\n    return 0\n", encoding="utf-8")
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Patch CLI",
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "src/medium_cli/cli.py",
+                    "new": "def main(argv=None):\n    return 0\n",
+                }
+            ],
+            "commands": [],
+            "verification": "python3 -m pytest -q",
+            "rollback": None,
+            "expected_files": ["src/medium_cli/cli.py"],
+        }
+    ]
+
+    result = ValidatorService.validate_plan(
+        plan,
+        output_text="[]",
+        task_prompt="Implement a Python CLI summary feature",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert result.repairable
+    assert result.details["empty_replace_old_text_steps"] == {
+        1: ["src/medium_cli/cli.py"]
+    }
+    assert "invalid_ops_steps" not in result.details["plan_schema"]["details"]
+
+
 def test_validate_plan_allows_replace_target_created_by_prior_step(tmp_path):
     plan = [
         {

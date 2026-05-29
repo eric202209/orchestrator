@@ -1587,6 +1587,7 @@ class PlannerService:
             "weak_verification_steps": [],
             "prefer_typed_ops_steps": [],
             "stale_replace_ops_steps": [],
+            "empty_replace_old_text_steps": [],
             "test_assertion_loss_ops_steps": [],
             "test_deletion_ops_steps": [],
             "fake_verification_artifact_steps": [],
@@ -1641,6 +1642,8 @@ class PlannerService:
                 step, Path(project_dir)
             ):
                 issues["stale_replace_ops_steps"].append(step_number)
+            if PlannerService._step_has_empty_replace_old_text_ops(step):
+                issues["empty_replace_old_text_steps"].append(step_number)
             if project_dir and PlannerService._step_has_test_assertion_loss_ops(
                 step, Path(project_dir)
             ):
@@ -1652,6 +1655,23 @@ class PlannerService:
             if ValidatorService._step_uses_fake_verification_artifact(step):
                 issues["fake_verification_artifact_steps"].append(step_number)
         return {key: sorted(set(value)) for key, value in issues.items() if value}
+
+    @staticmethod
+    def _step_has_empty_replace_old_text_ops(step: Dict[str, Any]) -> bool:
+        for operation in step.get("ops") or []:
+            if not isinstance(operation, dict):
+                continue
+            if str(operation.get("op") or "").strip() != "replace_in_file":
+                continue
+            old_present = "old" in operation or "old_text" in operation
+            old_value = (
+                operation.get("old")
+                if "old" in operation
+                else operation.get("old_text")
+            )
+            if not old_present or not isinstance(old_value, str) or not old_value:
+                return True
+        return False
 
     @staticmethod
     def _step_has_stale_replace_ops(step: Dict[str, Any], project_dir: Path) -> bool:
@@ -1971,6 +1991,7 @@ class PlannerService:
                 "weak_verification_steps": "weak verification command",
                 "prefer_typed_ops_steps": "python -c content write should use ops.write_file",
                 "stale_replace_ops_steps": "replace_in_file old text not found in workspace",
+                "empty_replace_old_text_steps": "replace_in_file old text is empty or missing",
                 "test_assertion_loss_ops_steps": "test rewrite would remove existing assertions",
                 "test_deletion_ops_steps": "test file deletion requires explicit preservation review",
             }.get(issue_key, issue_key)

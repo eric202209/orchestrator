@@ -35,6 +35,7 @@ ELIGIBLE_DEBUG_FAILURE_CLASSES = frozenset(
         "completion_validation_failed",
         "missing_dependency",
         "syntax_error",
+        "source_step_validation",
     }
 )
 
@@ -147,6 +148,8 @@ def classify_debug_failure(
     if not combined:
         return "unknown"
 
+    if _is_source_step_validation_failure(reasons):
+        return "source_step_validation"
     if "syntaxerror" in combined or "syntax error" in combined:
         return "syntax_error"
     if "modulenotfounderror" in combined or "no module named" in combined:
@@ -184,6 +187,19 @@ def classify_debug_failure(
     ):
         return "completion_validation_failed"
     return "unknown"
+
+
+def _is_source_step_validation_failure(reasons: str) -> bool:
+    lowered = str(reasons or "").lower()
+    if not lowered:
+        return False
+    source_markers = (
+        ".py still contains not-implemented markers",
+        "not-implemented markers",
+        "verification is too weak for implementation-heavy work",
+        "weak verification for implementation-heavy work",
+    )
+    return any(marker in lowered for marker in source_markers)
 
 
 def build_debug_feedback_envelope(
@@ -367,6 +383,7 @@ def build_debug_source_contract(
         "runtime_assertion_failure",
         "completion_validation_failed",
         "syntax_error",
+        "source_step_validation",
     }:
         return ""
 
