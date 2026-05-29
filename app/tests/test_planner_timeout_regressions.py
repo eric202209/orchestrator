@@ -907,6 +907,115 @@ def test_planning_lock_skips_direct_after_phase_unavailable(monkeypatch):
     assert "direct_planning_state" not in captured["kwargs"]
 
 
+def test_local_openclaw_direct_planning_can_skip_by_prompt_threshold(monkeypatch):
+    from app.services.orchestration.planning import planner as planner_module
+
+    captured = {}
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {"backend": "local_openclaw"}
+
+        async def execute_task(self, prompt, **kwargs):
+            captured["fallback_prompt"] = prompt
+            captured["fallback_kwargs"] = kwargs
+            return {"status": "completed", "output": "[]"}
+
+    async def direct_should_not_run(*args, **kwargs):
+        raise AssertionError("direct planning should be skipped")
+
+    monkeypatch.setattr(
+        PlannerService,
+        "_invoke_direct_no_thinking_planning",
+        direct_should_not_run,
+    )
+    monkeypatch.setattr(planner_module.settings, "PLANNING_REPAIR_ENABLED", True)
+    monkeypatch.setattr(
+        planner_module.settings,
+        "PLANNING_REPAIR_BASE_URL",
+        "http://localhost:8000/v1",
+    )
+    monkeypatch.setattr(planner_module.settings, "PLANNING_REPAIR_MODEL", "qwen-local")
+    monkeypatch.setattr(
+        planner_module.settings,
+        "PLANNING_DIRECT_SKIP_PROMPT_CHAR_THRESHOLD",
+        8,
+    )
+
+    result = asyncio.run(
+        PlannerService._execute_task_with_planning_lock(
+            Runtime(),
+            "plan this",
+            timeout_seconds=300,
+            reuse_task_session=False,
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert captured["fallback_prompt"] == "plan this"
+    assert captured["fallback_kwargs"]["timeout_seconds"] == 300
+
+
+def test_direct_ollama_direct_planning_ignores_local_openclaw_threshold(monkeypatch):
+    from app.services.orchestration.planning import planner as planner_module
+
+    captured = {}
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {"backend": "direct_ollama", "model_family": "qwen3-coder:30b"}
+
+        async def execute_task(self, prompt, **kwargs):
+            raise AssertionError("fallback should not run when direct succeeds")
+
+    async def direct_success(
+        cls, runtime_service, prompt, *, timeout_budget_seconds=None
+    ):
+        captured["direct_prompt"] = prompt
+        captured["direct_timeout_budget_seconds"] = timeout_budget_seconds
+        return {"status": "completed", "output": "[]", "planning_direct": True}
+
+    monkeypatch.setattr(
+        PlannerService,
+        "_invoke_direct_no_thinking_planning",
+        classmethod(direct_success),
+    )
+    monkeypatch.setattr(planner_module.settings, "PLANNING_REPAIR_ENABLED", True)
+    monkeypatch.setattr(
+        planner_module.settings,
+        "PLANNING_REPAIR_BASE_URL",
+        "http://localhost:11434/v1",
+    )
+    monkeypatch.setattr(
+        planner_module.settings,
+        "PLANNING_REPAIR_MODEL",
+        "qwen3-coder:30b",
+    )
+    monkeypatch.setattr(
+        planner_module.settings,
+        "PLANNING_DIRECT_NO_THINKING_FOR_DIRECT_OLLAMA",
+        True,
+    )
+    monkeypatch.setattr(
+        planner_module.settings,
+        "PLANNING_DIRECT_SKIP_PROMPT_CHAR_THRESHOLD",
+        8,
+    )
+
+    result = asyncio.run(
+        PlannerService._execute_task_with_planning_lock(
+            Runtime(),
+            "plan this",
+            timeout_seconds=300,
+            reuse_task_session=False,
+        )
+    )
+
+    assert result["planning_direct"] is True
+    assert captured["direct_prompt"] == "plan this"
+    assert captured["direct_timeout_budget_seconds"] == 300
+
+
 def test_planning_repair_uses_direct_no_thinking_chat_path(monkeypatch):
     from app.services.orchestration.planning import planner as planner_module
 

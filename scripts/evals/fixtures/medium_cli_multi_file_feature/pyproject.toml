@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "medium-cli-fixture"
+version = "0.1.0"
+description = "Seed fixture for orchestrator medium_cli_multi_file_feature evaluation"
+requires-python = ">=3.10"
+
+[project.scripts]
+medium-cli = "medium_cli.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

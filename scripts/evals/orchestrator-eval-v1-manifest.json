@@ -52,6 +52,45 @@
       ]
     },
     {
+      "case_id": "medium_cli_multi_file_feature",
+      "category": "medium_multi_file_feature",
+      "purpose": "Measure whether the selected qwen3.6 planner lane generalizes from a tiny CLI change to one constrained multi-file feature.",
+      "operator_prompt": "Add one medium Python CLI feature with pytest coverage. Keep the implementation scoped to the existing src/ and tests/ files and verify with python3 -m pytest -q.",
+      "verifier": {
+        "command": "python3 -m pytest -q",
+        "timeout_seconds": 120
+      },
+      "required_files": [
+        "pyproject.toml",
+        "src/medium_cli/cli.py",
+        "src/medium_cli/formatting.py",
+        "src/medium_cli/store.py",
+        "tests"
+      ],
+      "expected_touched_files": [],
+      "allowed_touched_prefixes": [
+        "src/",
+        "tests/",
+        "README",
+        "pyproject.toml",
+        "requirements"
+      ],
+      "forbidden_touched_prefixes": [
+        ".openclaw/",
+        "frontend/",
+        "backend/"
+      ],
+      "required_events": [
+        "task_started"
+      ],
+      "success_criteria": [
+        "verifier_exit_code_zero",
+        "task_completed_event_present",
+        "required_files_present",
+        "no_forbidden_touched_files"
+      ]
+    },
+    {
       "case_id": "debug_import_error_repair",
       "category": "debug_repair",
       "purpose": "Measure whether a deterministic import/runtime failure is captured and repaired into a verified completion.",

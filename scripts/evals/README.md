@@ -2,10 +2,11 @@
 
 This folder holds lightweight orchestrator evaluation manifests.
 
-The v1 manifest is intentionally not a runner. It defines three deterministic
-cases for the smallest backend resilience evaluation slice:
+The v1 manifest is intentionally not a runner. It defines deterministic cases
+for backend resilience and controlled eval expansion:
 
 - `python_cli_small_feature`
+- `medium_cli_multi_file_feature`
 - `debug_import_error_repair`
 - `checkpoint_resume_mid_task`
 
@@ -98,6 +99,7 @@ is the interpreter used to launch the runner.
 Supported case IDs are only:
 
 - `python_cli_small_feature`
+- `medium_cli_multi_file_feature`
 - `debug_import_error_repair`
 - `checkpoint_resume_mid_task`
 
@@ -150,6 +152,6 @@ prompts without creating API records with:
 
 ```bash
 venv/bin/python scripts/evals/run_orchestrator_eval_slice.py \
-  --cases python_cli_small_feature debug_import_error_repair checkpoint_resume_mid_task \
+  --cases python_cli_small_feature medium_cli_multi_file_feature debug_import_error_repair checkpoint_resume_mid_task \
   --print-prompts
 ```

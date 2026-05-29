@@ -20,6 +20,7 @@ from urllib import error, request
 SUPPORTED_CASES = frozenset(
     {
         "python_cli_small_feature",
+        "medium_cli_multi_file_feature",
         "debug_import_error_repair",
         "checkpoint_resume_mid_task",
     }

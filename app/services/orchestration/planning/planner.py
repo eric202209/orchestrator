@@ -342,13 +342,6 @@ class PlannerService:
             return False
         if not settings.PLANNING_REPAIR_MODEL.strip():
             return False
-        if prompt_chars > DIRECT_PLANNING_PROMPT_CHAR_CAP:
-            _logger.info(
-                "[PLANNING_DIRECT] skip: prompt_chars=%d > cap=%d",
-                prompt_chars,
-                DIRECT_PLANNING_PROMPT_CHAR_CAP,
-            )
-            return False
         backend_metadata: Dict[str, Any] = {}
         get_backend_metadata = getattr(runtime_service, "get_backend_metadata", None)
         if callable(get_backend_metadata):
@@ -357,6 +350,27 @@ class PlannerService:
             except Exception:
                 backend_metadata = {}
         backend_name = str(backend_metadata.get("backend") or "").strip()
+        if prompt_chars > DIRECT_PLANNING_PROMPT_CHAR_CAP:
+            _logger.info(
+                "[PLANNING_DIRECT] skip: prompt_chars=%d > cap=%d",
+                prompt_chars,
+                DIRECT_PLANNING_PROMPT_CHAR_CAP,
+            )
+            return False
+        local_openclaw_skip_threshold = int(
+            getattr(settings, "PLANNING_DIRECT_SKIP_PROMPT_CHAR_THRESHOLD", 0) or 0
+        )
+        if (
+            backend_name == "local_openclaw"
+            and local_openclaw_skip_threshold > 0
+            and prompt_chars >= local_openclaw_skip_threshold
+        ):
+            _logger.info(
+                "[PLANNING_DIRECT] skip: local_openclaw prompt_chars=%d >= threshold=%d",
+                prompt_chars,
+                local_openclaw_skip_threshold,
+            )
+            return False
         if (
             backend_name == "direct_ollama"
             and not settings.PLANNING_DIRECT_NO_THINKING_FOR_DIRECT_OLLAMA
