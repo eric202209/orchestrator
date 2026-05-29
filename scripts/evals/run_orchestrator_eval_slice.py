@@ -447,12 +447,70 @@ def _rate(count: int, total: int) -> float:
     return count / total
 
 
+def _aggregate_score_readiness(
+    score_readiness: list[dict[str, Any]],
+    repeat_count: int,
+) -> dict[str, Any]:
+    readiness_count = len(score_readiness)
+    stabilized_count = sum(
+        1 for readiness in score_readiness if readiness.get("stabilized") is True
+    )
+    required_terminal_event_count = sum(
+        1 for readiness in score_readiness if readiness.get("required_terminal_event")
+    )
+    required_terminal_event_observed_count = sum(
+        1
+        for readiness in score_readiness
+        if readiness.get("required_terminal_event")
+        and readiness.get("observed_terminal_event")
+        == readiness.get("required_terminal_event")
+    )
+    terminal_event_observed_count = sum(
+        1 for readiness in score_readiness if readiness.get("observed_terminal_event")
+    )
+    terminal_event_missing_count = (
+        required_terminal_event_count - required_terminal_event_observed_count
+    )
+    journal_paths = [
+        str(readiness["event_journal_path"])
+        for readiness in score_readiness
+        if readiness.get("event_journal_path")
+    ]
+    event_distribution = Counter(
+        str(readiness["observed_terminal_event"])
+        for readiness in score_readiness
+        if readiness.get("observed_terminal_event")
+    )
+    return {
+        "all_runs_scoreable": (
+            readiness_count == repeat_count
+            and stabilized_count == repeat_count
+            and terminal_event_missing_count == 0
+        ),
+        "readiness_recorded_count": readiness_count,
+        "stabilized_count": stabilized_count,
+        "stabilization_missing_count": repeat_count - stabilized_count,
+        "required_terminal_event_count": required_terminal_event_count,
+        "required_terminal_event_observed_count": (
+            required_terminal_event_observed_count
+        ),
+        "terminal_event_observed_count": terminal_event_observed_count,
+        "terminal_event_missing_count": terminal_event_missing_count,
+        "observed_terminal_event_distribution": dict(
+            sorted(event_distribution.items())
+        ),
+        "journal_paths": journal_paths,
+        "journal_path_count": len(journal_paths),
+    }
+
+
 def _aggregate_case_reports(
     *,
     case_id: str,
     reports: list[dict[str, Any]],
     report_paths: list[Path],
     run_context: dict[str, Any],
+    score_readiness: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     repeat_count = len(reports)
     phase_distribution = Counter(_primary_failure_phase(report) for report in reports)
@@ -507,6 +565,10 @@ def _aggregate_case_reports(
         "phase7g_exercised_rate": _rate(phase7g_used_count, repeat_count),
         "most_common_blocker": _most_common(blocker_distribution),
         "blocker_distribution": dict(sorted(blocker_distribution.items())),
+        "score_readiness_summary": _aggregate_score_readiness(
+            score_readiness or [],
+            repeat_count,
+        ),
         "run_report_paths": [str(path) for path in report_paths],
     }
 
@@ -781,6 +843,9 @@ def main() -> int:
                     reports=reports,
                     report_paths=report_paths,
                     run_context=run_context,
+                    score_readiness=[
+                        result["score_readiness"] for result in case_results
+                    ],
                 )
                 aggregate_report = args.reports_dir / (
                     f"orchestrator-eval-v1-{case_id.replace('_', '-')}-queue-"

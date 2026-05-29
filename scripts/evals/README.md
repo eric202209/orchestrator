@@ -133,6 +133,8 @@ Aggregate reports include:
 - execution and debug-repair reached counts/rates
 - Phase 7F and Phase 7G usage counts/rates
 - `most_common_blocker`
+- `score_readiness_summary`, including terminal-event observation,
+  event-journal stabilization, and journal paths used for scoring readiness
 - individual `run_report_paths`
 
 Use repeated runs to decide whether the next fix is a stable path bug or model

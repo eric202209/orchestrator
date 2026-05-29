@@ -110,6 +110,26 @@ def test_aggregate_case_reports_counts_path_observability_and_metadata():
             "runtime_profile": "standard",
             "repeat_seed": "seed-1",
         },
+        score_readiness=[
+            {
+                "event_journal_path": "workspace-r01/.openclaw/events/a.jsonl",
+                "required_terminal_event": "task_completed",
+                "observed_terminal_event": "task_completed",
+                "stabilized": True,
+            },
+            {
+                "event_journal_path": "workspace-r02/.openclaw/events/b.jsonl",
+                "required_terminal_event": "task_completed",
+                "observed_terminal_event": None,
+                "stabilized": True,
+            },
+            {
+                "event_journal_path": "workspace-r03/.openclaw/events/c.jsonl",
+                "required_terminal_event": None,
+                "observed_terminal_event": None,
+                "stabilized": True,
+            },
+        ],
     )
 
     assert aggregate["repeat_count"] == 3
@@ -134,6 +154,23 @@ def test_aggregate_case_reports_counts_path_observability_and_metadata():
     assert aggregate["phase7f_exercised_rate"] == 2 / 3
     assert aggregate["phase7g_exercised_rate"] == 1 / 3
     assert aggregate["most_common_blocker"] == "verifier_failed"
+    assert aggregate["score_readiness_summary"] == {
+        "all_runs_scoreable": False,
+        "readiness_recorded_count": 3,
+        "stabilized_count": 3,
+        "stabilization_missing_count": 0,
+        "required_terminal_event_count": 2,
+        "required_terminal_event_observed_count": 1,
+        "terminal_event_observed_count": 1,
+        "terminal_event_missing_count": 1,
+        "observed_terminal_event_distribution": {"task_completed": 1},
+        "journal_paths": [
+            "workspace-r01/.openclaw/events/a.jsonl",
+            "workspace-r02/.openclaw/events/b.jsonl",
+            "workspace-r03/.openclaw/events/c.jsonl",
+        ],
+        "journal_path_count": 3,
+    }
     assert aggregate["run_report_paths"] == ["run1.json", "run2.json", "run3.json"]
 
 
