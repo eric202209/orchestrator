@@ -37,6 +37,11 @@ TERMINAL_SESSION_STATUSES = frozenset(
 )
 FIXTURE_PROMPT_FILENAMES = ("task_prompt.txt", "prompt.txt")
 STABLE_PRIMARY_FAILURE_PHASE_THRESHOLD = 0.8
+TERMINAL_SUCCESS_EVENT = "task_completed"
+
+
+class AuthExpiredError(RuntimeError):
+    """Raised when the API bearer token expires during a long eval run."""
 
 
 def _default_python(repo_root: Path) -> str:
@@ -142,6 +147,12 @@ def _request_json(
             raw = response.read().decode("utf-8")
     except error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
+        if exc.code == 401:
+            raise AuthExpiredError(
+                f"auth_expired: {method} {path} returned HTTP 401. "
+                "The worker may still be running independently; refusing to score "
+                "until a fresh token can observe terminal state."
+            ) from exc
         raise SystemExit(f"{method} {path} failed: HTTP {exc.code}: {detail}") from exc
     except error.URLError as exc:
         raise SystemExit(f"{method} {path} failed: {exc.reason}") from exc
@@ -200,6 +211,113 @@ def _wait_for_terminal_session(
         f"Timed out waiting for session {session_id} terminal state; "
         f"last status={last_session.get('status')!r}"
     )
+
+
+def _event_journal_path(workspace: Path, session_id: int, task_id: int) -> Path:
+    return workspace / ".openclaw/events" / f"session_{session_id}_task_{task_id}.jsonl"
+
+
+def _event_types(path: Path) -> set[str]:
+    event_types: set[str] = set()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return event_types
+    except OSError:
+        return event_types
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("event_type"):
+            event_types.add(str(payload["event_type"]))
+    return event_types
+
+
+def _file_signature(path: Path) -> tuple[bool, int, int]:
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return (False, 0, 0)
+    return (True, stat.st_size, stat.st_mtime_ns)
+
+
+def _required_terminal_event(session_status: str) -> str | None:
+    status = str(session_status or "").lower()
+    if status == "completed":
+        return TERMINAL_SUCCESS_EVENT
+    if status in {"failed", "cancelled", "canceled"}:
+        return "task_failed"
+    return None
+
+
+def _wait_for_scoreable_event_journal(
+    *,
+    workspace: Path,
+    session_id: int,
+    task_id: int,
+    session_status: str,
+    timeout_seconds: float,
+    stable_seconds: float,
+    poll_seconds: float,
+) -> dict[str, Any]:
+    """Wait until scoring cannot race final event emission.
+
+    Completed sessions must have a `task_completed` event before scoring. Other
+    terminal states may not emit a single canonical task event, so the runner
+    waits until the journal stops changing.
+    """
+
+    path = _event_journal_path(workspace, session_id, task_id)
+    required_event = _required_terminal_event(session_status)
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    last_signature: tuple[bool, int, int] | None = None
+    stable_since: float | None = None
+    observed_events: set[str] = set()
+
+    while True:
+        observed_events = _event_types(path)
+        if required_event and required_event in observed_events:
+            return {
+                "event_journal_path": str(path),
+                "required_terminal_event": required_event,
+                "observed_terminal_event": required_event,
+                "stabilized": True,
+            }
+
+        signature = _file_signature(path)
+        now = time.monotonic()
+        if signature == last_signature:
+            if stable_since is None:
+                stable_since = now
+        else:
+            stable_since = now
+            last_signature = signature
+
+        if not required_event and stable_since is not None:
+            if now - stable_since >= stable_seconds:
+                return {
+                    "event_journal_path": str(path),
+                    "required_terminal_event": None,
+                    "observed_terminal_event": None,
+                    "stabilized": True,
+                }
+
+        if now >= deadline:
+            if required_event:
+                raise SystemExit(
+                    "terminal_event_missing: session reached "
+                    f"{session_status!r}, but {required_event!r} was not observed in "
+                    f"{path}. Refusing to score a potentially stale workspace."
+                )
+            raise SystemExit(
+                f"Timed out waiting for event journal stabilization: {path}"
+            )
+
+        time.sleep(max(0.0, poll_seconds))
 
 
 def _run_scorer(
@@ -454,6 +572,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout-seconds", type=int, default=3600)
     parser.add_argument("--poll-seconds", type=float, default=5.0)
     parser.add_argument(
+        "--event-stabilization-timeout-seconds",
+        type=float,
+        default=120.0,
+        help=(
+            "Maximum time to wait after API terminal state for the event journal "
+            "to contain its terminal event before scoring."
+        ),
+    )
+    parser.add_argument(
+        "--event-stable-seconds",
+        type=float,
+        default=2.0,
+        help=(
+            "For non-success terminal states without a required final event, wait "
+            "this long with no event journal changes before scoring."
+        ),
+    )
+    parser.add_argument(
         "--repeat",
         type=int,
         default=1,
@@ -549,6 +685,15 @@ def _run_case(
         timeout_seconds=args.timeout_seconds,
         poll_seconds=args.poll_seconds,
     )
+    score_readiness = _wait_for_scoreable_event_journal(
+        workspace=workspace,
+        session_id=session_id,
+        task_id=task_id,
+        session_status=str(final_session.get("status") or ""),
+        timeout_seconds=args.event_stabilization_timeout_seconds,
+        stable_seconds=args.event_stable_seconds,
+        poll_seconds=min(args.poll_seconds, 1.0),
+    )
     report = args.reports_dir / (
         f"orchestrator-eval-v1-{case_id.replace('_', '-')}-queue-{timestamp}.json"
     )
@@ -573,6 +718,7 @@ def _run_case(
         "scorer_exit_code": scorer_exit_code,
         "prompt_source": prompt_source,
         "scorer_python": args.python,
+        "score_readiness": score_readiness,
     }
 
 
@@ -609,38 +755,41 @@ def main() -> int:
         repo_root=repo_root,
         repeat_seed=args.repeat_seed,
     )
-    results = []
-    aggregate_reports = []
-    for case_id in case_ids:
-        case_results = []
-        for run_index in range(1, args.repeat + 1):
-            case_results.append(
-                _run_case(
-                    args=args,
-                    repo_root=repo_root,
-                    manifest=manifest,
-                    case_id=case_id,
-                    token=token,
-                    run_index=run_index,
-                    repeat_count=args.repeat,
+    try:
+        results = []
+        aggregate_reports = []
+        for case_id in case_ids:
+            case_results = []
+            for run_index in range(1, args.repeat + 1):
+                case_results.append(
+                    _run_case(
+                        args=args,
+                        repo_root=repo_root,
+                        manifest=manifest,
+                        case_id=case_id,
+                        token=token,
+                        run_index=run_index,
+                        repeat_count=args.repeat,
+                    )
                 )
-            )
-        results.extend(case_results)
-        if args.repeat > 1:
-            report_paths = [Path(result["report"]) for result in case_results]
-            reports = [_load_json(path) for path in report_paths]
-            aggregate_payload = _aggregate_case_reports(
-                case_id=case_id,
-                reports=reports,
-                report_paths=report_paths,
-                run_context=run_context,
-            )
-            aggregate_report = args.reports_dir / (
-                f"orchestrator-eval-v1-{case_id.replace('_', '-')}-queue-"
-                f"{run_timestamp}-aggregate.json"
-            )
-            _write_json_report(aggregate_report, aggregate_payload)
-            aggregate_reports.append(str(aggregate_report))
+            results.extend(case_results)
+            if args.repeat > 1:
+                report_paths = [Path(result["report"]) for result in case_results]
+                reports = [_load_json(path) for path in report_paths]
+                aggregate_payload = _aggregate_case_reports(
+                    case_id=case_id,
+                    reports=reports,
+                    report_paths=report_paths,
+                    run_context=run_context,
+                )
+                aggregate_report = args.reports_dir / (
+                    f"orchestrator-eval-v1-{case_id.replace('_', '-')}-queue-"
+                    f"{run_timestamp}-aggregate.json"
+                )
+                _write_json_report(aggregate_report, aggregate_payload)
+                aggregate_reports.append(str(aggregate_report))
+    except AuthExpiredError as exc:
+        raise SystemExit(str(exc)) from None
     baseline_report = args.reports_dir / (
         f"orchestrator-eval-v1-baseline-queue-{run_timestamp}.json"
     )

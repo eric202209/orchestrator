@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from io import BytesIO
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.error import HTTPError
 
 import pytest
 
@@ -181,3 +184,181 @@ def test_aggregate_case_reports_marks_stable_phase_at_eighty_percent_threshold()
         "planning_validation": 4,
     }
     assert aggregate["stable_primary_failure_phase"] is True
+
+
+def test_request_json_raises_auth_expired_on_401(monkeypatch):
+    def raise_unauthorized(_request, timeout):
+        raise HTTPError(
+            url="http://example.test/api/v1/sessions/1",
+            code=401,
+            msg="Unauthorized",
+            hdrs=None,
+            fp=BytesIO(b'{"detail":"Could not validate credentials"}'),
+        )
+
+    monkeypatch.setattr(runner.request, "urlopen", raise_unauthorized)
+
+    with pytest.raises(runner.AuthExpiredError, match="auth_expired"):
+        runner._request_json(
+            "GET",
+            "http://example.test/api/v1",
+            "sessions/1",
+            "expired-token",
+        )
+
+
+def test_wait_for_scoreable_event_journal_accepts_existing_task_completed(tmp_path):
+    event_dir = tmp_path / ".openclaw/events"
+    event_dir.mkdir(parents=True)
+    event_path = event_dir / "session_10_task_20.jsonl"
+    event_path.write_text(
+        '{"event_type":"task_completed","details":{"steps_completed":1}}\n',
+        encoding="utf-8",
+    )
+
+    result = runner._wait_for_scoreable_event_journal(
+        workspace=tmp_path,
+        session_id=10,
+        task_id=20,
+        session_status="completed",
+        timeout_seconds=0,
+        stable_seconds=999,
+        poll_seconds=0,
+    )
+
+    assert result["observed_terminal_event"] == "task_completed"
+
+
+def test_run_case_refuses_to_score_completed_session_without_terminal_event(
+    monkeypatch, tmp_path
+):
+    scored = False
+
+    def fake_request_json(method, _base_url, path, _token, payload=None):
+        if method == "POST" and path == "projects":
+            return {"id": 1}
+        if method == "POST" and path == "tasks":
+            return {"id": 2}
+        if method == "POST" and path == "sessions":
+            return {"id": 3}
+        if method == "POST" and path == "sessions/3/tasks/2/run":
+            return {}
+        raise AssertionError(f"unexpected request: {method} {path} {payload}")
+
+    def fake_run_scorer(**_kwargs):
+        nonlocal scored
+        scored = True
+        raise AssertionError("scorer should not run before terminal event")
+
+    monkeypatch.setattr(runner, "_select_case", lambda _manifest, _case_id: {})
+    monkeypatch.setattr(
+        runner, "_task_prompt_for_case", lambda _case, _fixture_dir: ("prompt", "test")
+    )
+    monkeypatch.setattr(
+        runner,
+        "_fresh_workspace",
+        lambda _root, _case_id, _fixture_dir, _timestamp: tmp_path,
+    )
+    monkeypatch.setattr(runner, "_request_json", fake_request_json)
+    monkeypatch.setattr(
+        runner,
+        "_wait_for_terminal_session",
+        lambda **_kwargs: {"status": "completed"},
+    )
+    monkeypatch.setattr(
+        runner,
+        "_wait_for_scoreable_event_journal",
+        lambda **_kwargs: (_ for _ in ()).throw(SystemExit("terminal_event_missing")),
+    )
+    monkeypatch.setattr(runner, "_run_scorer", fake_run_scorer)
+
+    args = SimpleNamespace(
+        api_base_url="http://example.test/api/v1",
+        fixtures_dir=tmp_path,
+        workspace_root=tmp_path,
+        reports_dir=tmp_path,
+        manifest=tmp_path / "manifest.json",
+        python="python",
+        timeout_seconds=60,
+        poll_seconds=0,
+        event_stabilization_timeout_seconds=0,
+        event_stable_seconds=0,
+    )
+
+    with pytest.raises(SystemExit, match="terminal_event_missing"):
+        runner._run_case(
+            args=args,
+            repo_root=tmp_path,
+            manifest={},
+            case_id="python_cli_small_feature",
+            token="token",
+            run_index=1,
+            repeat_count=1,
+        )
+
+    assert scored is False
+
+
+def test_run_case_auth_expiry_during_polling_does_not_score(monkeypatch, tmp_path):
+    scored = False
+
+    def fake_request_json(method, _base_url, path, _token, payload=None):
+        if method == "POST" and path == "projects":
+            return {"id": 1}
+        if method == "POST" and path == "tasks":
+            return {"id": 2}
+        if method == "POST" and path == "sessions":
+            return {"id": 3}
+        if method == "POST" and path == "sessions/3/tasks/2/run":
+            return {}
+        raise AssertionError(f"unexpected request: {method} {path} {payload}")
+
+    def fake_run_scorer(**_kwargs):
+        nonlocal scored
+        scored = True
+        raise AssertionError("scorer should not run after auth expiry")
+
+    monkeypatch.setattr(runner, "_select_case", lambda _manifest, _case_id: {})
+    monkeypatch.setattr(
+        runner, "_task_prompt_for_case", lambda _case, _fixture_dir: ("prompt", "test")
+    )
+    monkeypatch.setattr(
+        runner,
+        "_fresh_workspace",
+        lambda _root, _case_id, _fixture_dir, _timestamp: tmp_path,
+    )
+    monkeypatch.setattr(runner, "_request_json", fake_request_json)
+    monkeypatch.setattr(
+        runner,
+        "_wait_for_terminal_session",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            runner.AuthExpiredError("auth_expired: polling token expired")
+        ),
+    )
+    monkeypatch.setattr(runner, "_run_scorer", fake_run_scorer)
+
+    args = SimpleNamespace(
+        api_base_url="http://example.test/api/v1",
+        fixtures_dir=tmp_path,
+        workspace_root=tmp_path,
+        reports_dir=tmp_path,
+        manifest=tmp_path / "manifest.json",
+        python="python",
+        timeout_seconds=60,
+        poll_seconds=0,
+        event_stabilization_timeout_seconds=0,
+        event_stable_seconds=0,
+    )
+
+    with pytest.raises(runner.AuthExpiredError, match="auth_expired"):
+        runner._run_case(
+            args=args,
+            repo_root=tmp_path,
+            manifest={},
+            case_id="python_cli_small_feature",
+            token="token",
+            run_index=1,
+            repeat_count=1,
+        )
+
+    assert scored is False
