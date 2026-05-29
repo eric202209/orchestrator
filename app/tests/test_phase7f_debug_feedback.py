@@ -126,9 +126,11 @@ class _FakeRuntime:
     def __init__(self, responses):
         self.responses = list(responses)
         self.prompts = []
+        self.kwargs = []
 
-    async def execute_task(self, prompt, timeout_seconds=None):
+    async def execute_task(self, prompt, timeout_seconds=None, **kwargs):
         self.prompts.append(str(prompt))
+        self.kwargs.append({"timeout_seconds": timeout_seconds, **kwargs})
         if not self.responses:
             raise AssertionError("Fake runtime received unexpected prompt")
         response = self.responses.pop(0)
@@ -778,6 +780,13 @@ def test_phase7f_valid_bounded_repair_is_retried_and_succeeds(db_session, tmp_pa
     assert result["status"] == "completed", result
     assert len(runtime.prompts) == 3
     assert "Return a bare JSON array" in runtime.prompts[1]
+    assert runtime.kwargs[1]["diagnostic_label"] == "PHASE7F_DEBUG_REPAIR"
+    assert runtime.kwargs[1]["diagnostic_metadata"]["debug_prompt_mode"] == (
+        "phase7f_bounded_debug_repair"
+    )
+    assert runtime.kwargs[1]["diagnostic_metadata"]["debug_failure_class"]
+    assert runtime.kwargs[1]["diagnostic_metadata"]["task_execution_id"] == execution.id
+    assert runtime.kwargs[1]["diagnostic_metadata"]["step_index"] == 1
     assert ctx.orchestration_state.debug_repair_task_execution_ids == [execution.id]
     assert ctx.orchestration_state.plan[0]["commands"] == [
         "python3 -c \"print('fixed')\""

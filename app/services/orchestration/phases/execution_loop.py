@@ -1798,10 +1798,36 @@ def execute_step_loop(
         except Exception:
             pass
 
+        debug_runtime_kwargs: dict[str, Any] = {}
+        if debug_prompt_mode == "phase7f_bounded_debug_repair":
+            debug_runtime_kwargs = {
+                "diagnostic_label": "PHASE7F_DEBUG_REPAIR",
+                "diagnostic_metadata": {
+                    "phase": "debugging",
+                    "debug_prompt_mode": debug_prompt_mode,
+                    "debug_failure_class": (
+                        debug_feedback_envelope.failure_class
+                        if debug_feedback_envelope is not None
+                        else None
+                    ),
+                    "step_index": step_index + 1,
+                    "task_execution_id": ctx.task_execution_id,
+                    "evidence_capsule_used": (
+                        _evidence_capsule is not None
+                        and not _evidence_capsule.is_empty()
+                    ),
+                    "evidence_chars_total": (
+                        _evidence_capsule.total_chars if _evidence_capsule else 0
+                    ),
+                },
+            }
+
         try:
             debug_result = _run_coroutine(
                 runtime_service.execute_task(
-                    debug_prompt, timeout_seconds=DEBUG_TIMEOUT_SECONDS
+                    debug_prompt,
+                    timeout_seconds=DEBUG_TIMEOUT_SECONDS,
+                    **debug_runtime_kwargs,
                 )
             )
         except Exception as debug_error:

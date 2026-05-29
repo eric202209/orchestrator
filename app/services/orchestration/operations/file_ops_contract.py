@@ -20,6 +20,7 @@ REPLACE_IN_FILE_OLD_ALIASES = (
     "target",
     "old_string",
     "old_str",
+    "oldText",
 )
 REPLACE_IN_FILE_NEW_ALIASES = (
     "replace",
@@ -27,6 +28,7 @@ REPLACE_IN_FILE_NEW_ALIASES = (
     "content",
     "new_string",
     "new_str",
+    "newText",
 )
 
 

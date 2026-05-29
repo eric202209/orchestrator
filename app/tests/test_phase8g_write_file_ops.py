@@ -830,6 +830,50 @@ def test_validate_plan_rejects_empty_replace_old_text_as_repairable(tmp_path):
     assert "empty_replace_old_text_steps" in " ".join(result.reasons)
 
 
+def test_validate_plan_rejects_empty_camelcase_replace_old_text_as_repairable(
+    tmp_path,
+):
+    source = tmp_path / "src" / "medium_cli" / "formatting.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "def format_summary(total, completed):\n" "    raise NotImplementedError\n",
+        encoding="utf-8",
+    )
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Patch formatting",
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "src/medium_cli/formatting.py",
+                    "oldText": "",
+                    "newText": "",
+                }
+            ],
+            "commands": [],
+            "verification": "python3 -m pytest -q",
+            "rollback": None,
+            "expected_files": ["src/medium_cli/formatting.py"],
+        }
+    ]
+
+    result = ValidatorService.validate_plan(
+        plan,
+        output_text="[]",
+        task_prompt="Implement a Python CLI summary feature",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert result.repairable
+    assert not result.accepted
+    assert result.details["empty_replace_old_text_steps"] == {
+        1: ["src/medium_cli/formatting.py"]
+    }
+    assert "invalid_ops_steps" not in result.details["plan_schema"]["details"]
+
+
 def test_validate_plan_rejects_missing_replace_old_text_as_repairable(tmp_path):
     source = tmp_path / "src" / "medium_cli" / "cli.py"
     source.parent.mkdir(parents=True)
@@ -1072,6 +1116,19 @@ def test_phase8m_replace_in_file_aliases_normalize_to_contract():
             "path": "README.md",
             "old_str": "draft",
             "new_str": "ready",
+        }
+    ) == {
+        "op": "replace_in_file",
+        "path": "README.md",
+        "old": "draft",
+        "new": "ready",
+    }
+    assert normalize_replace_in_file_aliases(
+        {
+            "op": "replace_in_file",
+            "path": "README.md",
+            "oldText": "draft",
+            "newText": "ready",
         }
     ) == {
         "op": "replace_in_file",
