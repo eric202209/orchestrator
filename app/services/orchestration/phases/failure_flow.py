@@ -74,12 +74,12 @@ def _prepare_retry_workspace(
     record_live_log_fn: Callable[..., None],
     logger: logging.Logger,
     self_task: Any,
-) -> tuple[bool, Optional[dict[str, Any]]]:
+) -> tuple[bool, Optional[dict[str, Any]], bool]:
     """Prepare workspace before Celery retry.
 
-    Returns (workspace_restored, retry_kwargs). retry_kwargs is populated only
-    when the workspace could not be restored and the retried task should resume
-    from the error checkpoint instead of blindly starting clean.
+    Returns (workspace_restored, retry_kwargs, restore_blocked_retry).
+    restore_blocked_retry is true when an attempted restore failed or left the
+    workspace dirty enough that immediate retry would be unsafe.
     """
 
     db = ctx.db
@@ -126,7 +126,7 @@ def _prepare_retry_workspace(
             session_instance_id=session.instance_id if session else None,
             metadata={**retry_details, "restore_result": restore_result},
         )
-        return True, None
+        return True, None, False
 
     dirty_details = {
         **retry_details,
@@ -158,7 +158,7 @@ def _prepare_retry_workspace(
     if retry_kwargs is not None:
         retry_kwargs["resume_checkpoint_name"] = DIRTY_RETRY_CHECKPOINT_NAME
         retry_kwargs["queued_event_id"] = None
-    return False, retry_kwargs
+    return False, retry_kwargs, restore_result is not None
 
 
 def _is_phase7f_bounded_debug_timeout(
@@ -398,8 +398,13 @@ def handle_task_failure(
     if not knowledge_halted and has_retry_capacity and session and task:
         retry_workspace_restored = False
         retry_kwargs = None
+        retry_restore_blocked = False
         if ctx is not None:
-            retry_workspace_restored, retry_kwargs = _prepare_retry_workspace(
+            (
+                retry_workspace_restored,
+                retry_kwargs,
+                retry_restore_blocked,
+            ) = _prepare_retry_workspace(
                 ctx=ctx,
                 exc=exc,
                 restore_workspace_snapshot_if_needed=restore_workspace_snapshot_if_needed,
@@ -407,6 +412,29 @@ def handle_task_failure(
                 logger=logger,
                 self_task=self_task,
             )
+        if retry_restore_blocked:
+            retry_blocked_message = (
+                "Retry requires checkpoint resume because workspace restore failed "
+                "or the workspace remained dirty after failure."
+            )
+            mark_task_attempt_failed(
+                task=task,
+                session_task_link=session_task_link,
+                task_execution=task_execution,
+                error_message=retry_blocked_message,
+                completed_at=completed_at,
+                workspace_status=(
+                    "blocked" if task and task.task_subfolder else "not_created"
+                ),
+            )
+            mark_session_paused(
+                session,
+                alert_level="error",
+                alert_message=retry_blocked_message[:2000],
+            )
+            db.commit()
+            write_project_state_snapshot_fn(db, project, task, session_id)
+            return
         mark_task_attempt_pending(
             task=task,
             session_task_link=session_task_link,
