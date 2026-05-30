@@ -75,7 +75,10 @@ def test_path_observability_detects_phase7f_debug_repair():
         {"event_type": "debug_feedback_captured", "details": {}},
         {
             "event_type": "debug_repair_attempted",
-            "details": {"debug_prompt_mode": "phase7f_bounded_debug_repair"},
+            "details": {
+                "debug_prompt_mode": "phase7f_bounded_debug_repair",
+                "debug_prompt_mode_architecture": "bounded_execution_debug_repair",
+            },
         },
         {"event_type": "repair_rejected", "details": {"reason": "invalid"}},
     ]
@@ -96,7 +99,9 @@ def test_path_observability_detects_phase7f_debug_repair():
     assert result["step_started_count"] == 1
     assert result["debug_repair_reached"] is True
     assert result["phase7f_used"] is True
+    assert result["bounded_execution_debug_repair_used"] is True
     assert result["phase7g_used"] is False
+    assert result["diff_scoped_debug_repair_used"] is False
     assert result["repair_rejected_count"] == 1
     assert result["intended_path_observed"] is True
     assert result["primary_failure_phase"] == "debug_repair"
@@ -114,6 +119,7 @@ def test_path_observability_detects_phase7g_and_checkpoint_paths():
         {
             "event_type": "debug_repair_attempted",
             "details": {
+                "debug_prompt_mode_architecture": "diff_scoped_debug_repair",
                 "diff_repair_fallback_reason": None,
                 "diff_capsule_line_count": 8,
             },
@@ -132,6 +138,9 @@ def test_path_observability_detects_phase7g_and_checkpoint_paths():
     )
 
     assert debug_result["phase7g_used"] is True
+    assert debug_result["diff_scoped_debug_repair_used"] is True
+    assert debug_result["phase7f_used"] is False
+    assert debug_result["bounded_execution_debug_repair_used"] is False
 
     checkpoint_case = {
         "case_id": "checkpoint_resume_mid_task",
@@ -157,3 +166,42 @@ def test_path_observability_detects_phase7g_and_checkpoint_paths():
     assert checkpoint_result["checkpoint_loaded"] is True
     assert checkpoint_result["intended_path_observed"] is True
     assert checkpoint_result["primary_failure_phase"] is None
+
+
+def test_path_observability_reads_architecture_named_debug_prompt_modes():
+    case = {
+        "case_id": "debug_import_error_repair",
+        "category": "debug_repair",
+        "required_events": ["debug_feedback_captured", "debug_repair_attempted"],
+    }
+    events = [
+        {"event_type": "debug_feedback_captured", "details": {}},
+        {
+            "event_type": "debug_repair_attempted",
+            "details": {
+                "debug_prompt_mode_architecture": ("bounded_execution_debug_repair"),
+            },
+        },
+        {
+            "event_type": "debug_repair_attempted",
+            "details": {
+                "debug_prompt_mode_architecture": "diff_scoped_debug_repair",
+            },
+        },
+    ]
+    summary = _summary(events)
+
+    result = scorer._path_observability(
+        case=case,
+        events=events,
+        snapshots=[],
+        event_summary=summary,
+        verifier={"available": True, "passed": False},
+        clean_success=False,
+        required_events=_required(case, summary),
+    )
+
+    assert result["phase7f_used"] is True
+    assert result["bounded_execution_debug_repair_used"] is True
+    assert result["phase7g_used"] is True
+    assert result["diff_scoped_debug_repair_used"] is True

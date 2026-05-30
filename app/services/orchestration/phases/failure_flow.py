@@ -166,7 +166,15 @@ def _is_phase7f_bounded_debug_timeout(
 ) -> bool:
     """Return true only for Phase 7F source-step debug repair timeouts."""
 
-    if runtime_diagnostics.get("debug_prompt_mode") != "phase7f_bounded_debug_repair":
+    debug_prompt_mode = runtime_diagnostics.get("debug_prompt_mode")
+    debug_prompt_mode_architecture = runtime_diagnostics.get(
+        "debug_prompt_mode_architecture"
+    )
+    is_bounded_debug_repair = (
+        debug_prompt_mode == "phase7f_bounded_debug_repair"
+        or debug_prompt_mode_architecture == "bounded_execution_debug_repair"
+    )
+    if not is_bounded_debug_repair:
         return False
     if runtime_diagnostics.get("failure_phase") != "debug_repair":
         return False
@@ -357,9 +365,17 @@ def handle_task_failure(
                     "error_handler_retryable": should_retry,
                     "is_timeout": is_timeout,
                     "phase7f_bounded_debug_timeout": (is_phase7f_bounded_debug_timeout),
+                    "bounded_execution_debug_repair_timeout": (
+                        is_phase7f_bounded_debug_timeout
+                    ),
                     "planning_lock_wait_timeout": is_planning_lock_wait_timeout,
                     "project_mutation_lock_conflict": is_project_mutation_lock_conflict,
                     "reason": diagnostic_reason,
+                    "reason_architecture": (
+                        "bounded_execution_debug_repair_timeout"
+                        if diagnostic_reason == "phase7f_bounded_debug_timeout"
+                        else diagnostic_reason
+                    ),
                 },
             )
             save_orchestration_checkpoint_fn(

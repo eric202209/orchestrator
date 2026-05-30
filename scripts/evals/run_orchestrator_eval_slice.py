@@ -471,6 +471,11 @@ def _path_bool(report: dict[str, Any], name: str) -> bool:
     return bool(path_observability.get(name))
 
 
+def _path_any_bool(report: dict[str, Any], *names: str) -> bool:
+    path_observability = report.get("path_observability") or {}
+    return any(bool(path_observability.get(name)) for name in names)
+
+
 def _primary_failure_phase(report: dict[str, Any]) -> str:
     path_observability = report.get("path_observability") or {}
     phase = path_observability.get("primary_failure_phase")
@@ -583,10 +588,22 @@ def _aggregate_case_reports(
         1 for report in reports if _path_bool(report, "debug_repair_reached")
     )
     phase7f_used_count = sum(
-        1 for report in reports if _path_bool(report, "phase7f_used")
+        1
+        for report in reports
+        if _path_any_bool(
+            report,
+            "phase7f_used",
+            "bounded_execution_debug_repair_used",
+        )
     )
     phase7g_used_count = sum(
-        1 for report in reports if _path_bool(report, "phase7g_used")
+        1
+        for report in reports
+        if _path_any_bool(
+            report,
+            "phase7g_used",
+            "diff_scoped_debug_repair_used",
+        )
     )
     top_phase_count = phase_distribution.most_common(1)[0][1] if repeat_count else 0
     stable_primary_failure_phase = (
@@ -614,9 +631,17 @@ def _aggregate_case_reports(
         "debug_repair_reached_count": debug_repair_reached_count,
         "debug_repair_reached_rate": _rate(debug_repair_reached_count, repeat_count),
         "phase7f_used_count": phase7f_used_count,
+        "bounded_execution_debug_repair_used_count": phase7f_used_count,
         "phase7g_used_count": phase7g_used_count,
+        "diff_scoped_debug_repair_used_count": phase7g_used_count,
         "phase7f_exercised_rate": _rate(phase7f_used_count, repeat_count),
+        "bounded_execution_debug_repair_exercised_rate": _rate(
+            phase7f_used_count, repeat_count
+        ),
         "phase7g_exercised_rate": _rate(phase7g_used_count, repeat_count),
+        "diff_scoped_debug_repair_exercised_rate": _rate(
+            phase7g_used_count, repeat_count
+        ),
         "most_common_blocker": _most_common(blocker_distribution),
         "blocker_distribution": dict(sorted(blocker_distribution.items())),
         "score_readiness_summary": _aggregate_score_readiness(
