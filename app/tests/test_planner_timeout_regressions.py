@@ -7631,6 +7631,46 @@ def test_repair_prompt_includes_injected_weak_verification_rejection_line():
     assert "python -c file/content assertion is also valid" in prompt
 
 
+def test_planning_repair_prompt_guides_python_source_syntax_invalid():
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Add a summary command to this Python CLI.",
+        malformed_output=json.dumps(
+            [
+                {
+                    "step_number": 2,
+                    "description": "Write CLI source",
+                    "commands": ["python3 -m py_compile src/medium_cli/cli.py"],
+                    "verification": "python3 -m py_compile src/medium_cli/cli.py",
+                    "rollback": None,
+                    "expected_files": ["src/medium_cli/cli.py"],
+                    "ops": [
+                        {
+                            "op": "write_file",
+                            "path": "src/medium_cli/cli.py",
+                            "content": (
+                                'def summary():\\n    print("Summary command executed")\n'
+                            ),
+                        }
+                    ],
+                }
+            ]
+        ),
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+        rejection_reasons=[
+            "Plan writes Python source with invalid syntax "
+            "(python_source_syntax_invalid; src/medium_cli/cli.py line 1, "
+            "offset 15: unexpected character after line continuation character)"
+        ],
+    )
+
+    assert "Python source syntax repair:" in prompt
+    assert "complete valid Python source content" in prompt
+    assert "literal backslash-n text" in prompt
+    assert "real newline characters" in prompt
+    assert "ops.write_file with complete grounded file content" in prompt
+    assert "python3 -m py_compile <file>" in prompt
+
+
 def test_no_materialization_repair_prompt_requires_grounded_source_edits(tmp_path):
     (tmp_path / "src" / "medium_cli").mkdir(parents=True)
     (tmp_path / "tests").mkdir()

@@ -987,6 +987,8 @@ def normalize_diff_scoped_compliance_retry_command_list(
 
 def _extract_diff_scoped_command_list_items(raw_output: str) -> list[dict[str, str]]:
     text = str(raw_output or "").strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"\s*```$", "", text).strip()
     if not text.startswith("[") or not text.endswith("]"):
         return []
     objects = re.findall(r"\{(.*?)\}", text, flags=re.DOTALL)

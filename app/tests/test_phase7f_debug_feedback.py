@@ -999,7 +999,31 @@ def test_diff_scoped_compliance_retry_list_fallback_handles_json_looking_output(
     assert result.payload["verification"] == 'python3 -m pytest -q -k "ok"'
 
 
-def test_phase7f_normalizer_keeps_multi_command_list_shape_rejected():
+def test_diff_scoped_compliance_retry_list_fallback_handles_fenced_output():
+    raw_output = """
+```json
+[
+  {
+    "title": "Run focused verifier",
+    "command": "python3 -m pytest -q -k "ok"",
+    "verification_command": "python3 -m pytest -q -k "ok""
+  }
+]
+```
+"""
+
+    result = normalize_diff_scoped_compliance_retry_command_list(
+        raw_output,
+        source_edit_context=True,
+    )
+
+    assert result.rejection_reason is None
+    assert result.payload["fix_type"] == "command_fix"
+    assert result.payload["fix"] == 'python3 -m pytest -q -k "ok"'
+    assert result.payload["verification"] == 'python3 -m pytest -q -k "ok"'
+
+
+def test_bounded_debug_repair_normalizer_keeps_multi_command_list_shape_rejected():
     parsed = [
         {
             "title": "Run first verifier",
@@ -2284,12 +2308,6 @@ def test_phase7g_diff_repair_prompt_is_used_when_capsule_available(
     (holder["project_dir"] / "src" / "demo.py").write_text(
         "VALUE = 1\n", encoding="utf-8"
     )
-    (holder["project_dir"] / "tests").mkdir()
-    (holder["project_dir"] / "tests" / "test_ok.py").write_text(
-        "def test_ok():\n    assert True\n",
-        encoding="utf-8",
-    )
-
     result = execute_step_loop(
         ctx=ctx,
         extract_structured_text=_extract_structured_text,

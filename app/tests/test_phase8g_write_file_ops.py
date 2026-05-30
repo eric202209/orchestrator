@@ -335,6 +335,210 @@ def test_validate_plan_allows_missing_expected_src_file_with_write_op(tmp_path):
     assert "expected_source_file_not_materialized" not in verdict.details
 
 
+def test_validate_plan_rejects_python_write_file_unterminated_triple_quote(tmp_path):
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Write CLI source",
+                "commands": ["python3 -m py_compile src/medium_cli/cli.py"],
+                "verification": "python3 -m py_compile src/medium_cli/cli.py",
+                "rollback": None,
+                "expected_files": ["src/medium_cli/cli.py"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "src/medium_cli/cli.py",
+                        "content": (
+                            '"""Task-list CLI used by the eval fixture."\n'
+                            "\n"
+                            "def main(argv=None):\n"
+                            "    return 0\n"
+                        ),
+                    }
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Implement the medium_cli CLI",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.accepted is False
+    assert verdict.details["python_source_syntax_invalid"][0]["path"] == (
+        "src/medium_cli/cli.py"
+    )
+    assert "python_source_syntax_invalid" in verdict.details["semantic_violation_codes"]
+    assert "python_source_syntax_invalid" in " ".join(verdict.reasons)
+
+
+def test_validate_plan_rejects_python_write_file_literal_backslash_n_syntax_error(
+    tmp_path,
+):
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Write summary source",
+                "commands": ["python3 -m py_compile src/medium_cli/cli.py"],
+                "verification": "python3 -m py_compile src/medium_cli/cli.py",
+                "rollback": None,
+                "expected_files": ["src/medium_cli/cli.py"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "src/medium_cli/cli.py",
+                        "content": (
+                            'def summary():\\n    print("Summary command executed")\n'
+                        ),
+                    }
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Implement the medium_cli summary command",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.accepted is False
+    issue = verdict.details["python_source_syntax_invalid"][0]
+    assert issue["path"] == "src/medium_cli/cli.py"
+    assert issue["line"] == 1
+
+
+def test_validate_plan_rejects_python_append_file_resulting_syntax_error(tmp_path):
+    source_path = tmp_path / "src" / "medium_cli" / "cli.py"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("def main(argv=None):\n    return 0\n", encoding="utf-8")
+
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Append invalid source",
+                "commands": ["python3 -m py_compile src/medium_cli/cli.py"],
+                "verification": "python3 -m py_compile src/medium_cli/cli.py",
+                "rollback": None,
+                "expected_files": ["src/medium_cli/cli.py"],
+                "ops": [
+                    {
+                        "op": "append_file",
+                        "path": "src/medium_cli/cli.py",
+                        "content": "\ndef broken(:\n    return 1\n",
+                    }
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Implement the medium_cli CLI",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.accepted is False
+    assert verdict.details["python_source_syntax_invalid"][0]["path"] == (
+        "src/medium_cli/cli.py"
+    )
+
+
+def test_validate_plan_rejects_python_replace_in_file_resulting_syntax_error(
+    tmp_path,
+):
+    source_path = tmp_path / "src" / "medium_cli" / "cli.py"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("def main(argv=None):\n    return 0\n", encoding="utf-8")
+
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Patch invalid source",
+                "commands": ["python3 -m py_compile src/medium_cli/cli.py"],
+                "verification": "python3 -m py_compile src/medium_cli/cli.py",
+                "rollback": None,
+                "expected_files": ["src/medium_cli/cli.py"],
+                "ops": [
+                    {
+                        "op": "replace_in_file",
+                        "path": "src/medium_cli/cli.py",
+                        "old": "def main(argv=None):\n    return 0\n",
+                        "new": "def main(argv=None):\n    if True\n        return 0\n",
+                    }
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Implement the medium_cli CLI",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.accepted is False
+    assert verdict.details["python_source_syntax_invalid"][0]["path"] == (
+        "src/medium_cli/cli.py"
+    )
+
+
+def test_validate_plan_accepts_valid_python_write_file(tmp_path):
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Write valid source",
+                "commands": ["python3 -m py_compile src/medium_cli/cli.py"],
+                "verification": "python3 -m py_compile src/medium_cli/cli.py",
+                "rollback": None,
+                "expected_files": ["src/medium_cli/cli.py"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "src/medium_cli/cli.py",
+                        "content": "def main(argv=None):\n    return 0\n",
+                    }
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Implement the medium_cli CLI",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert "python_source_syntax_invalid" not in verdict.details
+
+
+def test_validate_plan_non_python_write_file_syntax_unchanged(tmp_path):
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Write notes",
+                "commands": [
+                    "python3 -c \"from pathlib import Path; assert Path('notes.txt').exists()\""
+                ],
+                "verification": "python3 -c \"from pathlib import Path; assert Path('notes.txt').exists()\"",
+                "rollback": None,
+                "expected_files": ["notes.txt"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "notes.txt",
+                        "content": "def broken(:\n",
+                    }
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Create notes",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert "python_source_syntax_invalid" not in verdict.details
+
+
 def test_validate_plan_allows_existing_expected_src_file_without_write_op(tmp_path):
     source_path = tmp_path / "src" / "math_tools" / "operations.py"
     source_path.parent.mkdir(parents=True)
