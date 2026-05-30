@@ -40,9 +40,30 @@ def _get_latest_session_task_link(
 
 
 def _runtime_selection_details(db: Session) -> Dict[str, Optional[str]]:
+    execution_model = (
+        settings.EXECUTION_MODEL
+        or settings.OLLAMA_AGENT_MODEL
+        or get_effective_agent_model_family(settings.AGENT_MODEL, db=db)
+    )
     return {
         "backend": get_effective_agent_backend(settings.AGENT_BACKEND, db=db),
         "model_family": get_effective_agent_model_family(settings.AGENT_MODEL, db=db),
+        "planner_model": settings.PLANNER_MODEL or settings.AGENT_MODEL,
+        "planner_backend": settings.PLANNING_BACKEND or settings.AGENT_BACKEND,
+        "planning_repair_model": settings.PLANNING_REPAIR_MODEL,
+        "planning_repair_backend": settings.PLANNING_BACKEND or settings.AGENT_BACKEND,
+        "debug_repair_model": (
+            settings.DEBUG_REPAIR_MODEL
+            or settings.PHASE7F_REPAIR_MODEL
+            or settings.PLANNING_REPAIR_MODEL
+        ),
+        "debug_repair_backend": (
+            settings.DEBUG_REPAIR_BACKEND
+            or settings.REPAIR_BACKEND
+            or settings.AGENT_BACKEND
+        ),
+        "execution_model": execution_model,
+        "execution_backend": settings.EXECUTION_BACKEND or settings.AGENT_BACKEND,
     }
 
 

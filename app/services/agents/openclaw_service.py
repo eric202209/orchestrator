@@ -210,6 +210,7 @@ class OpenClawSessionService:
             db.query(Task).filter(Task.id == task_id).first() if task_id else None
         )
         self.task_execution_id = task_execution_id
+        self.backend_role: Optional[str] = None
         self._safety_prompt_injected = False
         self.openclaw_session_key: Optional[str] = None
         self._task_session_id: Optional[str] = None
@@ -225,9 +226,7 @@ class OpenClawSessionService:
     def get_backend_metadata(self) -> Dict[str, Any]:
         """Return normalized backend metadata for logs, APIs, and orchestration."""
 
-        model_family = get_effective_agent_model_family(
-            settings.AGENT_MODEL, db=self.db
-        )
+        model_family = self._model_family_for_role()
         adaptation_profile = resolve_adaptation_profile(
             backend=self.backend_descriptor.name,
             model_family=model_family,
@@ -241,6 +240,18 @@ class OpenClawSessionService:
             "agent_interface": self.describe_interface().to_dict(),
             "capabilities": self.backend_descriptor.capabilities.to_dict(),
         }
+
+    def _model_family_for_role(self) -> str:
+        role_model = ""
+        if self.backend_role == "planning":
+            role_model = settings.PLANNER_MODEL
+        elif self.backend_role == "debug_repair":
+            role_model = settings.DEBUG_REPAIR_MODEL
+        elif self.backend_role == "execution":
+            role_model = settings.EXECUTION_MODEL or settings.OLLAMA_AGENT_MODEL
+        return str(role_model or "").strip() or get_effective_agent_model_family(
+            settings.AGENT_MODEL, db=self.db
+        )
 
     def normalize_execution_result(
         self,
@@ -259,9 +270,7 @@ class OpenClawSessionService:
         )
 
     def describe_interface(self) -> AgentInterfaceDescriptor:
-        model_family = get_effective_agent_model_family(
-            settings.AGENT_MODEL, db=self.db
-        )
+        model_family = self._model_family_for_role()
         profile = resolve_adaptation_profile(
             backend=self.backend_descriptor.name,
             model_family=model_family,
@@ -406,7 +415,7 @@ class OpenClawSessionService:
         """Classify labeled OpenClaw calls without changing the CLI invocation."""
 
         if diagnostic_label == "PHASE7F_DEBUG_REPAIR":
-            return "phase7f_debug_repair"
+            return "debug_repair"
         return "planning"
 
     @staticmethod
@@ -414,7 +423,7 @@ class OpenClawSessionService:
         """Name the owner of an OpenClaw wait timeout for runtime diagnostics."""
 
         if diagnostic_label == "PHASE7F_DEBUG_REPAIR":
-            return "phase7f_debug_repair_wait_for"
+            return "debug_repair_wait_for"
         return "planning_wait_for"
 
     @staticmethod
@@ -440,32 +449,62 @@ class OpenClawSessionService:
     def _should_use_phase7f_direct_repair(
         self, diagnostic_label: Optional[str]
     ) -> bool:
-        """Route only Phase 7F structured repair through direct no-thinking chat."""
+        """Route bounded debug repair through direct chat when configured.
+
+        The diagnostic label remains the historical Phase 7F marker for existing
+        reports. New configuration and metadata use the architecture name.
+        """
 
         if diagnostic_label != "PHASE7F_DEBUG_REPAIR":
             return False
-        if not settings.PHASE7F_REPAIR_DIRECT_ENABLED:
+        enabled = (
+            settings.DEBUG_REPAIR_DIRECT_ENABLED
+            if settings.DEBUG_REPAIR_DIRECT_ENABLED is not None
+            else settings.PHASE7F_REPAIR_DIRECT_ENABLED
+        )
+        if not enabled:
             return False
         return self.backend_descriptor.name == "local_openclaw"
 
     @staticmethod
-    def _phase7f_repair_direct_config() -> Dict[str, str]:
-        """Resolve Phase 7F direct repair settings with planning-repair fallbacks."""
+    def _debug_repair_direct_config() -> Dict[str, str]:
+        """Resolve direct debug repair settings with planning-repair fallbacks."""
 
         return {
+            "backend": (
+                settings.DEBUG_REPAIR_BACKEND or settings.REPAIR_BACKEND or ""
+            ).strip(),
             "base_url": (
-                settings.PHASE7F_REPAIR_BASE_URL
+                settings.DEBUG_REPAIR_BASE_URL
+                or settings.PHASE7F_REPAIR_BASE_URL
                 or settings.PLANNING_REPAIR_BASE_URL
                 or ""
             ).rstrip("/"),
-            "model": settings.PHASE7F_REPAIR_MODEL or settings.PLANNING_REPAIR_MODEL,
-            "api_key": settings.PHASE7F_REPAIR_API_KEY
+            "model": (
+                settings.DEBUG_REPAIR_MODEL
+                or settings.PHASE7F_REPAIR_MODEL
+                or settings.PLANNING_REPAIR_MODEL
+            ),
+            "api_key": settings.DEBUG_REPAIR_API_KEY
+            or settings.PHASE7F_REPAIR_API_KEY
             or settings.PLANNING_REPAIR_API_KEY,
         }
 
     @staticmethod
-    def _phase7f_repair_direct_payload(prompt: str, model: str) -> Dict[str, Any]:
-        """Build the direct structured-repair payload for qwen/vLLM no-thinking mode."""
+    def _debug_repair_disable_thinking() -> bool:
+        if settings.DEBUG_REPAIR_DISABLE_THINKING is not None:
+            return bool(settings.DEBUG_REPAIR_DISABLE_THINKING)
+        return bool(settings.PHASE7F_REPAIR_DISABLE_THINKING)
+
+    @staticmethod
+    def _phase7f_repair_direct_config() -> Dict[str, str]:
+        """Backward-compatible wrapper for the architecture-named config."""
+
+        return OpenClawSessionService._debug_repair_direct_config()
+
+    @staticmethod
+    def _debug_repair_direct_payload(prompt: str, model: str) -> Dict[str, Any]:
+        """Build the direct structured-repair payload."""
 
         payload: Dict[str, Any] = {
             "model": model,
@@ -474,11 +513,59 @@ class OpenClawSessionService:
             "max_tokens": 2048,
             "stream": False,
         }
-        if settings.PHASE7F_REPAIR_DISABLE_THINKING:
+        if OpenClawSessionService._debug_repair_disable_thinking():
             payload["think"] = False
             payload["enable_thinking"] = False
             payload["chat_template_kwargs"] = {"enable_thinking": False}
         return payload
+
+    @staticmethod
+    def _phase7f_repair_direct_payload(prompt: str, model: str) -> Dict[str, Any]:
+        """Backward-compatible wrapper for the architecture-named payload."""
+
+        return OpenClawSessionService._debug_repair_direct_payload(prompt, model)
+
+    @staticmethod
+    def _debug_repair_responses_payload(prompt: str, model: str) -> Dict[str, Any]:
+        """Build an OpenAI Responses API payload for direct debug repair."""
+
+        return {
+            "model": model,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": prompt}],
+                }
+            ],
+        }
+
+    @staticmethod
+    def _extract_responses_output_text(body: Any) -> str:
+        """Extract text from an OpenAI Responses API body."""
+
+        if not isinstance(body, dict):
+            return ""
+        output_text = body.get("output_text")
+        if isinstance(output_text, str):
+            return output_text
+
+        parts: list[str] = []
+        output = body.get("output")
+        if not isinstance(output, list):
+            return ""
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            content = item.get("content")
+            if not isinstance(content, list):
+                continue
+            for content_item in content:
+                if not isinstance(content_item, dict):
+                    continue
+                text = content_item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
 
     @staticmethod
     def _extract_chat_completion_content(body: Any) -> str:
@@ -513,36 +600,49 @@ class OpenClawSessionService:
         timeout_seconds: int,
         diagnostic_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        config = self._phase7f_repair_direct_config()
+        config = self._debug_repair_direct_config()
         base_url = config["base_url"]
         model = config["model"]
         if not base_url or not model:
             raise OpenClawSessionError(
-                "Phase 7F direct repair is enabled but base URL or model is not configured"
+                "Debug repair direct call is enabled but base URL or model is not configured"
             )
 
-        payload = self._phase7f_repair_direct_payload(prompt, model)
+        uses_responses_api = config["backend"] == "openai_responses_api"
+        if uses_responses_api:
+            payload = self._debug_repair_responses_payload(prompt, model)
+            url = f"{base_url}/responses"
+            timeout_boundary = "debug_repair_responses_api"
+            backend_id = "debug_repair_openai_responses_api"
+        else:
+            payload = self._debug_repair_direct_payload(prompt, model)
+            url = f"{base_url}/chat/completions"
+            timeout_boundary = "debug_repair_direct_chat"
+            backend_id = "debug_repair_direct_chat_completions"
+
         headers = {"Content-Type": "application/json"}
         api_key = config["api_key"].strip()
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
         started_at = time.monotonic()
-        url = f"{base_url}/chat/completions"
         self._log_entry(
             "INFO",
-            "[PHASE7F_DIRECT_REPAIR] attempting direct no-thinking structured repair "
+            "[DEBUG_REPAIR_DIRECT] attempting direct structured repair "
             f"model={model} timeout={timeout_seconds}s prompt_chars={len(prompt or '')}",
             metadata=json.dumps(
                 {
                     "diagnostic_label": "PHASE7F_DEBUG_REPAIR",
-                    "invocation_kind": "phase7f_debug_repair",
-                    "timeout_boundary": "phase7f_debug_repair_direct_chat",
+                    "architecture_lane": "debug_repair",
+                    "invocation_kind": "debug_repair",
+                    "timeout_boundary": timeout_boundary,
                     "prompt_chars": len(prompt or ""),
                     "prompt_sha256_12": hashlib.sha256(
                         (prompt or "").encode("utf-8")
                     ).hexdigest()[:12],
-                    "disable_thinking": settings.PHASE7F_REPAIR_DISABLE_THINKING,
+                    "backend": backend_id,
+                    "responses_api": uses_responses_api,
+                    "disable_thinking": self._debug_repair_disable_thinking(),
                     **(diagnostic_metadata or {}),
                 }
             ),
@@ -556,14 +656,17 @@ class OpenClawSessionService:
         except Exception as exc:
             duration_seconds = time.monotonic() - started_at
             error = OpenClawSessionError(
-                f"Phase 7F direct repair failed: {type(exc).__name__}: {str(exc)[:200]}"
+                f"Debug repair direct call failed: {type(exc).__name__}: {str(exc)[:200]}"
             )
             error.runtime_diagnostics = {
                 "diagnostic_label": "PHASE7F_DEBUG_REPAIR",
-                "invocation_kind": "phase7f_debug_repair",
-                "timeout_boundary": "phase7f_debug_repair_direct_chat",
-                "direct_chat_completions": True,
-                "disable_thinking": settings.PHASE7F_REPAIR_DISABLE_THINKING,
+                "architecture_lane": "debug_repair",
+                "invocation_kind": "debug_repair",
+                "timeout_boundary": timeout_boundary,
+                "backend": backend_id,
+                "responses_api": uses_responses_api,
+                "direct_chat_completions": not uses_responses_api,
+                "disable_thinking": self._debug_repair_disable_thinking(),
                 "duration_seconds": round(duration_seconds, 3),
                 "timed_out": isinstance(
                     exc, (httpx.TimeoutException, asyncio.TimeoutError)
@@ -571,7 +674,10 @@ class OpenClawSessionService:
             }
             raise error
 
-        output = self._extract_chat_completion_content(body)
+        if uses_responses_api:
+            output = self._extract_responses_output_text(body)
+        else:
+            output = self._extract_chat_completion_content(body)
         duration_seconds = time.monotonic() - started_at
         choices = body.get("choices") if isinstance(body, dict) else None
         first_choice = choices[0] if isinstance(choices, list) and choices else {}
@@ -585,10 +691,13 @@ class OpenClawSessionService:
 
         diagnostics = {
             "diagnostic_label": "PHASE7F_DEBUG_REPAIR",
-            "invocation_kind": "phase7f_debug_repair",
-            "timeout_boundary": "phase7f_debug_repair_direct_chat",
-            "direct_chat_completions": True,
-            "disable_thinking": settings.PHASE7F_REPAIR_DISABLE_THINKING,
+            "architecture_lane": "debug_repair",
+            "invocation_kind": "debug_repair",
+            "timeout_boundary": timeout_boundary,
+            "backend": backend_id,
+            "responses_api": uses_responses_api,
+            "direct_chat_completions": not uses_responses_api,
+            "disable_thinking": self._debug_repair_disable_thinking(),
             "duration_seconds": round(duration_seconds, 3),
             "timeout_seconds": timeout_seconds,
             "finish_reason": finish_reason,
@@ -598,7 +707,7 @@ class OpenClawSessionService:
         }
         self._log_entry(
             "INFO",
-            "[PHASE7F_DIRECT_REPAIR] completed direct structured repair "
+            "[DEBUG_REPAIR_DIRECT] completed direct structured repair "
             f"duration={duration_seconds:.1f}s output_chars={len(output or '')} "
             f"reasoning_chars={diagnostics['reasoning_chars']}",
             metadata=json.dumps(diagnostics),
@@ -606,7 +715,7 @@ class OpenClawSessionService:
 
         if not output.strip():
             error = OpenClawSessionError(
-                "Phase 7F direct repair returned empty content"
+                "Debug repair direct call returned empty content"
             )
             error.runtime_diagnostics = diagnostics
             raise error
@@ -615,7 +724,7 @@ class OpenClawSessionService:
             "status": "completed",
             "output": output,
             "logs": [],
-            "backend": "phase7f_direct_chat_completions",
+            "backend": backend_id,
             "model_family": model,
             "diagnostics": diagnostics,
         }
@@ -1114,7 +1223,7 @@ class OpenClawSessionService:
                 "reuse_task_session": reuse_task_session,
                 "demo_mode": self.use_demo_mode,
             },
-            model=get_effective_agent_model_family(settings.AGENT_MODEL, db=self.db),
+            model=self._model_family_for_role(),
         ) as observation:
             try:
                 # OPTIMIZATION: Track start time
@@ -1218,7 +1327,7 @@ class OpenClawSessionService:
                     )
 
                 result.setdefault("backend", self.backend_descriptor.name)
-                result.setdefault("model_family", settings.AGENT_MODEL)
+                result.setdefault("model_family", self._model_family_for_role())
                 result.setdefault(
                     "backend_capabilities",
                     self.backend_descriptor.capabilities.to_dict(),

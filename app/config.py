@@ -137,15 +137,23 @@ class Settings(BaseSettings):
     AGENT_SECONDARY_BACKEND: Optional[str] = None
     PLANNING_BACKEND: Optional[str] = None
     EXECUTION_BACKEND: Optional[str] = None
+    DEBUG_REPAIR_BACKEND: Optional[str] = None
     REPAIR_BACKEND: Optional[str] = None
     LOCAL_OPENCLAW_MAX_PARALLEL_SESSIONS: int = 1
     ENABLE_TEST_RUNTIME_BACKENDS: bool = False
     AGENT_MODEL: str = "local"
+    PLANNER_MODEL: str = ""
+    EXECUTION_MODEL: str = ""
     PLANNING_REPAIR_ENABLED: bool = True
     PLANNING_REPAIR_BASE_URL: str = "http://ai-gateway:8000/v1"
     PLANNING_REPAIR_MODEL: str = "qwen-local"
     PLANNING_REPAIR_API_KEY: str = ""
     PLANNING_REPAIR_DISABLE_THINKING: bool = True
+    DEBUG_REPAIR_DIRECT_ENABLED: Optional[bool] = None
+    DEBUG_REPAIR_BASE_URL: str = ""
+    DEBUG_REPAIR_MODEL: str = ""
+    DEBUG_REPAIR_API_KEY: str = ""
+    DEBUG_REPAIR_DISABLE_THINKING: Optional[bool] = None
     PHASE7F_REPAIR_DIRECT_ENABLED: bool = True
     PHASE7F_REPAIR_BASE_URL: str = ""
     PHASE7F_REPAIR_MODEL: str = ""
@@ -354,6 +362,7 @@ def validate_runtime_secrets() -> None:
         role_backends = {
             "PLANNING_BACKEND": settings.PLANNING_BACKEND,
             "EXECUTION_BACKEND": settings.EXECUTION_BACKEND,
+            "DEBUG_REPAIR_BACKEND": settings.DEBUG_REPAIR_BACKEND,
             "REPAIR_BACKEND": settings.REPAIR_BACKEND,
         }
         for env_name, role_backend in role_backends.items():

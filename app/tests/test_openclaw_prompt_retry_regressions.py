@@ -149,7 +149,7 @@ def test_phase7f_debug_repair_uses_direct_no_thinking_chat(db_session, monkeypat
             "status": "completed",
             "output": '{"ops":[]}',
             "logs": [],
-            "backend": "phase7f_direct_chat_completions",
+            "backend": "debug_repair_direct_chat_completions",
             "model_family": "qwen-local",
         }
 
@@ -172,7 +172,7 @@ def test_phase7f_debug_repair_uses_direct_no_thinking_chat(db_session, monkeypat
     )
 
     assert result["status"] == "completed"
-    assert result["backend"] == "phase7f_direct_chat_completions"
+    assert result["backend"] == "debug_repair_direct_chat_completions"
     assert seen["prompt"] == "Return bounded JSON repair"
     assert seen["timeout_seconds"] == 180
     assert seen["diagnostic_metadata"]["debug_failure_class"] == (
@@ -181,9 +181,9 @@ def test_phase7f_debug_repair_uses_direct_no_thinking_chat(db_session, monkeypat
 
 
 def test_phase7f_direct_repair_payload_disables_thinking(monkeypatch):
-    monkeypatch.setattr(settings, "PHASE7F_REPAIR_DISABLE_THINKING", True)
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_DISABLE_THINKING", True)
 
-    payload = OpenClawSessionService._phase7f_repair_direct_payload(
+    payload = OpenClawSessionService._debug_repair_direct_payload(
         "Return JSON", "qwen-local"
     )
 
@@ -192,6 +192,179 @@ def test_phase7f_direct_repair_payload_disables_thinking(monkeypatch):
     assert payload["think"] is False
     assert payload["enable_thinking"] is False
     assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_debug_repair_responses_payload_uses_openai_responses_shape():
+    payload = OpenClawSessionService._debug_repair_responses_payload(
+        "Return bounded JSON", "gpt-5.5"
+    )
+
+    assert payload == {
+        "model": "gpt-5.5",
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Return bounded JSON"}],
+            }
+        ],
+    }
+
+
+def test_debug_repair_extracts_responses_output_text():
+    body = {
+        "output": [
+            {
+                "content": [
+                    {"type": "output_text", "text": '{"ops":['},
+                    {"type": "output_text", "text": "]}"},
+                ]
+            }
+        ]
+    }
+
+    assert OpenClawSessionService._extract_responses_output_text(body) == '{"ops":[]}'
+
+
+def test_debug_repair_direct_config_keeps_phase7f_env_fallback(monkeypatch):
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_BASE_URL", "")
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_MODEL", "")
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_API_KEY", "")
+    monkeypatch.setattr(
+        settings, "PHASE7F_REPAIR_BASE_URL", "https://legacy.example/v1"
+    )
+    monkeypatch.setattr(settings, "PHASE7F_REPAIR_MODEL", "legacy-model")
+    monkeypatch.setattr(settings, "PHASE7F_REPAIR_API_KEY", "legacy-key")
+
+    config = OpenClawSessionService._debug_repair_direct_config()
+
+    assert config["base_url"] == "https://legacy.example/v1"
+    assert config["model"] == "legacy-model"
+    assert config["api_key"] == "legacy-key"
+
+
+def test_debug_repair_direct_config_prefers_architecture_names(monkeypatch):
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_BASE_URL", "https://debug.example/v1")
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_MODEL", "debug-model")
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_API_KEY", "debug-key")
+    monkeypatch.setattr(
+        settings, "PHASE7F_REPAIR_BASE_URL", "https://legacy.example/v1"
+    )
+    monkeypatch.setattr(settings, "PHASE7F_REPAIR_MODEL", "legacy-model")
+    monkeypatch.setattr(settings, "PHASE7F_REPAIR_API_KEY", "legacy-key")
+
+    config = OpenClawSessionService._debug_repair_direct_config()
+
+    assert config["base_url"] == "https://debug.example/v1"
+    assert config["model"] == "debug-model"
+    assert config["api_key"] == "debug-key"
+
+
+def test_debug_repair_openai_responses_path_posts_to_responses(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_BACKEND", "openai_responses_api")
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_BASE_URL", "https://api.example/v1")
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_MODEL", "gpt-5.5")
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_API_KEY", "secret")
+    session, task = _seed_service_models(db_session)
+    service = OpenClawSessionService(
+        db_session, session.id, task.id, use_demo_mode=False
+    )
+    monkeypatch.setattr(service, "_log_entry", lambda *args, **kwargs: None)
+
+    seen: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"output_text": '{"ops":[]}', "usage": {"input_tokens": 1}}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            seen["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, json, headers):
+            seen["url"] = url
+            seen["json"] = json
+            seen["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "app.services.agents.openclaw_service.httpx.AsyncClient", FakeAsyncClient
+    )
+
+    result = asyncio.run(
+        service._execute_phase7f_direct_repair("Return JSON", timeout_seconds=42)
+    )
+
+    assert seen["url"] == "https://api.example/v1/responses"
+    assert seen["json"] == {
+        "model": "gpt-5.5",
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Return JSON"}],
+            }
+        ],
+    }
+    assert seen["headers"]["Authorization"] == "Bearer secret"
+    assert result["backend"] == "debug_repair_openai_responses_api"
+    assert result["output"] == '{"ops":[]}'
+
+
+def test_debug_repair_local_chat_path_remains_chat_completions(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_BACKEND", "")
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_BASE_URL", "https://local.example/v1")
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_MODEL", "qwen-local")
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_API_KEY", "")
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_DISABLE_THINKING", True)
+    session, task = _seed_service_models(db_session)
+    service = OpenClawSessionService(
+        db_session, session.id, task.id, use_demo_mode=False
+    )
+    monkeypatch.setattr(service, "_log_entry", lambda *args, **kwargs: None)
+
+    seen: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": '{"ops":[]}'}}]}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, json, headers):
+            seen["url"] = url
+            seen["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "app.services.agents.openclaw_service.httpx.AsyncClient", FakeAsyncClient
+    )
+
+    result = asyncio.run(
+        service._execute_phase7f_direct_repair("Return JSON", timeout_seconds=42)
+    )
+
+    assert seen["url"] == "https://local.example/v1/chat/completions"
+    assert seen["json"]["think"] is False
+    assert result["backend"] == "debug_repair_direct_chat_completions"
 
 
 def test_non_phase7f_debug_repair_keeps_openclaw_streaming_path(

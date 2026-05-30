@@ -386,6 +386,32 @@ def _run_context_metadata(
     repo_root: Path,
     repeat_seed: str | None,
 ) -> dict[str, Any]:
+    planner_model = _first_env(
+        (
+            "PLANNER_MODEL",
+            "ORCHESTRATOR_AGENT_MODEL_FAMILY",
+            "AGENT_MODEL",
+            "OLLAMA_AGENT_MODEL",
+        )
+    )
+    planning_repair_model = _first_env(
+        (
+            "PLANNING_REPAIR_MODEL",
+            "ORCHESTRATOR_PLANNING_REPAIR_DIRECT_MODEL",
+            "AGENT_MODEL",
+        )
+    )
+    debug_repair_model = _first_env(
+        (
+            "DEBUG_REPAIR_MODEL",
+            "PHASE7F_REPAIR_MODEL",
+            "PLANNING_REPAIR_MODEL",
+            "AGENT_MODEL",
+        )
+    )
+    execution_model = _first_env(
+        ("EXECUTION_MODEL", "OLLAMA_AGENT_MODEL", "AGENT_MODEL")
+    )
     return {
         "git_sha": _git_sha(repo_root),
         "model": _first_env(
@@ -399,6 +425,33 @@ def _run_context_metadata(
         "runtime_profile": _first_env(
             ("ORCHESTRATOR_RUNTIME_PROFILE", "RUNTIME_PROFILE")
         ),
+        "planner_model": planner_model,
+        "planner_backend": _first_env(
+            ("PLANNING_BACKEND", "ORCHESTRATOR_PLANNING_BACKEND", "AGENT_BACKEND")
+        ),
+        "planning_repair_model": planning_repair_model,
+        "planning_repair_backend": _first_env(
+            (
+                "PLANNING_REPAIR_BACKEND",
+                "PLANNING_BACKEND",
+                "ORCHESTRATOR_PLANNING_BACKEND",
+                "AGENT_BACKEND",
+            )
+        ),
+        "debug_repair_model": debug_repair_model,
+        "debug_repair_backend": _first_env(
+            (
+                "DEBUG_REPAIR_BACKEND",
+                "REPAIR_BACKEND",
+                "AGENT_BACKEND",
+            )
+        ),
+        "execution_model": execution_model,
+        "execution_backend": _first_env(
+            ("EXECUTION_BACKEND", "ORCHESTRATOR_EXECUTION_BACKEND", "AGENT_BACKEND")
+        ),
+        "evaluation_model": _first_env(("EVALUATION_MODEL",)),
+        "evaluation_backend": _first_env(("EVALUATION_BACKEND",)),
         "repeat_seed": repeat_seed,
     }
 

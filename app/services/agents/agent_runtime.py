@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 class BackendRole(str, enum.Enum):
     PLANNING = "planning"
     EXECUTION = "execution"
+    DEBUG_REPAIR = "debug_repair"
     REPAIR = "repair"
 
 
@@ -43,6 +44,8 @@ def resolve_backend_name_for_role(db: Session, role: BackendRole) -> str:
     role_setting = {
         BackendRole.PLANNING: settings.PLANNING_BACKEND,
         BackendRole.EXECUTION: settings.EXECUTION_BACKEND,
+        BackendRole.DEBUG_REPAIR: settings.DEBUG_REPAIR_BACKEND
+        or settings.REPAIR_BACKEND,
         BackendRole.REPAIR: settings.REPAIR_BACKEND,
     }.get(role)
     if role_setting:
@@ -86,12 +89,15 @@ def create_agent_runtime(
     descriptor = require_backend_descriptor(backend_name)
     runtime_factory = get_runtime_factory(descriptor.name)
     if runtime_factory is not None:
-        return runtime_factory(
+        runtime = runtime_factory(
             db,
             session_id,
             task_id,
             use_demo_mode=use_demo_mode,
         )
+        if role is not None and hasattr(runtime, "__dict__"):
+            runtime.backend_role = role.value
+        return runtime
 
     raise UnsupportedAgentBackendError(
         f"Backend '{descriptor.name}' does not have a registered runtime adapter."

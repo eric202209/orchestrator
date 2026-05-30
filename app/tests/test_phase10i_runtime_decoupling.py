@@ -58,6 +58,7 @@ def _make_project_session_task(db_session):
 def test_backend_role_enum_values():
     assert BackendRole.PLANNING.value == "planning"
     assert BackendRole.EXECUTION.value == "execution"
+    assert BackendRole.DEBUG_REPAIR.value == "debug_repair"
     assert BackendRole.REPAIR.value == "repair"
 
 
@@ -66,6 +67,7 @@ def test_resolve_backend_name_for_role_falls_back_to_agent_backend(db_session):
     with patch("app.services.agents.agent_runtime.settings") as mock_settings:
         mock_settings.PLANNING_BACKEND = None
         mock_settings.EXECUTION_BACKEND = None
+        mock_settings.DEBUG_REPAIR_BACKEND = None
         mock_settings.REPAIR_BACKEND = None
         mock_settings.AGENT_BACKEND = "local_openclaw"
 
@@ -82,6 +84,10 @@ def test_resolve_backend_name_for_role_falls_back_to_agent_backend(db_session):
                 == "local_openclaw"
             )
             assert (
+                resolve_backend_name_for_role(db_session, BackendRole.DEBUG_REPAIR)
+                == "local_openclaw"
+            )
+            assert (
                 resolve_backend_name_for_role(db_session, BackendRole.REPAIR)
                 == "local_openclaw"
             )
@@ -92,6 +98,7 @@ def test_resolve_backend_name_for_role_uses_role_override(db_session):
     with patch("app.services.agents.agent_runtime.settings") as mock_settings:
         mock_settings.PLANNING_BACKEND = "direct_ollama"
         mock_settings.EXECUTION_BACKEND = None
+        mock_settings.DEBUG_REPAIR_BACKEND = None
         mock_settings.REPAIR_BACKEND = None
         mock_settings.AGENT_BACKEND = "local_openclaw"
 
@@ -108,9 +115,36 @@ def test_resolve_backend_name_for_role_uses_role_override(db_session):
                 == "local_openclaw"
             )
             assert (
+                resolve_backend_name_for_role(db_session, BackendRole.DEBUG_REPAIR)
+                == "local_openclaw"
+            )
+            assert (
                 resolve_backend_name_for_role(db_session, BackendRole.REPAIR)
                 == "local_openclaw"
             )
+
+
+def test_debug_repair_backend_prefers_architecture_name_then_legacy_repair(
+    db_session,
+):
+    """DEBUG_REPAIR_BACKEND is the architecture name; REPAIR_BACKEND remains an alias."""
+    with patch("app.services.agents.agent_runtime.settings") as mock_settings:
+        mock_settings.PLANNING_BACKEND = None
+        mock_settings.EXECUTION_BACKEND = None
+        mock_settings.DEBUG_REPAIR_BACKEND = "openai_responses_api"
+        mock_settings.REPAIR_BACKEND = "direct_ollama"
+        mock_settings.AGENT_BACKEND = "local_openclaw"
+
+        assert (
+            resolve_backend_name_for_role(db_session, BackendRole.DEBUG_REPAIR)
+            == "openai_responses_api"
+        )
+
+        mock_settings.DEBUG_REPAIR_BACKEND = None
+        assert (
+            resolve_backend_name_for_role(db_session, BackendRole.DEBUG_REPAIR)
+            == "direct_ollama"
+        )
 
 
 def test_create_agent_runtime_without_role_preserves_existing_behavior(db_session):

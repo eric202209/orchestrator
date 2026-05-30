@@ -3,6 +3,7 @@ from app.models import Project, Session as SessionModel, Task, TaskStatus
 from app.services.agents.agent_backends import UnsupportedAgentBackendError
 from app.services.agents.interfaces import AgentRuntimeError, UnsupportedCapabilityError
 from app.services.agents.agent_runtime import (
+    BackendRole,
     create_agent_runtime,
     invoke_runtime_prompt,
     runtime_reports_context_overflow,
@@ -44,6 +45,21 @@ def test_create_agent_runtime_supports_openai_backend(db_session, monkeypatch):
     runtime = create_agent_runtime(db_session, session_id=None)
     assert isinstance(runtime, OpenAIResponsesRuntime)
     assert runtime.backend_descriptor.name == "openai_responses_api"
+
+
+def test_openai_runtime_uses_planner_model_for_planning_role(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "local_openclaw")
+    monkeypatch.setattr(settings, "PLANNING_BACKEND", "openai_responses_api")
+    monkeypatch.setattr(settings, "PLANNER_MODEL", "gpt-planner")
+    monkeypatch.setattr(settings, "AGENT_MODEL", "global-model")
+
+    runtime = create_agent_runtime(
+        db_session, session_id=None, role=BackendRole.PLANNING
+    )
+
+    assert isinstance(runtime, OpenAIResponsesRuntime)
+    assert runtime.backend_role == "planning"
+    assert runtime.get_backend_metadata()["model_family"] == "gpt-planner"
 
 
 def test_create_agent_runtime_uses_db_backend_override(db_session, monkeypatch):

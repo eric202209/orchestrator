@@ -359,7 +359,10 @@ def build_python_test_source_context_block(
     malformed_output: str,
     rejection_reasons: Optional[list[str]] = None,
 ) -> str:
-    if not _is_python_test_file_repair_case(malformed_output, rejection_reasons):
+    if not (
+        _is_python_test_file_repair_case(malformed_output, rejection_reasons)
+        or _is_no_materialization_repair_case(rejection_reasons)
+    ):
         return ""
 
     try:
@@ -381,6 +384,11 @@ def build_python_test_source_context_block(
         "## PYTHON TEST SOURCE CONTEXT",
         "Tests import the source files below. Preserve the existing source API "
         "and CLI framework while repairing the plan.",
+        "- Preserve existing Python package roots imported by tests.",
+        "- Do not create a replacement src/<new_package> root when tests already "
+        "import an existing package.",
+        "- Do not rewrite tests/imports to fit a new package; edit the existing "
+        "source package instead.",
         "- Preserve public functions called by tests, such as main(argv) and build_parser().",
         "- Do not switch argparse to Click or Typer unless the project already uses that framework.",
         "- Implement behavior in source code, not by docstring-only or string-only edits.",
@@ -428,6 +436,8 @@ def _build_grounded_source_edit_repair_guidance(
             "Grounded source-edit repair required:",
             "- Preserve existing tests as the behavior contract; do not replace them with new expectations.",
             "- Edit real source behavior using the provided test/source context and project structure.",
+            "- Preserve existing Python package roots imported by tests; do not create a replacement src/<new_package> root.",
+            "- Do not rewrite tests/imports to fit a new package unless the user explicitly requested a package rename.",
             '- Do not use `pass`, TODOs, placeholder comments, stub-only functions, or no-op commands such as `python -c "import sys; sys.exit(0)"`.',
             "- Do not generic-rewrite whole files unless the content is complete, behavior-specific, and grounded in the existing source/tests.",
             "- Prefer concrete ops for src/ files named by the test/source context, followed by a real project test command.",
@@ -623,6 +633,13 @@ def _is_python_test_file_repair_case(
         or re.search(r"(^|[\"'\\s:/])test_[^\"'\\s,;\]]*\.py", text)
         or re.search(r"(^|[\"'\\s:/])[^\"'\\s,;\]]*_test\.py", text)
     )
+
+
+def _is_no_materialization_repair_case(
+    rejection_reasons: Optional[list[str]] = None,
+) -> bool:
+    text = "\n".join(str(reason or "") for reason in (rejection_reasons or []))
+    return "does not materialize any source changes" in text.lower()
 
 
 def build_compact_planning_repair_prompt(

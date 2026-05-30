@@ -993,6 +993,106 @@ def test_source_step_validation_prompt_includes_medium_test_contract(tmp_path):
     assert "command-driven" not in prompt
 
 
+def test_source_step_validation_prompt_includes_changed_file_source_excerpts(tmp_path):
+    source_dir = tmp_path / "src" / "medium_cli"
+    source_dir.mkdir(parents=True)
+    (source_dir / "__init__.py").write_text("", encoding="utf-8")
+    (source_dir / "store.py").write_text(
+        "from dataclasses import dataclass\n"
+        "\n"
+        "@dataclass(frozen=True)\n"
+        "class Task:\n"
+        "    title: str\n"
+        "    completed: bool = False\n"
+        "\n"
+        "class TaskStore:\n"
+        "    def summary(self) -> tuple[int, int]:\n"
+        "        raise NotImplementedError('summary counts are not implemented yet')\n",
+        encoding="utf-8",
+    )
+    (source_dir / "formatting.py").write_text(
+        "def format_summary(total: int, completed: int) -> str:\n"
+        "    raise NotImplementedError('summary formatting is not implemented yet')\n",
+        encoding="utf-8",
+    )
+    (source_dir / "cli.py").write_text(
+        "from medium_cli.store import TaskStore\n"
+        "from medium_cli.formatting import format_summary\n",
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_summary.py").write_text(
+        "from medium_cli.store import TaskStore\n"
+        "\n"
+        "def test_store_summary_counts_total_and_completed():\n"
+        "    assert TaskStore().summary() == (3, 2)\n",
+        encoding="utf-8",
+    )
+    envelope = build_debug_feedback_envelope(
+        task_execution_id=123,
+        task_id=45,
+        step_index=1,
+        failure_phase="step_validation",
+        failed_command="python3 -m pytest -q",
+        stderr="Step failed implementation validation",
+        validator_reasons=[
+            "formatting.py still contains not-implemented markers",
+            "store.py still contains not-implemented markers",
+        ],
+        changed_files=[
+            "src/medium_cli/formatting.py",
+            "src/medium_cli/store.py",
+            "src/medium_cli/cli.py",
+        ],
+        workspace_path=tmp_path,
+    )
+
+    prompt = build_bounded_debug_repair_prompt(envelope)
+
+    assert "Current source excerpts from changed_files:" in prompt
+    assert "higher priority than inferring source shape from tests alone" in prompt
+    assert "--- src/medium_cli/formatting.py" in prompt
+    assert "--- src/medium_cli/store.py" in prompt
+    assert "--- src/medium_cli/cli.py" in prompt
+    assert "class TaskStore:" in prompt
+    assert "from medium_cli.store import TaskStore" in prompt
+    assert prompt.index("Current source excerpts from changed_files:") < prompt.index(
+        "Debug source contract:"
+    )
+
+
+def test_source_step_validation_source_excerpts_are_bounded(tmp_path):
+    source_dir = tmp_path / "src" / "medium_cli"
+    source_dir.mkdir(parents=True)
+    long_source = "class TaskStore:\n" + "\n".join(
+        f"    def method_{index}(self): return {index}" for index in range(200)
+    )
+    (source_dir / "store.py").write_text(long_source, encoding="utf-8")
+    envelope = build_debug_feedback_envelope(
+        task_execution_id=123,
+        task_id=45,
+        step_index=1,
+        failure_phase="step_validation",
+        failed_command="python3 -m pytest -q",
+        stderr="Step failed implementation validation",
+        validator_reasons=["store.py still contains not-implemented markers"],
+        changed_files=["src/medium_cli/store.py"],
+        workspace_path=tmp_path,
+    )
+
+    prompt = build_bounded_debug_repair_prompt(envelope)
+    section = prompt.split("Current source excerpts from changed_files:", 1)[1].split(
+        "Source-context structured repair contract:",
+        1,
+    )[0]
+
+    assert "--- src/medium_cli/store.py" in section
+    assert "truncated" in section
+    assert "method_199" not in section
+    assert len(section) < 1600
+
+
 def test_phase7f_non_source_prompt_does_not_force_ops_fix(tmp_path):
     envelope = build_debug_feedback_envelope(
         task_execution_id=123,
@@ -1008,6 +1108,7 @@ def test_phase7f_non_source_prompt_does_not_force_ops_fix(tmp_path):
     prompt = build_bounded_debug_repair_prompt(envelope)
 
     assert "Source-context structured repair contract:" not in prompt
+    assert "Current source excerpts from changed_files:" not in prompt
     assert "command_fix is only for verifier/command-only repairs" not in prompt
     assert "prefer write_file with complete grounded file content" not in prompt
     assert "Never infer replace_in_file.old signatures from tests" not in prompt

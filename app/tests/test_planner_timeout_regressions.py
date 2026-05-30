@@ -3665,11 +3665,11 @@ def test_openclaw_invocation_metadata_redacts_prompt_and_captures_flags():
 def test_phase7f_openclaw_diagnostics_classify_boundary_and_redact_stream_tail():
     assert (
         OpenClawSessionService._diagnostic_invocation_kind("PHASE7F_DEBUG_REPAIR")
-        == "phase7f_debug_repair"
+        == "debug_repair"
     )
     assert (
         OpenClawSessionService._diagnostic_timeout_boundary("PHASE7F_DEBUG_REPAIR")
-        == "phase7f_debug_repair_wait_for"
+        == "debug_repair_wait_for"
     )
     assert OpenClawSessionService._diagnostic_invocation_kind("PLANNING") == "planning"
     assert (
@@ -7351,6 +7351,10 @@ def test_repair_prompt_includes_injected_weak_verification_rejection_line():
 def test_no_materialization_repair_prompt_requires_grounded_source_edits(tmp_path):
     (tmp_path / "src" / "medium_cli").mkdir(parents=True)
     (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "medium_cli" / "__init__.py").write_text(
+        "",
+        encoding="utf-8",
+    )
     (tmp_path / "src" / "medium_cli" / "cli.py").write_text(
         "def main(argv=None):\n    return 0\n",
         encoding="utf-8",
@@ -7390,12 +7394,213 @@ def test_no_materialization_repair_prompt_requires_grounded_source_edits(tmp_pat
     )
 
     assert "Grounded source-edit repair required:" in prompt
+    assert "## PYTHON TEST SOURCE CONTEXT" in prompt
     assert "Preserve existing tests as the behavior contract" in prompt
     assert "Edit real source behavior using the provided test/source context" in prompt
+    assert "Preserve existing Python package roots imported by tests" in prompt
+    assert "Do not create a replacement src/<new_package> root" in prompt
     assert (
         "Prefer concrete ops for src/ files named by the test/source context" in prompt
     )
     assert "src/medium_cli/cli.py" in prompt
+
+
+def test_no_materialization_repair_rejects_new_package_root_when_tests_import_existing(
+    tmp_path,
+):
+    (tmp_path / "src" / "medium_cli").mkdir(parents=True)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "medium_cli" / "__init__.py").write_text(
+        "",
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "medium_cli" / "cli.py").write_text(
+        "def main(argv=None):\n    return 0\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_summary.py").write_text(
+        "from medium_cli.cli import main\n"
+        "\n"
+        "def test_summary_command():\n"
+        "    assert main(['summary']) == 0\n",
+        encoding="utf-8",
+    )
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create implementation under a new package",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/task_cli/cli.py",
+                    "content": "def main(argv=None):\n    return 0\n",
+                },
+                {
+                    "op": "write_file",
+                    "path": "tests/test_summary.py",
+                    "content": (
+                        "from task_cli.cli import main\n"
+                        "\n"
+                        "def test_summary_command():\n"
+                        "    assert main(['summary']) == 0\n"
+                    ),
+                },
+            ],
+            "verification": "python3 -m pytest -q",
+            "rollback": None,
+            "expected_files": ["src/task_cli/cli.py", "tests/test_summary.py"],
+        }
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Add a summary command to the Python CLI.",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.repairable
+    assert any("changes package roots" in reason for reason in verdict.reasons)
+    details = verdict.details["python_package_root_contract"]
+    assert details["existing_package_roots"] == ["medium_cli"]
+    assert details["introduced_package_roots"] == ["task_cli"]
+    assert details["rewritten_test_import_roots"] == ["task_cli"]
+
+
+def test_no_materialization_repair_accepts_existing_package_root_source_edit(tmp_path):
+    (tmp_path / "src" / "medium_cli").mkdir(parents=True)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "medium_cli" / "__init__.py").write_text(
+        "",
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "medium_cli" / "cli.py").write_text(
+        "def main(argv=None):\n    return 0\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_summary.py").write_text(
+        "from medium_cli.cli import main\n"
+        "\n"
+        "def test_summary_command():\n"
+        "    assert main(['summary']) == 0\n",
+        encoding="utf-8",
+    )
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Edit existing package implementation",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "src/medium_cli/cli.py",
+                    "old": "def main(argv=None):\n    return 0\n",
+                    "new": "def main(argv=None):\n    return 0\n",
+                }
+            ],
+            "verification": "python3 -m pytest -q",
+            "rollback": None,
+            "expected_files": ["src/medium_cli/cli.py"],
+        }
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Add a summary command to the Python CLI.",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert "python_package_root_contract" not in verdict.details
+    assert not any("changes package roots" in reason for reason in verdict.reasons)
+
+
+def test_explicit_package_rename_bypasses_package_root_guard(tmp_path):
+    (tmp_path / "src" / "medium_cli").mkdir(parents=True)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "medium_cli" / "__init__.py").write_text(
+        "",
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "medium_cli" / "cli.py").write_text(
+        "def main(argv=None):\n    return 0\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_summary.py").write_text(
+        "from medium_cli.cli import main\n"
+        "\n"
+        "def test_summary_command():\n"
+        "    assert main(['summary']) == 0\n",
+        encoding="utf-8",
+    )
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Rename the package root",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/task_cli/cli.py",
+                    "content": "def main(argv=None):\n    return 0\n",
+                },
+                {
+                    "op": "write_file",
+                    "path": "tests/test_summary.py",
+                    "content": "from task_cli.cli import main\n",
+                },
+            ],
+            "verification": "python3 -m pytest -q",
+            "rollback": None,
+            "expected_files": ["src/task_cli/cli.py", "tests/test_summary.py"],
+        }
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Rename the Python package from medium_cli to task_cli.",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert "python_package_root_contract" not in verdict.details
+    assert not any("changes package roots" in reason for reason in verdict.reasons)
+
+
+def test_package_root_guard_ignores_non_python_or_no_import_contract(tmp_path):
+    (tmp_path / "src").mkdir()
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create a package in a project without Python tests",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/task_cli/cli.py",
+                    "content": "def main(argv=None):\n    return 0\n",
+                }
+            ],
+            "verification": "python3 -m py_compile src/task_cli/cli.py",
+            "rollback": None,
+            "expected_files": ["src/task_cli/cli.py"],
+        }
+    ]
+
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Add a small Python CLI.",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert "python_package_root_contract" not in verdict.details
+    assert not any("changes package roots" in reason for reason in verdict.reasons)
 
 
 def test_placeholder_repair_prompt_rejects_stubs_and_noop_commands(tmp_path):

@@ -53,6 +53,7 @@ from .integrity import (
     scan_python_test_text,
     scan_test_file_changes,
 )
+from app.services.project.source_imports import extract_python_test_contract
 
 MAX_INITIAL_PLAN_STEPS = 4
 MAX_PLANNING_COMMAND_CHARS = 900
@@ -965,6 +966,154 @@ class ValidatorService:
                     if path:
                         files.add(path)
         return files
+
+    @staticmethod
+    def _python_src_package_root(path: str) -> Optional[str]:
+        parts = Path(str(path or "").strip().lstrip("./")).parts
+        if len(parts) >= 3 and parts[0] == "src" and parts[1].isidentifier():
+            return parts[1]
+        return None
+
+    @staticmethod
+    def _task_prompt_requests_python_package_rename(
+        task_prompt: str,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> bool:
+        combined = " ".join(
+            str(value or "") for value in (task_prompt, title, description)
+        ).lower()
+        return bool(
+            re.search(
+                r"\b(?:rename|renaming|migrate|move|change)\b.{0,80}"
+                r"\b(?:package|module|import|namespace)\b",
+                combined,
+            )
+            or re.search(
+                r"\b(?:package|module|import|namespace)\b.{0,80}"
+                r"\b(?:rename|renaming|migrate|move|change)\b",
+                combined,
+            )
+        )
+
+    @staticmethod
+    def _operation_text_import_roots(operation: Dict[str, Any]) -> set[str]:
+        text = str(operation.get("content") or operation.get("new") or "")
+        if not text:
+            return set()
+        roots: set[str] = set()
+        for match in re.finditer(
+            r"^\s*(?:from\s+([A-Za-z_][A-Za-z0-9_]*)"
+            r"(?:\.[A-Za-z_][A-Za-z0-9_.]*)?\s+import\b|"
+            r"import\s+([A-Za-z_][A-Za-z0-9_]*)"
+            r"(?:\.[A-Za-z_][A-Za-z0-9_.]*)?)",
+            text,
+            re.MULTILINE,
+        ):
+            root = match.group(1) or match.group(2)
+            if root:
+                roots.add(root)
+        return roots
+
+    @classmethod
+    def _python_package_root_contract_violation(
+        cls,
+        plan: List[Dict[str, Any]],
+        *,
+        project_dir: Optional[Path],
+        task_prompt: str,
+        title: Optional[str],
+        description: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        if project_dir is None or not project_dir.exists():
+            return None
+        if cls._task_prompt_requests_python_package_rename(
+            task_prompt, title=title, description=description
+        ):
+            return None
+
+        try:
+            contract = extract_python_test_contract(project_dir)
+        except Exception:
+            return None
+        if contract is None or not contract.source_targets or not contract.imports:
+            return None
+
+        required_source_targets = sorted(
+            {
+                path
+                for path, _reason in contract.source_targets
+                if str(path or "").startswith("src/")
+            }
+        )
+        existing_roots = sorted(
+            {
+                root
+                for path in required_source_targets
+                if (root := cls._python_src_package_root(path))
+            }
+        )
+        if not required_source_targets or not existing_roots:
+            return None
+
+        materialized_targets = sorted(cls._plan_materialized_file_targets(plan))
+        source_write_paths = sorted(
+            path
+            for path in materialized_targets
+            if path.startswith("src/") and Path(path).suffix.lower() == ".py"
+        )
+        touched_existing_roots = sorted(
+            {
+                root
+                for path in source_write_paths
+                if (root := cls._python_src_package_root(path)) in set(existing_roots)
+            }
+        )
+        introduced_roots = sorted(
+            {
+                root
+                for path in source_write_paths
+                if (root := cls._python_src_package_root(path))
+                and root not in set(existing_roots)
+            }
+        )
+
+        rewritten_test_import_roots: set[str] = set()
+        for step in plan:
+            for operation in step.get("ops", []) or []:
+                if not isinstance(operation, dict):
+                    continue
+                path = str(operation.get("path") or "").strip().rstrip("/").lstrip("./")
+                if not path or not is_python_test_path(path):
+                    continue
+                rewritten_test_import_roots.update(
+                    root
+                    for root in cls._operation_text_import_roots(operation)
+                    if root not in set(existing_roots)
+                )
+
+        introduced_without_existing_touch = bool(
+            introduced_roots and not touched_existing_roots
+        )
+        rewrites_tests_to_introduced_root = bool(
+            set(rewritten_test_import_roots).intersection(introduced_roots)
+        )
+        if (
+            not introduced_without_existing_touch
+            and not rewrites_tests_to_introduced_root
+        ):
+            return None
+
+        return {
+            "existing_package_roots": existing_roots,
+            "required_source_targets": required_source_targets[:12],
+            "source_write_paths": source_write_paths[:12],
+            "touched_existing_package_roots": touched_existing_roots,
+            "introduced_package_roots": introduced_roots,
+            "rewritten_test_import_roots": sorted(rewritten_test_import_roots),
+            "introduced_without_existing_touch": introduced_without_existing_touch,
+            "rewrites_tests_to_introduced_root": rewrites_tests_to_introduced_root,
+        }
 
     @classmethod
     def _expected_source_files_not_materialized(
@@ -3316,6 +3465,20 @@ class ValidatorService:
                         "Implementation task plan does not materialize any source changes"
                     )
                     details["missing_materialization_for_implementation"] = True
+
+            package_root_violation = cls._python_package_root_contract_violation(
+                plan,
+                project_dir=project_dir,
+                task_prompt=task_prompt,
+                title=title,
+                description=description,
+            )
+            if package_root_violation:
+                repairable.append(
+                    "Python implementation plan changes package roots instead of "
+                    "editing the existing package imported by tests"
+                )
+                details["python_package_root_contract"] = package_root_violation
 
             missing_verification_steps = cls._plan_missing_verification_steps(plan)
             if missing_verification_steps:

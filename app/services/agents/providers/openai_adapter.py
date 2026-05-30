@@ -42,6 +42,7 @@ class OpenAIResponsesRuntime:
         self.task_id = task_id
         self.use_demo_mode = use_demo_mode
         self.backend_descriptor = get_backend_descriptor("openai_responses_api")
+        self.backend_role: Optional[str] = None
         self.response_session_key = (
             f"openai:session:{task_id or session_id or int(time.time())}"
         )
@@ -89,10 +90,7 @@ class OpenAIResponsesRuntime:
             )
 
         base_url = settings.OPENAI_BASE_URL.rstrip("/")
-        model_name = (
-            get_effective_agent_model_family(settings.AGENT_MODEL, db=self.db).strip()
-            or self.backend_descriptor.default_model_family
-        )
+        model_name = self._model_name()
 
         payload = {
             "model": model_name,
@@ -195,6 +193,22 @@ class OpenAIResponsesRuntime:
                 "model_family": model_name,
             }
 
+    def _model_name(self) -> str:
+        role_model = ""
+        if self.backend_role == "planning":
+            role_model = settings.PLANNER_MODEL
+        elif self.backend_role == "debug_repair":
+            role_model = settings.DEBUG_REPAIR_MODEL
+        elif self.backend_role == "execution":
+            role_model = settings.EXECUTION_MODEL
+        return (
+            str(role_model or "").strip()
+            or get_effective_agent_model_family(
+                settings.AGENT_MODEL, db=self.db
+            ).strip()
+            or self.backend_descriptor.default_model_family
+        )
+
     async def execute_task_with_orchestration(
         self, prompt: str, timeout_seconds: int = 300, orchestration_state: Any = None
     ) -> dict[str, Any]:
@@ -226,9 +240,7 @@ class OpenAIResponsesRuntime:
         }
 
     def get_backend_metadata(self) -> dict[str, Any]:
-        model_family = get_effective_agent_model_family(
-            settings.AGENT_MODEL, db=self.db
-        )
+        model_family = self._model_name()
         adaptation_profile = resolve_adaptation_profile(
             backend=self.backend_descriptor.name,
             model_family=model_family,
@@ -244,9 +256,7 @@ class OpenAIResponsesRuntime:
         }
 
     def describe_interface(self) -> AgentInterfaceDescriptor:
-        model_family = get_effective_agent_model_family(
-            settings.AGENT_MODEL, db=self.db
-        )
+        model_family = self._model_name()
         profile = resolve_adaptation_profile(
             backend=self.backend_descriptor.name,
             model_family=model_family,

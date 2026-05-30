@@ -40,6 +40,9 @@ ELIGIBLE_DEBUG_FAILURE_CLASSES = frozenset(
 )
 
 _DEBUG_SOURCE_CONTRACT_MAX_CHARS = 1100
+_SOURCE_STEP_EXCERPT_MAX_FILES = 4
+_SOURCE_STEP_EXCERPT_PER_FILE_CHARS = 900
+_SOURCE_STEP_EXCERPT_TOTAL_CHARS = 2600
 
 _CANNOT_IMPORT_FROM_FILE_RE = re.compile(
     r"cannot import name '([A-Za-z_][A-Za-z0-9_]*)' from '([A-Za-z_][A-Za-z0-9_.]*)'"
@@ -338,6 +341,7 @@ def build_bounded_debug_repair_prompt(
         rendered = render_evidence_section(evidence_capsule)
         if rendered:
             evidence_section = f"\n{rendered}\n"
+    source_excerpt_section = build_source_step_validation_excerpt_section(envelope)
     source_contract = build_debug_source_contract(envelope, evidence_capsule)
     source_contract_section = f"\n{source_contract}\n" if source_contract else ""
     source_ops_contract_section = ""
@@ -396,11 +400,85 @@ def build_bounded_debug_repair_prompt(
         f"{json.dumps(envelope.validator_reasons[:8], ensure_ascii=True)}\n"
         "Failure excerpts:\n"
         f"{json.dumps(excerpts, ensure_ascii=True)[:1800]}\n"
+        f"{source_excerpt_section}\n"
         f"{evidence_section}\n"
         f"{source_contract_section}"
         f"{source_ops_contract_section}"
         f"{rules_section}"
     )
+
+
+def build_source_step_validation_excerpt_section(
+    envelope: DebugFeedbackEnvelope,
+    *,
+    max_files: int = _SOURCE_STEP_EXCERPT_MAX_FILES,
+    per_file_chars: int = _SOURCE_STEP_EXCERPT_PER_FILE_CHARS,
+    total_chars: int = _SOURCE_STEP_EXCERPT_TOTAL_CHARS,
+) -> str:
+    """Render bounded current source excerpts for source-step validation repair."""
+
+    if envelope.failure_class != "source_step_validation":
+        return ""
+
+    project_dir = Path(envelope.workspace_path or ".")
+    if not project_dir.exists():
+        return ""
+
+    excerpts: list[tuple[str, str, bool]] = []
+    used_chars = 0
+    for raw_path in envelope.changed_files:
+        if len(excerpts) >= max_files or used_chars >= total_chars:
+            break
+        rel_path = _normalize_source_excerpt_path(raw_path)
+        if not rel_path:
+            continue
+        path = project_dir / rel_path
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(project_dir.resolve())
+            if not resolved.is_file():
+                continue
+            text = resolved.read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            continue
+        remaining = total_chars - used_chars
+        if remaining < 4:
+            break
+        excerpt_limit = min(per_file_chars, remaining)
+        excerpt = _excerpt(text, excerpt_limit)
+        if not excerpt:
+            continue
+        used_chars += len(excerpt)
+        excerpts.append((rel_path, excerpt, len(text.strip()) > len(excerpt)))
+
+    if not excerpts:
+        return ""
+
+    lines = [
+        "Current source excerpts from changed_files:",
+        "- Treat these as the current source truth; preserve public imports, classes, and function signatures shown here.",
+        "- These current source excerpts have higher priority than inferring source shape from tests alone.",
+    ]
+    for rel_path, excerpt, truncated in excerpts:
+        suffix = " truncated" if truncated else ""
+        lines.append(f"--- {rel_path} ({len(excerpt)} chars{suffix})")
+        lines.append(excerpt)
+    return "\n".join(lines)
+
+
+def _normalize_source_excerpt_path(path: Any) -> str:
+    normalized = str(path or "").strip().replace("\\", "/").lstrip("./")
+    if (
+        not normalized
+        or normalized.startswith("/")
+        or normalized.startswith("~")
+        or ".." in Path(normalized).parts
+        or not normalized.endswith(".py")
+        or normalized.startswith("tests/")
+        or normalized.startswith("test/")
+    ):
+        return ""
+    return normalized
 
 
 def build_debug_source_contract(
@@ -444,6 +522,12 @@ def build_debug_source_contract(
             _append_unique(targets, path, limit=3)
         for line in _debug_expected_behavior_lines(contract):
             _append_unique(behavior, line, limit=3)
+
+    if envelope.failure_class == "source_step_validation":
+        for path in envelope.changed_files:
+            target = _normalize_source_excerpt_path(path)
+            if target:
+                _append_unique(targets, target, limit=3)
 
     for target in _targets_from_evidence(evidence_capsule):
         _append_unique(targets, target, limit=3)
