@@ -1521,6 +1521,49 @@ class ValidatorService:
         return sorted(set(bad_paths))
 
     @classmethod
+    def _plan_appends_contextual_python_fragments(
+        cls,
+        plan: List[Dict[str, Any]],
+    ) -> List[str]:
+        bad_paths: List[str] = []
+        block_continuation_pattern = re.compile(
+            r"^(?:elif\b.*:|else\s*:|except\b.*:|finally\s*:|case\b.*:)"
+        )
+        indented_flow_exit_pattern = re.compile(r"^(?:return\b|break\b|continue\b)")
+
+        for step in plan:
+            for operation in step.get("ops", []) or []:
+                if not isinstance(operation, dict):
+                    continue
+                if str(operation.get("op") or "") != "append_file":
+                    continue
+                path_text = str(operation.get("path") or "").strip().lstrip("./")
+                if Path(path_text).suffix.lower() != ".py":
+                    continue
+                content = str(operation.get("content") or "")
+                if not content.strip():
+                    continue
+                try:
+                    ast.parse(content)
+                    continue
+                except SyntaxError:
+                    pass
+
+                for raw_line in content.splitlines():
+                    if not raw_line.strip():
+                        continue
+                    stripped = raw_line.strip()
+                    is_indented = raw_line[:1].isspace()
+                    if block_continuation_pattern.match(stripped):
+                        bad_paths.append(path_text or "(missing path)")
+                        break
+                    if is_indented and indented_flow_exit_pattern.match(stripped):
+                        bad_paths.append(path_text or "(missing path)")
+                        break
+
+        return sorted(set(bad_paths))
+
+    @classmethod
     def _plan_writes_physical_src_python_imports(
         cls,
         plan: List[Dict[str, Any]],
@@ -3579,6 +3622,20 @@ class ValidatorService:
                 details["import_time_parse_args_materializations"] = (
                     import_time_parse_args_files[:20]
                 )
+            unsafe_python_append_files = cls._plan_appends_contextual_python_fragments(
+                plan
+            )
+            if unsafe_python_append_files:
+                repairable.append(
+                    "Plan uses append_file to add contextual Python control-flow "
+                    "fragments that only make sense inside an existing block; use "
+                    "context-aware replace_in_file or write_file with complete "
+                    "valid file content instead "
+                    f"(files: {unsafe_python_append_files[:5]})"
+                )
+                details["unsafe_python_append_fragments"] = unsafe_python_append_files[
+                    :20
+                ]
             physical_src_import_files = cls._plan_writes_physical_src_python_imports(
                 plan, project_dir
             )
@@ -3711,6 +3768,8 @@ class ValidatorService:
             semantic_violation_codes.append("physical_src_import")
         if details.get("empty_replace_old_text_steps"):
             semantic_violation_codes.append("empty_replace_old_text")
+        if details.get("unsafe_python_append_fragments"):
+            semantic_violation_codes.append("unsafe_python_append_fragment")
         if semantic_violation_codes:
             details["semantic_violation_codes"] = semantic_violation_codes
 

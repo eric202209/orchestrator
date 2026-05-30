@@ -267,6 +267,9 @@ def build_planning_repair_prompt(
     empty_replace_old_text_guidance = _build_empty_replace_old_text_repair_guidance(
         rejection_reasons
     )
+    unsafe_python_append_guidance = _build_unsafe_python_append_repair_guidance(
+        rejection_reasons
+    )
     stale_replace_target_guidance = _build_stale_replace_target_preservation_guidance(
         project_dir=project_dir,
         malformed_output=malformed_output,
@@ -276,6 +279,7 @@ def build_planning_repair_prompt(
         grounded_source_edit_guidance,
         brittle_inline_python_guidance,
         empty_replace_old_text_guidance,
+        unsafe_python_append_guidance,
         stale_replace_target_guidance,
     )
 
@@ -488,6 +492,28 @@ def _build_empty_replace_old_text_repair_guidance(
     )
 
 
+def _build_unsafe_python_append_repair_guidance(
+    rejection_reasons: Optional[list[str]],
+) -> str:
+    text = "\n".join(str(reason or "") for reason in (rejection_reasons or []))
+    lowered = text.lower()
+    if not (
+        "unsafe_python_append_fragments" in lowered
+        or "contextual python control-flow fragments" in lowered
+    ):
+        return ""
+
+    return "\n".join(
+        [
+            "Unsafe Python append_file repair:",
+            "- Do not append indented `elif`, `else`, `except`, `finally`, `case`, `return`, `break`, or `continue` fragments to Python files.",
+            "- Use context-aware `replace_in_file` to edit the existing function/body when exact current text is available.",
+            "- Or use `write_file` with complete valid file content that preserves existing imports, functions, classes, and main guards.",
+            "- Keep safe top-level appends only for complete def/class/import/comment additions.",
+        ]
+    )
+
+
 def _build_stale_replace_target_preservation_guidance(
     *,
     project_dir: Path,
@@ -674,10 +700,14 @@ def build_compact_planning_repair_prompt(
     empty_replace_old_text_guidance = _build_empty_replace_old_text_repair_guidance(
         rejection_reasons
     )
+    unsafe_python_append_guidance = _build_unsafe_python_append_repair_guidance(
+        rejection_reasons
+    )
     validation_guidance_block = _join_optional_blocks(
         grounded_source_edit_guidance,
         brittle_inline_python_guidance,
         empty_replace_old_text_guidance,
+        unsafe_python_append_guidance,
     )
     prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
