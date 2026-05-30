@@ -469,7 +469,7 @@ class OpenClawSessionService:
         )
         return tail
 
-    def _should_use_phase7f_direct_repair(
+    def _should_use_structured_debug_repair_direct_chat(
         self, diagnostic_label: Optional[str]
     ) -> bool:
         """Route bounded debug repair through direct chat when configured.
@@ -488,6 +488,13 @@ class OpenClawSessionService:
         if not enabled:
             return False
         return self.backend_descriptor.name == "local_openclaw"
+
+    def _should_use_phase7f_direct_repair(
+        self, diagnostic_label: Optional[str]
+    ) -> bool:
+        """Backward-compatible wrapper for direct debug repair routing."""
+
+        return self._should_use_structured_debug_repair_direct_chat(diagnostic_label)
 
     @staticmethod
     def _debug_repair_direct_config() -> Dict[str, str]:
@@ -616,7 +623,7 @@ class OpenClawSessionService:
             )
         return ""
 
-    async def _execute_phase7f_direct_repair(
+    async def _execute_structured_debug_repair_direct_call(
         self,
         prompt: str,
         *,
@@ -754,6 +761,21 @@ class OpenClawSessionService:
             "model_family": model,
             "diagnostics": diagnostics,
         }
+
+    async def _execute_phase7f_direct_repair(
+        self,
+        prompt: str,
+        *,
+        timeout_seconds: int,
+        diagnostic_metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Backward-compatible wrapper for the architecture-named direct call."""
+
+        return await self._execute_structured_debug_repair_direct_call(
+            prompt,
+            timeout_seconds=timeout_seconds,
+            diagnostic_metadata=diagnostic_metadata,
+        )
 
     async def _run_cli_prompt_with_diagnostics(
         self,
@@ -1265,8 +1287,10 @@ class OpenClawSessionService:
                     result = await self._execute_demo_mode(optimized_prompt)
                     # Demo mode always completes successfully (by design)
                     result["status"] = "completed"
-                elif self._should_use_phase7f_direct_repair(diagnostic_label):
-                    result = await self._execute_phase7f_direct_repair(
+                elif self._should_use_structured_debug_repair_direct_chat(
+                    diagnostic_label
+                ):
+                    result = await self._execute_structured_debug_repair_direct_call(
                         optimized_prompt,
                         timeout_seconds=timeout_seconds,
                         diagnostic_metadata={

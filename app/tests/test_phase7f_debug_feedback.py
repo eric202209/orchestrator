@@ -33,12 +33,20 @@ from app.services.orchestration.reporting.decision_timeline import (
 )
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.phases.execution_loop import (
+    _bounded_debug_repair_source_edit_context,
+    _bounded_debug_repair_stale_replace_issues,
+    _build_bounded_debug_repair_stale_replace_correction_prompt,
+    _build_phase7f_stale_replace_correction_prompt,
+    _debug_repair_output_excerpt,
     _debug_repair_materially_changes_source_or_tests,
     _execute_simple_verification_step,
-    _mark_phase7f_bounded_debug_timeout_if_applicable,
+    _phase7f_repair_output_excerpt,
+    _phase7f_source_edit_context,
+    _phase7f_stale_replace_issues,
     _is_simple_verification_command,
     _is_low_value_weak_verifier_command_fix,
     _is_weak_completion_verifier_failure,
+    _mark_phase7f_bounded_debug_timeout_if_applicable,
     _is_read_only_inspection_command,
     _same_simple_verification_command,
     execute_step_loop,
@@ -126,6 +134,52 @@ def test_non_phase7f_timeout_does_not_get_non_retry_marker():
     )
 
     assert not hasattr(error, "runtime_diagnostics")
+
+
+def test_phase7f_helper_wrappers_match_architecture_helpers(tmp_path):
+    target = tmp_path / "src" / "demo.py"
+    target.parent.mkdir()
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    ops = [
+        {
+            "op": "replace_in_file",
+            "path": "src/demo.py",
+            "old": "VALUE = 2",
+            "new": "VALUE = 3",
+        }
+    ]
+    step = {"ops": ops}
+    envelope = SimpleNamespace(changed_files=["src/demo.py"])
+
+    assert _bounded_debug_repair_source_edit_context(step, envelope) is True
+    assert _phase7f_source_edit_context(step, envelope) is True
+    assert _debug_repair_output_excerpt("```json\nsecret=abc\n```") == (
+        _phase7f_repair_output_excerpt("```json\nsecret=abc\n```")
+    )
+    assert _bounded_debug_repair_stale_replace_issues(ops, tmp_path) == (
+        _phase7f_stale_replace_issues(ops, tmp_path)
+    )
+
+
+def test_phase7f_prompt_wrapper_matches_architecture_helper():
+    debug_data = {"fix_type": "ops_fix", "ops": []}
+    stale_issues = [
+        {
+            "index": 0,
+            "path": "src/demo.py",
+            "old": "missing",
+            "reason": "old_text_not_found",
+            "current_excerpt": "VALUE = 1\n",
+        }
+    ]
+
+    assert _build_bounded_debug_repair_stale_replace_correction_prompt(
+        debug_data=debug_data,
+        stale_issues=stale_issues,
+    ) == _build_phase7f_stale_replace_correction_prompt(
+        debug_data=debug_data,
+        stale_issues=stale_issues,
+    )
 
 
 class _FakeRuntime:

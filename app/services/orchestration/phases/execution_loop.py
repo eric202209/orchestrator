@@ -159,7 +159,9 @@ def _debug_repair_materially_changes_source_or_tests(
     return fix_type == "revise_plan"
 
 
-def _phase7f_source_edit_context(step: dict[str, Any], envelope: Any) -> bool:
+def _bounded_debug_repair_source_edit_context(
+    step: dict[str, Any], envelope: Any
+) -> bool:
     ops = step.get("ops") if isinstance(step, dict) else []
     if isinstance(ops, list) and any(
         isinstance(op, dict)
@@ -183,6 +185,12 @@ def _phase7f_source_edit_context(step: dict[str, Any], envelope: Any) -> bool:
     )
 
 
+def _phase7f_source_edit_context(step: dict[str, Any], envelope: Any) -> bool:
+    """Backward-compatible wrapper for bounded debug repair source context."""
+
+    return _bounded_debug_repair_source_edit_context(step, envelope)
+
+
 def _is_low_value_weak_verifier_command_fix(
     envelope: Any, debug_data: dict[str, Any]
 ) -> bool:
@@ -203,7 +211,7 @@ def _is_low_value_weak_verifier_command_fix(
     )
 
 
-def _phase7f_repair_output_excerpt(value: Any, max_chars: int = 500) -> str:
+def _debug_repair_output_excerpt(value: Any, max_chars: int = 500) -> str:
     text = str(value or "").strip()
     text = re.sub(r"```(?:json|javascript|js|python|bash|sh|shell)?", "", text)
     text = text.replace("```", "").strip()
@@ -218,6 +226,12 @@ def _phase7f_repair_output_excerpt(value: Any, max_chars: int = 500) -> str:
     return text[: max_chars - 3].rstrip() + "..."
 
 
+def _phase7f_repair_output_excerpt(value: Any, max_chars: int = 500) -> str:
+    """Backward-compatible wrapper for debug repair output excerpting."""
+
+    return _debug_repair_output_excerpt(value, max_chars=max_chars)
+
+
 def _safe_relative_op_path(path_value: Any) -> Optional[str]:
     raw_path = str(path_value or "").strip().replace("\\", "/")
     if not raw_path:
@@ -229,7 +243,7 @@ def _safe_relative_op_path(path_value: Any) -> Optional[str]:
     return relative
 
 
-def _phase7f_stale_replace_issues(
+def _bounded_debug_repair_stale_replace_issues(
     ops: Any,
     project_dir: Path,
 ) -> list[dict[str, Any]]:
@@ -283,7 +297,16 @@ def _phase7f_stale_replace_issues(
     return issues
 
 
-def _build_phase7f_stale_replace_correction_prompt(
+def _phase7f_stale_replace_issues(
+    ops: Any,
+    project_dir: Path,
+) -> list[dict[str, Any]]:
+    """Backward-compatible wrapper for stale replace issue detection."""
+
+    return _bounded_debug_repair_stale_replace_issues(ops, project_dir)
+
+
+def _build_bounded_debug_repair_stale_replace_correction_prompt(
     *,
     debug_data: dict[str, Any],
     stale_issues: list[dict[str, Any]],
@@ -303,6 +326,19 @@ def _build_phase7f_stale_replace_correction_prompt(
         f"{json.dumps(debug_data, indent=2, sort_keys=True)}\n\n"
         "Failed replace_in_file targets with exact current file excerpts:\n"
         f"{json.dumps(stale_issues, indent=2, sort_keys=True)}\n"
+    )
+
+
+def _build_phase7f_stale_replace_correction_prompt(
+    *,
+    debug_data: dict[str, Any],
+    stale_issues: list[dict[str, Any]],
+) -> str:
+    """Backward-compatible wrapper for stale replace correction prompting."""
+
+    return _build_bounded_debug_repair_stale_replace_correction_prompt(
+        debug_data=debug_data,
+        stale_issues=stale_issues,
     )
 
 
@@ -2086,7 +2122,7 @@ def execute_step_loop(
                         envelope=debug_feedback_envelope,
                         source_edit_context=(
                             debug_prompt_mode == "phase7f_bounded_debug_repair"
-                            and _phase7f_source_edit_context(
+                            and _bounded_debug_repair_source_edit_context(
                                 step, debug_feedback_envelope
                             )
                         ),
@@ -2118,7 +2154,7 @@ def execute_step_loop(
                         orchestration_state.debug_repair_task_execution_ids = sorted(
                             {*debug_repair_used_ids, int(task_execution_id)}
                         )
-                    phase7f_raw_output_excerpt = _phase7f_repair_output_excerpt(
+                    phase7f_raw_output_excerpt = _debug_repair_output_excerpt(
                         final_repair_output
                     )
                     append_orchestration_event(
@@ -2259,13 +2295,15 @@ def execute_step_loop(
                 continue
 
             if phase7f_debug_repair_allowed and fix_type == "ops_fix":
-                stale_replace_issues = _phase7f_stale_replace_issues(
+                stale_replace_issues = _bounded_debug_repair_stale_replace_issues(
                     debug_data.get("ops"), Path(orchestration_state.project_dir)
                 )
                 if stale_replace_issues:
-                    correction_prompt = _build_phase7f_stale_replace_correction_prompt(
-                        debug_data=debug_data,
-                        stale_issues=stale_replace_issues,
+                    correction_prompt = (
+                        _build_bounded_debug_repair_stale_replace_correction_prompt(
+                            debug_data=debug_data,
+                            stale_issues=stale_replace_issues,
+                        )
                     )
                     emit_live(
                         "WARN",
@@ -2323,7 +2361,7 @@ def execute_step_loop(
                         else None
                     )
                     corrected_stale_issues = (
-                        _phase7f_stale_replace_issues(
+                        _bounded_debug_repair_stale_replace_issues(
                             corrected_debug_data.get("ops"),
                             Path(orchestration_state.project_dir),
                         )
@@ -2350,7 +2388,7 @@ def execute_step_loop(
                         correction_rejection_reason = "stale_replace_after_correction"
 
                     if correction_rejection_reason:
-                        correction_raw_output_excerpt = _phase7f_repair_output_excerpt(
+                        correction_raw_output_excerpt = _debug_repair_output_excerpt(
                             correction_output
                         )
                         correction_parsed_shape = (

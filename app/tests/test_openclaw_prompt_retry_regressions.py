@@ -156,7 +156,9 @@ def test_phase7f_debug_repair_uses_direct_no_thinking_chat(db_session, monkeypat
     async def fake_execute_task_with_streaming(*args, **kwargs):
         raise AssertionError("Phase 7F should not use OpenClaw CLI streaming")
 
-    monkeypatch.setattr(service, "_execute_phase7f_direct_repair", fake_direct_repair)
+    monkeypatch.setattr(
+        service, "_execute_structured_debug_repair_direct_call", fake_direct_repair
+    )
     monkeypatch.setattr(
         service, "execute_task_with_streaming", fake_execute_task_with_streaming
     )
@@ -207,7 +209,9 @@ def test_bounded_debug_repair_architecture_label_uses_direct_chat(
     async def fake_execute_task_with_streaming(*args, **kwargs):
         raise AssertionError("bounded debug repair should not use CLI streaming")
 
-    monkeypatch.setattr(service, "_execute_phase7f_direct_repair", fake_direct_repair)
+    monkeypatch.setattr(
+        service, "_execute_structured_debug_repair_direct_call", fake_direct_repair
+    )
     monkeypatch.setattr(
         service, "execute_task_with_streaming", fake_execute_task_with_streaming
     )
@@ -243,6 +247,28 @@ def test_bounded_debug_repair_diagnostic_label_architecture_alias():
         == "BOUNDED_EXECUTION_DEBUG_REPAIR"
     )
     assert OpenClawSessionService._diagnostic_label_architecture("PLANNING") is None
+
+
+def test_phase7f_direct_repair_routing_wrapper_matches_architecture_helper(
+    db_session, monkeypatch
+):
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "local_openclaw")
+    monkeypatch.setattr(settings, "AGENT_MODEL", "local")
+    session, task = _seed_service_models(db_session)
+    service = OpenClawSessionService(
+        db_session, session.id, task.id, use_demo_mode=False
+    )
+
+    assert (
+        service._should_use_structured_debug_repair_direct_chat("PHASE7F_DEBUG_REPAIR")
+        is True
+    )
+    assert service._should_use_phase7f_direct_repair("PHASE7F_DEBUG_REPAIR") is True
+    assert (
+        service._should_use_phase7f_direct_repair("BOUNDED_EXECUTION_DEBUG_REPAIR")
+        is True
+    )
+    assert service._should_use_phase7f_direct_repair("PLANNING") is False
 
 
 def test_phase7f_direct_repair_payload_disables_thinking(monkeypatch):
@@ -473,7 +499,9 @@ def test_non_phase7f_debug_repair_keeps_openclaw_streaming_path(
             "logs": [],
         }
 
-    monkeypatch.setattr(service, "_execute_phase7f_direct_repair", fake_direct_repair)
+    monkeypatch.setattr(
+        service, "_execute_structured_debug_repair_direct_call", fake_direct_repair
+    )
     monkeypatch.setattr(
         service, "execute_task_with_streaming", fake_execute_task_with_streaming
     )
