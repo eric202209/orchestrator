@@ -190,40 +190,23 @@ def build_burn_in_report() -> dict[str, Any]:
         old_value=phase7g_path["phase7g_used"],
         architecture_value=phase7g_path["diff_scoped_debug_repair_used"],
     )
-    _assert_equal(
-        alias_checks,
-        surface="aggregate_bounded_debug_repair_count",
-        old_name="phase7f_used_count",
-        architecture_name="bounded_execution_debug_repair_used_count",
-        old_value=aggregate["phase7f_used_count"],
-        architecture_value=aggregate["bounded_execution_debug_repair_used_count"],
-    )
-    _assert_equal(
-        alias_checks,
-        surface="aggregate_diff_scoped_debug_repair_count",
-        old_name="phase7g_used_count",
-        architecture_name="diff_scoped_debug_repair_used_count",
-        old_value=aggregate["phase7g_used_count"],
-        architecture_value=aggregate["diff_scoped_debug_repair_used_count"],
-    )
-    _assert_equal(
-        alias_checks,
-        surface="aggregate_bounded_debug_repair_rate",
-        old_name="phase7f_exercised_rate",
-        architecture_name="bounded_execution_debug_repair_exercised_rate",
-        old_value=aggregate["phase7f_exercised_rate"],
-        architecture_value=aggregate[
-            "bounded_execution_debug_repair_exercised_rate"
-        ],
-    )
-    _assert_equal(
-        alias_checks,
-        surface="aggregate_diff_scoped_debug_repair_rate",
-        old_name="phase7g_exercised_rate",
-        architecture_name="diff_scoped_debug_repair_exercised_rate",
-        old_value=aggregate["phase7g_exercised_rate"],
-        architecture_value=aggregate["diff_scoped_debug_repair_exercised_rate"],
-    )
+    removed_aggregate_writes = {
+        "phase7f_used_count": "bounded_execution_debug_repair_used_count",
+        "phase7g_used_count": "diff_scoped_debug_repair_used_count",
+        "phase7f_exercised_rate": "bounded_execution_debug_repair_exercised_rate",
+        "phase7g_exercised_rate": "diff_scoped_debug_repair_exercised_rate",
+    }
+    for old_name, architecture_name in removed_aggregate_writes.items():
+        alias_checks.append(
+            {
+                "surface": "aggregate_old_write_removed",
+                "old_name": old_name,
+                "architecture_name": architecture_name,
+                "old_value": aggregate.get(old_name),
+                "architecture_value": aggregate.get(architecture_name),
+                "passed": old_name not in aggregate and architecture_name in aggregate,
+            }
+        )
 
     rejection_details = phase7f_events[-1]["details"]
     _assert_equal(
@@ -274,6 +257,7 @@ def build_burn_in_report() -> dict[str, Any]:
             "phase7f_bounded_debug_timeout": True,
             "bounded_execution_debug_repair_timeout": True,
         },
+        "removed_aggregate_writes": sorted(removed_aggregate_writes),
         "alias_checks": alias_checks,
         "passed": all(check["passed"] for check in alias_checks)
         and not audit_failures,

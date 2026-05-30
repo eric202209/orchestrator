@@ -149,13 +149,13 @@ def test_aggregate_case_reports_counts_path_observability_and_metadata():
     assert aggregate["intended_path_observed_count"] == 3
     assert aggregate["execution_reached_count"] == 3
     assert aggregate["debug_repair_reached_count"] == 2
-    assert aggregate["phase7f_used_count"] == 2
+    assert "phase7f_used_count" not in aggregate
     assert aggregate["bounded_execution_debug_repair_used_count"] == 2
-    assert aggregate["phase7g_used_count"] == 1
+    assert "phase7g_used_count" not in aggregate
     assert aggregate["diff_scoped_debug_repair_used_count"] == 1
-    assert aggregate["phase7f_exercised_rate"] == 2 / 3
+    assert "phase7f_exercised_rate" not in aggregate
     assert aggregate["bounded_execution_debug_repair_exercised_rate"] == 2 / 3
-    assert aggregate["phase7g_exercised_rate"] == 1 / 3
+    assert "phase7g_exercised_rate" not in aggregate
     assert aggregate["diff_scoped_debug_repair_exercised_rate"] == 1 / 3
     assert aggregate["most_common_blocker"] == "verifier_failed"
     assert aggregate["score_readiness_summary"] == {
@@ -268,13 +268,9 @@ def test_aggregate_case_reports_reads_architecture_named_debug_repair_aliases():
         },
     )
 
-    assert aggregate["phase7f_used_count"] == 1
     assert aggregate["bounded_execution_debug_repair_used_count"] == 1
-    assert aggregate["phase7g_used_count"] == 1
     assert aggregate["diff_scoped_debug_repair_used_count"] == 1
-    assert aggregate["phase7f_exercised_rate"] == 1 / 2
     assert aggregate["bounded_execution_debug_repair_exercised_rate"] == 1 / 2
-    assert aggregate["phase7g_exercised_rate"] == 1 / 2
     assert aggregate["diff_scoped_debug_repair_exercised_rate"] == 1 / 2
 
 
@@ -330,10 +326,10 @@ def test_aggregate_case_reports_prefers_architecture_names_with_old_fallback():
         },
     )
 
-    assert aggregate["phase7f_used_count"] == 1
     assert aggregate["bounded_execution_debug_repair_used_count"] == 1
-    assert aggregate["phase7g_used_count"] == 1
     assert aggregate["diff_scoped_debug_repair_used_count"] == 1
+    assert "phase7f_used_count" not in aggregate
+    assert "phase7g_used_count" not in aggregate
 
 
 def test_aggregate_case_reports_marks_all_runs_scoreable_when_ready():

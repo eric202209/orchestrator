@@ -81,14 +81,14 @@ def test_old_only_per_run_reports_still_aggregate_to_architecture_outputs():
         },
     )
 
-    assert aggregate["phase7f_used_count"] == 1
     assert aggregate["bounded_execution_debug_repair_used_count"] == 1
-    assert aggregate["phase7g_used_count"] == 1
     assert aggregate["diff_scoped_debug_repair_used_count"] == 1
-    assert aggregate["phase7f_exercised_rate"] == 0.5
     assert aggregate["bounded_execution_debug_repair_exercised_rate"] == 0.5
-    assert aggregate["phase7g_exercised_rate"] == 0.5
     assert aggregate["diff_scoped_debug_repair_exercised_rate"] == 0.5
+    assert "phase7f_used_count" not in aggregate
+    assert "phase7g_used_count" not in aggregate
+    assert "phase7f_exercised_rate" not in aggregate
+    assert "phase7g_exercised_rate" not in aggregate
 
 
 def test_old_only_phase7f_event_journal_still_scores_architecture_output():

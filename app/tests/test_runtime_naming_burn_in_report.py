@@ -40,7 +40,7 @@ def test_phase11q_burn_in_report_emits_old_and_architecture_names():
 
     assert path_observability["phase7f_used"] is True
     assert path_observability["bounded_execution_debug_repair_used"] is True
-    assert "phase7f_used_count" in aggregate
+    assert "phase7f_used_count" not in aggregate
     assert "bounded_execution_debug_repair_used_count" in aggregate
     assert metadata["phase7f_debug_prompt_mode"] == "phase7f_bounded_debug_repair"
     assert (

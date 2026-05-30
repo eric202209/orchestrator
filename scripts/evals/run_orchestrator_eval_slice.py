@@ -637,15 +637,11 @@ def _aggregate_case_reports(
         "execution_reached_rate": _rate(execution_reached_count, repeat_count),
         "debug_repair_reached_count": debug_repair_reached_count,
         "debug_repair_reached_rate": _rate(debug_repair_reached_count, repeat_count),
-        "phase7f_used_count": phase7f_used_count,
         "bounded_execution_debug_repair_used_count": phase7f_used_count,
-        "phase7g_used_count": phase7g_used_count,
         "diff_scoped_debug_repair_used_count": phase7g_used_count,
-        "phase7f_exercised_rate": _rate(phase7f_used_count, repeat_count),
         "bounded_execution_debug_repair_exercised_rate": _rate(
             phase7f_used_count, repeat_count
         ),
-        "phase7g_exercised_rate": _rate(phase7g_used_count, repeat_count),
         "diff_scoped_debug_repair_exercised_rate": _rate(
             phase7g_used_count, repeat_count
         ),

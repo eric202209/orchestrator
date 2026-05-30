@@ -23,6 +23,7 @@ class AuditSurface:
     removal_risk: str
     recommended_action: str
     reader_policy: str
+    write_status: str
     required_tokens: tuple[str, ...]
 
 
@@ -36,6 +37,7 @@ AUDIT_SURFACES: tuple[AuditSurface, ...] = (
         removal_risk="High until all active readers prefer the architecture key and historical reports stay readable.",
         recommended_action="Keep old writes; keep reader fallback permanently or migrate report schema explicitly.",
         reader_policy="Active aggregate readers prefer the architecture key and fall back to the old key.",
+        write_status="compatibility_write_retained",
         required_tokens=("phase7f_used", "bounded_execution_debug_repair_used"),
     ),
     AuditSurface(
@@ -47,6 +49,7 @@ AUDIT_SURFACES: tuple[AuditSurface, ...] = (
         removal_risk="High until all active readers prefer the architecture key and historical reports stay readable.",
         recommended_action="Keep old writes; keep reader fallback permanently or migrate report schema explicitly.",
         reader_policy="Active aggregate readers prefer the architecture key and fall back to the old key.",
+        write_status="compatibility_write_retained",
         required_tokens=("phase7g_used", "diff_scoped_debug_repair_used"),
     ),
     AuditSurface(
@@ -56,12 +59,10 @@ AUDIT_SURFACES: tuple[AuditSurface, ...] = (
         read_by=("scripts/evals/run_orchestrator_eval_slice.py",),
         historical_report_impact="Historical aggregate eval reports use the old count key.",
         removal_risk="High for longitudinal comparisons and dashboards that ingest aggregate JSON.",
-        recommended_action="Keep old aggregate writes through the compatibility window.",
-        reader_policy="Operator docs list the architecture key first; old aggregate key remains emitted.",
-        required_tokens=(
-            "phase7f_used_count",
-            "bounded_execution_debug_repair_used_count",
-        ),
+        recommended_action="Old aggregate write removed in Phase 11S; keep architecture output and historical per-run fallback.",
+        reader_policy="New aggregate reports emit only the architecture key; old per-run input fallback remains tested.",
+        write_status="compatibility_write_removed_phase11s",
+        required_tokens=("bounded_execution_debug_repair_used_count",),
     ),
     AuditSurface(
         old_name="phase7g_used_count",
@@ -70,9 +71,10 @@ AUDIT_SURFACES: tuple[AuditSurface, ...] = (
         read_by=("scripts/evals/run_orchestrator_eval_slice.py",),
         historical_report_impact="Historical aggregate eval reports use the old count key.",
         removal_risk="High for longitudinal comparisons and dashboards that ingest aggregate JSON.",
-        recommended_action="Keep old aggregate writes through the compatibility window.",
-        reader_policy="Operator docs list the architecture key first; old aggregate key remains emitted.",
-        required_tokens=("phase7g_used_count", "diff_scoped_debug_repair_used_count"),
+        recommended_action="Old aggregate write removed in Phase 11S; keep architecture output and historical per-run fallback.",
+        reader_policy="New aggregate reports emit only the architecture key; old per-run input fallback remains tested.",
+        write_status="compatibility_write_removed_phase11s",
+        required_tokens=("diff_scoped_debug_repair_used_count",),
     ),
     AuditSurface(
         old_name="phase7f_exercised_rate",
@@ -81,12 +83,10 @@ AUDIT_SURFACES: tuple[AuditSurface, ...] = (
         read_by=("scripts/evals/run_orchestrator_eval_slice.py",),
         historical_report_impact="Historical aggregate eval reports use the old rate key.",
         removal_risk="High for trend reports and release-readiness comparisons.",
-        recommended_action="Keep old aggregate writes through the compatibility window.",
-        reader_policy="Operator docs list the architecture key first; old aggregate key remains emitted.",
-        required_tokens=(
-            "phase7f_exercised_rate",
-            "bounded_execution_debug_repair_exercised_rate",
-        ),
+        recommended_action="Old aggregate write removed in Phase 11S; keep architecture output and historical per-run fallback.",
+        reader_policy="New aggregate reports emit only the architecture key; old per-run input fallback remains tested.",
+        write_status="compatibility_write_removed_phase11s",
+        required_tokens=("bounded_execution_debug_repair_exercised_rate",),
     ),
     AuditSurface(
         old_name="phase7g_exercised_rate",
@@ -95,12 +95,10 @@ AUDIT_SURFACES: tuple[AuditSurface, ...] = (
         read_by=("scripts/evals/run_orchestrator_eval_slice.py",),
         historical_report_impact="Historical aggregate eval reports use the old rate key.",
         removal_risk="High for trend reports and release-readiness comparisons.",
-        recommended_action="Keep old aggregate writes through the compatibility window.",
-        reader_policy="Operator docs list the architecture key first; old aggregate key remains emitted.",
-        required_tokens=(
-            "phase7g_exercised_rate",
-            "diff_scoped_debug_repair_exercised_rate",
-        ),
+        recommended_action="Old aggregate write removed in Phase 11S; keep architecture output and historical per-run fallback.",
+        reader_policy="New aggregate reports emit only the architecture key; old per-run input fallback remains tested.",
+        write_status="compatibility_write_removed_phase11s",
+        required_tokens=("diff_scoped_debug_repair_exercised_rate",),
     ),
     AuditSurface(
         old_name="phase7f_bounded_debug_repair",
@@ -115,6 +113,7 @@ AUDIT_SURFACES: tuple[AuditSurface, ...] = (
         removal_risk="High because failure classification and reports still accept old journals.",
         recommended_action="Keep old prompt mode; keep additive debug_prompt_mode_architecture metadata.",
         reader_policy="Scorer path observability treats debug_prompt_mode_architecture as authoritative when present.",
+        write_status="compatibility_write_retained",
         required_tokens=(
             "phase7f_bounded_debug_repair",
             "bounded_execution_debug_repair",
@@ -133,6 +132,7 @@ AUDIT_SURFACES: tuple[AuditSurface, ...] = (
         removal_risk="Medium-high for eval path observability and evidence reports.",
         recommended_action="Keep old prompt mode; keep additive debug_prompt_mode_architecture metadata.",
         reader_policy="Scorer path observability treats debug_prompt_mode_architecture as authoritative when present.",
+        write_status="compatibility_write_retained",
         required_tokens=(
             "phase7g_diff_repair",
             "diff_scoped_debug_repair",
@@ -151,6 +151,7 @@ AUDIT_SURFACES: tuple[AuditSurface, ...] = (
         removal_risk="High because terminalization logic still recognizes old diagnostics.",
         recommended_action="Keep old timeout marker until parser and terminal reason migration is explicit.",
         reader_policy="Failure-flow timeout classification accepts architecture metadata and old diagnostics.",
+        write_status="compatibility_write_retained",
         required_tokens=(
             "phase7f_bounded_debug_timeout",
             "bounded_execution_debug_repair_timeout",
@@ -165,6 +166,7 @@ AUDIT_SURFACES: tuple[AuditSurface, ...] = (
         removal_risk="Medium-high for report readers and regression fixtures.",
         recommended_action="Keep old rejection detail fields; prefer architecture aliases in new readers.",
         reader_policy="No removal; current regression coverage asserts architecture aliases are emitted.",
+        write_status="compatibility_write_retained",
         required_tokens=(
             "phase7f_rejection_reason",
             "bounded_execution_debug_repair_rejection_reason",
@@ -179,6 +181,7 @@ AUDIT_SURFACES: tuple[AuditSurface, ...] = (
         removal_risk="Medium for diagnostics and fixtures.",
         recommended_action="Keep old field; keep additive alias.",
         reader_policy="No removal; current regression coverage asserts architecture aliases are emitted.",
+        write_status="compatibility_write_retained",
         required_tokens=(
             "phase7f_parsed_shape",
             "bounded_execution_debug_repair_parsed_shape",
@@ -193,6 +196,7 @@ AUDIT_SURFACES: tuple[AuditSurface, ...] = (
         removal_risk="Medium for diagnostics and fixtures.",
         recommended_action="Keep old field; keep additive alias.",
         reader_policy="No removal; current regression coverage asserts architecture aliases are emitted.",
+        write_status="compatibility_write_retained",
         required_tokens=(
             "phase7f_raw_output_excerpt",
             "bounded_execution_debug_repair_raw_output_excerpt",
@@ -207,6 +211,7 @@ AUDIT_SURFACES: tuple[AuditSurface, ...] = (
         removal_risk="High if historical reports or alerting parse rejection reasons.",
         recommended_action="Keep old reason; keep reason_architecture metadata.",
         reader_policy="No removal; current regression coverage asserts architecture reason metadata is emitted.",
+        write_status="compatibility_write_retained",
         required_tokens=(
             "phase7f_debug_repair_output_invalid",
             "bounded_execution_debug_repair_output_invalid",
@@ -221,6 +226,7 @@ AUDIT_SURFACES: tuple[AuditSurface, ...] = (
         removal_risk="High if operator reports group stale exact-patch failures by reason.",
         recommended_action="Keep old reason; keep architecture reason and terminal_reason aliases.",
         reader_policy="No removal; current regression coverage asserts architecture reason metadata is emitted.",
+        write_status="compatibility_write_retained",
         required_tokens=(
             "phase7f_ops_fix_stale_replace",
             "bounded_execution_debug_repair_ops_fix_stale_replace",
@@ -235,6 +241,7 @@ AUDIT_SURFACES: tuple[AuditSurface, ...] = (
         removal_risk="Medium for repair diagnostics.",
         recommended_action="Keep old marker; keep additive alias.",
         reader_policy="No removal; current regression coverage asserts architecture aliases are emitted.",
+        write_status="compatibility_write_retained",
         required_tokens=(
             "phase7f_ops_fix_correction",
             "bounded_execution_debug_repair_ops_fix_correction",
@@ -249,6 +256,7 @@ AUDIT_SURFACES: tuple[AuditSurface, ...] = (
         removal_risk="High because direct runtime diagnostics still preserve old labels for compatibility.",
         recommended_action="Keep old diagnostic label writes; keep architecture label as input alias and metadata.",
         reader_policy="OpenClaw diagnostics accept the architecture label while preserving old label metadata.",
+        write_status="compatibility_write_retained",
         required_tokens=(
             "PHASE7F_DEBUG_REPAIR",
             "BOUNDED_EXECUTION_DEBUG_REPAIR",
@@ -264,6 +272,7 @@ AUDIT_SURFACES: tuple[AuditSurface, ...] = (
         removal_risk="High operational risk for configured repair lanes.",
         recommended_action="Keep config fallbacks until an explicit operator migration is documented and tested.",
         reader_policy="Runtime config prefers DEBUG_REPAIR_* values and falls back to PHASE7F_REPAIR_* values.",
+        write_status="compatibility_write_retained",
         required_tokens=(
             "PHASE7F_REPAIR_DIRECT_ENABLED",
             "PHASE7F_REPAIR_BASE_URL",
@@ -305,13 +314,13 @@ def surfaces_as_dicts() -> list[dict[str, object]]:
 def surfaces_as_markdown() -> str:
     header = (
         "| Old name | Architecture alias | Emitted by | Read by | "
-        "Historical report impact | Removal risk | Reader policy | Recommended action |\n"
-        "| --- | --- | --- | --- | --- | --- | --- | --- |"
+        "Historical report impact | Removal risk | Reader policy | Write status | Recommended action |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
     )
     rows = []
     for surface in AUDIT_SURFACES:
         rows.append(
-            "| {old} | {alias} | {emitted} | {read} | {impact} | {risk} | {policy} | {action} |".format(
+            "| {old} | {alias} | {emitted} | {read} | {impact} | {risk} | {policy} | {status} | {action} |".format(
                 old=f"`{surface.old_name}`",
                 alias=f"`{surface.architecture_alias}`",
                 emitted="<br>".join(f"`{path}`" for path in surface.emitted_by),
@@ -319,6 +328,7 @@ def surfaces_as_markdown() -> str:
                 impact=surface.historical_report_impact,
                 risk=surface.removal_risk,
                 policy=surface.reader_policy,
+                status=surface.write_status,
                 action=surface.recommended_action,
             )
         )

@@ -137,12 +137,16 @@ Aggregate reports include:
   primary failure phase
 - `path_observed_count` and `intended_path_observed_count`
 - execution and debug-repair reached counts/rates
-- debug-repair usage counts/rates, emitted with preferred architecture names
-  plus compatibility aliases:
-  - `bounded_execution_debug_repair_used_count` / `phase7f_used_count`
-  - `diff_scoped_debug_repair_used_count` / `phase7g_used_count`
-  - `bounded_execution_debug_repair_exercised_rate` / `phase7f_exercised_rate`
-  - `diff_scoped_debug_repair_exercised_rate` / `phase7g_exercised_rate`
+- debug-repair usage counts/rates, emitted with architecture names:
+  - `bounded_execution_debug_repair_used_count`
+  - `diff_scoped_debug_repair_used_count`
+  - `bounded_execution_debug_repair_exercised_rate`
+  - `diff_scoped_debug_repair_exercised_rate`
+
+Historical aggregate reports may contain old compatibility keys such as
+`phase7f_used_count`, `phase7g_used_count`, `phase7f_exercised_rate`, and
+`phase7g_exercised_rate`. New aggregate reports no longer write those old
+aggregate keys; old per-run report fields remain readable as input fallback.
 - `most_common_blocker`
 - `score_readiness_summary`, including terminal-event observation,
   event-journal stabilization, and journal paths used for scoring readiness

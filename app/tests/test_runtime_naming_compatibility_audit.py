@@ -54,7 +54,18 @@ def test_phase11p_runtime_naming_audit_tokens_are_present():
 
 
 def test_phase11p_runtime_naming_audit_recommends_no_removal_yet():
-    assert all("Keep" in surface.recommended_action for surface in audit.AUDIT_SURFACES)
+    removed = {
+        "phase7f_used_count",
+        "phase7g_used_count",
+        "phase7f_exercised_rate",
+        "phase7g_exercised_rate",
+    }
+
+    assert all(
+        "Keep" in surface.recommended_action
+        for surface in audit.AUDIT_SURFACES
+        if surface.old_name not in removed
+    )
 
 
 def test_phase11p_runtime_naming_audit_records_reader_policy():
@@ -66,3 +77,19 @@ def test_phase11p_runtime_naming_audit_records_reader_policy():
     assert "prefer" in policies["phase7g_used"].lower()
     assert "debug_prompt_mode_architecture" in policies["phase7f_bounded_debug_repair"]
     assert "DEBUG_REPAIR_*" in policies["PHASE7F_REPAIR_*"]
+
+
+def test_phase11s_audit_records_removed_aggregate_writes():
+    statuses = {
+        surface.old_name: surface.write_status for surface in audit.AUDIT_SURFACES
+    }
+
+    assert statuses["phase7f_used_count"] == "compatibility_write_removed_phase11s"
+    assert statuses["phase7g_used_count"] == "compatibility_write_removed_phase11s"
+    assert statuses["phase7f_exercised_rate"] == (
+        "compatibility_write_removed_phase11s"
+    )
+    assert statuses["phase7g_exercised_rate"] == (
+        "compatibility_write_removed_phase11s"
+    )
+    assert statuses["phase7f_used"] == "compatibility_write_retained"
