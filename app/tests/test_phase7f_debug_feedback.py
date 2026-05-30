@@ -2056,6 +2056,17 @@ def test_phase7f_ops_fix_stale_replace_failed_correction_is_rejected(
     assert rejected[-1]["details"]["phase7f_rejection_reason"] == (
         "stale_replace_after_correction"
     )
+    assert (
+        rejected[-1]["details"]["bounded_execution_debug_repair_rejection_reason"]
+        == "stale_replace_after_correction"
+    )
+    assert rejected[-1]["details"]["reason_architecture"] == (
+        "bounded_execution_debug_repair_ops_fix_stale_replace"
+    )
+    assert (
+        rejected[-1]["details"]["debug_repair_terminal_reason_architecture"]
+        == "bounded_execution_debug_repair_ops_fix_stale_replace"
+    )
 
 
 def test_phase7g_diff_repair_prompt_is_used_when_capsule_available(
@@ -2170,12 +2181,27 @@ def test_phase7f_invalid_bounded_repair_terminalizes(db_session, tmp_path):
     assert rejected[-1]["details"]["debug_repair_terminal_reason"] == (
         "invalid_debug_repair_output"
     )
+    assert rejected[-1]["details"]["reason_architecture"] == (
+        "bounded_execution_debug_repair_output_invalid"
+    )
     assert rejected[-1]["details"]["phase7f_rejection_reason"] == ("unsupported_shape")
+    assert (
+        rejected[-1]["details"]["bounded_execution_debug_repair_rejection_reason"]
+        == "unsupported_shape"
+    )
     assert rejected[-1]["details"]["phase7f_parsed_shape"] == {
         "type": "list",
         "length": 0,
     }
+    assert rejected[-1]["details"]["bounded_execution_debug_repair_parsed_shape"] == {
+        "type": "list",
+        "length": 0,
+    }
     assert rejected[-1]["details"]["phase7f_raw_output_excerpt"] == "[]"
+    assert (
+        rejected[-1]["details"]["bounded_execution_debug_repair_raw_output_excerpt"]
+        == "[]"
+    )
 
 
 def test_phase7f_compliance_retry_parse_failure_records_diagnostics(
@@ -2215,9 +2241,21 @@ def test_phase7f_compliance_retry_parse_failure_records_diagnostics(
     ]
     details = rejected[-1]["details"]
     assert details["debug_repair_terminal_reason"] == "invalid_debug_repair_output"
+    assert (
+        details["reason_architecture"]
+        == "bounded_execution_debug_repair_output_invalid"
+    )
     assert details["phase7f_rejection_reason"] == "compliance_retry_parse_failed"
+    assert (
+        details["bounded_execution_debug_repair_rejection_reason"]
+        == "compliance_retry_parse_failed"
+    )
     assert details["phase7f_parsed_shape"] is None
+    assert details["bounded_execution_debug_repair_parsed_shape"] is None
     assert details["phase7f_raw_output_excerpt"] == "not json final"
+    assert (
+        details["bounded_execution_debug_repair_raw_output_excerpt"] == "not json final"
+    )
     assert details["compliance_retry_attempted"] is True
     assert details["compliance_retry_succeeded"] is False
 
@@ -2252,3 +2290,15 @@ def test_phase7f_second_debug_repair_for_task_execution_is_blocked(
     assert result == {"status": "failed", "reason": "debug_repair_budget_exhausted"}
     assert len(runtime.prompts) == 1
     assert ctx.orchestration_state.debug_repair_task_execution_ids == [execution.id]
+    events = read_orchestration_events(
+        ctx.orchestration_state.project_dir, ctx.session_id, ctx.task_id
+    )
+    rejected = [
+        event for event in events if event["event_type"] == EventType.REPAIR_REJECTED
+    ]
+    details = rejected[-1]["details"]
+    assert details["reason"] == "debug_repair_budget_exhausted"
+    assert details["debug_repair_scope"] == "bounded_execution_debug_repair"
+    assert details["terminal_message_architecture"] == (
+        "Bounded execution debug repair budget exhausted for this TaskExecution"
+    )

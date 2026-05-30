@@ -74,6 +74,18 @@ def test_workspace_evidence_report_merges_log_and_journal_evidence(tmp_path):
                 },
             }
         )
+        + "\n"
+        + json.dumps(
+            {
+                "event_type": "debug_repair_attempted",
+                "details": {
+                    "debug_prompt_mode": "phase7f_bounded_debug_repair",
+                    "debug_prompt_mode_architecture": (
+                        "bounded_execution_debug_repair"
+                    ),
+                },
+            }
+        )
         + "\n",
         encoding="utf-8",
     )
@@ -112,6 +124,12 @@ def test_workspace_evidence_report_merges_log_and_journal_evidence(tmp_path):
     assert summary["average_evidence_chars"] == 42
     assert summary["by_failure_class"]["pytest_failure"]["evidence_collected"] == 1
     assert summary["top_evidence_files"] == [("tests/test_demo.py", 1)]
+    assert summary["records"][0]["debug_prompt_mode"] == (
+        "phase7f_bounded_debug_repair"
+    )
+    assert summary["records"][0]["debug_prompt_mode_architecture"] == (
+        "bounded_execution_debug_repair"
+    )
 
 
 def test_workspace_evidence_report_uses_metadata_when_journal_is_gone(tmp_path):
