@@ -150,9 +150,13 @@ def test_aggregate_case_reports_counts_path_observability_and_metadata():
     assert aggregate["execution_reached_count"] == 3
     assert aggregate["debug_repair_reached_count"] == 2
     assert aggregate["phase7f_used_count"] == 2
+    assert aggregate["bounded_execution_debug_repair_used_count"] == 2
     assert aggregate["phase7g_used_count"] == 1
+    assert aggregate["diff_scoped_debug_repair_used_count"] == 1
     assert aggregate["phase7f_exercised_rate"] == 2 / 3
+    assert aggregate["bounded_execution_debug_repair_exercised_rate"] == 2 / 3
     assert aggregate["phase7g_exercised_rate"] == 1 / 3
+    assert aggregate["diff_scoped_debug_repair_exercised_rate"] == 1 / 3
     assert aggregate["most_common_blocker"] == "verifier_failed"
     assert aggregate["score_readiness_summary"] == {
         "all_runs_scoreable": False,
@@ -221,6 +225,57 @@ def test_aggregate_case_reports_marks_stable_phase_at_eighty_percent_threshold()
         "planning_validation": 4,
     }
     assert aggregate["stable_primary_failure_phase"] is True
+
+
+def test_aggregate_case_reports_reads_architecture_named_debug_repair_aliases():
+    reports = [
+        _report(
+            clean_success=False,
+            primary_failure_phase="debug_repair",
+            path_observed=True,
+            intended_path_observed=True,
+            execution_reached=True,
+            debug_repair_reached=True,
+            phase7f_used=False,
+            phase7g_used=False,
+            blockers=["verifier_failed"],
+        ),
+        _report(
+            clean_success=False,
+            primary_failure_phase="debug_repair",
+            path_observed=True,
+            intended_path_observed=True,
+            execution_reached=True,
+            debug_repair_reached=True,
+            phase7f_used=False,
+            phase7g_used=False,
+            blockers=["verifier_failed"],
+        ),
+    ]
+    reports[0]["path_observability"]["bounded_execution_debug_repair_used"] = True
+    reports[1]["path_observability"]["diff_scoped_debug_repair_used"] = True
+
+    aggregate = runner._aggregate_case_reports(
+        case_id="python_cli_small_feature",
+        reports=reports,
+        report_paths=[Path("run1.json"), Path("run2.json")],
+        run_context={
+            "git_sha": None,
+            "model": None,
+            "backend": None,
+            "runtime_profile": None,
+            "repeat_seed": None,
+        },
+    )
+
+    assert aggregate["phase7f_used_count"] == 1
+    assert aggregate["bounded_execution_debug_repair_used_count"] == 1
+    assert aggregate["phase7g_used_count"] == 1
+    assert aggregate["diff_scoped_debug_repair_used_count"] == 1
+    assert aggregate["phase7f_exercised_rate"] == 1 / 2
+    assert aggregate["bounded_execution_debug_repair_exercised_rate"] == 1 / 2
+    assert aggregate["phase7g_exercised_rate"] == 1 / 2
+    assert aggregate["diff_scoped_debug_repair_exercised_rate"] == 1 / 2
 
 
 def test_aggregate_case_reports_marks_all_runs_scoreable_when_ready():

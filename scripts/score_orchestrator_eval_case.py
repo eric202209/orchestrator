@@ -387,7 +387,12 @@ def _phase7g_used(events: list[dict[str, Any]]) -> bool:
         details = _event_details(event)
         text = _details_text(details)
         mode = str(details.get("debug_prompt_mode") or "").lower()
+        mode_architecture = str(
+            details.get("debug_prompt_mode_architecture") or ""
+        ).lower()
         if "phase7g" in mode:
+            return True
+        if "diff_scoped_debug_repair" in mode_architecture:
             return True
         if isinstance(details.get("diff_capsule_line_count"), int) and (
             details["diff_capsule_line_count"] > 0
@@ -396,6 +401,8 @@ def _phase7g_used(events: list[dict[str, Any]]) -> bool:
         if details.get("diff_capsule_primary_file"):
             return True
         if "phase7g" in text:
+            return True
+        if "diff_scoped_debug_repair" in text:
             return True
     return False
 
@@ -416,10 +423,14 @@ def _case_intended_path_observed(
 
     if "checkpoint" in category or "checkpoint_loaded" in expected:
         return checkpoint_loaded
-    if "debug" in category or {
-        "debug_feedback_captured",
-        "debug_repair_attempted",
-    } & expected:
+    if (
+        "debug" in category
+        or {
+            "debug_feedback_captured",
+            "debug_repair_attempted",
+        }
+        & expected
+    ):
         return debug_repair_reached
     if case_id == "python_cli_small_feature" or category == "baseline_success":
         return execution_reached
@@ -493,7 +504,11 @@ def _path_observability(
         or any(status in {"executing", "execution"} for status in final_statuses)
     )
     debug_repair_reached = any(value > 0 for value in repair_events.values())
-    phase7f_used = "phase7f" in details_text or "bounded_debug_repair" in details_text
+    phase7f_used = (
+        "phase7f" in details_text
+        or "bounded_debug_repair" in details_text
+        or "bounded_execution_debug_repair" in details_text
+    )
     phase7g_used = _phase7g_used(events)
     checkpoint_loaded = checkpoint_events["checkpoint_loaded"] > 0
     intended_path_observed = _case_intended_path_observed(
@@ -520,7 +535,9 @@ def _path_observability(
         "step_started_count": step_started_count,
         "debug_repair_reached": debug_repair_reached,
         "phase7f_used": phase7f_used,
+        "bounded_execution_debug_repair_used": phase7f_used,
         "phase7g_used": phase7g_used,
+        "diff_scoped_debug_repair_used": phase7g_used,
         "repair_rejected_count": repair_events["repair_rejected"],
         "checkpoint_loaded": checkpoint_loaded,
         "intended_path_observed": intended_path_observed,

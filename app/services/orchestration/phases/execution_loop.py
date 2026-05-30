@@ -325,12 +325,22 @@ def _mark_phase7f_bounded_debug_timeout_if_applicable(
             {
                 "failure_phase": "debug_repair",
                 "debug_prompt_mode": debug_prompt_mode,
+                "debug_prompt_mode_architecture": ("bounded_execution_debug_repair"),
                 "debug_failure_class": debug_failure_class,
                 "phase7f_bounded_debug_timeout": True,
+                "bounded_execution_debug_repair_timeout": True,
                 "timed_out": True,
             }
         )
         setattr(debug_error, "runtime_diagnostics", diagnostics)
+
+
+def _debug_prompt_mode_architecture(debug_prompt_mode: str) -> Optional[str]:
+    if debug_prompt_mode == "phase7f_bounded_debug_repair":
+        return "bounded_execution_debug_repair"
+    if debug_prompt_mode == "phase7g_diff_repair":
+        return "diff_scoped_debug_repair"
+    return None
 
 
 def _run_coroutine(coro: Any) -> Any:
@@ -1863,6 +1873,9 @@ def execute_step_loop(
                         else "Phase 7F bounded repair not eligible or already used for TaskExecution"
                     ),
                     "debug_prompt_mode": debug_prompt_mode,
+                    "debug_prompt_mode_architecture": (
+                        _debug_prompt_mode_architecture(debug_prompt_mode)
+                    ),
                     "envelope_mode": (
                         "direct_capsule"
                         if debug_prompt_mode
@@ -1892,7 +1905,11 @@ def execute_step_loop(
                 "diagnostic_label": "PHASE7F_DEBUG_REPAIR",
                 "diagnostic_metadata": {
                     "phase": "debugging",
+                    "diagnostic_label_architecture": ("BOUNDED_EXECUTION_DEBUG_REPAIR"),
                     "debug_prompt_mode": debug_prompt_mode,
+                    "debug_prompt_mode_architecture": (
+                        _debug_prompt_mode_architecture(debug_prompt_mode)
+                    ),
                     "debug_failure_class": (
                         debug_feedback_envelope.failure_class
                         if debug_feedback_envelope is not None

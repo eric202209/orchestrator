@@ -106,8 +106,13 @@ def test_phase7f_source_step_timeout_gets_non_retry_marker():
     diagnostics = error.runtime_diagnostics
     assert diagnostics["failure_phase"] == "debug_repair"
     assert diagnostics["debug_prompt_mode"] == "phase7f_bounded_debug_repair"
+    assert (
+        diagnostics["debug_prompt_mode_architecture"]
+        == "bounded_execution_debug_repair"
+    )
     assert diagnostics["debug_failure_class"] == "source_step_validation"
     assert diagnostics["phase7f_bounded_debug_timeout"] is True
+    assert diagnostics["bounded_execution_debug_repair_timeout"] is True
     assert diagnostics["timed_out"] is True
 
 
@@ -948,8 +953,16 @@ def test_phase7f_valid_bounded_repair_is_retried_and_succeeds(db_session, tmp_pa
     assert len(runtime.prompts) == 3
     assert "Return a bare JSON array" in runtime.prompts[1]
     assert runtime.kwargs[1]["diagnostic_label"] == "PHASE7F_DEBUG_REPAIR"
+    assert (
+        runtime.kwargs[1]["diagnostic_metadata"]["diagnostic_label_architecture"]
+        == "BOUNDED_EXECUTION_DEBUG_REPAIR"
+    )
     assert runtime.kwargs[1]["diagnostic_metadata"]["debug_prompt_mode"] == (
         "phase7f_bounded_debug_repair"
+    )
+    assert (
+        runtime.kwargs[1]["diagnostic_metadata"]["debug_prompt_mode_architecture"]
+        == "bounded_execution_debug_repair"
     )
     assert runtime.kwargs[1]["diagnostic_metadata"]["debug_failure_class"]
     assert runtime.kwargs[1]["diagnostic_metadata"]["task_execution_id"] == execution.id
@@ -2113,6 +2126,10 @@ def test_phase7g_diff_repair_prompt_is_used_when_capsule_available(
         if event["event_type"] == EventType.DEBUG_REPAIR_ATTEMPTED
     ]
     assert attempted[-1]["details"]["debug_prompt_mode"] == "phase7g_diff_repair"
+    assert (
+        attempted[-1]["details"]["debug_prompt_mode_architecture"]
+        == "diff_scoped_debug_repair"
+    )
     assert attempted[-1]["details"]["diff_capsule_primary_file"] == "src/demo.py"
     assert attempted[-1]["details"]["diff_capsule_line_count"] > 0
 

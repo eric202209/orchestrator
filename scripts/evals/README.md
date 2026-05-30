@@ -62,7 +62,10 @@ Key fields:
 - `step_started_count`: number of `step_started` events.
 - `debug_repair_reached`: debug feedback or repair events were observed.
 - `phase7f_used`: bounded Phase 7F debug repair metadata was observed.
+- `bounded_execution_debug_repair_used`: architecture-named alias for
+  `phase7f_used`.
 - `phase7g_used`: diff-repair / Phase 7G metadata was observed.
+- `diff_scoped_debug_repair_used`: architecture-named alias for `phase7g_used`.
 - `repair_rejected_count`: number of rejected repair events.
 - `checkpoint_loaded`: checkpoint-load evidence was observed.
 - `intended_path_observed`: case-aware path check. For baseline implementation
@@ -133,7 +136,12 @@ Aggregate reports include:
   primary failure phase
 - `path_observed_count` and `intended_path_observed_count`
 - execution and debug-repair reached counts/rates
-- Phase 7F and Phase 7G usage counts/rates
+- debug-repair usage counts/rates, emitted with both compatibility and
+  architecture names:
+  - `phase7f_used_count` / `bounded_execution_debug_repair_used_count`
+  - `phase7g_used_count` / `diff_scoped_debug_repair_used_count`
+  - `phase7f_exercised_rate` / `bounded_execution_debug_repair_exercised_rate`
+  - `phase7g_exercised_rate` / `diff_scoped_debug_repair_exercised_rate`
 - `most_common_blocker`
 - `score_readiness_summary`, including terminal-event observation,
   event-journal stabilization, and journal paths used for scoring readiness
