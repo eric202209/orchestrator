@@ -360,6 +360,133 @@ def test_structured_write_file_compileall_verification_runs_locally(
     assert ctx.orchestration_state.current_step_index == 1
 
 
+def test_compileall_accepts_multiple_relative_python_files(tmp_path):
+    pkg = tmp_path / "src" / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "a.py").write_text("A = 1\n", encoding="utf-8")
+    (pkg / "b.py").write_text("B = 2\n", encoding="utf-8")
+
+    result = _execute_simple_verification_step(
+        project_dir=tmp_path,
+        commands=["python -m compileall src/pkg/a.py src/pkg/b.py"],
+        verification_command="python -m compileall src/pkg/a.py src/pkg/b.py",
+    )
+
+    assert result is not None
+    assert result["status"] == "completed", result
+
+
+def test_compileall_accepts_python3_package_directory(tmp_path):
+    pkg = tmp_path / "src" / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    result = _execute_simple_verification_step(
+        project_dir=tmp_path,
+        commands=["python3 -m compileall src/pkg"],
+        verification_command="python3 -m compileall src/pkg",
+    )
+
+    assert result is not None
+    assert result["status"] == "completed", result
+
+
+def test_compileall_rejects_absolute_paths(tmp_path):
+    target = tmp_path / "src" / "pkg" / "a.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("A = 1\n", encoding="utf-8")
+
+    assert not _is_simple_verification_command(
+        f"python -m compileall {target}", project_dir=tmp_path
+    )
+
+
+def test_compileall_rejects_parent_traversal(tmp_path):
+    assert not _is_simple_verification_command(
+        "python -m compileall ../outside.py", project_dir=tmp_path
+    )
+
+
+def test_compileall_rejects_shell_operators_pipes_redirects_and_semicolons(tmp_path):
+    commands = [
+        "python -m compileall src/pkg/a.py | cat",
+        "python -m compileall src/pkg/a.py > out.txt",
+        "python -m compileall src/pkg/a.py; echo done",
+        "python -m compileall src/pkg/a.py && echo done",
+        "python -m compileall src/pkg/a.py || echo done",
+    ]
+
+    for command in commands:
+        assert not _is_simple_verification_command(command, project_dir=tmp_path)
+
+
+def test_compileall_rejects_flags_and_options(tmp_path):
+    pkg = tmp_path / "src" / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "a.py").write_text("A = 1\n", encoding="utf-8")
+
+    assert not _is_simple_verification_command(
+        "python -m compileall -d /tmp src/pkg/a.py", project_dir=tmp_path
+    )
+
+
+def test_structured_ops_compileall_without_declared_verification_skips_runtime(
+    db_session, tmp_path
+):
+    command = (
+        "python -m compileall "
+        "src/medium_cli/cli.py src/medium_cli/store.py src/medium_cli/summary.py"
+    )
+    runtime = _FakeRuntime([])
+    ctx, _execution = _make_run_context(
+        db_session,
+        tmp_path,
+        runtime=runtime,
+        expected_files=[
+            "src/medium_cli/cli.py",
+            "src/medium_cli/store.py",
+            "src/medium_cli/summary.py",
+        ],
+        step_overrides={
+            "description": "Write medium CLI source and compile it",
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/medium_cli/cli.py",
+                    "content": "def main():\n    return 0\n",
+                },
+                {
+                    "op": "write_file",
+                    "path": "src/medium_cli/store.py",
+                    "content": "ITEMS = []\n",
+                },
+                {
+                    "op": "write_file",
+                    "path": "src/medium_cli/summary.py",
+                    "content": "def summarize(items):\n    return len(items)\n",
+                },
+            ],
+            "commands": [command],
+            "verification": "",
+        },
+    )
+
+    result = execute_step_loop(
+        ctx=ctx,
+        extract_structured_text=_extract_structured_text,
+        normalize_step=_normalize_step,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: [],
+        workspace_violation_error_cls=RuntimeError,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        record_live_log_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "completed", result
+    assert runtime.prompts == []
+    assert ctx.orchestration_state.current_step_index == 1
+
+
 def test_phase7f_classifies_runtime_failures():
     assert (
         classify_debug_failure(stderr="ModuleNotFoundError: No module named 'main'")

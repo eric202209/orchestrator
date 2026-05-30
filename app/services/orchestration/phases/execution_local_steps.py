@@ -625,7 +625,7 @@ def _execute_simple_verification_step(
 ) -> dict[str, Any] | None:
     normalized_commands = [str(command or "").strip() for command in commands or []]
     verification = str(verification_command or "").strip()
-    if len(normalized_commands) != 1 or not verification:
+    if len(normalized_commands) != 1:
         return None
     command = normalized_commands[0]
     command_is_simple_verification = _is_simple_verification_command(
@@ -634,7 +634,13 @@ def _execute_simple_verification_step(
     verification_is_simple = _is_simple_verification_command(
         verification, project_dir=project_dir
     )
-    if _same_simple_verification_command(command, verification):
+    if not verification and _is_safe_compileall_command(
+        command, project_dir=project_dir
+    ):
+        command_to_run = command
+    elif not verification:
+        return None
+    elif _same_simple_verification_command(command, verification):
         command_to_run = verification
     elif (
         command.startswith("node -e ")
