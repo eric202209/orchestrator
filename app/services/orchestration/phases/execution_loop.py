@@ -343,6 +343,19 @@ def _debug_prompt_mode_architecture(debug_prompt_mode: str) -> Optional[str]:
     return None
 
 
+def _bounded_debug_repair_rejection_alias_details(
+    *,
+    rejection_reason: Optional[str],
+    parsed_shape: Any,
+    raw_output_excerpt: str,
+) -> Dict[str, Any]:
+    return {
+        "bounded_execution_debug_repair_rejection_reason": rejection_reason,
+        "bounded_execution_debug_repair_parsed_shape": parsed_shape,
+        "bounded_execution_debug_repair_raw_output_excerpt": raw_output_excerpt,
+    }
+
+
 def _run_coroutine(coro: Any) -> Any:
     # asyncio.run() deadlocks inside a Celery ForkPoolWorker because os.fork()
     # inherits Python's asyncio internal mutexes in a locked state from the
@@ -1710,6 +1723,10 @@ def execute_step_loop(
                 metadata={
                     "phase": "debugging",
                     "step_index": step_index + 1,
+                    "debug_repair_scope": "bounded_execution_debug_repair",
+                    "terminal_message_architecture": (
+                        "Bounded execution debug repair budget exhausted for this TaskExecution"
+                    ),
                     "debug_repair_terminal_reason": "debug_repair_budget_exhausted",
                     "debug_failure_class": debug_feedback_envelope.failure_class,
                     "task_execution_id": task_execution_id,
@@ -1725,6 +1742,10 @@ def execute_step_loop(
                     details={
                         "phase": "execution",
                         "reason": "debug_repair_budget_exhausted",
+                        "debug_repair_scope": "bounded_execution_debug_repair",
+                        "terminal_message_architecture": (
+                            "Bounded execution debug repair budget exhausted for this TaskExecution"
+                        ),
                         "debug_repair_terminal_reason": (
                             "debug_repair_budget_exhausted"
                         ),
@@ -2097,6 +2118,9 @@ def execute_step_loop(
                         orchestration_state.debug_repair_task_execution_ids = sorted(
                             {*debug_repair_used_ids, int(task_execution_id)}
                         )
+                    phase7f_raw_output_excerpt = _phase7f_repair_output_excerpt(
+                        final_repair_output
+                    )
                     append_orchestration_event(
                         project_dir=orchestration_state.project_dir,
                         session_id=session_id,
@@ -2106,6 +2130,9 @@ def execute_step_loop(
                         details={
                             "phase": "execution",
                             "reason": "phase7f_debug_repair_output_invalid",
+                            "reason_architecture": (
+                                "bounded_execution_debug_repair_output_invalid"
+                            ),
                             "debug_repair_terminal_reason": (
                                 "invalid_debug_repair_output"
                             ),
@@ -2122,8 +2149,11 @@ def execute_step_loop(
                             "compliance_retry_succeeded": (compliance_retry_succeeded),
                             "phase7f_rejection_reason": phase7f_rejection_reason,
                             "phase7f_parsed_shape": phase7f_parsed_shape,
-                            "phase7f_raw_output_excerpt": (
-                                _phase7f_repair_output_excerpt(final_repair_output)
+                            "phase7f_raw_output_excerpt": phase7f_raw_output_excerpt,
+                            **_bounded_debug_repair_rejection_alias_details(
+                                rejection_reason=phase7f_rejection_reason,
+                                parsed_shape=phase7f_parsed_shape,
+                                raw_output_excerpt=phase7f_raw_output_excerpt,
                             ),
                         },
                     )
@@ -2244,6 +2274,9 @@ def execute_step_loop(
                             "phase": "debugging",
                             "step_index": step_index + 1,
                             "reason": "phase7f_ops_fix_stale_replace",
+                            "reason_architecture": (
+                                "bounded_execution_debug_repair_ops_fix_stale_replace"
+                            ),
                             "stale_replace_targets": [
                                 issue.get("path") for issue in stale_replace_issues[:10]
                             ],
@@ -2254,6 +2287,7 @@ def execute_step_loop(
                         correction_kwargs["diagnostic_metadata"] = {
                             **correction_kwargs["diagnostic_metadata"],
                             "phase7f_ops_fix_correction": True,
+                            "bounded_execution_debug_repair_ops_fix_correction": True,
                             "stale_replace_targets": [
                                 issue.get("path") for issue in stale_replace_issues[:10]
                             ],
@@ -2316,6 +2350,14 @@ def execute_step_loop(
                         correction_rejection_reason = "stale_replace_after_correction"
 
                     if correction_rejection_reason:
+                        correction_raw_output_excerpt = _phase7f_repair_output_excerpt(
+                            correction_output
+                        )
+                        correction_parsed_shape = (
+                            correction_normalized.parsed_shape
+                            if correction_normalized is not None
+                            else None
+                        )
                         if task_execution_id is not None:
                             orchestration_state.debug_repair_task_execution_ids = (
                                 sorted({*debug_repair_used_ids, int(task_execution_id)})
@@ -2332,8 +2374,14 @@ def execute_step_loop(
                                 details={
                                     "phase": "execution",
                                     "reason": "phase7f_ops_fix_stale_replace",
+                                    "reason_architecture": (
+                                        "bounded_execution_debug_repair_ops_fix_stale_replace"
+                                    ),
                                     "debug_repair_terminal_reason": (
                                         "phase7f_ops_fix_stale_replace"
+                                    ),
+                                    "debug_repair_terminal_reason_architecture": (
+                                        "bounded_execution_debug_repair_ops_fix_stale_replace"
                                     ),
                                     "debug_repair_attempted": True,
                                     "debug_repair_used": True,
@@ -2347,15 +2395,14 @@ def execute_step_loop(
                                     "phase7f_rejection_reason": (
                                         correction_rejection_reason
                                     ),
-                                    "phase7f_parsed_shape": (
-                                        correction_normalized.parsed_shape
-                                        if correction_normalized is not None
-                                        else None
-                                    ),
+                                    "phase7f_parsed_shape": correction_parsed_shape,
                                     "phase7f_raw_output_excerpt": (
-                                        _phase7f_repair_output_excerpt(
-                                            correction_output
-                                        )
+                                        correction_raw_output_excerpt
+                                    ),
+                                    **_bounded_debug_repair_rejection_alias_details(
+                                        rejection_reason=correction_rejection_reason,
+                                        parsed_shape=correction_parsed_shape,
+                                        raw_output_excerpt=correction_raw_output_excerpt,
                                     ),
                                     "stale_replace_targets": [
                                         issue.get("path")

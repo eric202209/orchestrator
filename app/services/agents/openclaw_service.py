@@ -411,10 +411,31 @@ class OpenClawSessionService:
         return max(1, (len(text) + 3) // 4)
 
     @staticmethod
+    def _is_bounded_debug_repair_diagnostic_label(
+        diagnostic_label: Optional[str],
+    ) -> bool:
+        return diagnostic_label in {
+            "PHASE7F_DEBUG_REPAIR",
+            "BOUNDED_EXECUTION_DEBUG_REPAIR",
+        }
+
+    @staticmethod
+    def _diagnostic_label_architecture(
+        diagnostic_label: Optional[str],
+    ) -> Optional[str]:
+        if OpenClawSessionService._is_bounded_debug_repair_diagnostic_label(
+            diagnostic_label
+        ):
+            return "BOUNDED_EXECUTION_DEBUG_REPAIR"
+        return None
+
+    @staticmethod
     def _diagnostic_invocation_kind(diagnostic_label: Optional[str]) -> str:
         """Classify labeled OpenClaw calls without changing the CLI invocation."""
 
-        if diagnostic_label == "PHASE7F_DEBUG_REPAIR":
+        if OpenClawSessionService._is_bounded_debug_repair_diagnostic_label(
+            diagnostic_label
+        ):
             return "debug_repair"
         return "planning"
 
@@ -422,7 +443,9 @@ class OpenClawSessionService:
     def _diagnostic_timeout_boundary(diagnostic_label: Optional[str]) -> str:
         """Name the owner of an OpenClaw wait timeout for runtime diagnostics."""
 
-        if diagnostic_label == "PHASE7F_DEBUG_REPAIR":
+        if OpenClawSessionService._is_bounded_debug_repair_diagnostic_label(
+            diagnostic_label
+        ):
             return "debug_repair_wait_for"
         return "planning_wait_for"
 
@@ -455,7 +478,7 @@ class OpenClawSessionService:
         reports. New configuration and metadata use the architecture name.
         """
 
-        if diagnostic_label != "PHASE7F_DEBUG_REPAIR":
+        if not self._is_bounded_debug_repair_diagnostic_label(diagnostic_label):
             return False
         enabled = (
             settings.DEBUG_REPAIR_DIRECT_ENABLED
@@ -633,6 +656,7 @@ class OpenClawSessionService:
             metadata=json.dumps(
                 {
                     "diagnostic_label": "PHASE7F_DEBUG_REPAIR",
+                    "diagnostic_label_architecture": ("BOUNDED_EXECUTION_DEBUG_REPAIR"),
                     "architecture_lane": "debug_repair",
                     "invocation_kind": "debug_repair",
                     "timeout_boundary": timeout_boundary,
@@ -660,6 +684,7 @@ class OpenClawSessionService:
             )
             error.runtime_diagnostics = {
                 "diagnostic_label": "PHASE7F_DEBUG_REPAIR",
+                "diagnostic_label_architecture": "BOUNDED_EXECUTION_DEBUG_REPAIR",
                 "architecture_lane": "debug_repair",
                 "invocation_kind": "debug_repair",
                 "timeout_boundary": timeout_boundary,
@@ -691,6 +716,7 @@ class OpenClawSessionService:
 
         diagnostics = {
             "diagnostic_label": "PHASE7F_DEBUG_REPAIR",
+            "diagnostic_label_architecture": "BOUNDED_EXECUTION_DEBUG_REPAIR",
             "architecture_lane": "debug_repair",
             "invocation_kind": "debug_repair",
             "timeout_boundary": timeout_boundary,
@@ -1749,6 +1775,9 @@ class OpenClawSessionService:
                 timeout_error.runtime_diagnostics = {
                     **(diagnostic_metadata or {}),
                     "diagnostic_label": diagnostic_label,
+                    "diagnostic_label_architecture": (
+                        self._diagnostic_label_architecture(diagnostic_label)
+                    ),
                     "timeout_seconds": timeout_seconds,
                     "timeout_with_cleanup_seconds": timeout_seconds + 30,
                     "duration_seconds": round(time.monotonic() - started_at, 3),
@@ -1801,6 +1830,9 @@ class OpenClawSessionService:
                     diagnostics: Dict[str, Any] = {
                         **(diagnostic_metadata or {}),
                         "diagnostic_label": diagnostic_label,
+                        "diagnostic_label_architecture": (
+                            self._diagnostic_label_architecture(diagnostic_label)
+                        ),
                         "timeout_seconds": timeout_seconds,
                         "timeout_with_cleanup_seconds": timeout_seconds + 30,
                         "planning_prompt_size": len(prompt or ""),

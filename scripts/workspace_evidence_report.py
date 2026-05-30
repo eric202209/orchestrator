@@ -281,6 +281,9 @@ def summarize(conn: sqlite3.Connection, limit: int) -> dict[str, Any]:
                 "debug_prompt_mode": _latest_value(
                     repair_attempt_rows, "debug_prompt_mode"
                 ),
+                "debug_prompt_mode_architecture": _latest_value(
+                    repair_attempt_rows, "debug_prompt_mode_architecture"
+                ),
                 "completion_repair_prompt_mode": _latest_value(
                     repair_attempt_rows, "completion_repair_prompt_mode"
                 ),

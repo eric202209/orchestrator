@@ -3710,7 +3710,19 @@ def test_phase7f_openclaw_diagnostics_classify_boundary_and_redact_stream_tail()
         == "debug_repair"
     )
     assert (
+        OpenClawSessionService._diagnostic_invocation_kind(
+            "BOUNDED_EXECUTION_DEBUG_REPAIR"
+        )
+        == "debug_repair"
+    )
+    assert (
         OpenClawSessionService._diagnostic_timeout_boundary("PHASE7F_DEBUG_REPAIR")
+        == "debug_repair_wait_for"
+    )
+    assert (
+        OpenClawSessionService._diagnostic_timeout_boundary(
+            "BOUNDED_EXECUTION_DEBUG_REPAIR"
+        )
         == "debug_repair_wait_for"
     )
     assert OpenClawSessionService._diagnostic_invocation_kind("PLANNING") == "planning"

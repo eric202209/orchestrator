@@ -180,6 +180,57 @@ def test_phase7f_debug_repair_uses_direct_no_thinking_chat(db_session, monkeypat
     )
 
 
+def test_bounded_debug_repair_architecture_label_uses_direct_chat(
+    db_session, monkeypatch
+):
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "local_openclaw")
+    monkeypatch.setattr(settings, "AGENT_MODEL", "local")
+    session, task = _seed_service_models(db_session)
+    service = OpenClawSessionService(
+        db_session, session.id, task.id, use_demo_mode=False
+    )
+
+    seen: dict[str, object] = {}
+
+    async def fake_direct_repair(prompt, *, timeout_seconds, diagnostic_metadata=None):
+        seen["prompt"] = prompt
+        seen["timeout_seconds"] = timeout_seconds
+        seen["diagnostic_metadata"] = diagnostic_metadata
+        return {
+            "status": "completed",
+            "output": '{"ops":[]}',
+            "logs": [],
+            "backend": "debug_repair_direct_chat_completions",
+            "model_family": "qwen-local",
+        }
+
+    async def fake_execute_task_with_streaming(*args, **kwargs):
+        raise AssertionError("bounded debug repair should not use CLI streaming")
+
+    monkeypatch.setattr(service, "_execute_phase7f_direct_repair", fake_direct_repair)
+    monkeypatch.setattr(
+        service, "execute_task_with_streaming", fake_execute_task_with_streaming
+    )
+    monkeypatch.setattr(service, "_log_entry", lambda *args, **kwargs: None)
+
+    result = asyncio.run(
+        service.execute_task(
+            "Return bounded JSON repair",
+            timeout_seconds=180,
+            diagnostic_label="BOUNDED_EXECUTION_DEBUG_REPAIR",
+            diagnostic_metadata={"debug_failure_class": "source_step_validation"},
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert result["backend"] == "debug_repair_direct_chat_completions"
+    assert seen["prompt"] == "Return bounded JSON repair"
+    assert seen["timeout_seconds"] == 180
+    assert seen["diagnostic_metadata"]["debug_failure_class"] == (
+        "source_step_validation"
+    )
+
+
 def test_phase7f_direct_repair_payload_disables_thinking(monkeypatch):
     monkeypatch.setattr(settings, "DEBUG_REPAIR_DISABLE_THINKING", True)
 
