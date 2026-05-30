@@ -170,10 +170,12 @@ def _is_phase7f_bounded_debug_timeout(
     debug_prompt_mode_architecture = runtime_diagnostics.get(
         "debug_prompt_mode_architecture"
     )
-    is_bounded_debug_repair = (
-        debug_prompt_mode == "phase7f_bounded_debug_repair"
-        or debug_prompt_mode_architecture == "bounded_execution_debug_repair"
-    )
+    if debug_prompt_mode_architecture is not None:
+        is_bounded_debug_repair = (
+            debug_prompt_mode_architecture == "bounded_execution_debug_repair"
+        )
+    else:
+        is_bounded_debug_repair = debug_prompt_mode == "phase7f_bounded_debug_repair"
     if not is_bounded_debug_repair:
         return False
     if runtime_diagnostics.get("failure_phase") != "debug_repair":

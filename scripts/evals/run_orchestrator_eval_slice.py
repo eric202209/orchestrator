@@ -471,9 +471,16 @@ def _path_bool(report: dict[str, Any], name: str) -> bool:
     return bool(path_observability.get(name))
 
 
-def _path_any_bool(report: dict[str, Any], *names: str) -> bool:
+def _path_preferred_bool(
+    report: dict[str, Any],
+    *,
+    architecture_name: str,
+    compatibility_name: str,
+) -> bool:
     path_observability = report.get("path_observability") or {}
-    return any(bool(path_observability.get(name)) for name in names)
+    if architecture_name in path_observability:
+        return bool(path_observability.get(architecture_name))
+    return bool(path_observability.get(compatibility_name))
 
 
 def _primary_failure_phase(report: dict[str, Any]) -> str:
@@ -590,19 +597,19 @@ def _aggregate_case_reports(
     phase7f_used_count = sum(
         1
         for report in reports
-        if _path_any_bool(
+        if _path_preferred_bool(
             report,
-            "phase7f_used",
-            "bounded_execution_debug_repair_used",
+            architecture_name="bounded_execution_debug_repair_used",
+            compatibility_name="phase7f_used",
         )
     )
     phase7g_used_count = sum(
         1
         for report in reports
-        if _path_any_bool(
+        if _path_preferred_bool(
             report,
-            "phase7g_used",
-            "diff_scoped_debug_repair_used",
+            architecture_name="diff_scoped_debug_repair_used",
+            compatibility_name="phase7g_used",
         )
     )
     top_phase_count = phase_distribution.most_common(1)[0][1] if repeat_count else 0

@@ -205,3 +205,72 @@ def test_path_observability_reads_architecture_named_debug_prompt_modes():
     assert result["bounded_execution_debug_repair_used"] is True
     assert result["phase7g_used"] is True
     assert result["diff_scoped_debug_repair_used"] is True
+
+
+def test_path_observability_prefers_architecture_prompt_modes_over_compatibility_modes():
+    case = {
+        "case_id": "debug_import_error_repair",
+        "category": "debug_repair",
+        "required_events": ["debug_feedback_captured", "debug_repair_attempted"],
+    }
+    events = [
+        {"event_type": "debug_feedback_captured", "details": {}},
+        {
+            "event_type": "debug_repair_attempted",
+            "details": {
+                "debug_prompt_mode": "phase7f_bounded_debug_repair",
+                "debug_prompt_mode_architecture": "diff_scoped_debug_repair",
+            },
+        },
+    ]
+    summary = _summary(events)
+
+    result = scorer._path_observability(
+        case=case,
+        events=events,
+        snapshots=[],
+        event_summary=summary,
+        verifier={"available": True, "passed": False},
+        clean_success=False,
+        required_events=_required(case, summary),
+    )
+
+    assert result["phase7f_used"] is False
+    assert result["bounded_execution_debug_repair_used"] is False
+    assert result["phase7g_used"] is True
+    assert result["diff_scoped_debug_repair_used"] is True
+
+
+def test_path_observability_falls_back_to_compatibility_prompt_modes():
+    case = {
+        "case_id": "debug_import_error_repair",
+        "category": "debug_repair",
+        "required_events": ["debug_feedback_captured", "debug_repair_attempted"],
+    }
+    events = [
+        {"event_type": "debug_feedback_captured", "details": {}},
+        {
+            "event_type": "debug_repair_attempted",
+            "details": {"debug_prompt_mode": "phase7f_bounded_debug_repair"},
+        },
+        {
+            "event_type": "debug_repair_attempted",
+            "details": {"debug_prompt_mode": "phase7g_diff_repair"},
+        },
+    ]
+    summary = _summary(events)
+
+    result = scorer._path_observability(
+        case=case,
+        events=events,
+        snapshots=[],
+        event_summary=summary,
+        verifier={"available": True, "passed": False},
+        clean_success=False,
+        required_events=_required(case, summary),
+    )
+
+    assert result["phase7f_used"] is True
+    assert result["bounded_execution_debug_repair_used"] is True
+    assert result["phase7g_used"] is True
+    assert result["diff_scoped_debug_repair_used"] is True

@@ -1163,6 +1163,31 @@ def test_bounded_debug_timeout_accepts_architecture_named_prompt_mode():
     assert failure_flow._is_phase7f_bounded_debug_timeout(timeout, diagnostics) is True
 
 
+def test_bounded_debug_timeout_prefers_architecture_prompt_mode():
+    timeout = TimeoutError("Task timed out after 180s")
+    diagnostics = {
+        "failure_phase": "debug_repair",
+        "debug_prompt_mode": "phase7f_bounded_debug_repair",
+        "debug_prompt_mode_architecture": "diff_scoped_debug_repair",
+        "debug_failure_class": "source_step_validation",
+        "timed_out": True,
+    }
+
+    assert failure_flow._is_phase7f_bounded_debug_timeout(timeout, diagnostics) is False
+
+
+def test_bounded_debug_timeout_falls_back_to_compatibility_prompt_mode():
+    timeout = TimeoutError("Task timed out after 180s")
+    diagnostics = {
+        "failure_phase": "debug_repair",
+        "debug_prompt_mode": "phase7f_bounded_debug_repair",
+        "debug_failure_class": "source_step_validation",
+        "timed_out": True,
+    }
+
+    assert failure_flow._is_phase7f_bounded_debug_timeout(timeout, diagnostics) is True
+
+
 def test_ordinary_backend_timeout_still_retries_and_restores_workspace(
     db_session, tmp_path
 ):

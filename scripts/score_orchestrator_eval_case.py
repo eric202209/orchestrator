@@ -382,17 +382,37 @@ def _planning_validation_blocked(events: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _phase7f_used(events: list[dict[str, Any]]) -> bool:
+    for event in events:
+        details = _event_details(event)
+        mode_architecture = str(
+            details.get("debug_prompt_mode_architecture") or ""
+        ).lower()
+        mode = str(details.get("debug_prompt_mode") or "").lower()
+        if mode_architecture:
+            if "bounded_execution_debug_repair" in mode_architecture:
+                return True
+            continue
+        if "phase7f" in mode or "bounded_debug_repair" in mode:
+            return True
+        text = _details_text(details)
+        if "phase7f" in text or "bounded_execution_debug_repair" in text:
+            return True
+    return False
+
+
 def _phase7g_used(events: list[dict[str, Any]]) -> bool:
     for event in events:
         details = _event_details(event)
-        text = _details_text(details)
         mode = str(details.get("debug_prompt_mode") or "").lower()
         mode_architecture = str(
             details.get("debug_prompt_mode_architecture") or ""
         ).lower()
+        if mode_architecture:
+            if "diff_scoped_debug_repair" in mode_architecture:
+                return True
+            continue
         if "phase7g" in mode:
-            return True
-        if "diff_scoped_debug_repair" in mode_architecture:
             return True
         if isinstance(details.get("diff_capsule_line_count"), int) and (
             details["diff_capsule_line_count"] > 0
@@ -400,6 +420,7 @@ def _phase7g_used(events: list[dict[str, Any]]) -> bool:
             return True
         if details.get("diff_capsule_primary_file"):
             return True
+        text = _details_text(details)
         if "phase7g" in text:
             return True
         if "diff_scoped_debug_repair" in text:
@@ -485,7 +506,6 @@ def _path_observability(
     counts = event_summary["event_type_counts"]
     repair_events = event_summary["repair_events"]
     checkpoint_events = event_summary["checkpoint_events"]
-    details_text = "\n".join(_details_text(_event_details(event)) for event in events)
     final_statuses = {
         str(snapshot.get("status") or "").lower() for snapshot in snapshots
     }
@@ -504,11 +524,7 @@ def _path_observability(
         or any(status in {"executing", "execution"} for status in final_statuses)
     )
     debug_repair_reached = any(value > 0 for value in repair_events.values())
-    phase7f_used = (
-        "phase7f" in details_text
-        or "bounded_debug_repair" in details_text
-        or "bounded_execution_debug_repair" in details_text
-    )
+    phase7f_used = _phase7f_used(events)
     phase7g_used = _phase7g_used(events)
     checkpoint_loaded = checkpoint_events["checkpoint_loaded"] > 0
     intended_path_observed = _case_intended_path_observed(

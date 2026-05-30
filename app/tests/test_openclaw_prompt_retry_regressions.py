@@ -231,6 +231,20 @@ def test_bounded_debug_repair_architecture_label_uses_direct_chat(
     )
 
 
+def test_bounded_debug_repair_diagnostic_label_architecture_alias():
+    assert (
+        OpenClawSessionService._diagnostic_label_architecture("PHASE7F_DEBUG_REPAIR")
+        == "BOUNDED_EXECUTION_DEBUG_REPAIR"
+    )
+    assert (
+        OpenClawSessionService._diagnostic_label_architecture(
+            "BOUNDED_EXECUTION_DEBUG_REPAIR"
+        )
+        == "BOUNDED_EXECUTION_DEBUG_REPAIR"
+    )
+    assert OpenClawSessionService._diagnostic_label_architecture("PLANNING") is None
+
+
 def test_phase7f_direct_repair_payload_disables_thinking(monkeypatch):
     monkeypatch.setattr(settings, "DEBUG_REPAIR_DISABLE_THINKING", True)
 
@@ -308,6 +322,20 @@ def test_debug_repair_direct_config_prefers_architecture_names(monkeypatch):
     assert config["base_url"] == "https://debug.example/v1"
     assert config["model"] == "debug-model"
     assert config["api_key"] == "debug-key"
+
+
+def test_debug_repair_disable_thinking_prefers_architecture_setting(monkeypatch):
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_DISABLE_THINKING", False)
+    monkeypatch.setattr(settings, "PHASE7F_REPAIR_DISABLE_THINKING", True)
+
+    assert OpenClawSessionService._debug_repair_disable_thinking() is False
+
+
+def test_debug_repair_disable_thinking_falls_back_to_phase7f_setting(monkeypatch):
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_DISABLE_THINKING", None)
+    monkeypatch.setattr(settings, "PHASE7F_REPAIR_DISABLE_THINKING", True)
+
+    assert OpenClawSessionService._debug_repair_disable_thinking() is True
 
 
 def test_debug_repair_openai_responses_path_posts_to_responses(db_session, monkeypatch):
