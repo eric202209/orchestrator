@@ -33,6 +33,7 @@ from app.services.orchestration.operations.file_ops_contract import (
     REPLACE_IN_FILE_NEW_ALIASES,
     REPLACE_IN_FILE_OLD_ALIASES,
     operation_has_file_op_path,
+    validate_file_op_shape,
 )
 from app.services.orchestration.planning.prompt_contracts import (
     render_operation_choice_contract as _render_operation_choice_contract,
@@ -910,6 +911,67 @@ class PlannerService:
         )
 
     @staticmethod
+    def _normalize_nested_file_operation(
+        operation: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        nested_file_op_names = {"write_file", "append_file", "replace_in_file"}
+        if "op" in operation:
+            return None
+
+        nested_keys = [key for key in operation if key in nested_file_op_names]
+        if not nested_keys:
+            return None
+
+        if len(operation) != 1 or len(nested_keys) != 1:
+            return dict(operation)
+
+        op_name = nested_keys[0]
+        payload = operation.get(op_name)
+        if not isinstance(payload, dict):
+            return dict(operation)
+
+        if op_name in {"write_file", "append_file"}:
+            normalized = {
+                "op": op_name,
+                "path": payload.get("path"),
+                "content": payload.get("content"),
+            }
+        else:
+            normalized = {
+                "op": op_name,
+                "path": payload.get("path"),
+                "old": payload.get("old"),
+                "new": payload.get("new"),
+            }
+
+        if validate_file_op_shape(normalized):
+            return normalized
+        return dict(operation)
+
+    @staticmethod
+    def _normalize_file_op_key_alias(
+        operation: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        if "o" not in operation:
+            return None
+
+        supported_aliases = {"write_file", "append_file", "replace_in_file"}
+        alias_name = str(operation.get("o") or "").strip()
+        explicit_name = str(operation.get("op") or "").strip()
+
+        if explicit_name and explicit_name != alias_name:
+            return dict(operation)
+        if alias_name not in supported_aliases:
+            return dict(operation)
+
+        normalized = dict(operation)
+        normalized.pop("o", None)
+        normalized["op"] = alias_name
+        if validate_file_op_shape(normalized):
+            return normalized
+        return dict(operation)
+
+    @staticmethod
     def _normalize_file_operation(
         *,
         raw_op_name: str,
@@ -1305,22 +1367,43 @@ class PlannerService:
                     for operation in raw_step["ops"]:
                         if not isinstance(operation, dict):
                             continue
-                        normalized_op = cls._normalize_file_operation(
-                            raw_op_name=str(
-                                operation.get("op") or operation.get("type") or ""
-                            ).strip(),
-                            path=str(
-                                operation.get("path") or operation.get("file") or ""
-                            ).strip(),
-                            source=operation,
+                        normalized_op = cls._normalize_file_op_key_alias(operation)
+                        alias_op_was_invalid = (
+                            normalized_op is not None
+                            and not validate_file_op_shape(normalized_op)
                         )
-                        if normalized_op:
+                        nested_op_was_invalid = False
+                        if normalized_op is None:
+                            normalized_op = cls._normalize_file_operation(
+                                raw_op_name=str(
+                                    operation.get("op") or operation.get("type") or ""
+                                ).strip(),
+                                path=str(
+                                    operation.get("path") or operation.get("file") or ""
+                                ).strip(),
+                                source=operation,
+                            )
+                        if normalized_op is None:
+                            normalized_op = cls._normalize_nested_file_operation(
+                                operation
+                            )
+                            nested_op_was_invalid = (
+                                normalized_op is not None
+                                and not validate_file_op_shape(normalized_op)
+                            )
+                        if (
+                            normalized_op
+                            and not nested_op_was_invalid
+                            and not alias_op_was_invalid
+                        ):
                             normalized_op = cls._normalize_unittest_write_content(
                                 normalized_op
                             )
                             normalized_op = cls._normalize_exact_line_from_task_prompt(
                                 normalized_op, task_prompt
                             )
+                            raw_ops.append(normalized_op)
+                        elif nested_op_was_invalid or alias_op_was_invalid:
                             raw_ops.append(normalized_op)
                         elif top_level_verification := cls._extract_top_level_file_verification(
                             operation

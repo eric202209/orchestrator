@@ -5989,6 +5989,157 @@ def test_targeted_second_repair_reason_handles_missing_runnable_commands():
     assert "runnable command" in reason.rejection_text
 
 
+def test_targeted_second_repair_reason_handles_python_source_syntax_invalid():
+    retry_state = _PlanningRetryState()
+    retry_state.repair_prompt_used = True
+    verdict = type(
+        "Verdict",
+        (),
+        {
+            "reasons": [
+                "Plan writes Python source with invalid syntax "
+                "(python_source_syntax_invalid; src/app.py line 1, offset 5: invalid syntax)"
+            ],
+            "details": {
+                "python_source_syntax_invalid": [
+                    {
+                        "path": "src/app.py",
+                        "line": 1,
+                        "offset": 5,
+                        "message": "invalid syntax",
+                        "candidate_content_excerpt": "def broken(: pass",
+                    }
+                ],
+                "semantic_violation_codes": ["python_source_syntax_invalid"],
+            },
+        },
+    )()
+
+    reason = _get_targeted_second_repair_reason(
+        retry_state=retry_state,
+        plan_verdict=verdict,
+    )
+
+    assert reason is not None
+    assert reason.issue_key == "python_source_syntax_invalid"
+    assert reason.event_reason == "post_repair_python_source_syntax_second_pass"
+    assert reason.semantic_violation_code == "python_source_syntax_invalid"
+    assert reason.cap_attribute == "post_repair_python_source_syntax_second_repair_used"
+    assert "src/app.py line 1, offset 5" in reason.rejection_text
+    assert "invalid syntax" in reason.rejection_text
+    assert "def broken(: pass" in reason.rejection_text
+    assert "valid JSON array only" in reason.rejection_text
+    assert "ops.write_file" in reason.rejection_text
+    assert "compile(content, path, 'exec')" in reason.rejection_text
+
+
+def test_targeted_second_repair_reason_handles_argparse_framework_mismatch(tmp_path):
+    source_dir = tmp_path / "src" / "medium_cli"
+    source_dir.mkdir(parents=True)
+    (source_dir / "cli.py").write_text(
+        "\n".join(
+            [
+                "import argparse",
+                "from medium_cli.formatting import format_task_line",
+                "from medium_cli.store import TaskStore",
+                "",
+                "def build_parser() -> argparse.ArgumentParser:",
+                "    parser = argparse.ArgumentParser()",
+                "    subparsers = parser.add_subparsers(dest='command', required=True)",
+                "    subparsers.add_parser('list')",
+                "    return parser",
+                "",
+                "def build_store() -> TaskStore:",
+                "    return TaskStore()",
+                "",
+                "def main(argv=None) -> int:",
+                "    parser = build_parser()",
+                "    args = parser.parse_args(argv)",
+                "    if args.command == 'list':",
+                "        return 0",
+                "    return 2",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    retry_state = _PlanningRetryState()
+    retry_state.repair_prompt_used = True
+    verdict = type(
+        "Verdict",
+        (),
+        {
+            "reasons": [
+                "Plan writes Python decorators whose root name is undefined "
+                "(files: ['src/medium_cli/cli.py'])"
+            ],
+            "details": {
+                "undefined_python_decorator_materializations": [
+                    "src/medium_cli/cli.py"
+                ],
+            },
+        },
+    )()
+
+    reason = _get_targeted_second_repair_reason(
+        retry_state=retry_state,
+        plan_verdict=verdict,
+        project_dir=tmp_path,
+    )
+
+    assert reason is not None
+    assert reason.issue_key == "framework_mismatch"
+    assert reason.event_reason == "post_repair_framework_mismatch_second_pass"
+    assert reason.semantic_violation_code == "framework_mismatch"
+    assert reason.cap_attribute == "post_repair_framework_second_repair_used"
+    assert "detected framework: argparse" in reason.rejection_text
+    assert "src/medium_cli/cli.py" in reason.rejection_text
+    assert "def build_parser()" in reason.rejection_text
+    assert "def main(argv=None)" in reason.rejection_text
+    assert "build_store" in reason.rejection_text
+    assert "TaskStore" in reason.rejection_text
+    assert "format_task_line" in reason.rejection_text
+    assert "@click.command" in reason.rejection_text
+    assert "@cli.command" in reason.rejection_text
+    assert "click.echo" in reason.rejection_text
+    assert "add a summary subparser" in reason.rejection_text
+    assert "valid JSON array only" in reason.rejection_text
+    assert "ops.write_file" in reason.rejection_text
+    assert "compile(content, path, 'exec')" in reason.rejection_text
+
+
+def test_targeted_second_repair_reason_skips_non_argparse_decorator_mismatch(tmp_path):
+    source_dir = tmp_path / "src" / "api"
+    source_dir.mkdir(parents=True)
+    (source_dir / "routes.py").write_text(
+        "from fastapi import APIRouter\n\nrouter = APIRouter()\n",
+        encoding="utf-8",
+    )
+    retry_state = _PlanningRetryState()
+    retry_state.repair_prompt_used = True
+    verdict = type(
+        "Verdict",
+        (),
+        {
+            "reasons": [
+                "Plan writes Python decorators whose root name is undefined "
+                "(files: ['src/api/routes.py'])"
+            ],
+            "details": {
+                "undefined_python_decorator_materializations": ["src/api/routes.py"],
+            },
+        },
+    )()
+
+    reason = _get_targeted_second_repair_reason(
+        retry_state=retry_state,
+        plan_verdict=verdict,
+        project_dir=tmp_path,
+    )
+
+    assert reason is None
+
+
 def test_targeted_second_repair_reason_adds_brittle_eligibility_when_only_issue():
     retry_state = _PlanningRetryState()
     retry_state.repair_prompt_used = True
@@ -6349,6 +6500,629 @@ def test_post_repair_weak_verification_second_repair_is_capped(tmp_path, monkeyp
     assert result == {
         "status": "failed",
         "reason": "planning_invalid_commands_after_repair",
+    }
+    assert task.status == TaskStatus.FAILED
+    assert session_task_link.status == TaskStatus.FAILED
+    assert session.status == "paused"
+    assert session.is_active is False
+
+
+def test_post_repair_python_source_syntax_gets_one_targeted_second_repair(
+    tmp_path, monkeypatch
+):
+    initial_plan = [
+        {
+            "step_number": 1,
+            "description": "Write broken source",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/app.py",
+                    "content": "def broken(:\n    pass\n",
+                }
+            ],
+            "verification": "python3 -m py_compile src/app.py",
+            "rollback": None,
+            "expected_files": ["src/app.py"],
+        }
+    ]
+    first_repair_plan = [
+        {
+            "step_number": 1,
+            "description": "Write still broken source",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/app.py",
+                    "content": '"""unterminated\n\ndef main():\n    return 0\n',
+                }
+            ],
+            "verification": "python3 -m py_compile src/app.py",
+            "rollback": None,
+            "expected_files": ["src/app.py"],
+        }
+    ]
+    second_repair_plan = [
+        {
+            "step_number": 1,
+            "description": "Write valid source",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/app.py",
+                    "content": "def main():\n    return 0\n",
+                }
+            ],
+            "verification": "python3 -m py_compile src/app.py",
+            "rollback": None,
+            "expected_files": ["src/app.py"],
+        }
+    ]
+
+    orchestration_state = MagicMock()
+    orchestration_state.project_dir = tmp_path
+    orchestration_state.project_context = ""
+    orchestration_state.plan = []
+    orchestration_state.current_step_index = 0
+    orchestration_state.reasoning_artifact = None
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {}
+
+        async def execute_task(self, *args, **kwargs):
+            return {"status": "completed", "output": json.dumps(initial_plan)}
+
+    task = MagicMock()
+    task.title = "Repair Python syntax"
+    task.description = "Repair Python syntax"
+    session = MagicMock()
+    session.status = "running"
+    session.is_active = True
+    session_task_link = MagicMock()
+    ctx = OrchestrationRunContext(
+        db=MagicMock(),
+        session=session,
+        project=MagicMock(),
+        task=task,
+        session_task_link=session_task_link,
+        session_id=66,
+        task_id=17,
+        prompt="Repair Python syntax",
+        timeout_seconds=300,
+        execution_profile="implementation",
+        validation_profile="standard",
+        runs_in_canonical_baseline=False,
+        orchestration_state=orchestration_state,
+        runtime_service=Runtime(),
+        task_service=MagicMock(),
+        logger=logging.getLogger("test.post_repair_python_source_syntax_second_pass"),
+        emit_live=lambda *args, **kwargs: None,
+        error_handler=MagicMock(),
+    )
+    ctx.error_handler.attempt_json_parsing = lambda output, **kwargs: (
+        True,
+        json.loads(output),
+        "json",
+    )
+
+    _patch_planning_flow_external_writes(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow._build_reasoning_artifact",
+        lambda *args, **kwargs: {
+            "intent": "Repair Python syntax",
+            "workspace_facts": [],
+            "planned_actions": [],
+            "verification_plan": ["Run py_compile"],
+        },
+    )
+    monkeypatch.setattr(
+        ValidatorService,
+        "validate_reasoning_artifact",
+        staticmethod(
+            lambda *args, **kwargs: type(
+                "Verdict",
+                (),
+                {"accepted": True, "status": "accepted", "reasons": []},
+            )()
+        ),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "should_start_with_minimal_prompt",
+        staticmethod(lambda *args, **kwargs: False),
+    )
+
+    repair_calls = []
+
+    def repair_output(cls, *args, **kwargs):
+        repair_calls.append(kwargs)
+        if len(repair_calls) == 1:
+            return {"output": json.dumps(first_repair_plan)}
+        return {"output": json.dumps(second_repair_plan)}
+
+    monkeypatch.setattr(PlannerService, "repair_output", classmethod(repair_output))
+
+    result = execute_planning_phase(
+        ctx=ctx,
+        workspace_review={"has_existing_files": False},
+        extract_structured_text=extract_structured_text,
+        extract_plan_steps=lambda value: value if isinstance(value, list) else None,
+        looks_like_truncated_multistep_plan=lambda text, plan: False,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: args[3],
+        workspace_violation_error_cls=RuntimeError,
+    )
+
+    assert result == {"status": "completed"}
+    assert len(repair_calls) == 2
+    assert repair_calls[1]["reason"].startswith(
+        "post_repair_python_source_syntax_invalid"
+    )
+    assert "src/app.py" in repair_calls[1]["rejection_reasons"][0]
+    assert "compile(content, path, 'exec')" in repair_calls[1]["rejection_reasons"][0]
+    assert ctx.orchestration_state.plan == second_repair_plan
+
+
+def test_post_repair_python_source_syntax_second_repair_is_capped(
+    tmp_path, monkeypatch
+):
+    broken_plan = [
+        {
+            "step_number": 1,
+            "description": "Write broken source",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/app.py",
+                    "content": "def broken(:\n    pass\n",
+                }
+            ],
+            "verification": "python3 -m py_compile src/app.py",
+            "rollback": None,
+            "expected_files": ["src/app.py"],
+        }
+    ]
+
+    orchestration_state = MagicMock()
+    orchestration_state.project_dir = tmp_path
+    orchestration_state.project_context = ""
+    orchestration_state.plan = []
+    orchestration_state.current_step_index = 0
+    orchestration_state.reasoning_artifact = None
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {}
+
+        async def execute_task(self, *args, **kwargs):
+            return {"status": "completed", "output": json.dumps(broken_plan)}
+
+    task = MagicMock()
+    task.title = "Repair Python syntax cap"
+    task.description = "Repair Python syntax cap"
+    session = MagicMock()
+    session.status = "running"
+    session.is_active = True
+    session_task_link = MagicMock()
+    ctx = OrchestrationRunContext(
+        db=MagicMock(),
+        session=session,
+        project=MagicMock(),
+        task=task,
+        session_task_link=session_task_link,
+        session_id=67,
+        task_id=18,
+        prompt="Repair Python syntax cap",
+        timeout_seconds=300,
+        execution_profile="implementation",
+        validation_profile="standard",
+        runs_in_canonical_baseline=False,
+        orchestration_state=orchestration_state,
+        runtime_service=Runtime(),
+        task_service=MagicMock(),
+        logger=logging.getLogger("test.post_repair_python_source_syntax_cap"),
+        emit_live=lambda *args, **kwargs: None,
+        error_handler=MagicMock(),
+    )
+    ctx.error_handler.attempt_json_parsing = lambda output, **kwargs: (
+        True,
+        json.loads(output),
+        "json",
+    )
+
+    _patch_planning_flow_external_writes(monkeypatch)
+    monkeypatch.setattr(
+        PlannerService,
+        "should_start_with_minimal_prompt",
+        staticmethod(lambda *args, **kwargs: False),
+    )
+
+    repair_calls = []
+
+    def repair_output(cls, *args, **kwargs):
+        repair_calls.append(kwargs)
+        return {"output": json.dumps(broken_plan)}
+
+    monkeypatch.setattr(PlannerService, "repair_output", classmethod(repair_output))
+
+    result = execute_planning_phase(
+        ctx=ctx,
+        workspace_review={"has_existing_files": False},
+        extract_structured_text=extract_structured_text,
+        extract_plan_steps=lambda value: value if isinstance(value, list) else None,
+        looks_like_truncated_multistep_plan=lambda text, plan: False,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: args[3],
+        workspace_violation_error_cls=RuntimeError,
+    )
+
+    assert len(repair_calls) == 2
+    assert result == {
+        "status": "failed",
+        "reason": "planning_validation_failed_after_repair",
+    }
+    assert task.status == TaskStatus.FAILED
+    assert session_task_link.status == TaskStatus.FAILED
+    assert session.status == "paused"
+    assert session.is_active is False
+
+
+def test_post_repair_argparse_framework_mismatch_gets_one_targeted_second_repair(
+    tmp_path, monkeypatch
+):
+    source_dir = tmp_path / "src" / "medium_cli"
+    source_dir.mkdir(parents=True)
+    (source_dir / "__init__.py").write_text("", encoding="utf-8")
+    existing_cli = (
+        "import argparse\n"
+        "from medium_cli.formatting import format_task_line\n"
+        "from medium_cli.store import TaskStore\n\n"
+        "def build_parser() -> argparse.ArgumentParser:\n"
+        "    parser = argparse.ArgumentParser(description='Inspect tasks')\n"
+        "    subparsers = parser.add_subparsers(dest='command', required=True)\n"
+        "    subparsers.add_parser('list')\n"
+        "    return parser\n\n"
+        "def build_store() -> TaskStore:\n"
+        "    return TaskStore()\n\n"
+        "def main(argv=None) -> int:\n"
+        "    parser = build_parser()\n"
+        "    args = parser.parse_args(argv)\n"
+        "    if args.command == 'list':\n"
+        "        return 0\n"
+        "    return 2\n"
+    )
+    valid_cli = (
+        "import argparse\n"
+        "from medium_cli.formatting import format_summary, format_task_line\n"
+        "from medium_cli.store import TaskStore\n\n"
+        "def build_parser() -> argparse.ArgumentParser:\n"
+        "    parser = argparse.ArgumentParser(description='Inspect tasks')\n"
+        "    subparsers = parser.add_subparsers(dest='command', required=True)\n"
+        "    subparsers.add_parser('list')\n"
+        "    subparsers.add_parser('summary')\n"
+        "    return parser\n\n"
+        "def build_store() -> TaskStore:\n"
+        "    return TaskStore()\n\n"
+        "def main(argv=None) -> int:\n"
+        "    parser = build_parser()\n"
+        "    args = parser.parse_args(argv)\n"
+        "    store = build_store()\n"
+        "    if args.command == 'list':\n"
+        "        return 0\n"
+        "    if args.command == 'summary':\n"
+        "        total, completed = store.summary()\n"
+        "        print(format_summary(total, completed))\n"
+        "        return 0\n"
+        "    return 2\n"
+    )
+    (source_dir / "cli.py").write_text(existing_cli, encoding="utf-8")
+    (source_dir / "formatting.py").write_text(
+        "def format_task_line(task):\n    return str(task)\n\n"
+        "def format_summary(total, completed):\n    return f'{total} tasks, {completed} complete'\n",
+        encoding="utf-8",
+    )
+    (source_dir / "store.py").write_text(
+        "class TaskStore:\n    def summary(self):\n        return (3, 2)\n",
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_summary.py").write_text(
+        "def test_existing_contract():\n    assert 1 == 1\n    assert 2 == 2\n",
+        encoding="utf-8",
+    )
+    initial_plan = [
+        {
+            "step_number": 1,
+            "description": "Add summary command",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "append_file",
+                    "path": "src/medium_cli/cli.py",
+                    "content": "\n@cli.command()\ndef summary():\n    print('summary')\n",
+                }
+            ],
+            "verification": "python3 -m py_compile src/medium_cli/cli.py",
+            "rollback": None,
+            "expected_files": ["src/medium_cli/cli.py"],
+        }
+    ]
+    click_repair_plan = [
+        {
+            "step_number": 1,
+            "description": "Add click summary command",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "append_file",
+                    "path": "src/medium_cli/cli.py",
+                    "content": "\n@click.command()\ndef summary():\n    click.echo('summary')\n",
+                }
+            ],
+            "verification": "python3 -m py_compile src/medium_cli/cli.py",
+            "rollback": None,
+            "expected_files": ["src/medium_cli/cli.py"],
+        },
+        {
+            "step_number": 2,
+            "description": "Rewrite summary tests",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "tests/test_summary.py",
+                    "content": "def test_summary():\n    assert True\n",
+                }
+            ],
+            "verification": "python3 -m pytest -q",
+            "rollback": None,
+            "expected_files": ["tests/test_summary.py"],
+        },
+    ]
+    argparse_repair_plan = [
+        {
+            "step_number": 1,
+            "description": "Preserve argparse CLI and add summary",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/medium_cli/cli.py",
+                    "content": valid_cli,
+                }
+            ],
+            "verification": "python3 -m py_compile src/medium_cli/cli.py",
+            "rollback": None,
+            "expected_files": ["src/medium_cli/cli.py"],
+        }
+    ]
+
+    orchestration_state = MagicMock()
+    orchestration_state.project_dir = tmp_path
+    orchestration_state.project_context = ""
+    orchestration_state.plan = []
+    orchestration_state.current_step_index = 0
+    orchestration_state.reasoning_artifact = None
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {}
+
+        async def execute_task(self, *args, **kwargs):
+            return {"status": "completed", "output": json.dumps(initial_plan)}
+
+    task = MagicMock()
+    task.title = "Add summary command"
+    task.description = "Add summary command"
+    session = MagicMock()
+    session.status = "running"
+    session.is_active = True
+    session_task_link = MagicMock()
+    ctx = OrchestrationRunContext(
+        db=MagicMock(),
+        session=session,
+        project=MagicMock(),
+        task=task,
+        session_task_link=session_task_link,
+        session_id=68,
+        task_id=19,
+        prompt="Add a summary command to the argparse CLI",
+        timeout_seconds=300,
+        execution_profile="implementation",
+        validation_profile="standard",
+        runs_in_canonical_baseline=False,
+        orchestration_state=orchestration_state,
+        runtime_service=Runtime(),
+        task_service=MagicMock(),
+        logger=logging.getLogger("test.post_repair_framework_mismatch_second_pass"),
+        emit_live=lambda *args, **kwargs: None,
+        error_handler=MagicMock(),
+    )
+    ctx.error_handler.attempt_json_parsing = lambda output, **kwargs: (
+        True,
+        json.loads(output),
+        "json",
+    )
+
+    _patch_planning_flow_external_writes(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_flow._build_reasoning_artifact",
+        lambda *args, **kwargs: {
+            "intent": "Add summary command",
+            "workspace_facts": [],
+            "planned_actions": [],
+            "verification_plan": ["Run py_compile"],
+        },
+    )
+    monkeypatch.setattr(
+        ValidatorService,
+        "validate_reasoning_artifact",
+        staticmethod(
+            lambda *args, **kwargs: type(
+                "Verdict",
+                (),
+                {"accepted": True, "status": "accepted", "reasons": []},
+            )()
+        ),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "should_start_with_minimal_prompt",
+        staticmethod(lambda *args, **kwargs: False),
+    )
+
+    repair_calls = []
+
+    def repair_output(cls, *args, **kwargs):
+        repair_calls.append(kwargs)
+        if len(repair_calls) == 1:
+            return {"output": json.dumps(click_repair_plan)}
+        return {"output": json.dumps(argparse_repair_plan)}
+
+    monkeypatch.setattr(PlannerService, "repair_output", classmethod(repair_output))
+
+    result = execute_planning_phase(
+        ctx=ctx,
+        workspace_review={"has_existing_files": True},
+        extract_structured_text=extract_structured_text,
+        extract_plan_steps=lambda value: value if isinstance(value, list) else None,
+        looks_like_truncated_multistep_plan=lambda text, plan: False,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: args[3],
+        workspace_violation_error_cls=RuntimeError,
+    )
+
+    assert result == {"status": "completed"}
+    assert len(repair_calls) == 2
+    assert repair_calls[1]["reason"].startswith("post_repair_framework_mismatch")
+    assert "detected framework: argparse" in repair_calls[1]["rejection_reasons"][0]
+    assert "build_parser" in repair_calls[1]["rejection_reasons"][0]
+    assert "main(argv=None)" in repair_calls[1]["rejection_reasons"][0]
+    assert "@click.command" in repair_calls[1]["rejection_reasons"][0]
+    assert any(
+        operation.get("op") == "write_file"
+        and operation.get("path") == "src/medium_cli/cli.py"
+        and operation.get("content") == valid_cli
+        for step in ctx.orchestration_state.plan
+        for operation in (step.get("ops") or [])
+    )
+
+
+def test_post_repair_argparse_framework_mismatch_second_repair_is_capped(
+    tmp_path, monkeypatch
+):
+    source_dir = tmp_path / "src" / "medium_cli"
+    source_dir.mkdir(parents=True)
+    (source_dir / "cli.py").write_text(
+        "import argparse\n\n"
+        "def build_parser() -> argparse.ArgumentParser:\n"
+        "    parser = argparse.ArgumentParser()\n"
+        "    parser.add_subparsers(dest='command', required=True)\n"
+        "    return parser\n\n"
+        "def main(argv=None) -> int:\n"
+        "    parser = build_parser()\n"
+        "    parser.parse_args(argv)\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+    bad_plan = [
+        {
+            "step_number": 1,
+            "description": "Add click summary command",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "append_file",
+                    "path": "src/medium_cli/cli.py",
+                    "content": "\n@click.command()\ndef summary():\n    click.echo('summary')\n",
+                }
+            ],
+            "verification": "python3 -m py_compile src/medium_cli/cli.py",
+            "rollback": None,
+            "expected_files": ["src/medium_cli/cli.py"],
+        }
+    ]
+
+    orchestration_state = MagicMock()
+    orchestration_state.project_dir = tmp_path
+    orchestration_state.project_context = ""
+    orchestration_state.plan = []
+    orchestration_state.current_step_index = 0
+    orchestration_state.reasoning_artifact = None
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {}
+
+        async def execute_task(self, *args, **kwargs):
+            return {"status": "completed", "output": json.dumps(bad_plan)}
+
+    task = MagicMock()
+    task.title = "Add summary command"
+    task.description = "Add summary command"
+    session = MagicMock()
+    session.status = "running"
+    session.is_active = True
+    session_task_link = MagicMock()
+    ctx = OrchestrationRunContext(
+        db=MagicMock(),
+        session=session,
+        project=MagicMock(),
+        task=task,
+        session_task_link=session_task_link,
+        session_id=69,
+        task_id=20,
+        prompt="Add a summary command to the argparse CLI",
+        timeout_seconds=300,
+        execution_profile="implementation",
+        validation_profile="standard",
+        runs_in_canonical_baseline=False,
+        orchestration_state=orchestration_state,
+        runtime_service=Runtime(),
+        task_service=MagicMock(),
+        logger=logging.getLogger("test.post_repair_framework_mismatch_cap"),
+        emit_live=lambda *args, **kwargs: None,
+        error_handler=MagicMock(),
+    )
+    ctx.error_handler.attempt_json_parsing = lambda output, **kwargs: (
+        True,
+        json.loads(output),
+        "json",
+    )
+
+    _patch_planning_flow_external_writes(monkeypatch)
+    monkeypatch.setattr(
+        PlannerService,
+        "should_start_with_minimal_prompt",
+        staticmethod(lambda *args, **kwargs: False),
+    )
+
+    repair_calls = []
+
+    def repair_output(cls, *args, **kwargs):
+        repair_calls.append(kwargs)
+        return {"output": json.dumps(bad_plan)}
+
+    monkeypatch.setattr(PlannerService, "repair_output", classmethod(repair_output))
+
+    result = execute_planning_phase(
+        ctx=ctx,
+        workspace_review={"has_existing_files": True},
+        extract_structured_text=extract_structured_text,
+        extract_plan_steps=lambda value: value if isinstance(value, list) else None,
+        looks_like_truncated_multistep_plan=lambda text, plan: False,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: args[3],
+        workspace_violation_error_cls=RuntimeError,
+    )
+
+    assert len(repair_calls) == 2
+    assert repair_calls[1]["reason"].startswith("post_repair_framework_mismatch")
+    assert result == {
+        "status": "failed",
+        "reason": "planning_validation_failed_after_repair",
     }
     assert task.status == TaskStatus.FAILED
     assert session_task_link.status == TaskStatus.FAILED
@@ -7790,6 +8564,73 @@ def test_concrete_source_materialization_guard_accepts_source_write_file(tmp_pat
     ]
 
     assert _plan_has_concrete_source_materialization(plan, tmp_path)
+
+
+def test_concrete_source_materialization_guard_accepts_normalized_nested_write_file(
+    tmp_path,
+):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Edit source",
+            "commands": [],
+            "ops": [
+                {
+                    "write_file": {
+                        "path": "src/medium_cli/cli.py",
+                        "content": "def main(argv=None):\n    return 0\n",
+                    }
+                }
+            ],
+            "verification": "python3 -m pytest -q",
+            "rollback": None,
+            "expected_files": ["src/medium_cli/cli.py"],
+        }
+    ]
+
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+
+    assert sanitized[0]["ops"] == [
+        {
+            "op": "write_file",
+            "path": "src/medium_cli/cli.py",
+            "content": "def main(argv=None):\n    return 0\n",
+        }
+    ]
+    assert _plan_has_concrete_source_materialization(sanitized, tmp_path)
+
+
+def test_concrete_source_materialization_guard_accepts_normalized_o_alias_write_file(
+    tmp_path,
+):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Edit source",
+            "commands": [],
+            "ops": [
+                {
+                    "o": "write_file",
+                    "path": "src/medium_cli/cli.py",
+                    "content": "def main(argv=None):\n    return 0\n",
+                }
+            ],
+            "verification": "python3 -m pytest -q",
+            "rollback": None,
+            "expected_files": ["src/medium_cli/cli.py"],
+        }
+    ]
+
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+
+    assert sanitized[0]["ops"] == [
+        {
+            "op": "write_file",
+            "path": "src/medium_cli/cli.py",
+            "content": "def main(argv=None):\n    return 0\n",
+        }
+    ]
+    assert _plan_has_concrete_source_materialization(sanitized, tmp_path)
 
 
 def test_concrete_source_materialization_guard_accepts_source_replace_in_file(

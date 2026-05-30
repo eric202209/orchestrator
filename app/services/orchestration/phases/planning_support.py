@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Dict
 
 from app.models import TaskExecution, TaskStatus
@@ -968,6 +969,8 @@ class _PlanningRetryState:
         self.post_repair_stale_replace_second_repair_used = False
         self.post_repair_validation_second_repair_used = False
         self.post_repair_malformed_shell_second_repair_used = False
+        self.post_repair_python_source_syntax_second_repair_used = False
+        self.post_repair_framework_second_repair_used = False
         self.source_materialization_required_after_repair = False
         self.last_repair_reason = ""
         self.last_multistep_plan_step_count = 0
@@ -1165,6 +1168,7 @@ def _get_targeted_second_repair_reason(
     blocking_repair_issues: dict[str, list[int]] | None = None,
     plan_verdict: Any | None = None,
     malformed_shell_quoting_violation: bool = False,
+    project_dir: Path | None = None,
 ) -> _SecondRepairReason | None:
     if not retry_state.repair_prompt_used:
         return None
@@ -1172,6 +1176,12 @@ def _get_targeted_second_repair_reason(
     if malformed_shell_quoting_violation:
         policy = _SECOND_REPAIR_WORKSPACE_POLICIES["malformed_shell_quoting"]
         return _second_repair_reason_from_policy(retry_state, policy, [])
+
+    framework_mismatch_reason = _post_repair_argparse_framework_mismatch_reason(
+        retry_state, plan_verdict, project_dir
+    )
+    if framework_mismatch_reason:
+        return framework_mismatch_reason
 
     issue_keys = set((blocking_repair_issues or {}).keys())
     if len(issue_keys) == 1:
@@ -1206,6 +1216,12 @@ def _get_targeted_second_repair_reason(
             missing_command_steps,
         )
 
+    python_source_syntax_reason = _post_repair_python_source_syntax_reason(
+        retry_state, plan_verdict
+    )
+    if python_source_syntax_reason:
+        return python_source_syntax_reason
+
     brittle_steps = (
         _post_repair_brittle_command_steps(plan_verdict) if plan_verdict else None
     )
@@ -1221,6 +1237,177 @@ def _get_targeted_second_repair_reason(
         )
 
     return None
+
+
+def _post_repair_argparse_framework_mismatch_reason(
+    retry_state: _PlanningRetryState,
+    plan_verdict: Any | None,
+    project_dir: Path | None,
+) -> _SecondRepairReason | None:
+    if not plan_verdict or project_dir is None:
+        return None
+    details = getattr(plan_verdict, "details", None) or {}
+    paths = [
+        str(path or "").strip().lstrip("./")
+        for path in (details.get("undefined_python_decorator_materializations") or [])
+        if str(path or "").strip()
+    ]
+    if not paths:
+        return None
+
+    root = Path(project_dir).resolve()
+    for path in paths:
+        if not path.endswith(".py"):
+            continue
+        source_path = (root / path).resolve()
+        try:
+            if not source_path.is_relative_to(root):
+                continue
+            source_text = source_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if not _source_text_is_argparse_cli(source_text):
+            continue
+        excerpt = _framework_source_excerpt(source_text)
+        required_symbols = _argparse_public_symbols_to_preserve(source_text)
+        symbol_clause = (
+            ", ".join(required_symbols)
+            if required_symbols
+            else "existing public CLI symbols"
+        )
+        rejection_text = (
+            "framework_mismatch: repaired Python source introduced decorator-style "
+            "CLI code into an argparse module. "
+            f"Affected file: {path}. detected framework: argparse. "
+            f"Required public symbols to preserve when present: {symbol_clause}. "
+            f"Source excerpt showing current argparse flow: {excerpt} "
+            "Return a valid JSON array only. Use canonical ops.write_file with "
+            "complete valid Python source content or ops.replace_in_file with exact "
+            "current text. Do not introduce @cli.command, @click.command, "
+            "@click.option, @app.command, @router.*, click.echo, or typer.*. "
+            "Modify build_parser() and main(argv=None) only, or use complete "
+            "write_file preserving the existing public API. add a summary subparser "
+            'and handle args.command == "summary" in main(argv=None). '
+            "The resulting Python source must pass compile(content, path, 'exec'). "
+            "Preserve concrete source materialization and preserve existing tests; "
+            "do not fix implementation work by editing tests only."
+        )
+        return _SecondRepairReason(
+            issue_key="framework_mismatch",
+            issue_label="framework mismatch",
+            retry_reason="post_repair_framework_mismatch",
+            event_reason="post_repair_framework_mismatch_second_pass",
+            semantic_violation_code="framework_mismatch",
+            step_numbers=[],
+            rejection_text=rejection_text,
+            cap_used=retry_state.post_repair_framework_second_repair_used,
+            cap_attribute="post_repair_framework_second_repair_used",
+        )
+    return None
+
+
+def _source_text_is_argparse_cli(source_text: str) -> bool:
+    lowered = source_text.lower()
+    return (
+        "import argparse" in lowered
+        and "def build_parser" in source_text
+        and "def main(" in source_text
+        and ("add_subparsers" in source_text or "add_argument" in source_text)
+    )
+
+
+def _argparse_public_symbols_to_preserve(source_text: str) -> list[str]:
+    candidates = [
+        "build_parser",
+        "build_store",
+        "main",
+        "TaskStore",
+        "format_task_line",
+        "format_summary",
+    ]
+    return [symbol for symbol in candidates if re.search(rf"\b{symbol}\b", source_text)]
+
+
+def _framework_source_excerpt(source_text: str) -> str:
+    lines = []
+    for line in source_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if any(
+            token in stripped
+            for token in (
+                "import argparse",
+                "def build_parser",
+                "add_subparsers",
+                "add_argument",
+                "def build_store",
+                "TaskStore",
+                "format_task_line",
+                "format_summary",
+                "def main(",
+                "args.command",
+            )
+        ):
+            lines.append(stripped)
+        if len(lines) >= 14:
+            break
+    return " ".join(lines)[:900]
+
+
+def _post_repair_python_source_syntax_reason(
+    retry_state: _PlanningRetryState,
+    plan_verdict: Any | None,
+) -> _SecondRepairReason | None:
+    if not plan_verdict:
+        return None
+    details = getattr(plan_verdict, "details", None) or {}
+    issues = [
+        issue
+        for issue in (details.get("python_source_syntax_invalid") or [])
+        if isinstance(issue, dict) and str(issue.get("path") or "").strip()
+    ]
+    if not issues:
+        return None
+
+    first_issue = issues[0]
+    path = str(first_issue.get("path") or "").strip()
+    line = first_issue.get("line")
+    offset = first_issue.get("offset")
+    message = str(first_issue.get("message") or "invalid Python syntax").strip()
+    excerpt = " ".join(str(first_issue.get("candidate_content_excerpt") or "").split())[
+        :500
+    ]
+    location = ""
+    if line is not None:
+        location = f" line {line}"
+        if offset is not None:
+            location += f", offset {offset}"
+    excerpt_clause = f" Candidate content excerpt: {excerpt}" if excerpt else ""
+    rejection_text = (
+        "python_source_syntax_invalid: repaired Python source is still invalid. "
+        f"Affected file: {path}{location}. Syntax error: {message}."
+        f"{excerpt_clause} Return a valid JSON array only. Use canonical "
+        "`ops.write_file` with complete valid Python source content or "
+        "`ops.replace_in_file` with exact current text. write_file.content must "
+        "be a JSON string that decodes to real newline characters; do not emit "
+        "broken triple-quoted source or literal source-level \\n artifacts. "
+        "The resulting Python source must pass compile(content, path, 'exec'). "
+        "Preserve concrete source materialization and preserve existing tests; "
+        "do not fix implementation work by editing tests only."
+    )
+
+    return _SecondRepairReason(
+        issue_key="python_source_syntax_invalid",
+        issue_label="Python source syntax",
+        retry_reason="post_repair_python_source_syntax_invalid",
+        event_reason="post_repair_python_source_syntax_second_pass",
+        semantic_violation_code="python_source_syntax_invalid",
+        step_numbers=[],
+        rejection_text=rejection_text,
+        cap_used=retry_state.post_repair_python_source_syntax_second_repair_used,
+        cap_attribute="post_repair_python_source_syntax_second_repair_used",
+    )
 
 
 def _classify_planning_timeout_failure(

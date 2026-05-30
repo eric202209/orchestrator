@@ -1341,6 +1341,7 @@ def execute_planning_phase(
                         second_repair_reason = _get_targeted_second_repair_reason(
                             retry_state=retry_state,
                             malformed_shell_quoting_violation=True,
+                            project_dir=ctx.orchestration_state.project_dir,
                         )
                         if not second_repair_reason or second_repair_reason.cap_used:
                             raise
@@ -1530,9 +1531,23 @@ def execute_planning_phase(
                 retry_state.consecutive_failures += 1
                 continue
             if blocking_repair_issues:
+                blocking_plan_verdict = ValidatorService.validate_plan(
+                    ctx.orchestration_state.plan,
+                    output_text=output_text,
+                    task_prompt=ctx.prompt,
+                    execution_profile=ctx.execution_profile,
+                    project_dir=ctx.orchestration_state.project_dir,
+                    title=ctx.task.title if ctx.task else None,
+                    description=ctx.task.description if ctx.task else None,
+                    validation_severity=ctx.validation_severity,
+                    workflow_profile=ctx.workflow_profile,
+                    workflow_stage=ctx.workflow_stage,
+                )
                 second_repair_reason = _get_targeted_second_repair_reason(
                     retry_state=retry_state,
                     blocking_repair_issues=blocking_repair_issues,
+                    plan_verdict=blocking_plan_verdict,
+                    project_dir=ctx.orchestration_state.project_dir,
                 )
                 if second_repair_reason and not second_repair_reason.cap_used:
                     issue_fragments = [second_repair_reason.rejection_text]
@@ -1918,6 +1933,7 @@ def execute_planning_phase(
                 second_repair_reason = _get_targeted_second_repair_reason(
                     retry_state=retry_state,
                     plan_verdict=plan_verdict,
+                    project_dir=ctx.orchestration_state.project_dir,
                 )
                 if second_repair_reason and not second_repair_reason.cap_used:
                     issue_fragments = [second_repair_reason.rejection_text]
@@ -1941,8 +1957,9 @@ def execute_planning_phase(
                         level="WARN",
                         phase="planning",
                         message=(
-                            "[ORCHESTRATION] Planning repair still missed "
-                            "verification; starting one targeted second repair pass"
+                            "[ORCHESTRATION] Planning repair still failed a "
+                            "targeted validator issue; starting one targeted "
+                            "second repair pass"
                         ),
                         details={
                             "reason": second_repair_reason.event_reason,
@@ -1954,8 +1971,9 @@ def execute_planning_phase(
                         },
                     )
                     ctx.logger.warning(
-                        "[ORCHESTRATION] Planning repair still missed verification "
-                        "in steps %s; starting one targeted second repair pass",
+                        "[ORCHESTRATION] Planning repair still failed %s in steps %s; "
+                        "starting one targeted second repair pass",
+                        second_repair_reason.issue_label,
                         second_repair_reason.step_numbers,
                     )
                     validation_knowledge_ctx = _retrieve_knowledge(

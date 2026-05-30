@@ -1376,6 +1376,391 @@ def test_normalize_step_normalizes_write_file_ops_and_rejects_escape(tmp_path):
         normalize_step(_ops_only_step("../outside.ts"), tmp_path, None, 1)
 
 
+def test_planning_sanitizer_normalizes_nested_write_file_op():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Write Python source",
+            "commands": [],
+            "verification": "python3 -m py_compile src/x.py",
+            "rollback": None,
+            "expected_files": ["src/x.py"],
+            "ops": [{"write_file": {"path": "src/x.py", "content": "print('ok')\n"}}],
+        }
+    ]
+
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+
+    assert sanitized[0]["ops"] == [
+        {"op": "write_file", "path": "src/x.py", "content": "print('ok')\n"}
+    ]
+
+
+def test_planning_sanitizer_normalizes_nested_append_file_op():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Append Python source",
+            "commands": [],
+            "verification": "python3 -m py_compile src/x.py",
+            "rollback": None,
+            "expected_files": ["src/x.py"],
+            "ops": [
+                {"append_file": {"path": "src/x.py", "content": "\nprint('ok')\n"}}
+            ],
+        }
+    ]
+
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+
+    assert sanitized[0]["ops"] == [
+        {"op": "append_file", "path": "src/x.py", "content": "\nprint('ok')\n"}
+    ]
+
+
+def test_planning_sanitizer_normalizes_nested_replace_in_file_op():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Patch Python source",
+            "commands": [],
+            "verification": "python3 -m py_compile src/x.py",
+            "rollback": None,
+            "expected_files": ["src/x.py"],
+            "ops": [
+                {
+                    "replace_in_file": {
+                        "path": "src/x.py",
+                        "old": "return 0",
+                        "new": "return 1",
+                    }
+                }
+            ],
+        }
+    ]
+
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+
+    assert sanitized[0]["ops"] == [
+        {
+            "op": "replace_in_file",
+            "path": "src/x.py",
+            "old": "return 0",
+            "new": "return 1",
+        }
+    ]
+
+
+def test_validate_plan_rejects_nested_write_file_missing_required_fields():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Write Python source",
+            "commands": [],
+            "verification": "python3 -m py_compile src/x.py",
+            "rollback": None,
+            "expected_files": ["src/x.py"],
+            "ops": [{"write_file": {"path": "src/x.py"}}],
+        }
+    ]
+
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+    result = ValidatorService.validate_plan(
+        sanitized,
+        output_text="[]",
+        task_prompt="Implement x.",
+        execution_profile="implementation",
+    )
+
+    assert result.rejected
+    assert "invalid_nested_file_ops" in result.details["plan_schema"]["details"]
+    assert any("invalid_nested_file_op" in reason for reason in result.reasons)
+
+
+def test_validate_plan_rejects_nested_replace_in_file_missing_old_new():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Patch Python source",
+            "commands": [],
+            "verification": "python3 -m py_compile src/x.py",
+            "rollback": None,
+            "expected_files": ["src/x.py"],
+            "ops": [{"replace_in_file": {"path": "src/x.py", "old": "a"}}],
+        }
+    ]
+
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+    result = ValidatorService.validate_plan(
+        sanitized,
+        output_text="[]",
+        task_prompt="Implement x.",
+        execution_profile="implementation",
+    )
+
+    assert result.rejected
+    assert "invalid_nested_file_ops" in result.details["plan_schema"]["details"]
+
+
+def test_validate_plan_rejects_multi_key_nested_file_op():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Write Python source",
+            "commands": [],
+            "verification": "python3 -m py_compile src/x.py",
+            "rollback": None,
+            "expected_files": ["src/x.py"],
+            "ops": [
+                {
+                    "write_file": {"path": "src/x.py", "content": "print('ok')\n"},
+                    "append_file": {"path": "src/x.py", "content": "print('more')\n"},
+                }
+            ],
+        }
+    ]
+
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+    result = ValidatorService.validate_plan(
+        sanitized,
+        output_text="[]",
+        task_prompt="Implement x.",
+        execution_profile="implementation",
+    )
+
+    assert result.rejected
+    details = result.details["plan_schema"]["details"]["invalid_nested_file_ops"]
+    assert "ambiguous nested file op" in details[1][0]
+
+
+def test_normalized_nested_python_write_file_still_validates_syntax(tmp_path):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Write invalid Python source",
+            "commands": [],
+            "verification": "python3 -m py_compile src/x.py",
+            "rollback": None,
+            "expected_files": ["src/x.py"],
+            "ops": [
+                {
+                    "write_file": {
+                        "path": "src/x.py",
+                        "content": "def broken(:\n    pass\n",
+                    }
+                }
+            ],
+        }
+    ]
+
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+    result = ValidatorService.validate_plan(
+        sanitized,
+        output_text="[]",
+        task_prompt="Implement x.",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert result.repairable
+    assert "python_source_syntax_invalid" in result.details
+    assert any("python_source_syntax_invalid" in reason for reason in result.reasons)
+
+
+def test_planning_sanitizer_normalizes_o_alias_write_file_op():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Write Python source",
+            "commands": [],
+            "verification": "python3 -m py_compile src/x.py",
+            "rollback": None,
+            "expected_files": ["src/x.py"],
+            "ops": [
+                {"o": "write_file", "path": "src/x.py", "content": "print('ok')\n"}
+            ],
+        }
+    ]
+
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+
+    assert sanitized[0]["ops"] == [
+        {"op": "write_file", "path": "src/x.py", "content": "print('ok')\n"}
+    ]
+
+
+def test_planning_sanitizer_normalizes_o_alias_append_file_op():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Append Python source",
+            "commands": [],
+            "verification": "python3 -m py_compile src/x.py",
+            "rollback": None,
+            "expected_files": ["src/x.py"],
+            "ops": [
+                {"o": "append_file", "path": "src/x.py", "content": "\nprint('ok')\n"}
+            ],
+        }
+    ]
+
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+
+    assert sanitized[0]["ops"] == [
+        {"op": "append_file", "path": "src/x.py", "content": "\nprint('ok')\n"}
+    ]
+
+
+def test_planning_sanitizer_normalizes_o_alias_replace_in_file_op():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Patch Python source",
+            "commands": [],
+            "verification": "python3 -m py_compile src/x.py",
+            "rollback": None,
+            "expected_files": ["src/x.py"],
+            "ops": [
+                {
+                    "o": "replace_in_file",
+                    "path": "src/x.py",
+                    "old": "return 0",
+                    "new": "return 1",
+                }
+            ],
+        }
+    ]
+
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+
+    assert sanitized[0]["ops"] == [
+        {
+            "op": "replace_in_file",
+            "path": "src/x.py",
+            "old": "return 0",
+            "new": "return 1",
+        }
+    ]
+
+
+def test_validate_plan_rejects_o_alias_write_file_missing_required_fields():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Write Python source",
+            "commands": [],
+            "verification": "python3 -m py_compile src/x.py",
+            "rollback": None,
+            "expected_files": ["src/x.py"],
+            "ops": [{"o": "write_file"}],
+        }
+    ]
+
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+    result = ValidatorService.validate_plan(
+        sanitized,
+        output_text="[]",
+        task_prompt="Implement x.",
+        execution_profile="implementation",
+    )
+
+    assert result.rejected
+    assert "invalid_file_op_alias" in result.details["plan_schema"]["details"]
+    assert any("invalid_file_op_alias" in reason for reason in result.reasons)
+
+
+def test_validate_plan_rejects_unknown_o_alias_file_op():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Delete file",
+            "commands": [],
+            "verification": "python3 -m pytest -q",
+            "rollback": None,
+            "expected_files": ["src/x.py"],
+            "ops": [{"o": "delete_file", "path": "src/x.py"}],
+        }
+    ]
+
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+    result = ValidatorService.validate_plan(
+        sanitized,
+        output_text="[]",
+        task_prompt="Implement x.",
+        execution_profile="implementation",
+    )
+
+    assert result.rejected
+    details = result.details["plan_schema"]["details"]["invalid_file_op_alias"]
+    assert "unsupported file op alias" in details[1][0]
+
+
+def test_validate_plan_rejects_conflicting_o_alias_file_op():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Append Python source",
+            "commands": [],
+            "verification": "python3 -m py_compile src/x.py",
+            "rollback": None,
+            "expected_files": ["src/x.py"],
+            "ops": [
+                {
+                    "op": "append_file",
+                    "o": "write_file",
+                    "path": "src/x.py",
+                    "content": "print('ok')\n",
+                }
+            ],
+        }
+    ]
+
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+    result = ValidatorService.validate_plan(
+        sanitized,
+        output_text="[]",
+        task_prompt="Implement x.",
+        execution_profile="implementation",
+    )
+
+    assert result.rejected
+    details = result.details["plan_schema"]["details"]["invalid_file_op_alias"]
+    assert "conflicting op alias values" in details[1][0]
+
+
+def test_normalized_o_alias_python_write_file_still_validates_syntax(tmp_path):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Write invalid Python source",
+            "commands": [],
+            "verification": "python3 -m py_compile src/x.py",
+            "rollback": None,
+            "expected_files": ["src/x.py"],
+            "ops": [
+                {
+                    "o": "write_file",
+                    "path": "src/x.py",
+                    "content": "def broken(:\n    pass\n",
+                }
+            ],
+        }
+    ]
+
+    sanitized = PlannerService.sanitize_common_plan_issues(plan)
+    result = ValidatorService.validate_plan(
+        sanitized,
+        output_text="[]",
+        task_prompt="Implement x.",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert result.repairable
+    assert "python_source_syntax_invalid" in result.details
+    assert any("python_source_syntax_invalid" in reason for reason in result.reasons)
+
+
 def test_executor_write_file_ops_create_parent_directory(tmp_path):
     result = ExecutorService.execute_file_ops(
         Path(tmp_path),

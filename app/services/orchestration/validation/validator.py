@@ -140,6 +140,8 @@ class ValidatorService:
         invalid_rollback: List[int] = []
         invalid_expected_files: List[int] = []
         invalid_ops: List[int] = []
+        invalid_file_op_aliases: Dict[int, List[str]] = {}
+        invalid_nested_file_ops: Dict[int, List[str]] = {}
         missing_required_fields: Dict[int, List[str]] = {}
         extra_fields: Dict[int, List[str]] = {}
         required_fields = {
@@ -189,7 +191,17 @@ class ValidatorService:
                 if not isinstance(ops, list):
                     invalid_ops.append(index)
                 else:
-                    for operation in ops:
+                    for op_index, operation in enumerate(ops, start=1):
+                        alias_issue = ValidatorService._file_op_alias_issue(operation)
+                        if alias_issue:
+                            invalid_file_op_aliases.setdefault(index, []).append(
+                                f"op {op_index}: {alias_issue}"
+                            )
+                        nested_issue = ValidatorService._nested_file_op_issue(operation)
+                        if nested_issue:
+                            invalid_nested_file_ops.setdefault(index, []).append(
+                                f"op {op_index}: {nested_issue}"
+                            )
                         if not validate_file_op_shape(
                             operation
                         ) and not ValidatorService._replace_in_file_has_repairable_old_text_issue(
@@ -232,8 +244,74 @@ class ValidatorService:
                 "Plan ops must be arrays of supported operation objects with valid string fields"
             )
             details["invalid_ops_steps"] = sorted(set(invalid_ops))
+        if invalid_file_op_aliases:
+            errors.append("Plan contains invalid_file_op_alias entries")
+            details["invalid_file_op_alias"] = invalid_file_op_aliases
+        if invalid_nested_file_ops:
+            errors.append("Plan contains invalid_nested_file_op entries")
+            details["invalid_nested_file_ops"] = invalid_nested_file_ops
 
         return {"valid": not errors, "errors": errors, "details": details}
+
+    @staticmethod
+    def _file_op_alias_issue(operation: Any) -> Optional[str]:
+        if not isinstance(operation, dict) or "o" not in operation:
+            return None
+
+        supported_aliases = {"write_file", "append_file", "replace_in_file"}
+        alias_name = str(operation.get("o") or "").strip()
+        explicit_name = str(operation.get("op") or "").strip()
+        if explicit_name and explicit_name != alias_name:
+            return f"conflicting op alias values: op={explicit_name}, o={alias_name}"
+        if alias_name not in supported_aliases:
+            return f"unsupported file op alias: {alias_name or '<empty>'}"
+
+        required_fields = {
+            "write_file": {"path", "content"},
+            "append_file": {"path", "content"},
+            "replace_in_file": {"path", "old", "new"},
+        }[alias_name]
+        missing = sorted(
+            field
+            for field in required_fields
+            if not isinstance(operation.get(field), str)
+            or (field == "path" and not operation.get(field).strip())
+        )
+        if missing:
+            return f"{alias_name} alias missing required fields: {missing}"
+        return None
+
+    @staticmethod
+    def _nested_file_op_issue(operation: Any) -> Optional[str]:
+        if not isinstance(operation, dict) or "op" in operation:
+            return None
+
+        nested_file_op_names = {"write_file", "append_file", "replace_in_file"}
+        nested_keys = [key for key in operation if key in nested_file_op_names]
+        if not nested_keys:
+            return None
+        if len(operation) != 1 or len(nested_keys) != 1:
+            return "ambiguous nested file op must contain exactly one file-op key"
+
+        op_name = nested_keys[0]
+        payload = operation.get(op_name)
+        if not isinstance(payload, dict):
+            return f"{op_name} payload must be an object"
+
+        required_fields = {
+            "write_file": {"path", "content"},
+            "append_file": {"path", "content"},
+            "replace_in_file": {"path", "old", "new"},
+        }[op_name]
+        missing = sorted(
+            field
+            for field in required_fields
+            if not isinstance(payload.get(field), str)
+            or (field == "path" and not payload.get(field).strip())
+        )
+        if missing:
+            return f"{op_name} missing required fields: {missing}"
+        return None
 
     @staticmethod
     def _plan_invalid_file_ops_paths(
@@ -368,12 +446,16 @@ class ValidatorService:
             if relative_path in seen_issue_paths:
                 return
             seen_issue_paths.add(relative_path)
+            candidate_excerpt = " ".join(
+                (simulated_files.get(relative_path) or "").split()
+            )[:500]
             issues.append(
                 {
                     "path": relative_path,
                     "line": exc.lineno,
                     "offset": exc.offset,
                     "message": str(exc.msg or "invalid Python syntax"),
+                    "candidate_content_excerpt": candidate_excerpt,
                 }
             )
 
