@@ -270,6 +270,9 @@ def build_planning_repair_prompt(
     unsafe_python_append_guidance = _build_unsafe_python_append_repair_guidance(
         rejection_reasons
     )
+    python_framework_guidance = _build_python_framework_repair_guidance(
+        rejection_reasons
+    )
     stale_replace_target_guidance = _build_stale_replace_target_preservation_guidance(
         project_dir=project_dir,
         malformed_output=malformed_output,
@@ -280,6 +283,7 @@ def build_planning_repair_prompt(
         brittle_inline_python_guidance,
         empty_replace_old_text_guidance,
         unsafe_python_append_guidance,
+        python_framework_guidance,
         stale_replace_target_guidance,
     )
 
@@ -438,6 +442,9 @@ def _build_grounded_source_edit_repair_guidance(
     return "\n".join(
         [
             "Grounded source-edit repair required:",
+            "- The repaired plan must include at least one concrete source edit operation.",
+            "- Do not return inspect-only, verification-only, or test-only plans for implementation tasks.",
+            "- Do not fix implementation tasks by editing only tests.",
             "- Preserve existing tests as the behavior contract; do not replace them with new expectations.",
             "- Edit real source behavior using the provided test/source context and project structure.",
             "- Preserve existing Python package roots imported by tests; do not create a replacement src/<new_package> root.",
@@ -453,7 +460,17 @@ def _build_brittle_inline_python_repair_guidance(
     rejection_reasons: Optional[list[str]],
 ) -> str:
     text = "\n".join(str(reason or "") for reason in (rejection_reasons or []))
-    if "brittle_inline_python" not in text.lower():
+    lowered = text.lower()
+    if not (
+        "brittle_inline_python" in lowered
+        or "brittle heredoc" in lowered
+        or "brittle_command_subcodes" in lowered
+        or "heredoc-heavy or malformed commands" in lowered
+        or "disallowed_heredoc_shape" in lowered
+        or "multiple_heredoc" in lowered
+        or "too_many_lines" in lowered
+        or "oversized_command_length" in lowered
+    ):
         return ""
 
     return "\n".join(
@@ -461,6 +478,8 @@ def _build_brittle_inline_python_repair_guidance(
             "Brittle inline Python command repair:",
             "- Preserve existing source ops exactly unless an op itself is invalid; this repair is for command validation only.",
             "- Do not regenerate unrelated source files while fixing brittle command validation.",
+            "- Do not use heredocs or multiline shell-generated file bodies; use ops.write_file or ops.replace_in_file for file content.",
+            "- Keep commands short, single-purpose, and under the command length limit.",
             "- Replace nested quote-heavy `python -c` assertion commands with simple verification commands.",
             "- Prefer `python3 -m pytest -q` for project verification or `python3 -m py_compile <changed source file>` for a changed Python source file.",
             "- Do not use heredocs, shell assertion one-liners, or nested quote-heavy inline Python.",
@@ -510,6 +529,31 @@ def _build_unsafe_python_append_repair_guidance(
             "- Use context-aware `replace_in_file` to edit the existing function/body when exact current text is available.",
             "- Or use `write_file` with complete valid file content that preserves existing imports, functions, classes, and main guards.",
             "- Keep safe top-level appends only for complete def/class/import/comment additions.",
+        ]
+    )
+
+
+def _build_python_framework_repair_guidance(
+    rejection_reasons: Optional[list[str]],
+) -> str:
+    text = "\n".join(str(reason or "") for reason in (rejection_reasons or []))
+    lowered = text.lower()
+    if not (
+        "undefined_python_decorator_materializations" in lowered
+        or "decorators whose root name is undefined" in lowered
+        or "undefined decorator root" in lowered
+        or "framework_mismatch" in lowered
+    ):
+        return ""
+
+    return "\n".join(
+        [
+            "Python framework-aware repair:",
+            "- Inspect the existing source/tests and preserve the framework already in use before proposing edits.",
+            "- For argparse CLIs, do not introduce Typer/Click/FastAPI/Django decorator patterns such as `@app.command`, `@click.command`, `@router.*`, or `@app.*`.",
+            "- Implement CLI behavior inside the existing parser/build_parser/main flow and preserve current imports/package roots.",
+            "- If a decorator is used, its root object must already be defined or imported in the same file by the repaired plan.",
+            "- Prefer concrete ops on existing src/ files plus a real project test command.",
         ]
     )
 
@@ -703,11 +747,15 @@ def build_compact_planning_repair_prompt(
     unsafe_python_append_guidance = _build_unsafe_python_append_repair_guidance(
         rejection_reasons
     )
+    python_framework_guidance = _build_python_framework_repair_guidance(
+        rejection_reasons
+    )
     validation_guidance_block = _join_optional_blocks(
         grounded_source_edit_guidance,
         brittle_inline_python_guidance,
         empty_replace_old_text_guidance,
         unsafe_python_append_guidance,
+        python_framework_guidance,
     )
     prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.

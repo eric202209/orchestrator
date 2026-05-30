@@ -857,7 +857,9 @@ def normalize_bounded_debug_repair_payload_detailed(
     command = str(item.get("command") or "").strip()
     verification = str(item.get("verification_command") or "").strip()
     ops = _normalize_durable_source_ops(item.get("ops"))
-    if source_edit_context and _ops_touch_source_files(ops):
+    item_fix_type = str(item.get("fix_type") or item.get("repair_type") or "").strip()
+    explicit_ops_fix = item_fix_type == "ops_fix"
+    if (source_edit_context or explicit_ops_fix) and _ops_touch_source_files(ops):
         if not verification:
             return _debug_repair_normalization_rejected(
                 parsed_data, "missing_verification_command"
@@ -924,6 +926,99 @@ def normalize_bounded_debug_repair_payload_detailed(
         rejection_reason=None,
         parsed_shape=_debug_repair_parsed_shape(parsed_data),
     )
+
+
+def normalize_diff_scoped_compliance_retry_command_list(
+    raw_output: str,
+    *,
+    parsed_data: Any = None,
+    envelope: Optional[DebugFeedbackEnvelope] = None,
+    source_edit_context: bool = False,
+) -> DebugRepairNormalizationResult:
+    """Normalize diff-scoped compliance retry list-shaped command repairs.
+
+    This is intentionally not part of the general bounded debug repair
+    normalizer. It exists only for the diff-scoped compliance retry path where
+    models often return a top-level list of command steps instead of the
+    bounded repair object.
+    """
+
+    items = parsed_data if isinstance(parsed_data, list) else None
+    if items is None:
+        items = _extract_diff_scoped_command_list_items(raw_output)
+    if not isinstance(items, list) or not items:
+        return _debug_repair_normalization_rejected(items, "unsupported_shape")
+
+    commands: list[str] = []
+    verifications: list[str] = []
+    titles: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            return _debug_repair_normalization_rejected(items, "unsupported_shape")
+        command = str(item.get("command") or "").strip()
+        verification = str(item.get("verification_command") or "").strip()
+        if not command:
+            return _debug_repair_normalization_rejected(items, "missing_command")
+        if not verification:
+            return _debug_repair_normalization_rejected(
+                items, "missing_verification_command"
+            )
+        commands.append(command)
+        verifications.append(verification)
+        title = str(item.get("title") or item.get("description") or "").strip()
+        if title:
+            titles.append(title)
+
+    return normalize_bounded_debug_repair_payload_detailed(
+        [
+            {
+                "title": (
+                    "; ".join(titles[:3])
+                    or "Apply diff-scoped compliance command repair"
+                ),
+                "command": " && ".join(commands),
+                "verification_command": " && ".join(verifications),
+            }
+        ],
+        envelope=envelope,
+        source_edit_context=source_edit_context,
+    )
+
+
+def _extract_diff_scoped_command_list_items(raw_output: str) -> list[dict[str, str]]:
+    text = str(raw_output or "").strip()
+    if not text.startswith("[") or not text.endswith("]"):
+        return []
+    objects = re.findall(r"\{(.*?)\}", text, flags=re.DOTALL)
+    items: list[dict[str, str]] = []
+    for obj in objects:
+        item: dict[str, str] = {}
+        for key in ("title", "description", "command", "verification_command"):
+            value = _extract_diff_scoped_string_field(obj, key)
+            if value is not None:
+                item[key] = value
+        if item:
+            items.append(item)
+    return items
+
+
+def _extract_diff_scoped_string_field(object_text: str, key: str) -> str | None:
+    marker = re.search(rf'"{re.escape(key)}"\s*:\s*"', object_text)
+    if not marker:
+        return None
+    start = marker.end()
+    next_key = re.search(
+        r',\s*"(?:title|description|command|verification_command)"\s*:\s*"',
+        object_text[start:],
+    )
+    if next_key:
+        raw = object_text[start : start + next_key.start()]
+    else:
+        raw = object_text[start:]
+    raw = raw.strip()
+    if raw.endswith('"'):
+        raw = raw[:-1]
+    return raw.strip()
 
 
 def _expected_files_from_item(item: dict[str, Any]) -> list[Any]:
