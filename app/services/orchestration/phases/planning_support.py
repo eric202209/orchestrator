@@ -1355,6 +1355,52 @@ def _framework_source_excerpt(source_text: str) -> str:
     return " ".join(lines)[:900]
 
 
+def _line_numbered_source_excerpt(
+    source_text: str,
+    *,
+    error_line: Any,
+    max_chars: int = 2400,
+    context_lines: int = 8,
+) -> str:
+    if not source_text:
+        return ""
+    lines = source_text.splitlines()
+    if not lines:
+        return ""
+    try:
+        line_number = int(error_line)
+    except (TypeError, ValueError):
+        line_number = 1
+    line_number = max(1, min(line_number, len(lines)))
+
+    candidate = "\n".join(
+        f"{index:>4}: {line}" for index, line in enumerate(lines, start=1)
+    )
+    if len(candidate) <= max_chars:
+        return candidate
+
+    start = max(1, line_number - context_lines)
+    end = min(len(lines), line_number + context_lines)
+    while start < end:
+        window = "\n".join(
+            f"{index:>4}: {lines[index - 1]}" for index in range(start, end + 1)
+        )
+        if len(window) <= max_chars:
+            prefix = "... preceding lines omitted ...\n" if start > 1 else ""
+            suffix = "\n... following lines omitted ..." if end < len(lines) else ""
+            return f"{prefix}{window}{suffix}"
+        if end - line_number >= line_number - start and end > line_number:
+            end -= 1
+        elif start < line_number:
+            start += 1
+        else:
+            break
+    return "\n".join(
+        f"{index:>4}: {lines[index - 1]}"
+        for index in range(line_number, line_number + 1)
+    )[:max_chars]
+
+
 def _post_repair_python_source_syntax_reason(
     retry_state: _PlanningRetryState,
     plan_verdict: Any | None,
@@ -1375,15 +1421,31 @@ def _post_repair_python_source_syntax_reason(
     line = first_issue.get("line")
     offset = first_issue.get("offset")
     message = str(first_issue.get("message") or "invalid Python syntax").strip()
-    excerpt = " ".join(str(first_issue.get("candidate_content_excerpt") or "").split())[
-        :500
-    ]
+    raw_candidate = str(first_issue.get("candidate_content") or "")
+    line_numbered_excerpt = _line_numbered_source_excerpt(
+        raw_candidate,
+        error_line=line,
+    )
+    compact_excerpt = " ".join(
+        str(first_issue.get("candidate_content_excerpt") or "").split()
+    )[:500]
     location = ""
     if line is not None:
         location = f" line {line}"
         if offset is not None:
             location += f", offset {offset}"
-    excerpt_clause = f" Candidate content excerpt: {excerpt}" if excerpt else ""
+    if line_numbered_excerpt:
+        excerpt_clause = (
+            " Candidate source excerpt with real newlines preserved:\n"
+            f"{line_numbered_excerpt}\n"
+            "End candidate source excerpt."
+        )
+        if first_issue.get("candidate_content_truncated"):
+            excerpt_clause += " Candidate content was truncated before prompting."
+    else:
+        excerpt_clause = (
+            f" Candidate content excerpt: {compact_excerpt}" if compact_excerpt else ""
+        )
     rejection_text = (
         "python_source_syntax_invalid: repaired Python source is still invalid. "
         f"Affected file: {path}{location}. Syntax error: {message}."
