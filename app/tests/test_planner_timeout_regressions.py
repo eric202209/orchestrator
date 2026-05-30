@@ -2879,6 +2879,48 @@ def test_planning_repair_prompt_bans_external_helpers_and_heredoc():
     assert "Never merge steps" in prompt
 
 
+def test_planning_repair_prompt_guides_unsafe_python_append_fragments():
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Add a summary command to this Python CLI.",
+        malformed_output=json.dumps(
+            [
+                {
+                    "step_number": 2,
+                    "description": "Append summary branch",
+                    "commands": ["python -m py_compile src/medium_cli/cli.py"],
+                    "verification": "python -m py_compile src/medium_cli/cli.py",
+                    "rollback": None,
+                    "expected_files": ["src/medium_cli/cli.py"],
+                    "ops": [
+                        {
+                            "op": "append_file",
+                            "path": "src/medium_cli/cli.py",
+                            "content": (
+                                "\n    elif command == 'summary':\n"
+                                "        return 0\n"
+                            ),
+                        }
+                    ],
+                }
+            ]
+        ),
+        project_dir=__import__("pathlib").Path("/tmp/project"),
+        rejection_reasons=[
+            "Plan uses append_file to add contextual Python control-flow "
+            "fragments that only make sense inside an existing block; use "
+            "context-aware replace_in_file or write_file with complete valid "
+            "file content instead (files: ['src/medium_cli/cli.py'])",
+            "unsafe_python_append_fragments: src/medium_cli/cli.py",
+        ],
+    )
+
+    assert "Unsafe Python append_file repair" in prompt
+    assert "Do not append indented `elif`" in prompt
+    assert "context-aware `replace_in_file`" in prompt
+    assert "`write_file` with complete valid file content" in prompt
+    assert "complete def/class/import/comment" in prompt
+
+
 def test_planning_repair_reasons_include_heredoc_and_inline_python_subcodes():
     reasons = _build_repair_rejection_reasons(
         ["Plan contains brittle heredoc-heavy or malformed commands"],

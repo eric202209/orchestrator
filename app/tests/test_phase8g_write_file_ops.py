@@ -571,6 +571,206 @@ def test_validate_plan_allows_parse_args_inside_main_function_without_project_di
     assert files == []
 
 
+def test_validate_plan_rejects_python_append_file_indented_elif_fragment(tmp_path):
+    (tmp_path / "src" / "medium_cli").mkdir(parents=True)
+    (tmp_path / "src" / "medium_cli" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src" / "medium_cli" / "cli.py").write_text(
+        "def main(command):\n"
+        "    if command == 'list':\n"
+        "        return 0\n"
+        "    return 2\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    raise SystemExit(main('list'))\n",
+        encoding="utf-8",
+    )
+
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Add summary branch",
+                "commands": ["python -m py_compile src/medium_cli/cli.py"],
+                "verification": "python -m py_compile src/medium_cli/cli.py",
+                "rollback": None,
+                "expected_files": ["src/medium_cli/cli.py"],
+                "ops": [
+                    {
+                        "op": "append_file",
+                        "path": "src/medium_cli/cli.py",
+                        "content": (
+                            "\n    elif command == 'summary':\n" "        return 0\n"
+                        ),
+                    }
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Add a summary command to the medium_cli CLI",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.accepted is False
+    assert verdict.details["unsafe_python_append_fragments"] == [
+        "src/medium_cli/cli.py"
+    ]
+    reasons = " ".join(verdict.reasons)
+    assert "contextual Python control-flow fragments" in reasons
+    assert "replace_in_file" in reasons
+    assert "write_file" in reasons
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "\nelse:\n    return 0\n",
+        "\n    except ValueError:\n        return 1\n",
+        "\n    finally:\n        cleanup()\n",
+        "\n    case 'summary':\n        return 0\n",
+    ],
+)
+def test_validate_plan_rejects_python_append_file_orphan_block_continuations(
+    tmp_path, content
+):
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Append branch",
+                "commands": ["python -m py_compile src/app.py"],
+                "verification": "python -m py_compile src/app.py",
+                "rollback": None,
+                "expected_files": ["src/app.py"],
+                "ops": [
+                    {
+                        "op": "append_file",
+                        "path": "src/app.py",
+                        "content": content,
+                    }
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Update app behavior",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.accepted is False
+    assert verdict.details["unsafe_python_append_fragments"] == ["src/app.py"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "\n    return result\n",
+        "\n    break\n",
+        "\n    continue\n",
+    ],
+)
+def test_validate_plan_rejects_python_append_file_indented_flow_exits(
+    tmp_path, content
+):
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Append control-flow exit",
+                "commands": ["python -m py_compile src/app.py"],
+                "verification": "python -m py_compile src/app.py",
+                "rollback": None,
+                "expected_files": ["src/app.py"],
+                "ops": [
+                    {
+                        "op": "append_file",
+                        "path": "src/app.py",
+                        "content": content,
+                    }
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Update app behavior",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.accepted is False
+    assert verdict.details["unsafe_python_append_fragments"] == ["src/app.py"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "\n\ndef summarize(items):\n    return len(items)\n",
+        "\n\nclass Summary:\n    pass\n",
+        "\n\nimport json\n",
+        "\n\n# Summary command notes\n",
+    ],
+)
+def test_validate_plan_allows_safe_top_level_python_append_file(tmp_path, content):
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Append safe top-level Python",
+                "commands": ["python -m py_compile src/app.py"],
+                "verification": "python -m py_compile src/app.py",
+                "rollback": None,
+                "expected_files": ["src/app.py"],
+                "ops": [
+                    {
+                        "op": "append_file",
+                        "path": "src/app.py",
+                        "content": content,
+                    }
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Update app behavior",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert "unsafe_python_append_fragments" not in verdict.details
+    assert not any(
+        "contextual Python control-flow fragments" in reason
+        for reason in verdict.reasons
+    )
+
+
+def test_validate_plan_allows_control_flow_append_to_text_files(tmp_path):
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Append release notes",
+                "commands": [
+                    "python -c \"from pathlib import Path; assert Path('notes.txt').exists()\""
+                ],
+                "verification": "python -c \"from pathlib import Path; assert Path('notes.txt').exists()\"",
+                "rollback": None,
+                "expected_files": ["notes.txt"],
+                "ops": [
+                    {
+                        "op": "append_file",
+                        "path": "notes.txt",
+                        "content": "\n    elif command == 'summary':\n        return 0\n",
+                    }
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Update release notes",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+    )
+
+    assert "unsafe_python_append_fragments" not in verdict.details
+
+
 def test_verification_plan_allows_expected_file_created_by_write_op(tmp_path):
     (tmp_path / "index.html").write_text(
         '<link rel="stylesheet" href="css/style.css">', encoding="utf-8"
