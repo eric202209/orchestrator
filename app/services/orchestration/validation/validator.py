@@ -334,6 +334,97 @@ class ValidatorService:
         }
 
     @classmethod
+    def _plan_python_source_syntax_issues(
+        cls,
+        plan: List[Dict[str, Any]],
+        project_dir: Optional[Path],
+    ) -> List[Dict[str, Any]]:
+        """Compile simulated Python file-op results without touching the workspace."""
+
+        root = Path(project_dir).resolve() if project_dir is not None else None
+        simulated_files: Dict[str, str] = {}
+        issues: List[Dict[str, Any]] = []
+        seen_issue_paths: set[str] = set()
+
+        def _read_current(relative_path: str) -> str:
+            if relative_path in simulated_files:
+                return simulated_files[relative_path]
+            if root is None:
+                return ""
+            candidate = (root / relative_path).resolve()
+            try:
+                if not candidate.is_relative_to(root) or not candidate.is_file():
+                    return ""
+            except ValueError:
+                return ""
+            try:
+                return candidate.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                return candidate.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                return ""
+
+        def _record_issue(relative_path: str, exc: SyntaxError) -> None:
+            if relative_path in seen_issue_paths:
+                return
+            seen_issue_paths.add(relative_path)
+            issues.append(
+                {
+                    "path": relative_path,
+                    "line": exc.lineno,
+                    "offset": exc.offset,
+                    "message": str(exc.msg or "invalid Python syntax"),
+                }
+            )
+
+        for step in plan:
+            for raw_operation in step.get("ops", []) or []:
+                if not isinstance(raw_operation, dict):
+                    continue
+                operation = normalize_file_op_shape(raw_operation)
+                op_name = str(operation.get("op") or "")
+                if op_name not in {"write_file", "append_file", "replace_in_file"}:
+                    continue
+                path_text = str(operation.get("path") or "").strip()
+                if not path_text or Path(path_text).suffix.lower() != ".py":
+                    continue
+                if root is not None:
+                    try:
+                        relative_path = normalize_path_reference(path_text, root)
+                    except TaskWorkspaceViolationError:
+                        continue
+                else:
+                    relative_path = path_text.rstrip("/").lstrip("./")
+                    if (
+                        not relative_path
+                        or Path(relative_path).is_absolute()
+                        or ".." in Path(relative_path).parts
+                    ):
+                        continue
+
+                current = _read_current(relative_path)
+                if op_name == "write_file":
+                    candidate_content = str(operation.get("content") or "")
+                elif op_name == "append_file":
+                    candidate_content = current + str(operation.get("content") or "")
+                else:
+                    old = operation.get("old")
+                    new = operation.get("new")
+                    if not isinstance(old, str) or not isinstance(new, str) or not old:
+                        continue
+                    if current.count(old) != 1:
+                        continue
+                    candidate_content = current.replace(old, new, 1)
+
+                simulated_files[relative_path] = candidate_content
+                try:
+                    compile(candidate_content, relative_path, "exec")
+                except SyntaxError as exc:
+                    _record_issue(relative_path, exc)
+
+        return issues
+
+    @classmethod
     def validate_reasoning_artifact(
         cls,
         artifact: Any,
@@ -3260,6 +3351,31 @@ class ValidatorService:
                 )
                 details["empty_replace_old_text_steps"] = empty_replace_old_text_steps
 
+            python_source_syntax_issues = cls._plan_python_source_syntax_issues(
+                plan,
+                Path(project_dir),
+            )
+            if python_source_syntax_issues:
+                files = [
+                    str(issue.get("path") or "(missing path)")
+                    for issue in python_source_syntax_issues
+                ]
+                first_issue = python_source_syntax_issues[0]
+                location = ""
+                if first_issue.get("line") is not None:
+                    location = f" line {first_issue.get('line')}"
+                    if first_issue.get("offset") is not None:
+                        location += f", offset {first_issue.get('offset')}"
+                repairable.append(
+                    "Plan writes Python source with invalid syntax "
+                    "(python_source_syntax_invalid; "
+                    f"{files[0]}{location}: {first_issue.get('message')}; "
+                    f"files: {files[:5]})"
+                )
+                details["python_source_syntax_invalid"] = python_source_syntax_issues[
+                    :20
+                ]
+
             static_site_off_root_mutations = cls._plan_static_site_off_root_mutations(
                 plan,
                 Path(project_dir),
@@ -3770,6 +3886,8 @@ class ValidatorService:
             semantic_violation_codes.append("empty_replace_old_text")
         if details.get("unsafe_python_append_fragments"):
             semantic_violation_codes.append("unsafe_python_append_fragment")
+        if details.get("python_source_syntax_invalid"):
+            semantic_violation_codes.append("python_source_syntax_invalid")
         if semantic_violation_codes:
             details["semantic_violation_codes"] = semantic_violation_codes
 

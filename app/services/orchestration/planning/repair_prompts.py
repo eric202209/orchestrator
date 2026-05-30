@@ -270,6 +270,9 @@ def build_planning_repair_prompt(
     unsafe_python_append_guidance = _build_unsafe_python_append_repair_guidance(
         rejection_reasons
     )
+    python_source_syntax_guidance = _build_python_source_syntax_repair_guidance(
+        rejection_reasons
+    )
     python_framework_guidance = _build_python_framework_repair_guidance(
         rejection_reasons
     )
@@ -283,6 +286,7 @@ def build_planning_repair_prompt(
         brittle_inline_python_guidance,
         empty_replace_old_text_guidance,
         unsafe_python_append_guidance,
+        python_source_syntax_guidance,
         python_framework_guidance,
         stale_replace_target_guidance,
     )
@@ -533,6 +537,26 @@ def _build_unsafe_python_append_repair_guidance(
     )
 
 
+def _build_python_source_syntax_repair_guidance(
+    rejection_reasons: Optional[list[str]],
+) -> str:
+    text = "\n".join(str(reason or "") for reason in (rejection_reasons or []))
+    lowered = text.lower()
+    if "python_source_syntax_invalid" not in lowered:
+        return ""
+
+    return "\n".join(
+        [
+            "Python source syntax repair:",
+            "- Use complete valid Python source content for any .py write_file, append_file, or replace_in_file result.",
+            "- Do not return partial Python fragments that only make sense inside an existing block.",
+            "- If generated code contains literal backslash-n text, fix the JSON string so file content decodes to real newline characters instead of leaving `\\n` inside Python syntax.",
+            "- Prefer ops.write_file with complete grounded file content when repairing broad syntax damage.",
+            "- Verify changed Python files with `python3 -m py_compile <file>` or the project pytest command.",
+        ]
+    )
+
+
 def _build_python_framework_repair_guidance(
     rejection_reasons: Optional[list[str]],
 ) -> str:
@@ -747,6 +771,9 @@ def build_compact_planning_repair_prompt(
     unsafe_python_append_guidance = _build_unsafe_python_append_repair_guidance(
         rejection_reasons
     )
+    python_source_syntax_guidance = _build_python_source_syntax_repair_guidance(
+        rejection_reasons
+    )
     python_framework_guidance = _build_python_framework_repair_guidance(
         rejection_reasons
     )
@@ -755,6 +782,7 @@ def build_compact_planning_repair_prompt(
         brittle_inline_python_guidance,
         empty_replace_old_text_guidance,
         unsafe_python_append_guidance,
+        python_source_syntax_guidance,
         python_framework_guidance,
     )
     prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
