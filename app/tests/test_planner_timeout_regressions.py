@@ -34,6 +34,10 @@ from app.services.orchestration.planning.planner import (
     PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS,
     PLANNING_REPAIR_PROMPT_MAX_CHARS,
 )
+from app.services.orchestration.planning.source_materialization import (
+    plan_has_concrete_source_materialization as _plan_has_concrete_source_materialization,
+    repair_context_requires_source_materialization as _repair_context_requires_source_materialization,
+)
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.orchestration.validation.parsing import extract_structured_text
@@ -3015,6 +3019,23 @@ def test_undefined_python_test_repair_reasons_preserve_existing_tests():
     assert "tests/test_cli_uppercase.py" in rendered
 
 
+def test_undefined_python_decorator_repair_reasons_preserve_framework():
+    reasons = _build_repair_rejection_reasons(
+        ["Plan writes Python decorators whose root name is undefined"],
+        {
+            "undefined_python_decorator_materializations": ["src/medium_cli/cli.py"],
+        },
+    )
+
+    rendered = "\n".join(reasons)
+    assert "framework_mismatch" in rendered
+    assert "Preserve the framework already present" in rendered
+    assert "argparse CLIs" in rendered
+    assert "parser/build_parser/main flow" in rendered
+    assert "@app.command" in rendered
+    assert "src/medium_cli/cli.py" in rendered
+
+
 def test_planning_repair_prompt_existing_tests_contract_removes_test_ops(tmp_path):
     (tmp_path / "src" / "small_cli").mkdir(parents=True)
     (tmp_path / "tests").mkdir()
@@ -3073,6 +3094,73 @@ def test_planning_repair_prompt_existing_tests_contract_removes_test_ops(tmp_pat
     assert "undefined helper names" in prompt
     assert "main(['--uppercase', 'hello']) == 0" in prompt
     assert "capsys.readouterr().out.strip() == 'HELLO'" in prompt
+
+
+def test_planning_repair_prompt_preserves_argparse_for_undefined_decorator(
+    tmp_path,
+):
+    (tmp_path / "src" / "medium_cli").mkdir(parents=True)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "medium_cli" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src" / "medium_cli" / "cli.py").write_text(
+        "import argparse\n"
+        "\n"
+        "def build_parser():\n"
+        "    parser = argparse.ArgumentParser()\n"
+        "    return parser\n"
+        "\n"
+        "def main(argv=None):\n"
+        "    parser = build_parser()\n"
+        "    parser.parse_args(argv)\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_cli.py").write_text(
+        "from medium_cli.cli import build_parser, main\n"
+        "\n"
+        "def test_summary_command_runs():\n"
+        "    parser = build_parser()\n"
+        "    assert parser is not None\n"
+        "    assert main(['summary']) == 0\n",
+        encoding="utf-8",
+    )
+
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Add a summary command to this Python CLI.",
+        malformed_output=json.dumps(
+            [
+                {
+                    "step_number": 2,
+                    "description": "Implement summary command",
+                    "commands": [],
+                    "verification": "python -m pytest",
+                    "rollback": None,
+                    "expected_files": ["src/medium_cli/cli.py"],
+                    "ops": [
+                        {
+                            "write_file": {
+                                "path": "src/medium_cli/cli.py",
+                                "content": "import typer\n\napp = typer.Typer()\n\n@app.command()\ndef summary():\n    pass\n",
+                            }
+                        }
+                    ],
+                }
+            ]
+        ),
+        project_dir=tmp_path,
+        rejection_reasons=[
+            "Plan writes Python decorators whose root name is undefined",
+            "framework_mismatch: offending source file(s): ['src/medium_cli/cli.py']",
+        ],
+    )
+
+    assert "Python framework-aware repair:" in prompt
+    assert "preserve the framework already in use" in prompt
+    assert "For argparse CLIs" in prompt
+    assert "do not introduce Typer/Click/FastAPI/Django decorator patterns" in prompt
+    assert "`@app.command`" in prompt
+    assert "parser/build_parser/main flow" in prompt
+    assert "src/medium_cli/cli.py" in prompt
 
 
 def test_planning_repair_prompt_allows_explicit_test_change_request(tmp_path):
@@ -6686,6 +6774,147 @@ def test_post_repair_missing_verification_second_repair_is_capped(
         "status": "failed",
         "reason": "planning_validation_failed_after_repair",
     }
+
+
+def test_post_repair_missing_materialization_rejects_inspect_only_plan(
+    tmp_path, monkeypatch
+):
+    initial_plan = [
+        {
+            "step_number": 1,
+            "description": "Inspect CLI",
+            "commands": ["rg summary src/medium_cli tests"],
+            "verification": 'python3 -c "import sys; sys.exit(0)"',
+            "rollback": None,
+            "expected_files": [],
+        }
+    ]
+    repaired_plan = [
+        {
+            "step_number": 1,
+            "description": "Inspect CLI",
+            "commands": ["rg summary src/medium_cli tests"],
+            "verification": 'python3 -c "import sys; sys.exit(0)"',
+            "rollback": None,
+            "expected_files": [],
+        },
+        {
+            "step_number": 2,
+            "description": "Run tests",
+            "commands": ["python3 -m pytest -q"],
+            "verification": "python3 -m pytest -q",
+            "rollback": None,
+            "expected_files": [],
+        },
+    ]
+
+    (tmp_path / "src" / "medium_cli").mkdir(parents=True)
+    (tmp_path / "src" / "medium_cli" / "__init__.py").write_text("", encoding="utf-8")
+
+    orchestration_state = MagicMock()
+    orchestration_state.project_dir = tmp_path
+    orchestration_state.project_context = ""
+    orchestration_state.plan = []
+    orchestration_state.current_step_index = 0
+    orchestration_state.reasoning_artifact = None
+
+    class Runtime:
+        def get_backend_metadata(self):
+            return {}
+
+        async def execute_task(self, *args, **kwargs):
+            return {"status": "completed", "output": json.dumps(initial_plan)}
+
+    task = MagicMock()
+    task.title = "Add summary command"
+    task.description = "Add a summary command to the Python CLI"
+    session = MagicMock()
+    session.status = "running"
+    session.is_active = True
+    session_task_link = MagicMock()
+
+    ctx = OrchestrationRunContext(
+        db=MagicMock(),
+        session=session,
+        project=MagicMock(),
+        task=task,
+        session_task_link=session_task_link,
+        session_id=69,
+        task_id=18,
+        prompt="Add a summary command to the Python CLI",
+        timeout_seconds=300,
+        execution_profile="implementation",
+        validation_profile="standard",
+        runs_in_canonical_baseline=False,
+        orchestration_state=orchestration_state,
+        runtime_service=Runtime(),
+        task_service=MagicMock(),
+        logger=logging.getLogger("test.post_repair_missing_materialization_guard"),
+        emit_live=lambda *args, **kwargs: None,
+        error_handler=MagicMock(),
+    )
+    ctx.error_handler.attempt_json_parsing = lambda output, **kwargs: (
+        True,
+        json.loads(output),
+        "json",
+    )
+
+    _patch_planning_flow_external_writes(monkeypatch)
+    monkeypatch.setattr(
+        PlannerService,
+        "should_start_with_minimal_prompt",
+        staticmethod(lambda *args, **kwargs: False),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "find_immediate_repair_step_issues",
+        staticmethod(lambda *args, **kwargs: {}),
+    )
+    monkeypatch.setattr(
+        PlannerService,
+        "repair_output",
+        classmethod(lambda cls, *args, **kwargs: {"output": json.dumps(repaired_plan)}),
+    )
+
+    validate_calls = []
+
+    def validate_plan(*args, **kwargs):
+        validate_calls.append(args)
+        return type(
+            "Verdict",
+            (),
+            {
+                "accepted": False,
+                "warning": False,
+                "status": "rejected",
+                "reasons": [
+                    "Implementation task plan does not materialize any source changes"
+                ],
+                "details": {
+                    "missing_materialization_for_implementation": True,
+                    "semantic_violation_codes": ["missing_source_materialization"],
+                },
+                "verdict": {"status": "rejected"},
+            },
+        )()
+
+    monkeypatch.setattr(ValidatorService, "validate_plan", staticmethod(validate_plan))
+
+    result = execute_planning_phase(
+        ctx=ctx,
+        workspace_review={"has_existing_files": True},
+        extract_structured_text=extract_structured_text,
+        extract_plan_steps=lambda value: value if isinstance(value, list) else None,
+        looks_like_truncated_multistep_plan=lambda text, plan: False,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: args[3],
+        workspace_violation_error_cls=RuntimeError,
+    )
+
+    assert result == {
+        "status": "failed",
+        "reason": "planning_repair_missing_source_materialization",
+    }
+    assert len(validate_calls) == 1
     assert task.status == TaskStatus.FAILED
     assert session_task_link.status == TaskStatus.FAILED
     assert session.status == "paused"
@@ -7457,6 +7686,122 @@ def test_no_materialization_repair_prompt_requires_grounded_source_edits(tmp_pat
         "Prefer concrete ops for src/ files named by the test/source context" in prompt
     )
     assert "src/medium_cli/cli.py" in prompt
+    assert "must include at least one concrete source edit operation" in prompt
+    assert "Do not return inspect-only, verification-only, or test-only plans" in prompt
+    assert "Do not fix implementation tasks by editing only tests" in prompt
+
+
+def test_missing_materialization_context_requires_source_repair_only_for_implementation():
+    assert _repair_context_requires_source_materialization(
+        execution_profile="implementation",
+        reason="plan_validation_failed",
+        rejection_reasons=[
+            "Implementation task plan does not materialize any source changes"
+        ],
+    )
+    assert not _repair_context_requires_source_materialization(
+        execution_profile="read_only",
+        reason="plan_validation_failed",
+        rejection_reasons=[
+            "Implementation task plan does not materialize any source changes"
+        ],
+    )
+
+
+def test_concrete_source_materialization_guard_rejects_test_only_ops(tmp_path):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Rewrite tests only",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "tests/test_summary.py",
+                    "content": "def test_summary():\n    assert True\n",
+                }
+            ],
+            "verification": "python3 -m pytest -q",
+            "rollback": None,
+            "expected_files": ["tests/test_summary.py"],
+        }
+    ]
+
+    assert not _plan_has_concrete_source_materialization(plan, tmp_path)
+
+
+def test_concrete_source_materialization_guard_accepts_source_write_file(tmp_path):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Edit source",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/medium_cli/cli.py",
+                    "content": "def main(argv=None):\n    return 0\n",
+                }
+            ],
+            "verification": "python3 -m pytest -q",
+            "rollback": None,
+            "expected_files": ["src/medium_cli/cli.py"],
+        }
+    ]
+
+    assert _plan_has_concrete_source_materialization(plan, tmp_path)
+
+
+def test_concrete_source_materialization_guard_accepts_source_replace_in_file(
+    tmp_path,
+):
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Patch source",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "src/medium_cli/cli.py",
+                    "old": "return 0",
+                    "new": "return 1",
+                }
+            ],
+            "verification": "python3 -m pytest -q",
+            "rollback": None,
+            "expected_files": ["src/medium_cli/cli.py"],
+        }
+    ]
+
+    assert _plan_has_concrete_source_materialization(plan, tmp_path)
+
+
+def test_concrete_source_materialization_guard_accepts_project_package_source(
+    tmp_path,
+):
+    (tmp_path / "medium_cli").mkdir()
+    (tmp_path / "medium_cli" / "__init__.py").write_text("", encoding="utf-8")
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Patch package source",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "medium_cli/cli.py",
+                    "old": "return 0",
+                    "new": "return 1",
+                }
+            ],
+            "verification": "python3 -m pytest -q",
+            "rollback": None,
+            "expected_files": ["medium_cli/cli.py"],
+        }
+    ]
+
+    assert _plan_has_concrete_source_materialization(plan, tmp_path)
 
 
 def test_no_materialization_repair_rejects_new_package_root_when_tests_import_existing(
@@ -7766,6 +8111,34 @@ def test_unrelated_repair_prompt_omits_brittle_inline_python_guidance(tmp_path):
     assert "Brittle inline Python command repair:" not in prompt
     assert "Preserve existing source ops exactly" not in prompt
     assert "python3 -m py_compile <changed source file>" not in prompt
+
+
+def test_repair_prompt_includes_brittle_command_guidance_for_heredoc(tmp_path):
+    prompt = PlannerService.build_planning_repair_prompt(
+        "Add a summary command to the Python CLI.",
+        malformed_output=json.dumps(
+            [
+                {
+                    "step_number": 2,
+                    "description": "Rewrite CLI with heredoc",
+                    "commands": ["cat > src/medium_cli/cli.py <<'PY'\n...\nPY"],
+                    "verification": "python -m pytest -q",
+                    "rollback": None,
+                    "expected_files": ["src/medium_cli/cli.py"],
+                }
+            ]
+        ),
+        project_dir=tmp_path,
+        rejection_reasons=[
+            "Plan contains brittle heredoc-heavy or malformed commands",
+            "Step [2]: invalid heredoc shape (disallowed_heredoc_shape). No heredoc.",
+        ],
+    )
+
+    assert "Brittle inline Python command repair:" in prompt
+    assert "Do not use heredocs or multiline shell-generated file bodies" in prompt
+    assert "ops.write_file or ops.replace_in_file" in prompt
+    assert "Keep commands short, single-purpose" in prompt
 
 
 def test_repair_prompt_includes_injected_truncated_multistep_subcodes():

@@ -27,6 +27,7 @@ from app.services.orchestration.diagnostics.debug_feedback import (
     build_bounded_debug_repair_prompt,
     build_debug_feedback_envelope,
     normalize_bounded_debug_repair_payload_detailed,
+    normalize_diff_scoped_compliance_retry_command_list,
     persist_debug_feedback_envelope,
 )
 from app.services.orchestration.diagnostics.diff_capsule import (
@@ -36,6 +37,11 @@ from app.services.orchestration.diagnostics.diff_capsule import (
 )
 from app.services.orchestration.diagnostics.evidence_capsule import (
     collect_workspace_evidence,
+)
+from app.services.orchestration.diagnostics.public_api_guard import (
+    DEBUG_REPAIR_PUBLIC_API_REMOVED_REASON,
+    detect_debug_repair_public_api_removal,
+    public_api_removal_event_details,
 )
 from app.services.orchestration.execution import ExecutorService
 from app.services.orchestration.execution.execution_flow import (
@@ -2090,20 +2096,36 @@ def execute_step_loop(
                         )
                     except Exception:
                         pass
-                normalization_result = (
-                    normalize_bounded_debug_repair_payload_detailed(
-                        parsed_repair,
-                        envelope=debug_feedback_envelope,
-                        source_edit_context=(
-                            is_bounded_debug_repair_mode(debug_prompt_mode)
-                            and _bounded_debug_repair_source_edit_context(
-                                step, debug_feedback_envelope
-                            )
-                        ),
-                    )
-                    if success
-                    else None
+                source_edit_context = is_bounded_debug_repair_mode(
+                    debug_prompt_mode
+                ) and _bounded_debug_repair_source_edit_context(
+                    step, debug_feedback_envelope
                 )
+                diff_scoped_compliance_retry = (
+                    compliance_retry_attempted
+                    and is_diff_scoped_debug_repair_mode(debug_prompt_mode)
+                )
+                if diff_scoped_compliance_retry:
+                    normalization_result = (
+                        normalize_diff_scoped_compliance_retry_command_list(
+                            final_repair_output,
+                            parsed_data=parsed_repair if success else None,
+                            envelope=debug_feedback_envelope,
+                            source_edit_context=source_edit_context,
+                        )
+                    )
+                    if normalization_result.payload is not None:
+                        success = True
+                else:
+                    normalization_result = (
+                        normalize_bounded_debug_repair_payload_detailed(
+                            parsed_repair,
+                            envelope=debug_feedback_envelope,
+                            source_edit_context=source_edit_context,
+                        )
+                        if success
+                        else None
+                    )
                 debug_data = (
                     normalization_result.payload if normalization_result else None
                 )
@@ -2722,6 +2744,83 @@ def execute_step_loop(
                     restore_workspace_snapshot_if_needed(reason)
                     write_project_state_snapshot_fn(db, project, task, session_id)
                     return {"status": "failed", "reason": reason}
+                if fix_type == "ops_fix":
+                    public_api_removals = detect_debug_repair_public_api_removal(
+                        project_dir=Path(orchestration_state.project_dir),
+                        ops=debug_data.get("ops"),
+                    )
+                    if public_api_removals:
+                        reason = DEBUG_REPAIR_PUBLIC_API_REMOVED_REASON
+                        removal_details = public_api_removal_event_details(
+                            public_api_removals
+                        )
+                        logger.warning(
+                            "[ORCHESTRATION] Rejecting debug repair that removes public API symbols before retrying step %s",
+                            step_index + 1,
+                        )
+                        emit_live(
+                            "ERROR",
+                            "[ORCHESTRATION] Debug repair removed public API symbols required by tests; stopping instead of corrupting the workspace",
+                            metadata={
+                                "phase": "debugging",
+                                "step_index": step_index + 1,
+                                "reason": reason,
+                                "fix_type": fix_type,
+                                **removal_details,
+                            },
+                        )
+                        orchestration_state.status = OrchestrationStatus.ABORTED
+                        orchestration_state.abort_reason = (
+                            "Debug repair removed public API symbols required by tests"
+                        )
+                        mark_task_attempt_failed(
+                            task=task,
+                            session_task_link=session_task_link,
+                            task_execution=_get_task_execution(db, task_execution_id),
+                            error_message=orchestration_state.abort_reason,
+                            completed_at=datetime.now(timezone.utc),
+                        )
+                        db.commit()
+                        try:
+                            phase_finished_event = append_orchestration_event(
+                                project_dir=orchestration_state.project_dir,
+                                session_id=session_id,
+                                task_id=task_id,
+                                event_type=EventType.REPAIR_REJECTED,
+                                parent_event_id=(debugging_phase_event or {}).get(
+                                    "event_id"
+                                ),
+                                details={
+                                    "phase": "execution",
+                                    "status": "repair_rejected",
+                                    "step_index": step_index + 1,
+                                    "reason": reason,
+                                    "debug_repair_terminal_reason": reason,
+                                    "debug_repair_attempted": True,
+                                    "debug_repair_used": True,
+                                    "debug_failure_class": (
+                                        debug_feedback_envelope.failure_class
+                                        if debug_feedback_envelope
+                                        else None
+                                    ),
+                                    "task_execution_id": task_execution_id,
+                                    "fix_type": fix_type,
+                                    **removal_details,
+                                },
+                            )
+                            write_orchestration_state_snapshot(
+                                project_dir=orchestration_state.project_dir,
+                                session_id=session_id,
+                                task_id=task_id,
+                                orchestration_state=orchestration_state,
+                                trigger="repair_rejected",
+                                related_event_id=phase_finished_event.get("event_id"),
+                            )
+                        except Exception:
+                            pass
+                        restore_workspace_snapshot_if_needed(reason)
+                        write_project_state_snapshot_fn(db, project, task, session_id)
+                        return {"status": "failed", "reason": reason}
                 structured_ops_present = isinstance(step.get("ops"), list) and bool(
                     step.get("ops")
                 )

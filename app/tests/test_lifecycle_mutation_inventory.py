@@ -111,7 +111,7 @@ EXPECTED_TASK_ATTEMPT_CALLS = {
     },
     "app/services/orchestration/phases/execution_loop.py": {
         "mark_task_attempt_cancelled": 1,
-        "mark_task_attempt_failed": 12,
+        "mark_task_attempt_failed": 13,
     },
     "app/services/orchestration/lifecycle/completion.py": {
         "mark_task_attempt_pending": 2,

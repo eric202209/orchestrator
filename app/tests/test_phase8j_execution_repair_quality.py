@@ -19,9 +19,153 @@ from app.services.orchestration.diagnostics.debug_feedback import (
     normalize_bounded_debug_repair_payload,
     normalize_bounded_debug_repair_payload_detailed,
 )
+from app.services.orchestration.diagnostics.public_api_guard import (
+    detect_debug_repair_public_api_removal,
+)
 from app.services.prompt_templates import PromptTemplates
 
 # --- typed command-fix validation ---
+
+
+def _write_public_api_fixture(tmp_path):
+    src_dir = tmp_path / "src" / "medium_cli"
+    tests_dir = tmp_path / "tests"
+    src_dir.mkdir(parents=True)
+    tests_dir.mkdir()
+    (src_dir / "__init__.py").write_text("", encoding="utf-8")
+    return src_dir, tests_dir
+
+
+def test_public_api_guard_rejects_cli_rewrite_removing_build_parser(tmp_path):
+    src_dir, tests_dir = _write_public_api_fixture(tmp_path)
+    (src_dir / "cli.py").write_text(
+        "def build_parser():\n"
+        "    return object()\n"
+        "\n"
+        "def build_store():\n"
+        "    return object()\n"
+        "\n"
+        "def main(argv=None):\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+    (tests_dir / "test_cli.py").write_text(
+        "from medium_cli.cli import build_parser, main\n",
+        encoding="utf-8",
+    )
+
+    removals = detect_debug_repair_public_api_removal(
+        project_dir=tmp_path,
+        ops=[
+            {
+                "op": "write_file",
+                "path": "src/medium_cli/cli.py",
+                "content": "def main(args):\n    return 0\n",
+            }
+        ],
+    )
+
+    assert len(removals) == 1
+    assert removals[0].path == "src/medium_cli/cli.py"
+    assert removals[0].module == "medium_cli.cli"
+    assert removals[0].removed_symbols == ["build_parser"]
+
+
+def test_public_api_guard_rejects_store_rewrite_removing_task(tmp_path):
+    src_dir, tests_dir = _write_public_api_fixture(tmp_path)
+    (src_dir / "store.py").write_text(
+        "class Task:\n" "    pass\n" "\n" "class TaskStore:\n" "    pass\n",
+        encoding="utf-8",
+    )
+    (tests_dir / "test_summary.py").write_text(
+        "from medium_cli.store import Task\n",
+        encoding="utf-8",
+    )
+
+    removals = detect_debug_repair_public_api_removal(
+        project_dir=tmp_path,
+        ops=[
+            {
+                "op": "write_file",
+                "path": "src/medium_cli/store.py",
+                "content": "class TaskStore:\n    pass\n",
+            }
+        ],
+    )
+
+    assert len(removals) == 1
+    assert removals[0].removed_symbols == ["Task"]
+
+
+def test_public_api_guard_allows_full_rewrite_preserving_imported_symbols(tmp_path):
+    src_dir, tests_dir = _write_public_api_fixture(tmp_path)
+    (src_dir / "cli.py").write_text(
+        "def build_parser():\n    return object()\n"
+        "def main(argv=None):\n    return 0\n",
+        encoding="utf-8",
+    )
+    (tests_dir / "test_cli.py").write_text(
+        "from medium_cli.cli import build_parser, main\n",
+        encoding="utf-8",
+    )
+
+    removals = detect_debug_repair_public_api_removal(
+        project_dir=tmp_path,
+        ops=[
+            {
+                "op": "write_file",
+                "path": "src/medium_cli/cli.py",
+                "content": (
+                    "def build_parser():\n    return object()\n"
+                    "def main(argv=None):\n    return 0\n"
+                    "def summary():\n    return None\n"
+                ),
+            }
+        ],
+    )
+
+    assert removals == []
+
+
+def test_public_api_guard_allows_removing_unused_public_symbol(tmp_path):
+    src_dir, tests_dir = _write_public_api_fixture(tmp_path)
+    (src_dir / "cli.py").write_text(
+        "def build_parser():\n    return object()\n"
+        "def unused_helper():\n    return None\n",
+        encoding="utf-8",
+    )
+    (tests_dir / "test_cli.py").write_text(
+        "from medium_cli.cli import build_parser\n",
+        encoding="utf-8",
+    )
+
+    removals = detect_debug_repair_public_api_removal(
+        project_dir=tmp_path,
+        ops=[
+            {
+                "op": "write_file",
+                "path": "src/medium_cli/cli.py",
+                "content": "def build_parser():\n    return object()\n",
+            }
+        ],
+    )
+
+    assert removals == []
+
+
+def test_public_api_guard_ignores_command_fix_without_source_ops(tmp_path):
+    _src_dir, tests_dir = _write_public_api_fixture(tmp_path)
+    tests_dir.joinpath("test_cli.py").write_text(
+        "from medium_cli.cli import build_parser\n",
+        encoding="utf-8",
+    )
+
+    removals = detect_debug_repair_public_api_removal(
+        project_dir=tmp_path,
+        ops=[],
+    )
+
+    assert removals == []
 
 
 @pytest.mark.parametrize(
@@ -229,6 +373,45 @@ def test_source_edit_context_accepts_structured_ops_fix():
     assert result is not None
     assert result["fix_type"] == "ops_fix"
     assert result["ops"][0]["path"] == "src/small_cli/cli.py"
+
+
+def test_explicit_ops_fix_accepts_source_ops_without_command():
+    envelope = DebugFeedbackEnvelope(
+        task_execution_id=1,
+        task_id=1,
+        step_index=0,
+        failure_phase="execution",
+        failed_command="python -m pytest -q",
+        return_code=2,
+        workspace_path=".",
+        failure_class="import_error",
+    )
+    payload = [
+        {
+            "repair_type": "ops_fix",
+            "verification_command": "python -m pytest -q",
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/small_cli/cli.py",
+                    "content": "def main(argv=None):\n    return 0\n",
+                }
+            ],
+        }
+    ]
+
+    result = normalize_bounded_debug_repair_payload_detailed(
+        payload,
+        envelope=envelope,
+        source_edit_context=False,
+    )
+
+    assert result.payload is not None
+    assert result.payload["fix_type"] == "ops_fix"
+    assert result.payload["fix"] == ""
+    assert result.payload["verification"] == "python -m pytest -q"
+    assert result.payload["ops"][0]["path"] == "src/small_cli/cli.py"
+    assert result.rejection_reason is None
 
 
 def test_source_edit_context_accepts_wrapped_structured_ops_fix():

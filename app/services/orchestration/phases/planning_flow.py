@@ -27,6 +27,10 @@ from app.services.orchestration.planning.planner import (
     PlanningRepairBudgetExceeded,
     PlanningRepairOutputContractViolation,
 )
+from app.services.orchestration.planning.source_materialization import (
+    repair_context_requires_source_materialization as _repair_context_requires_source_materialization,
+    repair_removed_source_materialization as _repair_removed_source_materialization,
+)
 from app.services.orchestration.planning.normalization import (
     normalize_existing_file_target_plan,
     normalize_stale_replace_ops_to_small_file_writes,
@@ -61,51 +65,6 @@ from app.services.orchestration.phases.planning_knowledge import (
 from app.services.orchestration.phases.read_only_fallbacks import (
     _read_only_stage_fallback_plan,
 )
-
-_SOURCE_MATERIALIZATION_EXTENSIONS = ".py .js .jsx .ts .tsx .css .html .md".split()
-
-
-def _plan_source_materialization_paths(plan: Any) -> set[str]:
-    """Return concrete source-like file write targets from a plan."""
-
-    if not isinstance(plan, list):
-        return set()
-
-    paths: set[str] = set()
-    for step in plan:
-        if not isinstance(step, dict):
-            continue
-        for operation in step.get("ops") or []:
-            if not isinstance(operation, dict):
-                continue
-            if str(operation.get("op") or "") not in {
-                "write_file",
-                "append_file",
-                "replace_in_file",
-            }:
-                continue
-            path_text = (
-                str(operation.get("path") or "").strip().rstrip("/").lstrip("./")
-            )
-            if not path_text:
-                continue
-            path = Path(path_text)
-            if path.suffix.lower() not in _SOURCE_MATERIALIZATION_EXTENSIONS:
-                continue
-            paths.add(path.as_posix())
-    return paths
-
-
-def _repair_removed_source_materialization(
-    previous_plan: Any, repaired_plan: Any
-) -> list[str]:
-    previous_source_paths = _plan_source_materialization_paths(previous_plan)
-    if not previous_source_paths:
-        return []
-    repaired_source_paths = _plan_source_materialization_paths(repaired_plan)
-    if repaired_source_paths:
-        return []
-    return sorted(previous_source_paths)
 
 
 def _split_repaired_single_step_full_lifecycle_plan(
@@ -285,6 +244,7 @@ from app.services.orchestration.phases.planning_support import (
     MAX_PLANNING_RETRIES,
     TRUNCATED_PLAN_REPAIR_REJECTION_REASON,
     _PlanningRetryState,
+    _abort_missing_source_materialization_repair,
     _abort_repeated_physical_src_import_repair,
     _build_reasoning_artifact,
     _build_repair_rejection_reasons,
@@ -1428,6 +1388,13 @@ def execute_planning_phase(
                     retry_state.consecutive_failures += 1
                     continue
                 raise
+            materialization_result = _abort_missing_source_materialization_repair(
+                ctx=ctx,
+                retry_state=retry_state,
+                output_text=output_text,
+            )
+            if materialization_result:
+                return materialization_result
             immediate_repair_issues = PlannerService.find_immediate_repair_step_issues(
                 ctx.orchestration_state.plan,
                 project_dir=ctx.orchestration_state.project_dir,
@@ -1543,6 +1510,7 @@ def execute_planning_phase(
                 )
                 planning_result = __repair_planning_output(
                     ctx=ctx,
+                    retry_state=retry_state,
                     planning_timeout_seconds=planning_timeout_seconds,
                     malformed_output=output_text,
                     reason="plan_contains_immediate_repair_issues: "
@@ -1636,6 +1604,7 @@ def execute_planning_phase(
                     retry_state.last_repair_reason = second_repair_reason.event_reason
                     planning_result = __repair_planning_output(
                         ctx=ctx,
+                        retry_state=retry_state,
                         planning_timeout_seconds=planning_timeout_seconds,
                         malformed_output=output_text,
                         reason=f"{second_repair_reason.retry_reason}: "
@@ -1908,16 +1877,18 @@ def execute_planning_phase(
                         ctx, validation_knowledge_ctx, used_in_prompt=True
                     )
                 retry_state.last_repair_reason = "plan_validation_failed"
+                repair_rejection_reasons = _build_repair_rejection_reasons(
+                    plan_verdict.reasons,
+                    plan_verdict.details,
+                )
                 planning_result = __repair_planning_output(
                     ctx=ctx,
+                    retry_state=retry_state,
                     planning_timeout_seconds=planning_timeout_seconds,
                     malformed_output=output_text,
                     reason="plan_validation_failed: "
                     + "; ".join(plan_verdict.reasons[:3]),
-                    rejection_reasons=_build_repair_rejection_reasons(
-                        plan_verdict.reasons,
-                        plan_verdict.details,
-                    ),
+                    rejection_reasons=repair_rejection_reasons,
                     prompt_profile=prompt_profile,
                     knowledge_context=(
                         validation_knowledge_ctx
@@ -2008,6 +1979,7 @@ def execute_planning_phase(
                     retry_state.last_repair_reason = second_repair_reason.event_reason
                     planning_result = __repair_planning_output(
                         ctx=ctx,
+                        retry_state=retry_state,
                         planning_timeout_seconds=planning_timeout_seconds,
                         malformed_output=output_text,
                         reason=f"{second_repair_reason.retry_reason}: "
@@ -2501,6 +2473,7 @@ def __retry_with_minimal_prompt(
 def __repair_planning_output(
     *,
     ctx: OrchestrationRunContext,
+    retry_state: _PlanningRetryState | None = None,
     planning_timeout_seconds: int,
     malformed_output: str,
     reason: str,
@@ -2508,6 +2481,12 @@ def __repair_planning_output(
     prompt_profile: str = "default",
     knowledge_context: KnowledgeContext | None = None,
 ) -> Dict[str, Any]:
+    if retry_state and _repair_context_requires_source_materialization(
+        execution_profile=ctx.execution_profile,
+        reason=reason,
+        rejection_reasons=rejection_reasons,
+    ):
+        retry_state.source_materialization_required_after_repair = True
     return PlannerService.repair_output(
         runtime_service=ctx.runtime_service,
         task_description=ctx.prompt,

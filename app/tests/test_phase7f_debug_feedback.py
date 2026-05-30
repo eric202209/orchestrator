@@ -21,6 +21,7 @@ from app.services.orchestration.diagnostics.debug_feedback import (
     classify_debug_failure,
     normalize_bounded_debug_repair_payload,
     normalize_bounded_debug_repair_payload_detailed,
+    normalize_diff_scoped_compliance_retry_command_list,
     persist_debug_feedback_envelope,
 )
 from app.services.orchestration.diagnostics.diff_capsule import build_diff_capsule
@@ -954,6 +955,126 @@ def test_bounded_debug_repair_payload_requires_single_json_array():
     }
     assert normalize_bounded_debug_repair_payload({"command": "echo bad"}) is None
     assert normalize_bounded_debug_repair_payload([{"command": "echo bad"}]) is None
+
+
+def test_diff_scoped_compliance_retry_accepts_command_list_shape():
+    result = normalize_diff_scoped_compliance_retry_command_list(
+        json.dumps(
+            [
+                {
+                    "title": "Run focused verifier",
+                    "command": "python3 -m pytest -q",
+                    "verification_command": "python3 -m pytest -q",
+                }
+            ]
+        ),
+        source_edit_context=True,
+    )
+
+    assert result.rejection_reason is None
+    assert result.payload["fix_type"] == "command_fix"
+    assert result.payload["fix"] == "python3 -m pytest -q"
+    assert result.payload["verification"] == "python3 -m pytest -q"
+
+
+def test_diff_scoped_compliance_retry_list_fallback_handles_json_looking_output():
+    raw_output = """
+[
+  {
+    "title": "Run focused verifier",
+    "command": "python3 -m pytest -q -k "ok"",
+    "verification_command": "python3 -m pytest -q -k "ok""
+  }
+]
+"""
+
+    result = normalize_diff_scoped_compliance_retry_command_list(
+        raw_output,
+        source_edit_context=True,
+    )
+
+    assert result.rejection_reason is None
+    assert result.payload["fix_type"] == "command_fix"
+    assert result.payload["fix"] == 'python3 -m pytest -q -k "ok"'
+    assert result.payload["verification"] == 'python3 -m pytest -q -k "ok"'
+
+
+def test_phase7f_normalizer_keeps_multi_command_list_shape_rejected():
+    parsed = [
+        {
+            "title": "Run first verifier",
+            "command": "python3 -m pytest -q",
+            "verification_command": "python3 -m pytest -q",
+        },
+        {
+            "title": "Run second verifier",
+            "command": "python3 -m pytest -q",
+            "verification_command": "python3 -m pytest -q",
+        },
+    ]
+
+    result = normalize_bounded_debug_repair_payload_detailed(parsed)
+
+    assert result.payload is None
+    assert result.rejection_reason == "unsupported_shape"
+
+
+def test_diff_scoped_compliance_retry_requires_command_and_verification():
+    missing_command = normalize_diff_scoped_compliance_retry_command_list(
+        json.dumps(
+            [
+                {
+                    "title": "Missing command",
+                    "verification_command": "python3 -m pytest -q",
+                }
+            ]
+        )
+    )
+    missing_verification = normalize_diff_scoped_compliance_retry_command_list(
+        json.dumps(
+            [
+                {
+                    "title": "Missing verifier",
+                    "command": "python3 -m pytest -q",
+                }
+            ]
+        )
+    )
+
+    assert missing_command.payload is None
+    assert missing_command.rejection_reason == "missing_command"
+    assert missing_verification.payload is None
+    assert missing_verification.rejection_reason == "missing_verification_command"
+
+
+def test_diff_scoped_compliance_retry_preserves_source_context_command_safety(tmp_path):
+    envelope = build_debug_feedback_envelope(
+        task_execution_id=123,
+        task_id=45,
+        step_index=1,
+        failure_phase="execution",
+        failed_command="python3 -m pytest -q",
+        stderr="SyntaxError: unterminated triple-quoted string literal",
+        changed_files=["src/medium_cli/cli.py"],
+        workspace_path=tmp_path,
+    )
+
+    result = normalize_diff_scoped_compliance_retry_command_list(
+        json.dumps(
+            [
+                {
+                    "title": "Patch source with shell",
+                    "command": "sed -i 's/bad/good/' src/medium_cli/cli.py",
+                    "verification_command": "python3 -m py_compile src/medium_cli/cli.py",
+                }
+            ]
+        ),
+        envelope=envelope,
+        source_edit_context=True,
+    )
+
+    assert result.payload is None
+    assert result.rejection_reason == "source_context_command_fix_rejected"
 
 
 def test_phase7f_valid_bounded_repair_is_retried_and_succeeds(db_session, tmp_path):
@@ -2163,6 +2284,11 @@ def test_phase7g_diff_repair_prompt_is_used_when_capsule_available(
     (holder["project_dir"] / "src" / "demo.py").write_text(
         "VALUE = 1\n", encoding="utf-8"
     )
+    (holder["project_dir"] / "tests").mkdir()
+    (holder["project_dir"] / "tests" / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n",
+        encoding="utf-8",
+    )
 
     result = execute_step_loop(
         ctx=ctx,
@@ -2192,6 +2318,87 @@ def test_phase7g_diff_repair_prompt_is_used_when_capsule_available(
     )
     assert attempted[-1]["details"]["diff_capsule_primary_file"] == "src/demo.py"
     assert attempted[-1]["details"]["diff_capsule_line_count"] > 0
+
+
+def test_diff_scoped_compliance_retry_list_shape_is_normalized_after_parse_failure(
+    db_session, tmp_path
+):
+    holder = {}
+
+    def fail_after_file_change():
+        source = holder["project_dir"] / "src" / "demo.py"
+        source.write_text("VALUE = 2\n", encoding="utf-8")
+        return {
+            "status": "failed",
+            "output": "FAILED tests/test_demo.py::test_value",
+            "error": "AssertionError: expected 1",
+            "files_changed": ["src/demo.py"],
+            "returncode": 1,
+        }
+
+    runtime = _FakeRuntime(
+        [
+            fail_after_file_change,
+            {"output": "not json first"},
+            {
+                "output": (
+                    "[\n"
+                    "  {\n"
+                    '    "title": "Run focused verifier",\n'
+                    '    "command": "python3 -m pytest -q -k "ok"",\n'
+                    '    "verification_command": "python3 -m pytest -q -k "ok""\n'
+                    "  }\n"
+                    "]"
+                )
+            },
+            {
+                "status": "success",
+                "output": "ok",
+                "files_changed": [],
+            },
+        ]
+    )
+    ctx, _execution = _make_run_context(
+        db_session, tmp_path, runtime=runtime, expected_files=["src/demo.py"]
+    )
+    holder["project_dir"] = ctx.orchestration_state.project_dir
+    (holder["project_dir"] / "src").mkdir(parents=True)
+    (holder["project_dir"] / "src" / "demo.py").write_text(
+        "VALUE = 1\n", encoding="utf-8"
+    )
+    (holder["project_dir"] / "tests").mkdir()
+    (holder["project_dir"] / "tests" / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n",
+        encoding="utf-8",
+    )
+
+    result = execute_step_loop(
+        ctx=ctx,
+        extract_structured_text=_extract_structured_text,
+        normalize_step=_normalize_step,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: [],
+        workspace_violation_error_cls=RuntimeError,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        record_live_log_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["status"] == "completed", result
+    events = read_orchestration_events(
+        ctx.orchestration_state.project_dir, ctx.session_id, ctx.task_id
+    )
+    rejected = [
+        event for event in events if event["event_type"] == EventType.REPAIR_REJECTED
+    ]
+    assert rejected == []
+    attempted = [
+        event
+        for event in events
+        if event["event_type"] == EventType.DEBUG_REPAIR_ATTEMPTED
+    ]
+    assert attempted[-1]["details"]["debug_prompt_mode"] == "phase7g_diff_repair"
+    assert ctx.orchestration_state.plan[0]["commands"] == [
+        'python3 -m pytest -q -k "ok"'
+    ]
 
 
 def test_phase7f_invalid_bounded_repair_terminalizes(db_session, tmp_path):

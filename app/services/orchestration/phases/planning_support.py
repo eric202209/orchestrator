@@ -14,6 +14,9 @@ from app.services.orchestration.planning.planner import (
     PlannerService,
     PlanningRepairNoOutputTimeout,
 )
+from app.services.orchestration.planning.source_materialization import (
+    plan_has_concrete_source_materialization,
+)
 from app.services.orchestration.run_state import mark_task_attempt_failed
 from app.services.orchestration.state.session_state import mark_session_paused
 from app.services.orchestration.types import OrchestrationRunContext, ReasoningArtifact
@@ -293,6 +296,14 @@ def _build_repair_rejection_reasons(
             "command that proves behavior for each implementation-heavy step."
         )
 
+    if details.get("missing_materialization_for_implementation"):
+        targeted_reasons.append(
+            "missing_source_materialization: implementation-heavy plans must "
+            "include at least one concrete source edit in the existing package. "
+            "Use ops write_file or replace_in_file for the real source file named "
+            "by tests/source context; inspect/test-only steps are not enough."
+        )
+
     missing_commands_steps = _normalized_step_numbers(
         details.get("missing_commands_steps") or []
     )
@@ -344,6 +355,22 @@ def _build_repair_rejection_reasons(
             "`src.`-prefixed imports. If a test file must be touched, every name "
             "must be imported, defined, or provided by pytest fixtures. Offending "
             f"test file(s): {undefined_python_test_files[:5]}"
+        )
+
+    undefined_python_decorator_files = [
+        str(path or "").strip()
+        for path in (details.get("undefined_python_decorator_materializations") or [])
+        if str(path or "").strip()
+    ]
+    if undefined_python_decorator_files:
+        targeted_reasons.append(
+            "framework_mismatch: Plan writes Python decorators whose root name is "
+            "undefined. Preserve the framework already present in existing source "
+            "and tests; for argparse CLIs, implement behavior in the existing "
+            "parser/build_parser/main flow instead of inventing Typer/Click/"
+            "FastAPI/Django decorators such as @app.command or @router.*. "
+            "Offending source file(s): "
+            f"{undefined_python_decorator_files[:5]}"
         )
 
     truncated_subcodes = details.get("truncated_multistep_subcodes") or []
@@ -526,6 +553,73 @@ def _abort_repeated_physical_src_import_repair(
         "status": "failed",
         "reason": failure_type,
     }
+
+
+def _abort_missing_source_materialization_repair(
+    *,
+    ctx: OrchestrationRunContext,
+    retry_state: Any,
+    output_text: str,
+) -> dict[str, str] | None:
+    if not (
+        retry_state.repair_prompt_used
+        and retry_state.source_materialization_required_after_repair
+        and not plan_has_concrete_source_materialization(
+            ctx.orchestration_state.plan,
+            ctx.orchestration_state.project_dir,
+        )
+    ):
+        return None
+
+    failure_type = "planning_repair_missing_source_materialization"
+    ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+    ctx.orchestration_state.abort_reason = (
+        "Planning repair removed required source materialization"
+    )
+    emit_phase_event(
+        ctx.orchestration_state,
+        ctx.emit_live,
+        level="ERROR",
+        phase="planning",
+        message=(
+            "[ORCHESTRATION] Planning repair did not include a concrete source "
+            "materialization"
+        ),
+        details={
+            "reason": failure_type,
+            "repair_reason": retry_state.last_repair_reason,
+        },
+    )
+    _emit_planning_diagnostics_contract_violation(
+        ctx,
+        reason=failure_type,
+        contract_violations=[
+            "planning_repair_missing_source_materialization: repaired "
+            "implementation-heavy plan must include at least one concrete source "
+            "edit under src/ or the existing project package; inspect-only, "
+            "test-only, and verification-only repairs are not acceptable"
+        ],
+        semantic_violation_codes=["missing_source_materialization"],
+        contract_diagnostics={
+            "repair_reason": retry_state.last_repair_reason,
+        },
+        output_text=output_text,
+        strategy_info=failure_type,
+    )
+    _finalize_planning_terminal_failure(
+        ctx=ctx,
+        failure_type=failure_type,
+        failure_reason=(
+            "Planning repair for an implementation-heavy task did not include "
+            "concrete source materialization under src/ or the existing project "
+            "package."
+        ),
+    )
+    if ctx.restore_workspace_snapshot_if_needed:
+        ctx.restore_workspace_snapshot_if_needed(
+            "planning repair missing source materialization"
+        )
+    return {"status": "failed", "reason": failure_type}
 
 
 def _post_repair_missing_verification_steps(plan_verdict: Any) -> list[int]:
@@ -874,6 +968,7 @@ class _PlanningRetryState:
         self.post_repair_stale_replace_second_repair_used = False
         self.post_repair_validation_second_repair_used = False
         self.post_repair_malformed_shell_second_repair_used = False
+        self.source_materialization_required_after_repair = False
         self.last_repair_reason = ""
         self.last_multistep_plan_step_count = 0
 
