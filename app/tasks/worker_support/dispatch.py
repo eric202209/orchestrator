@@ -53,9 +53,7 @@ def _runtime_selection_details(db: Session) -> Dict[str, Optional[str]]:
         "planning_repair_model": settings.PLANNING_REPAIR_MODEL,
         "planning_repair_backend": settings.PLANNING_BACKEND or settings.AGENT_BACKEND,
         "debug_repair_model": (
-            settings.DEBUG_REPAIR_MODEL
-            or settings.PHASE7F_REPAIR_MODEL
-            or settings.PLANNING_REPAIR_MODEL
+            settings.DEBUG_REPAIR_MODEL or settings.PLANNING_REPAIR_MODEL
         ),
         "debug_repair_backend": (
             settings.DEBUG_REPAIR_BACKEND
