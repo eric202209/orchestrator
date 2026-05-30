@@ -366,9 +366,13 @@ def test_validate_plan_rejects_python_write_file_unterminated_triple_quote(tmp_p
     )
 
     assert verdict.accepted is False
-    assert verdict.details["python_source_syntax_invalid"][0]["path"] == (
-        "src/medium_cli/cli.py"
+    issue = verdict.details["python_source_syntax_invalid"][0]
+    assert issue["path"] == "src/medium_cli/cli.py"
+    assert issue["candidate_content"].startswith(
+        '"""Task-list CLI used by the eval fixture."'
     )
+    assert "\n\ndef main(argv=None):\n" in issue["candidate_content"]
+    assert issue["candidate_content_truncated"] is False
     assert "python_source_syntax_invalid" in verdict.details["semantic_violation_codes"]
     assert "python_source_syntax_invalid" in " ".join(verdict.reasons)
 

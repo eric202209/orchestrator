@@ -446,9 +446,8 @@ class ValidatorService:
             if relative_path in seen_issue_paths:
                 return
             seen_issue_paths.add(relative_path)
-            candidate_excerpt = " ".join(
-                (simulated_files.get(relative_path) or "").split()
-            )[:500]
+            candidate_content = simulated_files.get(relative_path) or ""
+            candidate_excerpt = " ".join(candidate_content.split())[:500]
             issues.append(
                 {
                     "path": relative_path,
@@ -456,6 +455,8 @@ class ValidatorService:
                     "offset": exc.offset,
                     "message": str(exc.msg or "invalid Python syntax"),
                     "candidate_content_excerpt": candidate_excerpt,
+                    "candidate_content": candidate_content[:12000],
+                    "candidate_content_truncated": len(candidate_content) > 12000,
                 }
             )
 

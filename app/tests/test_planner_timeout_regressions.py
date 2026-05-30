@@ -6033,6 +6033,100 @@ def test_targeted_second_repair_reason_handles_python_source_syntax_invalid():
     assert "compile(content, path, 'exec')" in reason.rejection_text
 
 
+def test_targeted_second_repair_reason_preserves_line_numbered_syntax_excerpt():
+    retry_state = _PlanningRetryState()
+    retry_state.repair_prompt_used = True
+    candidate_content = (
+        '"""Broken module docstring.\n'
+        "from __future__ import annotations\n"
+        "\n"
+        "def main() -> int:\n"
+        "    return 0\n"
+    )
+    verdict = type(
+        "Verdict",
+        (),
+        {
+            "reasons": [
+                "Plan writes Python source with invalid syntax "
+                "(python_source_syntax_invalid; src/app.py line 1, offset 1: "
+                "unterminated triple-quoted string literal)"
+            ],
+            "details": {
+                "python_source_syntax_invalid": [
+                    {
+                        "path": "src/app.py",
+                        "line": 1,
+                        "offset": 1,
+                        "message": "unterminated triple-quoted string literal",
+                        "candidate_content": candidate_content,
+                        "candidate_content_excerpt": "flattened fallback",
+                    }
+                ],
+                "semantic_violation_codes": ["python_source_syntax_invalid"],
+            },
+        },
+    )()
+
+    reason = _get_targeted_second_repair_reason(
+        retry_state=retry_state,
+        plan_verdict=verdict,
+    )
+
+    assert reason is not None
+    assert "Candidate source excerpt with real newlines preserved:" in (
+        reason.rejection_text
+    )
+    assert '   1: """Broken module docstring.' in reason.rejection_text
+    assert "   2: from __future__ import annotations" in reason.rejection_text
+    assert "   4: def main() -> int:" in reason.rejection_text
+    assert '"""Broken module docstring.\n   2:' in reason.rejection_text
+    assert "flattened fallback" not in reason.rejection_text
+
+
+def test_targeted_second_repair_reason_windows_large_syntax_excerpt():
+    retry_state = _PlanningRetryState()
+    retry_state.repair_prompt_used = True
+    lines = [f"value_{index} = {index}" for index in range(1, 260)]
+    lines[150] = "def broken(:"
+    candidate_content = "\n".join(lines) + "\n"
+    verdict = type(
+        "Verdict",
+        (),
+        {
+            "reasons": [
+                "Plan writes Python source with invalid syntax "
+                "(python_source_syntax_invalid; src/app.py line 151, offset 11: "
+                "invalid syntax)"
+            ],
+            "details": {
+                "python_source_syntax_invalid": [
+                    {
+                        "path": "src/app.py",
+                        "line": 151,
+                        "offset": 11,
+                        "message": "invalid syntax",
+                        "candidate_content": candidate_content,
+                    }
+                ],
+                "semantic_violation_codes": ["python_source_syntax_invalid"],
+            },
+        },
+    )()
+
+    reason = _get_targeted_second_repair_reason(
+        retry_state=retry_state,
+        plan_verdict=verdict,
+    )
+
+    assert reason is not None
+    assert "... preceding lines omitted ..." in reason.rejection_text
+    assert "... following lines omitted ..." in reason.rejection_text
+    assert " 151: def broken(:" in reason.rejection_text
+    assert "   1: value_1 = 1" not in reason.rejection_text
+    assert " 259: value_259 = 259" not in reason.rejection_text
+
+
 def test_targeted_second_repair_reason_handles_argparse_framework_mismatch(tmp_path):
     source_dir = tmp_path / "src" / "medium_cli"
     source_dir.mkdir(parents=True)
