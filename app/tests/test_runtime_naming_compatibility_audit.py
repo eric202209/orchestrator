@@ -59,6 +59,12 @@ def test_phase11p_runtime_naming_audit_recommends_no_removal_yet():
         "phase7g_used_count",
         "phase7f_exercised_rate",
         "phase7g_exercised_rate",
+        "phase7f_rejection_reason",
+        "phase7f_parsed_shape",
+        "phase7f_raw_output_excerpt",
+        "phase7f_debug_repair_output_invalid",
+        "phase7f_ops_fix_stale_replace",
+        "phase7f_ops_fix_correction",
     }
 
     assert all(
@@ -93,3 +99,26 @@ def test_phase11s_audit_records_removed_aggregate_writes():
         "compatibility_write_removed_phase11s"
     )
     assert statuses["phase7f_used"] == "compatibility_write_retained"
+
+
+def test_phase11u_audit_records_removed_detail_writes():
+    statuses = {
+        surface.old_name: surface.write_status for surface in audit.AUDIT_SURFACES
+    }
+
+    assert statuses["phase7f_rejection_reason"] == (
+        "compatibility_write_removed_phase11u"
+    )
+    assert statuses["phase7f_parsed_shape"] == "compatibility_write_removed_phase11u"
+    assert statuses["phase7f_raw_output_excerpt"] == (
+        "compatibility_write_removed_phase11u"
+    )
+    assert statuses["phase7f_debug_repair_output_invalid"] == (
+        "compatibility_write_removed_phase11u"
+    )
+    assert statuses["phase7f_ops_fix_stale_replace"] == (
+        "compatibility_write_removed_phase11u"
+    )
+    assert statuses["phase7f_ops_fix_correction"] == (
+        "compatibility_write_removed_phase11u"
+    )

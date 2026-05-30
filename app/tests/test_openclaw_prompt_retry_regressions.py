@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from app.models import Project, Session as SessionModel, Task, TaskStatus
-from app.config import settings
+from app.config import Settings, settings
 from app.services.agents.openclaw_service import (
     OpenClawSessionError,
     OpenClawSessionService,
@@ -168,7 +168,7 @@ def test_phase7f_debug_repair_uses_direct_no_thinking_chat(db_session, monkeypat
         service.execute_task(
             "Return bounded JSON repair",
             timeout_seconds=180,
-            diagnostic_label="PHASE7F_DEBUG_REPAIR",
+            diagnostic_label="BOUNDED_EXECUTION_DEBUG_REPAIR",
             diagnostic_metadata={"debug_failure_class": "source_step_validation"},
         )
     )
@@ -237,7 +237,9 @@ def test_bounded_debug_repair_architecture_label_uses_direct_chat(
 
 def test_bounded_debug_repair_diagnostic_label_architecture_alias():
     assert (
-        OpenClawSessionService._diagnostic_label_architecture("PHASE7F_DEBUG_REPAIR")
+        OpenClawSessionService._diagnostic_label_architecture(
+            "BOUNDED_EXECUTION_DEBUG_REPAIR"
+        )
         == "BOUNDED_EXECUTION_DEBUG_REPAIR"
     )
     assert (
@@ -249,7 +251,7 @@ def test_bounded_debug_repair_diagnostic_label_architecture_alias():
     assert OpenClawSessionService._diagnostic_label_architecture("PLANNING") is None
 
 
-def test_phase7f_direct_repair_routing_wrapper_matches_architecture_helper(
+def test_debug_repair_direct_routing_accepts_legacy_and_architecture_labels(
     db_session, monkeypatch
 ):
     monkeypatch.setattr(settings, "AGENT_BACKEND", "local_openclaw")
@@ -260,15 +262,18 @@ def test_phase7f_direct_repair_routing_wrapper_matches_architecture_helper(
     )
 
     assert (
-        service._should_use_structured_debug_repair_direct_chat("PHASE7F_DEBUG_REPAIR")
+        service._should_use_structured_debug_repair_direct_chat(
+            "BOUNDED_EXECUTION_DEBUG_REPAIR"
+        )
         is True
     )
-    assert service._should_use_phase7f_direct_repair("PHASE7F_DEBUG_REPAIR") is True
     assert (
-        service._should_use_phase7f_direct_repair("BOUNDED_EXECUTION_DEBUG_REPAIR")
+        service._should_use_structured_debug_repair_direct_chat(
+            "BOUNDED_EXECUTION_DEBUG_REPAIR"
+        )
         is True
     )
-    assert service._should_use_phase7f_direct_repair("PLANNING") is False
+    assert service._should_use_structured_debug_repair_direct_chat("PLANNING") is False
 
 
 def test_phase7f_direct_repair_payload_disables_thinking(monkeypatch):
@@ -316,32 +321,10 @@ def test_debug_repair_extracts_responses_output_text():
     assert OpenClawSessionService._extract_responses_output_text(body) == '{"ops":[]}'
 
 
-def test_debug_repair_direct_config_keeps_phase7f_env_fallback(monkeypatch):
-    monkeypatch.setattr(settings, "DEBUG_REPAIR_BASE_URL", "")
-    monkeypatch.setattr(settings, "DEBUG_REPAIR_MODEL", "")
-    monkeypatch.setattr(settings, "DEBUG_REPAIR_API_KEY", "")
-    monkeypatch.setattr(
-        settings, "PHASE7F_REPAIR_BASE_URL", "https://legacy.example/v1"
-    )
-    monkeypatch.setattr(settings, "PHASE7F_REPAIR_MODEL", "legacy-model")
-    monkeypatch.setattr(settings, "PHASE7F_REPAIR_API_KEY", "legacy-key")
-
-    config = OpenClawSessionService._debug_repair_direct_config()
-
-    assert config["base_url"] == "https://legacy.example/v1"
-    assert config["model"] == "legacy-model"
-    assert config["api_key"] == "legacy-key"
-
-
-def test_debug_repair_direct_config_prefers_architecture_names(monkeypatch):
+def test_debug_repair_direct_config_uses_architecture_settings(monkeypatch):
     monkeypatch.setattr(settings, "DEBUG_REPAIR_BASE_URL", "https://debug.example/v1")
     monkeypatch.setattr(settings, "DEBUG_REPAIR_MODEL", "debug-model")
     monkeypatch.setattr(settings, "DEBUG_REPAIR_API_KEY", "debug-key")
-    monkeypatch.setattr(
-        settings, "PHASE7F_REPAIR_BASE_URL", "https://legacy.example/v1"
-    )
-    monkeypatch.setattr(settings, "PHASE7F_REPAIR_MODEL", "legacy-model")
-    monkeypatch.setattr(settings, "PHASE7F_REPAIR_API_KEY", "legacy-key")
 
     config = OpenClawSessionService._debug_repair_direct_config()
 
@@ -350,18 +333,27 @@ def test_debug_repair_direct_config_prefers_architecture_names(monkeypatch):
     assert config["api_key"] == "debug-key"
 
 
-def test_debug_repair_disable_thinking_prefers_architecture_setting(monkeypatch):
+def test_debug_repair_legacy_env_aliases_populate_architecture_settings():
+    configured = Settings(
+        _env_file=None,
+        PHASE7F_REPAIR_BASE_URL="https://legacy.example/v1",
+        PHASE7F_REPAIR_MODEL="legacy-model",
+        PHASE7F_REPAIR_API_KEY="legacy-key",
+        PHASE7F_REPAIR_DISABLE_THINKING=False,
+        PHASE7F_REPAIR_DIRECT_ENABLED=False,
+    )
+
+    assert configured.DEBUG_REPAIR_BASE_URL == "https://legacy.example/v1"
+    assert configured.DEBUG_REPAIR_MODEL == "legacy-model"
+    assert configured.DEBUG_REPAIR_API_KEY == "legacy-key"
+    assert configured.DEBUG_REPAIR_DISABLE_THINKING is False
+    assert configured.DEBUG_REPAIR_DIRECT_ENABLED is False
+
+
+def test_debug_repair_disable_thinking_uses_architecture_setting(monkeypatch):
     monkeypatch.setattr(settings, "DEBUG_REPAIR_DISABLE_THINKING", False)
-    monkeypatch.setattr(settings, "PHASE7F_REPAIR_DISABLE_THINKING", True)
 
     assert OpenClawSessionService._debug_repair_disable_thinking() is False
-
-
-def test_debug_repair_disable_thinking_falls_back_to_phase7f_setting(monkeypatch):
-    monkeypatch.setattr(settings, "DEBUG_REPAIR_DISABLE_THINKING", None)
-    monkeypatch.setattr(settings, "PHASE7F_REPAIR_DISABLE_THINKING", True)
-
-    assert OpenClawSessionService._debug_repair_disable_thinking() is True
 
 
 def test_debug_repair_openai_responses_path_posts_to_responses(db_session, monkeypatch):
@@ -405,7 +397,9 @@ def test_debug_repair_openai_responses_path_posts_to_responses(db_session, monke
     )
 
     result = asyncio.run(
-        service._execute_phase7f_direct_repair("Return JSON", timeout_seconds=42)
+        service._execute_structured_debug_repair_direct_call(
+            "Return JSON", timeout_seconds=42
+        )
     )
 
     assert seen["url"] == "https://api.example/v1/responses"
@@ -464,7 +458,9 @@ def test_debug_repair_local_chat_path_remains_chat_completions(db_session, monke
     )
 
     result = asyncio.run(
-        service._execute_phase7f_direct_repair("Return JSON", timeout_seconds=42)
+        service._execute_structured_debug_repair_direct_call(
+            "Return JSON", timeout_seconds=42
+        )
     )
 
     assert seen["url"] == "https://local.example/v1/chat/completions"

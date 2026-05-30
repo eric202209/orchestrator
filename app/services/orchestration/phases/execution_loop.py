@@ -54,6 +54,21 @@ from app.services.orchestration.policy import (
     DEBUG_TIMEOUT_SECONDS,
     MAX_STEP_ATTEMPTS,
 )
+from app.runtime_naming import (
+    BOUNDED_DEBUG_REPAIR_COMPLIANCE_RETRY_CONTEXT,
+    BOUNDED_DEBUG_REPAIR_CONTEXT,
+    BOUNDED_DEBUG_REPAIR_DIAGNOSTIC_LABEL,
+    BOUNDED_DEBUG_REPAIR_OPS_FIX_STALE_REPLACE_REASON,
+    BOUNDED_DEBUG_REPAIR_OUTPUT_INVALID_REASON,
+    BOUNDED_DEBUG_REPAIR_PROMPT_MODE,
+    BOUNDED_DEBUG_REPAIR_STALE_REPLACE_CORRECTION_CONTEXT,
+    DIFF_SCOPED_DEBUG_REPAIR_PROMPT_MODE,
+    bounded_debug_repair_timeout_alias_details,
+    diagnostic_label_alias_details,
+    debug_prompt_mode_alias_details,
+    is_bounded_debug_repair_mode,
+    is_diff_scoped_debug_repair_mode,
+)
 from app.services.orchestration.run_state import (
     mark_task_attempt_cancelled,
     mark_task_attempt_failed,
@@ -185,12 +200,6 @@ def _bounded_debug_repair_source_edit_context(
     )
 
 
-def _phase7f_source_edit_context(step: dict[str, Any], envelope: Any) -> bool:
-    """Backward-compatible wrapper for bounded debug repair source context."""
-
-    return _bounded_debug_repair_source_edit_context(step, envelope)
-
-
 def _is_low_value_weak_verifier_command_fix(
     envelope: Any, debug_data: dict[str, Any]
 ) -> bool:
@@ -224,12 +233,6 @@ def _debug_repair_output_excerpt(value: Any, max_chars: int = 500) -> str:
     if len(text) <= max_chars:
         return text
     return text[: max_chars - 3].rstrip() + "..."
-
-
-def _phase7f_repair_output_excerpt(value: Any, max_chars: int = 500) -> str:
-    """Backward-compatible wrapper for debug repair output excerpting."""
-
-    return _debug_repair_output_excerpt(value, max_chars=max_chars)
 
 
 def _safe_relative_op_path(path_value: Any) -> Optional[str]:
@@ -297,15 +300,6 @@ def _bounded_debug_repair_stale_replace_issues(
     return issues
 
 
-def _phase7f_stale_replace_issues(
-    ops: Any,
-    project_dir: Path,
-) -> list[dict[str, Any]]:
-    """Backward-compatible wrapper for stale replace issue detection."""
-
-    return _bounded_debug_repair_stale_replace_issues(ops, project_dir)
-
-
 def _build_bounded_debug_repair_stale_replace_correction_prompt(
     *,
     debug_data: dict[str, Any],
@@ -329,20 +323,7 @@ def _build_bounded_debug_repair_stale_replace_correction_prompt(
     )
 
 
-def _build_phase7f_stale_replace_correction_prompt(
-    *,
-    debug_data: dict[str, Any],
-    stale_issues: list[dict[str, Any]],
-) -> str:
-    """Backward-compatible wrapper for stale replace correction prompting."""
-
-    return _build_bounded_debug_repair_stale_replace_correction_prompt(
-        debug_data=debug_data,
-        stale_issues=stale_issues,
-    )
-
-
-def _mark_phase7f_bounded_debug_timeout_if_applicable(
+def _mark_bounded_debug_repair_timeout_if_applicable(
     debug_error: Exception,
     *,
     debug_prompt_mode: str,
@@ -354,17 +335,15 @@ def _mark_phase7f_bounded_debug_timeout_if_applicable(
     )
     if (
         is_timeout
-        and debug_prompt_mode == "phase7f_bounded_debug_repair"
+        and is_bounded_debug_repair_mode(debug_prompt_mode)
         and debug_failure_class == "source_step_validation"
     ):
         diagnostics.update(
             {
                 "failure_phase": "debug_repair",
-                "debug_prompt_mode": debug_prompt_mode,
-                "debug_prompt_mode_architecture": ("bounded_execution_debug_repair"),
+                **debug_prompt_mode_alias_details(debug_prompt_mode),
                 "debug_failure_class": debug_failure_class,
-                "phase7f_bounded_debug_timeout": True,
-                "bounded_execution_debug_repair_timeout": True,
+                **bounded_debug_repair_timeout_alias_details(True),
                 "timed_out": True,
             }
         )
@@ -372,10 +351,10 @@ def _mark_phase7f_bounded_debug_timeout_if_applicable(
 
 
 def _debug_prompt_mode_architecture(debug_prompt_mode: str) -> Optional[str]:
-    if debug_prompt_mode == "phase7f_bounded_debug_repair":
-        return "bounded_execution_debug_repair"
-    if debug_prompt_mode == "phase7g_diff_repair":
-        return "diff_scoped_debug_repair"
+    if is_bounded_debug_repair_mode(debug_prompt_mode):
+        return BOUNDED_DEBUG_REPAIR_PROMPT_MODE
+    if is_diff_scoped_debug_repair_mode(debug_prompt_mode):
+        return DIFF_SCOPED_DEBUG_REPAIR_PROMPT_MODE
     return None
 
 
@@ -1738,7 +1717,7 @@ def execute_step_loop(
             )
             if str(item).isdigit()
         )
-        phase7f_debug_repair_allowed = (
+        bounded_debug_repair_allowed = (
             debug_feedback_envelope is not None
             and debug_feedback_envelope.eligible_for_debug_repair
             and task_execution_id is not None
@@ -1808,7 +1787,7 @@ def execute_step_loop(
             write_project_state_snapshot_fn(db, project, task, session_id)
             return {"status": "failed", "reason": "debug_repair_budget_exhausted"}
 
-        if phase7f_debug_repair_allowed:
+        if bounded_debug_repair_allowed:
             _evidence_capsule = collect_workspace_evidence(
                 debug_feedback_envelope.failure_class,
                 orchestration_state.project_dir,
@@ -1856,13 +1835,13 @@ def execute_step_loop(
                     _evidence_capsule,
                     envelope=debug_feedback_envelope,
                 )
-                debug_prompt_mode = "phase7g_diff_repair"
+                debug_prompt_mode = DIFF_SCOPED_DEBUG_REPAIR_PROMPT_MODE
                 diff_repair_fallback_reason = None
             else:
                 debug_prompt = build_bounded_debug_repair_prompt(
                     debug_feedback_envelope, _evidence_capsule
                 )
-                debug_prompt_mode = "phase7f_bounded_debug_repair"
+                debug_prompt_mode = BOUNDED_DEBUG_REPAIR_PROMPT_MODE
                 if not debug_feedback_envelope.changed_files:
                     diff_repair_fallback_reason = "no_changed_files"
                 elif debug_feedback_envelope.failure_class not in {
@@ -1923,23 +1902,19 @@ def execute_step_loop(
                     "task_execution_id": ctx.task_execution_id,
                     "step_index": step_index + 1,
                     "attempt": current_attempt,
-                    "allowed": phase7f_debug_repair_allowed,
+                    "allowed": bounded_debug_repair_allowed,
                     "allowed_reason": (
                         "eligible failure class and no prior debug repair for TaskExecution"
-                        if phase7f_debug_repair_allowed
-                        else "Phase 7F bounded repair not eligible or already used for TaskExecution"
+                        if bounded_debug_repair_allowed
+                        else "Bounded debug repair not eligible or already used for TaskExecution"
                     ),
-                    "debug_prompt_mode": debug_prompt_mode,
-                    "debug_prompt_mode_architecture": (
-                        _debug_prompt_mode_architecture(debug_prompt_mode)
-                    ),
+                    **debug_prompt_mode_alias_details(debug_prompt_mode),
                     "envelope_mode": (
                         "direct_capsule"
-                        if debug_prompt_mode
-                        in {
-                            "phase7g_diff_repair",
-                            "phase7f_bounded_debug_repair",
-                        }
+                        if (
+                            is_diff_scoped_debug_repair_mode(debug_prompt_mode)
+                            or is_bounded_debug_repair_mode(debug_prompt_mode)
+                        )
                         else "legacy_envelope"
                     ),
                     "compliance_retry_attempted": False,
@@ -1957,16 +1932,15 @@ def execute_step_loop(
             pass
 
         debug_runtime_kwargs: dict[str, Any] = {}
-        if debug_prompt_mode == "phase7f_bounded_debug_repair":
+        if is_bounded_debug_repair_mode(debug_prompt_mode):
             debug_runtime_kwargs = {
-                "diagnostic_label": "PHASE7F_DEBUG_REPAIR",
+                "diagnostic_label": BOUNDED_DEBUG_REPAIR_DIAGNOSTIC_LABEL,
                 "diagnostic_metadata": {
                     "phase": "debugging",
-                    "diagnostic_label_architecture": ("BOUNDED_EXECUTION_DEBUG_REPAIR"),
-                    "debug_prompt_mode": debug_prompt_mode,
-                    "debug_prompt_mode_architecture": (
-                        _debug_prompt_mode_architecture(debug_prompt_mode)
+                    **diagnostic_label_alias_details(
+                        BOUNDED_DEBUG_REPAIR_DIAGNOSTIC_LABEL
                     ),
+                    **debug_prompt_mode_alias_details(debug_prompt_mode),
                     "debug_failure_class": (
                         debug_feedback_envelope.failure_class
                         if debug_feedback_envelope is not None
@@ -1993,7 +1967,7 @@ def execute_step_loop(
                 )
             )
         except Exception as debug_error:
-            _mark_phase7f_bounded_debug_timeout_if_applicable(
+            _mark_bounded_debug_repair_timeout_if_applicable(
                 debug_error,
                 debug_prompt_mode=debug_prompt_mode,
                 debug_failure_class=(
@@ -2047,14 +2021,14 @@ def execute_step_loop(
                 logger.info("[ORCHESTRATION] Removed debug artifact: %s", _artifact)
 
         try:
-            if phase7f_debug_repair_allowed:
+            if bounded_debug_repair_allowed:
                 repair_output = extract_structured_text(
                     debug_result.get("output", "{}")
                 )
                 final_repair_output = repair_output
                 success, parsed_repair, strategy_info = (
                     error_handler.attempt_json_parsing(
-                        repair_output, context="phase7f_debug_repair"
+                        repair_output, context=BOUNDED_DEBUG_REPAIR_CONTEXT
                     )
                 )
                 compliance_retry_attempted = False
@@ -2079,7 +2053,7 @@ def execute_step_loop(
                         success, parsed_repair, strategy_info = (
                             error_handler.attempt_json_parsing(
                                 compliance_output,
-                                context="phase7f_debug_repair_compliance_retry",
+                                context=BOUNDED_DEBUG_REPAIR_COMPLIANCE_RETRY_CONTEXT,
                             )
                         )
                     except Exception as compliance_error:
@@ -2102,7 +2076,7 @@ def execute_step_loop(
                                 "phase": "execution",
                                 "debug_repair_attempted": True,
                                 "debug_repair_used": True,
-                                "debug_prompt_mode": debug_prompt_mode,
+                                **debug_prompt_mode_alias_details(debug_prompt_mode),
                                 "envelope_mode": "direct_capsule",
                                 "task_execution_id": ctx.task_execution_id,
                                 "step_index": step_index + 1,
@@ -2121,7 +2095,7 @@ def execute_step_loop(
                         parsed_repair,
                         envelope=debug_feedback_envelope,
                         source_edit_context=(
-                            debug_prompt_mode == "phase7f_bounded_debug_repair"
+                            is_bounded_debug_repair_mode(debug_prompt_mode)
                             and _bounded_debug_repair_source_edit_context(
                                 step, debug_feedback_envelope
                             )
@@ -2135,17 +2109,19 @@ def execute_step_loop(
                 )
                 if not success or debug_data is None:
                     if normalization_result:
-                        phase7f_rejection_reason = normalization_result.rejection_reason
-                        phase7f_parsed_shape = normalization_result.parsed_shape
+                        debug_repair_rejection_reason = (
+                            normalization_result.rejection_reason
+                        )
+                        debug_repair_parsed_shape = normalization_result.parsed_shape
                     else:
-                        phase7f_rejection_reason = (
+                        debug_repair_rejection_reason = (
                             "compliance_retry_parse_failed"
                             if compliance_retry_attempted
                             else "json_parse_failed"
                         )
-                        phase7f_parsed_shape = None
+                        debug_repair_parsed_shape = None
                     if (
-                        phase7f_debug_repair_allowed
+                        bounded_debug_repair_allowed
                         and task_execution_id is not None
                         and not _is_weak_completion_verifier_failure(
                             debug_feedback_envelope
@@ -2154,7 +2130,7 @@ def execute_step_loop(
                         orchestration_state.debug_repair_task_execution_ids = sorted(
                             {*debug_repair_used_ids, int(task_execution_id)}
                         )
-                    phase7f_raw_output_excerpt = _debug_repair_output_excerpt(
+                    debug_repair_raw_output_excerpt = _debug_repair_output_excerpt(
                         final_repair_output
                     )
                     append_orchestration_event(
@@ -2165,9 +2141,9 @@ def execute_step_loop(
                         parent_event_id=(debugging_phase_event or {}).get("event_id"),
                         details={
                             "phase": "execution",
-                            "reason": "phase7f_debug_repair_output_invalid",
+                            "reason": BOUNDED_DEBUG_REPAIR_OUTPUT_INVALID_REASON,
                             "reason_architecture": (
-                                "bounded_execution_debug_repair_output_invalid"
+                                BOUNDED_DEBUG_REPAIR_OUTPUT_INVALID_REASON
                             ),
                             "debug_repair_terminal_reason": (
                                 "invalid_debug_repair_output"
@@ -2183,18 +2159,18 @@ def execute_step_loop(
                             "strategy": strategy_info,
                             "compliance_retry_attempted": (compliance_retry_attempted),
                             "compliance_retry_succeeded": (compliance_retry_succeeded),
-                            "phase7f_rejection_reason": phase7f_rejection_reason,
-                            "phase7f_parsed_shape": phase7f_parsed_shape,
-                            "phase7f_raw_output_excerpt": phase7f_raw_output_excerpt,
+                            "debug_repair_rejection_reason": debug_repair_rejection_reason,
+                            "debug_repair_parsed_shape": debug_repair_parsed_shape,
+                            "debug_repair_raw_output_excerpt": debug_repair_raw_output_excerpt,
                             **_bounded_debug_repair_rejection_alias_details(
-                                rejection_reason=phase7f_rejection_reason,
-                                parsed_shape=phase7f_parsed_shape,
-                                raw_output_excerpt=phase7f_raw_output_excerpt,
+                                rejection_reason=debug_repair_rejection_reason,
+                                parsed_shape=debug_repair_parsed_shape,
+                                raw_output_excerpt=debug_repair_raw_output_excerpt,
                             ),
                         },
                     )
                     raise ValueError(
-                        f"Invalid Phase 7F debug repair output: {strategy_info}"
+                        f"Invalid bounded debug repair output: {strategy_info}"
                     )
             else:
                 success, debug_data, strategy_info = coerce_debug_step_result(
@@ -2210,7 +2186,7 @@ def execute_step_loop(
             logger.info("[DEBUG-PARSE] Using strategy: %s", strategy_info)
 
             if (
-                phase7f_debug_repair_allowed
+                bounded_debug_repair_allowed
                 and _is_low_value_weak_verifier_command_fix(
                     debug_feedback_envelope, debug_data
                 )
@@ -2294,7 +2270,7 @@ def execute_step_loop(
                     pass
                 continue
 
-            if phase7f_debug_repair_allowed and fix_type == "ops_fix":
+            if bounded_debug_repair_allowed and fix_type == "ops_fix":
                 stale_replace_issues = _bounded_debug_repair_stale_replace_issues(
                     debug_data.get("ops"), Path(orchestration_state.project_dir)
                 )
@@ -2307,13 +2283,13 @@ def execute_step_loop(
                     )
                     emit_live(
                         "WARN",
-                        "[ORCHESTRATION] Phase 7F ops_fix contained stale replace_in_file old text; requesting one bounded correction",
+                        "[ORCHESTRATION] Bounded debug repair ops_fix contained stale replace_in_file old text; requesting one bounded correction",
                         metadata={
                             "phase": "debugging",
                             "step_index": step_index + 1,
-                            "reason": "phase7f_ops_fix_stale_replace",
+                            "reason": BOUNDED_DEBUG_REPAIR_OPS_FIX_STALE_REPLACE_REASON,
                             "reason_architecture": (
-                                "bounded_execution_debug_repair_ops_fix_stale_replace"
+                                BOUNDED_DEBUG_REPAIR_OPS_FIX_STALE_REPLACE_REASON
                             ),
                             "stale_replace_targets": [
                                 issue.get("path") for issue in stale_replace_issues[:10]
@@ -2324,7 +2300,6 @@ def execute_step_loop(
                     if correction_kwargs.get("diagnostic_metadata"):
                         correction_kwargs["diagnostic_metadata"] = {
                             **correction_kwargs["diagnostic_metadata"],
-                            "phase7f_ops_fix_correction": True,
                             "bounded_execution_debug_repair_ops_fix_correction": True,
                             "stale_replace_targets": [
                                 issue.get("path") for issue in stale_replace_issues[:10]
@@ -2343,7 +2318,7 @@ def execute_step_loop(
                     correction_success, correction_parsed, correction_strategy = (
                         error_handler.attempt_json_parsing(
                             correction_output,
-                            context="phase7f_ops_fix_stale_replace_correction",
+                            context=BOUNDED_DEBUG_REPAIR_STALE_REPLACE_CORRECTION_CONTEXT,
                         )
                     )
                     correction_normalized = (
@@ -2411,15 +2386,17 @@ def execute_step_loop(
                                 ),
                                 details={
                                     "phase": "execution",
-                                    "reason": "phase7f_ops_fix_stale_replace",
+                                    "reason": (
+                                        BOUNDED_DEBUG_REPAIR_OPS_FIX_STALE_REPLACE_REASON
+                                    ),
                                     "reason_architecture": (
-                                        "bounded_execution_debug_repair_ops_fix_stale_replace"
+                                        BOUNDED_DEBUG_REPAIR_OPS_FIX_STALE_REPLACE_REASON
                                     ),
                                     "debug_repair_terminal_reason": (
-                                        "phase7f_ops_fix_stale_replace"
+                                        BOUNDED_DEBUG_REPAIR_OPS_FIX_STALE_REPLACE_REASON
                                     ),
                                     "debug_repair_terminal_reason_architecture": (
-                                        "bounded_execution_debug_repair_ops_fix_stale_replace"
+                                        BOUNDED_DEBUG_REPAIR_OPS_FIX_STALE_REPLACE_REASON
                                     ),
                                     "debug_repair_attempted": True,
                                     "debug_repair_used": True,
@@ -2430,11 +2407,11 @@ def execute_step_loop(
                                     ),
                                     "task_execution_id": ctx.task_execution_id,
                                     "step_index": step_index + 1,
-                                    "phase7f_rejection_reason": (
+                                    "debug_repair_rejection_reason": (
                                         correction_rejection_reason
                                     ),
-                                    "phase7f_parsed_shape": correction_parsed_shape,
-                                    "phase7f_raw_output_excerpt": (
+                                    "debug_repair_parsed_shape": correction_parsed_shape,
+                                    "debug_repair_raw_output_excerpt": (
                                         correction_raw_output_excerpt
                                     ),
                                     **_bounded_debug_repair_rejection_alias_details(
@@ -2452,7 +2429,7 @@ def execute_step_loop(
                         except Exception:
                             pass
                         raise ValueError(
-                            "Phase 7F ops_fix stale replace correction failed: "
+                            "Bounded debug repair ops_fix stale replace correction failed: "
                             f"{correction_rejection_reason}"
                         )
 
@@ -2460,7 +2437,7 @@ def execute_step_loop(
                     fix_type = "ops_fix"
 
             if (
-                phase7f_debug_repair_allowed
+                bounded_debug_repair_allowed
                 and task_execution_id is not None
                 and (
                     not _is_weak_completion_verifier_failure(debug_feedback_envelope)

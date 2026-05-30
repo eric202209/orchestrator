@@ -36,17 +36,13 @@ from app.services.orchestration.phases.execution_loop import (
     _bounded_debug_repair_source_edit_context,
     _bounded_debug_repair_stale_replace_issues,
     _build_bounded_debug_repair_stale_replace_correction_prompt,
-    _build_phase7f_stale_replace_correction_prompt,
     _debug_repair_output_excerpt,
     _debug_repair_materially_changes_source_or_tests,
     _execute_simple_verification_step,
-    _phase7f_repair_output_excerpt,
-    _phase7f_source_edit_context,
-    _phase7f_stale_replace_issues,
     _is_simple_verification_command,
     _is_low_value_weak_verifier_command_fix,
     _is_weak_completion_verifier_failure,
-    _mark_phase7f_bounded_debug_timeout_if_applicable,
+    _mark_bounded_debug_repair_timeout_if_applicable,
     _is_read_only_inspection_command,
     _same_simple_verification_command,
     execute_step_loop,
@@ -105,7 +101,7 @@ def _seed_execution(db_session, tmp_path):
 def test_phase7f_source_step_timeout_gets_non_retry_marker():
     error = TimeoutError("Task timed out after 180s")
 
-    _mark_phase7f_bounded_debug_timeout_if_applicable(
+    _mark_bounded_debug_repair_timeout_if_applicable(
         error,
         debug_prompt_mode="phase7f_bounded_debug_repair",
         debug_failure_class="source_step_validation",
@@ -127,7 +123,7 @@ def test_phase7f_source_step_timeout_gets_non_retry_marker():
 def test_non_phase7f_timeout_does_not_get_non_retry_marker():
     error = TimeoutError("Task timed out after 180s")
 
-    _mark_phase7f_bounded_debug_timeout_if_applicable(
+    _mark_bounded_debug_repair_timeout_if_applicable(
         error,
         debug_prompt_mode="legacy_debugging",
         debug_failure_class="source_step_validation",
@@ -136,7 +132,7 @@ def test_non_phase7f_timeout_does_not_get_non_retry_marker():
     assert not hasattr(error, "runtime_diagnostics")
 
 
-def test_phase7f_helper_wrappers_match_architecture_helpers(tmp_path):
+def test_bounded_debug_repair_helpers_handle_source_context_and_stale_ops(tmp_path):
     target = tmp_path / "src" / "demo.py"
     target.parent.mkdir()
     target.write_text("VALUE = 1\n", encoding="utf-8")
@@ -152,16 +148,13 @@ def test_phase7f_helper_wrappers_match_architecture_helpers(tmp_path):
     envelope = SimpleNamespace(changed_files=["src/demo.py"])
 
     assert _bounded_debug_repair_source_edit_context(step, envelope) is True
-    assert _phase7f_source_edit_context(step, envelope) is True
-    assert _debug_repair_output_excerpt("```json\nsecret=abc\n```") == (
-        _phase7f_repair_output_excerpt("```json\nsecret=abc\n```")
+    assert "secret=<redacted>" in _debug_repair_output_excerpt(
+        "```json\nsecret=abc\n```"
     )
-    assert _bounded_debug_repair_stale_replace_issues(ops, tmp_path) == (
-        _phase7f_stale_replace_issues(ops, tmp_path)
-    )
+    assert _bounded_debug_repair_stale_replace_issues(ops, tmp_path)
 
 
-def test_phase7f_prompt_wrapper_matches_architecture_helper():
+def test_bounded_debug_repair_stale_replace_prompt_includes_current_excerpt():
     debug_data = {"fix_type": "ops_fix", "ops": []}
     stale_issues = [
         {
@@ -173,13 +166,12 @@ def test_phase7f_prompt_wrapper_matches_architecture_helper():
         }
     ]
 
-    assert _build_bounded_debug_repair_stale_replace_correction_prompt(
-        debug_data=debug_data,
-        stale_issues=stale_issues,
-    ) == _build_phase7f_stale_replace_correction_prompt(
+    prompt = _build_bounded_debug_repair_stale_replace_correction_prompt(
         debug_data=debug_data,
         stale_issues=stale_issues,
     )
+    assert "current file excerpt" in prompt
+    assert "VALUE = 1" in prompt
 
 
 class _FakeRuntime:
@@ -1006,7 +998,7 @@ def test_phase7f_valid_bounded_repair_is_retried_and_succeeds(db_session, tmp_pa
     assert result["status"] == "completed", result
     assert len(runtime.prompts) == 3
     assert "Return a bare JSON array" in runtime.prompts[1]
-    assert runtime.kwargs[1]["diagnostic_label"] == "PHASE7F_DEBUG_REPAIR"
+    assert runtime.kwargs[1]["diagnostic_label"] == "BOUNDED_EXECUTION_DEBUG_REPAIR"
     assert (
         runtime.kwargs[1]["diagnostic_metadata"]["diagnostic_label_architecture"]
         == "BOUNDED_EXECUTION_DEBUG_REPAIR"
@@ -2106,10 +2098,13 @@ def test_phase7f_ops_fix_stale_replace_failed_correction_is_rejected(
         for event in events
         if event.get("event_type") == EventType.REPAIR_REJECTED
     ]
-    assert rejected[-1]["details"]["reason"] == "phase7f_ops_fix_stale_replace"
-    assert rejected[-1]["details"]["phase7f_rejection_reason"] == (
-        "stale_replace_after_correction"
+    assert (
+        rejected[-1]["details"]["reason"]
+        == "bounded_execution_debug_repair_ops_fix_stale_replace"
     )
+    assert rejected[-1]["details"][
+        "bounded_execution_debug_repair_rejection_reason"
+    ] == ("stale_replace_after_correction")
     assert (
         rejected[-1]["details"]["bounded_execution_debug_repair_rejection_reason"]
         == "stale_replace_after_correction"
@@ -2238,12 +2233,14 @@ def test_phase7f_invalid_bounded_repair_terminalizes(db_session, tmp_path):
     assert rejected[-1]["details"]["reason_architecture"] == (
         "bounded_execution_debug_repair_output_invalid"
     )
-    assert rejected[-1]["details"]["phase7f_rejection_reason"] == ("unsupported_shape")
+    assert rejected[-1]["details"][
+        "bounded_execution_debug_repair_rejection_reason"
+    ] == ("unsupported_shape")
     assert (
         rejected[-1]["details"]["bounded_execution_debug_repair_rejection_reason"]
         == "unsupported_shape"
     )
-    assert rejected[-1]["details"]["phase7f_parsed_shape"] == {
+    assert rejected[-1]["details"]["bounded_execution_debug_repair_parsed_shape"] == {
         "type": "list",
         "length": 0,
     }
@@ -2251,7 +2248,10 @@ def test_phase7f_invalid_bounded_repair_terminalizes(db_session, tmp_path):
         "type": "list",
         "length": 0,
     }
-    assert rejected[-1]["details"]["phase7f_raw_output_excerpt"] == "[]"
+    assert (
+        rejected[-1]["details"]["bounded_execution_debug_repair_raw_output_excerpt"]
+        == "[]"
+    )
     assert (
         rejected[-1]["details"]["bounded_execution_debug_repair_raw_output_excerpt"]
         == "[]"
@@ -2299,14 +2299,19 @@ def test_phase7f_compliance_retry_parse_failure_records_diagnostics(
         details["reason_architecture"]
         == "bounded_execution_debug_repair_output_invalid"
     )
-    assert details["phase7f_rejection_reason"] == "compliance_retry_parse_failed"
     assert (
         details["bounded_execution_debug_repair_rejection_reason"]
         == "compliance_retry_parse_failed"
     )
-    assert details["phase7f_parsed_shape"] is None
+    assert (
+        details["bounded_execution_debug_repair_rejection_reason"]
+        == "compliance_retry_parse_failed"
+    )
     assert details["bounded_execution_debug_repair_parsed_shape"] is None
-    assert details["phase7f_raw_output_excerpt"] == "not json final"
+    assert details["bounded_execution_debug_repair_parsed_shape"] is None
+    assert (
+        details["bounded_execution_debug_repair_raw_output_excerpt"] == "not json final"
+    )
     assert (
         details["bounded_execution_debug_repair_raw_output_excerpt"] == "not json final"
     )

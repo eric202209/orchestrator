@@ -51,6 +51,9 @@ from app.services.orchestration.state.persistence import (
 from app.services.orchestration.policy import (
     COMPLETION_REPAIR_TIMEOUT_SECONDS,
 )
+from app.runtime_naming import (
+    completion_repair_prompt_mode_alias_details,
+)
 from app.services.orchestration.review_policy import decide_change_set_review
 from app.services.orchestration.run_state import (
     mark_task_attempt_failed,
@@ -368,7 +371,7 @@ def _attempt_completion_repair(
             "phase": "completion_repair",
             "attempt": orchestration_state.completion_repair_attempts,
             "reasons": completion_validation.reasons[:10],
-            "completion_repair_prompt_mode": "phase7h_capsule",
+            **completion_repair_prompt_mode_alias_details(),
             "capsule_relevant_file_count": len(repair_capsule.relevant_files),
             "capsule_last_step_present": bool(repair_capsule.last_step_summary),
             "envelope_mode": "direct_capsule",

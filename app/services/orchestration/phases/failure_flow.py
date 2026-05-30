@@ -19,6 +19,12 @@ from app.services.orchestration.run_state import (
     mark_task_attempt_pending,
     task_execution_id_from_context,
 )
+from app.runtime_naming import (
+    BOUNDED_DEBUG_REPAIR_TIMEOUT_REASON,
+    LEGACY_BOUNDED_DEBUG_REPAIR_TIMEOUT_REASON,
+    bounded_debug_repair_timeout_alias_details,
+    is_bounded_debug_repair_mode,
+)
 from app.services.orchestration.state.session_state import (
     mark_session_paused,
     mark_session_running,
@@ -161,21 +167,21 @@ def _prepare_retry_workspace(
     return False, retry_kwargs, restore_result is not None
 
 
-def _is_phase7f_bounded_debug_timeout(
+def _is_bounded_debug_repair_timeout(
     exc: Exception, runtime_diagnostics: dict[str, Any]
 ) -> bool:
-    """Return true only for Phase 7F source-step debug repair timeouts."""
+    """Return true only for bounded source-step debug repair timeouts."""
 
     debug_prompt_mode = runtime_diagnostics.get("debug_prompt_mode")
     debug_prompt_mode_architecture = runtime_diagnostics.get(
         "debug_prompt_mode_architecture"
     )
     if debug_prompt_mode_architecture is not None:
-        is_bounded_debug_repair = (
-            debug_prompt_mode_architecture == "bounded_execution_debug_repair"
+        is_bounded_debug_repair = is_bounded_debug_repair_mode(
+            debug_prompt_mode_architecture
         )
     else:
-        is_bounded_debug_repair = debug_prompt_mode == "phase7f_bounded_debug_repair"
+        is_bounded_debug_repair = is_bounded_debug_repair_mode(debug_prompt_mode)
     if not is_bounded_debug_repair:
         return False
     if runtime_diagnostics.get("failure_phase") != "debug_repair":
@@ -243,7 +249,7 @@ def handle_task_failure(
     retry_count = int(getattr(getattr(self_task, "request", None), "retries", 0) or 0)
     max_retries = int(getattr(self_task, "max_retries", 0) or 0)
     runtime_diagnostics = getattr(exc, "runtime_diagnostics", None) or {}
-    is_phase7f_bounded_debug_timeout = _is_phase7f_bounded_debug_timeout(
+    is_bounded_debug_repair_timeout = _is_bounded_debug_repair_timeout(
         exc, runtime_diagnostics
     )
     is_planning_lock_wait_timeout = runtime_diagnostics.get(
@@ -253,7 +259,7 @@ def handle_task_failure(
     has_retry_capacity = (
         should_retry
         and retry_count < max_retries
-        and not is_phase7f_bounded_debug_timeout
+        and not is_bounded_debug_repair_timeout
         and not is_planning_lock_wait_timeout
         and not is_project_mutation_lock_conflict
     )
@@ -265,8 +271,8 @@ def handle_task_failure(
     diagnostic_reason = None
     if is_project_mutation_lock_conflict:
         diagnostic_reason = "project_mutation_lock_conflict"
-    elif is_phase7f_bounded_debug_timeout:
-        diagnostic_reason = "phase7f_bounded_debug_timeout"
+    elif is_bounded_debug_repair_timeout:
+        diagnostic_reason = BOUNDED_DEBUG_REPAIR_TIMEOUT_REASON
     elif is_planning_lock_wait_timeout:
         diagnostic_reason = "planning_openclaw_lock_contention"
     elif is_timeout:
@@ -280,7 +286,7 @@ def handle_task_failure(
     )
     should_restore_workspace = (
         not any(marker in str(exc).lower() for marker in non_restoring_failure_markers)
-        and not is_phase7f_bounded_debug_timeout
+        and not is_bounded_debug_repair_timeout
     )
 
     auto_recovery_eligible = bool(
@@ -366,16 +372,19 @@ def handle_task_failure(
                     "retryable": has_retry_capacity,
                     "error_handler_retryable": should_retry,
                     "is_timeout": is_timeout,
-                    "phase7f_bounded_debug_timeout": (is_phase7f_bounded_debug_timeout),
-                    "bounded_execution_debug_repair_timeout": (
-                        is_phase7f_bounded_debug_timeout
+                    **bounded_debug_repair_timeout_alias_details(
+                        is_bounded_debug_repair_timeout
                     ),
                     "planning_lock_wait_timeout": is_planning_lock_wait_timeout,
                     "project_mutation_lock_conflict": is_project_mutation_lock_conflict,
                     "reason": diagnostic_reason,
                     "reason_architecture": (
-                        "bounded_execution_debug_repair_timeout"
-                        if diagnostic_reason == "phase7f_bounded_debug_timeout"
+                        BOUNDED_DEBUG_REPAIR_TIMEOUT_REASON
+                        if diagnostic_reason
+                        in {
+                            LEGACY_BOUNDED_DEBUG_REPAIR_TIMEOUT_REASON,
+                            BOUNDED_DEBUG_REPAIR_TIMEOUT_REASON,
+                        }
                         else diagnostic_reason
                     ),
                 },

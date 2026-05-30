@@ -5,6 +5,8 @@ from pydantic import model_validator, field_validator
 from typing import Any, List, Optional
 from pathlib import Path
 
+from app.runtime_naming import DEBUG_REPAIR_LEGACY_ENV_ALIASES
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DATABASE_URL = f"sqlite:///{BASE_DIR}/orchestrator.db"
 
@@ -22,6 +24,7 @@ LEGACY_ENV_ALIASES = {
     "ORCHESTRATOR_PLANNING_REPAIR_DIRECT_TIMEOUT_SECONDS": (
         "PLANNING_REPAIR_TIMEOUT_SECONDS"
     ),
+    **DEBUG_REPAIR_LEGACY_ENV_ALIASES,
     "ORCHESTRATOR_ENABLE_JUDGE_AGENT": "JUDGE_AGENT_ENABLED",
     "ORCHESTRATOR_TRACE_EXPORTER_BACKEND": "TRACE_EXPORTER_BACKEND",
     "ORCHESTRATOR_LANGFUSE_ENABLED": "LANGFUSE_ENABLED",
@@ -149,16 +152,12 @@ class Settings(BaseSettings):
     PLANNING_REPAIR_MODEL: str = "qwen-local"
     PLANNING_REPAIR_API_KEY: str = ""
     PLANNING_REPAIR_DISABLE_THINKING: bool = True
-    DEBUG_REPAIR_DIRECT_ENABLED: Optional[bool] = None
+    DEBUG_REPAIR_DIRECT_ENABLED: bool = True
     DEBUG_REPAIR_BASE_URL: str = ""
     DEBUG_REPAIR_MODEL: str = ""
     DEBUG_REPAIR_API_KEY: str = ""
-    DEBUG_REPAIR_DISABLE_THINKING: Optional[bool] = None
-    PHASE7F_REPAIR_DIRECT_ENABLED: bool = True
-    PHASE7F_REPAIR_BASE_URL: str = ""
-    PHASE7F_REPAIR_MODEL: str = ""
-    PHASE7F_REPAIR_API_KEY: str = ""
-    PHASE7F_REPAIR_DISABLE_THINKING: bool = True
+    DEBUG_REPAIR_DISABLE_THINKING: bool = True
+
     PLANNING_DIRECT_NO_THINKING_FOR_DIRECT_OLLAMA: bool = False
     PLANNING_DIRECT_SKIP_PROMPT_CHAR_THRESHOLD: int = 0
     PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS: int = 0

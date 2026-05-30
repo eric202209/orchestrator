@@ -50,6 +50,11 @@ from app.services.workspace.project_isolation_service import (
 from app.services.orchestration.task_rules import (
     should_execute_in_canonical_project_root,
 )
+from app.runtime_naming import (
+    BOUNDED_DEBUG_REPAIR_DIAGNOSTIC_LABEL,
+    canonical_diagnostic_label,
+    diagnostic_label_alias_details,
+)
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.state.persistence import append_orchestration_event
 from app.services.observability import (
@@ -414,10 +419,10 @@ class OpenClawSessionService:
     def _is_bounded_debug_repair_diagnostic_label(
         diagnostic_label: Optional[str],
     ) -> bool:
-        return diagnostic_label in {
-            "PHASE7F_DEBUG_REPAIR",
-            "BOUNDED_EXECUTION_DEBUG_REPAIR",
-        }
+        return (
+            canonical_diagnostic_label(diagnostic_label)
+            == BOUNDED_DEBUG_REPAIR_DIAGNOSTIC_LABEL
+        )
 
     @staticmethod
     def _diagnostic_label_architecture(
@@ -426,7 +431,7 @@ class OpenClawSessionService:
         if OpenClawSessionService._is_bounded_debug_repair_diagnostic_label(
             diagnostic_label
         ):
-            return "BOUNDED_EXECUTION_DEBUG_REPAIR"
+            return BOUNDED_DEBUG_REPAIR_DIAGNOSTIC_LABEL
         return None
 
     @staticmethod
@@ -480,21 +485,9 @@ class OpenClawSessionService:
 
         if not self._is_bounded_debug_repair_diagnostic_label(diagnostic_label):
             return False
-        enabled = (
-            settings.DEBUG_REPAIR_DIRECT_ENABLED
-            if settings.DEBUG_REPAIR_DIRECT_ENABLED is not None
-            else settings.PHASE7F_REPAIR_DIRECT_ENABLED
-        )
-        if not enabled:
+        if not settings.DEBUG_REPAIR_DIRECT_ENABLED:
             return False
         return self.backend_descriptor.name == "local_openclaw"
-
-    def _should_use_phase7f_direct_repair(
-        self, diagnostic_label: Optional[str]
-    ) -> bool:
-        """Backward-compatible wrapper for direct debug repair routing."""
-
-        return self._should_use_structured_debug_repair_direct_chat(diagnostic_label)
 
     @staticmethod
     def _debug_repair_direct_config() -> Dict[str, str]:
@@ -506,31 +499,17 @@ class OpenClawSessionService:
             ).strip(),
             "base_url": (
                 settings.DEBUG_REPAIR_BASE_URL
-                or settings.PHASE7F_REPAIR_BASE_URL
                 or settings.PLANNING_REPAIR_BASE_URL
                 or ""
             ).rstrip("/"),
-            "model": (
-                settings.DEBUG_REPAIR_MODEL
-                or settings.PHASE7F_REPAIR_MODEL
-                or settings.PLANNING_REPAIR_MODEL
-            ),
+            "model": (settings.DEBUG_REPAIR_MODEL or settings.PLANNING_REPAIR_MODEL),
             "api_key": settings.DEBUG_REPAIR_API_KEY
-            or settings.PHASE7F_REPAIR_API_KEY
             or settings.PLANNING_REPAIR_API_KEY,
         }
 
     @staticmethod
     def _debug_repair_disable_thinking() -> bool:
-        if settings.DEBUG_REPAIR_DISABLE_THINKING is not None:
-            return bool(settings.DEBUG_REPAIR_DISABLE_THINKING)
-        return bool(settings.PHASE7F_REPAIR_DISABLE_THINKING)
-
-    @staticmethod
-    def _phase7f_repair_direct_config() -> Dict[str, str]:
-        """Backward-compatible wrapper for the architecture-named config."""
-
-        return OpenClawSessionService._debug_repair_direct_config()
+        return bool(settings.DEBUG_REPAIR_DISABLE_THINKING)
 
     @staticmethod
     def _debug_repair_direct_payload(prompt: str, model: str) -> Dict[str, Any]:
@@ -548,12 +527,6 @@ class OpenClawSessionService:
             payload["enable_thinking"] = False
             payload["chat_template_kwargs"] = {"enable_thinking": False}
         return payload
-
-    @staticmethod
-    def _phase7f_repair_direct_payload(prompt: str, model: str) -> Dict[str, Any]:
-        """Backward-compatible wrapper for the architecture-named payload."""
-
-        return OpenClawSessionService._debug_repair_direct_payload(prompt, model)
 
     @staticmethod
     def _debug_repair_responses_payload(prompt: str, model: str) -> Dict[str, Any]:
@@ -662,8 +635,9 @@ class OpenClawSessionService:
             f"model={model} timeout={timeout_seconds}s prompt_chars={len(prompt or '')}",
             metadata=json.dumps(
                 {
-                    "diagnostic_label": "PHASE7F_DEBUG_REPAIR",
-                    "diagnostic_label_architecture": ("BOUNDED_EXECUTION_DEBUG_REPAIR"),
+                    **diagnostic_label_alias_details(
+                        BOUNDED_DEBUG_REPAIR_DIAGNOSTIC_LABEL
+                    ),
                     "architecture_lane": "debug_repair",
                     "invocation_kind": "debug_repair",
                     "timeout_boundary": timeout_boundary,
@@ -690,8 +664,7 @@ class OpenClawSessionService:
                 f"Debug repair direct call failed: {type(exc).__name__}: {str(exc)[:200]}"
             )
             error.runtime_diagnostics = {
-                "diagnostic_label": "PHASE7F_DEBUG_REPAIR",
-                "diagnostic_label_architecture": "BOUNDED_EXECUTION_DEBUG_REPAIR",
+                **diagnostic_label_alias_details(BOUNDED_DEBUG_REPAIR_DIAGNOSTIC_LABEL),
                 "architecture_lane": "debug_repair",
                 "invocation_kind": "debug_repair",
                 "timeout_boundary": timeout_boundary,
@@ -722,8 +695,7 @@ class OpenClawSessionService:
         )
 
         diagnostics = {
-            "diagnostic_label": "PHASE7F_DEBUG_REPAIR",
-            "diagnostic_label_architecture": "BOUNDED_EXECUTION_DEBUG_REPAIR",
+            **diagnostic_label_alias_details(BOUNDED_DEBUG_REPAIR_DIAGNOSTIC_LABEL),
             "architecture_lane": "debug_repair",
             "invocation_kind": "debug_repair",
             "timeout_boundary": timeout_boundary,
@@ -761,21 +733,6 @@ class OpenClawSessionService:
             "model_family": model,
             "diagnostics": diagnostics,
         }
-
-    async def _execute_phase7f_direct_repair(
-        self,
-        prompt: str,
-        *,
-        timeout_seconds: int,
-        diagnostic_metadata: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Backward-compatible wrapper for the architecture-named direct call."""
-
-        return await self._execute_structured_debug_repair_direct_call(
-            prompt,
-            timeout_seconds=timeout_seconds,
-            diagnostic_metadata=diagnostic_metadata,
-        )
 
     async def _run_cli_prompt_with_diagnostics(
         self,

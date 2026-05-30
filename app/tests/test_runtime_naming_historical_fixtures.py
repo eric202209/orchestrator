@@ -117,7 +117,7 @@ def test_old_only_timeout_diagnostics_still_classifies_bounded_debug_timeout():
     diagnostics = _load_json("old_only_phase7f_timeout_diagnostics.json")
 
     assert (
-        failure_flow._is_phase7f_bounded_debug_timeout(
+        failure_flow._is_bounded_debug_repair_timeout(
             TimeoutError("Task timed out after 180s"), diagnostics
         )
         is True

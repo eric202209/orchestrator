@@ -1160,7 +1160,7 @@ def test_bounded_debug_timeout_accepts_architecture_named_prompt_mode():
         "timed_out": True,
     }
 
-    assert failure_flow._is_phase7f_bounded_debug_timeout(timeout, diagnostics) is True
+    assert failure_flow._is_bounded_debug_repair_timeout(timeout, diagnostics) is True
 
 
 def test_bounded_debug_timeout_prefers_architecture_prompt_mode():
@@ -1173,7 +1173,7 @@ def test_bounded_debug_timeout_prefers_architecture_prompt_mode():
         "timed_out": True,
     }
 
-    assert failure_flow._is_phase7f_bounded_debug_timeout(timeout, diagnostics) is False
+    assert failure_flow._is_bounded_debug_repair_timeout(timeout, diagnostics) is False
 
 
 def test_bounded_debug_timeout_falls_back_to_compatibility_prompt_mode():
@@ -1185,7 +1185,7 @@ def test_bounded_debug_timeout_falls_back_to_compatibility_prompt_mode():
         "timed_out": True,
     }
 
-    assert failure_flow._is_phase7f_bounded_debug_timeout(timeout, diagnostics) is True
+    assert failure_flow._is_bounded_debug_repair_timeout(timeout, diagnostics) is True
 
 
 def test_ordinary_backend_timeout_still_retries_and_restores_workspace(
