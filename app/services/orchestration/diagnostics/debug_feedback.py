@@ -66,6 +66,7 @@ class DebugFeedbackEnvelope:
     pytest_excerpt: str = ""
     validator_reasons: list[str] = field(default_factory=list)
     changed_files: list[str] = field(default_factory=list)
+    expected_files: list[str] = field(default_factory=list)
     workspace_path: str = ""
     failure_class: str = "unknown"
     schema_version: int = 1
@@ -88,6 +89,7 @@ class DebugFeedbackEnvelope:
             "pytest_excerpt": self.pytest_excerpt,
             "validator_reasons": list(self.validator_reasons),
             "changed_files": list(self.changed_files),
+            "expected_files": list(self.expected_files),
             "workspace_path": self.workspace_path,
             "failure_class": self.failure_class,
             "eligible_for_debug_repair": self.eligible_for_debug_repair,
@@ -101,6 +103,14 @@ class DebugRepairNormalizationResult:
     payload: Optional[dict[str, Any]]
     rejection_reason: Optional[str]
     parsed_shape: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class DebugRepairPromptBuildResult:
+    """Bounded debug repair prompt plus non-sensitive build metadata."""
+
+    prompt: str
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def _excerpt(value: Any, max_chars: int = 1200) -> str:
@@ -217,6 +227,7 @@ def build_debug_feedback_envelope(
     stderr: str = "",
     validator_reasons: Optional[Iterable[str]] = None,
     changed_files: Optional[Iterable[str]] = None,
+    expected_files: Optional[Iterable[str]] = None,
     workspace_path: Any = "",
 ) -> DebugFeedbackEnvelope:
     reasons = [str(reason) for reason in (validator_reasons or []) if str(reason)]
@@ -235,6 +246,7 @@ def build_debug_feedback_envelope(
         pytest_excerpt=_first_pytest_excerpt(combined_output),
         validator_reasons=reasons[:10],
         changed_files=[str(path) for path in (changed_files or []) if str(path)][:20],
+        expected_files=[str(path) for path in (expected_files or []) if str(path)][:20],
         workspace_path=str(workspace_path or ""),
         failure_class=classify_debug_failure(
             failed_command=failed_command,
@@ -323,8 +335,28 @@ def persist_debug_feedback_envelope(
 def build_bounded_debug_repair_prompt(
     envelope: DebugFeedbackEnvelope,
     evidence_capsule: Optional[Any] = None,
+    *,
+    source_edit_context: bool = False,
+    candidate_repair: Optional[Any] = None,
 ) -> str:
     """Render the bounded Phase 7F debug repair prompt body."""
+
+    return build_bounded_debug_repair_prompt_with_metadata(
+        envelope,
+        evidence_capsule,
+        source_edit_context=source_edit_context,
+        candidate_repair=candidate_repair,
+    ).prompt
+
+
+def build_bounded_debug_repair_prompt_with_metadata(
+    envelope: DebugFeedbackEnvelope,
+    evidence_capsule: Optional[Any] = None,
+    *,
+    source_edit_context: bool = False,
+    candidate_repair: Optional[Any] = None,
+) -> DebugRepairPromptBuildResult:
+    """Render the bounded debug repair prompt with source/API metadata."""
 
     workspace = render_workspace_path_for_prompt(Path(envelope.workspace_path or "."))
     excerpts = {
@@ -343,7 +375,17 @@ def build_bounded_debug_repair_prompt(
             evidence_section = f"\n{rendered}\n"
     source_excerpt_section = build_source_step_validation_excerpt_section(envelope)
     source_contract = build_debug_source_contract(envelope, evidence_capsule)
+    source_api_contract, source_api_metadata = (
+        build_debug_source_api_contract_context_block(
+            envelope,
+            source_edit_context=source_edit_context,
+            candidate_repair=candidate_repair,
+        )
+    )
     source_contract_section = f"\n{source_contract}\n" if source_contract else ""
+    source_api_contract_section = (
+        f"\n{source_api_contract}\n" if source_api_contract else ""
+    )
     source_ops_contract_section = ""
     if source_contract:
         source_ops_contract_section = (
@@ -389,7 +431,7 @@ def build_bounded_debug_repair_prompt(
             "9. Do not request additional retries or describe policy.\n"
             "10. If workspace evidence names a missing Python module target, prefer creating that module file instead of editing only a package __init__.py.\n"
         )
-    return (
+    prompt = (
         "Return a bare JSON array of one minimal debug repair step. "
         "Do not return prose, markdown, comments, explanations, or fenced code.\n\n"
         f"Workspace scope: {workspace}\n"
@@ -404,8 +446,197 @@ def build_bounded_debug_repair_prompt(
         f"{evidence_section}\n"
         f"{source_contract_section}"
         f"{source_ops_contract_section}"
+        f"{source_api_contract_section}"
         f"{rules_section}"
     )
+    return DebugRepairPromptBuildResult(
+        prompt=prompt,
+        metadata=source_api_metadata,
+    )
+
+
+def build_debug_source_api_contract_context_block(
+    envelope: DebugFeedbackEnvelope,
+    *,
+    source_edit_context: bool = False,
+    candidate_repair: Optional[Any] = None,
+    max_chars: int = 3200,
+    compact_max_chars: int = 1500,
+) -> tuple[str, dict[str, Any]]:
+    """Render the shared source/API capsule for bounded debug source repair."""
+
+    metadata = {
+        "source_api_contract_available": False,
+        "source_api_contract_included": False,
+        "source_api_contract_chars": 0,
+        "source_api_contract_compacted": False,
+        "source_api_contract_omitted_reason": "not_available",
+        "source_api_contract_included_reason": None,
+    }
+    project_dir = Path(envelope.workspace_path or ".")
+    if not project_dir.exists():
+        return "", metadata
+
+    try:
+        from app.services.orchestration.planning.source_api_contract import (
+            build_source_api_contract_capsule,
+        )
+
+        capsule = build_source_api_contract_capsule(
+            project_dir,
+            max_excerpt_chars=450,
+        )
+    except Exception:
+        return "", metadata
+
+    if not capsule.source_modules:
+        return "", metadata
+
+    metadata["source_api_contract_available"] = True
+    metadata["source_api_contract_omitted_reason"] = None
+    included_reason = _debug_repair_source_api_contract_included_reason(
+        envelope,
+        capsule,
+        source_edit_context=source_edit_context,
+        candidate_repair=candidate_repair,
+    )
+    if not included_reason:
+        metadata["source_api_contract_omitted_reason"] = "non_python_debug_context"
+        return "", metadata
+
+    full_block = _render_debug_source_api_contract_block(capsule, compact=False)
+    compact_block = _render_debug_source_api_contract_block(capsule, compact=True)
+    block = full_block
+    compacted = False
+    if len(block) > max_chars and compact_block:
+        block = compact_block
+        compacted = True
+    limit = compact_max_chars if compacted else max_chars
+    block = _excerpt(block, limit)
+    metadata["source_api_contract_included"] = bool(block)
+    metadata["source_api_contract_chars"] = len(block)
+    metadata["source_api_contract_compacted"] = compacted
+    metadata["source_api_contract_included_reason"] = included_reason
+    if not block:
+        metadata["source_api_contract_omitted_reason"] = "empty"
+    return block, metadata
+
+
+def _debug_repair_source_api_contract_included_reason(
+    envelope: DebugFeedbackEnvelope,
+    capsule: Any,
+    *,
+    source_edit_context: bool,
+    candidate_repair: Optional[Any],
+) -> Optional[str]:
+    if source_edit_context:
+        return "source_edit_context"
+    if _candidate_repair_touches_python_source(candidate_repair):
+        return "python_source_ops"
+    if any(_normalize_source_excerpt_path(path) for path in envelope.expected_files):
+        return "expected_python_source_files"
+    if envelope.failure_class in {"import_error", "module_not_found", "syntax_error"}:
+        return "import_error_public_api_risk"
+    if any(_normalize_source_excerpt_path(path) for path in envelope.changed_files):
+        return "expected_python_source_files"
+    context = _debug_failure_context(envelope)
+    if _CANNOT_IMPORT_FROM_FILE_RE.search(context):
+        return "import_error_public_api_risk"
+    if _looks_like_public_api_attribute_error(context):
+        return "import_error_public_api_risk"
+    lowered_context = context.lower()
+    for module, symbols in getattr(capsule, "test_imported_symbols", {}).items():
+        if str(module or "").lower() in lowered_context:
+            return "import_error_public_api_risk"
+        for symbol in symbols:
+            if re.search(rf"\b{re.escape(str(symbol))}\b", context):
+                return "import_error_public_api_risk"
+    return None
+
+
+def _candidate_repair_touches_python_source(candidate_repair: Optional[Any]) -> bool:
+    if candidate_repair is None:
+        return False
+    if isinstance(candidate_repair, dict):
+        path = str(candidate_repair.get("path") or "").strip()
+        if _normalize_source_excerpt_path(path):
+            return True
+        if any(
+            _candidate_repair_touches_python_source(candidate_repair.get(key))
+            for key in ("ops", "repair", "fix", "candidate")
+        ):
+            return True
+        if len(candidate_repair) == 1:
+            value = next(iter(candidate_repair.values()))
+            return _candidate_repair_touches_python_source(value)
+        return False
+    if isinstance(candidate_repair, list):
+        return any(
+            _candidate_repair_touches_python_source(item) for item in candidate_repair
+        )
+    return False
+
+
+def _looks_like_public_api_attribute_error(context: str) -> bool:
+    return bool(
+        re.search(
+            r"AttributeError:\s+module\s+'[A-Za-z_][A-Za-z0-9_.]*'\s+has\s+no\s+attribute\s+'[A-Za-z_][A-Za-z0-9_]*'",
+            context,
+        )
+    )
+
+
+def _render_debug_source_api_contract_block(capsule: Any, *, compact: bool) -> str:
+    lines = [
+        "## SOURCE/API CONTRACT CAPSULE",
+        "Use this read-only contract to ground bounded debug source repair.",
+    ]
+    framework_family = getattr(capsule, "framework_family", None)
+    if framework_family:
+        lines.append(f"framework_family: {framework_family}")
+        lines.append(f"- Preserve the detected {framework_family} framework family.")
+    lines.extend(
+        [
+            "- Preserve required public symbols imported by tests.",
+            "- Do not add self-imports to restore symbols.",
+            "- Do not add physical src. imports inside package code.",
+            "- Prefer repairing existing source definitions over re-export hacks.",
+            "- Do not rewrite tests unless explicitly requested.",
+            "- Prefer canonical source ops under existing source modules.",
+        ]
+    )
+    source_modules = list(getattr(capsule, "source_modules", []) or [])
+    if source_modules:
+        lines.append("source_modules: " + ", ".join(source_modules[:8]))
+
+    test_imported = dict(getattr(capsule, "test_imported_symbols", {}) or {})
+    if test_imported:
+        lines.append("test_imported_symbols:")
+        for module, symbols in list(test_imported.items())[:8]:
+            lines.append(f"- {module}: {', '.join(list(symbols)[:12])}")
+        lines.append("required_public_symbols:")
+        for module, symbols in list(test_imported.items())[:8]:
+            lines.append(f"- {module}: {', '.join(list(symbols)[:12])}")
+
+    public_symbols = dict(getattr(capsule, "public_symbols", {}) or {})
+    if public_symbols:
+        lines.append("public_symbols:")
+        for module, symbols in list(public_symbols.items())[:8]:
+            lines.append(f"- {module}: {', '.join(list(symbols)[:12])}")
+
+    if compact:
+        return "\n".join(lines).strip()
+
+    source_excerpt = dict(getattr(capsule, "source_excerpt", {}) or {})
+    if source_excerpt:
+        lines.append("source_excerpt:")
+        for module, excerpt in list(source_excerpt.items())[:4]:
+            normalized = str(excerpt or "").strip()
+            if not normalized:
+                continue
+            lines.append(f"{module}:")
+            lines.append(normalized)
+    return "\n".join(lines).strip()
 
 
 def build_source_step_validation_excerpt_section(

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -20,6 +21,9 @@ from app.services.orchestration.planning.prompt_contracts import (
 )
 from app.services.orchestration.planning.repair_strategies import (
     build_specialized_repair_prompt,
+)
+from app.services.orchestration.planning.source_api_contract import (
+    build_source_api_contract_capsule,
 )
 from app.services.project.source_imports import (
     extract_python_test_contract,
@@ -39,6 +43,9 @@ PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS = 700
 PLANNING_REPAIR_MAX_VALIDATION_ERROR_CHARS = 450
 PLANNING_REPAIR_MAX_STALE_FALLBACK_VALIDATION_ERROR_CHARS = 1600
 PLANNING_REPAIR_MAX_SOURCE_CONTEXT_CHARS = 1400
+PLANNING_REPAIR_MAX_SOURCE_API_CONTRACT_CHARS = 1600
+PLANNING_REPAIR_COMPACT_SOURCE_API_CONTRACT_CHARS = 1200
+PLANNING_REPAIR_MINIMAL_SOURCE_API_CONTRACT_CHARS = 760
 PLANNING_REPAIR_STRUCTURE_TRUNCATION_MARKER = (
     "\n- ... project structure capsule truncated to fit repair prompt budget"
 )
@@ -63,6 +70,12 @@ PLANNING_REPAIR_STRIP_FIELD_NAMES = {
     "payloads",
     "executionLogs",
 }
+
+
+@dataclass
+class PlanningRepairPromptBuildResult:
+    prompt: str
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def render_repair_knowledge_block(knowledge_context: Any) -> str:
@@ -158,6 +171,28 @@ def build_planning_repair_prompt(
     knowledge_context: Any = None,
     project_structure_capsule: str | None = None,
 ) -> str:
+    return build_planning_repair_prompt_with_metadata(
+        task_description=task_description,
+        malformed_output=malformed_output,
+        project_dir=project_dir,
+        rejection_reasons=rejection_reasons,
+        prompt_profile=prompt_profile,
+        apply_prompt_profile=apply_prompt_profile,
+        knowledge_context=knowledge_context,
+        project_structure_capsule=project_structure_capsule,
+    ).prompt
+
+
+def build_planning_repair_prompt_with_metadata(
+    task_description: str,
+    malformed_output: str,
+    project_dir: Path,
+    rejection_reasons: Optional[list[str]] = None,
+    prompt_profile: str = "default",
+    apply_prompt_profile: Any = None,
+    knowledge_context: Any = None,
+    project_structure_capsule: str | None = None,
+) -> PlanningRepairPromptBuildResult:
     broken_output = compact_invalid_output_excerpt(malformed_output)
     knowledge_block = render_repair_knowledge_block(knowledge_context)
     source_context_block = build_python_test_source_context_block(
@@ -166,48 +201,49 @@ def build_planning_repair_prompt(
         malformed_output=malformed_output,
         rejection_reasons=rejection_reasons,
     )
+    source_api_contract_block = build_source_api_contract_context_block(
+        project_dir=project_dir,
+        malformed_output=malformed_output,
+        rejection_reasons=rejection_reasons,
+    )
+    source_api_contract_compact_block = build_source_api_contract_context_block(
+        project_dir=project_dir,
+        malformed_output=malformed_output,
+        rejection_reasons=rejection_reasons,
+        compact=True,
+    )
+    source_api_contract_minimal_block = build_minimal_source_api_contract_context_block(
+        project_dir=project_dir,
+        malformed_output=malformed_output,
+        rejection_reasons=rejection_reasons,
+    )
+    source_api_metadata = _source_api_contract_metadata(
+        full_block=source_api_contract_block,
+        compact_block=source_api_contract_compact_block,
+    )
     structure_capsule = (
         project_structure_capsule
         if project_structure_capsule is not None
         else _build_project_structure_capsule(project_dir)
     )
-    specialized_prompt = build_specialized_repair_prompt(
+    specialized_prompt, specialized_metadata = _build_specialized_prompt_protected(
         task_description=task_description,
         malformed_output=malformed_output,
         project_dir=project_dir,
         rejection_reasons=rejection_reasons,
-        knowledge_block=_join_optional_blocks(
-            knowledge_block, source_context_block, structure_capsule
-        ),
+        knowledge_block=knowledge_block,
+        source_context_block=source_context_block,
+        source_api_contract_block=source_api_contract_block,
+        source_api_contract_compact_block=source_api_contract_compact_block,
+        structure_capsule=structure_capsule,
     )
     if specialized_prompt is not None:
         if len(specialized_prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS:
-            overflow = len(specialized_prompt) - PLANNING_REPAIR_PROMPT_MAX_CHARS
-            reduced_structure_capsule = _truncate_repair_structure_capsule(
-                structure_capsule,
-                max_chars=len(structure_capsule) - overflow - 80,
+            fallback_source_api_block = (
+                source_api_contract_minimal_block
+                or source_api_contract_compact_block
+                or source_api_contract_block
             )
-            specialized_prompt = build_specialized_repair_prompt(
-                task_description=task_description,
-                malformed_output=malformed_output,
-                project_dir=project_dir,
-                rejection_reasons=rejection_reasons,
-                knowledge_block=_join_optional_blocks(
-                    knowledge_block, source_context_block, reduced_structure_capsule
-                ),
-            )
-        if (
-            len(specialized_prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS
-            and source_context_block
-        ):
-            specialized_prompt = build_specialized_repair_prompt(
-                task_description=task_description,
-                malformed_output=malformed_output,
-                project_dir=project_dir,
-                rejection_reasons=rejection_reasons,
-                knowledge_block=_join_optional_blocks(knowledge_block),
-            )
-        if len(specialized_prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS:
             specialized_prompt = _build_over_budget_compact_repair_prompt(
                 task_description=task_description,
                 malformed_output=malformed_output,
@@ -215,8 +251,33 @@ def build_planning_repair_prompt(
                 rejection_reasons=rejection_reasons,
                 prompt_profile=prompt_profile,
                 apply_prompt_profile=None,
+                source_api_contract_block=fallback_source_api_block,
+                knowledge_block=knowledge_block,
             )
-        return _apply_profile_or_compact_fallback(
+            specialized_metadata.update(
+                _metadata_for_final_source_api_block(
+                    source_api_metadata=source_api_metadata,
+                    source_api_block=(
+                        fallback_source_api_block
+                        if fallback_source_api_block
+                        and fallback_source_api_block in specialized_prompt
+                        else ""
+                    ),
+                    compacted=bool(
+                        source_api_contract_minimal_block
+                        or source_api_contract_compact_block
+                    ),
+                    omitted_reason="over_budget_compact_fallback",
+                    included_reason=(
+                        "hard_budget_minimal_capsule"
+                        if source_api_contract_minimal_block
+                        and fallback_source_api_block
+                        == source_api_contract_minimal_block
+                        else "repair_context"
+                    ),
+                )
+            )
+        prompt, final_metadata = _apply_profile_or_compact_fallback_with_metadata(
             specialized_prompt,
             task_description=task_description,
             project_dir=project_dir,
@@ -224,6 +285,25 @@ def build_planning_repair_prompt(
             rejection_reasons=rejection_reasons,
             prompt_profile=prompt_profile,
             apply_prompt_profile=apply_prompt_profile,
+            source_api_metadata={**source_api_metadata, **specialized_metadata},
+            source_api_contract_block=(
+                source_api_contract_minimal_block
+                or source_api_contract_compact_block
+                or source_api_contract_block
+            ),
+            knowledge_block=knowledge_block,
+            compacted=bool(
+                source_api_contract_minimal_block or source_api_contract_compact_block
+            ),
+            included_reason=(
+                "hard_budget_minimal_capsule"
+                if source_api_contract_minimal_block
+                else "repair_context"
+            ),
+        )
+        return PlanningRepairPromptBuildResult(
+            prompt=prompt,
+            metadata={**source_api_metadata, **specialized_metadata, **final_metadata},
         )
     validation_error = ""
     validation_char_limit = PLANNING_REPAIR_MAX_VALIDATION_ERROR_CHARS
@@ -294,6 +374,8 @@ def build_planning_repair_prompt(
     def _compose_prompt(
         current_structure_capsule: str,
         current_source_context_block: str,
+        current_source_api_contract_block: str,
+        current_knowledge_block: str,
     ) -> str:
         return f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
@@ -305,7 +387,8 @@ Bad:
 
 {validation_error or default_validation_error}
 
-{knowledge_block + chr(10) if knowledge_block else ""}
+{current_knowledge_block + chr(10) if current_knowledge_block else ""}
+{current_source_api_contract_block + chr(10) if current_source_api_contract_block else ""}
 {current_source_context_block + chr(10) if current_source_context_block else ""}
 {current_structure_capsule + chr(10) if current_structure_capsule else ""}
 {validation_guidance_block + chr(10) if validation_guidance_block else ""}
@@ -334,17 +417,80 @@ Rules:
 17. Each step is a separate JSON object. Never merge steps.
 """
 
-    prompt = _compose_prompt(structure_capsule, source_context_block)
+    prompt_metadata: dict[str, Any] = {
+        **source_api_metadata,
+        "source_api_contract_included": bool(source_api_contract_block),
+        "source_api_contract_compacted": False,
+        "source_api_contract_omitted_reason": None,
+    }
+    active_source_api_contract_block = source_api_contract_block
+    prompt = _compose_prompt(
+        structure_capsule,
+        source_context_block,
+        active_source_api_contract_block,
+        knowledge_block,
+    )
+    if (
+        len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS
+        and active_source_api_contract_block == source_api_contract_block
+        and source_api_contract_compact_block
+    ):
+        active_source_api_contract_block = source_api_contract_compact_block
+        prompt_metadata["source_api_contract_compacted"] = True
+        prompt = _compose_prompt(
+            structure_capsule,
+            source_context_block,
+            active_source_api_contract_block,
+            knowledge_block,
+        )
     if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS and structure_capsule:
         overflow = len(prompt) - PLANNING_REPAIR_PROMPT_MAX_CHARS
         reduced_structure_capsule = _truncate_repair_structure_capsule(
             structure_capsule,
             max_chars=len(structure_capsule) - overflow - 80,
         )
-        prompt = _compose_prompt(reduced_structure_capsule, source_context_block)
+        prompt = _compose_prompt(
+            reduced_structure_capsule,
+            source_context_block,
+            active_source_api_contract_block,
+            knowledge_block,
+        )
+    if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS and structure_capsule:
+        prompt = _compose_prompt(
+            "",
+            source_context_block,
+            active_source_api_contract_block,
+            knowledge_block,
+        )
+    active_source_context_block = source_context_block
     if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS and source_context_block:
-        prompt = _compose_prompt("", "")
+        active_source_context_block = _truncate_text(source_context_block, 560)
+        prompt = _compose_prompt(
+            "",
+            active_source_context_block,
+            active_source_api_contract_block,
+            knowledge_block,
+        )
+    if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS and knowledge_block:
+        prompt = _compose_prompt(
+            "",
+            active_source_context_block,
+            active_source_api_contract_block,
+            "",
+        )
+    if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS and source_context_block:
+        prompt = _compose_prompt(
+            "",
+            "",
+            active_source_api_contract_block,
+            "",
+        )
     if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS:
+        fallback_source_api_block = (
+            source_api_contract_minimal_block
+            or source_api_contract_compact_block
+            or source_api_contract_block
+        )
         prompt = _build_over_budget_compact_repair_prompt(
             task_description=task_description,
             malformed_output=malformed_output,
@@ -352,8 +498,38 @@ Rules:
             rejection_reasons=rejection_reasons,
             prompt_profile=prompt_profile,
             apply_prompt_profile=None,
+            source_api_contract_block=fallback_source_api_block,
+            knowledge_block=knowledge_block,
         )
-    return _apply_profile_or_compact_fallback(
+        prompt_metadata.update(
+            _metadata_for_final_source_api_block(
+                source_api_metadata=source_api_metadata,
+                source_api_block=(
+                    fallback_source_api_block
+                    if fallback_source_api_block and fallback_source_api_block in prompt
+                    else ""
+                ),
+                compacted=bool(
+                    source_api_contract_minimal_block
+                    or source_api_contract_compact_block
+                ),
+                omitted_reason="over_budget_compact_fallback",
+                included_reason=(
+                    "hard_budget_minimal_capsule"
+                    if source_api_contract_minimal_block
+                    and fallback_source_api_block == source_api_contract_minimal_block
+                    else "repair_context"
+                ),
+            )
+        )
+    else:
+        prompt_metadata["source_api_contract_included"] = bool(
+            active_source_api_contract_block
+        )
+        prompt_metadata["source_api_contract_chars"] = len(
+            active_source_api_contract_block
+        )
+    prompt, final_metadata = _apply_profile_or_compact_fallback_with_metadata(
         prompt,
         task_description=task_description,
         project_dir=project_dir,
@@ -361,7 +537,24 @@ Rules:
         rejection_reasons=rejection_reasons,
         prompt_profile=prompt_profile,
         apply_prompt_profile=apply_prompt_profile,
+        source_api_metadata={**source_api_metadata, **prompt_metadata},
+        source_api_contract_block=(
+            source_api_contract_minimal_block
+            or source_api_contract_compact_block
+            or source_api_contract_block
+        ),
+        knowledge_block=knowledge_block,
+        compacted=bool(
+            source_api_contract_minimal_block or source_api_contract_compact_block
+        ),
+        included_reason=(
+            "hard_budget_minimal_capsule"
+            if source_api_contract_minimal_block
+            else "repair_context"
+        ),
     )
+    prompt_metadata.update(final_metadata)
+    return PlanningRepairPromptBuildResult(prompt=prompt, metadata=prompt_metadata)
 
 
 def build_python_test_source_context_block(
@@ -429,6 +622,366 @@ def build_python_test_source_context_block(
         if total_chars >= PLANNING_REPAIR_MAX_SOURCE_CONTEXT_CHARS:
             break
     return "\n".join(lines).strip()[:PLANNING_REPAIR_MAX_SOURCE_CONTEXT_CHARS]
+
+
+def build_source_api_contract_context_block(
+    *,
+    project_dir: Path,
+    malformed_output: str,
+    rejection_reasons: Optional[list[str]] = None,
+    compact: bool = False,
+) -> str:
+    if not _is_source_api_contract_repair_case(malformed_output, rejection_reasons):
+        return ""
+
+    try:
+        capsule = build_source_api_contract_capsule(
+            project_dir,
+            max_excerpt_chars=500,
+        )
+    except Exception:
+        return ""
+    if not capsule.source_modules:
+        return ""
+
+    lines = [
+        "## SOURCE/API CONTRACT CAPSULE",
+        "Use this read-only contract to ground Python source repair.",
+    ]
+    if capsule.framework_family:
+        lines.append(f"framework_family: {capsule.framework_family}")
+        lines.append(
+            f"- Preserve the detected {capsule.framework_family} framework family."
+        )
+    lines.extend(
+        [
+            "- Preserve public symbols imported by tests.",
+            "- Do not rewrite tests unless the user explicitly requested test changes.",
+            "- Prefer canonical source ops under existing source modules.",
+            "- Preserve test-imported public function/class signatures, including main(argv=None) when present.",
+        ]
+    )
+    if capsule.public_symbols:
+        lines.append("public_symbols:")
+        for module, symbols in list(capsule.public_symbols.items())[:8]:
+            lines.append(f"- {module}: {', '.join(symbols[:12])}")
+
+    if capsule.test_imported_symbols:
+        lines.append("test_imported_symbols:")
+        for module, symbols in list(capsule.test_imported_symbols.items())[:8]:
+            lines.append(f"- {module}: {', '.join(symbols[:12])}")
+
+    lines.extend(
+        [
+            "- Do not repair missing symbols with self-imports or re-export hacks; repair the original source definitions.",
+            "- Prefer complete grounded source rewrite over contextual append_file or stale replace when source structure changed.",
+        ]
+    )
+    package_roots = _source_api_package_roots(capsule.source_modules)
+    if package_roots:
+        roots = ", ".join(package_roots[:6])
+        lines.extend(
+            [
+                f"src_layout_package_roots: {roots}",
+                "- Inside package code, never import using physical `src.<package>` paths.",
+                "- Use package imports such as `<package>.*` or relative imports when appropriate.",
+                "- Do not rewrite tests to use `src.<package>` imports.",
+            ]
+        )
+    if capsule.source_modules:
+        lines.append("source_modules: " + ", ".join(capsule.source_modules[:8]))
+
+    if compact:
+        return _truncate_text(
+            "\n".join(lines).strip(),
+            PLANNING_REPAIR_COMPACT_SOURCE_API_CONTRACT_CHARS,
+        )
+
+    if capsule.source_excerpt:
+        lines.append("source_excerpt:")
+        for module, excerpt in list(capsule.source_excerpt.items())[:4]:
+            normalized_excerpt = str(excerpt or "").strip()
+            if not normalized_excerpt:
+                continue
+            lines.append(f"{module}:")
+            lines.append(normalized_excerpt)
+
+    return _truncate_text(
+        "\n".join(lines).strip(),
+        PLANNING_REPAIR_MAX_SOURCE_API_CONTRACT_CHARS,
+    )
+
+
+def build_minimal_source_api_contract_context_block(
+    *,
+    project_dir: Path,
+    malformed_output: str,
+    rejection_reasons: Optional[list[str]] = None,
+) -> str:
+    if not _is_source_api_contract_repair_case(malformed_output, rejection_reasons):
+        return ""
+
+    try:
+        capsule = build_source_api_contract_capsule(
+            project_dir,
+            max_excerpt_chars=0,
+        )
+    except Exception:
+        return ""
+    if not capsule.source_modules:
+        return ""
+
+    lines = [
+        "## SOURCE/API CONTRACT CAPSULE",
+        "Minimal hard-budget repair contract.",
+    ]
+    if capsule.framework_family:
+        lines.append(f"framework_family: {capsule.framework_family}")
+
+    package_roots = _source_api_package_roots(capsule.source_modules)
+    if package_roots:
+        lines.append("package_roots: " + ", ".join(package_roots[:3]))
+
+    required_modules = capsule.test_imported_symbols or {}
+    if required_modules:
+        lines.append("test_required_symbols:")
+        for module, symbols in list(required_modules.items())[:4]:
+            lines.append(f"- {module}: {', '.join(symbols[:8])}")
+
+    public_modules = capsule.public_symbols or {}
+    if public_modules:
+        lines.append("source_public_symbols:")
+        for module, symbols in list(public_modules.items())[:4]:
+            lines.append(f"- {module}: {', '.join(symbols[:8])}")
+
+    if capsule.source_modules:
+        lines.append("source_modules: " + ", ".join(capsule.source_modules[:4]))
+
+    all_required_symbols = {
+        symbol for symbols in required_modules.values() for symbol in symbols
+    }
+    all_public_symbols = {
+        symbol for symbols in public_modules.values() for symbol in symbols
+    }
+    if "main" in all_required_symbols or "main" in all_public_symbols:
+        lines.append("- Preserve main(argv=None) when present.")
+
+    lines.append("- Preserve test-imported public symbols.")
+    if package_roots:
+        lines.append("- No physical src.<package> imports inside package code.")
+    if capsule.framework_family == "argparse":
+        lines.append(
+            "- Argparse project: forbid click.*, typer.*, @cli.command, @app.command."
+        )
+
+    return _truncate_text(
+        "\n".join(lines).strip(),
+        PLANNING_REPAIR_MINIMAL_SOURCE_API_CONTRACT_CHARS,
+    )
+
+
+def _source_api_package_roots(source_modules: list[str]) -> list[str]:
+    roots: list[str] = []
+    for rel_path in source_modules:
+        parts = Path(str(rel_path or "").replace("\\", "/")).parts
+        if len(parts) < 3 or parts[0] != "src":
+            continue
+        root = parts[1]
+        if root and root not in roots:
+            roots.append(root)
+    return roots
+
+
+def _source_api_contract_metadata(
+    *,
+    full_block: str,
+    compact_block: str,
+) -> dict[str, Any]:
+    available = bool(full_block or compact_block)
+    return {
+        "source_api_contract_available": available,
+        "source_api_contract_included": False,
+        "source_api_contract_chars": 0,
+        "source_api_contract_compacted": False,
+        "source_api_contract_omitted_reason": None if available else "not_available",
+    }
+
+
+def _build_specialized_prompt_protected(
+    *,
+    task_description: str,
+    malformed_output: str,
+    project_dir: Path,
+    rejection_reasons: Optional[list[str]],
+    knowledge_block: str,
+    source_context_block: str,
+    source_api_contract_block: str,
+    source_api_contract_compact_block: str,
+    structure_capsule: str,
+) -> tuple[str | None, dict[str, Any]]:
+    metadata = _source_api_contract_metadata(
+        full_block=source_api_contract_block,
+        compact_block=source_api_contract_compact_block,
+    )
+
+    attempts: list[dict[str, Any]] = [
+        {
+            "knowledge": knowledge_block,
+            "source_api": source_api_contract_block,
+            "source_context": source_context_block,
+            "structure": structure_capsule,
+            "compacted": False,
+        }
+    ]
+    if source_api_contract_compact_block:
+        attempts.append(
+            {
+                "knowledge": knowledge_block,
+                "source_api": source_api_contract_compact_block,
+                "source_context": source_context_block,
+                "structure": structure_capsule,
+                "compacted": True,
+            }
+        )
+    if structure_capsule:
+        attempts.append(
+            {
+                "knowledge": knowledge_block,
+                "source_api": (
+                    source_api_contract_compact_block or source_api_contract_block
+                ),
+                "source_context": source_context_block,
+                "structure": _truncate_repair_structure_capsule(
+                    structure_capsule,
+                    max_chars=max(len(structure_capsule) // 2, 0),
+                ),
+                "compacted": bool(source_api_contract_compact_block),
+            }
+        )
+        attempts.append(
+            {
+                "knowledge": knowledge_block,
+                "source_api": (
+                    source_api_contract_compact_block or source_api_contract_block
+                ),
+                "source_context": source_context_block,
+                "structure": "",
+                "compacted": bool(source_api_contract_compact_block),
+            }
+        )
+    if source_context_block:
+        attempts.append(
+            {
+                "knowledge": knowledge_block,
+                "source_api": (
+                    source_api_contract_compact_block or source_api_contract_block
+                ),
+                "source_context": "",
+                "structure": "",
+                "compacted": bool(source_api_contract_compact_block),
+            }
+        )
+    if knowledge_block:
+        attempts.append(
+            {
+                "knowledge": "",
+                "source_api": (
+                    source_api_contract_compact_block or source_api_contract_block
+                ),
+                "source_context": source_context_block,
+                "structure": "",
+                "compacted": bool(source_api_contract_compact_block),
+            }
+        )
+        attempts.append(
+            {
+                "knowledge": "",
+                "source_api": source_api_contract_compact_block,
+                "source_context": "",
+                "structure": "",
+                "compacted": True,
+            }
+        )
+    attempts.append(
+        {
+            "knowledge": knowledge_block,
+            "source_api": "",
+            "source_context": "",
+            "structure": structure_capsule,
+            "compacted": False,
+        }
+    )
+
+    last_prompt: str | None = None
+    for attempt in attempts:
+        prompt = build_specialized_repair_prompt(
+            task_description=task_description,
+            malformed_output=malformed_output,
+            project_dir=project_dir,
+            rejection_reasons=rejection_reasons,
+            knowledge_block=_join_optional_blocks(
+                attempt["knowledge"],
+                attempt["source_api"],
+                attempt["source_context"],
+                attempt["structure"],
+            ),
+        )
+        if prompt is None:
+            return None, metadata
+        last_prompt = prompt
+        if len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS:
+            source_api_block = str(attempt["source_api"] or "")
+            metadata["source_api_contract_included"] = bool(source_api_block)
+            metadata["source_api_contract_chars"] = len(source_api_block)
+            metadata["source_api_contract_compacted"] = bool(attempt.get("compacted"))
+            if not source_api_block and metadata["source_api_contract_available"]:
+                metadata["source_api_contract_omitted_reason"] = (
+                    "over_budget_after_lower_priority_blocks_dropped"
+                )
+            return prompt, metadata
+
+    if metadata["source_api_contract_available"]:
+        metadata["source_api_contract_omitted_reason"] = "over_budget"
+    return last_prompt, metadata
+
+
+def _is_source_api_contract_repair_case(
+    malformed_output: str,
+    rejection_reasons: Optional[list[str]],
+) -> bool:
+    text = "\n".join(
+        [str(malformed_output or "")]
+        + [str(reason or "") for reason in (rejection_reasons or [])]
+    ).lower()
+    if not text:
+        return False
+    if any(
+        marker in text
+        for marker in (
+            "undefined_decorator_root",
+            "decorators whose root name is undefined",
+            "framework_mismatch",
+            "missing_source_materialization",
+            "missing source materialization",
+            "does not materialize any source changes",
+            "python_source_syntax_invalid",
+            "unsafe_python_append",
+            "contextual python control-flow fragments",
+        )
+    ):
+        return True
+    if (
+        "stale_replace" in text
+        or "replace_in_file old text" in text
+        or "old text not found" in text
+    ) and re.search(r'"path"\s*:\s*"src/[^"]+\.py"|src/[^\s,;:]+\.py', text):
+        return True
+    if re.search(
+        r'"op"\s*:\s*"(?:write_file|append_file|replace_in_file)"',
+        text,
+    ) and re.search(r'"path"\s*:\s*"src/[^"]+\.py"', text):
+        return True
+    return False
 
 
 def _build_grounded_source_edit_repair_guidance(
@@ -741,13 +1294,8 @@ def build_compact_planning_repair_prompt(
     rejection_reasons: Optional[list[str]] = None,
     prompt_profile: str = "default",
     apply_prompt_profile: Any = None,
+    source_api_contract_block: str = "",
 ) -> str:
-    broken_output = compact_invalid_output_excerpt(malformed_output)[
-        :PLANNING_REPAIR_COMPACT_MALFORMED_OUTPUT_CHARS
-    ]
-    reason_lines = "\n".join(
-        f"- {reason[:140]}" for reason in (rejection_reasons or [])[:4]
-    )
     ops_contract = render_ops_first_contract()
     operation_choice_contract = render_operation_choice_contract()
     shell_fallback_limits = render_shell_fallback_limits()
@@ -785,7 +1333,23 @@ def build_compact_planning_repair_prompt(
         python_source_syntax_guidance,
         python_framework_guidance,
     )
-    prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
+
+    def _compose(
+        *,
+        output_chars: int,
+        reason_chars: int,
+        current_source_api_contract_block: str,
+    ) -> str:
+        broken_output = compact_invalid_output_excerpt(malformed_output)[:output_chars]
+        reason_lines = "\n".join(
+            f"- {reason[:reason_chars]}" for reason in (rejection_reasons or [])[:4]
+        )
+        invalid_output_block = (
+            f"Invalid output excerpt:\n{broken_output}\n"
+            if broken_output
+            else "Invalid output excerpt omitted to preserve source/API contract.\n"
+        )
+        return f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 
 Repair this invalid plan into 3 to 4 executable steps.
@@ -793,10 +1357,10 @@ Repair this invalid plan into 3 to 4 executable steps.
 Validation errors:
 {reason_lines or "- malformed or non-runnable planning output"}
 
-Invalid output excerpt:
-{broken_output}
+{invalid_output_block}
 
 {validation_guidance_block + chr(10) if validation_guidance_block else ""}
+{current_source_api_contract_block + chr(10) if current_source_api_contract_block else ""}
 Schema per step:
 step_number, description, commands, verification, rollback, expected_files, optional ops.
 
@@ -816,7 +1380,33 @@ Rules:
 - no background processes, dev servers, absolute paths, prose, markdown, or extra keys beyond optional ops.
 - each step is a separate complete JSON object in the array; never merge content from multiple steps into one step.
 """
-    return _apply_profile(prompt, prompt_profile, apply_prompt_profile)
+
+    for current_source_api_contract_block in (source_api_contract_block, ""):
+        for output_chars, reason_chars in (
+            (PLANNING_REPAIR_COMPACT_MALFORMED_OUTPUT_CHARS, 140),
+            (360, 120),
+            (240, 100),
+            (120, 80),
+            (0, 70),
+        ):
+            prompt = _apply_profile(
+                _compose(
+                    output_chars=output_chars,
+                    reason_chars=reason_chars,
+                    current_source_api_contract_block=current_source_api_contract_block,
+                ).rstrip(),
+                prompt_profile,
+                apply_prompt_profile,
+            )
+            if len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS:
+                return prompt
+
+    prompt = _compose(
+        output_chars=0,
+        reason_chars=50,
+        current_source_api_contract_block="",
+    )
+    return _apply_profile(prompt.rstrip(), prompt_profile, apply_prompt_profile)
 
 
 def build_compact_stale_replace_repair_prompt(
@@ -827,6 +1417,8 @@ def build_compact_stale_replace_repair_prompt(
     rejection_reasons: Optional[list[str]] = None,
     prompt_profile: str = "default",
     apply_prompt_profile: Any = None,
+    source_api_contract_block: str = "",
+    knowledge_block: str = "",
 ) -> str:
     """Build a bounded repair prompt for stale replace_in_file plans.
 
@@ -848,11 +1440,19 @@ def build_compact_stale_replace_repair_prompt(
     task = " ".join(str(task_description or "").split())[:500]
     json_content_contract = (
         "write_file.content and append_file.content must be JSON strings; "
-        "newline characters must be escaped as \\n; do not use raw triple-quoted "
-        "blocks; output must remain a valid JSON array."
+        "write_file.content must be a JSON string; escape newline characters as \\n; "
+        "do not use raw triple-quoted Python blocks; do not place bare multiline code "
+        "outside JSON string quotes; output must remain a valid JSON array."
     )
 
-    def _compose(output_chars: int, excerpt_chars: int, reason_chars: int) -> str:
+    def _compose(
+        output_chars: int,
+        excerpt_chars: int,
+        reason_chars: int,
+        *,
+        current_source_api_contract_block: str,
+        current_knowledge_block: str,
+    ) -> str:
         broken_output = compact_invalid_output_excerpt(malformed_output)[:output_chars]
         reason_lines = "\n".join(
             f"- {reason[:reason_chars]}" for reason in clean_reasons[:4]
@@ -860,7 +1460,7 @@ def build_compact_stale_replace_repair_prompt(
         excerpt = _truncate_text(file_excerpt, excerpt_chars)
         target_line = target_path or "target path from invalid plan"
         excerpt_block = (
-            f"Current file excerpt for {target_line}:\n{excerpt}\n"
+            f"Current file excerpt:\nCurrent file excerpt for {target_line}:\n{excerpt}\n"
             if excerpt
             else f"Current target path: {target_line}\n"
         )
@@ -876,9 +1476,13 @@ Validation errors:
 Invalid plan excerpt:
 {broken_output}
 
+{current_knowledge_block + chr(10) if current_knowledge_block else ""}
 {excerpt_block}
+{current_source_api_contract_block + chr(10) if current_source_api_contract_block else ""}
 Required repair:
+- Stale replace fixes: use identifiers and exact text from the current file excerpt.
 - Do not use replace_in_file for the stale target.
+- do not emit another replace_in_file for the same missing old text or stale target.
 - Use a write_file op for `{target_line}` with the full corrected file content.
 - Preserve existing imports, public functions, and CLI shape from the current file excerpt.
 - Preserve existing valid source ops from the invalid plan; do not drop unrelated src edits while fixing this stale target.
@@ -893,25 +1497,43 @@ Required repair:
 - Relative paths only. No absolute paths, parent traversal, background processes, prose commands, markdown, or extra keys.
 """
 
-    for output_chars, excerpt_chars, reason_chars in (
-        (
-            PLANNING_REPAIR_COMPACT_STALE_OUTPUT_CHARS,
-            PLANNING_REPAIR_COMPACT_STALE_EXCERPT_CHARS,
-            180,
-        ),
-        (360, 700, 150),
-        (260, 520, 130),
-        (180, 360, 110),
-        (120, 220, 90),
-        (80, 120, 70),
-    ):
-        prompt = _apply_profile(
-            _compose(output_chars, excerpt_chars, reason_chars),
-            prompt_profile,
-            apply_prompt_profile,
-        )
-        if len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS:
-            return prompt
+    compact_attempts = [
+        (source_api_contract_block, knowledge_block),
+        (source_api_contract_block, ""),
+        ("", knowledge_block),
+        ("", ""),
+    ]
+    seen_attempts: set[tuple[str, str]] = set()
+    for current_source_api_contract_block, current_knowledge_block in compact_attempts:
+        attempt_key = (current_source_api_contract_block, current_knowledge_block)
+        if attempt_key in seen_attempts:
+            continue
+        seen_attempts.add(attempt_key)
+        for output_chars, excerpt_chars, reason_chars in (
+            (
+                PLANNING_REPAIR_COMPACT_STALE_OUTPUT_CHARS,
+                PLANNING_REPAIR_COMPACT_STALE_EXCERPT_CHARS,
+                180,
+            ),
+            (360, 700, 150),
+            (260, 520, 130),
+            (180, 360, 110),
+            (120, 220, 90),
+            (80, 120, 70),
+        ):
+            prompt = _apply_profile(
+                _compose(
+                    output_chars,
+                    excerpt_chars,
+                    reason_chars,
+                    current_source_api_contract_block=current_source_api_contract_block,
+                    current_knowledge_block=current_knowledge_block,
+                ),
+                prompt_profile,
+                apply_prompt_profile,
+            )
+            if len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS:
+                return prompt
 
     target_line = target_path or "target path from invalid plan"
     prompt = f"""Return ONLY a valid JSON array.
@@ -939,7 +1561,9 @@ def _apply_profile_or_compact_fallback(
     prompt_profile: str,
     apply_prompt_profile: Any,
 ) -> str:
-    profiled_prompt = _apply_profile(prompt, prompt_profile, apply_prompt_profile)
+    profiled_prompt = _apply_profile(
+        prompt.rstrip(), prompt_profile, apply_prompt_profile
+    )
     if len(profiled_prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS:
         return profiled_prompt
     return _build_over_budget_compact_repair_prompt(
@@ -952,6 +1576,78 @@ def _apply_profile_or_compact_fallback(
     )
 
 
+def _apply_profile_or_compact_fallback_with_metadata(
+    prompt: str,
+    *,
+    task_description: str,
+    project_dir: Path,
+    malformed_output: str,
+    rejection_reasons: Optional[list[str]],
+    prompt_profile: str,
+    apply_prompt_profile: Any,
+    source_api_metadata: dict[str, Any],
+    source_api_contract_block: str,
+    knowledge_block: str = "",
+    compacted: bool = False,
+    included_reason: str = "repair_context",
+) -> tuple[str, dict[str, Any]]:
+    profiled_prompt = _apply_profile(
+        prompt.rstrip(), prompt_profile, apply_prompt_profile
+    )
+    if len(profiled_prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS:
+        return profiled_prompt, {}
+
+    fallback_prompt = _build_over_budget_compact_repair_prompt(
+        task_description=task_description,
+        malformed_output=malformed_output,
+        project_dir=project_dir,
+        rejection_reasons=rejection_reasons,
+        prompt_profile=prompt_profile,
+        apply_prompt_profile=apply_prompt_profile,
+        source_api_contract_block=source_api_contract_block,
+        knowledge_block=knowledge_block,
+    )
+    source_api_in_fallback = bool(
+        source_api_contract_block and source_api_contract_block in fallback_prompt
+    )
+    if (
+        len(fallback_prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS
+        and source_api_contract_block
+    ):
+        fallback_prompt = _build_over_budget_compact_repair_prompt(
+            task_description=task_description,
+            malformed_output=malformed_output,
+            project_dir=project_dir,
+            rejection_reasons=rejection_reasons,
+            prompt_profile=prompt_profile,
+            apply_prompt_profile=apply_prompt_profile,
+            source_api_contract_block="",
+            knowledge_block=knowledge_block,
+        )
+        return fallback_prompt, _metadata_for_final_source_api_block(
+            source_api_metadata=source_api_metadata,
+            source_api_block="",
+            compacted=False,
+            omitted_reason="over_budget_compact_fallback",
+            included_reason=included_reason,
+        )
+    if source_api_contract_block and not source_api_in_fallback:
+        return fallback_prompt, _metadata_for_final_source_api_block(
+            source_api_metadata=source_api_metadata,
+            source_api_block="",
+            compacted=False,
+            omitted_reason="over_budget_compact_fallback",
+            included_reason=included_reason,
+        )
+    return fallback_prompt, _metadata_for_final_source_api_block(
+        source_api_metadata=source_api_metadata,
+        source_api_block=source_api_contract_block,
+        compacted=compacted,
+        omitted_reason="over_budget_compact_fallback",
+        included_reason=included_reason,
+    )
+
+
 def _build_over_budget_compact_repair_prompt(
     *,
     task_description: str,
@@ -960,6 +1656,8 @@ def _build_over_budget_compact_repair_prompt(
     rejection_reasons: Optional[list[str]],
     prompt_profile: str,
     apply_prompt_profile: Any,
+    source_api_contract_block: str = "",
+    knowledge_block: str = "",
 ) -> str:
     if _is_stale_replace_repair(malformed_output, rejection_reasons):
         return build_compact_stale_replace_repair_prompt(
@@ -969,13 +1667,48 @@ def _build_over_budget_compact_repair_prompt(
             rejection_reasons=rejection_reasons,
             prompt_profile=prompt_profile,
             apply_prompt_profile=apply_prompt_profile,
+            source_api_contract_block=source_api_contract_block,
+            knowledge_block=knowledge_block,
         )
     return build_compact_planning_repair_prompt(
         malformed_output,
         rejection_reasons=rejection_reasons,
         prompt_profile=prompt_profile,
         apply_prompt_profile=apply_prompt_profile,
+        source_api_contract_block=source_api_contract_block,
     )
+
+
+def _metadata_for_final_source_api_block(
+    *,
+    source_api_metadata: dict[str, Any],
+    source_api_block: str,
+    compacted: bool,
+    omitted_reason: str,
+    included_reason: str = "repair_context",
+) -> dict[str, Any]:
+    available = bool(source_api_metadata.get("source_api_contract_available"))
+    if source_api_block:
+        return {
+            "source_api_contract_available": available,
+            "source_api_contract_included": True,
+            "source_api_contract_chars": len(source_api_block),
+            "source_api_contract_compacted": compacted,
+            "source_api_contract_omitted_reason": None,
+            "source_api_contract_included_reason": included_reason
+            or source_api_metadata.get("source_api_contract_included_reason")
+            or "repair_context",
+        }
+    if available:
+        return {
+            "source_api_contract_available": True,
+            "source_api_contract_included": False,
+            "source_api_contract_chars": 0,
+            "source_api_contract_compacted": False,
+            "source_api_contract_omitted_reason": omitted_reason,
+            "source_api_contract_included_reason": None,
+        }
+    return {}
 
 
 def _is_stale_replace_repair(

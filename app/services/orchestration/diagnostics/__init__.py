@@ -3,6 +3,7 @@
 from .debug_feedback import (
     DebugFeedbackEnvelope,
     build_bounded_debug_repair_prompt,
+    build_bounded_debug_repair_prompt_with_metadata,
     build_debug_feedback_envelope,
     classify_debug_failure,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "DiffCapsule",
     "WorkspaceEvidenceCapsule",
     "build_bounded_debug_repair_prompt",
+    "build_bounded_debug_repair_prompt_with_metadata",
     "build_debug_feedback_envelope",
     "build_diff_capsule",
     "classify_debug_failure",

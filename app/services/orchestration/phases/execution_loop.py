@@ -24,7 +24,7 @@ from app.services.orchestration.context.assembly import (
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.events.telemetry import emit_phase_event
 from app.services.orchestration.diagnostics.debug_feedback import (
-    build_bounded_debug_repair_prompt,
+    build_bounded_debug_repair_prompt_with_metadata,
     build_debug_feedback_envelope,
     normalize_bounded_debug_repair_payload_detailed,
     normalize_diff_scoped_compliance_retry_command_list,
@@ -1290,6 +1290,7 @@ def execute_step_loop(
                     else []
                 ),
                 changed_files=step_record.files_changed,
+                expected_files=expected_files,
                 workspace_path=orchestration_state.project_dir,
             )
         step_finished_event = None
@@ -1729,6 +1730,13 @@ def execute_step_loop(
             and task_execution_id is not None
             and int(task_execution_id) not in debug_repair_used_ids
         )
+        debug_source_api_contract_metadata: dict[str, Any] = {
+            "source_api_contract_available": False,
+            "source_api_contract_included": False,
+            "source_api_contract_chars": 0,
+            "source_api_contract_compacted": False,
+            "source_api_contract_omitted_reason": "not_bounded_debug_repair_prompt",
+        }
         if (
             debug_feedback_envelope is not None
             and debug_feedback_envelope.eligible_for_debug_repair
@@ -1844,8 +1852,20 @@ def execute_step_loop(
                 debug_prompt_mode = DIFF_SCOPED_DEBUG_REPAIR_PROMPT_MODE
                 diff_repair_fallback_reason = None
             else:
-                debug_prompt = build_bounded_debug_repair_prompt(
-                    debug_feedback_envelope, _evidence_capsule
+                source_edit_context_for_prompt = (
+                    _bounded_debug_repair_source_edit_context(
+                        step,
+                        debug_feedback_envelope,
+                    )
+                )
+                debug_prompt_result = build_bounded_debug_repair_prompt_with_metadata(
+                    debug_feedback_envelope,
+                    _evidence_capsule,
+                    source_edit_context=source_edit_context_for_prompt,
+                )
+                debug_prompt = debug_prompt_result.prompt
+                debug_source_api_contract_metadata = dict(
+                    debug_prompt_result.metadata or {}
                 )
                 debug_prompt_mode = BOUNDED_DEBUG_REPAIR_PROMPT_MODE
                 if not debug_feedback_envelope.changed_files:
@@ -1932,6 +1952,7 @@ def execute_step_loop(
                         diff_capsule.diff_line_count if diff_capsule else 0
                     ),
                     "diff_repair_fallback_reason": diff_repair_fallback_reason,
+                    **debug_source_api_contract_metadata,
                 },
             )
         except Exception:
@@ -1961,6 +1982,7 @@ def execute_step_loop(
                     "evidence_chars_total": (
                         _evidence_capsule.total_chars if _evidence_capsule else 0
                     ),
+                    **debug_source_api_contract_metadata,
                 },
             }
 
