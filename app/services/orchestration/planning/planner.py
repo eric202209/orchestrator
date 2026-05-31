@@ -49,6 +49,7 @@ from app.services.orchestration.planning.repair_prompts import (
     REPAIR_PROMPT_MAX_CHARS,
     build_compact_planning_repair_prompt as _build_compact_planning_repair_prompt,
     build_planning_repair_prompt as _build_planning_repair_prompt,
+    build_planning_repair_prompt_with_metadata as _build_planning_repair_prompt_with_metadata,
     compact_invalid_output_excerpt as _compact_invalid_output_excerpt,
     render_repair_knowledge_block as _render_repair_knowledge_block,
 )
@@ -2866,6 +2867,31 @@ Return only a JSON array matching this shape. No markdown. No prose.
             project_structure_capsule=cls._build_project_structure_capsule(project_dir),
         )
 
+    @classmethod
+    def build_planning_repair_prompt_with_metadata(
+        cls,
+        task_description: str,
+        malformed_output: str,
+        project_dir: Path,
+        rejection_reasons: Optional[List[str]] = None,
+        prompt_profile: str = "default",
+        workflow_profile: str = "default",
+        workflow_phases: Optional[List[str]] = None,
+        workspace_has_existing_files: bool = False,
+        knowledge_context: Any = None,
+    ):
+        del workflow_profile, workflow_phases, workspace_has_existing_files
+        return _build_planning_repair_prompt_with_metadata(
+            task_description=task_description,
+            malformed_output=malformed_output,
+            project_dir=project_dir,
+            rejection_reasons=rejection_reasons,
+            prompt_profile=prompt_profile,
+            apply_prompt_profile=PlannerService.apply_prompt_profile,
+            knowledge_context=knowledge_context,
+            project_structure_capsule=cls._build_project_structure_capsule(project_dir),
+        )
+
     @staticmethod
     def build_compact_planning_repair_prompt(
         malformed_output: str,
@@ -3134,8 +3160,15 @@ Return only a JSON array matching this shape. No markdown. No prose.
                 rejection_reasons=rejection_reasons,
                 prompt_profile=prompt_profile,
             )
+            repair_prompt_metadata: Dict[str, Any] = {
+                "source_api_contract_available": False,
+                "source_api_contract_included": False,
+                "source_api_contract_chars": 0,
+                "source_api_contract_compacted": False,
+                "source_api_contract_omitted_reason": "compact_no_output_retry",
+            }
         else:
-            repair_prompt = cls.build_planning_repair_prompt(
+            repair_prompt_result = cls.build_planning_repair_prompt_with_metadata(
                 task_description,
                 malformed_output,
                 project_dir,
@@ -3146,6 +3179,8 @@ Return only a JSON array matching this shape. No markdown. No prose.
                 workspace_has_existing_files=workspace_has_existing_files,
                 knowledge_context=knowledge_context,
             )
+            repair_prompt = repair_prompt_result.prompt
+            repair_prompt_metadata = dict(repair_prompt_result.metadata)
         validation_error_chars = sum(
             len(str(reason_text or "")[:180])
             for reason_text in (rejection_reasons or [])[:5]
@@ -3184,6 +3219,9 @@ Return only a JSON array matching this shape. No markdown. No prose.
             "[ORCHESTRATION] session_id=%s task_id=%s repair_prompt_chars=%s "
             "malformed_output_chars=%s validation_error_chars=%s knowledge_context_chars=%s "
             "includes_project_context=%s includes_non_project_context=%s "
+            "source_api_contract_available=%s source_api_contract_included=%s "
+            "source_api_contract_chars=%s source_api_contract_compacted=%s "
+            "source_api_contract_omitted_reason=%s "
             "repair_reason=%s repair_prompt_build_seconds=%.3f repair_attempts=%s "
             "compact_no_output_retry=%s stale_replace_prompt_hash=%s",
             session_id,
@@ -3194,6 +3232,11 @@ Return only a JSON array matching this shape. No markdown. No prose.
             knowledge_context_chars,
             includes_project_context,
             includes_non_project_context,
+            repair_prompt_metadata.get("source_api_contract_available"),
+            repair_prompt_metadata.get("source_api_contract_included"),
+            repair_prompt_metadata.get("source_api_contract_chars"),
+            repair_prompt_metadata.get("source_api_contract_compacted"),
+            repair_prompt_metadata.get("source_api_contract_omitted_reason"),
             reason[:120],
             repair_prompt_build_seconds,
             _repair_attempt_number,
@@ -3233,6 +3276,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
                         repair_prompt_build_seconds, 3
                     ),
                     "repair_attempts": 0,
+                    **repair_prompt_metadata,
                 },
             )
             raise PlanningRepairBudgetExceeded(budget_error)
@@ -3253,6 +3297,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
                 "malformed_output_chars": compact_malformed_output_chars,
                 "repair_prompt_build_seconds": round(repair_prompt_build_seconds, 3),
                 "repair_attempts": _repair_attempt_number,
+                **repair_prompt_metadata,
             },
         )
         emit_live(
@@ -3273,6 +3318,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
                 "malformed_output_chars": compact_malformed_output_chars,
                 "repair_prompt_build_seconds": round(repair_prompt_build_seconds, 3),
                 "repair_attempts": _repair_attempt_number,
+                **repair_prompt_metadata,
             },
         )
         repair_started_at = time.monotonic()
