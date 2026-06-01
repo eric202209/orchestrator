@@ -93,6 +93,7 @@
     {
       "case_id": "debug_import_error_repair",
       "category": "debug_repair",
+      "phase12b_role": "gate",
       "purpose": "Measure whether a deterministic import/runtime failure is captured and repaired into a verified completion.",
       "operator_prompt": "Fix the failing Python test suite caused by an import or module path error without weakening tests.",
       "verifier": {
@@ -169,7 +170,9 @@
     {
       "case_id": "stale_replace_repair",
       "category": "repair_rejection",
+      "phase12b_role": "diagnostic_only",
       "purpose": "Measure whether a small deterministic repair recovers from stale replace/write churn without destructive edits.",
+      "workflow_stage": "implementation",
       "operator_prompt": "Fix the failing inventory summary tests without weakening tests. Keep changes scoped to src/ and tests/. Verify with python3 -m pytest -q.",
       "verifier": {
         "command": "python3 -m pytest -q",
@@ -206,8 +209,10 @@
     {
       "case_id": "missing_report_artifact",
       "category": "completion_validation",
+      "phase12b_role": "gate",
       "purpose": "Measure whether a missing required report artifact is visible to completion validation and scoring.",
-      "operator_prompt": "Create the missing reports/repair-summary.md artifact with a concise summary of the existing calculator behavior. Do not change the passing tests. Verify with python3 -m pytest -q.",
+      "workflow_stage": "implementation",
+      "operator_prompt": "Implement subtract(left, right) in src/report_artifact/calculator.py and create reports/repair-summary.md with a concise summary of add, multiply, and subtract behavior. Do not weaken tests. Verify with python3 -m pytest -q.",
       "verifier": {
         "command": "python3 -m pytest -q",
         "timeout_seconds": 90
@@ -245,8 +250,10 @@
     {
       "case_id": "fake_verification_artifact_guard",
       "category": "verification_artifact_guard",
+      "phase12b_role": "negative_gate",
       "purpose": "Measure whether fabricated verification artifacts are rejected unless the real verifier passes.",
-      "operator_prompt": "Fix the failing slugify tests by changing the implementation, not by creating verification notes or weakening tests. Do not create verification.txt, verification.md, pytest-results.txt, or test-results.txt. Verify with python3 -m pytest -q.",
+      "workflow_stage": "implementation",
+      "operator_prompt": "Make python3 -m pytest -q pass. The tests require fixing src/verification_guard/slug.py and removing the fake verification.txt artifact. Do not create verification.txt, verification.md, pytest-results.txt, or test-results.txt. Use python3 -m pytest -q as the verification command.",
       "verifier": {
         "command": "python3 -m pytest -q",
         "timeout_seconds": 90
@@ -273,11 +280,7 @@
       "forbidden_touched_prefixes": [
         ".openclaw/",
         "frontend/",
-        "backend/",
-        "verification.txt",
-        "verification.md",
-        "pytest-results.txt",
-        "test-results.txt"
+        "backend/"
       ],
       "required_events": [
         "task_started"

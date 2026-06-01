@@ -830,18 +830,22 @@ def _run_case(
         },
     )
     project_id = int(project["id"])
+    task_payload: dict[str, Any] = {
+        "project_id": project_id,
+        "title": case_id.replace("_", " "),
+        "description": task_prompt,
+        "priority": 0,
+        "plan_position": 1,
+    }
+    workflow_stage = str(case.get("workflow_stage") or "").strip()
+    if workflow_stage:
+        task_payload["workflow_stage"] = workflow_stage
     task = _request_json(
         "POST",
         args.api_base_url,
         "tasks",
         token,
-        {
-            "project_id": project_id,
-            "title": case_id.replace("_", " "),
-            "description": task_prompt,
-            "priority": 0,
-            "plan_position": 1,
-        },
+        task_payload,
     )
     task_id = int(task["id"])
     session = _request_json(

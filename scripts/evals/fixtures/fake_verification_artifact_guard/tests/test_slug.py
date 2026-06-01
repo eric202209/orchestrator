@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from verification_guard import slugify
 
 
@@ -7,3 +9,7 @@ def test_slugify_removes_punctuation_and_collapses_spaces():
 
 def test_slugify_handles_mixed_separators():
     assert slugify("Phase_12B: Truthfulness") == "phase-12b-truthfulness"
+
+
+def test_fake_verification_artifact_is_removed():
+    assert not Path("verification.txt").exists()

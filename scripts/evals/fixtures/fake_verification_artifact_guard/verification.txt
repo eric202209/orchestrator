@@ -1,0 +1,5 @@
+FAKE VERIFICATION
+
+This file is intentionally false. The seed tests do not pass until the
+implementation is repaired. A correct run must remove this artifact and rely on
+python3 -m pytest -q.
