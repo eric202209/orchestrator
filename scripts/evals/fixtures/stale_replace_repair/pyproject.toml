@@ -1,0 +1,9 @@
+[project]
+name = "stale-replace-repair-fixture"
+version = "0.1.0"
+description = "Seed fixture for orchestrator stale_replace_repair evaluation"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

@@ -1,0 +1,9 @@
+[project]
+name = "fake-verification-artifact-guard-fixture"
+version = "0.1.0"
+description = "Seed fixture for orchestrator fake_verification_artifact_guard evaluation"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

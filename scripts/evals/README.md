@@ -9,6 +9,9 @@ for backend resilience and controlled eval expansion:
 - `medium_cli_multi_file_feature`
 - `debug_import_error_repair`
 - `checkpoint_resume_mid_task`
+- `stale_replace_repair`
+- `missing_report_artifact`
+- `fake_verification_artifact_guard`
 
 ## Running a Case
 
@@ -106,6 +109,9 @@ Supported case IDs are only:
 - `medium_cli_multi_file_feature`
 - `debug_import_error_repair`
 - `checkpoint_resume_mid_task`
+- `stale_replace_repair`
+- `missing_report_artifact`
+- `fake_verification_artifact_guard`
 
 The runner copies `scripts/evals/fixtures/<case-id>` into a fresh workspace
 under `/home/eric/projects`, creates project/session/task records through the
@@ -165,6 +171,6 @@ prompts without creating API records with:
 
 ```bash
 venv/bin/python scripts/evals/run_orchestrator_eval_slice.py \
-  --cases python_cli_small_feature medium_cli_multi_file_feature debug_import_error_repair checkpoint_resume_mid_task \
+  --cases python_cli_small_feature medium_cli_multi_file_feature debug_import_error_repair checkpoint_resume_mid_task stale_replace_repair missing_report_artifact fake_verification_artifact_guard \
   --print-prompts
 ```

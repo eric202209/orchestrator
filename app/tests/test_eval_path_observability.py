@@ -53,6 +53,8 @@ def test_path_observability_classifies_planning_validation_only_failure():
         verifier={"available": True, "passed": False},
         clean_success=False,
         required_events=_required(case, summary),
+        files={"missing_required_files": [], "present_forbidden_existing_files": []},
+        scope={"forbidden_touched_files": []},
     )
 
     assert result["planning_reached"] is True
@@ -95,6 +97,8 @@ def test_path_observability_reports_planning_terminal_root_cause():
         verifier={"available": True, "passed": False},
         clean_success=False,
         required_events=_required(case, summary),
+        files={"missing_required_files": [], "present_forbidden_existing_files": []},
+        scope={"forbidden_touched_files": []},
     )
 
     assert result["planning_terminal_state"] == "planning_circuit_breaker_opened"
@@ -137,6 +141,8 @@ def test_path_observability_classifies_root_cause_oscillation():
         verifier={"available": True, "passed": False},
         clean_success=False,
         required_events=_required(case, summary),
+        files={"missing_required_files": [], "present_forbidden_existing_files": []},
+        scope={"forbidden_touched_files": []},
     )
 
     assert result["cross_stage_convergence_class"] == "root_cause_oscillation"
@@ -177,6 +183,8 @@ def test_path_observability_honors_explicit_root_cause_oscillation_event():
         verifier={"available": True, "passed": False},
         clean_success=False,
         required_events=_required(case, summary),
+        files={"missing_required_files": [], "present_forbidden_existing_files": []},
+        scope={"forbidden_touched_files": []},
     )
 
     assert result["primary_failure_phase"] == "planning_validation"
@@ -217,6 +225,8 @@ def test_path_observability_does_not_report_historical_root_cause_after_planning
         verifier={"available": True, "passed": False},
         clean_success=False,
         required_events=_required(case, summary),
+        files={"missing_required_files": [], "present_forbidden_existing_files": []},
+        scope={"forbidden_touched_files": []},
     )
 
     assert result["planning_terminal_state"] == "accepted"
@@ -270,6 +280,8 @@ def test_path_observability_classifies_cross_stage_contract_regression():
         verifier={"available": True, "passed": False},
         clean_success=False,
         required_events=_required(case, summary),
+        files={"missing_required_files": [], "present_forbidden_existing_files": []},
+        scope={"forbidden_touched_files": []},
     )
 
     assert result["cross_stage_convergence_class"] == (
@@ -307,6 +319,8 @@ def test_path_observability_detects_phase7f_debug_repair():
         verifier={"available": True, "passed": False},
         clean_success=False,
         required_events=_required(case, summary),
+        files={"missing_required_files": [], "present_forbidden_existing_files": []},
+        scope={"forbidden_touched_files": []},
     )
 
     assert result["planning_reached"] is True
@@ -350,6 +364,8 @@ def test_path_observability_detects_phase7g_and_checkpoint_paths():
         verifier={"available": True, "passed": False},
         clean_success=False,
         required_events=_required(debug_case, debug_summary),
+        files={"missing_required_files": [], "present_forbidden_existing_files": []},
+        scope={"forbidden_touched_files": []},
     )
 
     assert debug_result["phase7g_used"] is True
@@ -376,6 +392,8 @@ def test_path_observability_detects_phase7g_and_checkpoint_paths():
         verifier={"available": True, "passed": True},
         clean_success=True,
         required_events=_required(checkpoint_case, checkpoint_summary),
+        files={"missing_required_files": [], "present_forbidden_existing_files": []},
+        scope={"forbidden_touched_files": []},
     )
 
     assert checkpoint_result["checkpoint_loaded"] is True
@@ -414,6 +432,8 @@ def test_path_observability_reads_architecture_named_debug_prompt_modes():
         verifier={"available": True, "passed": False},
         clean_success=False,
         required_events=_required(case, summary),
+        files={"missing_required_files": [], "present_forbidden_existing_files": []},
+        scope={"forbidden_touched_files": []},
     )
 
     assert result["phase7f_used"] is True
@@ -448,6 +468,8 @@ def test_path_observability_prefers_architecture_prompt_modes_over_compatibility
         verifier={"available": True, "passed": False},
         clean_success=False,
         required_events=_required(case, summary),
+        files={"missing_required_files": [], "present_forbidden_existing_files": []},
+        scope={"forbidden_touched_files": []},
     )
 
     assert result["phase7f_used"] is False
@@ -483,9 +505,180 @@ def test_path_observability_falls_back_to_compatibility_prompt_modes():
         verifier={"available": True, "passed": False},
         clean_success=False,
         required_events=_required(case, summary),
+        files={"missing_required_files": [], "present_forbidden_existing_files": []},
+        scope={"forbidden_touched_files": []},
     )
 
     assert result["phase7f_used"] is True
     assert result["bounded_execution_debug_repair_used"] is True
     assert result["phase7g_used"] is True
     assert result["diff_scoped_debug_repair_used"] is True
+
+
+def test_path_observability_requires_repair_rejection_for_stale_replace_case():
+    case = {
+        "case_id": "stale_replace_repair",
+        "category": "repair_rejection",
+        "required_events": ["task_started"],
+    }
+    no_rejection_events = [
+        {"event_type": "task_started", "details": {}},
+        {"event_type": "phase_started", "details": {"phase": "execution"}},
+    ]
+    no_rejection_summary = _summary(no_rejection_events)
+
+    no_rejection = scorer._path_observability(
+        case=case,
+        events=no_rejection_events,
+        snapshots=[{"status": "executing"}],
+        event_summary=no_rejection_summary,
+        verifier={"available": True, "passed": False},
+        clean_success=False,
+        required_events=_required(case, no_rejection_summary),
+        files={"missing_required_files": [], "present_forbidden_existing_files": []},
+        scope={"forbidden_touched_files": []},
+    )
+
+    assert no_rejection["intended_path_observed"] is False
+
+    rejection_events = [
+        *no_rejection_events,
+        {"event_type": "repair_rejected", "details": {"reason": "stale_replace"}},
+    ]
+    rejection_summary = _summary(rejection_events)
+
+    rejection = scorer._path_observability(
+        case=case,
+        events=rejection_events,
+        snapshots=[{"status": "executing"}],
+        event_summary=rejection_summary,
+        verifier={"available": True, "passed": False},
+        clean_success=False,
+        required_events=_required(case, rejection_summary),
+        files={"missing_required_files": [], "present_forbidden_existing_files": []},
+        scope={"forbidden_touched_files": []},
+    )
+
+    assert rejection["repair_rejected_count"] == 1
+    assert rejection["intended_path_observed"] is True
+
+    clean_direct_repair = scorer._path_observability(
+        case=case,
+        events=no_rejection_events,
+        snapshots=[{"status": "executing"}],
+        event_summary=no_rejection_summary,
+        verifier={"available": True, "passed": True},
+        clean_success=True,
+        required_events=_required(case, no_rejection_summary),
+        files={"missing_required_files": [], "present_forbidden_existing_files": []},
+        scope={"forbidden_touched_files": []},
+    )
+
+    assert clean_direct_repair["intended_path_observed"] is True
+    assert clean_direct_repair["primary_failure_phase"] is None
+
+
+def test_path_observability_treats_missing_report_as_completion_validation_signal():
+    case = {
+        "case_id": "missing_report_artifact",
+        "category": "completion_validation",
+        "required_events": ["task_started"],
+    }
+    events = [
+        {"event_type": "task_started", "details": {}},
+        {"event_type": "phase_started", "details": {"phase": "execution"}},
+    ]
+    summary = _summary(events)
+
+    result = scorer._path_observability(
+        case=case,
+        events=events,
+        snapshots=[{"status": "executing"}],
+        event_summary=summary,
+        verifier={"available": True, "passed": True},
+        clean_success=False,
+        required_events=_required(case, summary),
+        files={
+            "missing_required_files": ["reports/repair-summary.md"],
+            "present_forbidden_existing_files": [],
+        },
+        scope={"forbidden_touched_files": []},
+    )
+
+    assert result["execution_reached"] is True
+    assert result["intended_path_observed"] is True
+    assert result["primary_failure_phase"] == "execution"
+
+    clean_report_created = scorer._path_observability(
+        case=case,
+        events=events,
+        snapshots=[{"status": "executing"}],
+        event_summary=summary,
+        verifier={"available": True, "passed": True},
+        clean_success=True,
+        required_events=_required(case, summary),
+        files={"missing_required_files": [], "present_forbidden_existing_files": []},
+        scope={"forbidden_touched_files": []},
+    )
+
+    assert clean_report_created["intended_path_observed"] is True
+    assert clean_report_created["primary_failure_phase"] is None
+
+
+def test_path_observability_treats_fake_verification_artifact_as_guard_signal():
+    case = {
+        "case_id": "fake_verification_artifact_guard",
+        "category": "verification_artifact_guard",
+        "required_events": ["task_started"],
+    }
+    events = [
+        {"event_type": "task_started", "details": {}},
+        {"event_type": "phase_started", "details": {"phase": "execution"}},
+    ]
+    summary = _summary(events)
+
+    no_artifact = scorer._path_observability(
+        case=case,
+        events=events,
+        snapshots=[{"status": "executing"}],
+        event_summary=summary,
+        verifier={"available": True, "passed": False},
+        clean_success=False,
+        required_events=_required(case, summary),
+        files={"missing_required_files": [], "present_forbidden_existing_files": []},
+        scope={"forbidden_touched_files": []},
+    )
+
+    assert no_artifact["intended_path_observed"] is False
+
+    fake_artifact = scorer._path_observability(
+        case=case,
+        events=events,
+        snapshots=[{"status": "executing"}],
+        event_summary=summary,
+        verifier={"available": True, "passed": False},
+        clean_success=False,
+        required_events=_required(case, summary),
+        files={
+            "missing_required_files": [],
+            "present_forbidden_existing_files": ["verification.txt"],
+        },
+        scope={"forbidden_touched_files": []},
+    )
+
+    assert fake_artifact["intended_path_observed"] is True
+
+    clean_real_verification = scorer._path_observability(
+        case=case,
+        events=events,
+        snapshots=[{"status": "executing"}],
+        event_summary=summary,
+        verifier={"available": True, "passed": True},
+        clean_success=True,
+        required_events=_required(case, summary),
+        files={"missing_required_files": [], "present_forbidden_existing_files": []},
+        scope={"forbidden_touched_files": []},
+    )
+
+    assert clean_real_verification["intended_path_observed"] is True
+    assert clean_real_verification["primary_failure_phase"] is None
