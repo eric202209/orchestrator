@@ -371,6 +371,40 @@ def test_python_module_pytest_completion_verification_imports_workspace_root(
     assert result["success"] is True
 
 
+def test_completion_verification_honors_pytest_ini_src_pythonpath(tmp_path):
+    project_dir = tmp_path / "project"
+    package_dir = project_dir / "src" / "notes_app"
+    tests_dir = project_dir / "tests"
+    package_dir.mkdir(parents=True)
+    tests_dir.mkdir()
+    (project_dir / "pytest.ini").write_text(
+        "[pytest]\npythonpath = src\n",
+        encoding="utf-8",
+    )
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    (package_dir / "greetings.py").write_text(
+        "def greeting(name):\n    return f'Hello, {name}!'\n",
+        encoding="utf-8",
+    )
+    (tests_dir / "test_greetings.py").write_text(
+        "from notes_app.greetings import greeting\n\n"
+        "def test_greeting():\n"
+        "    assert greeting('Ada') == 'Hello, Ada!'\n",
+        encoding="utf-8",
+    )
+    command, source = _detect_completion_verification_command(project_dir)
+
+    result = _execute_completion_verification(
+        project_dir=project_dir,
+        command=command or "",
+        timeout_seconds=10,
+    )
+
+    assert command is not None
+    assert source == "python test suite detected"
+    assert result["success"] is True
+
+
 def test_completion_validation_requires_source_path_named_by_task(tmp_path):
     project_dir = tmp_path / "project"
     project_dir.mkdir()

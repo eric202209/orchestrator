@@ -662,6 +662,7 @@ class TestOpsMetricsSummaryEndpoint:
             w = body[window]
             assert "phase_latency" in w
             assert "repair" in w
+            assert "task1_product_health" in w
             assert "model_lanes" in w
             assert "retry_distribution" in w
             assert "review_policy_outcomes" in w
@@ -687,6 +688,17 @@ class TestOpsMetricsSummaryEndpoint:
         assert "sessions_repair_succeeded" in repair
         assert "repair_success_rate" in repair
         assert "total_repair_events" in repair
+
+    def test_metrics_summary_task1_product_health_shape(self, authenticated_client):
+        body = authenticated_client.get("/api/v1/ops/metrics/summary").json()
+        task1_health = body["last_24h"]["task1_product_health"]
+        assert "event_counters" in task1_health
+        assert "ordered_project_first_task_success_rate" in task1_health
+        assert "task1_bootstrap_contract_failure_rate" in task1_health
+        assert "task1_execution_failure_rate" in task1_health
+        assert "blocked_after_task1_count" in task1_health
+        assert "blocked_after_task1_rate" in task1_health
+        assert "clean_project_completion_rate" in task1_health
 
     def test_metrics_summary_model_lane_shape(self, authenticated_client):
         body = authenticated_client.get("/api/v1/ops/metrics/summary").json()

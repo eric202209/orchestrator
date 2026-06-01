@@ -13,6 +13,9 @@ from app.services.orchestration.phases.planning_task1_bootstrap import (
     task1_bootstrap_contract_passed,
     task1_plan_failed_only_brittle_command_shape,
 )
+from app.services.orchestration.planning.repair_arbitration import (
+    classify_planning_repair_candidate,
+)
 from app.services.orchestration.validation.validator import ValidatorService
 
 
@@ -108,6 +111,66 @@ def test_task1_bootstrap_rejects_requested_tests_without_test_files(tmp_path):
         is_first_ordered_task=True,
     )
 
+    contract = verdict.details["task1_bootstrap_contract"]
+    assert not verdict.accepted
+    assert "task1_bootstrap_missing_expected_test_files" in contract["violation_codes"]
+
+
+def test_task1_repair_source_preservation_is_not_enough_when_tests_disappear(tmp_path):
+    previous_plan = [
+        _step(
+            ops=[
+                {
+                    "op": "write_file",
+                    "path": "src/notes_app/greetings.py",
+                    "content": "def greeting(name):\n    return f'Hello, {name}!'\n",
+                },
+                {
+                    "op": "write_file",
+                    "path": "tests/test_greetings.py",
+                    "content": (
+                        "from notes_app.greetings import greeting\n\n"
+                        "def test_greeting():\n"
+                        "    assert greeting('Ada') == 'Hello, Ada!'\n"
+                    ),
+                },
+            ],
+            expected_files=[
+                "src/notes_app/greetings.py",
+                "tests/test_greetings.py",
+            ],
+        )
+    ]
+    repaired_plan = [
+        _step(
+            ops=[
+                {
+                    "op": "write_file",
+                    "path": "src/notes_app/greetings.py",
+                    "content": "def greeting(name):\n    return f'Hello, {name}!'\n",
+                }
+            ],
+            expected_files=["src/notes_app/greetings.py"],
+            verification="python -m pytest -q",
+        )
+    ]
+
+    arbitration = classify_planning_repair_candidate(
+        previous_plan=previous_plan,
+        repaired_plan=repaired_plan,
+        project_dir=tmp_path,
+    )
+    verdict = ValidatorService.validate_plan(
+        repaired_plan,
+        output_text=json.dumps(repaired_plan),
+        task_prompt="Extend the existing notes app with greeting support and tests",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+        is_first_ordered_task=True,
+    )
+
+    assert arbitration["source_materialization"]["status"] == "preserved"
+    assert "removed_materialization" not in arbitration["regression_labels"]
     contract = verdict.details["task1_bootstrap_contract"]
     assert not verdict.accepted
     assert "task1_bootstrap_missing_expected_test_files" in contract["violation_codes"]
