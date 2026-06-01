@@ -72,74 +72,13 @@ from app.services.orchestration.phases.planning_plan_shape import (
     prune_unmaterialized_expected_files as _prune_unmaterialized_expected_files,
     split_repaired_single_step_full_lifecycle_plan as _split_repaired_single_step_full_lifecycle_plan,
 )
-
-
-def _is_first_ordered_task(task: Any) -> bool:
-    return getattr(task, "plan_position", None) == 1
-
-
-def _emit_task1_bootstrap_contract_event(
-    ctx: OrchestrationRunContext,
-    plan_verdict: Any,
-) -> None:
-    contract = (getattr(plan_verdict, "details", None) or {}).get(
-        "task1_bootstrap_contract"
-    )
-    if not contract or not _is_first_ordered_task(ctx.task):
-        return
-    passed = bool(contract.get("passed"))
-    event_type = (
-        "task1_bootstrap_contract_passed"
-        if passed
-        else "task1_bootstrap_contract_failed"
-    )
-    ctx.emit_live(
-        "INFO" if passed else "WARN",
-        (
-            "[ORCHESTRATION] Task 1 bootstrap contract passed"
-            if passed
-            else "[ORCHESTRATION] Task 1 bootstrap contract failed"
-        ),
-        metadata={
-            "event_type": event_type,
-            "phase": "planning",
-            "task1_bootstrap_contract": contract,
-        },
-    )
-
-
-def _task1_bootstrap_contract_passed(plan_verdict: Any) -> bool:
-    contract = (getattr(plan_verdict, "details", None) or {}).get(
-        "task1_bootstrap_contract"
-    )
-    return bool(contract and contract.get("passed"))
-
-
-def _task1_plan_failed_only_brittle_command_shape(plan_verdict: Any) -> bool:
-    details = getattr(plan_verdict, "details", None) or {}
-    reasons = list(getattr(plan_verdict, "reasons", None) or [])
-    if reasons != ["Plan contains brittle heredoc-heavy or malformed commands"]:
-        return False
-    semantic_codes = set(details.get("semantic_violation_codes") or [])
-    return not any(str(code).startswith("task1_bootstrap_") for code in semantic_codes)
-
-
-def _normalize_task1_bootstrap_plan_for_json_stability(
-    plan: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    normalized: list[dict[str, Any]] = []
-    for step in plan:
-        updated = dict(step)
-        ops = [
-            operation
-            for operation in (updated.get("ops") or [])
-            if isinstance(operation, dict)
-            and str(operation.get("op") or "") in {"write_file", "append_file"}
-        ]
-        if ops:
-            updated["commands"] = []
-        normalized.append(updated)
-    return normalized
+from app.services.orchestration.phases.planning_task1_bootstrap import (
+    emit_task1_bootstrap_contract_event as _emit_task1_bootstrap_contract_event,
+    is_first_ordered_task as _is_first_ordered_task,
+    normalize_task1_bootstrap_plan_for_json_stability as _normalize_task1_bootstrap_plan_for_json_stability,
+    task1_bootstrap_contract_passed as _task1_bootstrap_contract_passed,
+    task1_plan_failed_only_brittle_command_shape as _task1_plan_failed_only_brittle_command_shape,
+)
 
 
 from app.services.orchestration.phases.planning_support import (
