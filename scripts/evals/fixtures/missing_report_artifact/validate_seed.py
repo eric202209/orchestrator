@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the seed fixture passes tests while missing the report artifact."""
+"""Validate the seed fixture fails tests while missing the report artifact."""
 
 from __future__ import annotations
 
@@ -34,10 +34,14 @@ def main() -> int:
         capture_output=True,
         check=False,
     )
-    if completed.returncode != 0:
-        print((completed.stdout + completed.stderr)[-2000:], file=sys.stderr)
+    if completed.returncode == 0:
+        print("Seed fixture unexpectedly passes; expected missing subtract failure.")
         return 1
-    print("Seed fixture is valid: pytest passes and the required report is missing.")
+    combined = f"{completed.stdout}\n{completed.stderr}"
+    if "subtract" not in combined:
+        print(combined[-2000:], file=sys.stderr)
+        return 1
+    print("Seed fixture is valid: pytest fails on missing subtract and report is missing.")
     return 0
 
 

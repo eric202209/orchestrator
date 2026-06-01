@@ -2,17 +2,17 @@
 
 Seed workspace for the `missing_report_artifact` evaluation case.
 
-The fixture starts with passing calculator tests but intentionally omits the
-required `reports/repair-summary.md` artifact. The expected behavior is to
-create that report without changing the already passing implementation or
-tests.
+The fixture starts with calculator tests that fail because `subtract` is
+missing, and it intentionally omits the required `reports/repair-summary.md`
+artifact. The expected behavior is to implement the small missing function and
+create the report.
 
 Suggested task prompt:
 
 ```text
-Create the missing reports/repair-summary.md artifact with a concise summary of
-the existing calculator behavior. Do not change the passing tests. Verify with
-python3 -m pytest -q.
+Implement subtract(left, right) in src/report_artifact/calculator.py and create
+reports/repair-summary.md with a concise summary of add, multiply, and subtract
+behavior. Do not weaken tests. Verify with python3 -m pytest -q.
 ```
 
 Verifier command:
@@ -21,5 +21,5 @@ Verifier command:
 python3 -m pytest -q
 ```
 
-The seed fixture is expected to pass pytest but fail the eval scorer until the
-required report artifact exists.
+The seed fixture is expected to fail pytest and fail the eval scorer until the
+small source change and required report artifact both exist.

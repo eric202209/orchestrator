@@ -571,6 +571,7 @@ def _case_intended_path_observed(
     clean_success: bool,
     files: dict[str, Any],
     scope: dict[str, Any],
+    planning_root_cause: str | None,
 ) -> bool:
     category = str(case.get("category") or "").lower()
     case_id = str(case.get("case_id") or "").lower()
@@ -579,15 +580,22 @@ def _case_intended_path_observed(
     expected = required_events | success_criteria
 
     if "repair_rejection" in category:
-        return clean_success or repair_rejected_count > 0
+        return (
+            clean_success
+            or repair_rejected_count > 0
+            or planning_root_cause == "stale_replace"
+        )
     if "completion_validation" in category:
         return clean_success or (
             execution_reached and bool(files["missing_required_files"])
         )
     if "verification_artifact_guard" in category:
-        return clean_success or bool(
-            files["present_forbidden_existing_files"]
-            or scope["forbidden_touched_files"]
+        return clean_success or (
+            execution_reached
+            and bool(
+                files["present_forbidden_existing_files"]
+                or scope["forbidden_touched_files"]
+            )
         )
     if "checkpoint" in category or "checkpoint_loaded" in expected:
         return checkpoint_loaded
@@ -649,9 +657,14 @@ def _path_observability(
     verifier: dict[str, Any],
     clean_success: bool,
     required_events: dict[str, Any],
-    files: dict[str, Any],
-    scope: dict[str, Any],
+    files: dict[str, Any] | None = None,
+    scope: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    files = files or {
+        "missing_required_files": [],
+        "present_forbidden_existing_files": [],
+    }
+    scope = scope or {"forbidden_touched_files": []}
     counts = event_summary["event_type_counts"]
     repair_events = event_summary["repair_events"]
     checkpoint_events = event_summary["checkpoint_events"]
@@ -676,6 +689,7 @@ def _path_observability(
     phase7f_used = _phase7f_used(events)
     phase7g_used = _phase7g_used(events)
     checkpoint_loaded = checkpoint_events["checkpoint_loaded"] > 0
+    planning_attribution = _planning_terminal_attribution(events)
     intended_path_observed = _case_intended_path_observed(
         case=case,
         existing_path_observed=bool(required_events["path_observed"]),
@@ -686,6 +700,7 @@ def _path_observability(
         clean_success=clean_success,
         files=files,
         scope=scope,
+        planning_root_cause=planning_attribution["planning_root_cause"],
     )
     primary_failure_phase = _primary_failure_phase(
         case=case,
@@ -698,7 +713,6 @@ def _path_observability(
         checkpoint_loaded=checkpoint_loaded,
         intended_path_observed=intended_path_observed,
     )
-    planning_attribution = _planning_terminal_attribution(events)
     cross_stage_class = _cross_stage_convergence_class(
         events=events,
         clean_success=clean_success,

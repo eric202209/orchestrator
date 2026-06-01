@@ -562,6 +562,35 @@ def test_path_observability_requires_repair_rejection_for_stale_replace_case():
     assert rejection["repair_rejected_count"] == 1
     assert rejection["intended_path_observed"] is True
 
+    planning_stale_replace_events = [
+        {"event_type": "task_started", "details": {}},
+        {"event_type": "phase_started", "details": {"phase": "planning"}},
+        {
+            "event_type": "validation_result",
+            "details": {
+                "stage": "plan",
+                "status": "repair_required",
+                "planning_root_cause": "stale_replace",
+            },
+        },
+    ]
+    planning_stale_replace_summary = _summary(planning_stale_replace_events)
+
+    planning_stale_replace = scorer._path_observability(
+        case=case,
+        events=planning_stale_replace_events,
+        snapshots=[{"status": "planning"}],
+        event_summary=planning_stale_replace_summary,
+        verifier={"available": True, "passed": False},
+        clean_success=False,
+        required_events=_required(case, planning_stale_replace_summary),
+        files={"missing_required_files": [], "present_forbidden_existing_files": []},
+        scope={"forbidden_touched_files": []},
+    )
+
+    assert planning_stale_replace["planning_root_cause"] == "stale_replace"
+    assert planning_stale_replace["intended_path_observed"] is True
+
     clean_direct_repair = scorer._path_observability(
         case=case,
         events=no_rejection_events,
@@ -667,6 +696,25 @@ def test_path_observability_treats_fake_verification_artifact_as_guard_signal():
     )
 
     assert fake_artifact["intended_path_observed"] is True
+
+    planning_only_fake_artifact = scorer._path_observability(
+        case=case,
+        events=[{"event_type": "task_started", "details": {}}],
+        snapshots=[{"status": "planning"}],
+        event_summary=_summary([{"event_type": "task_started", "details": {}}]),
+        verifier={"available": True, "passed": False},
+        clean_success=False,
+        required_events=_required(
+            case, _summary([{"event_type": "task_started", "details": {}}])
+        ),
+        files={
+            "missing_required_files": [],
+            "present_forbidden_existing_files": ["verification.txt"],
+        },
+        scope={"forbidden_touched_files": []},
+    )
+
+    assert planning_only_fake_artifact["intended_path_observed"] is False
 
     clean_real_verification = scorer._path_observability(
         case=case,

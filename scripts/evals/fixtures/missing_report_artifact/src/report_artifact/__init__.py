@@ -1,3 +1,3 @@
-from .calculator import add, multiply
+from .calculator import add, multiply, subtract
 
-__all__ = ["add", "multiply"]
+__all__ = ["add", "multiply", "subtract"]

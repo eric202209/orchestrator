@@ -28,12 +28,17 @@ def main() -> int:
     if missing:
         print(f"Missing fixture paths: {', '.join(missing)}", file=sys.stderr)
         return 2
-    present_forbidden = [
-        str(path.relative_to(ROOT)) for path in FORBIDDEN_ARTIFACTS if path.exists()
+    if not (ROOT / "verification.txt").exists():
+        print("Seed fixture is missing expected fake verification.txt artifact.")
+        return 1
+    unexpected_forbidden = [
+        str(path.relative_to(ROOT))
+        for path in FORBIDDEN_ARTIFACTS
+        if path.exists() and path.name != "verification.txt"
     ]
-    if present_forbidden:
+    if unexpected_forbidden:
         print(
-            f"Seed fixture contains forbidden artifacts: {', '.join(present_forbidden)}",
+            f"Seed fixture contains unexpected artifacts: {', '.join(unexpected_forbidden)}",
             file=sys.stderr,
         )
         return 1
@@ -52,7 +57,7 @@ def main() -> int:
     if "hello-world" not in combined or "hello,---world!" not in combined:
         print(combined[-2000:], file=sys.stderr)
         return 1
-    print("Seed fixture is valid: pytest fails and no fake verification artifact exists.")
+    print("Seed fixture is valid: pytest fails and fake verification.txt exists.")
     return 0
 
 
