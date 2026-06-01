@@ -6,6 +6,12 @@ from app.services.orchestration.planning.repair_arbitration import (
 from app.services.orchestration.planning.source_api_contract import (
     build_source_api_contract_capsule,
 )
+from app.services.orchestration.phases.planning_repair_arbitration_control import (
+    _materialization_regression_paths,
+)
+from app.services.orchestration.phases.planning_support import (
+    _repair_root_cause_from_arbitration,
+)
 
 
 def test_arbitration_labels_removed_materialization_and_verification(tmp_path: Path):
@@ -46,6 +52,67 @@ def test_arbitration_labels_removed_materialization_and_verification(tmp_path: P
     assert "removed_verification" in result["regression_labels"]
     assert result["source_materialization"]["status"] == "removed"
     assert result["verification_contract"]["status"] == "removed"
+    assert _materialization_regression_paths(result) == ["src/math_tools/operations.py"]
+    assert _repair_root_cause_from_arbitration(result) == (
+        "missing_source_materialization"
+    )
+
+
+def test_materialization_regression_detects_moved_expected_source_path(
+    tmp_path: Path,
+):
+    previous_plan = [
+        {
+            "step_number": 1,
+            "description": "Create imported formatter module",
+            "commands": [],
+            "verification": "python -m pytest -q",
+            "expected_files": ["src/import_repair/formatters.py"],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/import_repair/formatters.py",
+                    "content": "def normalize_greeting(name):\n    return name\n",
+                }
+            ],
+        }
+    ]
+    repaired_plan = [
+        {
+            "step_number": 1,
+            "description": "Create singular formatter module",
+            "commands": [],
+            "verification": "python -m pytest -q",
+            "expected_files": ["src/import_repair/formatter.py"],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/import_repair/formatter.py",
+                    "content": "def normalize_greeting(name):\n    return name\n",
+                }
+            ],
+        }
+    ]
+
+    result = classify_planning_repair_candidate(
+        previous_plan=previous_plan,
+        repaired_plan=repaired_plan,
+        project_dir=tmp_path,
+    )
+
+    assert result["outcome"] == "regressed"
+    assert result["source_materialization"] == {
+        "status": "moved",
+        "previous_paths": ["src/import_repair/formatters.py"],
+        "repaired_paths": ["src/import_repair/formatter.py"],
+    }
+    assert "removed_materialization" in result["regression_labels"]
+    assert _materialization_regression_paths(result) == [
+        "src/import_repair/formatters.py"
+    ]
+    assert _repair_root_cause_from_arbitration(result) == (
+        "missing_source_materialization"
+    )
 
 
 def test_arbitration_labels_stale_replace_and_test_rewrite(tmp_path: Path):

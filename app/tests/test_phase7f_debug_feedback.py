@@ -1341,7 +1341,13 @@ def test_source_step_validation_prompt_includes_medium_test_contract(tmp_path):
     assert "Do not edit tests or verifier commands." in prompt
     assert "Source-context structured repair contract:" in prompt
     assert "ops_fix" in prompt
-    assert "write_file or replace_in_file" in prompt
+    assert "write_file, append_file, or replace_in_file" in prompt
+    assert (
+        "write_file and append_file operations must include content, not new" in prompt
+    )
+    assert (
+        "write_file/append_file use content; replace_in_file uses old and new" in prompt
+    )
     assert "prefer write_file with complete grounded file content" in prompt
     assert "exact current old text is not visible" in prompt
     assert (
@@ -1355,7 +1361,8 @@ def test_source_step_validation_prompt_includes_medium_test_contract(tmp_path):
     assert (
         "Do not use shell commands, heredocs, cat > file, sed, or python -c" in prompt
     )
-    assert '{"repair_type":"ops_fix","ops":[{"op":"replace_in_file"' in prompt
+    assert '{"repair_type":"ops_fix","ops":[{"op":"write_file"' in prompt
+    assert '"content":"complete file content"' in prompt
     assert (
         "step object must include title, command, and verification_command"
         not in prompt
@@ -1513,6 +1520,44 @@ def test_source_context_command_fix_rejected_remains_enforced(tmp_path):
 
     assert result.payload is None
     assert result.rejection_reason == "source_context_command_fix_rejected"
+
+
+def test_ops_fix_write_file_new_field_reports_invalid_ops_not_missing_command(tmp_path):
+    envelope = build_debug_feedback_envelope(
+        task_execution_id=123,
+        task_id=45,
+        step_index=1,
+        failure_phase="execution",
+        failed_command="python3 -m pytest -q",
+        stderr="ModuleNotFoundError: No module named 'import_repair.formatters'",
+        workspace_path=tmp_path,
+    )
+
+    result = normalize_bounded_debug_repair_payload_detailed(
+        [
+            {
+                "repair_type": "ops_fix",
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "src/import_repair/formatters.py",
+                        "new": "def normalize_greeting(name):\n    return name\n",
+                    }
+                ],
+                "verification_command": "python3 -m pytest -q",
+            }
+        ],
+        envelope=envelope,
+    )
+
+    assert result.payload is None
+    assert result.rejection_reason == "invalid_ops_fix_ops"
+    assert result.parsed_shape == {
+        "type": "list",
+        "length": 1,
+        "first_item_type": "dict",
+        "first_item_keys": ["ops", "repair_type", "verification_command"],
+    }
 
 
 def test_unrelated_unknown_failure_stays_legacy_ineligible(tmp_path):

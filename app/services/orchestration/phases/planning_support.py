@@ -584,6 +584,8 @@ def _repair_root_cause_from_arbitration(arbitration: dict[str, Any]) -> str:
         return "stale_replace"
     if "framework_drift" in labels:
         return "framework_mismatch"
+    if "removed_materialization" in labels:
+        return "missing_source_materialization"
     if "removed_verification" in labels:
         return "missing_verification"
     return "unknown"

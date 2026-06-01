@@ -391,7 +391,9 @@ def build_bounded_debug_repair_prompt_with_metadata(
         source_ops_contract_section = (
             "\nSource-context structured repair contract:\n"
             "- For this source-context failure, return repair_type/fix_type ops_fix with an ops array.\n"
-            "- Use structured write_file or replace_in_file operations for source changes.\n"
+            "- Use structured write_file, append_file, or replace_in_file operations for source changes.\n"
+            "- write_file and append_file operations must include content, not new.\n"
+            "- replace_in_file operations must include old and new.\n"
             "- For source_step_validation, prefer write_file with complete grounded file content when replacing function bodies or when exact current old text is not visible.\n"
             "- Use replace_in_file only when old is copied exactly from a visible current source excerpt.\n"
             "- Never infer replace_in_file.old signatures from tests; tests describe expected behavior, not current source text.\n"
@@ -401,7 +403,7 @@ def build_bounded_debug_repair_prompt_with_metadata(
             "- Any shell strings must be runnable shell strings, not prose instructions.\n"
             "- Do not use heredoc rewrites.\n"
             "- Minimal valid source repair example:\n"
-            '  {"repair_type":"ops_fix","ops":[{"op":"replace_in_file","path":"src/...","old":"...","new":"..."}],"verification_command":"python3 -m pytest -q"}\n'
+            '  {"repair_type":"ops_fix","ops":[{"op":"write_file","path":"src/...","content":"complete file content"}],"verification_command":"python3 -m pytest -q"}\n'
         )
     if source_contract:
         rules_section = (
@@ -409,13 +411,14 @@ def build_bounded_debug_repair_prompt_with_metadata(
             "1. Output exactly one JSON array containing one source repair object.\n"
             "2. The repair object must include repair_type or fix_type set to ops_fix, an ops array, and verification_command.\n"
             "3. ops must contain structured replace_in_file, write_file, or append_file operations.\n"
-            "4. verification_command must be a runnable verification shell string, not a mutation command.\n"
-            "5. Keep the fix atomic; do not rewrite unrelated files.\n"
-            "6. Use relative paths only; no absolute paths, `..`, or `~`.\n"
-            f"7. Commands execute from the workspace root ({workspace}). Do not cd into the workspace root or any path containing vault/projects; you are already there.\n"
-            "8. Do not bypass validators, workspace boundaries, or verification.\n"
-            "9. Do not request additional retries or describe policy.\n"
-            "10. If workspace evidence names a missing Python module target, prefer creating that module file instead of editing only a package __init__.py.\n"
+            "4. write_file/append_file use content; replace_in_file uses old and new.\n"
+            "5. verification_command must be a runnable verification shell string, not a mutation command.\n"
+            "6. Keep the fix atomic; do not rewrite unrelated files.\n"
+            "7. Use relative paths only; no absolute paths, `..`, or `~`.\n"
+            f"8. Commands execute from the workspace root ({workspace}). Do not cd into the workspace root or any path containing vault/projects; you are already there.\n"
+            "9. Do not bypass validators, workspace boundaries, or verification.\n"
+            "10. Do not request additional retries or describe policy.\n"
+            "11. If workspace evidence names a missing Python module target, prefer creating that module file instead of editing only a package __init__.py.\n"
         )
     else:
         rules_section = (
@@ -1090,6 +1093,9 @@ def normalize_bounded_debug_repair_payload_detailed(
     ops = _normalize_durable_source_ops(item.get("ops"))
     item_fix_type = str(item.get("fix_type") or item.get("repair_type") or "").strip()
     explicit_ops_fix = item_fix_type == "ops_fix"
+    raw_ops_present = isinstance(item.get("ops"), list)
+    if explicit_ops_fix and raw_ops_present and not ops:
+        return _debug_repair_normalization_rejected(parsed_data, "invalid_ops_fix_ops")
     if (source_edit_context or explicit_ops_fix) and _ops_touch_source_files(ops):
         if not verification:
             return _debug_repair_normalization_rejected(

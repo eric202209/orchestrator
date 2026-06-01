@@ -79,6 +79,66 @@ def arbitrate_planning_repair_candidate(
         root_cause=_repair_root_cause_from_arbitration(arbitration),
         stage="planning_repair_arbitration",
     )
+    materialization_regression_paths = _materialization_regression_paths(arbitration)
+    if materialization_regression_paths:
+        root_cause = _record_planning_root_cause(
+            retry_state,
+            "missing_source_materialization",
+        )
+        arbitration["reason"] = "planning_repair_materialization_regression"
+        arbitration["arbitration_action"] = "reject_materialization_regression"
+        arbitration["planning_root_cause"] = root_cause
+        arbitration["materialization_regression_paths"] = (
+            materialization_regression_paths[:20]
+        )
+        _emit_planning_repair_arbitration(
+            ctx,
+            arbitration=arbitration,
+            planning_phase_event=planning_phase_event,
+        )
+        ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+        ctx.orchestration_state.abort_reason = (
+            "Planning repair moved or removed required source materialization"
+        )
+        failure_reason = (
+            "Planning repair moved or removed required source materialization: "
+            + ", ".join(materialization_regression_paths[:4])
+        )
+        emit_phase_event(
+            ctx.orchestration_state,
+            ctx.emit_live,
+            level="ERROR",
+            phase="planning",
+            message=(
+                "[ORCHESTRATION] Planning repair moved or removed required "
+                "source materialization"
+            ),
+            details={
+                "reason": "planning_repair_materialization_regression",
+                "planning_root_cause": root_cause,
+                "materialization_regression_paths": (
+                    materialization_regression_paths[:20]
+                ),
+                "planning_repair_arbitration": arbitration,
+            },
+        )
+        _finalize_planning_terminal_failure(
+            ctx=ctx,
+            failure_type="planning_repair_materialization_regression",
+            failure_reason=failure_reason,
+            planning_root_cause=root_cause,
+        )
+        if ctx.restore_workspace_snapshot_if_needed:
+            ctx.restore_workspace_snapshot_if_needed(
+                "planning repair materialization regression"
+            )
+        return {
+            "action": "return",
+            "result": {
+                "status": "failed",
+                "reason": "planning_repair_materialization_regression",
+            },
+        }
     if not invalid_python_repair_candidate:
         _emit_planning_repair_arbitration(
             ctx,
@@ -260,3 +320,24 @@ def _emit_planning_repair_arbitration(
             "arbitration event: %s",
             exc,
         )
+
+
+def _materialization_regression_paths(arbitration: dict[str, Any]) -> list[str]:
+    materialization = arbitration.get("source_materialization")
+    if not isinstance(materialization, dict):
+        return []
+    if materialization.get("status") not in {"removed", "moved"}:
+        return []
+    previous_paths = [
+        str(path).strip()
+        for path in (materialization.get("previous_paths") or [])
+        if str(path).strip()
+    ]
+    repaired_paths = {
+        str(path).strip()
+        for path in (materialization.get("repaired_paths") or [])
+        if str(path).strip()
+    }
+    if not previous_paths:
+        return []
+    return [path for path in previous_paths if path not in repaired_paths]
