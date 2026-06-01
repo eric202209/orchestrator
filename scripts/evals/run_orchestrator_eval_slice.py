@@ -23,6 +23,9 @@ SUPPORTED_CASES = frozenset(
         "medium_cli_multi_file_feature",
         "debug_import_error_repair",
         "checkpoint_resume_mid_task",
+        "stale_replace_repair",
+        "missing_report_artifact",
+        "fake_verification_artifact_guard",
     }
 )
 TERMINAL_SESSION_STATUSES = frozenset(

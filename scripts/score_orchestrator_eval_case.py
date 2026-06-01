@@ -566,7 +566,11 @@ def _case_intended_path_observed(
     existing_path_observed: bool,
     execution_reached: bool,
     debug_repair_reached: bool,
+    repair_rejected_count: int,
     checkpoint_loaded: bool,
+    clean_success: bool,
+    files: dict[str, Any],
+    scope: dict[str, Any],
 ) -> bool:
     category = str(case.get("category") or "").lower()
     case_id = str(case.get("case_id") or "").lower()
@@ -574,6 +578,17 @@ def _case_intended_path_observed(
     success_criteria = set(_as_list(case.get("success_criteria")))
     expected = required_events | success_criteria
 
+    if "repair_rejection" in category:
+        return clean_success or repair_rejected_count > 0
+    if "completion_validation" in category:
+        return clean_success or (
+            execution_reached and bool(files["missing_required_files"])
+        )
+    if "verification_artifact_guard" in category:
+        return clean_success or bool(
+            files["present_forbidden_existing_files"]
+            or scope["forbidden_touched_files"]
+        )
     if "checkpoint" in category or "checkpoint_loaded" in expected:
         return checkpoint_loaded
     if (
@@ -634,6 +649,8 @@ def _path_observability(
     verifier: dict[str, Any],
     clean_success: bool,
     required_events: dict[str, Any],
+    files: dict[str, Any],
+    scope: dict[str, Any],
 ) -> dict[str, Any]:
     counts = event_summary["event_type_counts"]
     repair_events = event_summary["repair_events"]
@@ -664,7 +681,11 @@ def _path_observability(
         existing_path_observed=bool(required_events["path_observed"]),
         execution_reached=execution_reached,
         debug_repair_reached=debug_repair_reached,
+        repair_rejected_count=repair_events["repair_rejected"],
         checkpoint_loaded=checkpoint_loaded,
+        clean_success=clean_success,
+        files=files,
+        scope=scope,
     )
     primary_failure_phase = _primary_failure_phase(
         case=case,
@@ -789,6 +810,8 @@ def _score_case(
         verifier=verifier,
         clean_success=clean_success,
         required_events=required_events,
+        files=files,
+        scope=scope,
     )
     hallucination_signals = {
         "unexpected_touched_files": scope["unexpected_touched_files"],
