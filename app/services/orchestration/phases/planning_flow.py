@@ -115,6 +115,7 @@ from app.services.orchestration.phases.planning_support import (
     _terminal_planning_root_cause,
     _task1_bootstrap_second_repair_rejection_reasons,
     _truncated_multistep_collapse_diagnostics,
+    _usable_knowledge_context,
 )
 
 
@@ -200,11 +201,7 @@ def execute_planning_phase(
         assemble_planning_prompt(
             ctx,
             workspace_review,
-            knowledge_context=(
-                planning_knowledge_ctx
-                if planning_knowledge_ctx and planning_knowledge_ctx.retrieved_items
-                else None
-            ),
+            knowledge_context=_usable_knowledge_context(planning_knowledge_ctx),
         )
         if ctx.runtime_service
         else None
@@ -314,11 +311,7 @@ def execute_planning_phase(
             workspace_has_existing_files=getattr(
                 ctx, "workspace_has_existing_files", False
             ),
-            knowledge_context=(
-                planning_knowledge_ctx
-                if planning_knowledge_ctx and planning_knowledge_ctx.retrieved_items
-                else None
-            ),
+            knowledge_context=_usable_knowledge_context(planning_knowledge_ctx),
         )
     else:
         planning_result = asyncio.run(
@@ -425,11 +418,7 @@ def execute_planning_phase(
             workspace_has_existing_files=getattr(
                 ctx, "workspace_has_existing_files", False
             ),
-            knowledge_context=(
-                planning_knowledge_ctx
-                if planning_knowledge_ctx and planning_knowledge_ctx.retrieved_items
-                else None
-            ),
+            knowledge_context=_usable_knowledge_context(planning_knowledge_ctx),
         )
         used_minimal_planning_prompt = True
 
@@ -1408,13 +1397,8 @@ def execute_planning_phase(
                     + "; ".join(issue_fragments),
                     rejection_reasons=issue_fragments,
                     prompt_profile=prompt_profile,
-                    knowledge_context=(
+                    knowledge_context=_usable_knowledge_context(
                         validation_knowledge_ctx
-                        if (
-                            validation_knowledge_ctx
-                            and validation_knowledge_ctx.retrieved_items
-                        )
-                        else None
                     ),
                 )
                 retry_state.repair_prompt_used = True
@@ -1530,13 +1514,8 @@ def execute_planning_phase(
                         + "; ".join(issue_fragments),
                         rejection_reasons=issue_fragments,
                         prompt_profile=prompt_profile,
-                        knowledge_context=(
+                        knowledge_context=_usable_knowledge_context(
                             validation_knowledge_ctx
-                            if (
-                                validation_knowledge_ctx
-                                and validation_knowledge_ctx.retrieved_items
-                            )
-                            else None
                         ),
                     )
                     setattr(
@@ -1875,13 +1854,8 @@ def execute_planning_phase(
                     + "; ".join(plan_verdict.reasons[:3]),
                     rejection_reasons=repair_rejection_reasons,
                     prompt_profile=prompt_profile,
-                    knowledge_context=(
+                    knowledge_context=_usable_knowledge_context(
                         validation_knowledge_ctx
-                        if (
-                            validation_knowledge_ctx
-                            and validation_knowledge_ctx.retrieved_items
-                        )
-                        else None
                     ),
                 )
                 retry_state.repair_prompt_used = True
@@ -2002,13 +1976,8 @@ def execute_planning_phase(
                         + "; ".join(issue_fragments),
                         rejection_reasons=issue_fragments,
                         prompt_profile=prompt_profile,
-                        knowledge_context=(
+                        knowledge_context=_usable_knowledge_context(
                             validation_knowledge_ctx
-                            if (
-                                validation_knowledge_ctx
-                                and validation_knowledge_ctx.retrieved_items
-                            )
-                            else None
                         ),
                     )
                     setattr(
@@ -2490,11 +2459,7 @@ def __retry_with_minimal_prompt(
         workspace_has_existing_files=getattr(
             ctx, "workspace_has_existing_files", False
         ),
-        knowledge_context=(
-            knowledge_context
-            if knowledge_context and knowledge_context.retrieved_items
-            else None
-        ),
+        knowledge_context=_usable_knowledge_context(knowledge_context),
     )
 
 
