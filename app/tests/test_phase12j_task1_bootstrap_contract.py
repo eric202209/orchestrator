@@ -8,10 +8,10 @@ from sqlalchemy.pool import StaticPool
 
 from app.models import Base, LogEntry, Project, Task, TaskStatus
 from app.services.observability.metrics_collector import MetricsCollector
-from app.services.orchestration.phases.planning_flow import (
-    _normalize_task1_bootstrap_plan_for_json_stability,
-    _task1_bootstrap_contract_passed,
-    _task1_plan_failed_only_brittle_command_shape,
+from app.services.orchestration.phases.planning_task1_bootstrap import (
+    normalize_task1_bootstrap_plan_for_json_stability,
+    task1_bootstrap_contract_passed,
+    task1_plan_failed_only_brittle_command_shape,
 )
 from app.services.orchestration.validation.validator import ValidatorService
 
@@ -192,10 +192,10 @@ def test_task1_bootstrap_normalizes_stale_heredoc_output_before_repair(tmp_path)
     )
 
     assert not initial_verdict.accepted
-    assert _task1_bootstrap_contract_passed(initial_verdict)
-    assert _task1_plan_failed_only_brittle_command_shape(initial_verdict)
+    assert task1_bootstrap_contract_passed(initial_verdict)
+    assert task1_plan_failed_only_brittle_command_shape(initial_verdict)
 
-    normalized_plan = _normalize_task1_bootstrap_plan_for_json_stability(plan)
+    normalized_plan = normalize_task1_bootstrap_plan_for_json_stability(plan)
     final_verdict = ValidatorService.validate_plan(
         normalized_plan,
         output_text=json.dumps(normalized_plan),
