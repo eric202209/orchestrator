@@ -99,6 +99,89 @@ def test_path_observability_reports_planning_terminal_root_cause():
 
     assert result["planning_terminal_state"] == "planning_circuit_breaker_opened"
     assert result["planning_root_cause"] == "missing_verification"
+    assert result["cross_stage_convergence_class"] == "planning_only_blocker"
+
+
+def test_path_observability_classifies_root_cause_oscillation():
+    case = {
+        "case_id": "python_cli_small_feature",
+        "category": "baseline_success",
+        "required_events": ["task_started"],
+    }
+    events = [
+        {"event_type": "task_started", "details": {}},
+        {"event_type": "phase_started", "details": {"phase": "planning"}},
+        {
+            "event_type": "planning_repair_arbitration",
+            "details": {
+                "invalid_output": True,
+                "planning_root_cause": "invalid_python",
+            },
+        },
+        {
+            "event_type": "validation_result",
+            "details": {
+                "stage": "plan",
+                "status": "repair_required",
+                "reasons": ["Plan is missing verification commands"],
+            },
+        },
+    ]
+    summary = _summary(events)
+
+    result = scorer._path_observability(
+        case=case,
+        events=events,
+        snapshots=[{"status": "planning"}],
+        event_summary=summary,
+        verifier={"available": True, "passed": False},
+        clean_success=False,
+        required_events=_required(case, summary),
+    )
+
+    assert result["cross_stage_convergence_class"] == "root_cause_oscillation"
+
+
+def test_path_observability_honors_explicit_root_cause_oscillation_event():
+    case = {
+        "case_id": "python_cli_small_feature",
+        "category": "baseline_success",
+        "required_events": ["task_started"],
+    }
+    events = [
+        {"event_type": "task_started", "details": {}},
+        {"event_type": "phase_started", "details": {"phase": "planning"}},
+        {
+            "event_type": "cross_stage_convergence",
+            "details": {
+                "reason": "root_cause_oscillation_no_progress",
+                "cross_stage_convergence_class": "root_cause_oscillation",
+                "oscillation_detected": True,
+                "oscillation_root_causes": ["invalid_python", "missing_verification"],
+                "oscillation_stage_sequence": [
+                    "planning_repair_arbitration",
+                    "post_repair_missing_verification_second_pass",
+                ],
+                "oscillation_action": "stop_repair_loop",
+                "planning_root_cause": "invalid_python",
+            },
+        },
+    ]
+    summary = _summary(events)
+
+    result = scorer._path_observability(
+        case=case,
+        events=events,
+        snapshots=[{"status": "planning"}],
+        event_summary=summary,
+        verifier={"available": True, "passed": False},
+        clean_success=False,
+        required_events=_required(case, summary),
+    )
+
+    assert result["primary_failure_phase"] == "planning_validation"
+    assert result["planning_root_cause"] == "invalid_python"
+    assert result["cross_stage_convergence_class"] == "root_cause_oscillation"
 
 
 def test_path_observability_does_not_report_historical_root_cause_after_planning_acceptance():
@@ -139,6 +222,59 @@ def test_path_observability_does_not_report_historical_root_cause_after_planning
     assert result["planning_terminal_state"] == "accepted"
     assert result["planning_root_cause"] == "unknown"
     assert result["primary_failure_phase"] == "debug_repair"
+    assert (
+        result["cross_stage_convergence_class"]
+        == "debug_repair_after_accepted_planning"
+    )
+
+
+def test_path_observability_classifies_cross_stage_contract_regression():
+    case = {
+        "case_id": "debug_import_error_repair",
+        "category": "debug_repair",
+        "required_events": ["debug_feedback_captured"],
+    }
+    events = [
+        {"event_type": "phase_started", "details": {"phase": "planning"}},
+        {
+            "event_type": "planning_repair_arbitration",
+            "details": {
+                "regression_labels": ["source_api_regression"],
+                "source_api_contract": {
+                    "missing_required_symbols": ["medium_cli.cli.build_parser"]
+                },
+            },
+        },
+        {
+            "event_type": "phase_finished",
+            "details": {"phase": "planning", "status": "accepted"},
+        },
+        {"event_type": "phase_started", "details": {"phase": "execution"}},
+        {
+            "event_type": "debug_feedback_captured",
+            "details": {
+                "pytest_excerpt": (
+                    "ImportError: cannot import name 'build_parser' "
+                    "from 'medium_cli.cli'"
+                )
+            },
+        },
+    ]
+    summary = _summary(events)
+
+    result = scorer._path_observability(
+        case=case,
+        events=events,
+        snapshots=[{"status": "executing"}],
+        event_summary=summary,
+        verifier={"available": True, "passed": False},
+        clean_success=False,
+        required_events=_required(case, summary),
+    )
+
+    assert result["cross_stage_convergence_class"] == (
+        "cross_stage_contract_regression"
+    )
 
 
 def test_path_observability_detects_phase7f_debug_repair():

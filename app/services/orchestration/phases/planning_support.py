@@ -11,6 +11,7 @@ from typing import Any, Dict
 
 from app.models import TaskExecution, TaskStatus
 from app.services.orchestration.context.assembly import compress_orchestration_context
+from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.events.telemetry import emit_phase_event
 from app.services.orchestration.planning.planner import (
     PlannerService,
@@ -20,6 +21,7 @@ from app.services.orchestration.planning.source_materialization import (
     plan_has_concrete_source_materialization,
 )
 from app.services.orchestration.run_state import mark_task_attempt_failed
+from app.services.orchestration.state.persistence import append_orchestration_event
 from app.services.orchestration.state.session_state import mark_session_paused
 from app.services.orchestration.types import OrchestrationRunContext, ReasoningArtifact
 from app.services.orchestration.validation.validator import MAX_PLANNING_COMMAND_CHARS
@@ -545,11 +547,113 @@ def _planning_root_cause_from_plan_verdict(plan_verdict: Any) -> str:
     return "unknown"
 
 
+def _repair_root_cause_from_plan_verdict(plan_verdict: Any) -> str:
+    details = getattr(plan_verdict, "details", None) or {}
+    reasons = "\n".join(
+        str(reason or "") for reason in getattr(plan_verdict, "reasons", []) or []
+    )
+    text = (json.dumps(details, default=str, sort_keys=True) + "\n" + reasons).lower()
+    planning_root_cause = _planning_root_cause_from_plan_verdict(plan_verdict)
+    if planning_root_cause != "unknown":
+        return planning_root_cause
+    if "source_api_regression" in text or "missing_required_symbols" in text:
+        return "source_api_regression"
+    if "placeholder or stub" in text or "placeholder_only_steps" in text:
+        return "placeholder_stub"
+    return "unknown"
+
+
+def _repair_root_cause_from_arbitration(arbitration: dict[str, Any]) -> str:
+    labels = {
+        str(label or "").strip() for label in arbitration.get("regression_labels") or []
+    }
+    source_api = arbitration.get("source_api_contract") or {}
+    python_syntax = arbitration.get("python_syntax") or {}
+    if arbitration.get("invalid_output") or python_syntax.get("status") in {
+        "regressed",
+        "still_invalid",
+    }:
+        return "invalid_python"
+    if (
+        "source_api_regression" in labels
+        or source_api.get("status") == "regressed"
+        or source_api.get("missing_required_symbols")
+    ):
+        return "source_api_regression"
+    if "stale_replace" in labels:
+        return "stale_replace"
+    if "framework_drift" in labels:
+        return "framework_mismatch"
+    if "removed_verification" in labels:
+        return "missing_verification"
+    return "unknown"
+
+
 def _record_planning_root_cause(retry_state: Any, root_cause: Any) -> str:
     normalized = _normalize_planning_root_cause(root_cause)
     if normalized != "unknown":
         retry_state.planning_root_cause = normalized
     return getattr(retry_state, "planning_root_cause", "unknown")
+
+
+def _record_repair_root_cause(
+    retry_state: Any,
+    *,
+    root_cause: Any,
+    stage: str,
+    progress: bool = False,
+) -> None:
+    normalized = str(root_cause or "").strip() or "unknown"
+    if normalized == "unknown":
+        return
+    if _normalize_planning_root_cause(normalized) != "unknown":
+        _record_planning_root_cause(retry_state, normalized)
+    sequence = getattr(retry_state, "repair_root_cause_sequence", [])
+    stage_sequence = getattr(retry_state, "repair_stage_sequence", [])
+    if not sequence or sequence[-1] != normalized:
+        sequence.append(normalized)
+        stage_sequence.append(str(stage or "unknown"))
+    retry_state.repair_root_cause_sequence = sequence
+    retry_state.repair_stage_sequence = stage_sequence
+    if progress:
+        retry_state.repair_progress_observed = True
+
+
+def _root_cause_oscillation_details(
+    retry_state: Any,
+    *,
+    latest_progress: bool = False,
+) -> dict[str, Any] | None:
+    if latest_progress:
+        return None
+    sequence = [
+        str(item)
+        for item in getattr(retry_state, "repair_root_cause_sequence", []) or []
+        if str(item or "").strip() and str(item or "") != "unknown"
+    ]
+    distinct = list(dict.fromkeys(sequence))
+    if len(distinct) < 2:
+        return None
+    return {
+        "reason": "root_cause_oscillation_no_progress",
+        "cross_stage_convergence_class": "root_cause_oscillation",
+        "oscillation_detected": True,
+        "oscillation_root_causes": distinct,
+        "oscillation_stage_sequence": list(
+            getattr(retry_state, "repair_stage_sequence", []) or []
+        ),
+        "oscillation_action": "stop_repair_loop",
+    }
+
+
+def _verifier_failures_decreased_materially(
+    *,
+    previous_failure_count: int | None,
+    current_failure_count: int | None,
+) -> bool:
+    if previous_failure_count is None or current_failure_count is None:
+        return False
+    return current_failure_count < previous_failure_count
 
 
 def _terminal_planning_root_cause(
@@ -716,6 +820,65 @@ def _abort_missing_source_materialization_repair(
         ctx.restore_workspace_snapshot_if_needed(
             "planning repair missing source materialization"
         )
+    return {"status": "failed", "reason": failure_type}
+
+
+def _abort_root_cause_oscillation_repair_loop(
+    *,
+    ctx: OrchestrationRunContext,
+    retry_state: Any,
+) -> dict[str, str] | None:
+    details = _root_cause_oscillation_details(retry_state)
+    if not details:
+        return None
+
+    failure_type = "root_cause_oscillation_no_progress"
+    ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+    ctx.orchestration_state.abort_reason = (
+        "Planning repair root cause oscillated without execution or verifier "
+        "progress"
+    )
+    emit_phase_event(
+        ctx.orchestration_state,
+        ctx.emit_live,
+        level="ERROR",
+        phase="planning",
+        message=(
+            "[ORCHESTRATION] Planning repair root cause oscillated without "
+            "progress; stopping repair loop"
+        ),
+        details={
+            **details,
+            "planning_root_cause": _terminal_planning_root_cause(retry_state),
+        },
+    )
+    try:
+        append_orchestration_event(
+            project_dir=ctx.orchestration_state.project_dir,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            event_type=EventType.CROSS_STAGE_CONVERGENCE,
+            details={
+                **details,
+                "planning_root_cause": _terminal_planning_root_cause(retry_state),
+            },
+        )
+    except Exception as exc:
+        ctx.logger.debug(
+            "[ORCHESTRATION] Failed to persist root-cause oscillation event: %s",
+            exc,
+        )
+    _finalize_planning_terminal_failure(
+        ctx=ctx,
+        failure_type=failure_type,
+        failure_reason=(
+            "Planning repair root cause oscillated without progress: "
+            + " -> ".join(details["oscillation_root_causes"])
+        ),
+        planning_root_cause=_terminal_planning_root_cause(retry_state),
+    )
+    if ctx.restore_workspace_snapshot_if_needed:
+        ctx.restore_workspace_snapshot_if_needed("root cause oscillation")
     return {"status": "failed", "reason": failure_type}
 
 
@@ -1071,6 +1234,9 @@ class _PlanningRetryState:
         self.last_repair_reason = ""
         self.last_multistep_plan_step_count = 0
         self.planning_root_cause = "unknown"
+        self.repair_root_cause_sequence: list[str] = []
+        self.repair_stage_sequence: list[str] = []
+        self.repair_progress_observed = False
 
     @property
     def circuit_open(self) -> bool:

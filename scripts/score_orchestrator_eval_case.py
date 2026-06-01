@@ -372,9 +372,13 @@ def _phase_started(events: list[dict[str, Any]], phase: str) -> bool:
 def _planning_validation_blocked(events: list[dict[str, Any]]) -> bool:
     blocked_statuses = {"failed", "failure", "repair_required", "rejected"}
     for event in events:
+        details = _event_details(event)
+        if details.get("cross_stage_convergence_class") == "root_cause_oscillation":
+            return True
+        if str(details.get("reason") or "") == "root_cause_oscillation_no_progress":
+            return True
         if event.get("event_type") != "validation_result":
             continue
-        details = _event_details(event)
         if str(details.get("stage") or "").lower() != "plan":
             continue
         if str(details.get("status") or "").lower() in blocked_statuses:
@@ -432,6 +436,82 @@ def _planning_terminal_attribution(
         "terminal_state": terminal_state,
         "planning_root_cause": root_cause or "unknown",
     }
+
+
+def _planning_issue_classes(events: list[dict[str, Any]]) -> list[str]:
+    classes: list[str] = []
+    for event in events:
+        details = _event_details(event)
+        if event.get("event_type") == "validation_result" and str(
+            details.get("stage") or ""
+        ).lower() != "plan":
+            continue
+        text = _details_text(details)
+        root_cause = _planning_root_cause_from_details(details)
+        if root_cause:
+            classes.append(root_cause)
+        if "source_api_regression" in text or "missing_required_symbols" in text:
+            classes.append("source_api_regression")
+        if "placeholder or stub" in text or "placeholder_only_steps" in text:
+            classes.append("placeholder_stub")
+    return list(dict.fromkeys(item for item in classes if item != "unknown"))
+
+
+def _has_cross_stage_contract_regression(events: list[dict[str, Any]]) -> bool:
+    for event in events:
+        details = _event_details(event)
+        if event.get("event_type") == "planning_repair_arbitration":
+            text = _details_text(details)
+            if "source_api_regression" in text or "test_rewrite" in text:
+                return True
+        if event.get("event_type") in {
+            "debug_feedback_captured",
+            "step_finished",
+            "repair_rejected",
+        }:
+            text = _details_text(details)
+            if "cannot import name" in text or "missing_required_symbols" in text:
+                return True
+    return False
+
+
+def _cross_stage_convergence_class(
+    *,
+    events: list[dict[str, Any]],
+    clean_success: bool,
+    primary_failure_phase: str | None,
+    execution_reached: bool,
+    debug_repair_reached: bool,
+    planning_terminal_state: str | None,
+) -> str:
+    if clean_success:
+        return "clean_success"
+    for event in events:
+        details = _event_details(event)
+        explicit_class = str(details.get("cross_stage_convergence_class") or "")
+        if explicit_class == "root_cause_oscillation":
+            return "root_cause_oscillation"
+    planning_accepted = str(planning_terminal_state or "").lower() in {
+        "accepted",
+        "completed",
+        "success",
+    }
+    if planning_accepted and debug_repair_reached:
+        if _has_cross_stage_contract_regression(events):
+            return "cross_stage_contract_regression"
+        return "debug_repair_after_accepted_planning"
+    planning_issues = _planning_issue_classes(events)
+    if (
+        primary_failure_phase == "planning_validation"
+        and not execution_reached
+        and len(planning_issues) > 1
+    ):
+        return "root_cause_oscillation"
+    if primary_failure_phase == "planning_validation" and not execution_reached:
+        return "planning_only_blocker"
+    if execution_reached:
+        return "stage_progression_without_success"
+    return "unknown"
 
 
 def _phase7f_used(events: list[dict[str, Any]]) -> bool:
@@ -598,6 +678,14 @@ def _path_observability(
         intended_path_observed=intended_path_observed,
     )
     planning_attribution = _planning_terminal_attribution(events)
+    cross_stage_class = _cross_stage_convergence_class(
+        events=events,
+        clean_success=clean_success,
+        primary_failure_phase=primary_failure_phase,
+        execution_reached=execution_reached,
+        debug_repair_reached=debug_repair_reached,
+        planning_terminal_state=planning_attribution["terminal_state"],
+    )
     return {
         "planning_reached": planning_reached,
         "execution_reached": execution_reached,
@@ -613,6 +701,7 @@ def _path_observability(
         "primary_failure_phase": primary_failure_phase,
         "planning_terminal_state": planning_attribution["terminal_state"],
         "planning_root_cause": planning_attribution["planning_root_cause"],
+        "cross_stage_convergence_class": cross_stage_class,
     }
 
 
@@ -743,6 +832,9 @@ def _score_case(
                 "planning_terminal_state"
             ],
             "planning_root_cause": path_observability["planning_root_cause"],
+            "cross_stage_convergence_class": path_observability[
+                "cross_stage_convergence_class"
+            ],
         },
         "path_observability": path_observability,
         "verifier": verifier,

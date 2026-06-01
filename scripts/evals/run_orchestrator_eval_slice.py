@@ -517,6 +517,16 @@ def _planning_root_cause(report: dict[str, Any]) -> str:
     return str(root_cause or "unknown")
 
 
+def _cross_stage_convergence_class(report: dict[str, Any]) -> str:
+    path_observability = report.get("path_observability") or {}
+    class_name = path_observability.get("cross_stage_convergence_class")
+    if class_name:
+        return str(class_name)
+    result = report.get("result") or {}
+    class_name = result.get("cross_stage_convergence_class")
+    return str(class_name or "unknown")
+
+
 def _rate(count: int, total: int) -> float:
     if total <= 0:
         return 0.0
@@ -594,6 +604,9 @@ def _aggregate_case_reports(
     planning_root_cause_distribution = Counter(
         _planning_root_cause(report) for report in reports
     )
+    cross_stage_distribution = Counter(
+        _cross_stage_convergence_class(report) for report in reports
+    )
     clean_success_count = sum(1 for report in reports if _clean_success(report))
     path_observed_count = sum(
         1 for report in reports if _result_bool(report, "path_observed")
@@ -665,6 +678,12 @@ def _aggregate_case_reports(
         ),
         "planning_root_cause_distribution": dict(
             sorted(planning_root_cause_distribution.items())
+        ),
+        "most_common_cross_stage_convergence_class": _most_common(
+            cross_stage_distribution
+        ),
+        "cross_stage_convergence_distribution": dict(
+            sorted(cross_stage_distribution.items())
         ),
         "score_readiness_summary": _aggregate_score_readiness(
             score_readiness or [],

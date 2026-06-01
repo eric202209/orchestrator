@@ -45,6 +45,7 @@ def _report(
     phase7g_used: bool,
     blockers: list[str],
     planning_root_cause: str = "unknown",
+    cross_stage_convergence_class: str = "unknown",
 ) -> dict:
     return {
         "result": {
@@ -60,6 +61,7 @@ def _report(
             "phase7f_used": phase7f_used,
             "phase7g_used": phase7g_used,
             "planning_root_cause": planning_root_cause,
+            "cross_stage_convergence_class": cross_stage_convergence_class,
         },
     }
 
@@ -77,6 +79,7 @@ def test_aggregate_case_reports_counts_path_observability_and_metadata():
             phase7g_used=False,
             blockers=["verifier_failed"],
             planning_root_cause="missing_verification",
+            cross_stage_convergence_class="cross_stage_contract_regression",
         ),
         _report(
             clean_success=False,
@@ -89,6 +92,7 @@ def test_aggregate_case_reports_counts_path_observability_and_metadata():
             phase7g_used=True,
             blockers=["verifier_failed"],
             planning_root_cause="missing_verification",
+            cross_stage_convergence_class="cross_stage_contract_regression",
         ),
         _report(
             clean_success=True,
@@ -165,6 +169,13 @@ def test_aggregate_case_reports_counts_path_observability_and_metadata():
     assert aggregate["most_common_planning_root_cause"] == "missing_verification"
     assert aggregate["planning_root_cause_distribution"] == {
         "missing_verification": 2,
+        "unknown": 1,
+    }
+    assert aggregate["most_common_cross_stage_convergence_class"] == (
+        "cross_stage_contract_regression"
+    )
+    assert aggregate["cross_stage_convergence_distribution"] == {
+        "cross_stage_contract_regression": 2,
         "unknown": 1,
     }
     assert aggregate["score_readiness_summary"] == {

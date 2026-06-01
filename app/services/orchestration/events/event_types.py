@@ -35,6 +35,7 @@ class EventType:
     # ── Planning ──────────────────────────────────────────────────────────────
     PLAN_REVISED = "plan_revised"
     PLANNING_REPAIR_ARBITRATION = "planning_repair_arbitration"
+    CROSS_STAGE_CONVERGENCE = "cross_stage_convergence"
     REASONING_ARTIFACT_GENERATED = "reasoning_artifact_generated"
     LANE_ESCALATION_TRIGGERED = "lane_escalation_triggered"
     LANE_ESCALATION_RESULT = "lane_escalation_result"

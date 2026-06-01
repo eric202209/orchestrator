@@ -69,101 +69,9 @@ from app.services.orchestration.phases.planning_repair_arbitration_control impor
     arbitrate_planning_repair_candidate,
 )
 from app.services.orchestration.phases.planning_plan_shape import (
+    prune_unmaterialized_expected_files as _prune_unmaterialized_expected_files,
     split_repaired_single_step_full_lifecycle_plan as _split_repaired_single_step_full_lifecycle_plan,
 )
-
-
-def _prune_unmaterialized_expected_files(
-    plan: list[dict[str, Any]],
-    unmaterialized_paths: list[str],
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Drop expected_files entries that validation proved are not outputs.
-
-    This is deliberately narrower than contract completion. It never adds file
-    content or paths; it only removes stale/speculative expected_files while
-    preserving concrete mutating op targets as the implementation scope.
-    """
-
-    if not unmaterialized_paths:
-        return plan, {"changed": False, "reason": "no_unmaterialized_expected_files"}
-
-    stale_paths = {
-        str(path or "").strip().rstrip("/").lstrip("./")
-        for path in unmaterialized_paths
-        if str(path or "").strip()
-    }
-    if not stale_paths:
-        return plan, {"changed": False, "reason": "empty_unmaterialized_expected_files"}
-
-    concrete_op_paths = {
-        str(op.get("path") or "").strip().rstrip("/").lstrip("./")
-        for step in plan
-        if isinstance(step, dict)
-        for op in (step.get("ops") or [])
-        if isinstance(op, dict)
-        and str(op.get("op") or "") in {"write_file", "append_file", "replace_in_file"}
-        and str(op.get("path") or "").strip()
-    }
-    if not concrete_op_paths:
-        return plan, {"changed": False, "reason": "no_concrete_file_ops"}
-
-    referenced_paths: set[str] = set()
-    for step in plan:
-        if not isinstance(step, dict):
-            continue
-        step_text = "\n".join(
-            [str(step.get("verification") or "")]
-            + [str(command or "") for command in (step.get("commands") or [])]
-        )
-        normalized_step_text = step_text.replace("\\", "/")
-        for path in stale_paths:
-            if not path:
-                continue
-            if path in normalized_step_text:
-                referenced_paths.add(path)
-                continue
-            if path.startswith("tests/") and "tests" in normalized_step_text:
-                referenced_paths.add(path)
-                continue
-            if path == "tests" and "tests" in normalized_step_text:
-                referenced_paths.add(path)
-
-    changed = False
-    removed: list[str] = []
-    normalized: list[dict[str, Any]] = []
-    for step in plan:
-        if not isinstance(step, dict):
-            normalized.append(step)
-            continue
-        updated = dict(step)
-        expected_files = []
-        for raw_path in updated.get("expected_files") or []:
-            path = str(raw_path or "").strip().rstrip("/").lstrip("./")
-            if not path:
-                continue
-            if (
-                path in stale_paths
-                and path not in concrete_op_paths
-                and path not in referenced_paths
-            ):
-                removed.append(path)
-                changed = True
-                continue
-            expected_files.append(path)
-        updated["expected_files"] = list(dict.fromkeys(expected_files))
-        normalized.append(updated)
-
-    return normalized, {
-        "changed": changed,
-        "reason": (
-            "pruned_unmaterialized_expected_files"
-            if changed
-            else "no_speculative_expected_files_removed"
-        ),
-        "removed_expected_files": sorted(set(removed)),
-        "concrete_op_paths": sorted(concrete_op_paths),
-        "preserved_referenced_expected_files": sorted(referenced_paths),
-    }
 
 
 from app.services.orchestration.phases.planning_support import (
@@ -172,6 +80,7 @@ from app.services.orchestration.phases.planning_support import (
     _PlanningRetryState,
     _abort_missing_source_materialization_repair,
     _abort_repeated_physical_src_import_repair,
+    _abort_root_cause_oscillation_repair_loop,
     _build_reasoning_artifact,
     _build_repair_rejection_reasons,
     _classify_planning_timeout_failure,
@@ -190,6 +99,8 @@ from app.services.orchestration.phases.planning_support import (
     _planning_root_cause_from_issue_key,
     _planning_root_cause_from_plan_verdict,
     _record_planning_root_cause,
+    _record_repair_root_cause,
+    _repair_root_cause_from_plan_verdict,
     _semantic_codes_for_immediate_repair_issues,
     _should_repair_truncated_single_step_plan,
     _terminal_validation_failure_details,
@@ -1377,11 +1288,12 @@ def execute_planning_phase(
                 if key in blocking_issue_keys and value
             }
             if blocking_repair_issues:
-                _record_planning_root_cause(
+                _record_repair_root_cause(
                     retry_state,
-                    _planning_root_cause_from_immediate_repair_issues(
+                    root_cause=_planning_root_cause_from_immediate_repair_issues(
                         blocking_repair_issues
                     ),
+                    stage="planning_immediate_repair_issue",
                 )
             if blocking_repair_issues and not retry_state.repair_prompt_used:
                 contract_violations = (
@@ -1519,12 +1431,19 @@ def execute_planning_phase(
                     project_dir=ctx.orchestration_state.project_dir,
                 )
                 if second_repair_reason and not second_repair_reason.cap_used:
-                    _record_planning_root_cause(
+                    _record_repair_root_cause(
                         retry_state,
-                        _planning_root_cause_from_issue_key(
+                        root_cause=_planning_root_cause_from_issue_key(
                             second_repair_reason.issue_key
                         ),
+                        stage=second_repair_reason.event_reason,
                     )
+                    oscillation_result = _abort_root_cause_oscillation_repair_loop(
+                        ctx=ctx,
+                        retry_state=retry_state,
+                    )
+                    if oscillation_result:
+                        return oscillation_result
                     issue_fragments = [second_repair_reason.rejection_text]
                     if second_repair_reason.issue_key == "stale_replace_ops_steps":
                         issue_fragments.extend(
@@ -1798,9 +1717,10 @@ def execute_planning_phase(
                     )
             ctx.db.commit()
             if not plan_verdict.accepted:
-                _record_planning_root_cause(
+                _record_repair_root_cause(
                     retry_state,
-                    _planning_root_cause_from_plan_verdict(plan_verdict),
+                    root_cause=_repair_root_cause_from_plan_verdict(plan_verdict),
+                    stage="planning_validation",
                 )
             schema_validation = (plan_verdict.details or {}).get("plan_schema") or {}
             if not schema_validation.get("valid", True):
@@ -1913,6 +1833,12 @@ def execute_planning_phase(
                     )
                     if repeated_src_import_result:
                         return repeated_src_import_result
+                    oscillation_result = _abort_root_cause_oscillation_repair_loop(
+                        ctx=ctx,
+                        retry_state=retry_state,
+                    )
+                    if oscillation_result:
+                        return oscillation_result
 
                 second_repair_reason = _get_targeted_second_repair_reason(
                     retry_state=retry_state,
@@ -1920,12 +1846,19 @@ def execute_planning_phase(
                     project_dir=ctx.orchestration_state.project_dir,
                 )
                 if second_repair_reason and not second_repair_reason.cap_used:
-                    _record_planning_root_cause(
+                    _record_repair_root_cause(
                         retry_state,
-                        _planning_root_cause_from_issue_key(
+                        root_cause=_planning_root_cause_from_issue_key(
                             second_repair_reason.issue_key
                         ),
+                        stage=second_repair_reason.event_reason,
                     )
+                    oscillation_result = _abort_root_cause_oscillation_repair_loop(
+                        ctx=ctx,
+                        retry_state=retry_state,
+                    )
+                    if oscillation_result:
+                        return oscillation_result
                     issue_fragments = [second_repair_reason.rejection_text]
                     contract_diagnostics = _plan_contract_diagnostics(
                         plan_verdict.details

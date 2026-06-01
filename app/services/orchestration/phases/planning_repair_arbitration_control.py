@@ -17,6 +17,8 @@ from app.services.orchestration.phases.planning_support import (
     _get_targeted_second_repair_reason,
     _plan_contract_diagnostics,
     _record_planning_root_cause,
+    _record_repair_root_cause,
+    _repair_root_cause_from_arbitration,
     _terminal_validation_failure_details,
     _terminal_planning_root_cause,
 )
@@ -72,6 +74,11 @@ def arbitrate_planning_repair_candidate(
     }
     arbitration["invalid_output"] = invalid_python_repair_candidate
     arbitration["arbitration_action"] = "none"
+    _record_repair_root_cause(
+        retry_state,
+        root_cause=_repair_root_cause_from_arbitration(arbitration),
+        stage="planning_repair_arbitration",
+    )
     if not invalid_python_repair_candidate:
         _emit_planning_repair_arbitration(
             ctx,
