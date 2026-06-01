@@ -334,6 +334,163 @@ class MetricsCollector:
         }
 
     # ------------------------------------------------------------------
+    # Phase 12R: Ordered-project product health
+    # ------------------------------------------------------------------
+
+    def ordered_project_health(self, days: int = 7) -> dict[str, Any]:
+        """Phase 12R product-level health metrics for ordered projects.
+
+        All task1_* aliases are preserved as output keys so existing
+        consumers are not broken.  project_blocked_after_task1 is kept
+        as an alias for project_blocked_after_bootstrap.
+        """
+        cutoff = self._cutoff(days)
+
+        bootstrap_tasks = (
+            self.db.query(Task)
+            .filter(
+                Task.plan_position == 1,
+                Task.created_at >= cutoff,
+            )
+            .all()
+        )
+
+        bootstrap_total = len(bootstrap_tasks)
+        bootstrap_success = sum(
+            1 for t in bootstrap_tasks if t.status == TaskStatus.DONE
+        )
+        bootstrap_failure = sum(
+            1 for t in bootstrap_tasks if t.status == TaskStatus.FAILED
+        )
+
+        project_blocked_count = 0
+        ordered_completion_count = 0
+        task2_success_count = 0
+        task2_total = 0
+        latency_samples: list[float] = []
+
+        for bt in bootstrap_tasks:
+            project_tasks = (
+                self.db.query(Task)
+                .filter(
+                    Task.project_id == bt.project_id,
+                    Task.plan_position.isnot(None),
+                )
+                .all()
+            )
+
+            if project_tasks and all(
+                t.status == TaskStatus.DONE for t in project_tasks
+            ):
+                ordered_completion_count += 1
+
+            later_tasks = [t for t in project_tasks if (t.plan_position or 0) > 1]
+            if bt.status == TaskStatus.FAILED and any(
+                t.status not in {TaskStatus.DONE, TaskStatus.CANCELLED}
+                for t in later_tasks
+            ):
+                project_blocked_count += 1
+
+            task2 = next((t for t in project_tasks if t.plan_position == 2), None)
+            if bt.status == TaskStatus.DONE and task2 is not None:
+                task2_total += 1
+                if task2.status == TaskStatus.DONE:
+                    task2_success_count += 1
+                if bt.completed_at and task2.started_at:
+                    try:
+                        delta = (task2.started_at - bt.completed_at).total_seconds()
+                        if delta >= 0:
+                            latency_samples.append(delta)
+                    except Exception:
+                        pass
+
+        repair_applied = 0
+        repair_rejected = 0
+        vsm_count = 0
+        vsm_by_type: dict[str, int] = {}
+
+        log_rows = (
+            self.db.query(LogEntry.log_metadata)
+            .filter(
+                LogEntry.log_metadata.isnot(None),
+                LogEntry.created_at >= cutoff,
+            )
+            .all()
+        )
+        for (raw,) in log_rows:
+            meta = _parse_meta(raw)
+            event_type = str(meta.get("event_type") or "")
+            if event_type == "repair_applied":
+                repair_applied += 1
+            elif event_type == "repair_rejected":
+                repair_rejected += 1
+            elif event_type == "verification_surface_mismatch":
+                vsm_count += 1
+                mtype = str(meta.get("mismatch_type") or "UNKNOWN")
+                vsm_by_type[mtype] = vsm_by_type.get(mtype, 0) + 1
+
+        repair_total = repair_applied + repair_rejected
+
+        return {
+            # --- Bootstrap task outcome ---
+            "bootstrap_task_total": bootstrap_total,
+            "bootstrap_task_success_count": bootstrap_success,
+            "bootstrap_task_failure_count": bootstrap_failure,
+            "bootstrap_task_success_rate": (
+                round(bootstrap_success / bootstrap_total, 3)
+                if bootstrap_total
+                else None
+            ),
+            "bootstrap_task_failure_rate": (
+                round(bootstrap_failure / bootstrap_total, 3)
+                if bootstrap_total
+                else None
+            ),
+            # --- Ordered project completion ---
+            "ordered_project_completion_count": ordered_completion_count,
+            "ordered_project_completion_rate": (
+                round(ordered_completion_count / bootstrap_total, 3)
+                if bootstrap_total
+                else None
+            ),
+            # --- Blocked after bootstrap ---
+            "project_blocked_after_bootstrap": project_blocked_count,
+            "blocked_after_bootstrap_rate": (
+                round(project_blocked_count / bootstrap_total, 3)
+                if bootstrap_total
+                else None
+            ),
+            # --- Task 2 continuation ---
+            "task2_continuation_total": task2_total,
+            "task2_continuation_success_count": task2_success_count,
+            "task2_continuation_success_rate": (
+                round(task2_success_count / task2_total, 3) if task2_total else None
+            ),
+            # --- Bootstrap → Task 2 latency ---
+            "bootstrap_to_task2_continuation_latency": {
+                "mean_seconds": _mean(latency_samples),
+                "p95_seconds": _p95(latency_samples),
+                "sample_count": len(latency_samples),
+            },
+            # --- Verification surface mismatches (0 until runtime wired) ---
+            "verification_surface_mismatch_count": vsm_count,
+            "verification_surface_mismatch_by_type": vsm_by_type,
+            # --- Repair contract rejection ---
+            "repair_contract_applied": repair_applied,
+            "repair_contract_rejected": repair_rejected,
+            "repair_contract_rejection_rate": (
+                round(repair_rejected / repair_total, 3) if repair_total else None
+            ),
+            # --- Compatibility aliases (task1_* → bootstrap equivalents) ---
+            "project_blocked_after_task1": project_blocked_count,
+            "blocked_after_task1_rate": (
+                round(project_blocked_count / bootstrap_total, 3)
+                if bootstrap_total
+                else None
+            ),
+        }
+
+    # ------------------------------------------------------------------
     # Model lane distribution
     # ------------------------------------------------------------------
 
