@@ -340,4 +340,19 @@ def _materialization_regression_paths(arbitration: dict[str, Any]) -> list[str]:
     }
     if not previous_paths:
         return []
-    return [path for path in previous_paths if path not in repaired_paths]
+    return [
+        path
+        for path in previous_paths
+        if path not in repaired_paths and _is_required_source_materialization_path(path)
+    ]
+
+
+def _is_required_source_materialization_path(path: str) -> bool:
+    normalized = str(path or "").strip().replace("\\", "/").lstrip("./")
+    if not normalized:
+        return False
+    if normalized.startswith(("tests/", "test/")):
+        return False
+    return normalized.startswith("src/") and normalized.endswith(
+        (".py", ".js", ".jsx", ".ts", ".tsx", ".css")
+    )

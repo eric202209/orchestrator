@@ -115,6 +115,52 @@ def test_materialization_regression_detects_moved_expected_source_path(
     )
 
 
+def test_materialization_regression_block_ignores_html_stale_replace_path(
+    tmp_path: Path,
+):
+    previous_plan = [
+        {
+            "step_number": 1,
+            "description": "Update existing image reference",
+            "commands": [],
+            "verification": 'python -c "import sys; sys.exit(0)"',
+            "expected_files": ["index.html"],
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "index.html",
+                    "old": '<img src="images/',
+                    "new": '<img src="images/',
+                }
+            ],
+        }
+    ]
+    repaired_plan = [
+        {
+            "step_number": 1,
+            "description": "Verify existing page",
+            "commands": [
+                "python -c \"import pathlib; assert pathlib.Path('index.html').exists()\""
+            ],
+            "verification": (
+                'python -c "import pathlib; '
+                "assert pathlib.Path('index.html').exists()\""
+            ),
+            "expected_files": ["index.html"],
+        }
+    ]
+
+    result = classify_planning_repair_candidate(
+        previous_plan=previous_plan,
+        repaired_plan=repaired_plan,
+        project_dir=tmp_path,
+    )
+
+    assert "removed_materialization" in result["regression_labels"]
+    assert result["source_materialization"]["status"] == "removed"
+    assert _materialization_regression_paths(result) == []
+
+
 def test_arbitration_labels_stale_replace_and_test_rewrite(tmp_path: Path):
     repaired_plan = [
         {
