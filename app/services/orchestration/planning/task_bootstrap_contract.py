@@ -23,6 +23,9 @@ PLACEHOLDER_RE = re.compile(
 class TaskBootstrapContract:
     expected_source_files: list[str] = field(default_factory=list)
     expected_test_files: list[str] = field(default_factory=list)
+    required_artifacts: list[str] = field(default_factory=list)
+    required_source_files: list[str] = field(default_factory=list)
+    required_test_files: list[str] = field(default_factory=list)
     required_verification: list[str] = field(default_factory=list)
     forbidden_path_drift: list[str] = field(default_factory=list)
     python_package_markers: list[str] = field(default_factory=list)
@@ -35,6 +38,9 @@ class TaskBootstrapContract:
         return {
             "expected_source_files": list(self.expected_source_files),
             "expected_test_files": list(self.expected_test_files),
+            "required_artifacts": list(self.required_artifacts),
+            "required_source_files": list(self.required_source_files),
+            "required_test_files": list(self.required_test_files),
             "required_verification": list(self.required_verification),
             "forbidden_path_drift": list(self.forbidden_path_drift),
             "python_package_markers": list(self.python_package_markers),
@@ -225,10 +231,14 @@ def build_task1_bootstrap_contract(
     *,
     plan: list[dict[str, Any]],
     forbidden_path_drift: list[str] | None = None,
+    existing_files: set[str] | None = None,
 ) -> TaskBootstrapContract:
     materialized = _materialized_file_targets(plan)
     declared = _declared_expected_files(plan)
     all_paths = materialized | declared
+    known_paths = all_paths | {
+        _normalize_path(path) for path in existing_files or set()
+    }
     source_candidates = sorted(path for path in all_paths if _is_source_path(path))
     test_candidates = sorted(path for path in all_paths if _is_test_path(path))
     import_targets = _python_import_targets(plan)
@@ -241,11 +251,17 @@ def build_task1_bootstrap_contract(
         source_paths=set(source_candidates),
     )
     missing_package_markers = sorted(
-        marker for marker in package_markers if marker not in all_paths
+        marker for marker in package_markers if marker not in known_paths
     )
+    required_source_files = sorted(set(source_candidates) | set(package_markers))
+    required_test_files = sorted(set(test_candidates))
+    required_artifacts = sorted(set(required_source_files) | set(required_test_files))
     return TaskBootstrapContract(
         expected_source_files=source_candidates,
         expected_test_files=test_candidates,
+        required_artifacts=required_artifacts,
+        required_source_files=required_source_files,
+        required_test_files=required_test_files,
         required_verification=_verification_commands(plan),
         forbidden_path_drift=sorted(set(forbidden_path_drift or [])),
         python_package_markers=package_markers,
@@ -261,10 +277,12 @@ def validate_task1_bootstrap_contract(
     plan: list[dict[str, Any]],
     task_prompt: str = "",
     forbidden_path_drift: list[str] | None = None,
+    existing_files: set[str] | None = None,
 ) -> TaskBootstrapContractVerdict:
     contract = build_task1_bootstrap_contract(
         plan=plan,
         forbidden_path_drift=forbidden_path_drift,
+        existing_files=existing_files,
     )
     violations: list[str] = []
     codes: list[str] = []

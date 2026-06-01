@@ -3685,6 +3685,11 @@ class ValidatorService:
                     str(value or "") for value in (title, description, task_prompt)
                 ),
                 forbidden_path_drift=task1_forbidden_path_drift,
+                existing_files={
+                    str(path.relative_to(project_dir))
+                    for path in project_dir.rglob("*")
+                    if path.is_file()
+                },
             )
             details["task1_bootstrap_contract"] = task1_bootstrap_contract.to_dict()
             if not task1_bootstrap_contract.passed:
