@@ -34,6 +34,14 @@ TRUNCATED_PLAN_REPAIR_REJECTION_REASON = (
 )
 
 
+def _usable_knowledge_context(knowledge_context: Any) -> Any:
+    return (
+        knowledge_context
+        if knowledge_context and knowledge_context.retrieved_items
+        else None
+    )
+
+
 def _truncated_multistep_collapse_diagnostics(
     *,
     output_text: str,
