@@ -663,6 +663,7 @@ class TestOpsMetricsSummaryEndpoint:
             assert "phase_latency" in w
             assert "repair" in w
             assert "task1_product_health" in w
+            assert "ordered_project_health" in w
             assert "model_lanes" in w
             assert "retry_distribution" in w
             assert "review_policy_outcomes" in w
@@ -699,6 +700,22 @@ class TestOpsMetricsSummaryEndpoint:
         assert "blocked_after_task1_count" in task1_health
         assert "blocked_after_task1_rate" in task1_health
         assert "clean_project_completion_rate" in task1_health
+
+    def test_metrics_summary_ordered_project_health_shape(self, authenticated_client):
+        body = authenticated_client.get("/api/v1/ops/metrics/summary").json()
+        health = body["last_24h"]["ordered_project_health"]
+        assert "bootstrap_task_success_rate" in health
+        assert "bootstrap_task_failure_rate" in health
+        assert "ordered_project_completion_rate" in health
+        assert "project_blocked_after_bootstrap" in health
+        assert "blocked_after_bootstrap_rate" in health
+        assert "task2_continuation_success_rate" in health
+        assert "bootstrap_to_task2_continuation_latency" in health
+        assert "verification_surface_mismatch_count" in health
+        assert "verification_surface_mismatch_by_type" in health
+        assert "repair_contract_rejection_rate" in health
+        assert "project_blocked_after_task1" in health
+        assert "blocked_after_task1_rate" in health
 
     def test_metrics_summary_model_lane_shape(self, authenticated_client):
         body = authenticated_client.get("/api/v1/ops/metrics/summary").json()
