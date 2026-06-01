@@ -113,6 +113,7 @@ from app.services.orchestration.phases.planning_support import (
     _should_repair_truncated_single_step_plan,
     _terminal_validation_failure_details,
     _terminal_planning_root_cause,
+    _task1_bootstrap_second_repair_rejection_reasons,
     _truncated_multistep_collapse_diagnostics,
 )
 
@@ -1858,6 +1859,9 @@ def execute_planning_phase(
                         ctx, validation_knowledge_ctx, used_in_prompt=True
                     )
                 retry_state.last_repair_reason = "plan_validation_failed"
+                retry_state.task1_bootstrap_rejection_contract = (
+                    plan_verdict.details or {}
+                ).get("task1_bootstrap_contract")
                 repair_rejection_reasons = _build_repair_rejection_reasons(
                     plan_verdict.reasons,
                     plan_verdict.details,
@@ -1921,7 +1925,16 @@ def execute_planning_phase(
                     )
                     if oscillation_result:
                         return oscillation_result
-                    issue_fragments = [second_repair_reason.rejection_text]
+                    if second_repair_reason.issue_key == "task1_bootstrap_contract":
+                        issue_fragments = (
+                            _task1_bootstrap_second_repair_rejection_reasons(
+                                retry_state=retry_state,
+                                plan_verdict=plan_verdict,
+                                rejection_text=second_repair_reason.rejection_text,
+                            )
+                        )
+                    else:
+                        issue_fragments = [second_repair_reason.rejection_text]
                     contract_diagnostics = _plan_contract_diagnostics(
                         plan_verdict.details
                     )

@@ -8,6 +8,11 @@ from sqlalchemy.pool import StaticPool
 
 from app.models import Base, LogEntry, Project, Task, TaskStatus
 from app.services.observability.metrics_collector import MetricsCollector
+from app.services.orchestration.phases.planning_support import (
+    _PlanningRetryState,
+    _build_repair_rejection_reasons,
+    _get_targeted_second_repair_reason,
+)
 from app.services.orchestration.phases.planning_task1_bootstrap import (
     normalize_task1_bootstrap_plan_for_json_stability,
     task1_bootstrap_contract_passed,
@@ -174,6 +179,126 @@ def test_task1_repair_source_preservation_is_not_enough_when_tests_disappear(tmp
     contract = verdict.details["task1_bootstrap_contract"]
     assert not verdict.accepted
     assert "task1_bootstrap_missing_expected_test_files" in contract["violation_codes"]
+
+
+def test_task1_bootstrap_contract_reports_required_artifacts_for_repair(tmp_path):
+    verdict = ValidatorService.validate_plan(
+        [
+            _step(
+                ops=[
+                    {
+                        "op": "write_file",
+                        "path": "src/notes_app/parser.py",
+                        "content": "def parse_note(raw):\n    return {'title': raw}\n",
+                    },
+                    {
+                        "op": "write_file",
+                        "path": "tests/test_parser.py",
+                        "content": (
+                            "from notes_app.parser import parse_note\n\n"
+                            "def test_parse_note():\n"
+                            "    assert parse_note('Title')['title'] == 'Title'\n"
+                        ),
+                    },
+                ],
+                expected_files=["src/notes_app/parser.py", "tests/test_parser.py"],
+            )
+        ],
+        output_text="[]",
+        task_prompt="Extend the existing notes app with parser tests",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+        is_first_ordered_task=True,
+    )
+
+    contract = verdict.details["task1_bootstrap_contract"]
+    assert "src/notes_app/__init__.py" in contract["required_artifacts"]
+    assert "src/notes_app/parser.py" in contract["required_source_files"]
+    assert "src/notes_app/__init__.py" in contract["required_source_files"]
+    assert contract["required_test_files"] == ["tests/test_parser.py"]
+
+
+def test_task1_repair_rejection_reasons_include_same_contract_payload(tmp_path):
+    verdict = ValidatorService.validate_plan(
+        [
+            _step(
+                ops=[
+                    {
+                        "op": "write_file",
+                        "path": "src/notes_app/parser.py",
+                        "content": "def parse_note(raw):\n    return {'title': raw}\n",
+                    },
+                    {
+                        "op": "write_file",
+                        "path": "tests/test_parser.py",
+                        "content": (
+                            "from notes_app.parser import parse_note\n\n"
+                            "def test_parse_note():\n"
+                            "    assert parse_note('Title')['title'] == 'Title'\n"
+                        ),
+                    },
+                ],
+                expected_files=["src/notes_app/parser.py", "tests/test_parser.py"],
+            )
+        ],
+        output_text="[]",
+        task_prompt="Extend the existing notes app with parser tests",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+        is_first_ordered_task=True,
+    )
+
+    reasons = _build_repair_rejection_reasons(verdict.reasons, verdict.details)
+    rendered = "\n".join(reasons)
+
+    assert "task1_bootstrap_contract" in rendered
+    assert "required_artifacts" in rendered
+    assert "src/notes_app/__init__.py" in rendered
+    assert "tests/test_parser.py" in rendered
+    assert "import the package namespace, not `src.*`" in rendered
+
+
+def test_post_repair_task1_bootstrap_failure_gets_targeted_second_pass(tmp_path):
+    verdict = ValidatorService.validate_plan(
+        [
+            _step(
+                ops=[
+                    {
+                        "op": "write_file",
+                        "path": "src/notes_app/__init__.py",
+                        "content": "",
+                    },
+                    {
+                        "op": "write_file",
+                        "path": "src/notes_app/parser.py",
+                        "content": "def parse_note(raw):\n    return {'title': raw}\n",
+                    },
+                ],
+                expected_files=[
+                    "src/notes_app/__init__.py",
+                    "src/notes_app/parser.py",
+                ],
+            )
+        ],
+        output_text="[]",
+        task_prompt="Extend the existing notes app with parser tests",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+        is_first_ordered_task=True,
+    )
+    retry_state = _PlanningRetryState()
+    retry_state.repair_prompt_used = True
+
+    reason = _get_targeted_second_repair_reason(
+        retry_state=retry_state,
+        plan_verdict=verdict,
+        project_dir=tmp_path,
+    )
+
+    assert reason is not None
+    assert reason.issue_key == "task1_bootstrap_contract"
+    assert reason.event_reason == "post_repair_task1_bootstrap_contract_second_pass"
+    assert reason.cap_used is False
 
 
 def test_task1_bootstrap_accepts_source_test_and_verification(tmp_path):

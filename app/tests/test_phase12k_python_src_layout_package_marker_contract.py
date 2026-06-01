@@ -113,6 +113,43 @@ def test_task1_accepts_empty_required_src_layout_package_marker(tmp_path):
     assert contract["missing_python_package_markers"] == []
 
 
+def test_task1_accepts_existing_src_layout_package_marker(tmp_path):
+    package_dir = tmp_path / "src" / "phase12j_greeting"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    plan = [
+        _step(
+            ops=[
+                {
+                    "op": "write_file",
+                    "path": "src/phase12j_greeting/greeter.py",
+                    "content": "def greet(name: str) -> str:\n    return f'Hello, {name}!'\n",
+                },
+                {
+                    "op": "write_file",
+                    "path": "tests/test_greeter.py",
+                    "content": (
+                        "from phase12j_greeting.greeter import greet\n\n"
+                        "def test_greet():\n"
+                        "    assert greet('Ada') == 'Hello, Ada!'\n"
+                    ),
+                },
+            ],
+            expected_files=[
+                "src/phase12j_greeting/greeter.py",
+                "tests/test_greeter.py",
+            ],
+        )
+    ]
+
+    verdict = _validate(plan, tmp_path)
+    contract = verdict.details["task1_bootstrap_contract"]
+
+    assert verdict.accepted
+    assert contract["python_package_markers"] == ["src/phase12j_greeting/__init__.py"]
+    assert contract["missing_python_package_markers"] == []
+
+
 def test_task1_rejects_src_prefixed_test_import_for_src_layout_package(tmp_path):
     plan = [
         _step(

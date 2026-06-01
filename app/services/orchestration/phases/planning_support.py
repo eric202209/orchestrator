@@ -308,6 +308,60 @@ def _build_repair_rejection_reasons(
             "by tests/source context; inspect/test-only steps are not enough."
         )
 
+    task1_bootstrap_contract = details.get("task1_bootstrap_contract")
+    if isinstance(task1_bootstrap_contract, dict):
+        required_artifacts = [
+            str(path or "").strip()
+            for path in task1_bootstrap_contract.get("required_artifacts") or []
+            if str(path or "").strip()
+        ]
+        required_source_files = [
+            str(path or "").strip()
+            for path in task1_bootstrap_contract.get("required_source_files") or []
+            if str(path or "").strip()
+        ]
+        required_test_files = [
+            str(path or "").strip()
+            for path in task1_bootstrap_contract.get("required_test_files") or []
+            if str(path or "").strip()
+        ]
+        required_verification = [
+            str(command or "").strip()
+            for command in task1_bootstrap_contract.get("required_verification") or []
+            if str(command or "").strip()
+        ]
+        package_markers = [
+            str(path or "").strip()
+            for path in task1_bootstrap_contract.get("python_package_markers") or []
+            if str(path or "").strip()
+        ]
+        forbidden_src_imports = [
+            str(import_name or "").strip()
+            for import_name in (
+                task1_bootstrap_contract.get("forbidden_python_src_imports") or []
+            )
+            if str(import_name or "").strip()
+        ]
+        violation_codes = [
+            str(code or "").strip()
+            for code in task1_bootstrap_contract.get("violation_codes") or []
+            if str(code or "").strip()
+        ]
+        if violation_codes:
+            targeted_reasons.append(
+                "task1_bootstrap_contract: Repair must satisfy the same "
+                "TaskBootstrapContract payload that caused validation rejection; "
+                f"violation_codes={violation_codes[:8]}; "
+                f"required_artifacts={required_artifacts[:8]}; "
+                f"required_source_files={required_source_files[:8]}; "
+                f"required_test_files={required_test_files[:8]}; "
+                f"required_verification={required_verification[:4]}; "
+                f"python_package_markers={package_markers[:8]}; "
+                f"forbidden_python_src_imports={forbidden_src_imports[:8]}. "
+                "Do not drop required tests or package markers. For Python "
+                "src-layout tests, import the package namespace, not `src.*`."
+            )
+
     missing_commands_steps = _normalized_step_numbers(
         details.get("missing_commands_steps") or []
     )
@@ -1232,6 +1286,8 @@ class _PlanningRetryState:
         self.post_repair_malformed_shell_second_repair_used = False
         self.post_repair_python_source_syntax_second_repair_used = False
         self.post_repair_framework_second_repair_used = False
+        self.post_repair_task1_bootstrap_second_repair_used = False
+        self.task1_bootstrap_rejection_contract: dict[str, Any] | None = None
         self.source_materialization_required_after_repair = False
         self.last_repair_reason = ""
         self.last_multistep_plan_step_count = 0
@@ -1389,6 +1445,20 @@ _SECOND_REPAIR_VALIDATOR_POLICIES: dict[str, _SecondRepairPolicy] = {
             "no cat heredoc, no printf multiline, no python -c with nested quotes"
         ),
     ),
+    "task1_bootstrap_contract": _SecondRepairPolicy(
+        issue_key="task1_bootstrap_contract",
+        issue_label="Task-1 bootstrap contract",
+        retry_reason="post_repair_task1_bootstrap_contract",
+        event_reason="post_repair_task1_bootstrap_contract_second_pass",
+        semantic_violation_code="task1_bootstrap_contract",
+        cap_attribute="post_repair_task1_bootstrap_second_repair_used",
+        rejection_template=(
+            "task1_bootstrap_contract: repaired Task 1 still violates the "
+            "bootstrap contract. Preserve or restore every required source file, "
+            "test file, package marker, and verification command. Python "
+            "src-layout tests must import the package namespace, not `src.*`"
+        ),
+    ),
 }
 
 _SECOND_REPAIR_WORKSPACE_POLICIES: dict[str, _SecondRepairPolicy] = {
@@ -1501,7 +1571,46 @@ def _get_targeted_second_repair_reason(
             brittle_steps,
         )
 
+    task1_bootstrap_reason = _post_repair_task1_bootstrap_contract_reason(
+        retry_state,
+        plan_verdict,
+    )
+    if task1_bootstrap_reason:
+        return task1_bootstrap_reason
+
     return None
+
+
+def _post_repair_task1_bootstrap_contract_reason(
+    retry_state: _PlanningRetryState,
+    plan_verdict: Any | None,
+) -> _SecondRepairReason | None:
+    if not plan_verdict:
+        return None
+    details = getattr(plan_verdict, "details", None) or {}
+    contract = details.get("task1_bootstrap_contract")
+    if not isinstance(contract, dict) or contract.get("passed") is not False:
+        return None
+
+    policy = _SECOND_REPAIR_VALIDATOR_POLICIES["task1_bootstrap_contract"]
+    return _second_repair_reason_from_policy(retry_state, policy, [])
+
+
+def _task1_bootstrap_second_repair_rejection_reasons(
+    *,
+    retry_state: _PlanningRetryState,
+    plan_verdict: Any,
+    rejection_text: str,
+) -> list[str]:
+    details = dict(getattr(plan_verdict, "details", None) or {})
+    details["task1_bootstrap_contract"] = (
+        retry_state.task1_bootstrap_rejection_contract
+        or details.get("task1_bootstrap_contract")
+    )
+    return _build_repair_rejection_reasons(
+        [rejection_text, *list(getattr(plan_verdict, "reasons", []) or [])],
+        details,
+    )
 
 
 def _post_repair_argparse_framework_mismatch_reason(
