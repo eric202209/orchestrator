@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "mode": "simulation",
+  "description": "Phase 12C-A non-blocking deterministic eval gate simulation policy.",
+  "cases": {
+    "missing_report_artifact": {
+      "role": "simulated_hard_gate",
+      "thresholds": {
+        "clean_success_rate": {
+          "op": "==",
+          "value": 1.0
+        },
+        "intended_path_observed_rate": {
+          "op": "==",
+          "value": 1.0
+        }
+      }
+    },
+    "debug_import_error_repair": {
+      "role": "simulated_hard_gate",
+      "thresholds": {
+        "clean_success_rate": {
+          "op": ">=",
+          "value": 0.66
+        },
+        "intended_path_observed_rate": {
+          "op": "==",
+          "value": 1.0
+        }
+      }
+    },
+    "fake_verification_artifact_guard": {
+      "role": "simulated_negative_gate",
+      "thresholds": {
+        "intended_path_observed_rate": {
+          "op": "==",
+          "value": 1.0
+        }
+      },
+      "negative_evidence": {
+        "allow_stable_primary_failure_phase": true,
+        "verifier_backed_blockers": [
+          "verifier_failed"
+        ]
+      }
+    },
+    "stale_replace_repair": {
+      "role": "diagnostic_only",
+      "report_fields": [
+        "clean_success_rate",
+        "intended_path_observed_rate"
+      ]
+    }
+  }
+}
