@@ -162,6 +162,45 @@ Use repeated runs to decide whether the next fix is a stable path bug or model
 variance. Do not add new benchmark cases or medium/large project runs for this
 first-slice stability loop.
 
+## Phase 12C Gate Simulation
+
+`scripts/evals/check_phase12c_gates.py` evaluates aggregate reports against the
+Phase 12C-A simulation policy in `scripts/evals/phase12c-gate-policy.json`.
+This command does not launch sessions, call model APIs, or make CI fail when a
+simulated gate misses its threshold.
+
+Example:
+
+```bash
+venv/bin/python scripts/evals/check_phase12c_gates.py \
+  --summary-output docs/roadmap/reports/evals/phase12c-gate-simulation-summary.json \
+  docs/roadmap/reports/evals/orchestrator-eval-v1-debug-import-error-repair-queue-20260601-010627-aggregate.json \
+  docs/roadmap/reports/evals/orchestrator-eval-v1-missing-report-artifact-queue-20260601-005610-aggregate.json \
+  docs/roadmap/reports/evals/orchestrator-eval-v1-fake-verification-artifact-guard-queue-20260601-010941-aggregate.json \
+  docs/roadmap/reports/evals/orchestrator-eval-v1-stale-replace-repair-queue-20260601-005610-aggregate.json
+```
+
+The summary separates `simulated_hard_gate`, `simulated_negative_gate`, and
+`diagnostic_only` cases. Phase 12C-A emits `would_pass` and `would_fail`, but
+threshold misses remain advisory. Parse or schema errors still exit non-zero
+because CI must be able to trust the generated artifact.
+
+Phase 12C-B stability fields are included in the same summary. Use
+`--min-evidence-sets` to control how many aggregate reports per case are needed
+before a repeated pass is reported as an optional warning candidate:
+
+```bash
+venv/bin/python scripts/evals/check_phase12c_gates.py \
+  --min-evidence-sets 3 \
+  --summary-output docs/roadmap/reports/evals/phase12c-gate-simulation-summary.json \
+  <aggregate-report> ...
+```
+
+The stability section remains warning-only. It can report
+`optional_warning_candidate=true` or `flaky=true`, but it always keeps
+`promotion_ready=false` and `blocking=false`. Real blocking gates require a
+separate Phase 12C-C promotion decision.
+
 For task creation, the runner prefers fixture-specific prompt text over the
 manifest's generic `operator_prompt`. It first checks
 `scripts/evals/fixtures/<case-id>/task_prompt.txt`, then `prompt.txt`, then the
