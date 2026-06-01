@@ -76,6 +76,7 @@ from app.services.orchestration.phases.planning_task1_bootstrap import (
     emit_task1_bootstrap_contract_event as _emit_task1_bootstrap_contract_event,
     is_first_ordered_task as _is_first_ordered_task,
     normalize_task1_bootstrap_plan_for_json_stability as _normalize_task1_bootstrap_plan_for_json_stability,
+    normalize_task1_python_src_layout_verification as _normalize_task1_python_src_layout_verification,
     task1_bootstrap_contract_passed as _task1_bootstrap_contract_passed,
     task1_plan_failed_only_brittle_command_shape as _task1_plan_failed_only_brittle_command_shape,
 )
@@ -1745,6 +1746,15 @@ def execute_planning_phase(
                         workflow_stage=ctx.workflow_stage,
                         is_first_ordered_task=_is_first_ordered_task(ctx.task),
                     )
+            if _is_first_ordered_task(ctx.task) and _task1_bootstrap_contract_passed(
+                plan_verdict
+            ):
+                normalized_plan = _normalize_task1_python_src_layout_verification(
+                    ctx.orchestration_state.plan, plan_verdict
+                )
+                if normalized_plan != ctx.orchestration_state.plan:
+                    ctx.orchestration_state.plan = normalized_plan
+                    output_text = json.dumps(normalized_plan)
             record_validation_verdict(
                 ctx.db,
                 ctx.session_id,
