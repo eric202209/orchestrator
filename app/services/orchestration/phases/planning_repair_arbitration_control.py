@@ -165,7 +165,7 @@ def arbitrate_planning_repair_candidate(
                     is_first_ordered_task=True,
                 )
             except Exception as exc:
-                ctx.logger.debug(
+                ctx.logger.warning(
                     "[ORCHESTRATION] Bootstrap Contract pre-check in arbitration "
                     "raised an exception; falling through to accept: %s",
                     exc,
@@ -420,7 +420,7 @@ def _reject_repair_candidate_by_bootstrap_contract(
                 details=arbitration,
             )
         except Exception as exc:
-            ctx.logger.debug(
+            ctx.logger.warning(
                 "[ORCHESTRATION] Failed to persist Bootstrap Contract "
                 "rejection arbitration event: %s",
                 exc,
@@ -491,7 +491,7 @@ def _reject_repair_candidate_by_bootstrap_contract(
             details=arbitration,
         )
     except Exception as exc:
-        ctx.logger.debug(
+        ctx.logger.warning(
             "[ORCHESTRATION] Failed to persist Bootstrap Contract "
             "no-budget rejection event: %s",
             exc,
@@ -551,7 +551,7 @@ def _emit_planning_repair_arbitration(
             details=arbitration,
         )
     except Exception as exc:
-        ctx.logger.debug(
+        ctx.logger.warning(
             "[ORCHESTRATION] Failed to persist planning repair "
             "arbitration event: %s",
             exc,
