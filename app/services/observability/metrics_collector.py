@@ -481,7 +481,10 @@ class MetricsCollector:
             "repair_contract_rejection_rate": (
                 round(repair_rejected / repair_total, 3) if repair_total else None
             ),
-            # --- Compatibility aliases (task1_* → bootstrap equivalents) ---
+            # Compatibility aliases — task1_* keys preserved for existing dashboard
+            # consumers and eval scripts. Retire when: (1) all consumers confirmed
+            # to use bootstrap_* keys; (2) no report schema references task1_* fields;
+            # (3) trend-continuity tests pass after renaming.
             "project_blocked_after_task1": project_blocked_count,
             "blocked_after_task1_rate": (
                 round(project_blocked_count / bootstrap_total, 3)

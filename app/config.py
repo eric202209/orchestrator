@@ -10,6 +10,10 @@ from app.runtime_naming import DEBUG_REPAIR_LEGACY_ENV_ALIASES
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DATABASE_URL = f"sqlite:///{BASE_DIR}/orchestrator.db"
 
+# Legacy env var aliases kept for deployments using old ORCHESTRATOR_* names.
+# Retire individual entries only when: (1) all active deployments confirmed on
+# current names; (2) /api/v1/ops/build-identity config_source shows no legacy
+# vars in use; (3) a regression test verifies settings load without the alias.
 LEGACY_ENV_ALIASES = {
     "ORCHESTRATOR_AGENT_BACKEND": "AGENT_BACKEND",
     "ORCHESTRATOR_AGENT_SECONDARY_BACKEND": "AGENT_SECONDARY_BACKEND",

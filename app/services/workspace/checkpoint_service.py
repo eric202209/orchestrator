@@ -32,6 +32,10 @@ class CheckpointError(Exception):
 class CheckpointService:
     """Service for managing OpenClaw session checkpoints"""
 
+    # Legacy root-container checkpoint path kept for sessions created before the
+    # CHECKPOINT_DIR setting was introduced. Retire when: (1) no active sessions
+    # have checkpoints under /root/.openclaw/...; (2) operator migration guidance
+    # is published; (3) flat-format support in _find_latest_checkpoint is removed.
     LEGACY_CHECKPOINT_DIR = (
         "/root/.openclaw/workspace/vault/projects/orchestrator/checkpoints"
     )

@@ -16,6 +16,10 @@ from app.models import SystemSetting
 logger = logging.getLogger(__name__)
 
 WORKSPACE_ROOT_KEY = "workspace_root"
+# Legacy DB key kept for rows written by older installs. Retire when: (1) a DB
+# migration confirms no system_settings rows use this key; (2) all UI/API callers
+# read WORKSPACE_ROOT_KEY only; (3) OPENCLAW_WORKSPACE fallback in
+# _host_workspace_root_fallback() is also removed.
 LEGACY_WORKSPACE_ROOT_KEY = "openclaw_workspace_root"
 MOBILE_API_KEY_KEY = "mobile_gateway_api_key"
 AGENT_BACKEND_KEY = "orchestrator_agent_backend"
@@ -78,6 +82,8 @@ def set_setting_value(
     db.commit()
     db.refresh(record)
     if key == WORKSPACE_ROOT_KEY:
+        # Dual-write keeps the legacy key in sync for older readers.
+        # Remove when LEGACY_WORKSPACE_ROOT_KEY retirement criteria are met.
         legacy_record = (
             db.query(SystemSetting)
             .filter(SystemSetting.key == LEGACY_WORKSPACE_ROOT_KEY)

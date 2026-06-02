@@ -12,6 +12,10 @@ BOUNDED_DEBUG_REPAIR_PROMPT_MODE = "bounded_execution_debug_repair"
 DIFF_SCOPED_DEBUG_REPAIR_PROMPT_MODE = "diff_scoped_debug_repair"
 COMPLETION_REPAIR_CAPSULE_PROMPT_MODE = "completion_repair_capsule"
 
+# Legacy phase-labelled prompt mode strings kept for historical eval artifacts and
+# old debug-repair observations. Retire when: (1) no eval artifact, replay bundle,
+# or report references the phase7* strings; (2) scripts/runtime_naming_compatibility_audit.py
+# confirms all active paths resolve to architecture names.
 LEGACY_BOUNDED_DEBUG_REPAIR_PROMPT_MODE = "phase7f_bounded_debug_repair"
 LEGACY_DIFF_SCOPED_DEBUG_REPAIR_PROMPT_MODE = "phase7g_diff_repair"
 LEGACY_COMPLETION_REPAIR_CAPSULE_PROMPT_MODE = "phase7h_capsule"
@@ -36,6 +40,11 @@ BOUNDED_DEBUG_REPAIR_STALE_REPLACE_CORRECTION_CONTEXT = (
     "bounded_execution_debug_repair_ops_fix_stale_replace_correction"
 )
 
+# Legacy PHASE7F_* env vars mapped to current DEBUG_REPAIR_* names.
+# Retire when: (1) all active deployments confirmed to use DEBUG_REPAIR_* names
+# (verify via /api/v1/ops/build-identity config_source); (2) a targeted regression
+# test confirms settings load without these aliases; (3) retirement of legacy prompt
+# mode constants above is also complete.
 DEBUG_REPAIR_LEGACY_ENV_ALIASES = {
     "PHASE7F_REPAIR_DIRECT_ENABLED": "DEBUG_REPAIR_DIRECT_ENABLED",
     "PHASE7F_REPAIR_BASE_URL": "DEBUG_REPAIR_BASE_URL",
