@@ -410,18 +410,6 @@ def get_session_task_subfolder(db: Session, session: SessionModel) -> str:
     return f"task_{session.id}"
 
 
-def set_session_alert(
-    db: Session,
-    session: SessionModel,
-    level: Optional[str] = None,
-    message: Optional[str] = None,
-) -> None:
-    session.last_alert_level = level
-    session.last_alert_message = message
-    session.last_alert_at = datetime.now(timezone.utc) if message else None
-    db.flush()
-
-
 def build_task_execution_prompt(task: Task) -> str:
     """Build the runtime prompt for a task, preserving recovery context when needed."""
     base_prompt = (task.description or task.title or "").strip()

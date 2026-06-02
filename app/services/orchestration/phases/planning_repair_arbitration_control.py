@@ -25,7 +25,6 @@ from app.services.orchestration.phases.planning_support import (
 )
 from app.services.orchestration.phases.planning_task1_bootstrap import (
     is_first_ordered_task as _is_first_ordered_task,
-    task1_bootstrap_contract_passed as _task1_bootstrap_contract_passed,
 )
 from app.services.orchestration.planning.repair_arbitration import (
     classify_planning_repair_candidate,

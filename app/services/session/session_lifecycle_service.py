@@ -31,7 +31,6 @@ from app.services.session.session_runtime_service import (
     queue_task_for_session,
     reopen_failed_ordered_task_if_needed,
     revoke_session_celery_tasks,
-    set_session_alert,
 )
 from app.services.orchestration.task_rules import (
     should_execute_in_canonical_project_root,

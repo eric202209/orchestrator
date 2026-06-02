@@ -88,7 +88,6 @@ from .session_runtime_service import (
     retry_session_with_stronger_planning_lane,
     reopen_failed_ordered_task_if_needed,
     revoke_session_celery_tasks,
-    set_session_alert,
     slugify_task_name,
 )
 from .replan_service import (
@@ -179,7 +178,6 @@ __all__ = [
     "retry_session_with_stronger_planning_lane",
     "reopen_failed_ordered_task_if_needed",
     "revoke_session_celery_tasks",
-    "set_session_alert",
     "slugify_task_name",
     "stream_session_logs",
     "stream_session_status",
