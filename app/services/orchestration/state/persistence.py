@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import os
 import re
 import time
@@ -24,6 +25,9 @@ from app.services.prompt_templates import OrchestrationState, StepResult
 from ..events.event_types import EventType
 from ..policy import MAX_STEP_ATTEMPTS
 from ..types import FailureEnvelope, ValidationVerdict
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -929,8 +933,13 @@ def save_orchestration_checkpoint(
             trigger="checkpoint_saved",
             related_event_id=event.get("event_id"),
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "[ORCHESTRATION] CHECKPOINT_SAVED event/snapshot write failed — "
+            "checkpoint %r is saved but absent from replay journal: %s",
+            checkpoint_name,
+            exc,
+        )
 
 
 def record_validation_verdict(
@@ -979,8 +988,14 @@ def record_validation_verdict(
             trigger=f"validation_{verdict.stage}",
             related_event_id=event.get("event_id"),
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "[ORCHESTRATION] VALIDATION_RESULT event/snapshot write failed — "
+            "verdict stage=%r status=%r absent from replay journal: %s",
+            verdict.stage,
+            verdict.status,
+            exc,
+        )
     if verdict.stage == "plan":
         orchestration_state.last_plan_validation = verdict_payload
     elif verdict.stage == "task_completion":
