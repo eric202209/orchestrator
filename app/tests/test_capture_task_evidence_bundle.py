@@ -74,6 +74,32 @@ def _schema(conn: sqlite3.Connection) -> None:
             feedback_at text,
             replan_planning_session_id integer
         );
+        create table task_execution_change_sets (
+            id integer primary key,
+            project_id integer,
+            task_id integer,
+            session_id integer,
+            task_execution_id integer,
+            base_snapshot_key text,
+            head_snapshot_key text,
+            snapshot_path text,
+            target_path text,
+            snapshot_exists boolean,
+            added_files text,
+            modified_files text,
+            deleted_files text,
+            warning_flags text,
+            review_decision text,
+            review_reason text,
+            disposition text,
+            disposition_reason text,
+            disposition_at text,
+            disposition_metadata text,
+            status text,
+            captured_at text,
+            created_at text,
+            updated_at text
+        );
         """
     )
 
@@ -185,6 +211,42 @@ def _seed(
         )
 
 
+def _seed_change_set(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        insert into task_execution_change_sets values (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
+        """,
+        (
+            40,
+            1,
+            20,
+            10,
+            30,
+            "autosave_before_task_30",
+            "autosave_after_task_30",
+            "/tmp/snapshot",
+            "/tmp/workspace",
+            1,
+            json.dumps(["src/app.py"]),
+            json.dumps(["tests/test_app.py"]),
+            json.dumps(["old.txt"]),
+            json.dumps(["deleted_files", "config_files_changed"]),
+            json.dumps({"outcome": "hold_for_review"}),
+            "warning_flags_present",
+            "captured",
+            None,
+            None,
+            json.dumps({"source": "test"}),
+            "failed",
+            "now",
+            "now",
+            "now",
+        ),
+    )
+
+
 def _load(bundle_dir: Path, filename: str) -> dict:
     return json.loads((bundle_dir / filename).read_text(encoding="utf-8"))
 
@@ -213,6 +275,7 @@ def test_capture_task_evidence_bundle_writes_expected_files(tmp_path):
         encoding="utf-8",
     )
     _seed(conn, str(workspace))
+    _seed_change_set(conn)
     conn.commit()
     conn.close()
 
@@ -238,6 +301,17 @@ def test_capture_task_evidence_bundle_writes_expected_files(tmp_path):
     evidence = _load(bundle_dir, "workspace_evidence_summary.json")
     assert evidence["workspace_evidence_collected"] is True
     assert evidence["evidence_total_chars"] == 12
+    replay = _load(bundle_dir, "replay_report.semantic.json")
+    assert replay["available"] is True
+    assert replay["integrity"]["event_count_applied"] == 1
+    change_set = _load(bundle_dir, "change_set_summary.json")
+    assert change_set["available"] is True
+    assert change_set["task_execution_id"] == 30
+    assert change_set["changed_count"] == 3
+    assert change_set["added_files"] == ["src/app.py"]
+    assert change_set["modified_files"] == ["tests/test_app.py"]
+    assert change_set["deleted_files"] == ["old.txt"]
+    assert change_set["review_decision"]["outcome"] == "hold_for_review"
     planning = _load(bundle_dir, "planning_contract_summary.json")
     assert planning["available"] is True
     assert planning["record"]["planning_repair_recovered"] is True

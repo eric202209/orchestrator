@@ -26,6 +26,7 @@ EXPECTED_FILES = (
     "decision_timeline.json",
     "replay_report.semantic.json",
     "workspace_evidence_summary.json",
+    "change_set_summary.json",
     "planning_contract_summary.json",
     "logs_summary.json",
 )
@@ -463,6 +464,96 @@ def _workspace_evidence_summary(
     }
 
 
+def _json_list(value: Any) -> list[Any]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if value is None or value == "":
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _change_set_summary(
+    conn: sqlite3.Connection, task_execution_id: int
+) -> dict[str, Any]:
+    if not _table_exists(conn, "task_execution_change_sets"):
+        return {"available": False, "reason": "change_set_table_missing"}
+
+    row = _one(
+        conn,
+        """
+        select id, project_id, task_id, session_id, task_execution_id,
+               base_snapshot_key, head_snapshot_key, snapshot_path, target_path,
+               snapshot_exists, added_files, modified_files, deleted_files,
+               warning_flags, review_decision, review_reason, disposition,
+               disposition_reason, disposition_at, disposition_metadata, status,
+               captured_at, created_at, updated_at
+        from task_execution_change_sets
+        where task_execution_id = ?
+        order by captured_at desc, id desc
+        limit 1
+        """,
+        (task_execution_id,),
+    )
+    if row is None:
+        return {"available": False, "reason": "change_set_missing"}
+
+    added = [str(item) for item in _json_list(row.get("added_files"))]
+    modified = [str(item) for item in _json_list(row.get("modified_files"))]
+    deleted = [str(item) for item in _json_list(row.get("deleted_files"))]
+    warning_flags = [str(item) for item in _json_list(row.get("warning_flags"))]
+    return {
+        "available": True,
+        "change_set_id": row.get("id"),
+        "project_id": row.get("project_id"),
+        "task_id": row.get("task_id"),
+        "session_id": row.get("session_id"),
+        "task_execution_id": row.get("task_execution_id"),
+        "base_snapshot_key": row.get("base_snapshot_key"),
+        "head_snapshot_key": row.get("head_snapshot_key"),
+        "snapshot_path": row.get("snapshot_path"),
+        "target_path": row.get("target_path"),
+        "snapshot_exists": bool(row.get("snapshot_exists")),
+        "added_files": added,
+        "modified_files": modified,
+        "deleted_files": deleted,
+        "added_count": len(added),
+        "modified_count": len(modified),
+        "deleted_count": len(deleted),
+        "changed_count": len(added) + len(modified) + len(deleted),
+        "warning_flags": warning_flags,
+        "review_decision": _json_object(row.get("review_decision")),
+        "review_reason": row.get("review_reason"),
+        "disposition": row.get("disposition"),
+        "disposition_reason": row.get("disposition_reason"),
+        "disposition_at": row.get("disposition_at"),
+        "disposition_metadata": _json_object(row.get("disposition_metadata")),
+        "status": row.get("status"),
+        "captured_at": row.get("captured_at"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
 def _planning_contract_summary(
     conn: sqlite3.Connection, task_execution_id: int
 ) -> dict[str, Any]:
@@ -496,7 +587,9 @@ def _replay_report_semantic(context: dict[str, Any]) -> dict[str, Any]:
             "project_dir": str(project_dir),
         }
     try:
-        from app.services.orchestration.replay import reconstruct_execution_state
+        from app.services.orchestration.reporting.replay import (
+            reconstruct_execution_state,
+        )
         from app.tests.report_semantic_assertions import semantic_replay_report
 
         report = reconstruct_execution_state(
@@ -560,6 +653,7 @@ def capture_bundle(
             "workspace_evidence_summary.json": _workspace_evidence_summary(
                 rows, journal
             ),
+            "change_set_summary.json": _change_set_summary(conn, task_execution_id),
             "planning_contract_summary.json": _planning_contract_summary(
                 conn, task_execution_id
             ),
