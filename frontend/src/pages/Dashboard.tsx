@@ -67,33 +67,16 @@ function Dashboard() {
     checkAuth();
   }, [checkAuth]);
 
-  // Only fetch projects after auth is confirmed
-  useEffect(() => {
-    if (isAuthChecked && user) {
-      fetchProjects();
-      fetchOutcomeRates();
-    } else if (isAuthChecked && !user) {
-      setLoading(false);
-    }
-  }, [isAuthChecked, user]);
-
-  // Refresh tasks every 30s so running status stays current
-  useEffect(() => {
-    if (!isAuthChecked || !user) return;
-    const id = setInterval(fetchTasks, 30_000);
-    return () => clearInterval(id);
-  }, [isAuthChecked, user]);
-
-  const fetchOutcomeRates = async () => {
+  const fetchOutcomeRates = useCallback(async () => {
     try {
       const response = await adminAPI.getOutcomeRates(50);
       setOutcomeRates(response.data);
     } catch {
       // non-critical — silently ignore
     }
-  };
+  }, []);
 
-  const fetchTasks = async () => {
+  const fetchTasks = useCallback(async () => {
     try {
       const tasksResponse = await tasksAPI.getAll({ limit: 500 });
       setTasks(tasksResponse.data);
@@ -103,9 +86,9 @@ function Dashboard() {
         console.error('Failed to fetch tasks:', axiosError.message || error);
       }
     }
-  };
+  }, []);
 
-  const fetchProjects = async () => {
+  const fetchProjects = useCallback(async () => {
     try {
       const [projectsResponse] = await Promise.all([
         projectsAPI.getAll({ limit: 500 }),
@@ -120,7 +103,24 @@ function Dashboard() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [fetchTasks]);
+
+  // Only fetch projects after auth is confirmed
+  useEffect(() => {
+    if (isAuthChecked && user) {
+      fetchProjects();
+      fetchOutcomeRates();
+    } else if (isAuthChecked && !user) {
+      setLoading(false);
+    }
+  }, [isAuthChecked, user, fetchProjects, fetchOutcomeRates]);
+
+  // Refresh tasks every 30s so running status stays current
+  useEffect(() => {
+    if (!isAuthChecked || !user) return;
+    const id = setInterval(fetchTasks, 30_000);
+    return () => clearInterval(id);
+  }, [isAuthChecked, user, fetchTasks]);
 
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
