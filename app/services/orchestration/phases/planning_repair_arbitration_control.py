@@ -375,9 +375,25 @@ def _reject_repair_candidate_by_bootstrap_contract(
         ),
         details={
             "event": "repair_candidate_rejected_by_bootstrap_contract",
+            "bootstrap_contract_passed": bootstrap_contract.get("passed"),
             "bootstrap_task_type": bootstrap_task_type,
+            "classification_evidence": bootstrap_contract.get("classification_evidence")
+            or {},
+            "violations": list(bootstrap_contract.get("violations") or [])[:8],
             "failed_requirements": failed_requirements,
             "expected_test_reason": expected_test_reason,
+            "required_artifacts": list(
+                bootstrap_contract.get("required_artifacts") or []
+            )[:20],
+            "required_source_files": list(
+                bootstrap_contract.get("required_source_files") or []
+            )[:20],
+            "required_test_files": list(
+                bootstrap_contract.get("required_test_files") or []
+            )[:20],
+            "required_verification": list(
+                bootstrap_contract.get("required_verification") or []
+            )[:8],
         },
     )
 

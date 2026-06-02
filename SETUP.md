@@ -119,6 +119,83 @@ PLANNING_REPAIR_MODEL=qwen-local
 
 Only switch to `AGENT_BACKEND=openai_responses_api` if you want Orchestrator to bypass OpenClaw and call OpenAI directly.
 
+### Provider and lane routing
+
+`AGENT_BACKEND` is the default runtime. The current implemented backend ids are:
+
+| Backend | Supported use |
+|---|---|
+| `local_openclaw` | Full local OpenClaw planning, execution, and debug repair |
+| `direct_ollama` | Direct Ollama planning and structured file-operation generation; no native shell/tool execution |
+| `openai_responses_api` | OpenAI Responses planning/repair prompts; no full step-by-step tool execution |
+
+Optional lane overrides can route specific phases differently:
+
+```ini
+PLANNING_BACKEND=openai_responses_api
+EXECUTION_BACKEND=local_openclaw
+DEBUG_REPAIR_BACKEND=openai_responses_api
+REPAIR_BACKEND=
+```
+
+Fallbacks:
+
+- Blank `PLANNING_BACKEND` and `EXECUTION_BACKEND` use `AGENT_BACKEND`.
+- Blank `DEBUG_REPAIR_BACKEND` uses `REPAIR_BACKEND`, then `AGENT_BACKEND`.
+- `PLANNER_MODEL`, `EXECUTION_MODEL`, and `DEBUG_REPAIR_MODEL` override the
+  model for their lanes when the selected runtime supports role-specific model
+  selection.
+
+Direct planning repair is separate from lane backend routing. It uses these
+settings and does not have a `PLANNING_REPAIR_BACKEND` variable:
+
+```ini
+PLANNING_REPAIR_ENABLED=true
+PLANNING_REPAIR_BASE_URL=http://host.docker.internal:11434/v1
+PLANNING_REPAIR_MODEL=qwen3:8b-hybrid
+PLANNING_REPAIR_API_KEY=
+PLANNING_REPAIR_DISABLE_THINKING=true
+```
+
+Bounded debug repair can use its own direct endpoint. Lane-specific values are
+optional; blank values fall back to the planning-repair endpoint/model/key:
+
+```ini
+DEBUG_REPAIR_DIRECT_ENABLED=true
+DEBUG_REPAIR_BACKEND=openai_responses_api
+DEBUG_REPAIR_BASE_URL=https://api.openai.com/v1
+DEBUG_REPAIR_MODEL=gpt-5
+DEBUG_REPAIR_API_KEY=<your OpenAI API key>
+DEBUG_REPAIR_DISABLE_THINKING=true
+```
+
+For OpenAI Responses as a planning lane:
+
+```ini
+PLANNING_BACKEND=openai_responses_api
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=<your OpenAI API key>
+PLANNER_MODEL=gpt-5
+```
+
+For local Qwen through Ollama:
+
+```ini
+AGENT_BACKEND=direct_ollama
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+OLLAMA_AGENT_MODEL=qwen3:8b-hybrid
+OLLAMA_NUM_CTX=4096
+```
+
+For llama.cpp or LM Studio as an OpenAI-compatible endpoint:
+
+```ini
+AGENT_BACKEND=openai_responses_api
+AGENT_MODEL=local
+OPENAI_BASE_URL=http://host.docker.internal:8001/v1
+OPENAI_API_KEY=dummy
+```
+
 ### Stopping
 
 ```bash
@@ -876,13 +953,23 @@ Kill llama-server: `Ctrl+C` in the PowerShell window running it.
 | Variable | Default | Description |
 |---|---|---|
 | `SECRET_KEY` | — | Required. JWT signing key. |
-| `AGENT_BACKEND` | `local_openclaw` | Runtime backend: `local_openclaw`, `direct_ollama`, or `openai_responses_api`. |
-| `OPENAI_BASE_URL` | — | Required for `openai_responses_api`. Point to llama.cpp or any OpenAI-compatible endpoint. |
-| `OPENAI_API_KEY` | — | Required for `openai_responses_api`. Set to `dummy` for local endpoints. |
+| `AGENT_BACKEND` | `local_openclaw` | Default runtime backend: `local_openclaw`, `direct_ollama`, or `openai_responses_api`. |
+| `AGENT_SECONDARY_BACKEND` | — | Optional stronger planning lane selected by the operator for governed escalation. |
+| `PLANNING_BACKEND` | — | Optional planning-lane override. Blank falls back to `AGENT_BACKEND`. |
+| `EXECUTION_BACKEND` | — | Optional execution-lane override. Blank falls back to `AGENT_BACKEND`. |
+| `REPAIR_BACKEND` | — | Optional generic repair-lane override. |
+| `DEBUG_REPAIR_BACKEND` | — | Optional debug-repair lane override. Blank falls back to `REPAIR_BACKEND`, then `AGENT_BACKEND`. |
+| `AGENT_MODEL` | `local` | Default model family. |
+| `PLANNER_MODEL` | — | Optional planning-lane model override. |
+| `EXECUTION_MODEL` | — | Optional execution-lane model override. |
+| `DEBUG_REPAIR_MODEL` | — | Optional debug-repair model override. Also used by direct debug repair when set. |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Base URL for `openai_responses_api`; point to OpenAI, llama.cpp, LM Studio, or another compatible endpoint. |
+| `OPENAI_API_KEY` | — | Required for `openai_responses_api`. Set to a dummy value only for local endpoints that do not require auth. |
 | `OPENCLAW_GATEWAY_URL` | `http://127.0.0.1:8000` | OpenClaw gateway (Linux only). |
 | `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | Ollama API base URL. |
-| `OLLAMA_AGENT_MODEL` | `qwen3:8b-hybrid` | Model used for planning/execution (direct_ollama only). |
+| `OLLAMA_AGENT_MODEL` | — | Model used by `direct_ollama`; set this to a model already pulled on the host. |
 | `OLLAMA_NUM_CTX` | `4096` | Context window tokens sent to Ollama. |
+| `OLLAMA_PLANNING_TIMEOUT_SECONDS` | `0` | Optional planning-only Ollama timeout override. |
 | `OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model for knowledge retrieval. |
 | `EMBEDDING_PROVIDER` | `auto` | `auto` / `ollama` / `openai`. |
 | `EMBEDDING_DIM` | `0` | `0` = auto (768 for Ollama, 1536 for OpenAI). |
@@ -893,7 +980,14 @@ Kill llama-server: `Ctrl+C` in the PowerShell window running it.
 | `OPENCLAW_WORKSPACE` | — | Legacy fallback for older OpenClaw-oriented installs. Prefer `WORKSPACE_ROOT` for new installs, including Ollama and llama.cpp lanes. |
 | `WORKSPACE_REVIEW_POLICY` | `hold_nontrivial` | `auto_publish_all` / `hold_nontrivial` / `hold_all`. |
 | `PLANNING_REPAIR_ENABLED` | `true` | Enable second-pass plan repair. |
-| `PLANNING_REPAIR_BASE_URL` | — | Endpoint for planning repair model. |
+| `PLANNING_REPAIR_BASE_URL` | `http://ai-gateway:8000/v1` | OpenAI-compatible chat-completions endpoint for direct planning repair. |
+| `PLANNING_REPAIR_MODEL` | `qwen-local` | Direct planning-repair model name. |
+| `PLANNING_REPAIR_API_KEY` | — | Optional bearer token for the planning-repair endpoint. |
+| `PLANNING_REPAIR_DISABLE_THINKING` | `true` | Sends no-thinking flags to compatible local chat endpoints. |
+| `DEBUG_REPAIR_DIRECT_ENABLED` | `true` | Enables bounded direct debug repair for eligible local OpenClaw debug-repair calls. |
+| `DEBUG_REPAIR_BASE_URL` | — | Optional direct debug-repair endpoint. Blank falls back to `PLANNING_REPAIR_BASE_URL`. |
+| `DEBUG_REPAIR_API_KEY` | — | Optional direct debug-repair key. Blank falls back to `PLANNING_REPAIR_API_KEY`. |
+| `DEBUG_REPAIR_DISABLE_THINKING` | `true` | Sends no-thinking flags to compatible direct debug-repair chat endpoints. |
 | `RUNTIME_PROFILE` | `standard` | `standard`, `medium`, or `low_resource`. Use `low_resource` for 8 GB llama.cpp or constrained local backends; use `medium` only after a 12-16 GB VRAM llama.cpp setup is stable. |
 | `MOBILE_GATEWAY_API_KEY` | — | Shared key for `/api/v1/mobile/*`. |
 | `LANGFUSE_ENABLED` | `false` | Enable Langfuse tracing. |

@@ -250,6 +250,13 @@ def test_rejection_diagnostic_emitted_with_correct_fields(tmp_path):
     assert "bootstrap_task_type" in event
     assert "failed_requirements" in event
     assert "expected_test_reason" in event
+    assert event["bootstrap_contract_passed"] is False
+    assert "classification_evidence" in event
+    assert "violations" in event
+    assert "required_artifacts" in event
+    assert "required_source_files" in event
+    assert "required_test_files" in event
+    assert "required_verification" in event
     assert isinstance(event["failed_requirements"], list)
 
 

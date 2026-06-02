@@ -22,15 +22,38 @@ Orchestrator is a FastAPI + React control plane for AI-driven development work. 
 | Backend | Use case |
 |---|---|
 | `local_openclaw` | Linux/Ubuntu with OpenClaw installed (default) |
-| `remote_openclaw_gateway` | OpenClaw running on a remote host |
+| `remote_openclaw_gateway` | Registered for future remote OpenClaw use; not implemented for runtime use yet |
 | `openai_responses_api` | OpenAI API (cloud) |
 | `direct_ollama` | Native Ollama, no OpenClaw needed — Windows or air-gapped |
 
 `direct_ollama` is planning-first: it supports planning and structured file operations, but not native shell/tool execution. Use `local_openclaw` for full agent execution.
 
+Backend routing is lane-aware. `AGENT_BACKEND` is the default runtime, while
+`PLANNING_BACKEND`, `EXECUTION_BACKEND`, `REPAIR_BACKEND`, and
+`DEBUG_REPAIR_BACKEND` can override specific lanes. Blank lane overrides fall
+back to `AGENT_BACKEND`. Direct planning repair is configured separately with
+`PLANNING_REPAIR_BASE_URL`, `PLANNING_REPAIR_MODEL`, and
+`PLANNING_REPAIR_API_KEY`; there is no `PLANNING_REPAIR_BACKEND` setting.
+
+## Current Architecture Notes
+
+- **Bootstrap Contract** — first ordered implementation tasks are validated by
+  a deterministic bootstrap contract before execution.
+- **BootstrapTaskType** — Phase 12T classifies bootstrap tasks as
+  `SOURCE_CODE`, `ARTIFACT_ONLY`, `MIXED`, or `UNKNOWN`. Artifact-only tasks do
+  not require source-code implementation files; source-code, mixed, and unknown
+  tasks remain conservative.
+- **Repair arbitration** — Phase 12U made planning repair acceptance depend on
+  Bootstrap Contract validity. A repaired Task 1 candidate that violates the
+  contract is rejected with `repair_candidate_rejected_by_bootstrap_contract`
+  diagnostics instead of being counted as accepted progress.
+- **Test-file calibration** — Phase 12V added `expected_test_reason`
+  diagnostics so checklist/report lifecycle language does not automatically
+  become a source-code test-file requirement.
+
 ## Key Features
 
-- **Multi-backend runtime** — swap AI backends via one env var (`AGENT_BACKEND`)
+- **Multi-backend runtime** — choose a default backend with `AGENT_BACKEND` and optional lane-specific overrides
 - **Workflow templates** — YAML-defined governance per task shape; auto-promote or hold based on warning flags
 - **Change-set review policy** — auto_publish_all / hold_nontrivial / hold_all; full operator override trail
 - **Knowledge layer** — SQLite/Qdrant runtime with task-type and failure-signature gates; session logs expose `knowledge_used`, retrieval reason, top items, and phase
@@ -152,7 +175,7 @@ Projects store `workspace_path` as a root-relative slug. API responses also incl
 
 ---
 
-**Last updated: 2026-05-23**
+**Last updated: 2026-06-02**
 
 <p align="center">
   <a href="https://github.com/henrycode03/orchestrator/stargazers">
