@@ -87,7 +87,6 @@ from app.services import (
     save_session_checkpoint_payload as _save_session_checkpoint_payload,
     pause_session_lifecycle as _pause_session_lifecycle,
     resume_session_lifecycle as _resume_session_lifecycle,
-    set_session_alert as _set_session_alert,
     start_session_lifecycle as _start_session_lifecycle,
     stop_session_lifecycle as _stop_session_lifecycle,
     stream_session_logs as _stream_session_logs,
