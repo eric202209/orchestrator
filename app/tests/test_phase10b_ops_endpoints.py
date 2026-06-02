@@ -24,6 +24,7 @@ from app.models import (
     User,
 )
 from app.services.observability.metrics_collector import MetricsCollector
+from app.services.build_identity import build_identity_payload
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -646,6 +647,47 @@ class TestOpsHealthEndpoint:
     def test_health_requires_auth(self, api_client):
         resp = api_client.get("/api/v1/ops/health")
         assert resp.status_code in (401, 403)
+
+
+class TestOpsBuildIdentityEndpoint:
+    def test_build_identity_returns_200(self, authenticated_client):
+        resp = authenticated_client.get("/api/v1/ops/build-identity")
+        assert resp.status_code == 200
+
+    def test_build_identity_shape(self, authenticated_client):
+        body = authenticated_client.get("/api/v1/ops/build-identity").json()
+        for key in (
+            "version",
+            "git_sha",
+            "build_time",
+            "image_tag",
+            "image_id",
+            "migration_version",
+            "expected_migration_version",
+            "planning_backend",
+            "execution_backend",
+            "debug_repair_backend",
+            "planner_model",
+            "execution_model",
+            "debug_repair_model",
+            "active_backend_lanes",
+            "active_model_names",
+            "config_source",
+            "stale_container_check",
+        ):
+            assert key in body
+        assert body["stale_container_check"] in ("ok", "stale", "unknown")
+
+    def test_build_identity_requires_auth(self, api_client):
+        resp = api_client.get("/api/v1/ops/build-identity")
+        assert resp.status_code in (401, 403)
+
+    def test_build_identity_reports_stale_sha(self, mem_db, monkeypatch):
+        monkeypatch.setenv("ORCHESTRATOR_GIT_SHA", "build-sha")
+        body = build_identity_payload(mem_db, repo_sha_provider=lambda: "repo-sha")
+        assert body["build_git_sha"] == "build-sha"
+        assert body["repo_git_sha"] == "repo-sha"
+        assert body["stale_container_check"] == "stale"
 
 
 class TestOpsMetricsSummaryEndpoint:
