@@ -55,6 +55,8 @@ from .integrity import (
 )
 from app.services.project.source_imports import extract_python_test_contract
 from app.services.orchestration.planning.task_bootstrap_contract import (
+    BootstrapTaskType,
+    build_task1_bootstrap_contract,
     validate_task1_bootstrap_contract,
 )
 
@@ -4181,6 +4183,22 @@ class ValidatorService:
         )
         if workflow_stage in READ_ONLY_WORKFLOW_STAGES:
             profile = "verification"
+        bootstrap_contract = build_task1_bootstrap_contract(
+            plan=plan,
+            task_prompt=" ".join(
+                str(value or "") for value in (title, description, task_prompt)
+            ),
+            existing_files={
+                str(path.relative_to(project_dir))
+                for path in project_dir.rglob("*")
+                if path.is_file()
+            },
+        )
+        bootstrap_task_type = bootstrap_contract.bootstrap_task_type
+        artifact_only_completion = (
+            bootstrap_task_type == BootstrapTaskType.ARTIFACT_ONLY
+            and profile in {"implementation", "integration"}
+        )
         expected_core_files = list(
             dict.fromkeys(
                 cls._core_expected_files(plan)
@@ -4237,8 +4255,20 @@ class ValidatorService:
                 completion_evidence.get("execution_results_count") or 0
             ),
             "requires_source_outputs": profile in {"implementation", "integration"},
+            "bootstrap_task_type": str(bootstrap_task_type),
+            "artifact_only_completion": artifact_only_completion,
         }
         details["completion_contract"] = contract
+        details["bootstrap_task_classification"] = {
+            "bootstrap_task_type": str(bootstrap_task_type),
+            "classification_evidence": dict(bootstrap_contract.classification_evidence),
+            "required_artifacts": list(bootstrap_contract.required_artifacts),
+            "required_source_files": list(bootstrap_contract.required_source_files),
+            "minimum_artifact_evidence": bootstrap_contract.minimum_artifact_evidence,
+            "minimum_implementation_evidence": (
+                bootstrap_contract.minimum_implementation_evidence
+            ),
+        }
         details["mutation_completion"] = mutation_completion
         command_quality_rank = {
             "missing": 0,
@@ -4339,6 +4369,11 @@ class ValidatorService:
             rejected.append(
                 "Completion contract requires at least one recorded execution result"
             )
+        if (
+            artifact_only_completion
+            and not bootstrap_contract.minimum_artifact_evidence
+        ):
+            rejected.append("Artifact completion lacks substantive artifact evidence")
         if requires_independent_evidence:
             if best_command_quality in {"missing", "insufficient"}:
                 verification_insufficient = True
@@ -4443,6 +4478,7 @@ class ValidatorService:
             profile == "implementation"
             and not candidate_files
             and not mutation_completion["supported"]
+            and not artifact_only_completion
         ):
             if nested_matches:
                 target = warnings if relaxed_mode else repairable
@@ -4459,6 +4495,7 @@ class ValidatorService:
                 workspace_summary["source_file_count"] <= 0
                 and workspace_summary["config_file_count"] > 0
                 and not mutation_completion["supported"]
+                and not artifact_only_completion
             ):
                 rejected.append(
                     "Workspace contains only framework/config scaffolding without any implementation source files"

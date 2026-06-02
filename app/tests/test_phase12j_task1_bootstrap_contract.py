@@ -18,6 +18,9 @@ from app.services.orchestration.phases.planning_task1_bootstrap import (
     task1_bootstrap_contract_passed,
     task1_plan_failed_only_brittle_command_shape,
 )
+from app.services.orchestration.planning.task_bootstrap_contract import (
+    validate_task1_bootstrap_contract,
+)
 from app.services.orchestration.planning.repair_arbitration import (
     classify_planning_repair_candidate,
 )
@@ -338,6 +341,199 @@ def test_task1_bootstrap_accepts_source_test_and_verification(tmp_path):
     assert contract["expected_source_files"] == ["src/app.py"]
     assert contract["expected_test_files"] == ["tests/test_app.py"]
     assert contract["minimum_implementation_evidence"] is True
+    assert contract["bootstrap_task_type"] == "SOURCE_CODE"
+
+
+def test_task1_artifact_only_bootstrap_does_not_require_source_materialization(
+    tmp_path,
+):
+    verdict = ValidatorService.validate_plan(
+        [
+            _step(
+                ops=[
+                    {
+                        "op": "write_file",
+                        "path": "reports/status.md",
+                        "content": (
+                            "# Status Report\n\n"
+                            "## Findings\n"
+                            "- Bootstrap evidence is summarized.\n\n"
+                            "## Recommendations\n"
+                            "- Continue with Task 2.\n"
+                        ),
+                    }
+                ],
+                expected_files=["reports/status.md"],
+                verification=(
+                    'python -c "from pathlib import Path; '
+                    "text=Path('reports/status.md').read_text(); "
+                    "assert 'Recommendations' in text and len(text) > 50\""
+                ),
+            )
+        ],
+        output_text="[]",
+        task_prompt="Create a status report artifact for the project",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+        is_first_ordered_task=True,
+    )
+
+    contract = verdict.details["task1_bootstrap_contract"]
+    assert verdict.accepted
+    assert contract["bootstrap_task_type"] == "ARTIFACT_ONLY"
+    assert contract["classification_evidence"]["artifact_paths"] == [
+        "reports/status.md"
+    ]
+    assert contract["required_artifacts"] == ["reports/status.md"]
+    assert contract["required_source_files"] == []
+    assert contract["expected_source_files"] == []
+    assert contract["minimum_artifact_evidence"] is True
+    assert (
+        "task1_bootstrap_missing_expected_source_files"
+        not in contract["violation_codes"]
+    )
+    assert (
+        "task1_bootstrap_minimum_implementation_evidence_missing"
+        not in contract["violation_codes"]
+    )
+
+
+def test_task1_artifact_only_ignores_negated_source_code_instruction(tmp_path):
+    verdict = ValidatorService.validate_plan(
+        [
+            _step(
+                ops=[
+                    {
+                        "op": "write_file",
+                        "path": "reports/status.md",
+                        "content": (
+                            "# Phase 12T Status\n\n"
+                            "## Findings\n"
+                            "- Artifact-only evidence is present.\n\n"
+                            "## Recommendations\n"
+                            "- Ready for continuation.\n"
+                        ),
+                    }
+                ],
+                expected_files=["reports/status.md"],
+                verification=(
+                    'python -c "from pathlib import Path; '
+                    "text=Path('reports/status.md').read_text(); "
+                    "assert 'Ready for continuation' in text\""
+                ),
+            )
+        ],
+        output_text="[]",
+        task_prompt=(
+            "Create a status report artifact. This is an artifact-only "
+            "deliverable; do not create source code."
+        ),
+        execution_profile="implementation",
+        project_dir=tmp_path,
+        is_first_ordered_task=True,
+    )
+
+    contract = verdict.details["task1_bootstrap_contract"]
+    assert verdict.accepted
+    assert contract["bootstrap_task_type"] == "ARTIFACT_ONLY"
+    assert contract["classification_evidence"]["has_source_intent"] is False
+    assert contract["classification_evidence"]["negated_source_intent_removed"] is True
+
+
+def test_task1_artifact_only_bootstrap_still_requires_verification(tmp_path):
+    verdict = validate_task1_bootstrap_contract(
+        plan=[
+            _step(
+                ops=[
+                    {
+                        "op": "write_file",
+                        "path": "docs/summary.md",
+                        "content": "# Summary\n\nSubstantive project summary.\n",
+                    }
+                ],
+                expected_files=["docs/summary.md"],
+                verification=None,
+            )
+        ],
+        task_prompt="Create a docs summary artifact",
+    )
+
+    contract = verdict.to_dict()
+    assert not verdict.passed
+    assert contract["bootstrap_task_type"] == "ARTIFACT_ONLY"
+    assert (
+        "task1_bootstrap_missing_required_verification" in contract["violation_codes"]
+    )
+    assert (
+        "task1_bootstrap_missing_expected_source_files"
+        not in contract["violation_codes"]
+    )
+
+
+def test_task1_artifact_only_bootstrap_rejects_placeholder_artifact(tmp_path):
+    verdict = ValidatorService.validate_plan(
+        [
+            _step(
+                ops=[
+                    {
+                        "op": "write_file",
+                        "path": "CHECKLIST.md",
+                        "content": "TODO placeholder\n",
+                    }
+                ],
+                expected_files=["CHECKLIST.md"],
+                verification="test -s CHECKLIST.md",
+            )
+        ],
+        output_text="[]",
+        task_prompt="Create a checklist artifact",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+        is_first_ordered_task=True,
+    )
+
+    contract = verdict.details["task1_bootstrap_contract"]
+    assert not verdict.accepted
+    assert contract["bootstrap_task_type"] == "ARTIFACT_ONLY"
+    assert contract["minimum_artifact_evidence"] is False
+    assert (
+        "task1_bootstrap_minimum_artifact_evidence_missing"
+        in contract["violation_codes"]
+    )
+
+
+def test_task1_mixed_bootstrap_keeps_source_materialization_required(tmp_path):
+    verdict = ValidatorService.validate_plan(
+        [
+            _step(
+                ops=[
+                    {
+                        "op": "write_file",
+                        "path": "reports/status.md",
+                        "content": "# Status Report\n\nImplementation notes.\n",
+                    }
+                ],
+                expected_files=["reports/status.md"],
+                verification="test -s reports/status.md",
+            )
+        ],
+        output_text="[]",
+        task_prompt="Implement a CLI and create a status report",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+        is_first_ordered_task=True,
+    )
+
+    contract = verdict.details["task1_bootstrap_contract"]
+    assert not verdict.accepted
+    assert contract["bootstrap_task_type"] == "MIXED"
+    assert (
+        "task1_bootstrap_missing_expected_source_files" in contract["violation_codes"]
+    )
+    assert (
+        "task1_bootstrap_minimum_implementation_evidence_missing"
+        in contract["violation_codes"]
+    )
 
 
 def test_task1_bootstrap_normalizes_stale_heredoc_output_before_repair(tmp_path):

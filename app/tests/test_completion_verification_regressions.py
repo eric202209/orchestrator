@@ -664,6 +664,159 @@ def test_completion_validation_accepts_docs_mutation_without_source(tmp_path):
     ]
 
 
+def test_artifact_only_bootstrap_completion_skips_source_file_obligation(tmp_path):
+    project_dir = tmp_path / "project"
+    (project_dir / "reports").mkdir(parents=True)
+    (project_dir / "reports" / "status.md").write_text(
+        "# Phase 12T Status\n\n"
+        "## Findings\n"
+        "- Artifact-only evidence is present.\n\n"
+        "## Recommendations\n"
+        "- Ready for continuation.\n",
+        encoding="utf-8",
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=[
+            {
+                "step_number": 1,
+                "description": "Create report artifact",
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "reports/status.md",
+                        "content": (
+                            "# Phase 12T Status\n\n"
+                            "## Findings\n"
+                            "- Artifact-only evidence is present.\n\n"
+                            "## Recommendations\n"
+                            "- Ready for continuation.\n"
+                        ),
+                    }
+                ],
+                "commands": [],
+                "verification": (
+                    'python -c "from pathlib import Path; '
+                    "text=Path('reports/status.md').read_text(); "
+                    "assert 'Ready for continuation' in text\""
+                ),
+                "expected_files": ["reports/status.md"],
+            }
+        ],
+        task_prompt=(
+            "Create a status report artifact. This is an artifact-only "
+            "deliverable; do not create source code."
+        ),
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": ["reports/status.md"],
+        },
+    )
+
+    assert verdict.accepted is True
+    assert "No core implementation source files were produced" not in verdict.reasons
+    assert (
+        "Workspace contains only framework/config scaffolding without any implementation source files"
+        not in verdict.reasons
+    )
+    assert (
+        verdict.details["completion_contract"]["bootstrap_task_type"] == "ARTIFACT_ONLY"
+    )
+    assert verdict.details["completion_contract"]["artifact_only_completion"] is True
+
+
+def test_artifact_only_bootstrap_completion_still_rejects_placeholder_artifact(
+    tmp_path,
+):
+    project_dir = tmp_path / "project"
+    (project_dir / "reports").mkdir(parents=True)
+    (project_dir / "reports" / "status.md").write_text(
+        "TODO placeholder\n",
+        encoding="utf-8",
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=[
+            {
+                "step_number": 1,
+                "description": "Create report artifact",
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "reports/status.md",
+                        "content": "TODO placeholder\n",
+                    }
+                ],
+                "commands": [],
+                "verification": "test -s reports/status.md",
+                "expected_files": ["reports/status.md"],
+            }
+        ],
+        task_prompt=(
+            "Create a status report artifact. This is an artifact-only "
+            "deliverable; do not create source code."
+        ),
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": ["reports/status.md"],
+        },
+    )
+
+    assert verdict.accepted is False
+    assert verdict.details["completion_contract"]["artifact_only_completion"] is True
+    assert "Artifact completion lacks substantive artifact evidence" in verdict.reasons
+
+
+def test_mixed_bootstrap_completion_keeps_source_file_obligation(tmp_path):
+    project_dir = tmp_path / "project"
+    (project_dir / "reports").mkdir(parents=True)
+    (project_dir / "reports" / "summary.txt").write_text(
+        "phase12t summary\n",
+        encoding="utf-8",
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=[
+            {
+                "step_number": 1,
+                "description": "Create mixed deliverable",
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "reports/summary.txt",
+                        "content": "phase12t summary\n",
+                    }
+                ],
+                "commands": [],
+                "verification": "test -s reports/summary.txt",
+                "expected_files": ["reports/summary.txt"],
+            }
+        ],
+        task_prompt="Implement a script and create a report artifact.",
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": ["reports/summary.txt"],
+        },
+    )
+
+    assert verdict.accepted is False
+    assert verdict.details["completion_contract"]["bootstrap_task_type"] == "MIXED"
+    assert verdict.details["completion_contract"]["artifact_only_completion"] is False
+    assert "No core implementation source files were produced" in verdict.reasons
+
+
 def test_completion_validation_still_rejects_code_task_with_only_package_json(tmp_path):
     project_dir = tmp_path / "project"
     project_dir.mkdir()

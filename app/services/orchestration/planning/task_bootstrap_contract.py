@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import ast
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +20,17 @@ PLACEHOLDER_RE = re.compile(
 )
 
 
+class BootstrapTaskType(StrEnum):
+    SOURCE_CODE = "SOURCE_CODE"
+    ARTIFACT_ONLY = "ARTIFACT_ONLY"
+    MIXED = "MIXED"
+    UNKNOWN = "UNKNOWN"
+
+
 @dataclass(frozen=True)
 class TaskBootstrapContract:
+    bootstrap_task_type: BootstrapTaskType = BootstrapTaskType.UNKNOWN
+    classification_evidence: dict[str, Any] = field(default_factory=dict)
     expected_source_files: list[str] = field(default_factory=list)
     expected_test_files: list[str] = field(default_factory=list)
     required_artifacts: list[str] = field(default_factory=list)
@@ -33,9 +43,12 @@ class TaskBootstrapContract:
     forbidden_python_src_imports: list[str] = field(default_factory=list)
     missing_python_package_markers: list[str] = field(default_factory=list)
     minimum_implementation_evidence: bool = False
+    minimum_artifact_evidence: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "bootstrap_task_type": str(self.bootstrap_task_type),
+            "classification_evidence": dict(self.classification_evidence),
             "expected_source_files": list(self.expected_source_files),
             "expected_test_files": list(self.expected_test_files),
             "required_artifacts": list(self.required_artifacts),
@@ -48,6 +61,7 @@ class TaskBootstrapContract:
             "forbidden_python_src_imports": list(self.forbidden_python_src_imports),
             "missing_python_package_markers": list(self.missing_python_package_markers),
             "minimum_implementation_evidence": self.minimum_implementation_evidence,
+            "minimum_artifact_evidence": self.minimum_artifact_evidence,
         }
 
 
@@ -81,6 +95,26 @@ def _is_source_path(path_text: str) -> bool:
     if not normalized or _is_test_path(normalized):
         return False
     return Path(normalized).suffix.lower() in SOURCE_EXTENSIONS
+
+
+def _is_artifact_path(path_text: str) -> bool:
+    normalized = _normalize_path(path_text)
+    if not normalized or _is_test_path(normalized) or _is_source_path(normalized):
+        return False
+    path = Path(normalized)
+    if not path.suffix:
+        return False
+    return path.suffix.lower() in {
+        ".csv",
+        ".json",
+        ".md",
+        ".pdf",
+        ".rst",
+        ".toml",
+        ".txt",
+        ".yaml",
+        ".yml",
+    }
 
 
 def _materialized_file_targets(plan: list[dict[str, Any]]) -> set[str]:
@@ -127,6 +161,82 @@ def _declared_expected_files(plan: list[dict[str, Any]]) -> set[str]:
     return paths
 
 
+def _classify_bootstrap_task_type(
+    *,
+    task_prompt: str,
+    all_paths: set[str],
+) -> tuple[BootstrapTaskType, dict[str, Any]]:
+    prompt_lower = str(task_prompt or "").lower()
+    positive_source_intent_text = re.sub(
+        r"\b(?:do not|don't|without)\s+"
+        r"(?:create|write|add|implement|include|use)\b"
+        r"[^.;\n]*(?:source\s+code|code|scripts?|packages?|tests?)",
+        " ",
+        prompt_lower,
+    )
+    source_paths = sorted(path for path in all_paths if _is_source_path(path))
+    test_paths = sorted(path for path in all_paths if _is_test_path(path))
+    artifact_paths = sorted(path for path in all_paths if _is_artifact_path(path))
+
+    source_terms = {
+        "cli",
+        "code",
+        "function",
+        "feature",
+        "implement",
+        "implementation",
+        "module",
+        "package",
+        "script",
+        "source",
+        "tests",
+    }
+    artifact_terms = {
+        "checklist",
+        "doc",
+        "docs",
+        "documentation",
+        "manifest",
+        "markdown",
+        "readme",
+        "report",
+        "summary",
+    }
+
+    def has_term(terms: set[str]) -> bool:
+        return any(
+            re.search(rf"\b{re.escape(term)}\b", positive_source_intent_text)
+            for term in terms
+        )
+
+    has_source_intent = has_term(source_terms)
+    has_artifact_intent = any(
+        re.search(rf"\b{re.escape(term)}\b", prompt_lower) for term in artifact_terms
+    )
+    has_source_surface = bool(source_paths or test_paths)
+    has_artifact_surface = bool(artifact_paths)
+
+    if has_source_surface and has_artifact_surface:
+        task_type = BootstrapTaskType.MIXED
+    elif has_artifact_surface and has_source_intent:
+        task_type = BootstrapTaskType.MIXED
+    elif has_source_surface:
+        task_type = BootstrapTaskType.SOURCE_CODE
+    elif has_artifact_surface and has_artifact_intent and not has_source_surface:
+        task_type = BootstrapTaskType.ARTIFACT_ONLY
+    else:
+        task_type = BootstrapTaskType.UNKNOWN
+
+    return task_type, {
+        "source_paths": source_paths[:20],
+        "test_paths": test_paths[:20],
+        "artifact_paths": artifact_paths[:20],
+        "has_source_intent": has_source_intent,
+        "has_artifact_intent": has_artifact_intent,
+        "negated_source_intent_removed": positive_source_intent_text != prompt_lower,
+    }
+
+
 def _verification_commands(plan: list[dict[str, Any]]) -> list[str]:
     commands: list[str] = []
     for step in plan:
@@ -134,6 +244,25 @@ def _verification_commands(plan: list[dict[str, Any]]) -> list[str]:
         if verification:
             commands.append(verification)
     return list(dict.fromkeys(commands))
+
+
+def _minimum_artifact_evidence(plan: list[dict[str, Any]]) -> bool:
+    for step in plan:
+        for operation in step.get("ops") or []:
+            if not isinstance(operation, dict):
+                continue
+            if str(operation.get("op") or "") not in {"write_file", "append_file"}:
+                continue
+            path = _normalize_path(operation.get("path"))
+            if not _is_artifact_path(path):
+                continue
+            content = str(operation.get("content") or "").strip()
+            if len(content) < 12:
+                continue
+            if PLACEHOLDER_RE.search(content):
+                continue
+            return True
+    return False
 
 
 def _minimum_implementation_evidence(plan: list[dict[str, Any]]) -> bool:
@@ -230,6 +359,7 @@ def _forbidden_python_src_layout_imports(
 def build_task1_bootstrap_contract(
     *,
     plan: list[dict[str, Any]],
+    task_prompt: str = "",
     forbidden_path_drift: list[str] | None = None,
     existing_files: set[str] | None = None,
 ) -> TaskBootstrapContract:
@@ -239,6 +369,10 @@ def build_task1_bootstrap_contract(
     known_paths = all_paths | {
         _normalize_path(path) for path in existing_files or set()
     }
+    bootstrap_task_type, classification_evidence = _classify_bootstrap_task_type(
+        task_prompt=task_prompt,
+        all_paths=all_paths,
+    )
     source_candidates = sorted(path for path in all_paths if _is_source_path(path))
     test_candidates = sorted(path for path in all_paths if _is_test_path(path))
     import_targets = _python_import_targets(plan)
@@ -256,7 +390,15 @@ def build_task1_bootstrap_contract(
     required_source_files = sorted(set(source_candidates) | set(package_markers))
     required_test_files = sorted(set(test_candidates))
     required_artifacts = sorted(set(required_source_files) | set(required_test_files))
+    if bootstrap_task_type == BootstrapTaskType.ARTIFACT_ONLY:
+        required_source_files = []
+        required_test_files = []
+        required_artifacts = sorted(
+            path for path in all_paths if _is_artifact_path(path)
+        )
     return TaskBootstrapContract(
+        bootstrap_task_type=bootstrap_task_type,
+        classification_evidence=classification_evidence,
         expected_source_files=source_candidates,
         expected_test_files=test_candidates,
         required_artifacts=required_artifacts,
@@ -269,6 +411,7 @@ def build_task1_bootstrap_contract(
         forbidden_python_src_imports=forbidden_src_imports,
         missing_python_package_markers=missing_package_markers,
         minimum_implementation_evidence=_minimum_implementation_evidence(plan),
+        minimum_artifact_evidence=_minimum_artifact_evidence(plan),
     )
 
 
@@ -281,13 +424,20 @@ def validate_task1_bootstrap_contract(
 ) -> TaskBootstrapContractVerdict:
     contract = build_task1_bootstrap_contract(
         plan=plan,
+        task_prompt=task_prompt,
         forbidden_path_drift=forbidden_path_drift,
         existing_files=existing_files,
     )
     violations: list[str] = []
     codes: list[str] = []
 
-    if not contract.expected_source_files:
+    source_materialization_required = contract.bootstrap_task_type in {
+        BootstrapTaskType.SOURCE_CODE,
+        BootstrapTaskType.MIXED,
+        BootstrapTaskType.UNKNOWN,
+    }
+
+    if source_materialization_required and not contract.expected_source_files:
         violations.append("Task 1 bootstrap must declare or materialize source files")
         codes.append("task1_bootstrap_missing_expected_source_files")
 
@@ -301,6 +451,13 @@ def validate_task1_bootstrap_contract(
     if not contract.required_verification:
         violations.append("Task 1 bootstrap must include required verification")
         codes.append("task1_bootstrap_missing_required_verification")
+
+    if (
+        contract.bootstrap_task_type == BootstrapTaskType.ARTIFACT_ONLY
+        and not contract.minimum_artifact_evidence
+    ):
+        violations.append("Task 1 artifact bootstrap lacks deliverable evidence")
+        codes.append("task1_bootstrap_minimum_artifact_evidence_missing")
 
     if contract.forbidden_path_drift:
         violations.append("Task 1 bootstrap contains forbidden path drift")
@@ -322,7 +479,7 @@ def validate_task1_bootstrap_contract(
         )
         codes.append("task1_bootstrap_forbidden_python_src_import")
 
-    if not contract.minimum_implementation_evidence:
+    if source_materialization_required and not contract.minimum_implementation_evidence:
         violations.append("Task 1 bootstrap lacks minimum implementation evidence")
         codes.append("task1_bootstrap_minimum_implementation_evidence_missing")
 
