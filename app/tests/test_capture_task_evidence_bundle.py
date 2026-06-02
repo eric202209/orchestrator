@@ -454,6 +454,239 @@ def test_capture_task_evidence_bundle_degrades_for_missing_task_execution(
     assert planning["available"] is False
 
 
+def test_replay_bundle_field_coverage_characterization(tmp_path):
+    """Characterize RunReplayBundle field coverage against the gap matrix.
+
+    Each assertion is labelled AVAILABLE, PARTIAL, or ABSENT to document the
+    current state.  This test should fail if a gap is accidentally closed or
+    regressed.
+    """
+    workspace = tmp_path / "workspace"
+    journal_dir = workspace / ".openclaw" / "events"
+    journal_dir.mkdir(parents=True)
+
+    known_workspace_hash = "abc123def456abc123"
+    journal_events = [
+        {
+            "event_id": "evt-001",
+            "event_type": "task_started",
+            "timestamp": "2026-06-02T10:00:00Z",
+            "session_id": 10,
+            "task_id": 20,
+            "details": {"phase": "execution"},
+        },
+        {
+            "event_id": "evt-002",
+            "event_type": "phase_started",
+            "timestamp": "2026-06-02T10:00:01Z",
+            "session_id": 10,
+            "task_id": 20,
+            "details": {"phase": "planning"},
+        },
+        {
+            "event_id": "evt-003",
+            "event_type": "checkpoint_saved",
+            "timestamp": "2026-06-02T10:01:00Z",
+            "session_id": 10,
+            "task_id": 20,
+            "details": {
+                "checkpoint_name": "step_2_pre_repair",
+                "current_step_index": 2,
+            },
+        },
+        {
+            "event_id": "evt-004",
+            "event_type": "validation_result",
+            "timestamp": "2026-06-02T10:02:00Z",
+            "session_id": 10,
+            "task_id": 20,
+            "details": {
+                "stage": "completion_validation",
+                "status": "failed",
+                "reason": "missing_test_file",
+            },
+        },
+        {
+            "event_id": "evt-005",
+            "event_type": "repair_generated",
+            "timestamp": "2026-06-02T10:02:30Z",
+            "session_id": 10,
+            "task_id": 20,
+            "details": {"attempt": 1},
+        },
+        {
+            "event_id": "evt-006",
+            "event_type": "repair_rejected",
+            "timestamp": "2026-06-02T10:03:00Z",
+            "session_id": 10,
+            "task_id": 20,
+            "details": {"attempt": 1, "reason": "bootstrap_contract_violation"},
+        },
+        {
+            "event_id": "evt-007",
+            "event_type": "debug_repair_attempted",
+            "timestamp": "2026-06-02T10:03:30Z",
+            "session_id": 10,
+            "task_id": 20,
+            "details": {"attempt": 1, "backend": "qwen-local"},
+        },
+        {
+            "event_id": "evt-008",
+            "event_type": "workspace_evidence_collected",
+            "timestamp": "2026-06-02T10:04:00Z",
+            "session_id": 10,
+            "task_id": 20,
+            "details": {
+                "failure_class": "completion_validation_failed",
+                "evidence_chars_total": 512,
+                "commands_run": ["pytest tests/", "find . -name '*.py'"],
+                "evidence_files_inspected": ["tests/test_app.py"],
+                "workspace_hash": known_workspace_hash,
+            },
+        },
+        {
+            "event_id": "evt-009",
+            "event_type": "task_failed",
+            "timestamp": "2026-06-02T10:05:00Z",
+            "session_id": 10,
+            "task_id": 20,
+            "details": {
+                "failure_category": "completion_validation_failed",
+                "terminal_reason": "max_repair_attempts_reached",
+            },
+        },
+    ]
+    journal_path = journal_dir / "session_10_task_20.jsonl"
+    journal_path.write_text(
+        "\n".join(json.dumps(e) for e in journal_events) + "\n",
+        encoding="utf-8",
+    )
+
+    db_path = tmp_path / "bundle.db"
+    conn = sqlite3.connect(db_path)
+    _schema(conn)
+    _seed(conn, str(workspace))
+    _seed_change_set(conn)
+    conn.execute(
+        "insert into execution_failure_summaries values (?, ?, ?, ?, ?, ?, ?)",
+        (
+            2,
+            10,
+            "Completion validation failed: missing test file",
+            None,
+            "2026-06-02T10:05:01Z",
+            None,
+            None,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    bundle_dir = module.capture_bundle(
+        db_path=str(db_path),
+        session_id=10,
+        task_id=20,
+        task_execution_id=30,
+        output_dir=tmp_path / "bundles",
+    )
+
+    metadata = _load(bundle_dir, "metadata.json")
+    failure_doc = _load(bundle_dir, "failure_summary.json")
+    timeline = _load(bundle_dir, "decision_timeline.json")
+    replay = _load(bundle_dir, "replay_report.semantic.json")
+    workspace_ev = _load(bundle_dir, "workspace_evidence_summary.json")
+
+    # ── AVAILABLE ────────────────────────────────────────────────────────────
+
+    # prompt: task title + description present in context
+    assert metadata["context"]["task_title"] == "Bundle Task"
+    assert "FastAPI" in (metadata["context"]["task_description"] or "")
+
+    # event_journal: path resolved, all events present
+    assert metadata["event_journal"]["available"] is True
+    assert metadata["event_journal"]["event_count"] == len(journal_events)
+
+    # workspace_path: both raw and resolved present
+    assert metadata["context"]["workspace_path"] is not None
+    assert metadata["context"]["resolved_workspace_path"] is not None
+
+    # build_identity / backend_lanes / model_names: via runtime_identity capture-time
+    ri = metadata["runtime_identity"]
+    assert ri["source"] == "capture_time_fallback"
+    assert set(ri["build"]) >= {
+        "version",
+        "build_git_sha",
+        "repo_git_sha",
+        "image_tag",
+        "stale_container_check",
+    }
+    assert set(ri["lanes"]) >= {"planning", "execution", "debug_repair", "repair"}
+    assert set(ri["models"]) >= {
+        "planner",
+        "execution",
+        "debug_repair",
+        "planning_repair",
+    }
+
+    # workspace_hash: captured in workspace_evidence_collected event details
+    assert replay["available"] is True
+    assert known_workspace_hash in replay["artifact_state"]["workspace_hashes"]
+
+    # ── PARTIAL ──────────────────────────────────────────────────────────────
+
+    # checkpoint_refs: latest_checkpoint_name in replay state; no consolidated
+    # checkpoint_refs[] list across event/db/disk sources exists in the bundle
+    assert replay["state"]["latest_checkpoint_name"] == "step_2_pre_repair"
+
+    # verification_commands: workspace evidence has commands_run for the
+    # workspace_evidence surface only; no cross-surface verification.commands[]
+    assert workspace_ev["workspace_evidence_collected"] is True
+    assert "pytest tests/" in workspace_ev["commands_run"]
+
+    # verification_results: validation_verdict_status_history in replay; no
+    # per-channel (step/completion/repair/scorer) verification.results[] list
+    assert "failed" in replay["state"]["validation_verdict_status_history"]
+
+    # repair_attempts: repair_count in replay state and repair events in
+    # decision timeline; no repair.attempts[] list with input/model/backend/result
+    assert replay["state"]["repair_count"] > 0
+    journal_event_types = [
+        e["event_type"]
+        for e in timeline["events"]
+        if e.get("source") == "event_journal"
+    ]
+    assert "repair_generated" in journal_event_types
+    assert "repair_rejected" in journal_event_types
+
+    # terminal_reason: task error_message + fallback summary each carry partial
+    # signal; no single canonical terminal.reason field with precedence
+    assert metadata["context"]["task_error_message"] == "completion_validation_failed"
+    assert failure_doc["summary"] is not None
+    assert "completion_validation_failed" in failure_doc["summary"]
+
+    # failure_summary: stored but session-scoped so bundle falls back to log
+    # excerpt; gap closed when failure summary is scoped to task_execution
+    assert failure_doc["available"] is False
+    assert failure_doc["reason"] == "stored_failure_summary_not_task_execution_scoped"
+    assert failure_doc["ignored_stored_summary"]["scope"] == "session"
+
+    # ── ABSENT ───────────────────────────────────────────────────────────────
+
+    # config_snapshot: runtime_identity covers lanes/models but not a sanitized
+    # effective config snapshot with source/value provenance
+    assert "config_snapshot" not in metadata
+    assert "effective_config" not in metadata
+
+    # scorer_result: non-eval run; no scorer field in any bundle document
+    for label, doc in [
+        ("metadata", metadata),
+        ("replay", replay),
+        ("failure", failure_doc),
+    ]:
+        assert "scorer" not in doc, f"unexpected scorer field in {label}"
+        assert "scorer_result" not in doc, f"unexpected scorer_result in {label}"
+
+
 def test_capture_task_evidence_bundle_runtime_identity_structure(tmp_path):
     db_path = tmp_path / "bundle.db"
     conn = sqlite3.connect(db_path)
