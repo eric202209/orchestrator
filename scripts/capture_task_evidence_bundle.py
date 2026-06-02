@@ -55,6 +55,14 @@ def _status(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+def _env_str(*names: str) -> str:
+    for name in names:
+        value = os.environ.get(name)
+        if value and value.strip():
+            return value.strip()
+    return "unknown"
+
+
 def _json_default(value: Any) -> str:
     return str(value)
 
@@ -211,8 +219,89 @@ def _read_event_journal(context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _runtime_identity(conn: sqlite3.Connection) -> dict[str, Any]:
+    build_git_sha = _env_str("ORCHESTRATOR_GIT_SHA", "GIT_SHA", "COMMIT_SHA")
+    try:
+        from app.services.build_identity import _read_repo_git_sha
+
+        repo_git_sha = _read_repo_git_sha() or "unknown"
+    except Exception:
+        repo_git_sha = "unknown"
+
+    if build_git_sha != "unknown" and repo_git_sha != "unknown":
+        stale_check = "ok" if build_git_sha == repo_git_sha else "stale"
+    else:
+        stale_check = "unknown"
+
+    expected_migration_version = "unknown"
+    try:
+        from app.db_migrations import MIGRATIONS
+
+        if MIGRATIONS:
+            expected_migration_version = str(MIGRATIONS[-1].version)
+    except Exception:
+        pass
+
+    migration_versions: list[str] = []
+    latest_migration = "unknown"
+    migration_status = "unavailable"
+    try:
+        rows = conn.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        migration_versions = [str(row[0]) for row in rows]
+        latest_migration = migration_versions[-1] if migration_versions else "unknown"
+        migration_status = (
+            "ok" if expected_migration_version in migration_versions else "pending"
+        )
+    except Exception:
+        pass
+
+    return {
+        "source": "capture_time_fallback",
+        "captured_at": datetime.now(UTC).isoformat(),
+        "build": {
+            "version": _env_str("VERSION"),
+            "build_git_sha": build_git_sha,
+            "repo_git_sha": repo_git_sha,
+            "build_time": _env_str("ORCHESTRATOR_BUILD_TIME", "BUILD_TIME"),
+            "image_tag": _env_str("ORCHESTRATOR_IMAGE_TAG", "IMAGE_TAG"),
+            "image_id": _env_str("ORCHESTRATOR_IMAGE_ID", "IMAGE_ID"),
+            "stale_container_check": stale_check,
+        },
+        "database": {
+            "migration_version": latest_migration,
+            "migration_count": len(migration_versions),
+            "expected_migration_version": expected_migration_version,
+            "migration_status": migration_status,
+        },
+        "lanes": {
+            "planning": _env_str("PLANNING_BACKEND", "AGENT_BACKEND"),
+            "execution": _env_str("EXECUTION_BACKEND", "AGENT_BACKEND"),
+            "debug_repair": _env_str(
+                "DEBUG_REPAIR_BACKEND", "REPAIR_BACKEND", "AGENT_BACKEND"
+            ),
+            "repair": _env_str("REPAIR_BACKEND", "AGENT_BACKEND"),
+        },
+        "models": {
+            "planner": _env_str("PLANNER_MODEL", "AGENT_MODEL"),
+            "execution": _env_str("EXECUTION_MODEL", "AGENT_MODEL"),
+            "debug_repair": _env_str(
+                "DEBUG_REPAIR_MODEL", "PLANNING_REPAIR_MODEL", "AGENT_MODEL"
+            ),
+            "planning_repair": _env_str("PLANNING_REPAIR_MODEL", "AGENT_MODEL"),
+        },
+        "config": {
+            "config_source": _env_str("ORCHESTRATOR_CONFIG_SOURCE"),
+            "capture_note": "captured at evidence-bundle time, not at run-start",
+        },
+    }
+
+
 def _metadata_payload(
-    context: dict[str, Any], journal: dict[str, Any]
+    context: dict[str, Any],
+    journal: dict[str, Any],
+    runtime_identity: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -223,6 +312,7 @@ def _metadata_payload(
             key: value for key, value in journal.items() if key not in {"events"}
         },
         "bundle_files": list(EXPECTED_FILES),
+        "runtime_identity": runtime_identity,
     }
 
 
@@ -637,9 +727,10 @@ def capture_bundle(
             task_execution_id=task_execution_id,
         )
         journal = _read_event_journal(context)
+        runtime_identity = _runtime_identity(conn)
 
         payloads = {
-            "metadata.json": _metadata_payload(context, journal),
+            "metadata.json": _metadata_payload(context, journal, runtime_identity),
             "logs_summary.json": _logs_summary(rows),
             "failure_summary.json": _failure_summary(
                 conn,

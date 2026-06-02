@@ -452,3 +452,71 @@ def test_capture_task_evidence_bundle_degrades_for_missing_task_execution(
     assert replay["available"] is False
     assert replay["reason"] == "workspace_path_missing"
     assert planning["available"] is False
+
+
+def test_capture_task_evidence_bundle_runtime_identity_structure(tmp_path):
+    db_path = tmp_path / "bundle.db"
+    conn = sqlite3.connect(db_path)
+    _schema(conn)
+    _seed(conn, str(tmp_path / "missing-workspace"))
+    conn.commit()
+    conn.close()
+
+    bundle_dir = module.capture_bundle(
+        db_path=str(db_path),
+        session_id=10,
+        task_id=20,
+        task_execution_id=30,
+        output_dir=tmp_path / "bundles",
+    )
+
+    metadata = _load(bundle_dir, "metadata.json")
+    ri = metadata["runtime_identity"]
+    assert ri["source"] == "capture_time_fallback"
+    assert "captured_at" in ri
+    for section in ("build", "database", "lanes", "models", "config"):
+        assert section in ri, f"runtime_identity missing section: {section}"
+    assert set(ri["build"]) >= {
+        "version",
+        "build_git_sha",
+        "repo_git_sha",
+        "build_time",
+        "image_tag",
+        "image_id",
+        "stale_container_check",
+    }
+    assert set(ri["lanes"]) >= {"planning", "execution", "debug_repair", "repair"}
+    assert set(ri["models"]) >= {
+        "planner",
+        "execution",
+        "debug_repair",
+        "planning_repair",
+    }
+    assert ri["database"]["migration_status"] in {"ok", "pending", "unavailable"}
+    assert "config_source" in ri["config"]
+
+
+def test_capture_task_evidence_bundle_runtime_identity_with_migrations(tmp_path):
+    db_path = tmp_path / "bundle.db"
+    conn = sqlite3.connect(db_path)
+    _schema(conn)
+    conn.execute("CREATE TABLE schema_migrations (version TEXT PRIMARY KEY)")
+    conn.execute("INSERT INTO schema_migrations VALUES ('001')")
+    conn.execute("INSERT INTO schema_migrations VALUES ('002')")
+    _seed(conn, str(tmp_path / "missing-workspace"))
+    conn.commit()
+    conn.close()
+
+    bundle_dir = module.capture_bundle(
+        db_path=str(db_path),
+        session_id=10,
+        task_id=20,
+        task_execution_id=30,
+        output_dir=tmp_path / "bundles",
+    )
+
+    metadata = _load(bundle_dir, "metadata.json")
+    ri = metadata["runtime_identity"]
+    assert ri["database"]["migration_version"] == "002"
+    assert ri["database"]["migration_count"] == 2
+    assert ri["database"]["migration_status"] in {"ok", "pending"}
