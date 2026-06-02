@@ -19,8 +19,13 @@ from app.services.orchestration.phases.planning_support import (
     _record_planning_root_cause,
     _record_repair_root_cause,
     _repair_root_cause_from_arbitration,
+    _task1_bootstrap_second_repair_rejection_reasons,
     _terminal_validation_failure_details,
     _terminal_planning_root_cause,
+)
+from app.services.orchestration.phases.planning_task1_bootstrap import (
+    is_first_ordered_task as _is_first_ordered_task,
+    task1_bootstrap_contract_passed as _task1_bootstrap_contract_passed,
 )
 from app.services.orchestration.planning.repair_arbitration import (
     classify_planning_repair_candidate,
@@ -140,6 +145,51 @@ def arbitrate_planning_repair_candidate(
             },
         }
     if not invalid_python_repair_candidate:
+        # Acceptance definition: accepted progress = repair improved the plan
+        # AND repair produced a Bootstrap Contract-valid plan.
+        # Bootstrap Contract must be satisfied before a candidate is classified
+        # as accepted progress — not checked separately afterward.
+        if _is_first_ordered_task(ctx.task):
+            try:
+                bootstrap_verdict = ValidatorService.validate_plan(
+                    ctx.orchestration_state.plan,
+                    output_text=output_text,
+                    task_prompt=ctx.prompt,
+                    execution_profile=ctx.execution_profile,
+                    project_dir=ctx.orchestration_state.project_dir,
+                    title=ctx.task.title if ctx.task else None,
+                    description=ctx.task.description if ctx.task else None,
+                    validation_severity=ctx.validation_severity,
+                    workflow_profile=ctx.workflow_profile,
+                    workflow_stage=ctx.workflow_stage,
+                    is_first_ordered_task=True,
+                )
+            except Exception as exc:
+                ctx.logger.debug(
+                    "[ORCHESTRATION] Bootstrap Contract pre-check in arbitration "
+                    "raised an exception; falling through to accept: %s",
+                    exc,
+                )
+                bootstrap_verdict = None
+            if bootstrap_verdict is not None:
+                bootstrap_contract = (bootstrap_verdict.details or {}).get(
+                    "task1_bootstrap_contract"
+                )
+                if (
+                    isinstance(bootstrap_contract, dict)
+                    and bootstrap_contract.get("passed") is False
+                ):
+                    return _reject_repair_candidate_by_bootstrap_contract(
+                        ctx=ctx,
+                        retry_state=retry_state,
+                        arbitration=arbitration,
+                        bootstrap_verdict=bootstrap_verdict,
+                        planning_phase_event=planning_phase_event,
+                        output_text=output_text,
+                        planning_timeout_seconds=planning_timeout_seconds,
+                        prompt_profile=prompt_profile,
+                        repair_planning_output=repair_planning_output,
+                    )
         _emit_planning_repair_arbitration(
             ctx,
             arbitration=arbitration,
@@ -285,6 +335,172 @@ def arbitrate_planning_repair_candidate(
         "result": {
             "status": "failed",
             "reason": "planning_validation_failed_after_repair",
+        },
+    }
+
+
+def _reject_repair_candidate_by_bootstrap_contract(
+    *,
+    ctx: OrchestrationRunContext,
+    retry_state: _PlanningRetryState,
+    arbitration: dict[str, Any],
+    bootstrap_verdict: Any,
+    planning_phase_event: dict[str, Any] | None,
+    output_text: str,
+    planning_timeout_seconds: int,
+    prompt_profile: str | None,
+    repair_planning_output: Callable[..., Any],
+) -> dict[str, Any]:
+    """Arbitration rejection path: repair candidate fails Bootstrap Contract.
+
+    Emits the repair_candidate_rejected_by_bootstrap_contract diagnostic, then
+    either triggers a targeted Bootstrap Contract repair pass (if budget remains)
+    or terminates planning with a specific failure reason.
+    """
+    bootstrap_contract = (bootstrap_verdict.details or {}).get(
+        "task1_bootstrap_contract"
+    ) or {}
+    failed_requirements = bootstrap_contract.get("violation_codes") or []
+    bootstrap_task_type = bootstrap_contract.get("bootstrap_task_type")
+
+    emit_phase_event(
+        ctx.orchestration_state,
+        ctx.emit_live,
+        level="WARN",
+        phase="planning",
+        message=(
+            "[ORCHESTRATION] Repair candidate rejected by Bootstrap Contract; "
+            "not classified as accepted progress"
+        ),
+        details={
+            "event": "repair_candidate_rejected_by_bootstrap_contract",
+            "bootstrap_task_type": bootstrap_task_type,
+            "failed_requirements": failed_requirements,
+        },
+    )
+
+    second_repair_reason = _get_targeted_second_repair_reason(
+        retry_state=retry_state,
+        plan_verdict=bootstrap_verdict,
+        project_dir=ctx.orchestration_state.project_dir,
+    )
+    if second_repair_reason and not second_repair_reason.cap_used:
+        issue_fragments = _task1_bootstrap_second_repair_rejection_reasons(
+            retry_state=retry_state,
+            plan_verdict=bootstrap_verdict,
+            rejection_text=second_repair_reason.rejection_text,
+        )
+        arbitration["arbitration_action"] = "bootstrap_contract_repair"
+        arbitration["reason"] = "repair_candidate_rejected_by_bootstrap_contract"
+        try:
+            append_orchestration_event(
+                project_dir=ctx.orchestration_state.project_dir,
+                session_id=ctx.session_id,
+                task_id=ctx.task_id,
+                event_type=EventType.PLANNING_REPAIR_ARBITRATION,
+                parent_event_id=(planning_phase_event or {}).get("event_id"),
+                details=arbitration,
+            )
+        except Exception as exc:
+            ctx.logger.debug(
+                "[ORCHESTRATION] Failed to persist Bootstrap Contract "
+                "rejection arbitration event: %s",
+                exc,
+            )
+        emit_phase_event(
+            ctx.orchestration_state,
+            ctx.emit_live,
+            level="WARN",
+            phase="planning",
+            message=(
+                "[ORCHESTRATION] Planning repair arbitration starting targeted "
+                "Bootstrap Contract repair pass"
+            ),
+            details={
+                "reason": second_repair_reason.event_reason,
+                "bootstrap_task_type": bootstrap_task_type,
+                "failed_requirements": failed_requirements,
+                "repair_attempts": retry_state.consecutive_failures + 1,
+            },
+        )
+        validation_knowledge_ctx = _retrieve_knowledge(
+            ctx,
+            trigger_phase="validation",
+            knowledge_types=["failure_memory", "format_guide", "debug_case"],
+            query="Task 1 Bootstrap Contract failed after repair: "
+            + "; ".join(str(f) for f in failed_requirements[:3]),
+            failure_signature=(
+                second_repair_reason.semantic_violation_code
+                or "task1_bootstrap_contract"
+            ),
+        )
+        if validation_knowledge_ctx:
+            _log_knowledge_usage(ctx, validation_knowledge_ctx, used_in_prompt=True)
+        retry_state.last_repair_reason = second_repair_reason.event_reason
+        planning_result = repair_planning_output(
+            ctx=ctx,
+            retry_state=retry_state,
+            planning_timeout_seconds=planning_timeout_seconds,
+            malformed_output=output_text,
+            reason=f"{second_repair_reason.retry_reason}: "
+            + "; ".join(str(f) for f in issue_fragments[:4]),
+            rejection_reasons=issue_fragments,
+            prompt_profile=prompt_profile,
+            knowledge_context=(
+                validation_knowledge_ctx
+                if (
+                    validation_knowledge_ctx
+                    and validation_knowledge_ctx.retrieved_items
+                )
+                else None
+            ),
+        )
+        setattr(retry_state, second_repair_reason.cap_attribute, True)
+        retry_state.consecutive_failures += 1
+        return {"action": "continue", "planning_result": planning_result}
+
+    # No repair budget for Bootstrap Contract — terminate with specific reason.
+    arbitration["arbitration_action"] = "reject_bootstrap_contract_no_budget"
+    arbitration["reason"] = "repair_candidate_rejected_by_bootstrap_contract"
+    try:
+        append_orchestration_event(
+            project_dir=ctx.orchestration_state.project_dir,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            event_type=EventType.PLANNING_REPAIR_ARBITRATION,
+            parent_event_id=(planning_phase_event or {}).get("event_id"),
+            details=arbitration,
+        )
+    except Exception as exc:
+        ctx.logger.debug(
+            "[ORCHESTRATION] Failed to persist Bootstrap Contract "
+            "no-budget rejection event: %s",
+            exc,
+        )
+    ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+    ctx.orchestration_state.abort_reason = (
+        "Repair candidate rejected by Bootstrap Contract: "
+        + "; ".join(str(f) for f in failed_requirements[:3])
+    )
+    failure_reason = (
+        "Planning repair produced a Bootstrap Contract-invalid candidate: "
+        + "; ".join(str(f) for f in failed_requirements[:4])
+    )
+    _finalize_planning_terminal_failure(
+        ctx=ctx,
+        failure_type="repair_candidate_rejected_by_bootstrap_contract",
+        failure_reason=failure_reason,
+        planning_root_cause=_terminal_planning_root_cause(retry_state),
+    )
+    if ctx.restore_workspace_snapshot_if_needed:
+        ctx.restore_workspace_snapshot_if_needed(
+            "repair candidate rejected by Bootstrap Contract"
+        )
+    return {
+        "action": "return",
+        "result": {
+            "status": "failed",
+            "reason": "repair_candidate_rejected_by_bootstrap_contract",
         },
     }
 
