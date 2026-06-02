@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.dependencies import get_current_admin_user, get_db
 from app.models import Project, TaskExecution
+from app.services.build_identity import build_identity_payload
 from app.services.observability.metrics_collector import MetricsCollector
 from app.services.workspace.system_settings import diagnose_runtime_lane
 
@@ -150,6 +151,15 @@ def ops_health(
         "checked_at": datetime.now(UTC).isoformat(),
         "components": components,
     }
+
+
+@router.get("/build-identity")
+def ops_build_identity(
+    current_user=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Read-only build/deployment identity for validation evidence."""
+    return build_identity_payload(db)
 
 
 @router.get("/metrics/summary")
