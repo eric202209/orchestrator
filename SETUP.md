@@ -274,7 +274,9 @@ export ORCHESTRATOR_IMAGE_TAG=orchestrator:$(git rev-parse --short HEAD)
 After rebuild, confirm the running image matches the repo commit:
 
 ```bash
-curl -fsS http://127.0.0.1:8080/api/v1/ops/build-identity
+curl -fsS \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_TOKEN" \
+  http://127.0.0.1:8080/api/v1/ops/build-identity
 # stale_container_check must be "ok"
 ```
 
@@ -295,11 +297,13 @@ without manual database cleanup.
 curl -fsS http://127.0.0.1:8080/health
 ```
 
-For Docker/WSL validation, also capture build identity before accepting eval or
-audit evidence:
+For Docker/WSL validation, also capture build identity before relying on the
+running service:
 
 ```bash
-curl -fsS http://127.0.0.1:8080/api/v1/ops/build-identity
+curl -fsS \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_TOKEN" \
+  http://127.0.0.1:8080/api/v1/ops/build-identity
 ```
 
 4. Run backend tests:
@@ -462,8 +466,9 @@ export ORCHESTRATOR_IMAGE_TAG=orchestrator:$(git rev-parse --short HEAD)
 ```
 
 For backend-only validation, add `--no-frontend`.
-For audit/eval validation, capture `/api/v1/ops/build-identity` after startup
-and require `stale_container_check` to be `ok` when commit freshness matters.
+For validation records, capture authenticated `/api/v1/ops/build-identity`
+after startup and require `stale_container_check` to be `ok` when commit
+freshness matters.
 
 To ingest local `knowledge/` into the active Docker runtime during startup,
 use:
@@ -877,10 +882,10 @@ LLAMA_EXE_WIN="/mnt/d/AI/llama.cpp/llama-server.exe" \
 ./wsl-start.sh --backend-only
 ```
 
-For audit/eval validation, capture `/api/v1/ops/build-identity` after startup.
-If `stale_container_check` is `unknown`, the running container lacks enough
-metadata to prove freshness. If it is `stale`, rebuild before using the run as
-validation evidence.
+For validation records, capture authenticated `/api/v1/ops/build-identity`
+after startup. If `stale_container_check` is `unknown`, the running container
+lacks enough metadata to prove freshness. If it is `stale`, rebuild before
+relying on the running service.
 
 To ingest `knowledge/` into the active Docker runtime while starting, run:
 
@@ -893,7 +898,8 @@ First build takes several minutes. Verify all containers are up:
 ```bash
 docker compose -f docker-compose.windows.yml ps
 curl http://localhost:8080/health
-curl http://localhost:8080/api/v1/ops/build-identity
+curl -H "Authorization: Bearer $ORCHESTRATOR_API_TOKEN" \
+  http://localhost:8080/api/v1/ops/build-identity
 ```
 
 Expected health response:

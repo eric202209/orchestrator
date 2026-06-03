@@ -17,7 +17,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.failure_taxonomy import failure_class, parse_log_metadata  # noqa: E402
+from scripts.failure_taxonomy import (  # noqa: E402
+    failure_class,
+    parse_log_metadata,
+    terminal_reason_from_rows,
+)
 
 DEFAULT_WORKSPACE_ROOT = REPO_ROOT.parent
 EXPECTED_FILES = (
@@ -304,6 +308,29 @@ def _runtime_identity(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def _run_start_runtime_identity(journal: dict[str, Any]) -> dict[str, Any] | None:
+    for event in journal.get("events") or []:
+        if event.get("event_type") != "task_started":
+            continue
+        details = event.get("details")
+        if not isinstance(details, dict):
+            continue
+        identity = details.get("run_start_runtime_identity")
+        if isinstance(identity, dict):
+            return identity
+    return None
+
+
+def _effective_runtime_identity(
+    conn: sqlite3.Connection,
+    journal: dict[str, Any],
+) -> dict[str, Any]:
+    run_start = _run_start_runtime_identity(journal)
+    if run_start is not None:
+        return run_start
+    return _runtime_identity(conn)
+
+
 def _metadata_payload(
     context: dict[str, Any],
     journal: dict[str, Any],
@@ -319,6 +346,7 @@ def _metadata_payload(
         },
         "bundle_files": list(EXPECTED_FILES),
         "runtime_identity": runtime_identity,
+        "config_snapshot": runtime_identity.get("config") or {},
     }
 
 
@@ -590,6 +618,14 @@ def _json_object(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
 def _change_set_summary(
     conn: sqlite3.Connection, task_execution_id: int
 ) -> dict[str, Any]:
@@ -740,6 +776,227 @@ def _extract_contract_verdicts(timeline: dict[str, Any]) -> list[dict[str, Any]]
     return verdicts
 
 
+def _extract_planning_prompt_ref(timeline: dict[str, Any]) -> dict[str, Any] | None:
+    for event in timeline.get("events") or []:
+        details = event.get("details") or {}
+        if not isinstance(details, dict):
+            continue
+        prompt_ref = details.get("planning_prompt_ref") or details.get("prompt_ref")
+        if isinstance(prompt_ref, dict):
+            return prompt_ref
+        if isinstance(prompt_ref, str) and prompt_ref.strip():
+            return {"ref": prompt_ref.strip(), "source": event.get("source")}
+    return None
+
+
+def _append_verification_record(
+    records: list[dict[str, Any]],
+    seen: set[tuple[str, str, str]],
+    *,
+    command: Any,
+    channel: str,
+    source: str,
+    timestamp: Any = None,
+    status: Any = None,
+    exit_code: Any = None,
+    details: dict[str, Any] | None = None,
+) -> None:
+    text = str(command or "").strip()
+    if not text:
+        return
+    key = (channel, source, text)
+    if key in seen:
+        return
+    seen.add(key)
+    records.append(
+        {
+            "channel": channel,
+            "source": source,
+            "command": text,
+            "timestamp": timestamp,
+            "status": status,
+            "exit_code": exit_code,
+            "details": details or {},
+        }
+    )
+
+
+def _extract_verification_records(
+    decision_timeline: dict[str, Any],
+    workspace_evidence_summary: dict[str, Any],
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    for command in workspace_evidence_summary.get("commands_run") or []:
+        _append_verification_record(
+            records,
+            seen,
+            command=command,
+            channel="workspace_evidence",
+            source="workspace_evidence_summary",
+        )
+
+    for event in decision_timeline.get("events") or []:
+        details = event.get("details") or {}
+        if not isinstance(details, dict):
+            details = {}
+        event_type = str(event.get("event_type") or "")
+        timestamp = event.get("timestamp")
+        source = str(event.get("source") or "unknown")
+
+        if event_type == "validation_result":
+            channel = str(details.get("stage") or "validation")
+            commands = (
+                _string_list(details.get("commands"))
+                or _string_list(details.get("verification_commands"))
+                or _string_list(details.get("command"))
+                or _string_list(details.get("verification_command"))
+            )
+            for command in commands:
+                _append_verification_record(
+                    records,
+                    seen,
+                    command=command,
+                    channel=channel,
+                    source=source,
+                    timestamp=timestamp,
+                    status=details.get("status"),
+                    exit_code=details.get("exit_code"),
+                    details={
+                        key: details.get(key)
+                        for key in ("reason", "stage", "status")
+                        if details.get(key) is not None
+                    },
+                )
+            continue
+
+        for key in (
+            "verification_command",
+            "completion_verification_command",
+            "failed_command",
+        ):
+            if details.get(key):
+                _append_verification_record(
+                    records,
+                    seen,
+                    command=details.get(key),
+                    channel=str(details.get("phase") or event_type or "verification"),
+                    source=source,
+                    timestamp=timestamp,
+                    status=details.get("status"),
+                    exit_code=details.get("exit_code"),
+                    details={
+                        name: details.get(name)
+                        for name in ("reason", "phase", "status")
+                        if details.get(name) is not None
+                    },
+                )
+    return records
+
+
+def _extract_scorer_result_from_timeline(
+    decision_timeline: dict[str, Any],
+) -> dict[str, Any] | None:
+    for event in reversed(decision_timeline.get("events") or []):
+        details = event.get("details") or {}
+        if not isinstance(details, dict):
+            continue
+        for key in ("scorer_result", "scorer", "eval_scorer_result"):
+            value = details.get(key)
+            if isinstance(value, dict):
+                return {
+                    "available": True,
+                    "source": f"decision_timeline.{key}",
+                    "timestamp": event.get("timestamp"),
+                    "result": value,
+                }
+        if "scorer_passed" in details or "verifier_passed" in details:
+            return {
+                "available": True,
+                "source": "decision_timeline.details",
+                "timestamp": event.get("timestamp"),
+                "result": {
+                    key: details.get(key)
+                    for key in (
+                        "scorer_passed",
+                        "verifier_passed",
+                        "lifecycle_agrees_with_scorer",
+                        "verification_command",
+                    )
+                    if key in details
+                },
+            }
+    return None
+
+
+def _extract_scorer_result_from_reports(context: dict[str, Any]) -> dict[str, Any] | None:
+    reports_dir = Path(
+        os.environ.get(
+            "RUN_REPLAY_SCORER_REPORT_DIR",
+            str(REPO_ROOT / "docs" / "roadmap" / "reports" / "evals"),
+        )
+    )
+    if not reports_dir.is_dir():
+        return None
+
+    session_id = context.get("session_id")
+    task_id = context.get("task_id")
+    workspace_path = str(
+        context.get("resolved_workspace_path") or context.get("workspace_path") or ""
+    )
+    matches: list[tuple[float, Path, dict[str, Any]]] = []
+    for path in reports_dir.glob("*.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        input_block = payload.get("input") or {}
+        if not isinstance(input_block, dict):
+            continue
+        if session_id is not None and input_block.get("session_id") != session_id:
+            continue
+        if task_id is not None and input_block.get("task_id") != task_id:
+            continue
+        if workspace_path and str(input_block.get("project_dir") or "") != workspace_path:
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        matches.append((mtime, path, payload))
+
+    if not matches:
+        return None
+    _, path, payload = sorted(matches, key=lambda item: item[0])[-1]
+    return {
+        "available": True,
+        "source": "eval_report",
+        "path": str(path),
+        "result": payload.get("result") or {},
+        "verifier": payload.get("verifier") or {},
+        "path_observability": payload.get("path_observability") or {},
+    }
+
+
+def _scorer_result(
+    context: dict[str, Any],
+    decision_timeline: dict[str, Any],
+) -> dict[str, Any]:
+    from_timeline = _extract_scorer_result_from_timeline(decision_timeline)
+    if from_timeline is not None:
+        return from_timeline
+    from_report = _extract_scorer_result_from_reports(context)
+    if from_report is not None:
+        return from_report
+    return {
+        "available": False,
+        "reason": "scorer_result_not_found",
+    }
+
+
 def _extract_repair_event_counts(timeline: dict[str, Any]) -> dict[str, int]:
     _REPAIR_TYPES = {
         "repair_generated",
@@ -756,6 +1013,67 @@ def _extract_repair_event_counts(timeline: dict[str, Any]) -> dict[str, int]:
     return dict(counts)
 
 
+def _extract_repair_attempts(timeline: dict[str, Any]) -> list[dict[str, Any]]:
+    repair_event_types = {
+        "repair_generated",
+        "repair_applied",
+        "repair_rejected",
+        "debug_repair_attempted",
+        "debug_feedback_captured",
+        "planning_repair_arbitration",
+    }
+    attempts: list[dict[str, Any]] = []
+    for event in timeline.get("events") or []:
+        event_type = str(event.get("event_type") or "")
+        if event_type not in repair_event_types:
+            continue
+        details = event.get("details") or {}
+        if not isinstance(details, dict):
+            details = {}
+        attempts.append(
+            {
+                "event_type": event_type,
+                "timestamp": event.get("timestamp"),
+                "source": event.get("source"),
+                "attempt": details.get("attempt")
+                or details.get("repair_attempt")
+                or details.get("debug_attempt")
+                or details.get("retry_count"),
+                "backend": details.get("backend")
+                or details.get("backend_id")
+                or details.get("debug_repair_backend")
+                or details.get("planning_repair_backend"),
+                "model": details.get("model")
+                or details.get("model_name")
+                or details.get("debug_repair_model")
+                or details.get("planning_repair_model"),
+                "status": details.get("status") or details.get("result"),
+                "reason": details.get("reason")
+                or details.get("rejection_reason")
+                or details.get("failure_type"),
+                "input_ref": details.get("input_ref")
+                or details.get("failure_signature")
+                or details.get("failure_class"),
+                "output_ref": details.get("output_ref")
+                or details.get("candidate_ref")
+                or details.get("event_id"),
+                "details": {
+                    key: details.get(key)
+                    for key in (
+                        "phase",
+                        "repair_type",
+                        "compliance_retry_attempted",
+                        "compliance_retry_succeeded",
+                        "debug_repair_attempted",
+                        "cross_stage_convergence_class",
+                    )
+                    if details.get(key) is not None
+                },
+            }
+        )
+    return attempts
+
+
 def _run_replay_bundle_manifest(
     *,
     context: dict[str, Any],
@@ -765,6 +1083,9 @@ def _run_replay_bundle_manifest(
     replay_report: dict[str, Any],
     decision_timeline: dict[str, Any],
     change_set_summary: dict[str, Any],
+    workspace_evidence_summary: dict[str, Any],
+    terminal_reason: str,
+    scorer_result: dict[str, Any],
 ) -> dict[str, Any]:
     ri = runtime_identity
     workspace_path = context.get("resolved_workspace_path") or context.get(
@@ -791,6 +1112,10 @@ def _run_replay_bundle_manifest(
         else {}
     )
     cs = change_set_summary
+    verification_records = _extract_verification_records(
+        decision_timeline,
+        workspace_evidence_summary,
+    )
 
     return {
         "schema_version": 1,
@@ -808,15 +1133,18 @@ def _run_replay_bundle_manifest(
         "prompt": {
             "task_title": context.get("task_title"),
             "task_description": context.get("task_description"),
-            "planning_prompt_ref": None,
+            "planning_prompt_ref": _extract_planning_prompt_ref(decision_timeline),
         },
         "runtime_identity": {
             "source": ri.get("source"),
             "build_identity": ri.get("build"),
             "backend_lanes": ri.get("lanes"),
             "model_names": ri.get("models"),
-            "config_source": (ri.get("config") or {}).get("config_source"),
+            "config_snapshot": ri.get("config") or {},
+            "config_source": (ri.get("config") or {}).get("config_source")
+            or (ri.get("config") or {}).get("source"),
             "capture_note": (ri.get("config") or {}).get("capture_note"),
+            "run_start_snapshot_available": ri.get("source") == "task_started_event",
         },
         "workspace": {
             "path": workspace_path,
@@ -834,16 +1162,30 @@ def _run_replay_bundle_manifest(
             },
         },
         "verification": {
-            "commands": [],
+            "commands": verification_records,
+            "results": [
+                record
+                for record in verification_records
+                if record.get("status") is not None or record.get("exit_code") is not None
+            ],
             "contract_verdicts": _extract_contract_verdicts(decision_timeline),
-            "scorer_result_ref": None,
+            "scorer_result_ref": (
+                scorer_result.get("path")
+                if scorer_result.get("source") == "eval_report"
+                else scorer_result.get("source")
+                if scorer_result.get("available")
+                else None
+            ),
         },
+        "scorer": scorer_result,
         "repair": {
             "repair_event_counts": _extract_repair_event_counts(decision_timeline),
+            "attempts": _extract_repair_attempts(decision_timeline),
         },
         "terminal": {
             "status": context.get("task_execution_status"),
             "failure_category": context.get("task_error_message"),
+            "terminal_reason": terminal_reason,
             "failure_summary_available": failure_summary.get("available", False),
             "failure_summary": failure_summary.get("summary"),
         },
@@ -862,6 +1204,8 @@ def _run_replay_bundle_text(
     failure_summary: dict[str, Any],
     replay_report: dict[str, Any],
     decision_timeline: dict[str, Any],
+    terminal_reason: str,
+    scorer_result: dict[str, Any],
 ) -> str:
     lines: list[str] = [
         "RunReplayBundle v1",
@@ -883,6 +1227,8 @@ def _run_replay_bundle_text(
     fc = context.get("task_error_message") or ""
     if fc:
         lines.append(f"Failure category: {fc}")
+    if terminal_reason:
+        lines.append(f"Terminal reason:  {terminal_reason}")
     lines.append(f"Captured: {runtime_identity.get('captured_at', 'unknown')}")
     lines.append("")
 
@@ -916,6 +1262,19 @@ def _run_replay_bundle_text(
             lines.append(f"  {etype}: {count}")
     else:
         lines.append("  (none)")
+    lines.append("")
+
+    lines.append("Scorer")
+    lines.append("-" * 30)
+    if scorer_result.get("available"):
+        lines.append(f"  Source: {scorer_result.get('source', 'unknown')}")
+        result = scorer_result.get("result") or {}
+        if isinstance(result, dict):
+            for key in ("clean_success", "verifier_passed", "scorer_passed"):
+                if key in result:
+                    lines.append(f"  {key}: {result[key]}")
+    else:
+        lines.append(f"  {scorer_result.get('reason', 'not available')}")
     lines.append("")
 
     lines.append("Replay Integrity")
@@ -967,7 +1326,7 @@ def capture_bundle(
             task_execution_id=task_execution_id,
         )
         journal = _read_event_journal(context)
-        runtime_identity = _runtime_identity(conn)
+        runtime_identity = _effective_runtime_identity(conn, journal)
 
         payloads: dict[str, Any] = {
             "metadata.json": _metadata_payload(context, journal, runtime_identity),
@@ -989,6 +1348,17 @@ def capture_bundle(
                 conn, task_execution_id
             ),
         }
+        terminal_reason = terminal_reason_from_rows(
+            rows,
+            {
+                **context,
+                "error_message": context.get("task_error_message"),
+            },
+        )
+        scorer_result = _scorer_result(
+            context=context,
+            decision_timeline=payloads["decision_timeline.json"],
+        )
         payloads["run_replay_bundle.json"] = _run_replay_bundle_manifest(
             context=context,
             runtime_identity=runtime_identity,
@@ -997,6 +1367,9 @@ def capture_bundle(
             replay_report=payloads["replay_report.semantic.json"],
             decision_timeline=payloads["decision_timeline.json"],
             change_set_summary=payloads["change_set_summary.json"],
+            workspace_evidence_summary=payloads["workspace_evidence_summary.json"],
+            terminal_reason=terminal_reason,
+            scorer_result=scorer_result,
         )
         payloads["run_replay_bundle.txt"] = _run_replay_bundle_text(
             context=context,
@@ -1004,6 +1377,8 @@ def capture_bundle(
             failure_summary=payloads["failure_summary.json"],
             replay_report=payloads["replay_report.semantic.json"],
             decision_timeline=payloads["decision_timeline.json"],
+            terminal_reason=terminal_reason,
+            scorer_result=scorer_result,
         )
     finally:
         conn.close()

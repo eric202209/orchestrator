@@ -82,6 +82,31 @@ def test_task_started_event_contains_execution_profile(tmp_path):
     assert events[0]["details"]["execution_profile"] == "review_only"
 
 
+def test_run_start_runtime_identity_omits_secret_values():
+    import app.tasks.worker as worker
+
+    runtime_selection = {
+        "backend": "local_openclaw",
+        "model_family": "local",
+        "planner_backend": "openai_responses_api",
+        "planner_model": "gpt-5",
+        "execution_backend": "local_openclaw",
+        "execution_model": "local",
+        "debug_repair_backend": "openai_responses_api",
+        "debug_repair_model": "gpt-5",
+    }
+
+    identity = worker._run_start_runtime_identity(None, runtime_selection)
+
+    assert identity["source"] == "task_started_event"
+    assert identity["lanes"]["planning"] == "openai_responses_api"
+    assert identity["models"]["debug_repair"] == "gpt-5"
+    config = identity["config"]
+    assert config["source"] == "task_started_event"
+    assert "OPENAI_API_KEY" in config["secret_fields_omitted"]
+    assert "OPENAI_API_KEY" not in config["values"]
+
+
 def test_failure_flow_imports_task_failed_event_type():
     """Ensure failure_flow.py is wired to emit TASK_FAILED events."""
     import app.services.orchestration.phases.failure_flow as ff

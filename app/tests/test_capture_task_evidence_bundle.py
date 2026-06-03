@@ -504,6 +504,7 @@ def test_replay_bundle_field_coverage_characterization(tmp_path):
                 "stage": "completion_validation",
                 "status": "failed",
                 "reason": "missing_test_file",
+                "verification_command": "pytest tests/",
             },
         },
         {
@@ -595,6 +596,7 @@ def test_replay_bundle_field_coverage_characterization(tmp_path):
     timeline = _load(bundle_dir, "decision_timeline.json")
     replay = _load(bundle_dir, "replay_report.semantic.json")
     workspace_ev = _load(bundle_dir, "workspace_evidence_summary.json")
+    manifest = _load(bundle_dir, "run_replay_bundle.json")
 
     # ── AVAILABLE ────────────────────────────────────────────────────────────
 
@@ -638,14 +640,20 @@ def test_replay_bundle_field_coverage_characterization(tmp_path):
     # checkpoint_refs[] list across event/db/disk sources exists in the bundle
     assert replay["state"]["latest_checkpoint_name"] == "step_2_pre_repair"
 
-    # verification_commands: workspace evidence has commands_run for the
-    # workspace_evidence surface only; no cross-surface verification.commands[]
+    # verification_commands: canonical manifest consolidates workspace and
+    # validation commands.
     assert workspace_ev["workspace_evidence_collected"] is True
     assert "pytest tests/" in workspace_ev["commands_run"]
+    assert any(
+        record["command"] == "pytest tests/"
+        for record in manifest["verification"]["commands"]
+    )
 
-    # verification_results: validation_verdict_status_history in replay; no
-    # per-channel (step/completion/repair/scorer) verification.results[] list
+    # verification_results: validation command status is represented separately.
     assert "failed" in replay["state"]["validation_verdict_status_history"]
+    assert any(
+        record["status"] == "failed" for record in manifest["verification"]["results"]
+    )
 
     # repair_attempts: repair_count in replay state and repair events in
     # decision timeline; no repair.attempts[] list with input/model/backend/result
@@ -658,11 +666,11 @@ def test_replay_bundle_field_coverage_characterization(tmp_path):
     assert "repair_generated" in journal_event_types
     assert "repair_rejected" in journal_event_types
 
-    # terminal_reason: task error_message + fallback summary each carry partial
-    # signal; no single canonical terminal.reason field with precedence
+    # terminal_reason: canonical manifest has a separate terminal_reason field.
     assert metadata["context"]["task_error_message"] == "completion_validation_failed"
     assert failure_doc["summary"] is not None
     assert "completion_validation_failed" in failure_doc["summary"]
+    assert manifest["terminal"]["terminal_reason"] == "completion_validation_failed"
 
     # failure_summary: stored but session-scoped so bundle falls back to log
     # excerpt; gap closed when failure summary is scoped to task_execution
@@ -672,19 +680,13 @@ def test_replay_bundle_field_coverage_characterization(tmp_path):
 
     # ── ABSENT ───────────────────────────────────────────────────────────────
 
-    # config_snapshot: runtime_identity covers lanes/models but not a sanitized
-    # effective config snapshot with source/value provenance
-    assert "config_snapshot" not in metadata
+    # config_snapshot: metadata exposes sanitized runtime config provenance.
+    assert "config_snapshot" in metadata
     assert "effective_config" not in metadata
 
-    # scorer_result: non-eval run; no scorer field in any bundle document
-    for label, doc in [
-        ("metadata", metadata),
-        ("replay", replay),
-        ("failure", failure_doc),
-    ]:
-        assert "scorer" not in doc, f"unexpected scorer field in {label}"
-        assert "scorer_result" not in doc, f"unexpected scorer_result in {label}"
+    # scorer_result: non-eval runs record explicit absence in the manifest.
+    assert manifest["scorer"]["available"] is False
+    assert manifest["scorer"]["reason"] == "scorer_result_not_found"
 
 
 def test_capture_task_evidence_bundle_runtime_identity_structure(tmp_path):
@@ -737,11 +739,71 @@ def test_run_replay_bundle_manifest_canonical_shape(tmp_path):
 
     journal_events = [
         {
+            "event_type": "task_started",
+            "timestamp": "2026-06-02T10:00:00Z",
+            "session_id": 10,
+            "task_id": 20,
+            "details": {
+                "execution_profile": "full_lifecycle",
+                "run_start_runtime_identity": {
+                    "source": "task_started_event",
+                    "captured_at": "2026-06-02T10:00:00Z",
+                    "build": {
+                        "version": "0.1.0",
+                        "build_git_sha": "abc",
+                        "repo_git_sha": "abc",
+                        "stale_container_check": "ok",
+                    },
+                    "lanes": {
+                        "planning": "openai_responses_api",
+                        "execution": "local_openclaw",
+                        "debug_repair": "openai_responses_api",
+                        "repair": "local_openclaw",
+                    },
+                    "models": {
+                        "planner": "gpt-5",
+                        "execution": "local",
+                        "debug_repair": "gpt-5",
+                        "planning_repair": "qwen-local",
+                    },
+                    "config": {
+                        "source": "task_started_event",
+                        "values": {
+                            "AGENT_BACKEND": "local_openclaw",
+                            "PLANNING_BACKEND": "openai_responses_api",
+                        },
+                        "effective": {
+                            "planning_backend": "openai_responses_api",
+                        },
+                        "secret_fields_omitted": ["OPENAI_API_KEY"],
+                    },
+                },
+                "run_start_config_snapshot": {
+                    "source": "task_started_event",
+                },
+            },
+        },
+        {
             "event_type": "checkpoint_saved",
             "timestamp": "2026-06-02T10:01:00Z",
             "session_id": 10,
             "task_id": 20,
             "details": {"checkpoint_name": "pre_repair_step_2"},
+        },
+        {
+            "event_type": "phase_started",
+            "timestamp": "2026-06-02T10:01:30Z",
+            "session_id": 10,
+            "task_id": 20,
+            "details": {
+                "phase": "planning",
+                "planning_prompt_ref": {
+                    "kind": "sha256",
+                    "sha256": "prompt-sha",
+                    "chars": 1200,
+                    "estimated_tokens": 300,
+                },
+            },
         },
         {
             "event_type": "validation_result",
@@ -752,6 +814,7 @@ def test_run_replay_bundle_manifest_canonical_shape(tmp_path):
                 "stage": "completion_validation",
                 "status": "failed",
                 "reason": "missing_test_file",
+                "verification_command": "pytest tests/",
             },
         },
         {
@@ -812,10 +875,14 @@ def test_run_replay_bundle_manifest_canonical_shape(tmp_path):
 
     # runtime_identity sections present
     ri = manifest["runtime_identity"]
-    assert ri["source"] == "capture_time_fallback"
+    assert ri["source"] == "task_started_event"
     assert "build_identity" in ri
     assert "backend_lanes" in ri
     assert "model_names" in ri
+    assert ri["run_start_snapshot_available"] is True
+    assert ri["config_snapshot"]["source"] == "task_started_event"
+    assert ri["config_snapshot"]["values"]["PLANNING_BACKEND"] == "openai_responses_api"
+    assert ri["build_identity"]["stale_container_check"] == "ok"
 
     # workspace
     ws = manifest["workspace"]
@@ -828,21 +895,32 @@ def test_run_replay_bundle_manifest_canonical_shape(tmp_path):
     assert ws["change_set"]["available"] is True
     assert ws["change_set"]["changed_count"] == 3
 
+    assert manifest["prompt"]["planning_prompt_ref"]["sha256"] == "prompt-sha"
+
     # verification: contract verdicts extracted from timeline
     verdicts = manifest["verification"]["contract_verdicts"]
     assert len(verdicts) == 1
     assert verdicts[0]["stage"] == "completion_validation"
     assert verdicts[0]["status"] == "failed"
+    commands = manifest["verification"]["commands"]
+    assert commands[0]["command"] == "pytest tests/"
+    assert commands[0]["channel"] == "completion_validation"
+    assert manifest["verification"]["results"][0]["status"] == "failed"
 
     # repair counts
     counts = manifest["repair"]["repair_event_counts"]
     assert counts.get("repair_generated") == 1
     assert counts.get("repair_rejected") == 1
+    attempt_types = [item["event_type"] for item in manifest["repair"]["attempts"]]
+    assert "repair_generated" in attempt_types
+    assert "repair_rejected" in attempt_types
 
     # terminal
     terminal = manifest["terminal"]
     assert terminal["status"] == "failed"
     assert terminal["failure_category"] == "completion_validation_failed"
+    assert terminal["terminal_reason"] == "completion_validation_failed"
+    assert manifest["scorer"]["available"] is False
 
     # integrity present (may be partial when workspace exists)
     assert "integrity" in manifest
@@ -875,9 +953,84 @@ def test_run_replay_bundle_text_human_readable(tmp_path):
     assert "Runtime Identity" in text
     assert "Failure Summary" in text
     assert "Repair Events" in text
+    assert "Scorer" in text
     assert "Replay Integrity" in text
     assert "Bundle Files" in text
     assert "run_replay_bundle.json" in text
+
+
+def test_run_replay_bundle_manifest_reads_eval_scorer_report(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    event_dir = workspace / ".openclaw" / "events"
+    event_dir.mkdir(parents=True)
+    (event_dir / "session_10_task_20.jsonl").write_text(
+        json.dumps(
+            {
+                "event_type": "validation_result",
+                "timestamp": "2026-06-02T10:02:00Z",
+                "session_id": 10,
+                "task_id": 20,
+                "details": {
+                    "stage": "scorer",
+                    "status": "passed",
+                    "verification_command": "python -m pytest -q",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    reports_dir = tmp_path / "evals"
+    reports_dir.mkdir()
+    scorer_report = reports_dir / "score.json"
+    scorer_report.write_text(
+        json.dumps(
+            {
+                "input": {
+                    "project_dir": str(workspace),
+                    "session_id": 10,
+                    "task_id": 20,
+                },
+                "result": {
+                    "clean_success": True,
+                    "verifier_passed": True,
+                },
+                "verifier": {
+                    "available": True,
+                    "command": "python -m pytest -q",
+                    "passed": True,
+                },
+                "path_observability": {
+                    "execution_reached": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("RUN_REPLAY_SCORER_REPORT_DIR", str(reports_dir))
+
+    db_path = tmp_path / "bundle.db"
+    conn = sqlite3.connect(db_path)
+    _schema(conn)
+    _seed(conn, str(workspace))
+    conn.commit()
+    conn.close()
+
+    bundle_dir = module.capture_bundle(
+        db_path=str(db_path),
+        session_id=10,
+        task_id=20,
+        task_execution_id=30,
+        output_dir=tmp_path / "bundles",
+    )
+
+    manifest = _load(bundle_dir, "run_replay_bundle.json")
+
+    assert manifest["scorer"]["available"] is True
+    assert manifest["scorer"]["source"] == "eval_report"
+    assert manifest["scorer"]["path"] == str(scorer_report)
+    assert manifest["scorer"]["result"]["clean_success"] is True
+    assert manifest["verification"]["scorer_result_ref"] == str(scorer_report)
 
 
 def test_capture_task_evidence_bundle_runtime_identity_with_migrations(tmp_path):

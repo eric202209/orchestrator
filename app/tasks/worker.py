@@ -117,6 +117,120 @@ MAX_SUBFOLDER_COLLISION_ATTEMPTS = 999
 BACKEND_CAPACITY_RETRY_MAX_RETRIES = 5
 
 
+def _env_value(name: str) -> Optional[str]:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    text = value.strip()
+    return text if text else None
+
+
+def _build_identity_snapshot() -> Dict[str, Optional[str]]:
+    try:
+        from app.services.build_identity import _read_repo_git_sha
+
+        repo_git_sha = _read_repo_git_sha() or "unknown"
+    except Exception:
+        repo_git_sha = "unknown"
+
+    build_git_sha = (
+        _env_value("ORCHESTRATOR_GIT_SHA")
+        or _env_value("GIT_SHA")
+        or _env_value("COMMIT_SHA")
+        or "unknown"
+    )
+    if build_git_sha != "unknown" and repo_git_sha != "unknown":
+        stale_check = "ok" if build_git_sha == repo_git_sha else "stale"
+    else:
+        stale_check = "unknown"
+    return {
+        "version": str(settings.VERSION),
+        "build_git_sha": build_git_sha,
+        "repo_git_sha": repo_git_sha,
+        "build_time": _env_value("ORCHESTRATOR_BUILD_TIME") or _env_value("BUILD_TIME"),
+        "image_tag": _env_value("ORCHESTRATOR_IMAGE_TAG") or _env_value("IMAGE_TAG"),
+        "image_id": _env_value("ORCHESTRATOR_IMAGE_ID") or _env_value("IMAGE_ID"),
+        "stale_container_check": stale_check,
+    }
+
+
+def _run_start_config_snapshot(
+    db,
+    runtime_selection: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Capture non-secret run-start config provenance for replay bundles."""
+
+    effective_agent_backend = runtime_selection.get("backend")
+    effective_agent_model = runtime_selection.get("model_family")
+    return {
+        "source": "task_started_event",
+        "values": {
+            "AGENT_BACKEND": settings.AGENT_BACKEND,
+            "PLANNING_BACKEND": settings.PLANNING_BACKEND or None,
+            "EXECUTION_BACKEND": settings.EXECUTION_BACKEND or None,
+            "REPAIR_BACKEND": settings.REPAIR_BACKEND or None,
+            "DEBUG_REPAIR_BACKEND": settings.DEBUG_REPAIR_BACKEND or None,
+            "AGENT_MODEL": settings.AGENT_MODEL,
+            "PLANNER_MODEL": settings.PLANNER_MODEL or None,
+            "EXECUTION_MODEL": settings.EXECUTION_MODEL or None,
+            "DEBUG_REPAIR_MODEL": settings.DEBUG_REPAIR_MODEL or None,
+            "PLANNING_REPAIR_MODEL": settings.PLANNING_REPAIR_MODEL,
+            "PLANNING_REPAIR_ENABLED": settings.PLANNING_REPAIR_ENABLED,
+            "PLANNING_REPAIR_DISABLE_THINKING": (
+                settings.PLANNING_REPAIR_DISABLE_THINKING
+            ),
+            "DEBUG_REPAIR_DIRECT_ENABLED": settings.DEBUG_REPAIR_DIRECT_ENABLED,
+            "DEBUG_REPAIR_DISABLE_THINKING": settings.DEBUG_REPAIR_DISABLE_THINKING,
+            "WORKSPACE_REVIEW_POLICY": settings.WORKSPACE_REVIEW_POLICY,
+            "INLINE_PLANNING": settings.INLINE_PLANNING,
+        },
+        "effective": {
+            "agent_backend": effective_agent_backend,
+            "agent_model": effective_agent_model,
+            "planning_backend": runtime_selection.get("planner_backend"),
+            "planning_model": runtime_selection.get("planner_model"),
+            "execution_backend": runtime_selection.get("execution_backend"),
+            "execution_model": runtime_selection.get("execution_model"),
+            "repair_backend": settings.REPAIR_BACKEND or settings.AGENT_BACKEND,
+            "debug_repair_backend": runtime_selection.get("debug_repair_backend"),
+            "debug_repair_model": runtime_selection.get("debug_repair_model"),
+        },
+        "secret_fields_omitted": [
+            "SECRET_KEY",
+            "OPENAI_API_KEY",
+            "OPENCLAW_API_KEY",
+            "PLANNING_REPAIR_API_KEY",
+            "DEBUG_REPAIR_API_KEY",
+            "GITHUB_TOKEN",
+            "MOBILE_GATEWAY_API_KEY",
+        ],
+    }
+
+
+def _run_start_runtime_identity(
+    db,
+    runtime_selection: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "source": "task_started_event",
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "build": _build_identity_snapshot(),
+        "lanes": {
+            "planning": runtime_selection.get("planner_backend"),
+            "execution": runtime_selection.get("execution_backend"),
+            "debug_repair": runtime_selection.get("debug_repair_backend"),
+            "repair": settings.REPAIR_BACKEND or settings.AGENT_BACKEND,
+        },
+        "models": {
+            "planner": runtime_selection.get("planner_model"),
+            "execution": runtime_selection.get("execution_model"),
+            "debug_repair": runtime_selection.get("debug_repair_model"),
+            "planning_repair": settings.PLANNING_REPAIR_MODEL,
+        },
+        "config": _run_start_config_snapshot(db, runtime_selection),
+    }
+
+
 def should_use_configured_planning_runtime(
     *,
     planning_backend_override: Optional[str],
@@ -525,6 +639,7 @@ def execute_orchestration_task(
                 emit_live=emit_live,
             )
 
+        runtime_selection = _runtime_selection_details(db)
         claimed_details = {
             "session_instance_id": session.instance_id,
             "expected_session_instance_id": expected_session_instance_id,
@@ -533,7 +648,7 @@ def execute_orchestration_task(
             "project_dir": str(dispatch_project_dir) if dispatch_project_dir else None,
             "queue_latency_seconds": queue_latency_seconds,
             "queued_event_id": (queued_event or {}).get("event_id"),
-            **_runtime_selection_details(db),
+            **runtime_selection,
         }
         if dispatch_project_dir:
             _append_orchestration_event(
@@ -952,12 +1067,21 @@ def execute_orchestration_task(
             metadata={"phase": "start"},
         )
         try:
+            run_start_runtime_identity = _run_start_runtime_identity(
+                db,
+                runtime_selection,
+            )
             _append_orchestration_event(
                 project_dir=orchestration_state.project_dir,
                 session_id=session_id,
                 task_id=task_id,
                 event_type=EventType.TASK_STARTED,
-                details={"execution_profile": execution_profile},
+                details={
+                    "execution_profile": execution_profile,
+                    "task_execution_id": task_execution_id,
+                    "run_start_runtime_identity": run_start_runtime_identity,
+                    "run_start_config_snapshot": run_start_runtime_identity["config"],
+                },
             )
         except Exception as exc:
             logger.debug(

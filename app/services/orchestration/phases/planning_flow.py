@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Callable, Dict
@@ -229,6 +230,15 @@ def execute_planning_phase(
             ctx, planning_knowledge_ctx, used_in_prompt=bool(planning_prompt)
         )
     planning_prompt_tokens = estimate_token_count(planning_prompt or "")
+    planning_prompt_ref = None
+    if planning_prompt:
+        planning_prompt_ref = {
+            "kind": "sha256",
+            "sha256": hashlib.sha256(planning_prompt.encode("utf-8")).hexdigest(),
+            "chars": len(planning_prompt),
+            "estimated_tokens": planning_prompt_tokens,
+            "prompt_profile": prompt_profile,
+        }
     # 10H-C: emit context budget on every planning attempt so it appears in
     # session debug output regardless of dense-prompt detection.
     emit_phase_event(
@@ -247,6 +257,7 @@ def execute_planning_phase(
             "project_context_chars": len(ctx.orchestration_state.project_context or ""),
             "task_chars": len(ctx.prompt or ""),
             "prompt_profile": prompt_profile,
+            "planning_prompt_ref": planning_prompt_ref,
             "model_capability_label": model_capability_label,
             "context_budget_status": (
                 "dense" if planning_prompt_tokens > 8000 else "normal"
