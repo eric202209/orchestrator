@@ -29,7 +29,15 @@ def _env(*names: str) -> str:
     return UNKNOWN
 
 
+def _repo_sha_from_env() -> Optional[str]:
+    value = _env("ORCHESTRATOR_REPO_GIT_SHA", "REPO_GIT_SHA")
+    return None if value == UNKNOWN else value
+
+
 def _read_repo_git_sha(repo_root: Path = BASE_DIR) -> Optional[str]:
+    env_sha = _repo_sha_from_env()
+    if env_sha:
+        return env_sha
     git_path = repo_root / ".git"
     try:
         if git_path.is_file():

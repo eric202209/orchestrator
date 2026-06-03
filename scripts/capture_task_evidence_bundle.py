@@ -148,11 +148,33 @@ def _resolve_workspace_path(workspace_path: Any) -> Path | None:
         return None
     path = Path(raw)
     if path.is_absolute():
+        mapped = _map_container_workspace_path(path)
+        if mapped is not None:
+            return mapped
         return path
-    workspace_root = Path(
-        os.environ.get("OPENCLAW_WORKSPACE", str(DEFAULT_WORKSPACE_ROOT))
-    )
-    return workspace_root / raw
+    return _host_workspace_root() / raw
+
+
+def _host_workspace_root() -> Path:
+    for key in ("OPENCLAW_WORKSPACE", "WORKSPACE_ROOT"):
+        value = os.environ.get(key)
+        if value:
+            return Path(value)
+    default_projects = DEFAULT_WORKSPACE_ROOT / "projects"
+    if default_projects.exists():
+        return default_projects
+    return DEFAULT_WORKSPACE_ROOT
+
+
+def _map_container_workspace_path(path: Path) -> Path | None:
+    container_root = Path("/app/projects")
+    try:
+        relative = path.relative_to(container_root)
+    except ValueError:
+        return None
+    if not relative.parts:
+        return _host_workspace_root()
+    return _host_workspace_root() / relative
 
 
 def _metadata_rows(

@@ -18,6 +18,34 @@ sys.modules[SPEC.name] = module
 SPEC.loader.exec_module(module)
 
 
+def test_resolve_workspace_path_maps_docker_project_path_to_host_root(
+    tmp_path, monkeypatch
+):
+    host_root = tmp_path / "projects"
+    host_root.mkdir()
+    monkeypatch.setenv("OPENCLAW_WORKSPACE", str(host_root))
+
+    resolved = module._resolve_workspace_path("/app/projects/example-workspace")
+
+    assert resolved == host_root / "example-workspace"
+
+
+def test_resolve_workspace_path_maps_relative_slug_to_host_root(tmp_path, monkeypatch):
+    host_root = tmp_path / "projects"
+    host_root.mkdir()
+    monkeypatch.setenv("OPENCLAW_WORKSPACE", str(host_root))
+
+    resolved = module._resolve_workspace_path("example-workspace")
+
+    assert resolved == host_root / "example-workspace"
+
+
+def test_resolve_workspace_path_leaves_other_absolute_paths_unchanged(tmp_path):
+    resolved = module._resolve_workspace_path(tmp_path / "workspace")
+
+    assert resolved == tmp_path / "workspace"
+
+
 def _schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """

@@ -689,6 +689,16 @@ class TestOpsBuildIdentityEndpoint:
         assert body["repo_git_sha"] == "repo-sha"
         assert body["stale_container_check"] == "stale"
 
+    def test_build_identity_accepts_repo_sha_env_override(self, mem_db, monkeypatch):
+        monkeypatch.setenv("ORCHESTRATOR_GIT_SHA", "same-sha")
+        monkeypatch.setenv("ORCHESTRATOR_REPO_GIT_SHA", "same-sha")
+
+        body = build_identity_payload(mem_db)
+
+        assert body["build_git_sha"] == "same-sha"
+        assert body["repo_git_sha"] == "same-sha"
+        assert body["stale_container_check"] == "ok"
+
 
 class TestOpsMetricsSummaryEndpoint:
     def test_metrics_summary_returns_200(self, authenticated_client):
