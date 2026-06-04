@@ -385,6 +385,9 @@ def test_invoke_runtime_prompt_supports_openai_chat_backend(db_session, monkeypa
     )
     monkeypatch.setattr(settings, "OPENAI_CHAT_COMPLETIONS_API_KEY", "dummy")
     monkeypatch.setattr(settings, "OPENAI_CHAT_COMPLETIONS_MODEL", "local")
+    monkeypatch.setattr(settings, "OPENAI_CHAT_COMPLETIONS_TEMPERATURE", 0.0)
+    monkeypatch.setattr(settings, "OPENAI_CHAT_COMPLETIONS_TOP_P", 0.85)
+    monkeypatch.setattr(settings, "OPENAI_CHAT_COMPLETIONS_REPEAT_PENALTY", 1.05)
 
     class _FakeResponse:
         def raise_for_status(self):
@@ -407,6 +410,9 @@ def test_invoke_runtime_prompt_supports_openai_chat_backend(db_session, monkeypa
             assert url == "http://amd:8001/v1/chat/completions"
             assert headers["Authorization"] == "Bearer dummy"
             assert json["model"] == "local"
+            assert json["temperature"] == 0.0
+            assert json["top_p"] == 0.85
+            assert json["repeat_penalty"] == 1.05
             assert json["messages"][0]["role"] == "system"
             assert json["messages"][1]["role"] == "user"
             return _FakeResponse()
@@ -421,3 +427,7 @@ def test_invoke_runtime_prompt_supports_openai_chat_backend(db_session, monkeypa
     assert result["status"] == "completed"
     assert result["output"] == '[{"step":1,"ops":[]}]'
     assert result["backend"] == "openai_chat_completions"
+
+    monkeypatch.setattr(settings, "OPENAI_CHAT_COMPLETIONS_TEMPERATURE", 0.1)
+    monkeypatch.setattr(settings, "OPENAI_CHAT_COMPLETIONS_TOP_P", None)
+    monkeypatch.setattr(settings, "OPENAI_CHAT_COMPLETIONS_REPEAT_PENALTY", None)

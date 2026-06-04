@@ -120,9 +120,15 @@ class OpenAIChatCompletionsRuntime:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "temperature": 0.1,
+            "temperature": float(settings.OPENAI_CHAT_COMPLETIONS_TEMPERATURE),
             "stream": False,
         }
+        if settings.OPENAI_CHAT_COMPLETIONS_TOP_P is not None:
+            payload["top_p"] = float(settings.OPENAI_CHAT_COMPLETIONS_TOP_P)
+        if settings.OPENAI_CHAT_COMPLETIONS_REPEAT_PENALTY is not None:
+            payload["repeat_penalty"] = float(
+                settings.OPENAI_CHAT_COMPLETIONS_REPEAT_PENALTY
+            )
 
         try:
             async with httpx.AsyncClient(timeout=timeout_seconds + 30) as client:

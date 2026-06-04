@@ -521,21 +521,50 @@ Rules:
                 and compact_source_api_contract_block != source_api_contract_block
             )
     if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS:
-        fallback_source_api_block = (
-            source_api_contract_minimal_block
-            or source_api_contract_compact_block
-            or source_api_contract_block
+        fallback_source_api_block = ""
+        prompt = ""
+        hard_budget_malformed_output = (
+            len(str(malformed_output or ""))
+            > PLANNING_REPAIR_COMPACT_MALFORMED_OUTPUT_CHARS
         )
-        prompt = _build_over_budget_compact_repair_prompt(
-            task_description=task_description,
-            malformed_output=malformed_output,
-            project_dir=project_dir,
-            rejection_reasons=rejection_reasons,
-            prompt_profile=prompt_profile,
-            apply_prompt_profile=None,
-            source_api_contract_block=fallback_source_api_block,
-            knowledge_block=knowledge_block,
-        )
+        if hard_budget_malformed_output:
+            fallback_candidates = [
+                source_api_contract_minimal_block,
+                source_api_contract_compact_block,
+                source_api_contract_block,
+                "",
+            ]
+        else:
+            fallback_candidates = [
+                source_api_contract_compact_block,
+                source_api_contract_minimal_block,
+                source_api_contract_block,
+                "",
+            ]
+        for candidate_block in dict.fromkeys(
+            block for block in fallback_candidates if block is not None
+        ):
+            candidate_prompt = _build_over_budget_compact_repair_prompt(
+                task_description=task_description,
+                malformed_output=malformed_output,
+                project_dir=project_dir,
+                rejection_reasons=rejection_reasons,
+                prompt_profile=prompt_profile,
+                apply_prompt_profile=None,
+                source_api_contract_block=candidate_block,
+                knowledge_block=knowledge_block,
+            )
+            if len(candidate_prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS and (
+                not candidate_block or candidate_block in candidate_prompt
+            ):
+                prompt = candidate_prompt
+                fallback_source_api_block = candidate_block
+                break
+            if not prompt:
+                prompt = candidate_prompt
+                fallback_source_api_block = (
+                    candidate_block if candidate_block in candidate_prompt else ""
+                )
         prompt_metadata.update(
             _metadata_for_final_source_api_block(
                 source_api_metadata=source_api_metadata,
@@ -1073,6 +1102,30 @@ def _build_materialization_preservation_guidance(malformed_output: str) -> str:
     )
 
 
+def _build_compact_materialization_preservation_guidance(malformed_output: str) -> str:
+    try:
+        parsed = json.loads(str(malformed_output or ""))
+    except Exception:
+        return ""
+
+    paths = sorted(plan_source_materialization_paths(parsed))
+    if not paths:
+        return ""
+
+    rendered_paths = ", ".join(paths[:4])
+    if len(paths) > 4:
+        rendered_paths += ", ..."
+
+    return "\n".join(
+        [
+            "Source materialization preservation contract:",
+            "- Preserve source/test materialization from the rejected plan.",
+            "- Do not remove write_file/append_file/replace_in_file for implementation or test paths unless equivalent ops update the same files.",
+            f"- Required materialization paths: {rendered_paths}",
+        ]
+    )
+
+
 def _build_brittle_inline_python_repair_guidance(
     rejection_reasons: Optional[list[str]],
 ) -> str:
@@ -1394,7 +1447,7 @@ def build_compact_planning_repair_prompt(
         "JSON quotes; output must remain a valid JSON array."
     )
     materialization_preservation_guidance = (
-        _build_materialization_preservation_guidance(malformed_output)
+        _build_compact_materialization_preservation_guidance(malformed_output)
     )
     grounded_source_edit_guidance = _build_grounded_source_edit_repair_guidance(
         rejection_reasons

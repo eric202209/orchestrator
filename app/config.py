@@ -140,6 +140,9 @@ class Settings(BaseSettings):
     OPENAI_CHAT_COMPLETIONS_BASE_URL: str = ""
     OPENAI_CHAT_COMPLETIONS_API_KEY: str = ""
     OPENAI_CHAT_COMPLETIONS_MODEL: str = ""
+    OPENAI_CHAT_COMPLETIONS_TEMPERATURE: float = 0.1
+    OPENAI_CHAT_COMPLETIONS_TOP_P: Optional[float] = None
+    OPENAI_CHAT_COMPLETIONS_REPEAT_PENALTY: Optional[float] = None
     MOBILE_GATEWAY_API_KEY: str = ""
     AGENT_BACKEND: str = (
         "local_openclaw"  # BACKEND_COUPLING: default names OpenClaw directly; future backends register here
