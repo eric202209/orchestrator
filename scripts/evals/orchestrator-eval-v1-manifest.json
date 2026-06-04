@@ -207,6 +207,42 @@
       ]
     },
     {
+      "case_id": "amd_tiny_source_rewrite",
+      "category": "amd_local_reduced_complexity",
+      "phase12b_role": "diagnostic_only",
+      "purpose": "Measure whether an AMD-local model lane can complete one bounded existing-source rewrite without test creation or source materialization from scratch.",
+      "workflow_stage": "implementation",
+      "operator_prompt": "Fix the existing string formatter in src/amd_tiny/formatting.py so the existing tests pass. Edit only that source file. Do not create new files. Do not edit tests. Verify with python3 -m pytest -q.",
+      "verifier": {
+        "command": "python3 -m pytest -q",
+        "timeout_seconds": 60
+      },
+      "required_files": [
+        "pyproject.toml",
+        "src/amd_tiny/formatting.py",
+        "tests/test_formatting.py"
+      ],
+      "expected_touched_files": [],
+      "allowed_touched_prefixes": [
+        "src/amd_tiny/formatting.py"
+      ],
+      "forbidden_touched_prefixes": [
+        ".openclaw/",
+        "frontend/",
+        "backend/",
+        "tests/"
+      ],
+      "required_events": [
+        "task_started"
+      ],
+      "success_criteria": [
+        "verifier_exit_code_zero",
+        "task_completed_event_present",
+        "required_files_present",
+        "no_forbidden_touched_files"
+      ]
+    },
+    {
       "case_id": "missing_report_artifact",
       "category": "completion_validation",
       "phase12b_role": "gate",
