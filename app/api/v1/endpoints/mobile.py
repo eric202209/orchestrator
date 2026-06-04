@@ -568,6 +568,31 @@ def get_project_tree(
     }
 
 
+# ── Provider status ───────────────────────────────────────────
+
+
+@router.get("/mobile/providers/status")
+def get_provider_status(request: Request):
+    """Return server-side agent backend status without exposing provider secrets."""
+    _log_mobile_request(request, "provider_status")
+    from app.services.agents.agent_backends import list_supported_backends
+
+    backends = list_supported_backends()
+    return {
+        "providers": [
+            {
+                "id": backend.name,
+                "type": backend.implementation,
+                "displayName": backend.display_name,
+                "status": backend.health.status,
+                "activeModel": backend.default_model_family,
+                "lastLatencyMs": None,
+            }
+            for backend in backends
+        ]
+    }
+
+
 # ── Sessions ─────────────────────────────────────────────────
 
 
@@ -576,10 +601,19 @@ def list_sessions(
     request: Request,
     project_id: Optional[int] = None,
     status: Optional[str] = None,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
     """List sessions, optionally filtered by project or status"""
-    _log_mobile_request(request, "list_sessions", project_id=project_id, status=status)
+    _log_mobile_request(
+        request,
+        "list_sessions",
+        project_id=project_id,
+        status=status,
+        limit=limit,
+        offset=offset,
+    )
     query = db.query(SessionModel).filter(SessionModel.deleted_at.is_(None))
 
     if project_id:
@@ -587,7 +621,7 @@ def list_sessions(
     if status:
         query = query.filter(SessionModel.status == status)
 
-    sessions = query.order_by(SessionModel.id.desc()).limit(20).all()
+    sessions = query.order_by(SessionModel.id.desc()).offset(offset).limit(limit).all()
 
     return {
         "sessions": [
