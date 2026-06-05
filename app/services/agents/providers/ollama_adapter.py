@@ -58,9 +58,31 @@ _GENERIC_SYSTEM = """You are a helpful AI assistant integrated into a developmen
 Answer concisely and accurately."""
 
 
-def _strip_thinking(text: str) -> str:
+def _normalize_ollama_content_value(value: Any) -> str:
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("text", "output_text", "content"):
+            extracted = _normalize_ollama_content_value(value.get(key))
+            if extracted:
+                return extracted
+        return ""
+    if isinstance(value, list):
+        return "".join(_normalize_ollama_content_value(item) for item in value)
+    return ""
+
+
+def _extract_ollama_chat_content(body: dict[str, Any]) -> str:
+    content = body["choices"][0]["message"]["content"]
+    return _normalize_ollama_content_value(content)
+
+
+def _strip_thinking(text: Any) -> str:
     """Remove <think>...</think> blocks from model output."""
-    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    normalized = _normalize_ollama_content_value(text)
+    return re.sub(r"<think>.*?</think>", "", normalized, flags=re.DOTALL).strip()
 
 
 def _no_think_suffix() -> str:
@@ -147,7 +169,7 @@ class OllamaRuntime:
             async with httpx.AsyncClient(timeout=effective_timeout) as client:
                 resp = await client.post(url, json=payload)
                 resp.raise_for_status()
-                content = resp.json()["choices"][0]["message"]["content"]
+                content = _extract_ollama_chat_content(resp.json())
                 return _strip_thinking(content)
         except httpx.TimeoutException as exc:
             logger.error(

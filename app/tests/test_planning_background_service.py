@@ -169,6 +169,86 @@ def test_process_session_preserves_operator_cancel_during_runtime_failure(
     assert db_session.query(PlanningArtifact).count() == 0
 
 
+def test_malformed_planning_synthesis_failure_writes_diagnostic_artifact(
+    db_session, monkeypatch
+):
+    project = _create_project(db_session, name="Malformed Synthesis Project")
+    session = PlanningSession(
+        project_id=project.id,
+        title="Malformed synthesis",
+        prompt="Plan a settings form with validation and tests.",
+        status="active",
+        source_brain="local",
+    )
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+
+    service = PlanningSessionService(db_session)
+    service._add_message(
+        session,
+        "user",
+        session.prompt,
+        metadata={"kind": "prompt", "skip_clarification": True},
+    )
+    db_session.commit()
+
+    compact_output = (
+        '{"requirements": "# Requirements",\n'
+        ' "design": "# Design",\n'
+        ' "implementation_plan" "missing colon",\n'
+        ' "planner_markdown": "## Task List"}'
+    )
+    outputs = [
+        '{"requirements": "# Requirements", "design" "missing colon"}',
+        compact_output,
+    ]
+
+    def fake_run_openclaw(
+        self,
+        prompt,
+        *,
+        source_brain="local",
+        timeout_seconds=None,
+    ):
+        return {
+            "status": "completed",
+            "output": outputs.pop(0),
+            "backend": "direct_ollama",
+            "model_family": "qwen3:8b-hybrid",
+        }
+
+    monkeypatch.setattr(PlanningSessionService, "_run_openclaw", fake_run_openclaw)
+
+    updated = service.process_session(session.id)
+
+    assert updated is not None
+    assert updated.status == "failed"
+    assert "Expecting ':' delimiter" in (updated.last_error or "")
+
+    diagnostic = (
+        db_session.query(PlanningArtifact)
+        .filter(
+            PlanningArtifact.planning_session_id == updated.id,
+            PlanningArtifact.artifact_type
+            == "planning_synthesis_parse_failure_diagnostic",
+        )
+        .one()
+    )
+    payload = json.loads(diagnostic.content)
+    assert payload["kind"] == "planning_synthesis_parse_failure"
+    assert payload["attempt"] == "compact_retry"
+    assert payload["backend"] == "direct_ollama"
+    assert payload["model_family"] == "qwen3:8b-hybrid"
+    assert payload["classification"] == "malformed_json_syntax"
+    assert payload["json_error_line"] == 3
+    assert payload["json_error_column"] > 0
+    assert payload["response_chars"] == len(compact_output)
+    assert len(payload["raw_sha256"]) == 64
+    assert "first_attempt_error" in payload
+    assert "missing colon" in payload["raw_excerpt_head"]
+
+
 def test_replan_recovery_uses_short_timeout_and_deterministic_fallback(
     db_session, monkeypatch
 ):

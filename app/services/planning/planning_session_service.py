@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -621,6 +622,13 @@ class PlanningSessionService:
                 except HTTPException:
                     raise
                 except Exception as exc:
+                    self._capture_finalization_parse_failure(
+                        session,
+                        result,
+                        exc,
+                        attempt="compact_retry",
+                        first_attempt_error=str(first_exc),
+                    )
                     session.status = "failed"
                     session.last_error = str(exc)
                     session.current_prompt_id = None
@@ -804,6 +812,80 @@ class PlanningSessionService:
             raise RuntimeError("Planning synthesis returned malformed artifact payload")
         return {key: str(parsed.get(key, "")).strip() for key in required_keys}
 
+    def _capture_finalization_parse_failure(
+        self,
+        session: PlanningSession,
+        result: dict[str, Any],
+        exc: Exception,
+        *,
+        attempt: str,
+        first_attempt_error: Optional[str] = None,
+    ) -> None:
+        output_text = self._extract_output_text(
+            result,
+            context="finalization_diagnostic",
+            allow_parse_fallback=False,
+        )
+        if not isinstance(output_text, str):
+            output_text = ""
+        cleaned = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", output_text.strip())
+        raw_digest = hashlib.sha256(output_text.encode("utf-8")).hexdigest()
+        metadata: dict[str, Any] = {
+            "kind": "planning_synthesis_parse_failure",
+            "prompt_phase": "planning_synthesis",
+            "attempt": attempt,
+            "backend": result.get("backend"),
+            "model_family": result.get("model_family"),
+            "status": result.get("status"),
+            "response_chars": len(output_text),
+            "cleaned_chars": len(cleaned),
+            "raw_sha256": raw_digest,
+            "parse_error": str(exc),
+            "classification": self._classify_finalization_parse_failure(cleaned, exc),
+            "raw_excerpt_head": self._redacted_diagnostic_excerpt(output_text[:1200]),
+            "raw_excerpt_tail": self._redacted_diagnostic_excerpt(output_text[-1200:]),
+        }
+        if first_attempt_error:
+            metadata["first_attempt_error"] = first_attempt_error[:500]
+        if isinstance(exc, json.JSONDecodeError):
+            metadata.update(
+                {
+                    "json_error_message": exc.msg,
+                    "json_error_line": exc.lineno,
+                    "json_error_column": exc.colno,
+                    "json_error_position": exc.pos,
+                }
+            )
+        self._append_artifact_version(
+            session,
+            artifact_type="planning_synthesis_parse_failure_diagnostic",
+            filename="planning_synthesis_parse_failure.json",
+            content=json.dumps(metadata, indent=2, sort_keys=True),
+        )
+
+    @staticmethod
+    def _classify_finalization_parse_failure(
+        cleaned_output: str, exc: Exception
+    ) -> str:
+        if not cleaned_output.strip():
+            return "empty_output"
+        if isinstance(exc, json.JSONDecodeError):
+            lowered = str(exc).lower()
+            near_end = exc.pos >= max(len(cleaned_output) - 5, 0)
+            if near_end or "unterminated" in lowered:
+                return "incomplete_or_truncated_json"
+            return "malformed_json_syntax"
+        return "malformed_artifact_payload"
+
+    @staticmethod
+    def _redacted_diagnostic_excerpt(text: str) -> str:
+        redacted = re.sub(
+            r"(?i)(api[_-]?key|token|secret|password)([\"'\s:=]+)([^\"'\s,}]+)",
+            r"\1\2[REDACTED]",
+            text,
+        )
+        return redacted
+
     def _build_synthesis_prompt(
         self, session: PlanningSession, project: Project
     ) -> str:
@@ -840,7 +922,22 @@ class PlanningSessionService:
 
     def _build_compact_synthesis_prompt(self, prompt: str) -> str:
         compact = optimize_prompt(prompt, max_tokens=700, hard_char_limit=2200)
-        compact += "\n\nKeep every artifact concise. Prefer short markdown sections and compact task descriptions."
+        compact += (
+            "\n\nKeep every artifact concise. Prefer short markdown sections and compact "
+            "task descriptions.\n\n"
+            "COMPACT RETRY OUTPUT CONTRACT:\n"
+            "Return exactly one top-level JSON object. The first non-whitespace "
+            "character must be { and the last non-whitespace character must be }.\n"
+            "The object must contain exactly these artifact keys: requirements, "
+            "design, implementation_plan, planner_markdown.\n"
+            "Do not return a top-level array. Do not return step objects, "
+            "task-plan arrays, implementation-plan arrays, or objects with "
+            "top-level step/title/description fields.\n"
+            "TASK_START lines are allowed only inside the planner_markdown string "
+            "value. They must not appear as top-level array items or top-level "
+            "step objects.\n"
+            "Do not include prose outside the JSON object."
+        )
         return compact
 
     def _heuristic_needs_clarification(self, session: PlanningSession) -> bool:
