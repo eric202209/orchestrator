@@ -1351,8 +1351,7 @@ def execute_planning_phase(
                 if blocking_repair_issues.get("empty_replace_old_text_steps"):
                     issue_fragments.append(
                         "replace_in_file without old text in steps "
-                        f"{blocking_repair_issues['empty_replace_old_text_steps'][:5]}; "
-                        "every replace_in_file op must specify literal old text to search for"
+                        f"{blocking_repair_issues['empty_replace_old_text_steps'][:5]}"
                     )
                 if blocking_repair_issues.get("test_assertion_loss_ops_steps"):
                     issue_fragments.append(
@@ -1935,7 +1934,7 @@ def execute_planning_phase(
                         "stale_replace_ops_steps",
                         "empty_replace_old_text_steps",
                     ):
-                        issue_fragments = list(issue_fragments) + list(
+                        issue_fragments.extend(
                             PlannerService.stale_replace_fallback_hints(
                                 ctx.orchestration_state.plan,
                                 ctx.orchestration_state.project_dir,
