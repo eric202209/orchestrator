@@ -25,6 +25,8 @@ SUPPORTED_CASES = frozenset(
         "checkpoint_resume_mid_task",
         "stale_replace_repair",
         "amd_tiny_source_rewrite",
+        "tiny_slug_source_rewrite",
+        "tiny_money_source_rewrite",
         "missing_report_artifact",
         "fake_verification_artifact_guard",
     }
@@ -385,6 +387,10 @@ def _first_env(names: tuple[str, ...]) -> str | None:
     return None
 
 
+def _env_flag_enabled(name: str) -> bool:
+    return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _run_context_metadata(
     *,
     repo_root: Path,
@@ -456,6 +462,9 @@ def _run_context_metadata(
         ),
         "evaluation_model": _first_env(("EVALUATION_MODEL",)),
         "evaluation_backend": _first_env(("EVALUATION_BACKEND",)),
+        "slot_based_planning_repair_experiment": _env_flag_enabled(
+            "SLOT_BASED_PLANNING_REPAIR_EXPERIMENT"
+        ),
         "repeat_seed": repeat_seed,
     }
 

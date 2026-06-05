@@ -243,6 +243,78 @@
       ]
     },
     {
+      "case_id": "tiny_slug_source_rewrite",
+      "category": "small_one_file_source_rewrite",
+      "phase12b_role": "diagnostic_only",
+      "purpose": "Measure whether slot-based planning repair generalizes to a bounded existing-source slug formatter rewrite without test creation.",
+      "workflow_stage": "implementation",
+      "operator_prompt": "Fix the existing slug formatter in src/tiny_slug/slug.py so the existing tests pass. Edit only that source file. Do not create new files. Do not edit tests. Verify with python3 -m pytest -q.",
+      "verifier": {
+        "command": "python3 -m pytest -q",
+        "timeout_seconds": 60
+      },
+      "required_files": [
+        "pyproject.toml",
+        "src/tiny_slug/slug.py",
+        "tests/test_slug.py"
+      ],
+      "expected_touched_files": [],
+      "allowed_touched_prefixes": [
+        "src/tiny_slug/slug.py"
+      ],
+      "forbidden_touched_prefixes": [
+        ".openclaw/",
+        "frontend/",
+        "backend/",
+        "tests/"
+      ],
+      "required_events": [
+        "task_started"
+      ],
+      "success_criteria": [
+        "verifier_exit_code_zero",
+        "task_completed_event_present",
+        "required_files_present",
+        "no_forbidden_touched_files"
+      ]
+    },
+    {
+      "case_id": "tiny_money_source_rewrite",
+      "category": "small_one_file_source_rewrite",
+      "phase12b_role": "diagnostic_only",
+      "purpose": "Measure whether slot-based planning repair generalizes to a bounded existing-source money formatter rewrite without test creation.",
+      "workflow_stage": "implementation",
+      "operator_prompt": "Fix the existing money formatter in src/tiny_money/money.py so the existing tests pass. Edit only that source file. Do not create new files. Do not edit tests. Verify with python3 -m pytest -q.",
+      "verifier": {
+        "command": "python3 -m pytest -q",
+        "timeout_seconds": 60
+      },
+      "required_files": [
+        "pyproject.toml",
+        "src/tiny_money/money.py",
+        "tests/test_money.py"
+      ],
+      "expected_touched_files": [],
+      "allowed_touched_prefixes": [
+        "src/tiny_money/money.py"
+      ],
+      "forbidden_touched_prefixes": [
+        ".openclaw/",
+        "frontend/",
+        "backend/",
+        "tests/"
+      ],
+      "required_events": [
+        "task_started"
+      ],
+      "success_criteria": [
+        "verifier_exit_code_zero",
+        "task_completed_event_present",
+        "required_files_present",
+        "no_forbidden_touched_files"
+      ]
+    },
+    {
       "case_id": "missing_report_artifact",
       "category": "completion_validation",
       "phase12b_role": "gate",

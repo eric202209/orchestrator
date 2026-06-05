@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any, Callable
 
 from app.services.orchestration.events.event_types import EventType
@@ -32,6 +34,13 @@ from app.services.orchestration.planning.repair_arbitration import (
 from app.services.orchestration.planning.repair_evidence import (
     write_failed_planning_repair_triplet,
 )
+from app.services.orchestration.planning.slot_repair import (
+    SlotRepairError,
+    SlotRepairTaskContext,
+    compile_slots_to_typed_plan,
+    extract_plan_slots,
+    merge_repair_slots,
+)
 from app.services.orchestration.planning.source_api_contract import (
     build_source_api_contract_capsule,
 )
@@ -39,6 +48,10 @@ from app.services.orchestration.state.persistence import append_orchestration_ev
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.prompt_templates import OrchestrationStatus
+
+
+_SLOT_REPAIR_EXPERIMENT_ENV = "SLOT_BASED_PLANNING_REPAIR_EXPERIMENT"
+_SLOT_REPAIR_VERIFY = "python3 -m pytest -q"
 
 
 def arbitrate_planning_repair_candidate(
@@ -64,6 +77,12 @@ def arbitrate_planning_repair_candidate(
             "planning repair arbitration: %s",
             exc,
         )
+    slot_repair_diagnostics = _maybe_apply_slot_repair_experiment(
+        ctx=ctx,
+        retry_state=retry_state,
+        previous_plan=previous_plan,
+        output_text=output_text,
+    )
     arbitration = classify_planning_repair_candidate(
         previous_plan=previous_plan,
         repaired_plan=ctx.orchestration_state.plan,
@@ -71,6 +90,17 @@ def arbitrate_planning_repair_candidate(
         source_api_capsule=source_api_capsule,
         immediate_repair_issues=immediate_repair_issues,
     )
+    arbitration["slot_repair_experiment"] = {
+        **slot_repair_diagnostics,
+        "arbitration_result": arbitration.get("outcome")
+        or arbitration.get("status")
+        or "classified",
+        "arbitration_source_materialization_status": (
+            (arbitration.get("source_materialization") or {}).get("status")
+            if isinstance(arbitration.get("source_materialization"), dict)
+            else None
+        ),
+    }
     arbitration["repair_reason"] = retry_state.last_repair_reason
     arbitration["repair_attempts"] = retry_state.consecutive_failures
     invalid_python_repair_candidate = "invalid_output" in arbitration.get(
@@ -604,6 +634,181 @@ def _emit_planning_repair_arbitration(
             "arbitration event: %s",
             exc,
         )
+
+
+def _maybe_apply_slot_repair_experiment(
+    *,
+    ctx: OrchestrationRunContext,
+    retry_state: _PlanningRetryState,
+    previous_plan: Any,
+    output_text: str,
+) -> dict[str, Any]:
+    enabled = _env_flag_enabled(_SLOT_REPAIR_EXPERIMENT_ENV)
+    diagnostics: dict[str, Any] = {
+        "slot_repair_experiment_enabled": enabled,
+        "slot_merge_attempted": False,
+        "slot_merge_applied": False,
+        "slot_merge_rejected": False,
+        "slot_merge_rejected_reason": None,
+        "preserved_source_materialization": False,
+        "preserved_verification": False,
+        "compiled_plan_validator_result": "not_run",
+    }
+    if not enabled:
+        return diagnostics
+
+    diagnostics["slot_merge_attempted"] = True
+    eligibility = _slot_repair_experiment_eligibility(ctx)
+    diagnostics["eligibility"] = eligibility
+    if not eligibility.get("eligible"):
+        diagnostics["slot_merge_rejected"] = True
+        diagnostics["slot_merge_rejected_reason"] = eligibility.get("reason")
+        return diagnostics
+
+    try:
+        task_context = _slot_repair_task_context(ctx)
+        previous_slots = extract_plan_slots(previous_plan, task_context)
+        candidate_slots = extract_plan_slots(ctx.orchestration_state.plan, task_context)
+        diagnostics.update(
+            {
+                "previous_slots_rejected": previous_slots.rejected,
+                "previous_slot_rejection_reasons": list(
+                    previous_slots.rejection_reasons
+                )[:8],
+                "candidate_slots_rejected": candidate_slots.rejected,
+                "candidate_slot_rejection_reasons": list(
+                    candidate_slots.rejection_reasons
+                )[:8],
+                "previous_source_materialization": previous_slots.target_file,
+                "candidate_source_materialization": candidate_slots.target_file,
+                "previous_verification": previous_slots.verification_command,
+                "candidate_verification": candidate_slots.verification_command,
+            }
+        )
+        merged_slots = merge_repair_slots(
+            previous_slots,
+            candidate_slots,
+            retry_state.last_repair_reason or "",
+        )
+        compiled_plan = compile_slots_to_typed_plan(merged_slots)
+        diagnostics["preserved_source_materialization"] = bool(
+            previous_slots.source_op
+            and merged_slots.source_op
+            and previous_slots.source_op.get("path")
+            == merged_slots.source_op.get("path")
+        )
+        diagnostics["preserved_verification"] = bool(
+            previous_slots.verification_command
+            and merged_slots.verification_command == previous_slots.verification_command
+        )
+    except SlotRepairError as exc:
+        diagnostics["slot_merge_rejected"] = True
+        diagnostics["slot_merge_rejected_reason"] = str(exc)
+        return diagnostics
+    except Exception as exc:
+        diagnostics["slot_merge_rejected"] = True
+        diagnostics["slot_merge_rejected_reason"] = f"slot_repair_error: {exc}"
+        return diagnostics
+
+    verdict = ValidatorService.validate_plan(
+        compiled_plan,
+        output_text=output_text,
+        task_prompt=ctx.prompt,
+        execution_profile=ctx.execution_profile,
+        project_dir=ctx.orchestration_state.project_dir,
+        title=ctx.task.title if ctx.task else None,
+        description=ctx.task.description if ctx.task else None,
+        validation_severity=ctx.validation_severity,
+        workflow_profile=ctx.workflow_profile,
+        workflow_stage=ctx.workflow_stage,
+        is_first_ordered_task=_is_first_ordered_task(ctx.task),
+    )
+    diagnostics["compiled_plan_validator_result"] = (
+        "accepted" if verdict.accepted else "rejected"
+    )
+    diagnostics["compiled_plan_validator_reasons"] = list(verdict.reasons or [])[:8]
+    if not verdict.accepted:
+        diagnostics["slot_merge_rejected"] = True
+        diagnostics["slot_merge_rejected_reason"] = "compiled_plan_validator_rejected"
+        return diagnostics
+
+    ctx.orchestration_state.plan = compiled_plan
+    diagnostics["slot_merge_applied"] = True
+    return diagnostics
+
+
+def _env_flag_enabled(name: str) -> bool:
+    return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _slot_repair_experiment_eligibility(
+    ctx: OrchestrationRunContext,
+) -> dict[str, Any]:
+    project_dir = Path(str(ctx.orchestration_state.project_dir or ""))
+    prompt = str(ctx.prompt or "")
+    if _SLOT_REPAIR_VERIFY not in prompt:
+        return {"eligible": False, "reason": "prompt_missing_known_verification"}
+    required_phrases = (
+        "Edit only that source file",
+        "Do not create new files",
+        "Do not edit tests",
+    )
+    missing_phrases = [phrase for phrase in required_phrases if phrase not in prompt]
+    if missing_phrases:
+        return {
+            "eligible": False,
+            "reason": "prompt_missing_constrained_task_language",
+            "missing_phrases": missing_phrases,
+        }
+    try:
+        source_files = sorted(
+            path.relative_to(project_dir).as_posix()
+            for path in (project_dir / "src").rglob("*.py")
+            if path.name != "__init__.py"
+        )
+        test_files = sorted(
+            path.relative_to(project_dir).as_posix()
+            for path in (project_dir / "tests").rglob("test_*.py")
+        )
+    except OSError as exc:
+        return {"eligible": False, "reason": f"workspace_shape_scan_failed: {exc}"}
+    if len(source_files) != 1:
+        return {
+            "eligible": False,
+            "reason": "source_shape_not_one_existing_file",
+            "source_files": source_files[:20],
+        }
+    if not test_files:
+        return {"eligible": False, "reason": "existing_tests_missing"}
+    target_file = source_files[0]
+    if target_file not in prompt:
+        return {"eligible": False, "reason": "prompt_missing_allowed_target"}
+    return {
+        "eligible": True,
+        "reason": "constrained_one_file_source_rewrite",
+        "allowed_target_files": [target_file],
+        "allowed_test_files": test_files,
+        "allowed_verification_commands": [_SLOT_REPAIR_VERIFY],
+    }
+
+
+def _slot_repair_task_context(ctx: OrchestrationRunContext) -> SlotRepairTaskContext:
+    eligibility = _slot_repair_experiment_eligibility(ctx)
+    target_file = str((eligibility.get("allowed_target_files") or [""])[0])
+    test_files = tuple(
+        str(path) for path in eligibility.get("allowed_test_files") or ()
+    )
+    project_dir = Path(str(ctx.orchestration_state.project_dir or ""))
+    current_content = (project_dir / target_file).read_text(encoding="utf-8")
+    return SlotRepairTaskContext(
+        allowed_target_files=(target_file,),
+        allowed_verification_commands=(_SLOT_REPAIR_VERIFY,),
+        allow_test_changes=False,
+        current_file_contents={target_file: current_content},
+        bootstrap_required_source_files=(target_file,),
+        bootstrap_required_test_files=test_files,
+        bootstrap_required_verification=(_SLOT_REPAIR_VERIFY,),
+    )
 
 
 def _materialization_regression_paths(arbitration: dict[str, Any]) -> list[str]:

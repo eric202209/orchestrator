@@ -20,9 +20,26 @@ def render(payload: Dict[str, Any]) -> str:
     return f"{_PREFIX}{json.dumps(payload, separators=(',', ':'))}{_SUFFIX}"
 
 
-def parse(output: str) -> Optional[Dict[str, Any]]:
+def _coerce_output_text(output: Any) -> str:
+    """Extract text-like content before applying the HITL sentinel regex."""
+    if output is None:
+        return ""
+    if isinstance(output, str):
+        return output
+    if isinstance(output, list):
+        return "\n".join(text for item in output if (text := _coerce_output_text(item)))
+    if isinstance(output, dict):
+        for key in ("text", "output_text", "output", "content", "message"):
+            text = _coerce_output_text(output.get(key))
+            if text:
+                return text
+        return ""
+    return ""
+
+
+def parse(output: Any) -> Optional[Dict[str, Any]]:
     """Return parsed payload dict if *output* contains HITL sentinel, else None."""
-    m = _RE.search(output or "")
+    m = _RE.search(_coerce_output_text(output))
     if not m:
         return None
     try:

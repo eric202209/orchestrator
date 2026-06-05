@@ -29,10 +29,14 @@ class TestRender:
 class TestParse:
     def test_returns_none_for_empty(self):
         assert parse("") is None
-        assert parse(None) is None  # type: ignore[arg-type]
+        assert parse(None) is None
 
     def test_returns_none_when_no_sentinel(self):
         assert parse("some normal agent output") is None
+
+    def test_returns_none_for_structured_output_without_text(self):
+        assert parse({"metadata": {"status": "ok"}}) is None
+        assert parse([{"metadata": {"status": "ok"}}]) is None
 
     def test_extracts_approval(self):
         sentinel = '<<<HITL_REQUEST:{"intervention_type":"approval","prompt":"Delete prod?","context":{}}>>>'
@@ -48,6 +52,15 @@ class TestParse:
         result = parse(output)
         assert result is not None
         assert result["intervention_type"] == "approval"
+
+    def test_extracts_from_dict_text_field(self):
+        payload = {"intervention_type": "approval", "prompt": "proceed?", "context": {}}
+        assert parse({"text": render(payload)}) == payload
+
+    def test_extracts_from_list_text_parts(self):
+        payload = {"intervention_type": "guidance", "prompt": "path?", "context": {}}
+        output = [{"text": "first"}, {"content": render(payload)}]
+        assert parse(output) == payload
 
     def test_returns_none_for_invalid_json(self):
         assert parse("<<<HITL_REQUEST:{bad json}>>>") is None

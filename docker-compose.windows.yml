@@ -42,6 +42,7 @@ services:
       - ORCHESTRATOR_IMAGE_TAG=${ORCHESTRATOR_IMAGE_TAG:-orchestrator:local}
       - ORCHESTRATOR_IMAGE_ID=${ORCHESTRATOR_IMAGE_ID:-unknown}
       - ORCHESTRATOR_CONFIG_SOURCE=${ORCHESTRATOR_CONFIG_SOURCE:-docker-compose.windows+.env}
+      - SLOT_BASED_PLANNING_REPAIR_EXPERIMENT=${SLOT_BASED_PLANNING_REPAIR_EXPERIMENT:-false}
     depends_on:
       - redis
       - qdrant
@@ -86,6 +87,7 @@ services:
       - ORCHESTRATOR_IMAGE_TAG=${ORCHESTRATOR_IMAGE_TAG:-orchestrator:local}
       - ORCHESTRATOR_IMAGE_ID=${ORCHESTRATOR_IMAGE_ID:-unknown}
       - ORCHESTRATOR_CONFIG_SOURCE=${ORCHESTRATOR_CONFIG_SOURCE:-docker-compose.windows+.env}
+      - SLOT_BASED_PLANNING_REPAIR_EXPERIMENT=${SLOT_BASED_PLANNING_REPAIR_EXPERIMENT:-false}
     depends_on:
       - redis
       - qdrant

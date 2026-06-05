@@ -54,8 +54,25 @@ _GENERIC_SYSTEM = """You are a helpful AI assistant integrated into a developmen
 Answer concisely and accurately."""
 
 
-def _strip_thinking(text: str) -> str:
-    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+def _normalize_chat_content_value(value: Any) -> str:
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("text", "output_text", "content"):
+            extracted = _normalize_chat_content_value(value.get(key))
+            if extracted:
+                return extracted
+        return ""
+    if isinstance(value, list):
+        return "".join(_normalize_chat_content_value(item) for item in value)
+    return ""
+
+
+def _strip_thinking(text: Any) -> str:
+    normalized = _normalize_chat_content_value(text)
+    return re.sub(r"<think>.*?</think>", "", normalized, flags=re.DOTALL).strip()
 
 
 class OpenAIChatCompletionsRuntime:
@@ -301,16 +318,7 @@ def _extract_chat_completion_content(body: Any) -> str:
     message = first.get("message")
     if not isinstance(message, dict):
         return ""
-    content = message.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "".join(
-            item["text"]
-            for item in content
-            if isinstance(item, dict) and isinstance(item.get("text"), str)
-        )
-    return ""
+    return _normalize_chat_content_value(message.get("content"))
 
 
 def create_runtime(*args, **kwargs) -> OpenAIChatCompletionsRuntime:
