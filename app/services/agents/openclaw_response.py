@@ -119,6 +119,20 @@ def text_contains_model_content(text: str) -> bool:
         return False
 
 
+def extract_payloads_text(payloads: list[Any]) -> str:
+    """Extract model-visible text from OpenClaw payload objects."""
+
+    parts = [
+        text
+        for payload in payloads
+        if isinstance(payload, dict)
+        if (text := extract_structured_text(payload))
+    ]
+    if parts:
+        return "\n".join(parts)
+    return extract_structured_text(payloads)
+
+
 def channel_metadata(stdout_text: str, stderr_text: str) -> Dict[str, Any]:
     stdout_has_content = bool((stdout_text or "").strip())
     stderr_has_content = bool((stderr_text or "").strip())
@@ -218,7 +232,7 @@ def parse_openclaw_response(result: Any, log_entry) -> Dict[str, Any]:
         if isinstance(output_data, dict) and "payloads" in output_data:
             payloads = output_data.get("payloads", [])
             if isinstance(payloads, list) and len(payloads) > 0:
-                output_text = payloads[0].get("text", "")
+                output_text = extract_payloads_text(payloads)
             else:
                 output_text = extract_structured_text(output_data) or json.dumps(
                     output_data
