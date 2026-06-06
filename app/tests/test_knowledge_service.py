@@ -417,3 +417,246 @@ def test_max_total_chars_budget_enforced(svc, db):
         )
     total_chars = sum(len(ref.content) for ref in ctx.retrieved_items)
     assert total_chars <= 2000
+
+
+# ---------------------------------------------------------------------------
+# Budget fix: truncated-length accounting and continue-not-break
+# ---------------------------------------------------------------------------
+
+
+def test_budget_uses_truncated_length_not_raw_length(svc, db):
+    """Item whose raw length exceeds remaining budget but truncated length fits is included."""
+    # guide1 fills 1006 raw chars (≤ 800 truncated → 800 effective)
+    guide1 = _make_item(
+        db,
+        title="Guide First",
+        content="A" * 1006,
+        applies_to=["planning"],
+        knowledge_type=KnowledgeType.format_guide,
+        priority=10,
+    )
+    # guide2: raw=1795, truncated=800 — previously dropped by raw-length check (800+1795>2000)
+    # With fix: 800+800=1600 ≤ 2000 → must be included
+    guide2 = _make_item(
+        db,
+        title="Guide Second Large Raw",
+        content="B" * 1795,
+        applies_to=["planning"],
+        knowledge_type=KnowledgeType.format_guide,
+        priority=9,
+    )
+    with patch.object(svc, "_embed", return_value=_FAKE_VECTOR):
+        svc.ingest(guide1)
+        svc.ingest(guide2)
+        ctx = svc.retrieve(
+            query="format",
+            trigger_phase="planning",
+            knowledge_types=[KnowledgeType.format_guide],
+            top_k=10,
+            db=db,
+        )
+    titles = {ref.title for ref in ctx.retrieved_items}
+    assert "Guide Second Large Raw" in titles, (
+        "Item with raw_len=1795 (truncated=800) must fit after an 1006-char item "
+        "when budget=2000; was incorrectly dropped by raw-length accounting"
+    )
+
+
+def test_oversized_item_after_truncation_is_still_excluded(svc, db):
+    """Item whose truncated length still overflows the remaining budget is excluded."""
+    # guide1: raw=1300, truncated=800 → effective=800
+    _make_item(
+        db,
+        title="Guide Fills Most Budget",
+        content="A" * 1300,
+        applies_to=["planning"],
+        knowledge_type=KnowledgeType.format_guide,
+        priority=10,
+    )
+    # guide2: raw=1500, truncated=800 → 800+800=1600 ≤ 2000 → fits
+    _make_item(
+        db,
+        title="Guide Also Fits",
+        content="B" * 1500,
+        applies_to=["planning"],
+        knowledge_type=KnowledgeType.format_guide,
+        priority=9,
+    )
+    # guide3: raw=900, truncated=800 → 1600+800=2400 > 2000 → must be excluded
+    excluded = _make_item(
+        db,
+        title="Guide Too Large After Two",
+        content="C" * 900,
+        applies_to=["planning"],
+        knowledge_type=KnowledgeType.format_guide,
+        priority=8,
+    )
+    with patch.object(svc, "_has_indexed_points", return_value=False):
+        ctx = svc.retrieve(
+            query="format",
+            trigger_phase="planning",
+            knowledge_types=[KnowledgeType.format_guide],
+            top_k=10,
+            db=db,
+        )
+    titles = {ref.title for ref in ctx.retrieved_items}
+    assert excluded.title not in titles
+
+
+def test_later_small_item_included_after_oversized_item_skipped(svc, db):
+    """A small item after a too-large item is still included (continue, not break)."""
+    # guide1: raw=1006, truncated=800 → effective=800, total=800
+    _make_item(
+        db,
+        title="Guide One",
+        content="A" * 1006,
+        applies_to=["planning"],
+        knowledge_type=KnowledgeType.format_guide,
+        priority=10,
+    )
+    # guide2: raw=1795, truncated=800 → total would be 1600 ≤ 2000 → added, total=1600
+    _make_item(
+        db,
+        title="Guide Two Large",
+        content="B" * 1795,
+        applies_to=["planning"],
+        knowledge_type=KnowledgeType.format_guide,
+        priority=9,
+    )
+    # guide3: raw=276 → total would be 1876 ≤ 2000 → must be included
+    small = _make_item(
+        db,
+        title="Guide Three Small",
+        content="C" * 276,
+        applies_to=["planning"],
+        knowledge_type=KnowledgeType.format_guide,
+        priority=8,
+    )
+    with patch.object(svc, "_embed", return_value=_FAKE_VECTOR):
+        svc.ingest(
+            db.query(KnowledgeItem).filter(KnowledgeItem.title == "Guide One").first()
+        )
+        svc.ingest(
+            db.query(KnowledgeItem)
+            .filter(KnowledgeItem.title == "Guide Two Large")
+            .first()
+        )
+        svc.ingest(small)
+        ctx = svc.retrieve(
+            query="format",
+            trigger_phase="planning",
+            knowledge_types=[KnowledgeType.format_guide],
+            top_k=10,
+            db=db,
+        )
+    titles = {ref.title for ref in ctx.retrieved_items}
+    assert "Guide Three Small" in titles, (
+        "Small item after oversized item must not be discarded; "
+        "budget loop must use continue not break"
+    )
+
+
+def test_total_budget_still_enforced_after_fix(svc, db):
+    """Total injected chars must not exceed KNOWLEDGE_MAX_TOTAL_CHARS after fix."""
+    for i in range(3):
+        _make_item(
+            db,
+            title=f"Budget Item {i}",
+            content="X" * 900,
+            applies_to=["planning"],
+            knowledge_type=KnowledgeType.format_guide,
+            priority=10 - i,
+        )
+    with patch.object(svc, "_has_indexed_points", return_value=False):
+        ctx = svc.retrieve(
+            query="format",
+            trigger_phase="planning",
+            knowledge_types=[KnowledgeType.format_guide],
+            top_k=10,
+            db=db,
+        )
+    total_injected = sum(len(ref.content) for ref in ctx.retrieved_items)
+    assert total_injected <= 2000
+
+
+def test_static_site_guide_fits_after_format_guide_in_2000_char_budget(svc, db):
+    """Reproduces the Garden Story production scenario.
+
+    A 1006-char format guide is sorted first (format_guide rank=2 < task_example rank=4).
+    The Static Site Task Planning Guide has raw_len=1795 but truncated_len=800.
+    With the fix, both fit in the 2000-char budget: 800+800=1600.
+    """
+    format_guide = _make_item(
+        db,
+        title="Workspace Root Never Nested",
+        content="W" * 1006,
+        applies_to=["planning"],
+        knowledge_type=KnowledgeType.format_guide,
+        priority=10,
+    )
+    static_site_guide = _make_item(
+        db,
+        title="Static Site Task Planning Guide",
+        content="S" * 1795,
+        applies_to=["planning"],
+        knowledge_type=KnowledgeType.task_example,
+        tags=["static-site", "html", "css"],
+        priority=8,
+    )
+    with patch.object(svc, "_embed", return_value=_FAKE_VECTOR):
+        svc.ingest(format_guide)
+        svc.ingest(static_site_guide)
+        ctx = svc.retrieve(
+            query="Build a plain static site with index.html and css/style.css",
+            trigger_phase="planning",
+            knowledge_types=[KnowledgeType.format_guide, KnowledgeType.task_example],
+            top_k=10,
+            db=db,
+        )
+    titles = {ref.title for ref in ctx.retrieved_items}
+    assert "Static Site Task Planning Guide" in titles, (
+        "Static Site Guide (raw=1795, truncated=800) must be included alongside "
+        "the 1006-char format guide; total effective size 1600 ≤ 2000"
+    )
+    assert "Workspace Root Never Nested" in titles
+
+
+def test_budget_ordering_unchanged_type_rank_still_applies(svc, db):
+    """format_guide (rank=2) still sorts before task_example (rank=4) at equal priority."""
+    task_ex = _make_item(
+        db,
+        title="Task Example Item",
+        content="T" * 100,
+        applies_to=["planning"],
+        knowledge_type=KnowledgeType.task_example,
+        priority=5,
+    )
+    fmt_guide = _make_item(
+        db,
+        title="Format Guide Item",
+        content="F" * 100,
+        applies_to=["planning"],
+        knowledge_type=KnowledgeType.format_guide,
+        priority=5,
+    )
+    with patch.object(svc, "_has_indexed_points", return_value=False):
+        ctx = svc.retrieve(
+            query="format guide",
+            trigger_phase="planning",
+            knowledge_types=[KnowledgeType.format_guide, KnowledgeType.task_example],
+            top_k=10,
+            db=db,
+        )
+    # format_guide must appear before task_example
+    types_in_order = [ref.knowledge_type for ref in ctx.retrieved_items]
+    fmt_pos = next(
+        (i for i, t in enumerate(types_in_order) if t == KnowledgeType.format_guide),
+        None,
+    )
+    task_pos = next(
+        (i for i, t in enumerate(types_in_order) if t == KnowledgeType.task_example),
+        None,
+    )
+    assert fmt_pos is not None
+    assert task_pos is not None
+    assert fmt_pos < task_pos, "format_guide must still rank before task_example"

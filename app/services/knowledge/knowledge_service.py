@@ -356,13 +356,17 @@ class KnowledgeService:
         scored = sorted(scored, key=sort_key)
         # Apply item cap
         scored = scored[: settings.KNOWLEDGE_MAX_ITEMS]
-        # Apply total char cap — drop trailing items (never mid-item)
+        # Apply total char cap using the injected (truncated) size, not raw size.
+        # _build_context calls _truncate which caps each item at KNOWLEDGE_CONTENT_MAX_CHARS,
+        # so budget accounting must use the same ceiling to avoid false overflows.
+        # Use continue (not break) so that one oversized item does not discard later
+        # smaller items that would fit.
         total = 0
         result = []
         for pair in scored:
-            item_len = len(pair[0].content)
+            item_len = min(len(pair[0].content), settings.KNOWLEDGE_CONTENT_MAX_CHARS)
             if total + item_len > settings.KNOWLEDGE_MAX_TOTAL_CHARS and result:
-                break
+                continue
             result.append(pair)
             total += item_len
         return result
