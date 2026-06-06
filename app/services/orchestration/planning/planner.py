@@ -899,6 +899,14 @@ class PlannerService:
         # Reject shell chaining — && and || are never needed in a single verification
         if re.search(r"&&|\|\|", text):
             return False
+        # Do not promote python -c assertion forms from verification into commands.
+        # When a step has structured ops (replace_in_file / write_file), the write
+        # intent is already covered; the assertion is a pre-check annotation only.
+        # If the model places assert directly in commands[], the validator still rejects it.
+        if text.startswith(("python -c ", "python3 -c ")) and re.search(
+            r"\bassert\s", text
+        ):
+            return False
         # For non-python-c commands, also reject ; | > < ` $( to prevent injection
         if not text.startswith(("python -c ", "python3 -c ")):
             if re.search(r";|\|(?!\|)|>|<|`|\$\(", text):
