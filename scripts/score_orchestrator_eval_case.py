@@ -12,6 +12,7 @@ import argparse
 from collections import Counter
 from datetime import UTC, datetime
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -21,9 +22,87 @@ from typing import Any
 
 EVENT_DIR = ".openclaw/events"
 
+_TIMEOUT_ENV_KEYS = (
+    "PLANNING_REPAIR_TIMEOUT_SECONDS",
+    "PLANNING_SYNTHESIS_TIMEOUT_SECONDS",
+    "REPLAN_SYNTHESIS_TIMEOUT_SECONDS",
+    "OLLAMA_PLANNING_TIMEOUT_SECONDS",
+    "PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS",
+    "ORCHESTRATOR_OPENCLAW_PLANNING_LOCK_ACQUIRE_TIMEOUT_SECONDS",
+)
+_ABORTED_STATUSES = frozenset({"paused", "stopped", "failed", "cancelled", "canceled"})
+
 
 def _json_default(value: Any) -> str:
     return str(value)
+
+
+def _is_session_aborted(session_status: str | None, failure_category: str | None) -> bool:
+    """Return True when the API reports a definitively-failed terminal state."""
+    return (
+        str(session_status or "").lower() in _ABORTED_STATUSES
+        and bool(str(failure_category or "").strip())
+    )
+
+
+def _scorer_env_summary(project_dir: Path) -> dict[str, Any]:
+    """Collect environment metadata at scoring time for the report."""
+    git_sha: str | None = None
+    try:
+        repo_root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            git_sha = result.stdout.strip() or None
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    worker_pid: int | None = None
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "celery"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            pids = [p.strip() for p in result.stdout.splitlines() if p.strip()]
+            worker_pid = int(pids[0]) if pids else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        pass
+
+    timeout_env = {
+        k: os.environ[k] for k in _TIMEOUT_ENV_KEYS if k in os.environ
+    }
+    backend = (
+        os.environ.get("ORCHESTRATOR_AGENT_BACKEND")
+        or os.environ.get("AGENT_BACKEND")
+    )
+    model = (
+        os.environ.get("ORCHESTRATOR_AGENT_MODEL_FAMILY")
+        or os.environ.get("AGENT_MODEL")
+        or os.environ.get("OLLAMA_AGENT_MODEL")
+    )
+    runtime_profile = (
+        os.environ.get("ORCHESTRATOR_RUNTIME_PROFILE")
+        or os.environ.get("RUNTIME_PROFILE")
+    )
+    return {
+        "git_sha": git_sha,
+        "backend": backend,
+        "model": model,
+        "worker_pid": worker_pid,
+        "workspace_root": str(project_dir.parent),
+        "runtime_profile": runtime_profile,
+        "timeout_env": timeout_env,
+    }
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -762,7 +841,12 @@ def _derive_clean_success(
     scope: dict[str, Any],
     event_summary: dict[str, Any],
     snapshot_summary: dict[str, Any],
+    session_status: str | None = None,
+    failure_category: str | None = None,
 ) -> tuple[bool, list[str]]:
+    if _is_session_aborted(session_status, failure_category):
+        category = str(failure_category or "").strip()
+        return False, [f"session_aborted:{category}"]
     blockers: list[str] = []
     if not verifier.get("passed"):
         blockers.append("verifier_failed")
@@ -808,6 +892,7 @@ def _score_case(
         python_executable=python_executable,
     )
     required_events = _required_event_results(case, event_summary["event_type_counts"])
+    session_aborted = _is_session_aborted(session_status, failure_category)
     clean_success, blockers = _derive_clean_success(
         case=case,
         verifier=verifier,
@@ -815,6 +900,8 @@ def _score_case(
         scope=scope,
         event_summary=event_summary,
         snapshot_summary=snapshot_summary,
+        session_status=session_status,
+        failure_category=failure_category,
     )
     path_observability = _path_observability(
         case=case,
@@ -827,6 +914,11 @@ def _score_case(
         files=files,
         scope=scope,
     )
+    if session_aborted:
+        path_observability = {
+            **path_observability,
+            "primary_failure_phase": "session_aborted",
+        }
     hallucination_signals = {
         "unexpected_touched_files": scope["unexpected_touched_files"],
         "intent_outcome_mismatch_count": event_summary["intent_outcome_mismatch_count"],
@@ -857,6 +949,7 @@ def _score_case(
             "event_journal_path": str(events_path),
             "state_snapshot_path": str(snapshots_path),
         },
+        "env_summary": _scorer_env_summary(project_dir),
         "result": {
             "clean_success": clean_success,
             "blockers": blockers,
@@ -874,6 +967,7 @@ def _score_case(
             ],
             "session_status": session_status,
             "session_failure_category": failure_category,
+            "session_aborted": session_aborted,
         },
         "path_observability": path_observability,
         "verifier": verifier,

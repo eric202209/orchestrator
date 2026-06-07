@@ -432,7 +432,16 @@ def _resolve_workspace_root(
             resp = _request_json("GET", base_url, "settings", token)
             ws_root = str((resp.get("system") or {}).get("workspace_root") or "").strip()
             if ws_root:
-                return Path(ws_root)
+                ws_path = Path(ws_root)
+                if ws_path.exists():
+                    return ws_path
+                print(
+                    f"WARNING: settings API returned workspace_root={ws_root!r} "
+                    "but that path does not exist on this host. "
+                    "Pass --workspace-root explicitly or set OPENCLAW_WORKSPACE_ROOT "
+                    "to avoid scoring against a stale or foreign workspace path.",
+                    file=sys.stderr,
+                )
         except SystemExit:
             pass
     raise SystemExit(
@@ -514,6 +523,30 @@ def _preflight_check_workspace_root(workspace_root: Path) -> None:
         ) from None
 
 
+def _preflight_warn_token_lifetime(token: str, timeout_seconds: int) -> None:
+    """Warn if the token's remaining lifetime is shorter than the eval timeout."""
+    try:
+        import base64
+        parts = token.split(".")
+        if len(parts) < 2:
+            return
+        padded = parts[1] + "=" * (4 - len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded))
+        exp = int(payload.get("exp") or 0)
+        if not exp:
+            return
+        remaining = exp - int(time.time())
+        if remaining < timeout_seconds:
+            print(
+                f"WARNING: token expires in {remaining}s but --timeout-seconds={timeout_seconds}. "
+                "The token may expire during polling and halt the eval mid-run. "
+                "Generate a longer-lived token with: python scripts/create_access_token.py <email>",
+                file=sys.stderr,
+            )
+    except Exception:
+        pass
+
+
 def _preflight_warn_stale_slots() -> None:
     """Warn if Redis backend slot keys are non-empty."""
     redis_cli = shutil.which("redis-cli")
@@ -556,12 +589,38 @@ def _preflight_warn_stale_slots() -> None:
         )
 
 
-def _preflight_run(base_url: str, token: str, workspace_root: Path) -> None:
+def _preflight_warn_stale_workers() -> None:
+    """Warn if no celery worker process is detected."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "celery"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode != 0:
+            print(
+                "WARNING: No celery worker process detected (pgrep -f celery returned nothing). "
+                "Eval tasks will queue in Redis but will not execute. "
+                "Start a worker with: celery -A app.celery_app worker --loglevel=info",
+                file=sys.stderr,
+            )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _preflight_run(
+    base_url: str, token: str, workspace_root: Path, timeout_seconds: int = 0
+) -> None:
     """Run all pre-flight checks. Any hard failure exits before creating sessions."""
     _preflight_check_api_and_redis(base_url)
     _preflight_check_token(base_url, token)
     _preflight_check_workspace_root(workspace_root)
     _preflight_warn_stale_slots()
+    _preflight_warn_stale_workers()
+    if timeout_seconds > 0:
+        _preflight_warn_token_lifetime(token, timeout_seconds)
 
 
 def _run_context_metadata(
@@ -1135,7 +1194,7 @@ def main() -> int:
     args.workspace_root = _resolve_workspace_root(
         args.workspace_root, args.api_base_url, token
     )
-    _preflight_run(args.api_base_url, token, args.workspace_root)
+    _preflight_run(args.api_base_url, token, args.workspace_root, args.timeout_seconds)
 
     run_timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     run_context = _run_context_metadata(
