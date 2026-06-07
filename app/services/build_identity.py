@@ -11,7 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.config import BASE_DIR, settings
+from app.config import BASE_DIR, LEGACY_ENV_ALIASES, settings
 from app.db_migrations import MIGRATIONS
 from app.services.workspace.system_settings import (
     get_effective_agent_backend,
@@ -73,6 +73,60 @@ def _stale_container_check(build_sha: str, repo_sha: Optional[str]) -> str:
     if build_sha == UNKNOWN or not repo_sha:
         return UNKNOWN
     return "ok" if build_sha == repo_sha else "stale"
+
+
+def _stale_container_warning(
+    stale_check: str, build_sha: str, repo_sha: Optional[str]
+) -> Optional[str]:
+    if stale_check != "stale":
+        return None
+    return (
+        f"Container image SHA ({build_sha}) differs from repo HEAD "
+        f"({repo_sha or 'unknown'}). "
+        "Running code may not match the deployed image. "
+        "Rebuild or redeploy to synchronize."
+    )
+
+
+def _timeout_settings() -> Dict[str, Any]:
+    return {
+        "planning_repair_timeout_seconds": settings.PLANNING_REPAIR_TIMEOUT_SECONDS,
+        "planning_synthesis_timeout_seconds": settings.PLANNING_SYNTHESIS_TIMEOUT_SECONDS,
+        "replan_synthesis_timeout_seconds": settings.REPLAN_SYNTHESIS_TIMEOUT_SECONDS,
+        "ollama_planning_timeout_seconds": settings.OLLAMA_PLANNING_TIMEOUT_SECONDS,
+        "planning_direct_local_openclaw_timeout_seconds": (
+            settings.PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS
+        ),
+    }
+
+
+_PRIMARY_CONFIG_KEYS = (
+    "AGENT_BACKEND",
+    "AGENT_MODEL",
+    "PLANNING_BACKEND",
+    "EXECUTION_BACKEND",
+    "DEBUG_REPAIR_BACKEND",
+    "REPAIR_BACKEND",
+    "PLANNING_REPAIR_MODEL",
+    "DEBUG_REPAIR_MODEL",
+    "RUNTIME_PROFILE",
+    "OLLAMA_AGENT_MODEL",
+)
+
+
+def _config_source_summary() -> Dict[str, Any]:
+    active_legacy: list[str] = [
+        f"{legacy} → {current}"
+        for legacy, current in LEGACY_ENV_ALIASES.items()
+        if os.environ.get(legacy)
+    ]
+    explicitly_set = [k for k in _PRIMARY_CONFIG_KEYS if os.environ.get(k)]
+    return {
+        "sources": ["environment", ".env"],
+        "explicitly_set_env_vars": explicitly_set,
+        "active_legacy_aliases": active_legacy,
+        "legacy_aliases_in_use": len(active_legacy) > 0,
+    }
 
 
 def _migration_identity(db: Session) -> Dict[str, Any]:
@@ -139,6 +193,7 @@ def build_identity_payload(
     migration = _migration_identity(db)
     active_backend_lanes = lanes["active_backend_lanes"]
     active_model_names = lanes["active_model_names"]
+    stale_check = _stale_container_check(build_sha, repo_sha)
     return {
         "computed_at": datetime.now(UTC).isoformat(),
         "version": settings.VERSION,
@@ -149,6 +204,8 @@ def build_identity_payload(
         "image_tag": _env("ORCHESTRATOR_IMAGE_TAG", "IMAGE_TAG"),
         "image_id": _env("ORCHESTRATOR_IMAGE_ID", "IMAGE_ID"),
         **migration,
+        "runtime_profile": settings.RUNTIME_PROFILE,
+        "timeout_settings": _timeout_settings(),
         "planning_backend": active_backend_lanes["planning"],
         "execution_backend": active_backend_lanes["execution"],
         "debug_repair_backend": active_backend_lanes["debug_repair"],
@@ -161,5 +218,9 @@ def build_identity_payload(
         "active_model_names": active_model_names,
         "config_source": _env("ORCHESTRATOR_CONFIG_SOURCE"),
         "config_sources": ["environment", ".env"],
-        "stale_container_check": _stale_container_check(build_sha, repo_sha),
+        "config_source_summary": _config_source_summary(),
+        "stale_container_check": stale_check,
+        "stale_container_warning": _stale_container_warning(
+            stale_check, build_sha, repo_sha
+        ),
     }
