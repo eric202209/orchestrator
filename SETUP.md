@@ -157,6 +157,25 @@ PLANNING_REPAIR_API_KEY=
 PLANNING_REPAIR_DISABLE_THINKING=true
 ```
 
+**`local_openclaw` timeout tuning:** The default `PLANNING_REPAIR_TIMEOUT_SECONDS=90` is
+sized for hosted APIs. On local hardware (vLLM / ai-gateway) the model runs at
+roughly 10 tok/s, so a full static-site plan (~900 tokens) takes ~155 s. Set
+`PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS=240` in your `.env` when using
+`AGENT_BACKEND=local_openclaw`; leave it at `0` for all other backends.
+
+> **Important:** This value is read from `.env` only if the variable is **not**
+> already exported in the shell that starts the Celery worker. If you change it
+> after the worker is running, kill the worker and relaunch from a fresh shell:
+>
+> ```bash
+> pkill -f "celery.*app.celery_app worker"
+> # confirm the variable is absent in your current shell, then:
+> source venv/bin/activate && nohup celery -A app.celery_app worker --loglevel=info >> logs/worker.log 2>&1 &
+> # verify:
+> tr '\0' '\n' < /proc/$(pgrep -f "celery.*app.celery_app worker" | head -1)/environ \
+>   | grep PLANNING_DIRECT_LOCAL_OPENCLAW   # should return nothing
+> ```
+
 Bounded debug repair can use its own direct endpoint. Lane-specific values are
 optional; blank values fall back to the planning-repair endpoint/model/key:
 
