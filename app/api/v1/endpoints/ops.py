@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC, datetime
 from typing import Any, Dict
 from urllib.parse import urlparse
@@ -203,6 +204,59 @@ def ops_project_state_summary(
 ) -> Dict[str, Any]:
     """Read-only ProjectStateSummary: completed tasks, files changed, constraints, next task."""
     return build_project_state_summary(project_id, db)
+
+
+@router.get("/planning-config")
+def ops_planning_config(
+    current_user=Depends(get_current_admin_user),
+) -> Dict[str, Any]:
+    """Effective planning/repair timeout values, their config source, and any low-timeout warning."""
+    from app.config import (
+        LOCAL_OPENCLAW_SAFE_TIMEOUT_SECONDS,
+        LOCAL_OPENCLAW_VALIDATED_TIMEOUT_SECONDS,
+    )
+
+    planning_backend = (
+        settings.PLANNING_BACKEND or settings.AGENT_BACKEND or ""
+    ).strip()
+    direct_timeout = settings.PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS
+    repair_timeout = settings.PLANNING_REPAIR_TIMEOUT_SECONDS
+
+    direct_source = (
+        "env"
+        if os.environ.get("PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS")
+        else "default"
+    )
+    repair_source = (
+        "env" if os.environ.get("PLANNING_REPAIR_TIMEOUT_SECONDS") else "default"
+    )
+
+    low_timeout_warning: str | None = None
+    if (
+        planning_backend == "local_openclaw"
+        and direct_timeout < LOCAL_OPENCLAW_SAFE_TIMEOUT_SECONDS
+    ):
+        low_timeout_warning = (
+            f"PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS={direct_timeout} is below the "
+            f"safe threshold of {LOCAL_OPENCLAW_SAFE_TIMEOUT_SECONDS}s. "
+            f"Validated value: {LOCAL_OPENCLAW_VALIDATED_TIMEOUT_SECONDS}s."
+        )
+
+    return {
+        "computed_at": datetime.now(UTC).isoformat(),
+        "planning_backend": planning_backend,
+        "planning_direct_local_openclaw_timeout_seconds": {
+            "value": direct_timeout,
+            "source": direct_source,
+            "validated_value": LOCAL_OPENCLAW_VALIDATED_TIMEOUT_SECONDS,
+        },
+        "planning_repair_timeout_seconds": {
+            "value": repair_timeout,
+            "source": repair_source,
+        },
+        "thinking_disabled": settings.PLANNING_REPAIR_DISABLE_THINKING,
+        "local_openclaw_timeout_warning": low_timeout_warning,
+    }
 
 
 @router.get("/failure-classes")

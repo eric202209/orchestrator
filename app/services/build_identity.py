@@ -88,7 +88,19 @@ def _stale_container_warning(
     )
 
 
+_TIMEOUT_ENV_KEYS = (
+    "PLANNING_REPAIR_TIMEOUT_SECONDS",
+    "PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS",
+    "PLANNING_SYNTHESIS_TIMEOUT_SECONDS",
+    "REPLAN_SYNTHESIS_TIMEOUT_SECONDS",
+    "OLLAMA_PLANNING_TIMEOUT_SECONDS",
+)
+
+
 def _timeout_settings() -> Dict[str, Any]:
+    sources = {
+        k: ("env" if os.environ.get(k) else "default") for k in _TIMEOUT_ENV_KEYS
+    }
     return {
         "planning_repair_timeout_seconds": settings.PLANNING_REPAIR_TIMEOUT_SECONDS,
         "planning_synthesis_timeout_seconds": settings.PLANNING_SYNTHESIS_TIMEOUT_SECONDS,
@@ -97,6 +109,7 @@ def _timeout_settings() -> Dict[str, Any]:
         "planning_direct_local_openclaw_timeout_seconds": (
             settings.PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS
         ),
+        "timeout_config_sources": sources,
     }
 
 

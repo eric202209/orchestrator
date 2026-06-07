@@ -170,7 +170,9 @@ class Settings(BaseSettings):
 
     PLANNING_DIRECT_NO_THINKING_FOR_DIRECT_OLLAMA: bool = False
     PLANNING_DIRECT_SKIP_PROMPT_CHAR_THRESHOLD: int = 0
-    PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS: int = 0
+    # Validated value: 240s. 0 = disabled (falls back to PLANNING_REPAIR_TIMEOUT_SECONDS).
+    # Sessions 597-603 timed out with the prior default of 0; 240s resolved all failures.
+    PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS: int = 240
     PLANNING_REPAIR_TIMEOUT_SECONDS: int = 90
     PLANNING_SYNTHESIS_TIMEOUT_SECONDS: int = 180
     REPLAN_SYNTHESIS_TIMEOUT_SECONDS: int = 45
@@ -407,3 +409,37 @@ def validate_runtime_secrets() -> None:
         raise RuntimeError(
             f"Invalid AGENT_BACKEND '{settings.AGENT_BACKEND}': {exc}"
         ) from exc
+
+
+# Minimum safe timeout for local_openclaw direct planning calls.
+# Below this value, cold-start Qwen models consistently time out.
+LOCAL_OPENCLAW_SAFE_TIMEOUT_SECONDS = 120
+LOCAL_OPENCLAW_VALIDATED_TIMEOUT_SECONDS = 240
+
+
+def warn_local_openclaw_timeout() -> None:
+    """Warn at startup if the local_openclaw direct-planning timeout may be too short."""
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    effective_planning_backend = (
+        settings.PLANNING_BACKEND or settings.AGENT_BACKEND or ""
+    ).strip()
+    if effective_planning_backend != "local_openclaw":
+        return
+
+    timeout = settings.PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS
+    if timeout >= LOCAL_OPENCLAW_SAFE_TIMEOUT_SECONDS:
+        return
+
+    logger.warning(
+        "local_openclaw planning timeout is below the safe threshold: "
+        "PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS=%d "
+        "(0 = disabled, falls back to PLANNING_REPAIR_TIMEOUT_SECONDS=%d). "
+        "Validated value: %d. "
+        "Short timeouts caused repeated backend_timeout failures on cold Qwen starts.",
+        timeout,
+        settings.PLANNING_REPAIR_TIMEOUT_SECONDS,
+        LOCAL_OPENCLAW_VALIDATED_TIMEOUT_SECONDS,
+    )
