@@ -8,7 +8,12 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.config import settings, validate_runtime_secrets, warn_local_openclaw_timeout
+from app.config import (
+    settings,
+    validate_runtime_secrets,
+    warn_incremental_execution,
+    warn_local_openclaw_timeout,
+)
 from app.api.v1.router import api_router
 from app.api.v1.endpoints.auth import router as auth_router
 from app.database import init_db, get_db_session
@@ -73,6 +78,7 @@ async def lifespan(app: FastAPI):
 
     emit_runtime_lane_warning()
     warn_local_openclaw_timeout()
+    warn_incremental_execution()
 
     logger.info("=" * 50)
     logger.info("Orchestrator API starting up")

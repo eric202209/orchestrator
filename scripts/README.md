@@ -36,5 +36,15 @@ handled by `../start.sh`; service logs are written directly to `../logs/`.
 - `orchestrator-mobile-api.sh` - call mobile API endpoints using local env credentials.
 - `kill-all.sh` - force-kill local development processes.
 
+## Maintenance
+
+- `check_openai_compatible_endpoint.py` - verify an OpenAI-compatible endpoint is reachable and responding correctly.
+- `score_orchestrator_eval_case.py` - score a single orchestrator eval case against expected outcomes.
+- `planning_contract_report.py` - summarize recent planning contract violations (also listed under Session And Replay).
+- `validate_incremental.py` - initial live-validation harness for Slice J incremental execution (creation-only fast path).
+- `validate_incremental_fresh_process.py` - fresh-process re-run harness confirming the `search()` code-fence fix (8-task Python corpus).
+- `validate_incremental_20task.py` - 20-task controlled validation window for Slice J post A+E fix (Python/HTML/CSS/JSON).
+- `probe_incremental_output.py` - diagnostic probe capturing raw `execute_task` output shapes (no file writes; used for attribution).
+
 Removed obsolete scripts: old `/tmp` log sync/status/cleanup helpers. Current
 startup no longer writes logs to `/tmp`.

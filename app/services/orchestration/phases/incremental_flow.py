@@ -164,8 +164,10 @@ def attempt_incremental_execution(
         f"Generate the content for the following file creation task.\n\n"
         f"Task: {task_description}\n"
         f"File to create: {primary_file}\n\n"
-        f"Output ONLY the raw file content. No code fences, no explanation, "
-        f"no markdown. Start directly with the content."
+        f"Output ONLY the raw file content. Do NOT describe your actions. "
+        f"Do NOT say you created or verified the file. "
+        f"No code fences, no explanation, no markdown. "
+        f"Start the output directly with the first line of file content."
     )
     try:
         result = asyncio.run(
@@ -178,8 +180,21 @@ def attempt_incremental_execution(
     if not content:
         return _fallback(ctx, "content_empty", "content_generation")
 
+    # For Python targets: validate syntax before writing.
+    # Catches agent completion reports that pass the empty check but fail py_compile.
+    if verify_cmd and "py_compile" in verify_cmd:
+        try:
+            compile(content, "<incremental>", "exec")
+        except SyntaxError:
+            return _fallback(ctx, "content_invalid_syntax", "content_validation")
+
     # Write file — parent directories are created as needed.
     target_path = project_dir / primary_file
+
+    # Safety: creation-only path must not overwrite existing files.
+    if target_path.exists():
+        return _fallback(ctx, "target_exists", "file_write")
+
     try:
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_text(content, encoding="utf-8")

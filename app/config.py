@@ -460,3 +460,22 @@ def warn_local_openclaw_timeout() -> None:
         settings.PLANNING_REPAIR_TIMEOUT_SECONDS,
         LOCAL_OPENCLAW_VALIDATED_TIMEOUT_SECONDS,
     )
+
+
+def warn_incremental_execution() -> None:
+    """Log startup notice and safety warning when incremental execution is enabled."""
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    if not settings.INCREMENTAL_EXECUTION_ENABLED:
+        return
+
+    logger.info("[ORCHESTRATION] Incremental execution ENABLED — limited opt-in only")
+
+    effective_backend = (settings.AGENT_BACKEND or "").strip()
+    if effective_backend == "local_openclaw":
+        logger.warning(
+            "[ORCHESTRATION] Incremental execution on local_openclaw may still "
+            "fallback on OpenClawSessionError/timeouts"
+        )

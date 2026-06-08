@@ -371,6 +371,88 @@ def test_parse_verify_unrecognised_returns_none():
     assert result is None
 
 
+# ── Overwrite guard ──────────────────────────────────────────────────────────
+
+_HTML_DESC = "Create about.html with heading 'Phase 10A Alpha' and verify it exists."
+_ORIGINAL_CONTENT = "<html><h1>Original</h1></html>"
+
+
+def test_overwrite_guard_returns_target_exists(tmp_path, monkeypatch):
+    """Existing target file causes fallback with reason target_exists."""
+    _patch_event(monkeypatch)
+    (tmp_path / "about.html").write_text(_ORIGINAL_CONTENT)
+    ctx = _make_ctx(str(tmp_path))
+    result = attempt_incremental_execution(ctx=ctx, task_description=_HTML_DESC)
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "target_exists"
+
+
+def test_overwrite_guard_preserves_original_content(tmp_path, monkeypatch):
+    """Original file content is untouched when target_exists fallback fires."""
+    _patch_event(monkeypatch)
+    (tmp_path / "about.html").write_text(_ORIGINAL_CONTENT)
+    ctx = _make_ctx(str(tmp_path))
+    attempt_incremental_execution(ctx=ctx, task_description=_HTML_DESC)
+
+    assert (tmp_path / "about.html").read_text() == _ORIGINAL_CONTENT
+
+
+def test_overwrite_guard_preserves_plan_empty(tmp_path, monkeypatch):
+    """orchestration_state.plan remains empty on target_exists fallback."""
+    _patch_event(monkeypatch)
+    (tmp_path / "about.html").write_text(_ORIGINAL_CONTENT)
+    ctx = _make_ctx(str(tmp_path))
+    attempt_incremental_execution(ctx=ctx, task_description=_HTML_DESC)
+
+    assert ctx.orchestration_state.plan == []
+
+
+def test_overwrite_guard_preserves_execution_results_empty(tmp_path, monkeypatch):
+    """execution_results remains empty on target_exists fallback."""
+    _patch_event(monkeypatch)
+    (tmp_path / "about.html").write_text(_ORIGINAL_CONTENT)
+    ctx = _make_ctx(str(tmp_path))
+    attempt_incremental_execution(ctx=ctx, task_description=_HTML_DESC)
+
+    assert ctx.orchestration_state.execution_results == []
+
+
+def test_overwrite_guard_does_not_consume_debug_budget(tmp_path, monkeypatch):
+    """debug_attempts is not modified on target_exists fallback."""
+    _patch_event(monkeypatch)
+    (tmp_path / "about.html").write_text(_ORIGINAL_CONTENT)
+    ctx = _make_ctx(str(tmp_path))
+    initial = list(ctx.orchestration_state.debug_attempts)
+    attempt_incremental_execution(ctx=ctx, task_description=_HTML_DESC)
+
+    assert ctx.orchestration_state.debug_attempts == initial
+
+
+def test_overwrite_guard_emits_fallback_event_with_reason(tmp_path, monkeypatch):
+    """INCREMENTAL_FALLBACK_TO_PLANNING event carries reason=target_exists."""
+    events = _patch_event(monkeypatch)
+    (tmp_path / "about.html").write_text(_ORIGINAL_CONTENT)
+    ctx = _make_ctx(str(tmp_path))
+    attempt_incremental_execution(ctx=ctx, task_description=_HTML_DESC)
+
+    fallback_events = [
+        e for e in events if e["event_type"] == "incremental_fallback_to_planning"
+    ]
+    assert len(fallback_events) == 1
+    assert fallback_events[0]["details"]["reason"] == "target_exists"
+
+
+def test_overwrite_guard_absent_file_still_succeeds(tmp_path, monkeypatch):
+    """New-file creation path is unaffected by the overwrite guard."""
+    _patch_event(monkeypatch)
+    ctx = _make_ctx(str(tmp_path))
+    result = attempt_incremental_execution(ctx=ctx, task_description=_HTML_DESC)
+
+    assert result["status"] == "completed"
+    assert (tmp_path / "about.html").exists()
+
+
 # ── Worker flag guard (unit test) ────────────────────────────────────────────
 
 

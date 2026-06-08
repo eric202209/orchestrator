@@ -227,3 +227,47 @@ def test_validate_raises_clear_error_for_unknown_role_backend(monkeypatch):
 
     with pytest.raises(RuntimeError, match="EXECUTION_BACKEND='missing_backend'"):
         config_module.validate_runtime_secrets()
+
+
+# ── warn_incremental_execution ────────────────────────────────────────────────
+
+
+def test_warn_incremental_execution_logs_info_when_enabled(monkeypatch, caplog):
+    import logging
+
+    from app import config as config_module
+
+    monkeypatch.setattr(config_module.settings, "INCREMENTAL_EXECUTION_ENABLED", True)
+    monkeypatch.setattr(config_module.settings, "AGENT_BACKEND", "openai_responses_api")
+
+    with caplog.at_level(logging.INFO, logger="app.config"):
+        config_module.warn_incremental_execution()
+
+    assert any("Incremental execution ENABLED" in r.message for r in caplog.records)
+
+
+def test_warn_incremental_execution_warns_for_local_openclaw(monkeypatch, caplog):
+    import logging
+
+    from app import config as config_module
+
+    monkeypatch.setattr(config_module.settings, "INCREMENTAL_EXECUTION_ENABLED", True)
+    monkeypatch.setattr(config_module.settings, "AGENT_BACKEND", "local_openclaw")
+
+    with caplog.at_level(logging.WARNING, logger="app.config"):
+        config_module.warn_incremental_execution()
+
+    assert any("OpenClawSessionError" in r.message for r in caplog.records)
+
+
+def test_warn_incremental_execution_silent_when_disabled(monkeypatch, caplog):
+    import logging
+
+    from app import config as config_module
+
+    monkeypatch.setattr(config_module.settings, "INCREMENTAL_EXECUTION_ENABLED", False)
+
+    with caplog.at_level(logging.DEBUG, logger="app.config"):
+        config_module.warn_incremental_execution()
+
+    assert not any("Incremental execution" in r.message for r in caplog.records)
