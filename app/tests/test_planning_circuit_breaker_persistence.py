@@ -28,7 +28,7 @@ from app.services.orchestration.phases.planning_flow import (
     _count_prior_failed_planning_executions,
     _last_plan_output_snippet,
 )
-from scripts.failure_taxonomy import outcome_class
+from scripts.session_and_replay.failure_taxonomy import outcome_class
 
 
 # ── _PlanningRetryState unit tests ────────────────────────────────────────────

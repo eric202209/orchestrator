@@ -19,6 +19,7 @@ def _load_scorer():
     path = (
         Path(__file__).resolve().parents[2]
         / "scripts"
+        / "maintenance"
         / "score_orchestrator_eval_case.py"
     )
     spec = importlib.util.spec_from_file_location("score_orchestrator_eval_case", path)

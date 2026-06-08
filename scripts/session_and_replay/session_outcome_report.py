@@ -16,7 +16,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.failure_taxonomy import (  # noqa: E402
+from scripts.session_and_replay.failure_taxonomy import (  # noqa: E402
     FAILED_EXECUTION_STATUSES,
     TERMINAL_REASON_PRIORITY,
     TERMINAL_SESSION_STATUSES,

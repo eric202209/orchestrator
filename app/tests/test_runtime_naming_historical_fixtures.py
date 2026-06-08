@@ -24,7 +24,10 @@ def _load_module(module_name: str, path: Path):
 
 scorer = _load_module(
     "historical_runtime_naming_score_orchestrator_eval_case",
-    Path(__file__).resolve().parents[2] / "scripts" / "score_orchestrator_eval_case.py",
+    Path(__file__).resolve().parents[2]
+    / "scripts"
+    / "maintenance"
+    / "score_orchestrator_eval_case.py",
 )
 runner = _load_module(
     "historical_runtime_naming_run_orchestrator_eval_slice",

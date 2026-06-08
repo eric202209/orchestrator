@@ -7,7 +7,10 @@ import sys
 from pathlib import Path
 
 SCRIPT_PATH = (
-    Path(__file__).resolve().parents[2] / "scripts" / "workspace_evidence_report.py"
+    Path(__file__).resolve().parents[2]
+    / "scripts"
+    / "session_and_replay"
+    / "workspace_evidence_report.py"
 )
 SPEC = importlib.util.spec_from_file_location("workspace_evidence_report", SCRIPT_PATH)
 assert SPEC and SPEC.loader

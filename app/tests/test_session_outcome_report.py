@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from scripts.session_outcome_report import _task_outcome_rates
+from scripts.session_and_replay.session_outcome_report import _task_outcome_rates
 
 
 def test_task_outcome_rates_are_task_centric_not_session_centric():

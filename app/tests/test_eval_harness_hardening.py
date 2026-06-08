@@ -36,7 +36,7 @@ def _load_runner():
 
 
 def _load_scorer():
-    path = _repo_root() / "scripts" / "score_orchestrator_eval_case.py"
+    path = _repo_root() / "scripts" / "maintenance" / "score_orchestrator_eval_case.py"
     spec = importlib.util.spec_from_file_location("score_orchestrator_eval_case", path)
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from scripts.failure_taxonomy import (
+from scripts.session_and_replay.failure_taxonomy import (
     KNOWN_TERMINAL_REASONS,
     contract_reason,
     failure_class,

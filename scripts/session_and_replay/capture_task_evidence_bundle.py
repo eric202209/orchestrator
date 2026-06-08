@@ -17,7 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.failure_taxonomy import (  # noqa: E402
+from scripts.session_and_replay.failure_taxonomy import (  # noqa: E402
     failure_class,
     parse_log_metadata,
     terminal_reason_from_rows,
@@ -714,7 +714,7 @@ def _planning_contract_summary(
     conn: sqlite3.Connection, task_execution_id: int
 ) -> dict[str, Any]:
     try:
-        import scripts.planning_contract_report as planning_report
+        import scripts.maintenance.planning_contract_report as planning_report
 
         summary = planning_report.summarize(conn, limit=1000)
         for record in summary.get("records") or []:

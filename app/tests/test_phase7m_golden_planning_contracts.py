@@ -12,7 +12,10 @@ from app.services.orchestration.task_rules import get_workflow_profile
 from app.services.orchestration.validation.validator import ValidatorService
 
 REPORT_SCRIPT = (
-    Path(__file__).resolve().parents[2] / "scripts" / "planning_contract_report.py"
+    Path(__file__).resolve().parents[2]
+    / "scripts"
+    / "maintenance"
+    / "planning_contract_report.py"
 )
 SPEC = importlib.util.spec_from_file_location("planning_contract_report", REPORT_SCRIPT)
 assert SPEC and SPEC.loader

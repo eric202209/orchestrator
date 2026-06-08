@@ -7,7 +7,10 @@ import sys
 from pathlib import Path
 
 SCRIPT_PATH = (
-    Path(__file__).resolve().parents[2] / "scripts" / "capture_task_evidence_bundle.py"
+    Path(__file__).resolve().parents[2]
+    / "scripts"
+    / "session_and_replay"
+    / "capture_task_evidence_bundle.py"
 )
 SPEC = importlib.util.spec_from_file_location(
     "capture_task_evidence_bundle", SCRIPT_PATH
