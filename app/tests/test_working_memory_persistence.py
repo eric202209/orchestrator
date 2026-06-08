@@ -355,6 +355,44 @@ def test_render_includes_implementation_strategy(tmp_path, monkeypatch):
     assert "Used incremental approach for speed" in result
 
 
+def test_render_only_flag_reads_existing_fixture(tmp_path, monkeypatch):
+    """Render flag True + persistence flag False: render reads pre-existing fixture."""
+    monkeypatch.setattr("app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", False)
+    monkeypatch.setattr("app.config.settings.WORKING_MEMORY_RENDER_ENABLED", True)
+    # Write fixture file manually (simulating a previously persisted state)
+    openclaw_dir = tmp_path / ".openclaw"
+    openclaw_dir.mkdir()
+    fixture: dict = {
+        "schema_version": SCHEMA_VERSION,
+        "project_dir": str(tmp_path),
+        "last_updated": "2026-06-07T00:00:00+00:00",
+        "files_by_task": {
+            "1": {
+                "task_id": 1,
+                "task_title": "Fixture task",
+                "added": ["fixture.py"],
+                "modified": [],
+                "deleted": [],
+            }
+        },
+        "known_good_commands": [
+            {
+                "task_id": 1,
+                "task_title": "Fixture task",
+                "steps": [{"step": "Install", "commands": ["npm ci"]}],
+            }
+        ],
+        "active_constraints": [],
+        "implementation_strategy": [],
+        "unresolved_failures": [],
+    }
+    (openclaw_dir / _FILENAME).write_text(json.dumps(fixture))
+    result = render_working_memory(tmp_path, _make_logger())
+    assert "=== WORKING MEMORY ===" in result
+    assert "npm ci" in result
+    assert "fixture.py" in result
+
+
 # ---------------------------------------------------------------------------
 # Slice J: inject_working_memory_into_context
 # ---------------------------------------------------------------------------
@@ -459,3 +497,50 @@ def test_inject_for_task_position_none_is_safe(tmp_path, monkeypatch):
         orchestration_state=state, task=task, logger=_make_logger()
     )
     assert state.project_context == "original"
+
+
+def test_inject_only_flag_reads_existing_fixture(tmp_path, monkeypatch):
+    """Inject flag True + persistence flag False: injection reads pre-existing fixture."""
+    monkeypatch.setattr("app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", False)
+    monkeypatch.setattr("app.config.settings.WORKING_MEMORY_INJECTION_ENABLED", True)
+    # Write fixture file manually (simulating a previously persisted state)
+    openclaw_dir = tmp_path / ".openclaw"
+    openclaw_dir.mkdir()
+    fixture: dict = {
+        "schema_version": SCHEMA_VERSION,
+        "project_dir": str(tmp_path),
+        "last_updated": "2026-06-07T00:00:00+00:00",
+        "files_by_task": {
+            "1": {
+                "task_id": 1,
+                "task_title": "Prior task",
+                "added": ["index.js"],
+                "modified": [],
+                "deleted": [],
+            }
+        },
+        "known_good_commands": [
+            {
+                "task_id": 1,
+                "task_title": "Prior task",
+                "steps": [
+                    {"step": "Verify", "commands": ["node -e \"require('./index')\""]}
+                ],
+            }
+        ],
+        "active_constraints": [],
+        "implementation_strategy": [],
+        "unresolved_failures": [],
+    }
+    (openclaw_dir / _FILENAME).write_text(json.dumps(fixture))
+    state = _make_orchestration_state(str(tmp_path))
+    state.project_context = "existing context"
+    task2 = _make_task(task_id=2, plan_position=2)
+    inject_working_memory_into_context(
+        orchestration_state=state, task=task2, logger=_make_logger()
+    )
+    ctx = state.project_context
+    assert "=== WORKING MEMORY ===" in ctx
+    assert "node -e" in ctx
+    assert "index.js" in ctx
+    assert "existing context" in ctx

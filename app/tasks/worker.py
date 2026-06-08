@@ -1713,6 +1713,28 @@ def execute_orchestration_task(
                     task=task,
                     logger=logger,
                 )
+            # Slice J: incremental execution path (creation-only prototype, flag-gated).
+            # Runs after context injection; before execute_planning_phase.
+            # Falls back to full planning on any failure.
+            _incremental_route_taken = False
+            if settings.INCREMENTAL_EXECUTION_ENABLED:
+                _inc_task_desc = getattr(task, "description", None) or prompt or ""
+                from app.services.orchestration.planning.incremental_classifier import (
+                    is_incremental_candidate as _is_incremental_candidate,
+                )
+
+                if _is_incremental_candidate(_inc_task_desc):
+                    from app.services.orchestration.phases.incremental_flow import (
+                        attempt_incremental_execution,
+                    )
+
+                    _inc_result = attempt_incremental_execution(
+                        ctx=run_ctx,
+                        task_description=_inc_task_desc,
+                    )
+                    if _inc_result.get("status") == "completed":
+                        _incremental_route_taken = True
+                        planning_phase_result = {"status": "completed"}
             with start_langfuse_observation(
                 name="planning-phase",
                 as_type="span",
@@ -1733,34 +1755,36 @@ def execute_orchestration_task(
                 if planning_runtime_service is not None:
                     run_ctx.runtime_service = planning_runtime_service
                 try:
-                    planning_phase_result = execute_planning_phase(
-                        ctx=run_ctx,
-                        workspace_review=workspace_review,
-                        extract_structured_text=_extract_structured_text,
-                        extract_plan_steps=_extract_plan_steps,
-                        looks_like_truncated_multistep_plan=_looks_like_truncated_multistep_plan,
-                        normalize_plan_with_live_logging=_normalize_plan_with_live_logging,
-                        workspace_violation_error_cls=TaskWorkspaceViolationError,
-                    )
+                    if not _incremental_route_taken:
+                        planning_phase_result = execute_planning_phase(
+                            ctx=run_ctx,
+                            workspace_review=workspace_review,
+                            extract_structured_text=_extract_structured_text,
+                            extract_plan_steps=_extract_plan_steps,
+                            looks_like_truncated_multistep_plan=_looks_like_truncated_multistep_plan,
+                            normalize_plan_with_live_logging=_normalize_plan_with_live_logging,
+                            workspace_violation_error_cls=TaskWorkspaceViolationError,
+                        )
                 finally:
                     run_ctx.runtime_service = original_runtime_service
-                update_langfuse_observation(
-                    planning_phase_observation,
-                    output=planning_phase_result,
-                    metadata={
-                        "phase": "planning",
-                        "plan_steps": len(orchestration_state.plan or []),
-                    },
-                    level=(
-                        "ERROR"
-                        if planning_phase_result.get("status") == "failed"
-                        else None
-                    ),
-                    status_message=(
-                        str(planning_phase_result.get("reason") or "")[:500] or None
-                    ),
-                )
-                if planning_backend_override:
+                if not _incremental_route_taken:
+                    update_langfuse_observation(
+                        planning_phase_observation,
+                        output=planning_phase_result,
+                        metadata={
+                            "phase": "planning",
+                            "plan_steps": len(orchestration_state.plan or []),
+                        },
+                        level=(
+                            "ERROR"
+                            if planning_phase_result.get("status") == "failed"
+                            else None
+                        ),
+                        status_message=(
+                            str(planning_phase_result.get("reason") or "")[:500] or None
+                        ),
+                    )
+                if not _incremental_route_taken and planning_backend_override:
                     escalation_result_metadata = {
                         "event_type": EventType.LANE_ESCALATION_RESULT,
                         "phase": "planning",

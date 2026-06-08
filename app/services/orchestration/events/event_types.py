@@ -86,6 +86,12 @@ class EventType:
     # ── Diagnostics ──────────────────────────────────────────────────────────
     PLANNING_CONTEXT_PROVENANCE = "planning_context_provenance"
 
+    # ── Incremental execution (Slice J) ───────────────────────────────────────
+    INCREMENTAL_ATTEMPTED = "incremental_attempted"
+    INCREMENTAL_SUCCEEDED = "incremental_succeeded"
+    INCREMENTAL_FALLBACK_TO_PLANNING = "incremental_fallback_to_planning"
+    INCREMENTAL_FALSE_POSITIVE = "incremental_false_positive"
+
 
 _ALL_EVENT_TYPES: frozenset[str] = frozenset(
     v for k, v in EventType.__dict__.items() if not k.startswith("_")

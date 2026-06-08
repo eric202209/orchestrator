@@ -885,6 +885,43 @@ def _run_evaluator(
         return {"verdict": "ERROR", "error": str(e)}
 
 
+_PROGRESS_NOTES_COMMANDS_CAP = 10
+_PROGRESS_NOTES_COMMAND_MAX_CHARS = 120
+
+
+def _extract_progress_notes_commands(orchestration_state: Any) -> list:
+    """Return deduplicated command strings from successfully completed plan steps.
+
+    Correlates plan step commands with execution_results (success-only) by
+    step_number. Caps at _PROGRESS_NOTES_COMMANDS_CAP entries.
+    """
+    successful_step_numbers: set = set()
+    for r in getattr(orchestration_state, "execution_results", None) or []:
+        n = (
+            r.step_number
+            if hasattr(r, "step_number")
+            else (r.get("step_number") if isinstance(r, dict) else None)
+        )
+        if n is not None:
+            successful_step_numbers.add(n)
+
+    seen: set = set()
+    commands: list = []
+    for step in getattr(orchestration_state, "plan", None) or []:
+        if not isinstance(step, dict):
+            continue
+        if step.get("step_number") not in successful_step_numbers:
+            continue
+        for cmd in step.get("commands") or []:
+            cmd = str(cmd or "").strip()
+            if cmd and cmd not in seen:
+                seen.add(cmd)
+                commands.append(cmd)
+                if len(commands) >= _PROGRESS_NOTES_COMMANDS_CAP:
+                    return commands
+    return commands
+
+
 def _write_progress_notes(
     *,
     orchestration_state: Any,
@@ -931,6 +968,12 @@ def _write_progress_notes(
             entry_lines.append("")
             entry_lines.append("**Summary:**")
             entry_lines.append(summary[:800])
+        known_good_cmds = _extract_progress_notes_commands(orchestration_state)
+        if known_good_cmds:
+            entry_lines.append("")
+            entry_lines.append("**Known good commands:**")
+            for cmd in known_good_cmds:
+                entry_lines.append(f"- {cmd[:_PROGRESS_NOTES_COMMAND_MAX_CHARS]}")
         entry_lines.append("")
 
         with open(notes_path, "a", encoding="utf-8") as fh:

@@ -205,6 +205,11 @@ class Settings(BaseSettings):
     # Slice J: inject rendered WorkingMemory into Task 2+ planning context.
     # Off by default. Requires WORKING_MEMORY_PERSISTENCE_ENABLED and injection gate.
     WORKING_MEMORY_INJECTION_ENABLED: bool = False
+    # Slice J: incremental execution prototype — bypass full planning for
+    # creation-only tasks where the target path, content, and verify command are
+    # explicit in the description. Off by default. Enablement requires ≥20 live
+    # observations, ≥70% success rate, 0 destructive false positives.
+    INCREMENTAL_EXECUTION_ENABLED: bool = False
 
     @field_validator("AGENT_SECONDARY_BACKEND")
     @classmethod

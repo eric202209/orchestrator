@@ -188,3 +188,84 @@ def test_estimate_token_count_basic():
     # 400 chars ≈ 100 tokens (len//4)
     text = "a" * 400
     assert estimate_token_count(text) == 100
+
+
+# ── Slice H: Injection Gate (280 → 800) ─────────────────────────────────────
+
+
+def test_shape_project_context_preserves_content_beyond_280_chars():
+    """Content beyond 280 chars must survive shaping at the new 800-char budget."""
+    # Build a context that is clearly longer than 280 chars
+    context = "known_good_commands: npm install && npm test; " * 15  # ~690 chars
+    result = _shape_project_context(
+        context,
+        workspace_summary="",
+        recent_history="",
+        validation_history="",
+        max_chars=800,
+    )
+    # The result must be longer than the old 280-char cap
+    assert (
+        len(result) > 280
+    ), f"Shaped context is only {len(result)} chars — content beyond 280 was discarded"
+    # And must contain content from beyond the first 280 chars of input
+    assert "npm install" in result
+
+
+def test_shape_project_context_800_char_budget_respected():
+    """The new budget cap is 800, not exceeded even with very long inputs."""
+    long_context = "x" * 5000
+    result = _shape_project_context(
+        long_context,
+        workspace_summary="y" * 2000,
+        recent_history="z" * 1000,
+        validation_history="w" * 1000,
+        operator_guidance="v" * 500,
+        max_chars=800,
+    )
+    assert len(result) <= 800
+
+
+def test_assemble_planning_prompt_task2_continuation_context_survives():
+    """A Task 2+ project_context of ~600 chars must not be truncated to 280 chars."""
+    continuation_context = (
+        "=== WORKING MEMORY ===\n\n"
+        "Known Good Commands\n"
+        "  Task: Setup project\n"
+        "  $ npm install\n"
+        "  $ npm test\n"
+        "  $ node -e \"require('./app')\"\n\n"
+        "Recent Files\n"
+        "  Task: Setup project\n"
+        "  - src/app.js\n"
+        "  - tests/app.test.js\n\n"
+        "Constraints\n"
+        "  - use node -e for all verification\n"
+        "  - heredoc syntax not allowed\n\n"
+        "=== END WORKING MEMORY ==="
+    )
+    assert len(continuation_context) > 280, "fixture must exceed the old 280-char cap"
+
+    ctx = _make_ctx(project_context=continuation_context)
+    prompt = assemble_planning_prompt(ctx, {})
+
+    # The planning prompt must contain continuation content from beyond char 280
+    assert "WORKING MEMORY" in prompt, "continuation block header not present in prompt"
+    assert "node -e" in prompt, "known_good_commands content missing from prompt"
+    # Prompt must stay well under the hard cap
+    assert (
+        len(prompt) < 12000
+    ), f"prompt is {len(prompt)} chars, exceeds DIRECT_PLANNING_PROMPT_CHAR_CAP"
+
+
+def test_assemble_planning_prompt_task2_under_token_threshold():
+    """Task 2+ prompt with 600-char continuation context stays under token threshold."""
+    continuation_context = (
+        "=== WORKING MEMORY ===\n"
+        + ("known_good_command: npm install\n" * 20)
+        + "=== END WORKING MEMORY ==="
+    )
+    ctx = _make_ctx(project_context=continuation_context)
+    prompt = assemble_planning_prompt(ctx, {})
+    tokens = estimate_token_count(prompt)
+    assert tokens < MINIMAL_PROMPT_TOKEN_THRESHOLD
