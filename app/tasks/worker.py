@@ -1713,6 +1713,15 @@ def execute_orchestration_task(
                     task=task,
                     logger=logger,
                 )
+            if settings.REPO_MEMORY_INJECTION_ENABLED:
+                from app.services.orchestration.repo_memory import (
+                    inject_repo_memory_into_context,
+                )
+
+                inject_repo_memory_into_context(
+                    orchestration_state=orchestration_state,
+                    logger=logger,
+                )
             # Slice J: incremental execution path (creation-only prototype, flag-gated).
             # Runs after context injection; before execute_planning_phase.
             # Falls back to full planning on any failure.

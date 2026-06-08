@@ -43,10 +43,41 @@ class _FakeLogger:
         pass
 
 
+def _run_detection_only(label: str, project_dir: Path) -> dict:
+    """Read-only detection task for real (production) project dirs.
+
+    Calls build_repo_memory only — no filesystem writes, no file mutations.
+    write_repo_memory and invalidation tests are skipped to avoid leaving
+    .agent/ artefacts or temporarily mutating tracked config files.
+    """
+    rm = build_repo_memory(project_dir)
+    result: dict = {
+        "task": label,
+        "project_dir": str(project_dir),
+        "file_created": None,       # not tested — read-only run
+        "cache_hit_after_write": None,
+        "stability_ok": None,
+        "invalidation_triggered": None,
+        "project_type": rm.project_type,
+        "package_manager": rm.package_manager,
+        "source_root": rm.source_root,
+        "test_root": rm.test_root,
+        "test_command": rm.test_command,
+        "build_command": rm.build_command,
+        "entry_points": rm.entry_points,
+        "known_config_files": rm.known_config_files,
+    }
+    return result
+
+
 def _run_task(label: str, project_dir: Path, *, check_stability: bool = True,
               check_invalidation_file: Optional[str] = None,
               invalidation_new_content: Optional[str] = None) -> dict:
-    """Run one characterization task. Returns a result dict."""
+    """Run one characterization task against a temp directory. Returns a result dict.
+
+    Must only be called with temporary directories (from tempfile.TemporaryDirectory).
+    Use _run_detection_only for real/production project dirs.
+    """
     log = _FakeLogger()
 
     # First write.
@@ -69,7 +100,7 @@ def _run_task(label: str, project_dir: Path, *, check_stability: bool = True,
             and rm1.test_command == rm2.test_command
         )
 
-    # Hash invalidation check.
+    # Hash invalidation check — safe because project_dir is a temp dir.
     invalidation_triggered: Optional[bool] = None
     if check_invalidation_file and rm1 is not None:
         target = project_dir / check_invalidation_file
@@ -81,12 +112,10 @@ def _run_task(label: str, project_dir: Path, *, check_stability: bool = True,
             after = load_repo_memory(project_dir)
             invalidation_triggered = after is None
         finally:
-            # Restore original.
             if original is not None:
                 target.write_text(original, encoding="utf-8")
             elif target.exists():
                 target.unlink()
-            # Re-populate so the file is clean for subsequent tasks.
             write_repo_memory(project_dir, _logger=log)
 
     result = {
@@ -177,34 +206,26 @@ def main() -> int:
     results = []
     failed = 0
 
-    # ── Task 1: orchestrator (real Python+Node mixed project) ──────────────
+    # ── Tasks 1–4: real project dirs — detection only, no writes ─────────
+    # _run_detection_only calls build_repo_memory only. No .agent/ files are
+    # created and no tracked config files are mutated.
     if ORCHESTRATOR.exists():
-        results.append(
-            _run_task(
-                "T01_orchestrator_mixed",
-                ORCHESTRATOR,
-                check_invalidation_file="requirements.txt",
-                invalidation_new_content="pytest\nfastapi\nhttpx\n# mutated\n",
-            )
-        )
+        results.append(_run_detection_only("T01_orchestrator_mixed", ORCHESTRATOR))
     else:
         print(f"SKIP T01: {ORCHESTRATOR} not found", file=sys.stderr)
 
-    # ── Task 2: orchestrator frontend (real Node project) ─────────────────
     if ORCHESTRATOR_FRONTEND.exists():
-        results.append(_run_task("T02_orchestrator_frontend_node", ORCHESTRATOR_FRONTEND))
+        results.append(_run_detection_only("T02_orchestrator_frontend_node", ORCHESTRATOR_FRONTEND))
     else:
         print(f"SKIP T02: {ORCHESTRATOR_FRONTEND} not found", file=sys.stderr)
 
-    # ── Task 3: garden-story-microsite (real static HTML project) ─────────
     if GARDEN_MICROSITE.exists():
-        results.append(_run_task("T03_garden_microsite_static", GARDEN_MICROSITE))
+        results.append(_run_detection_only("T03_garden_microsite_static", GARDEN_MICROSITE))
     else:
         print(f"SKIP T03: {GARDEN_MICROSITE} not found", file=sys.stderr)
 
-    # ── Task 4: clawmobile (real Android/Gradle project) ──────────────────
     if CLAWMOBILE.exists():
-        results.append(_run_task("T04_clawmobile_android", CLAWMOBILE))
+        results.append(_run_detection_only("T04_clawmobile_android", CLAWMOBILE))
     else:
         print(f"SKIP T04: {CLAWMOBILE} not found", file=sys.stderr)
 
@@ -272,7 +293,11 @@ def main() -> int:
     print("\n=== REPO MEMORY CHARACTERIZATION WINDOW — 10 tasks ===\n")
     passed = 0
     for r in results:
-        ok = r.get("file_created") and r.get("cache_hit_after_write")
+        if r.get("file_created") is None:
+            # Detection-only task (real dir): pass if no error was recorded.
+            ok = "error" not in r
+        else:
+            ok = r.get("file_created") and r.get("cache_hit_after_write")
         status = "PASS" if ok else "FAIL"
         if not ok:
             failed += 1
@@ -301,12 +326,8 @@ def main() -> int:
     output_path = (
         Path(__file__).resolve().parents[2]
         / "docs/roadmap/reports/maintenance"
-        / "transition_to_project_aware_continuation_execution"
-        / "slices_B_repo_memory"
-        / "artifacts"
         / "repo_memory_characterization_results.json"
     )
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as fh:
         json.dump(results, fh, indent=2)
     print(f"Results written to: {output_path}")

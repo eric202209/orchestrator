@@ -1,10 +1,9 @@
-"""Tests for RepoMemory population (populate-only, no injection).
+"""Tests for RepoMemory population and injection (flag-gated, default off).
 
 Constraints:
 - No live model calls.
 - No DB access.
 - Uses tmp_path; no production filesystem access.
-- No prompt injection — REPO_MEMORY_INJECTION_ENABLED not defined.
 """
 
 from __future__ import annotations
@@ -18,9 +17,12 @@ import pytest
 from app.services.orchestration.repo_memory import (
     SCHEMA_VERSION,
     _FILENAME,
+    _RENDER_CAP,
     RepoMemory,
     build_repo_memory,
+    inject_repo_memory_into_context,
     load_repo_memory,
+    render_repo_memory,
     write_repo_memory,
 )
 
@@ -454,3 +456,217 @@ def test_write_progress_notes_completion_unaffected_when_repo_memory_fails(
 
     notes = (tmp_path / ".agent" / "progress_notes.md").read_text()
     assert "test task" in notes
+
+
+# ---------------------------------------------------------------------------
+# render_repo_memory
+# ---------------------------------------------------------------------------
+
+
+def _full_memory(tmp_path: Path) -> RepoMemory:
+    """Return a fully-populated RepoMemory with all injectable fields set."""
+    return RepoMemory(
+        schema_version=SCHEMA_VERSION,
+        project_dir=str(tmp_path),
+        last_updated="2026-06-08T00:00:00+00:00",
+        invalidation_hashes={},
+        project_type="python",
+        package_manager="pip",
+        source_root="app/",
+        test_root="app/tests/",
+        test_command="pytest",
+        build_command=None,
+        entry_points=["app/main.py"],
+        known_config_files=["requirements.txt"],
+    )
+
+
+def test_render_all_fields(tmp_path):
+    mem = _full_memory(tmp_path)
+    result = render_repo_memory(mem)
+    assert result == "[Repo] python · pip · src=app/ · tests=app/tests/ · test=pytest"
+
+
+def test_render_includes_build_command_when_present(tmp_path):
+    mem = _full_memory(tmp_path)
+    mem.build_command = "make build"
+    result = render_repo_memory(mem)
+    assert "build=make build" in result
+
+
+def test_render_omits_null_fields(tmp_path):
+    mem = _full_memory(tmp_path)
+    mem.package_manager = None
+    mem.test_root = None
+    result = render_repo_memory(mem)
+    assert "pip" not in result
+    assert "tests=" not in result
+    assert "python" in result
+    assert "test=pytest" in result
+
+
+def test_render_suppresses_source_root_when_project_type_none(tmp_path):
+    # D2 guard: source_root must not appear when project_type is None.
+    mem = _full_memory(tmp_path)
+    mem.project_type = None
+    mem.source_root = "app/"
+    result = render_repo_memory(mem)
+    assert "src=" not in result
+
+
+def test_render_suppresses_source_root_for_none_only(tmp_path):
+    # D2 guard: source_root must appear for python/node/mixed.
+    for pt in ("python", "node", "mixed"):
+        mem = _full_memory(tmp_path)
+        mem.project_type = pt
+        mem.source_root = "src/"
+        result = render_repo_memory(mem)
+        assert "src=src/" in result, f"Expected src= for project_type={pt}"
+
+
+def test_render_returns_empty_when_no_stable_facts(tmp_path):
+    mem = RepoMemory(
+        schema_version=SCHEMA_VERSION,
+        project_dir=str(tmp_path),
+        last_updated="",
+        invalidation_hashes={},
+        project_type=None,
+        package_manager=None,
+        source_root=None,
+        test_root=None,
+        test_command=None,
+        build_command=None,
+        entry_points=[],
+        known_config_files=[],
+    )
+    assert render_repo_memory(mem) == ""
+
+
+def test_render_caps_at_160_chars(tmp_path):
+    mem = _full_memory(tmp_path)
+    # Make build_command very long to force cap.
+    mem.build_command = "make " + "x" * 200
+    result = render_repo_memory(mem)
+    assert len(result) <= _RENDER_CAP
+
+
+def test_render_does_not_include_entry_points(tmp_path):
+    mem = _full_memory(tmp_path)
+    mem.entry_points = ["app/main.py", "manage.py"]
+    result = render_repo_memory(mem)
+    assert "app/main.py" not in result
+    assert "manage.py" not in result
+
+
+def test_render_node_project(tmp_path):
+    mem = RepoMemory(
+        schema_version=SCHEMA_VERSION,
+        project_dir=str(tmp_path),
+        last_updated="",
+        invalidation_hashes={},
+        project_type="node",
+        package_manager="npm",
+        source_root="src/",
+        test_root=None,
+        test_command="npm test",
+        build_command=None,
+        entry_points=[],
+        known_config_files=[],
+    )
+    result = render_repo_memory(mem)
+    assert result == "[Repo] node · npm · src=src/ · test=npm test"
+
+
+# ---------------------------------------------------------------------------
+# inject_repo_memory_into_context
+# ---------------------------------------------------------------------------
+
+
+def _make_state(tmp_path: Path, context: str = "") -> MagicMock:
+    state = MagicMock()
+    state.project_dir = str(tmp_path)
+    state.project_context = context
+    return state
+
+
+def test_inject_prepends_to_project_context(tmp_path):
+    (tmp_path / "requirements.txt").write_text("pytest\n")
+    write_repo_memory(tmp_path, _logger=_make_logger())
+    state = _make_state(tmp_path, "existing context")
+    inject_repo_memory_into_context(state, logger=_make_logger())
+    assert state.project_context.startswith("[Repo]")
+    assert "existing context" in state.project_context
+
+
+def test_inject_repo_line_appears_before_existing_context(tmp_path):
+    (tmp_path / "requirements.txt").write_text("pytest\n")
+    write_repo_memory(tmp_path, _logger=_make_logger())
+    state = _make_state(tmp_path, "prior context")
+    inject_repo_memory_into_context(state, logger=_make_logger())
+    repo_pos = state.project_context.index("[Repo]")
+    prior_pos = state.project_context.index("prior context")
+    assert repo_pos < prior_pos
+
+
+def test_inject_skips_when_cache_missing(tmp_path):
+    state = _make_state(tmp_path, "unchanged")
+    inject_repo_memory_into_context(state, logger=_make_logger())
+    assert state.project_context == "unchanged"
+
+
+def test_inject_skips_when_cache_stale(tmp_path):
+    (tmp_path / "requirements.txt").write_text("pytest\n")
+    write_repo_memory(tmp_path, _logger=_make_logger())
+    # Invalidate by mutating a tracked file.
+    (tmp_path / "requirements.txt").write_text("pytest\nrequests\n")
+    state = _make_state(tmp_path, "unchanged")
+    inject_repo_memory_into_context(state, logger=_make_logger())
+    assert state.project_context == "unchanged"
+
+
+def test_inject_skips_when_no_stable_facts(tmp_path):
+    # Static HTML project — all detection returns None — render returns "".
+    write_repo_memory(tmp_path, _logger=_make_logger())
+    state = _make_state(tmp_path, "unchanged")
+    inject_repo_memory_into_context(state, logger=_make_logger())
+    assert state.project_context == "unchanged"
+
+
+def test_inject_does_not_raise_on_missing_project_dir():
+    state = MagicMock()
+    state.project_dir = None
+    state.project_context = "safe"
+    inject_repo_memory_into_context(state, logger=_make_logger())
+    assert state.project_context == "safe"
+
+
+def test_inject_does_not_raise_when_load_raises(tmp_path, monkeypatch):
+    def _explode(*a, **kw):
+        raise RuntimeError("disk error")
+
+    monkeypatch.setattr(
+        "app.services.orchestration.repo_memory.load_repo_memory", _explode
+    )
+    state = _make_state(tmp_path, "safe")
+    inject_repo_memory_into_context(state, logger=_make_logger())
+    assert state.project_context == "safe"
+
+
+# ---------------------------------------------------------------------------
+# Config: REPO_MEMORY_INJECTION_ENABLED default
+# ---------------------------------------------------------------------------
+
+
+def test_repo_memory_injection_flag_default_false():
+    # Test the code-level default (False), not the live settings singleton which
+    # may be overridden by .env during active validation windows.
+    from app.config import Settings
+
+    field = Settings.model_fields.get("REPO_MEMORY_INJECTION_ENABLED")
+    assert (
+        field is not None
+    ), "REPO_MEMORY_INJECTION_ENABLED field missing from Settings"
+    assert field.default is False, (
+        "REPO_MEMORY_INJECTION_ENABLED code default must remain False; "
+        "set True in .env to enable the validation window"
+    )

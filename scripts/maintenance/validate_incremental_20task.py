@@ -391,7 +391,7 @@ def _compute_metrics(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-REPORT_DIR = Path("docs/roadmap/reports/maintenance")
+REPORT_DIR = Path(__file__).resolve().parents[2] / "docs/roadmap/reports/maintenance"
 REPORT_PATH = REPORT_DIR / "incremental-execution-20-task-controlled-window-20260608.md"
 JSONL_PATH = REPORT_DIR / "incremental-execution-20-task-controlled-window-20260608.jsonl"
 
@@ -526,7 +526,6 @@ def _write_report(records: List[Dict[str, Any]], metrics: Dict[str, Any]) -> Non
 
     lines += ["", "---", ""]
 
-    REPORT_DIR.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text("\n".join(lines), encoding="utf-8")
     print(f"\nReport: {REPORT_PATH}", flush=True)
 
@@ -581,7 +580,6 @@ def main() -> None:
                 )
 
         # Write JSONL
-        JSONL_PATH.parent.mkdir(parents=True, exist_ok=True)
         with JSONL_PATH.open("w", encoding="utf-8") as f:
             for r in records:
                 f.write(json.dumps(r) + "\n")

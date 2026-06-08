@@ -300,7 +300,6 @@ def _write_report(
             "",
         ]
 
-    report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"\nReport written to {report_path}", flush=True)
 
@@ -349,14 +348,9 @@ def _format_window_section(
 
 
 def main() -> None:
-    report_path = Path(
-        "docs/roadmap/reports/maintenance/"
-        "incremental-execution-live-validation-20260608.md"
-    )
-    metrics_jsonl = Path(
-        "docs/roadmap/reports/maintenance/"
-        "incremental-execution-live-validation-metrics-20260608.jsonl"
-    )
+    _reports = Path(__file__).resolve().parents[2] / "docs/roadmap/reports/maintenance"
+    report_path = _reports / "incremental-execution-live-validation-20260608.md"
+    metrics_jsonl = _reports / "incremental-execution-live-validation-metrics-20260608.jsonl"
 
     print("=" * 60, flush=True)
     print("Slice J Live Validation", flush=True)
@@ -414,7 +408,6 @@ def main() -> None:
 
         # ── Write metrics JSONL ───────────────────────────────────────────
         all_records = smoke_records + (extended_records or [])
-        metrics_jsonl.parent.mkdir(parents=True, exist_ok=True)
         with metrics_jsonl.open("w", encoding="utf-8") as f:
             for rec in all_records:
                 f.write(json.dumps(rec) + "\n")

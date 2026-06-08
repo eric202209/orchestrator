@@ -1,10 +1,11 @@
-"""RepoMemory: stable per-project structure facts, population-only (no injection).
+"""RepoMemory: stable per-project structure facts cached in .agent/repo_memory.json.
 
 Populated after successful task completion alongside WorkingMemory.
 No LLM calls, no embeddings, no external network.
 Deterministic filesystem/config inspection only.
 
-No prompt injection occurs. REPO_MEMORY_INJECTION_ENABLED is not yet defined.
+Optional injection via inject_repo_memory_into_context(); gated by
+REPO_MEMORY_INJECTION_ENABLED (default False in config.py).
 """
 
 from __future__ import annotations
@@ -300,6 +301,68 @@ def load_repo_memory(project_dir: Any) -> Optional[RepoMemory]:
         )
     except Exception:
         return None
+
+
+_RENDER_CAP = 160
+_STABLE_TYPES = frozenset({"python", "node", "mixed"})
+
+
+def render_repo_memory(memory: RepoMemory) -> str:
+    """Render a single-line context hint from a RepoMemory snapshot.
+
+    Format: [Repo] python · pip · src=app/ · tests=app/tests/ · test=pytest
+    Returns "" when no stable facts are available.
+    """
+    parts = []
+    if memory.project_type:
+        parts.append(memory.project_type)
+    if memory.package_manager:
+        parts.append(memory.package_manager)
+    if memory.source_root and memory.project_type in _STABLE_TYPES:
+        parts.append(f"src={memory.source_root}")
+    if memory.test_root:
+        parts.append(f"tests={memory.test_root}")
+    if memory.test_command:
+        parts.append(f"test={memory.test_command}")
+    if memory.build_command:
+        parts.append(f"build={memory.build_command}")
+    if not parts:
+        return ""
+    line = "[Repo] " + " · ".join(parts)
+    if len(line) > _RENDER_CAP:
+        # Truncate at last complete field boundary.
+        line = line[:_RENDER_CAP].rsplit(" · ", 1)[0]
+    return line
+
+
+def inject_repo_memory_into_context(
+    orchestration_state: Any,
+    logger: Any = None,
+) -> None:
+    """Prepend a single-line RepoMemory hint to project_context.
+
+    Read-only: calls load_repo_memory only. Never rebuilds on stale cache.
+    Silently skips when cache is missing, stale, or corrupt.
+    Failure-safe: catches all exceptions, logs a warning, never fails the task.
+    """
+    log = logger or globals().get("logger")
+    try:
+        project_dir = getattr(orchestration_state, "project_dir", None)
+        if not project_dir:
+            return
+        memory = load_repo_memory(project_dir)
+        if memory is None:
+            return
+        rendered = render_repo_memory(memory)
+        if not rendered:
+            return
+        existing = orchestration_state.project_context or ""
+        orchestration_state.project_context = (rendered + "\n" + existing).strip()
+        if log:
+            log.info("[REPO_MEMORY] Injected: %s", rendered)
+    except Exception as exc:
+        if log:
+            log.warning("[REPO_MEMORY] Failed to inject repo memory: %s", exc)
 
 
 def write_repo_memory(project_dir: Any, _logger: Any = None) -> Optional[RepoMemory]:

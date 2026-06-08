@@ -205,6 +205,10 @@ class Settings(BaseSettings):
     # Slice J: inject rendered WorkingMemory into Task 2+ planning context.
     # Off by default. Requires WORKING_MEMORY_PERSISTENCE_ENABLED and injection gate.
     WORKING_MEMORY_INJECTION_ENABLED: bool = False
+    # RepoMemory injection: prepend single-line structural facts to project_context.
+    # Off by default. Read-only; load only, never rebuilds during prompt assembly.
+    # No effect on planning behavior when False.
+    REPO_MEMORY_INJECTION_ENABLED: bool = False
     # Slice J: incremental execution prototype — bypass full planning for
     # creation-only tasks where the target path, content, and verify command are
     # explicit in the description. Off by default. Enablement requires ≥20 live
