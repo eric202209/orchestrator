@@ -276,7 +276,7 @@ def test_write_progress_notes_caps_command_count(tmp_path):
         logger=_make_logger(),
     )
     notes = (tmp_path / ".openclaw" / "progress_notes.md").read_text()
-    cmd_lines = [l for l in notes.splitlines() if l.startswith("- echo")]
+    cmd_lines = [line for line in notes.splitlines() if line.startswith("- echo")]
     assert len(cmd_lines) == _PROGRESS_NOTES_COMMANDS_CAP
 
 

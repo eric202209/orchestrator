@@ -587,9 +587,9 @@ class TestMinimumPlanMeasurements:
 
     @staticmethod
     def _report(label: str, status: str, m: Dict[str, Any]) -> None:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"  {label}  [{status}]")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
         print(f"  Steps:             {m['step_count']}")
         print(f"  Compact chars:     {m['compact_chars']}")
         print(f"  Estimated tokens:  {m['estimated_tokens']}")
@@ -691,16 +691,16 @@ class TestMinimumPlanMeasurements:
         print(f"\nSchema overhead breakdown (tiny_money 1-step):")
         print(f"  Total chars:       {m['compact_chars']}")
         print(
-            f"  Structural chars:  {struct_chars} ({round(100*struct_chars/m['compact_chars'])}%)"
+            f"  Structural chars:  {struct_chars} ({round(100 * struct_chars / m['compact_chars'])}%)"
         )
         print(
-            f"  Key name chars:    {key_chars} ({round(100*key_chars/m['compact_chars'])}%)"
+            f"  Key name chars:    {key_chars} ({round(100 * key_chars / m['compact_chars'])}%)"
         )
         print(
-            f"  Schema overhead:   {struct_chars + key_chars} ({round(100*(struct_chars+key_chars)/m['compact_chars'])}%)"
+            f"  Schema overhead:   {struct_chars + key_chars} ({round(100 * (struct_chars + key_chars) / m['compact_chars'])}%)"
         )
         print(
-            f"  Content chars:     {content_chars} ({round(100*content_chars/m['compact_chars'])}%)"
+            f"  Content chars:     {content_chars} ({round(100 * content_chars / m['compact_chars'])}%)"
         )
 
         # Schema overhead = structure + keys; content = values
