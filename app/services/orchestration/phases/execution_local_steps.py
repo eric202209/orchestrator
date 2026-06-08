@@ -576,7 +576,7 @@ def _execute_local_shell_commands_step(
         if os.path.relpath(root, project_dir) != "."
     )
     files_changed = [
-        f for f in files_after - files_before if not f.startswith(".openclaw")
+        f for f in files_after - files_before if not f.startswith(".agent")
     ]
     for relative_path in files_changed:
         try:
@@ -584,7 +584,7 @@ def _execute_local_shell_commands_step(
         except Exception:
             pass
     for relative_path in dirs_after - dirs_before:
-        if str(relative_path).startswith(".openclaw"):
+        if str(relative_path).startswith(".agent"):
             continue
         try:
             ensure_shared_permissions(project_dir / relative_path)

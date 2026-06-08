@@ -215,7 +215,7 @@ def _simulate_base_context(completed_task_title: str, next_task_title: str) -> s
 
 
 def _simulate_progress_notes(completed_task_title: str, files: List[str]) -> str:
-    """Approximate .openclaw/progress_notes.md content for a completed task."""
+    """Approximate .agent/progress_notes.md content for a completed task."""
     file_list = "\n".join(f"- {f}" for f in files)
     return (
         f"## Task 1: {completed_task_title}\n"

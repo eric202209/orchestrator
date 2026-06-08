@@ -930,7 +930,7 @@ def _write_progress_notes(
     summary: str,
     logger: Any,
 ) -> None:
-    """Append a structured completion entry to .openclaw/progress_notes.md.
+    """Append a structured completion entry to .agent/progress_notes.md.
 
     This replaces git commits as the session artifact bridge when the project is
     not version-controlled.  The orient phase in worker.py reads this file before
@@ -940,7 +940,7 @@ def _write_progress_notes(
         project_dir = getattr(orchestration_state, "project_dir", None)
         if not project_dir:
             return
-        notes_dir = Path(project_dir) / ".openclaw"
+        notes_dir = Path(project_dir) / ".agent"
         notes_dir.mkdir(parents=True, exist_ok=True)
         ensure_shared_permissions(notes_dir)
         notes_path = notes_dir / "progress_notes.md"
@@ -990,6 +990,16 @@ def _write_progress_notes(
         summary=summary,
         logger=logger,
     )
+
+    try:
+        from app.services.orchestration.repo_memory import write_repo_memory
+
+        write_repo_memory(
+            project_dir=getattr(orchestration_state, "project_dir", None),
+            _logger=logger,
+        )
+    except Exception as exc:
+        logger.warning("[REPO_MEMORY] Unexpected error during write: %s", exc)
 
 
 def finalize_successful_task(

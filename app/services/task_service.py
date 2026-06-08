@@ -31,7 +31,7 @@ TASK_CHANGE_SET_LOG_MESSAGE = (
     "[WORKSPACE_CHANGE_SET] Task execution change set captured"
 )
 WORKSPACE_AUDIT_SCAFFOLD_NAMES = {
-    ".openclaw",
+    ".agent",
     "__pycache__",
     "package.json",
     "README.md",

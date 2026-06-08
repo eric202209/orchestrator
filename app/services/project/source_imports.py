@@ -20,7 +20,7 @@ _IGNORED_PARTS = {
     "venv",
     "node_modules",
     "__pycache__",
-    ".openclaw",
+    ".agent",
     "dist",
     "build",
 }
@@ -463,7 +463,7 @@ def imported_source_excerpts_from_tests(
         "venv",
         "node_modules",
         "__pycache__",
-        ".openclaw",
+        ".agent",
     }
     for test_path in sorted(project_dir.rglob("*.py")):
         try:

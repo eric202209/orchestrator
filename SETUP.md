@@ -265,7 +265,7 @@ PYTHONPATH=. python scripts/capture_task_evidence_bundle.py \
   --task-id <task_id> \
   --task-execution-id <task_execution_id>
 
-# Replay reducer only (no database needed, just the workspace .openclaw/events/ dir)
+# Replay reducer only (no database needed, just the workspace .agent/events/ dir)
 PYTHONPATH=. python scripts/capture_replay_report.py \
   --project-dir <workspace_path> \
   --session-id <session_id> \

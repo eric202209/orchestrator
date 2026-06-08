@@ -251,7 +251,7 @@ def test_task_retry_dual_writes_pending_task_execution(
         isolated_workspace_root
         / "dual-write-project"
         / "retry-task-1"
-        / ".openclaw"
+        / ".agent"
         / "events"
         / f"session_{payload['session_id']}_task_{task.id}.jsonl"
     ).exists()

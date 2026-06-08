@@ -102,7 +102,7 @@ def _journal_events(context: dict[str, Any]) -> list[dict[str, Any]]:
         return []
     path = (
         workspace_path
-        / ".openclaw"
+        / ".agent"
         / "events"
         / f"session_{context['session_id']}_task_{context['task_id']}.jsonl"
     )

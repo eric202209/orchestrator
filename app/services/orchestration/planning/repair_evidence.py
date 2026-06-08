@@ -73,7 +73,7 @@ def write_failed_planning_repair_triplet(
     if pending is None:
         return None
 
-    artifact_dir = Path(project_dir) / ".openclaw" / "planning-repair-evidence"
+    artifact_dir = Path(project_dir) / ".agent" / "planning-repair-evidence"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     ensure_shared_permissions(artifact_dir)
 

@@ -203,7 +203,7 @@ def _event_journal_path(context: dict[str, Any]) -> Path | None:
         return None
     return (
         workspace_path
-        / ".openclaw"
+        / ".agent"
         / "events"
         / f"session_{context['session_id']}_task_{context['task_id']}.jsonl"
     )
@@ -1118,7 +1118,7 @@ def _run_replay_bundle_manifest(
     if workspace_path and context.get("session_id") and context.get("task_id"):
         state_snapshot_path = str(
             Path(workspace_path)
-            / ".openclaw"
+            / ".agent"
             / "events"
             / f"session_{context['session_id']}_task_{context['task_id']}_state_snapshots.jsonl"
         )

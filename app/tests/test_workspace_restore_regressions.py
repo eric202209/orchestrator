@@ -126,7 +126,7 @@ def test_restore_workspace_snapshot_preserves_existing_files_when_snapshot_is_em
     existing_file = target_dir / "keep.txt"
     existing_file.write_text("preserve me", encoding="utf-8")
 
-    snapshot_dir = project_root / ".openclaw" / "auto-snapshots" / "task-1-pre-run"
+    snapshot_dir = project_root / ".agent" / "auto-snapshots" / "task-1-pre-run"
     snapshot_dir.mkdir(parents=True, exist_ok=True)
 
     result = TaskService(db_session).restore_workspace_snapshot(

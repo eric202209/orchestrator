@@ -14,7 +14,7 @@ from app.services.workspace.project_isolation_service import (
 )
 
 HYDRATION_EXCLUDED_NAMES = {
-    ".openclaw",
+    ".agent",
     ".venv",
     "__pycache__",
     "node_modules",
@@ -23,19 +23,19 @@ HYDRATION_EXCLUDED_NAMES = {
     "venv",
 }
 LEGACY_BASELINE_DIR_NAME = ".project-baseline"
-AUTO_SNAPSHOT_ROOT = ".openclaw/auto-snapshots"
+AUTO_SNAPSHOT_ROOT = ".agent/auto-snapshots"
 AUTO_SNAPSHOT_DIR_NAME = "auto-snapshots"
-PROMOTED_WORKSPACE_ARCHIVE_ROOT = ".openclaw/promoted-workspace-archive"
-REJECTED_CHANGE_ARCHIVE_ROOT = ".openclaw/rejected-change-archive"
-RETAINED_WORKSPACE_ARCHIVE_ROOT = ".openclaw/retained-workspace-archive"
-REQUESTED_CHANGES_ARCHIVE_ROOT = ".openclaw/requested-changes-archive"
-TASK_REPORT_ROOT = ".openclaw/task-reports"
+PROMOTED_WORKSPACE_ARCHIVE_ROOT = ".agent/promoted-workspace-archive"
+REJECTED_CHANGE_ARCHIVE_ROOT = ".agent/rejected-change-archive"
+RETAINED_WORKSPACE_ARCHIVE_ROOT = ".agent/retained-workspace-archive"
+REQUESTED_CHANGES_ARCHIVE_ROOT = ".agent/requested-changes-archive"
+TASK_REPORT_ROOT = ".agent/task-reports"
 TASK_REPORT_RE = re.compile(r"^task_report_\d+\.md$", re.IGNORECASE)
 
 PROJECT_GITIGNORE_GUARD_START = "# BEGIN OpenClaw workspace guard"
 PROJECT_GITIGNORE_GUARD_END = "# END OpenClaw workspace guard"
 PROJECT_GITIGNORE_GUARD_LINES = [
-    ".openclaw/",
+    ".agent/",
     "__pycache__/",
     "node_modules/",
     ".venv/",

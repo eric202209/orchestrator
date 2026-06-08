@@ -40,7 +40,7 @@ def _make_session(db, project, *, status="stopped"):
 def _write_events(
     workspace_path: str, session_id: int, task_id: int, events: list[dict]
 ) -> None:
-    events_dir = Path(workspace_path) / ".openclaw" / "events"
+    events_dir = Path(workspace_path) / ".agent" / "events"
     events_dir.mkdir(parents=True, exist_ok=True)
     log_path = events_dir / f"session_{session_id}_task_{task_id}.jsonl"
     with log_path.open("w", encoding="utf-8") as f:

@@ -9,7 +9,7 @@ from pathlib import Path
 _EXCLUDE_DIRS = {
     ".git",
     ".mypy_cache",
-    ".openclaw",
+    ".agent",
     ".pytest_cache",
     "__pycache__",
     "dist",

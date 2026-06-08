@@ -278,16 +278,16 @@ def _augment_completion_verification_command(command: str, test_script: str) -> 
     if not normalized_command or not normalized_script:
         return normalized_command
 
-    if ".openclaw" in normalized_script:
+    if ".agent" in normalized_script:
         return normalized_command
 
     if "vitest" in normalized_script and "--exclude" not in normalized_script:
-        return f"{normalized_command} -- --exclude=.openclaw/**"
+        return f"{normalized_command} -- --exclude=.agent/**"
 
     if re.search(r"(^|\s)jest(\s|$)", normalized_script) and (
         "--testpathignorepatterns" not in normalized_script
     ):
-        return f"{normalized_command} -- --testPathIgnorePatterns=.openclaw/"
+        return f"{normalized_command} -- --testPathIgnorePatterns=.agent/"
 
     return normalized_command
 

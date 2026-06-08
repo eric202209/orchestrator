@@ -34,7 +34,7 @@ def project_mutation_lock(
     wait_timeout_seconds: float = 2.0,
     poll_interval_seconds: float = 0.1,
 ) -> Iterator[Path]:
-    lock_dir = project_root / ".openclaw" / "locks"
+    lock_dir = project_root / ".agent" / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     try:
         lock_dir.chmod(0o777)

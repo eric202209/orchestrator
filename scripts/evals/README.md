@@ -44,7 +44,7 @@ python3 scripts/score_orchestrator_eval_case.py \
   --output docs/roadmap/reports/evals/example-report.json
 ```
 
-The scorer reads existing `.openclaw/events/*.jsonl` files, state snapshot
+The scorer reads existing `.agent/events/*.jsonl` files, state snapshot
 JSONL, workspace files, and verifier command output. It does not submit tasks
 or modify orchestration behavior. Verifier commands that start with `python` or
 `python3` are run with the active scorer interpreter by default; pass `--python`

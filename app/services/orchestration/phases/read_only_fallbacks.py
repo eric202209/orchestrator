@@ -18,7 +18,7 @@ def _read_only_stage_fallback_plan(
     script = (
         "import pathlib; "
         "files=[p for p in pathlib.Path('.').rglob('*') "
-        "if p.is_file() and '.openclaw' not in p.parts]; "
+        "if p.is_file() and '.agent' not in p.parts]; "
         "print('\\n'.join(str(p) for p in files[:200]))"
     )
     command = "python -c " + json.dumps(script)

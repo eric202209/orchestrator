@@ -538,7 +538,7 @@ class TestSecurityEventsCount:
 
 class TestSecurityStorageStats:
     def test_storage_stats_exposes_quota_and_retention_limits(self, mem_db, tmp_path):
-        snap_dir = tmp_path / ".openclaw" / "auto-snapshots"
+        snap_dir = tmp_path / ".agent" / "auto-snapshots"
         snap_dir.mkdir(parents=True)
         (snap_dir / "one.txt").write_text("snapshot")
         project = Project(name="QuotaProj", workspace_path=str(tmp_path))

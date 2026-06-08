@@ -196,7 +196,7 @@ class Settings(BaseSettings):
     # Experimental: inject ProjectStateSummary into Task 2+ planning context.
     # Off by default. Characterization only — no effect on any runtime path when False.
     PSS_CONTINUATION_INJECTION_ENABLED: bool = False
-    # Slice H: write WorkingMemory to .openclaw/working_memory.json after task success.
+    # Slice H: write WorkingMemory to .agent/working_memory.json after task success.
     # Off by default. No injection; persistence only.
     WORKING_MEMORY_PERSISTENCE_ENABLED: bool = False
     # Slice I: render WorkingMemory to a text block (for testing/debugging only).

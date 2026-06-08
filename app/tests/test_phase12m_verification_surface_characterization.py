@@ -292,7 +292,7 @@ def test_phase12m_scorer_verifier_can_pass_without_task_completed_event(tmp_path
 
 
 def test_phase12m_scorer_has_artifact_expectations_beyond_surface_verifier(tmp_path):
-    events_dir = tmp_path / ".openclaw" / "events"
+    events_dir = tmp_path / ".agent" / "events"
     events_dir.mkdir(parents=True)
     (events_dir / "session_1_task_1.jsonl").write_text(
         '{"event_type": "task_completed", "details": {}}\n',

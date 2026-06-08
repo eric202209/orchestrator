@@ -783,7 +783,7 @@ _CHECKSUM_IGNORED = frozenset(
         ".pytest_cache",
         "dist",
         "build",
-        ".openclaw",
+        ".agent",
     }
 )
 

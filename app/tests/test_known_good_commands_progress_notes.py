@@ -172,7 +172,7 @@ def test_write_progress_notes_appends_known_good_commands(tmp_path):
         summary="Installed and tested",
         logger=_make_logger(),
     )
-    notes = (tmp_path / ".openclaw" / "progress_notes.md").read_text()
+    notes = (tmp_path / ".agent" / "progress_notes.md").read_text()
     assert "**Known good commands:**" in notes
     assert "- npm install" in notes
     assert "- npm test" in notes
@@ -191,7 +191,7 @@ def test_write_progress_notes_no_known_good_section_when_no_commands(tmp_path):
         summary="done",
         logger=_make_logger(),
     )
-    notes = (tmp_path / ".openclaw" / "progress_notes.md").read_text()
+    notes = (tmp_path / ".agent" / "progress_notes.md").read_text()
     assert "**Known good commands:**" not in notes
 
 
@@ -209,7 +209,7 @@ def test_write_progress_notes_preserves_existing_sections(tmp_path):
         summary="Tests added",
         logger=_make_logger(),
     )
-    notes = (tmp_path / ".openclaw" / "progress_notes.md").read_text()
+    notes = (tmp_path / ".agent" / "progress_notes.md").read_text()
     # Existing sections must still be present
     assert "**Steps completed" in notes
     assert "**Files changed" in notes
@@ -235,7 +235,7 @@ def test_write_progress_notes_deduplicates_across_plan_steps(tmp_path):
         summary="",
         logger=_make_logger(),
     )
-    notes = (tmp_path / ".openclaw" / "progress_notes.md").read_text()
+    notes = (tmp_path / ".agent" / "progress_notes.md").read_text()
     assert notes.count("npm test") == 1
     assert "npm run build" in notes
 
@@ -254,7 +254,7 @@ def test_write_progress_notes_truncates_long_commands(tmp_path):
         summary="",
         logger=_make_logger(),
     )
-    notes = (tmp_path / ".openclaw" / "progress_notes.md").read_text()
+    notes = (tmp_path / ".agent" / "progress_notes.md").read_text()
     for line in notes.splitlines():
         if line.startswith("- echo"):
             assert len(line) <= _PROGRESS_NOTES_COMMAND_MAX_CHARS + 2  # "- " prefix
@@ -275,7 +275,7 @@ def test_write_progress_notes_caps_command_count(tmp_path):
         summary="",
         logger=_make_logger(),
     )
-    notes = (tmp_path / ".openclaw" / "progress_notes.md").read_text()
+    notes = (tmp_path / ".agent" / "progress_notes.md").read_text()
     cmd_lines = [line for line in notes.splitlines() if line.startswith("- echo")]
     assert len(cmd_lines) == _PROGRESS_NOTES_COMMANDS_CAP
 
@@ -295,7 +295,7 @@ def test_write_progress_notes_accumulates_across_tasks(tmp_path):
             summary=f"done {task_num}",
             logger=_make_logger(),
         )
-    notes = (tmp_path / ".openclaw" / "progress_notes.md").read_text()
+    notes = (tmp_path / ".agent" / "progress_notes.md").read_text()
     assert "npm install" in notes
     assert "node -e" in notes
     assert "Task 1" in notes
@@ -322,7 +322,7 @@ def test_known_good_commands_survive_planning_prompt_after_slice_h(tmp_path):
     from app.tasks.worker_support.context import _inject_progress_notes_into_context
 
     # Step 1: write progress_notes for a completed task
-    notes_dir = tmp_path / ".openclaw"
+    notes_dir = tmp_path / ".agent"
     notes_dir.mkdir()
     state_task1 = _make_state(
         str(tmp_path),
@@ -345,7 +345,7 @@ def test_known_good_commands_survive_planning_prompt_after_slice_h(tmp_path):
         summary="Installed deps, ran tests",
         logger=_make_logger(),
     )
-    assert (tmp_path / ".openclaw" / "progress_notes.md").exists()
+    assert (tmp_path / ".agent" / "progress_notes.md").exists()
 
     # Step 2: inject progress_notes into a Task 2 orchestration state
     orch_state = OrchestrationState(

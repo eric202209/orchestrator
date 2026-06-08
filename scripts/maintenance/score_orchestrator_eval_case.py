@@ -20,7 +20,7 @@ import sys
 from typing import Any
 
 
-EVENT_DIR = ".openclaw/events"
+EVENT_DIR = ".agent/events"
 
 _TIMEOUT_ENV_KEYS = (
     "PLANNING_REPAIR_TIMEOUT_SECONDS",
@@ -241,7 +241,7 @@ def _touch_scope(touched_files: list[str], case: dict[str, Any]) -> dict[str, An
                 continue
             if _matches_prefix(path, allowed_prefixes):
                 continue
-            if path.startswith(".openclaw/"):
+            if path.startswith(".agent/"):
                 continue
             unexpected_touched.append(path)
     return {

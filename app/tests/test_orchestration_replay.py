@@ -72,7 +72,7 @@ def test_replay_reconstructs_state_with_reducer_version_and_field_classes(tmp_pa
 
 def test_replay_reports_malformed_unknown_duplicate_and_order_findings(tmp_path):
     project_dir = tmp_path / "replay-integrity"
-    event_dir = project_dir / ".openclaw" / "events"
+    event_dir = project_dir / ".agent" / "events"
     event_dir.mkdir(parents=True)
     path = event_dir / "session_1_task_2.jsonl"
     duplicate_id = "duplicate-event"

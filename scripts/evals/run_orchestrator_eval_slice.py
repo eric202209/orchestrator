@@ -221,7 +221,7 @@ def _wait_for_terminal_session(
 
 
 def _event_journal_path(workspace: Path, session_id: int, task_id: int) -> Path:
-    return workspace / ".openclaw/events" / f"session_{session_id}_task_{task_id}.jsonl"
+    return workspace / ".agent/events" / f"session_{session_id}_task_{task_id}.jsonl"
 
 
 def _event_types(path: Path) -> set[str]:

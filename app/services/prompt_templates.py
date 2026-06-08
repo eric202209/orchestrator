@@ -83,7 +83,7 @@ class OrchestrationState:
       <project_name>/                    ← project workspace
         task_{task_id}/                  ← task-specific subfolder
           ...source files...
-          .openclaw/
+          .agent/
             session_<id>.json            ← session manifest
     """
 
@@ -189,7 +189,7 @@ class OrchestrationState:
     @property
     def session_manifest_path(self) -> Path:
         """Path where the session JSON manifest is saved on close."""
-        return self.project_dir / ".openclaw" / f"session_{self.session_id}.json"
+        return self.project_dir / ".agent" / f"session_{self.session_id}.json"
 
     # ── convenience helpers ──────────────────────────────────────────────────
 

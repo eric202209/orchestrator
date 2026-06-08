@@ -16,7 +16,7 @@ from app.services.workspace.workspace_paths import (
 
 COMPATIBILITY_NAMESPACE = "openclaw"
 CANONICAL_OWNER = "orchestrator"
-EVENT_JOURNAL_ROOT = ".openclaw/events"
+EVENT_JOURNAL_ROOT = ".agent/events"
 
 
 @dataclass(frozen=True)

@@ -120,19 +120,19 @@ def test_aggregate_case_reports_counts_path_observability_and_metadata():
         },
         score_readiness=[
             {
-                "event_journal_path": "workspace-r01/.openclaw/events/a.jsonl",
+                "event_journal_path": "workspace-r01/.agent/events/a.jsonl",
                 "required_terminal_event": "task_completed",
                 "observed_terminal_event": "task_completed",
                 "stabilized": True,
             },
             {
-                "event_journal_path": "workspace-r02/.openclaw/events/b.jsonl",
+                "event_journal_path": "workspace-r02/.agent/events/b.jsonl",
                 "required_terminal_event": "task_completed",
                 "observed_terminal_event": None,
                 "stabilized": True,
             },
             {
-                "event_journal_path": "workspace-r03/.openclaw/events/c.jsonl",
+                "event_journal_path": "workspace-r03/.agent/events/c.jsonl",
                 "required_terminal_event": None,
                 "observed_terminal_event": None,
                 "stabilized": True,
@@ -189,9 +189,9 @@ def test_aggregate_case_reports_counts_path_observability_and_metadata():
         "terminal_event_missing_count": 1,
         "observed_terminal_event_distribution": {"task_completed": 1},
         "journal_paths": [
-            "workspace-r01/.openclaw/events/a.jsonl",
-            "workspace-r02/.openclaw/events/b.jsonl",
-            "workspace-r03/.openclaw/events/c.jsonl",
+            "workspace-r01/.agent/events/a.jsonl",
+            "workspace-r02/.agent/events/b.jsonl",
+            "workspace-r03/.agent/events/c.jsonl",
         ],
         "journal_path_count": 3,
     }
@@ -381,7 +381,7 @@ def test_aggregate_case_reports_marks_all_runs_scoreable_when_ready():
         },
         score_readiness=[
             {
-                "event_journal_path": f"workspace-r0{index}/.openclaw/events/log.jsonl",
+                "event_journal_path": f"workspace-r0{index}/.agent/events/log.jsonl",
                 "required_terminal_event": "task_completed",
                 "observed_terminal_event": "task_completed",
                 "stabilized": True,
@@ -401,9 +401,9 @@ def test_aggregate_case_reports_marks_all_runs_scoreable_when_ready():
         "terminal_event_missing_count": 0,
         "observed_terminal_event_distribution": {"task_completed": 3},
         "journal_paths": [
-            "workspace-r01/.openclaw/events/log.jsonl",
-            "workspace-r02/.openclaw/events/log.jsonl",
-            "workspace-r03/.openclaw/events/log.jsonl",
+            "workspace-r01/.agent/events/log.jsonl",
+            "workspace-r02/.agent/events/log.jsonl",
+            "workspace-r03/.agent/events/log.jsonl",
         ],
         "journal_path_count": 3,
     }
@@ -431,7 +431,7 @@ def test_request_json_raises_auth_expired_on_401(monkeypatch):
 
 
 def test_wait_for_scoreable_event_journal_accepts_existing_task_completed(tmp_path):
-    event_dir = tmp_path / ".openclaw/events"
+    event_dir = tmp_path / ".agent/events"
     event_dir.mkdir(parents=True)
     event_path = event_dir / "session_10_task_20.jsonl"
     event_path.write_text(

@@ -242,7 +242,7 @@ def materialize_replay_fixture(
     tmp_path: Path, fixture: ReplayFixture
 ) -> tuple[Path, Optional[Path]]:
     project_dir = tmp_path / fixture.fixture_id
-    event_dir = project_dir / ".openclaw" / "events"
+    event_dir = project_dir / ".agent" / "events"
     event_dir.mkdir(parents=True)
     event_path = event_dir / f"session_{SESSION_ID}_task_{TASK_ID}.jsonl"
     event_path.write_text(

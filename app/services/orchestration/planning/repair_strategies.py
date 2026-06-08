@@ -24,7 +24,7 @@ _SOURCE_EXTENSIONS = {
 }
 _EXCLUDED_PARTS = {
     ".git",
-    ".openclaw",
+    ".agent",
     ".openclaw-workspaces",
     "__pycache__",
     "dist",

@@ -33,12 +33,12 @@ def _inject_progress_notes_into_context(
     orchestration_state: Any,
     logger: Any,
 ) -> None:
-    """Read .openclaw/progress_notes.md and prepend it to project_context."""
+    """Read .agent/progress_notes.md and prepend it to project_context."""
 
     project_dir = getattr(orchestration_state, "project_dir", None)
     if not project_dir:
         return
-    notes_path = Path(project_dir) / ".openclaw" / "progress_notes.md"
+    notes_path = Path(project_dir) / ".agent" / "progress_notes.md"
     if not notes_path.exists():
         return
     try:

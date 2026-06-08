@@ -323,7 +323,7 @@ def test_permission_request_emits_waiting_for_input_event(
     log_path = (
         tmp_path
         / "permission-events"
-        / ".openclaw"
+        / ".agent"
         / "events"
         / f"session_{session.id}_task_{task.id}.jsonl"
     )

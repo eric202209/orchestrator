@@ -106,7 +106,7 @@ def test_write_working_memory_no_op_when_flag_off(tmp_path, monkeypatch):
     write_working_memory(
         orchestration_state=state, task=task, summary="done", logger=_make_logger()
     )
-    assert not (tmp_path / ".openclaw" / _FILENAME).exists()
+    assert not (tmp_path / ".agent" / _FILENAME).exists()
 
 
 def test_write_working_memory_creates_file(tmp_path, monkeypatch):
@@ -123,7 +123,7 @@ def test_write_working_memory_creates_file(tmp_path, monkeypatch):
         summary="Created foo.py",
         logger=_make_logger(),
     )
-    path = tmp_path / ".openclaw" / _FILENAME
+    path = tmp_path / ".agent" / _FILENAME
     assert path.exists()
     data = json.loads(path.read_text())
     assert data["schema_version"] == SCHEMA_VERSION
@@ -148,7 +148,7 @@ def test_write_working_memory_appends_known_good_commands(tmp_path, monkeypatch)
         summary="Tests passed",
         logger=_make_logger(),
     )
-    data = json.loads((tmp_path / ".openclaw" / _FILENAME).read_text())
+    data = json.loads((tmp_path / ".agent" / _FILENAME).read_text())
     assert len(data["known_good_commands"]) == 1
     entry = data["known_good_commands"][0]
     assert entry["task_id"] == 10
@@ -165,7 +165,7 @@ def test_write_working_memory_records_implementation_strategy(tmp_path, monkeypa
     write_working_memory(
         orchestration_state=state, task=task, summary=summary, logger=_make_logger()
     )
-    data = json.loads((tmp_path / ".openclaw" / _FILENAME).read_text())
+    data = json.loads((tmp_path / ".agent" / _FILENAME).read_text())
     assert len(data["implementation_strategy"]) == 1
     assert data["implementation_strategy"][0]["summary"] == summary
 
@@ -185,7 +185,7 @@ def test_write_working_memory_accumulates_across_tasks(tmp_path, monkeypatch):
             summary=f"summary {task_id}",
             logger=_make_logger(),
         )
-    data = json.loads((tmp_path / ".openclaw" / _FILENAME).read_text())
+    data = json.loads((tmp_path / ".agent" / _FILENAME).read_text())
     assert "1" in data["files_by_task"]
     assert "2" in data["files_by_task"]
     assert len(data["known_good_commands"]) == 2
@@ -207,7 +207,7 @@ def test_write_working_memory_records_active_constraints(tmp_path, monkeypatch):
     write_working_memory(
         orchestration_state=state, task=task, summary="", logger=_make_logger()
     )
-    data = json.loads((tmp_path / ".openclaw" / _FILENAME).read_text())
+    data = json.loads((tmp_path / ".agent" / _FILENAME).read_text())
     constraints = [c["constraint"] for c in data["active_constraints"]]
     assert "heredoc syntax not allowed" in constraints
     assert "use node -e for verification" in constraints
@@ -227,7 +227,7 @@ def test_write_working_memory_no_project_dir_is_safe(monkeypatch):
 
 def test_write_working_memory_corrupted_file_is_replaced(tmp_path, monkeypatch):
     monkeypatch.setattr("app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", True)
-    openclaw_dir = tmp_path / ".openclaw"
+    openclaw_dir = tmp_path / ".agent"
     openclaw_dir.mkdir()
     (openclaw_dir / _FILENAME).write_text("not valid json")
     state = _make_orchestration_state(
@@ -360,7 +360,7 @@ def test_render_only_flag_reads_existing_fixture(tmp_path, monkeypatch):
     monkeypatch.setattr("app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", False)
     monkeypatch.setattr("app.config.settings.WORKING_MEMORY_RENDER_ENABLED", True)
     # Write fixture file manually (simulating a previously persisted state)
-    openclaw_dir = tmp_path / ".openclaw"
+    openclaw_dir = tmp_path / ".agent"
     openclaw_dir.mkdir()
     fixture: dict = {
         "schema_version": SCHEMA_VERSION,
@@ -504,7 +504,7 @@ def test_inject_only_flag_reads_existing_fixture(tmp_path, monkeypatch):
     monkeypatch.setattr("app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", False)
     monkeypatch.setattr("app.config.settings.WORKING_MEMORY_INJECTION_ENABLED", True)
     # Write fixture file manually (simulating a previously persisted state)
-    openclaw_dir = tmp_path / ".openclaw"
+    openclaw_dir = tmp_path / ".agent"
     openclaw_dir.mkdir()
     fixture: dict = {
         "schema_version": SCHEMA_VERSION,

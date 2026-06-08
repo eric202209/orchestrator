@@ -470,7 +470,7 @@ def _looks_like_workspace_rewrite(path: str) -> bool:
     normalized = str(path or "").replace("\\", "/").lstrip("./")
     parts = Path(normalized).parts
     return bool(parts) and parts[0] in {
-        ".openclaw",
+        ".agent",
         "checkpoints",
         "logs",
         "run",

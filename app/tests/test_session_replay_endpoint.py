@@ -95,7 +95,7 @@ def _write_replay_events(
     task_id: int,
     events: list[dict | str],
 ) -> None:
-    events_dir = Path(workspace_path) / ".openclaw" / "events"
+    events_dir = Path(workspace_path) / ".agent" / "events"
     events_dir.mkdir(parents=True, exist_ok=True)
     log_path = events_dir / f"session_{session_id}_task_{task_id}.jsonl"
     log_path.write_text(

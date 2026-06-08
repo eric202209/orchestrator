@@ -40,7 +40,7 @@ def test_append_orchestration_event_writes_append_only_jsonl(tmp_path):
         details={"phase": "planning", "status": "accepted"},
     )
 
-    log_path = project_dir / ".openclaw" / "events" / "session_7_task_13.jsonl"
+    log_path = project_dir / ".agent" / "events" / "session_7_task_13.jsonl"
     lines = [
         json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()
     ]
@@ -101,7 +101,7 @@ def test_event_journal_writes_normalize_log_and_lock_ownership(monkeypatch, tmp_
         details={"phase": "planning"},
     )
 
-    event_dir = project_dir / ".openclaw" / "events"
+    event_dir = project_dir / ".agent" / "events"
     expected_uid = event_dir.stat().st_uid
     expected_gid = event_dir.stat().st_gid
     log_path = event_dir / "session_7_task_13.jsonl"
@@ -142,7 +142,7 @@ def test_validation_verdict_also_persists_event(db_session, tmp_path):
         verdict=verdict,
     )
 
-    log_path = project_dir / ".openclaw" / "events" / "session_9_task_5.jsonl"
+    log_path = project_dir / ".agent" / "events" / "session_9_task_5.jsonl"
     lines = [
         json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()
     ]
@@ -178,7 +178,7 @@ def test_checkpoint_save_also_persists_checkpoint_saved_event(db_session, tmp_pa
         checkpoint_name="autosave_latest",
     )
 
-    log_path = project_dir / ".openclaw" / "events" / "session_11_task_8.jsonl"
+    log_path = project_dir / ".agent" / "events" / "session_11_task_8.jsonl"
     lines = [
         json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()
     ]
@@ -242,7 +242,7 @@ def test_tool_tracking_also_persists_tool_events(db_session, tmp_path, monkeypat
         tmp_path
         / "tool-events"
         / "task-21"
-        / ".openclaw"
+        / ".agent"
         / "events"
         / f"session_{session.id}_task_{task.id}.jsonl"
     )

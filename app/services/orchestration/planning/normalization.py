@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Tuple
 _WORKSPACE_TARGET_EXCLUDE_DIRS = {
     ".git",
     ".mypy_cache",
-    ".openclaw",
+    ".agent",
     ".pytest_cache",
     "__pycache__",
     "dist",

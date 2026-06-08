@@ -84,7 +84,7 @@ def _orchestration_event_log_path(
 ) -> Path:
     return (
         Path(project_dir)
-        / ".openclaw"
+        / ".agent"
         / "events"
         / f"session_{session_id}_task_{task_id}.jsonl"
     )
@@ -92,10 +92,7 @@ def _orchestration_event_log_path(
 
 def _session_fingerprint_index_path(workspace_path: Any, session_id: int) -> Path:
     return (
-        Path(workspace_path)
-        / ".openclaw"
-        / "fingerprints"
-        / f"session_{session_id}.json"
+        Path(workspace_path) / ".agent" / "fingerprints" / f"session_{session_id}.json"
     )
 
 
@@ -198,7 +195,7 @@ def _orchestration_state_snapshot_log_path(
 ) -> Path:
     return (
         Path(project_dir)
-        / ".openclaw"
+        / ".agent"
         / "events"
         / f"session_{session_id}_task_{task_id}_state_snapshots.jsonl"
     )
@@ -288,7 +285,7 @@ def _compute_workspace_hash(project_dir: Any) -> Optional[str]:
         for file_path in sorted(
             item
             for item in path.rglob("*")
-            if item.is_file() and ".openclaw" not in item.parts
+            if item.is_file() and ".agent" not in item.parts
         ):
             rel_path = file_path.relative_to(path)
             stat = file_path.stat()

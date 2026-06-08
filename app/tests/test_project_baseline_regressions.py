@@ -99,7 +99,7 @@ def test_project_gitignore_guard_creates_runtime_exclusions(
     assert gitignore.exists()
     contents = gitignore.read_text(encoding="utf-8")
     assert "# BEGIN OpenClaw workspace guard" in contents
-    assert ".openclaw/" in contents
+    assert ".agent/" in contents
     assert "node_modules/" in contents
     assert "__pycache__/" in contents
 
@@ -129,7 +129,7 @@ def test_project_gitignore_guard_preserves_existing_rules_and_is_idempotent(
     assert second["changed"] is False
     assert contents.startswith("dist/\n.env\n")
     assert contents.count("# BEGIN OpenClaw workspace guard") == 1
-    assert contents.count(".openclaw/") == 1
+    assert contents.count(".agent/") == 1
 
 
 def test_workspace_services_share_project_root_contract(db_session, tmp_path: Path):
@@ -157,7 +157,7 @@ def test_workspace_services_share_project_root_contract(db_session, tmp_path: Pa
     assert (
         (expected_root / AUTO_SNAPSHOT_ROOT)
         .as_posix()
-        .endswith(".openclaw/auto-snapshots")
+        .endswith(".agent/auto-snapshots")
     )
 
 
@@ -213,8 +213,8 @@ def test_task_execution_change_set_captures_added_modified_and_deleted_files(
     (project_root / "README.md").write_text("after\n", encoding="utf-8")
     (project_root / "old.txt").unlink()
     (project_root / "package.json").write_text('{"scripts": {}}\n', encoding="utf-8")
-    (project_root / ".openclaw" / "runtime").mkdir(parents=True)
-    (project_root / ".openclaw" / "runtime" / "ignored.txt").write_text(
+    (project_root / ".agent" / "runtime").mkdir(parents=True)
+    (project_root / ".agent" / "runtime" / "ignored.txt").write_text(
         "ignored\n", encoding="utf-8"
     )
 
@@ -240,7 +240,7 @@ def test_task_execution_change_set_captures_added_modified_and_deleted_files(
     assert change_set["changed_count"] == 3
     assert "deleted_files" in change_set["warning_flags"]
     assert "dependency_files_changed" in change_set["warning_flags"]
-    assert all(".openclaw" not in path for path in change_set["added_files"])
+    assert all(".agent" not in path for path in change_set["added_files"])
 
     durable_change_set = (
         db_session.query(TaskExecutionChangeSet)
@@ -340,13 +340,13 @@ def test_reject_task_execution_change_set_archives_candidate_and_restores_snapsh
     (project_root / "keep.txt").unlink()
     (project_root / "new.txt").write_text("candidate file\n", encoding="utf-8")
     preserved_snapshot_marker = (
-        project_root / ".openclaw" / "auto-snapshots" / "manual-sentinel"
+        project_root / ".agent" / "auto-snapshots" / "manual-sentinel"
     )
     preserved_snapshot_marker.mkdir(parents=True)
     (preserved_snapshot_marker / "marker.txt").write_text(
         "snapshot history\n", encoding="utf-8"
     )
-    preserved_archive = project_root / ".openclaw" / "rejected-change-archive" / "prior"
+    preserved_archive = project_root / ".agent" / "rejected-change-archive" / "prior"
     preserved_archive.mkdir(parents=True)
     (preserved_archive / "manifest.json").write_text("{}", encoding="utf-8")
     task_service.persist_task_execution_change_set(
@@ -374,7 +374,7 @@ def test_reject_task_execution_change_set_archives_candidate_and_restores_snapsh
     assert (project_root / "README.md").read_text(encoding="utf-8") == "accepted\n"
     assert (project_root / "keep.txt").read_text(encoding="utf-8") == "keep\n"
     assert not (project_root / "new.txt").exists()
-    assert ".openclaw/" in (project_root / ".gitignore").read_text(encoding="utf-8")
+    assert ".agent/" in (project_root / ".gitignore").read_text(encoding="utf-8")
     assert (preserved_snapshot_marker / "marker.txt").read_text(
         encoding="utf-8"
     ) == "snapshot history\n"
@@ -637,7 +637,7 @@ def test_rebuild_project_baseline_preserves_project_gitignore_guard(
     assert result["files_copied"] == 1
     contents = gitignore.read_text(encoding="utf-8")
     assert contents.startswith("dist/\n")
-    assert ".openclaw/" in contents
+    assert ".agent/" in contents
     assert "__pycache__/" in contents
 
 
@@ -681,7 +681,7 @@ def test_promoted_workspace_archive_removes_visible_task_folder_but_preserves_re
     assert not task_dir.exists()
     archived_dir = Path(archive_result["archive_path"])
     assert archived_dir.exists()
-    assert task.task_subfolder.startswith(".openclaw/promoted-workspace-archive/")
+    assert task.task_subfolder.startswith(".agent/promoted-workspace-archive/")
     assert task.workspace_status == "promoted"
     assert task.promoted_at is not None
 
@@ -758,7 +758,7 @@ def test_manual_promote_endpoint_archives_visible_task_workspace(
     db_session.refresh(task)
     assert not task_dir.exists()
     assert task.workspace_status == "promoted"
-    assert task.task_subfolder.startswith(".openclaw/promoted-workspace-archive/")
+    assert task.task_subfolder.startswith(".agent/promoted-workspace-archive/")
     assert (project_root / "README.md").read_text(encoding="utf-8") == "manual"
     assert (project_root / task.task_subfolder / "README.md").read_text(
         encoding="utf-8"
@@ -1035,7 +1035,7 @@ def test_manual_promote_clears_terminal_execution_mutation_lock(
         snapshot_key=workspace_snapshot_key(task.id, execution.id),
         target_dir=task_dir,
     )
-    lock_dir = project_root / ".openclaw" / "locks"
+    lock_dir = project_root / ".agent" / "locks"
     lock_dir.mkdir(parents=True)
     lock_path = lock_dir / f"project-{project.id}.mutation.lock"
     lock_path.write_text(
@@ -1349,8 +1349,8 @@ def test_workspace_shape_audit_distinguishes_baseline_from_retained_sandboxes(
     (ready_dir / "tests" / "test_app.py").write_text(
         "def test_app(): pass\n", encoding="utf-8"
     )
-    (ready_dir / ".openclaw").mkdir()
-    (ready_dir / ".openclaw" / "events.jsonl").write_text("{}", encoding="utf-8")
+    (ready_dir / ".agent").mkdir()
+    (ready_dir / ".agent" / "events.jsonl").write_text("{}", encoding="utf-8")
 
     db_session.add_all(
         [
@@ -1395,7 +1395,7 @@ def test_workspace_shape_audit_distinguishes_baseline_from_retained_sandboxes(
         "README.md": 2,
         "package.json": 2,
     }
-    assert audit["transient_artifact_names"] == [".openclaw"]
+    assert audit["transient_artifact_names"] == [".agent"]
     assert any("completed task workspace" in issue for issue in audit["issues"])
     ready_workspace = next(
         item

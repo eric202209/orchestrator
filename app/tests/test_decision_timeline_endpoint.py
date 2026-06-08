@@ -84,7 +84,7 @@ def _write_events(
     *,
     malformed: bool = False,
 ) -> None:
-    events_dir = Path(workspace_path) / ".openclaw" / "events"
+    events_dir = Path(workspace_path) / ".agent" / "events"
     events_dir.mkdir(parents=True, exist_ok=True)
     log_path = events_dir / f"session_{session_id}_task_{task_id}.jsonl"
     with log_path.open("w", encoding="utf-8") as handle:
@@ -1144,7 +1144,7 @@ def test_decision_timeline_surfaces_workspace_isolation_terminal(
                     {
                         "phase": "workspace_restore",
                         "reason": "workspace isolation violation",
-                        "snapshot_path": f"{tmpdir}/.openclaw/auto-snapshots/task",
+                        "snapshot_path": f"{tmpdir}/.agent/auto-snapshots/task",
                         "target_path": tmpdir,
                         "task_execution_id": execution.id,
                     }
@@ -1169,7 +1169,7 @@ def test_decision_timeline_surfaces_workspace_isolation_terminal(
         assert failure["details"]["reason"] == "workspace isolation violation"
         assert failure["details"]["task_execution_id"] == execution.id
         assert failure["details"]["snapshot_path"].endswith(
-            ".openclaw/auto-snapshots/task"
+            ".agent/auto-snapshots/task"
         )
         assert failure["details"]["target_path"] == tmpdir
         assert failure["details"]["repair_attempted"] is False

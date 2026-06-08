@@ -42,10 +42,7 @@ from app.services.prompt_templates import OrchestrationState, OrchestrationStatu
 
 def _journal(project_dir: Path, session_id: int, task_id: int) -> list[dict]:
     path = (
-        project_dir
-        / ".openclaw"
-        / "events"
-        / f"session_{session_id}_task_{task_id}.jsonl"
+        project_dir / ".agent" / "events" / f"session_{session_id}_task_{task_id}.jsonl"
     )
     if not path.exists():
         return []

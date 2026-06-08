@@ -115,7 +115,7 @@ TREE_MAX_DEPTH = 3
 TREE_MAX_ENTRIES = 120
 TREE_EXCLUDED_NAMES = {
     ".git",
-    ".openclaw",
+    ".agent",
     "node_modules",
     "__pycache__",
     ".venv",

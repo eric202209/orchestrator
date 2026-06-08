@@ -39,7 +39,7 @@ def _poll_new_orchestration_events(
     ``task_event_cursors`` maps task_id → number of lines already sent.
     Returns (new_events_list, updated_cursors).
     """
-    events_dir = Path(workspace_path) / ".openclaw" / "events"
+    events_dir = Path(workspace_path) / ".agent" / "events"
     if not events_dir.exists():
         return [], task_event_cursors
 

@@ -37,7 +37,7 @@
         "requirements"
       ],
       "forbidden_touched_prefixes": [
-        ".openclaw/",
+        ".agent/",
         "frontend/",
         "backend/"
       ],
@@ -76,7 +76,7 @@
         "requirements"
       ],
       "forbidden_touched_prefixes": [
-        ".openclaw/",
+        ".agent/",
         "frontend/",
         "backend/"
       ],
@@ -112,7 +112,7 @@
         "requirements"
       ],
       "forbidden_touched_prefixes": [
-        ".openclaw/",
+        ".agent/",
         "frontend/"
       ],
       "required_events": [
@@ -137,7 +137,7 @@
         "timeout_seconds": 90
       },
       "required_files": [
-        ".openclaw/events"
+        ".agent/events"
       ],
       "expected_touched_files": [],
       "allowed_touched_prefixes": [
@@ -192,7 +192,7 @@
         "requirements"
       ],
       "forbidden_touched_prefixes": [
-        ".openclaw/",
+        ".agent/",
         "frontend/",
         "backend/"
       ],
@@ -227,7 +227,7 @@
         "src/amd_tiny/formatting.py"
       ],
       "forbidden_touched_prefixes": [
-        ".openclaw/",
+        ".agent/",
         "frontend/",
         "backend/",
         "tests/"
@@ -263,7 +263,7 @@
         "src/tiny_slug/slug.py"
       ],
       "forbidden_touched_prefixes": [
-        ".openclaw/",
+        ".agent/",
         "frontend/",
         "backend/",
         "tests/"
@@ -299,7 +299,7 @@
         "src/tiny_money/money.py"
       ],
       "forbidden_touched_prefixes": [
-        ".openclaw/",
+        ".agent/",
         "frontend/",
         "backend/",
         "tests/"
@@ -341,7 +341,7 @@
         "requirements"
       ],
       "forbidden_touched_prefixes": [
-        ".openclaw/",
+        ".agent/",
         "frontend/",
         "backend/"
       ],
@@ -386,7 +386,7 @@
         "requirements"
       ],
       "forbidden_touched_prefixes": [
-        ".openclaw/",
+        ".agent/",
         "frontend/",
         "backend/"
       ],

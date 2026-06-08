@@ -144,7 +144,7 @@ def write_working_memory(
     summary: str,
     logger: Any,
 ) -> None:
-    """Persist WorkingMemory to .openclaw/working_memory.json after task success.
+    """Persist WorkingMemory to .agent/working_memory.json after task success.
 
     Slice H. Only runs when WORKING_MEMORY_PERSISTENCE_ENABLED=True.
     Never raises — logs warnings on failure.
@@ -155,7 +155,7 @@ def write_working_memory(
         project_dir = getattr(orchestration_state, "project_dir", None)
         if not project_dir:
             return
-        openclaw_dir = Path(project_dir) / ".openclaw"
+        openclaw_dir = Path(project_dir) / ".agent"
         openclaw_dir.mkdir(parents=True, exist_ok=True)
 
         task_id = getattr(task, "id", None) or 0
@@ -228,7 +228,7 @@ def render_working_memory(project_dir: Any, logger: Any) -> str:
 def _render_working_memory_content(project_dir: Any, logger: Any) -> str:
     """Render without checking the feature flag (used by injection path)."""
     try:
-        openclaw_dir = Path(str(project_dir)) / ".openclaw"
+        openclaw_dir = Path(str(project_dir)) / ".agent"
         wm = _load(openclaw_dir, str(project_dir))
         if not wm.get("known_good_commands") and not wm.get("files_by_task"):
             return ""

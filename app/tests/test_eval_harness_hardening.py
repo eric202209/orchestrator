@@ -119,7 +119,7 @@ def test_derive_clean_success_aborted_session_returns_single_blocker():
 
 
 def test_score_case_aborted_session_sets_primary_failure_phase(tmp_path):
-    events_dir = tmp_path / ".openclaw" / "events"
+    events_dir = tmp_path / ".agent" / "events"
     events_dir.mkdir(parents=True)
 
     manifest = {
@@ -160,7 +160,7 @@ def test_score_case_aborted_session_sets_primary_failure_phase(tmp_path):
 
 
 def test_score_case_normal_session_does_not_set_session_aborted(tmp_path):
-    events_dir = tmp_path / ".openclaw" / "events"
+    events_dir = tmp_path / ".agent" / "events"
     events_dir.mkdir(parents=True)
 
     manifest = {

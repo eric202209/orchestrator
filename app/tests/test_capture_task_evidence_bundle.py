@@ -287,7 +287,7 @@ def test_capture_task_evidence_bundle_writes_expected_files(tmp_path):
     conn = sqlite3.connect(db_path)
     _schema(conn)
     workspace = tmp_path / "workspace"
-    journal_dir = workspace / ".openclaw" / "events"
+    journal_dir = workspace / ".agent" / "events"
     journal_dir.mkdir(parents=True)
     (journal_dir / "session_10_task_20.jsonl").write_text(
         json.dumps(
@@ -493,7 +493,7 @@ def test_replay_bundle_field_coverage_characterization(tmp_path):
     regressed.
     """
     workspace = tmp_path / "workspace"
-    journal_dir = workspace / ".openclaw" / "events"
+    journal_dir = workspace / ".agent" / "events"
     journal_dir.mkdir(parents=True)
 
     known_workspace_hash = "abc123def456abc123"
@@ -765,7 +765,7 @@ def test_capture_task_evidence_bundle_runtime_identity_structure(tmp_path):
 def test_run_replay_bundle_manifest_canonical_shape(tmp_path):
     """run_replay_bundle.json follows the canonical RunReplayBundle v1 shape."""
     workspace = tmp_path / "workspace"
-    journal_dir = workspace / ".openclaw" / "events"
+    journal_dir = workspace / ".agent" / "events"
     journal_dir.mkdir(parents=True)
 
     journal_events = [
@@ -992,7 +992,7 @@ def test_run_replay_bundle_text_human_readable(tmp_path):
 
 def test_run_replay_bundle_manifest_reads_eval_scorer_report(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
-    event_dir = workspace / ".openclaw" / "events"
+    event_dir = workspace / ".agent" / "events"
     event_dir.mkdir(parents=True)
     (event_dir / "session_10_task_20.jsonl").write_text(
         json.dumps(

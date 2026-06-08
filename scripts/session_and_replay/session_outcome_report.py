@@ -135,7 +135,7 @@ def _journal_paths(session: dict[str, Any], task_ids: Iterable[int]) -> list[Pat
         for task_id in task_ids:
             paths.append(
                 root
-                / ".openclaw"
+                / ".agent"
                 / "events"
                 / f"session_{session['id']}_task_{task_id}.jsonl"
             )

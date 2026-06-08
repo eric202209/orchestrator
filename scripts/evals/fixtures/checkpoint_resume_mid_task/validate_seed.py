@@ -11,7 +11,7 @@ import sys
 ROOT = Path(__file__).resolve().parent
 REQUIRED_PATHS = [
     ROOT / "pyproject.toml",
-    ROOT / ".openclaw" / "events",
+    ROOT / ".agent" / "events",
     ROOT / "docs" / "step-one.txt",
     ROOT / "src" / "resume_task" / "__init__.py",
     ROOT / "src" / "resume_task" / "workflow.py",

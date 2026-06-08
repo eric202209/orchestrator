@@ -127,6 +127,6 @@ def test_ordered_task_reports_live_in_openclaw(monkeypatch, db_session, tmp_path
     )
 
     project_root = resolve_project_workspace_path(project.workspace_path, project.name)
-    expected = project_root / ".openclaw" / "task-reports" / f"task_report_{task.id}.md"
+    expected = project_root / ".agent" / "task-reports" / f"task_report_{task.id}.md"
 
     assert get_task_report_path(project_root, task) == expected

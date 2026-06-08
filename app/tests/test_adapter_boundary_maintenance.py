@@ -109,10 +109,10 @@ def test_artifact_namespace_wraps_existing_openclaw_paths_without_renaming(tmp_p
 
     assert payload["canonical_owner"] == "orchestrator"
     assert payload["compatibility_namespace"] == "openclaw"
-    assert payload["event_journal_root"] == ".openclaw/events"
-    assert payload["task_report_root"] == ".openclaw/task-reports"
-    assert str(event_journal_dir(tmp_path)).endswith(".openclaw/events")
-    assert str(task_report_dir(tmp_path)).endswith(".openclaw/task-reports")
+    assert payload["event_journal_root"] == ".agent/events"
+    assert payload["task_report_root"] == ".agent/task-reports"
+    assert str(event_journal_dir(tmp_path)).endswith(".agent/events")
+    assert str(task_report_dir(tmp_path)).endswith(".agent/task-reports")
 
 
 def test_start_openclaw_route_remains_backend_neutral_alias(

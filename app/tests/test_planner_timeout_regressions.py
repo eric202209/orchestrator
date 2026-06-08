@@ -645,7 +645,7 @@ def test_failed_planning_repair_triplet_evidence_is_redacted(tmp_path):
     assert artifact_ref is not None
     artifact_path = (
         tmp_path
-        / ".openclaw"
+        / ".agent"
         / "planning-repair-evidence"
         / ("session_11_task_22_repair_attempt_1_failed.json")
     )

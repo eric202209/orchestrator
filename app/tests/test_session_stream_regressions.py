@@ -33,7 +33,7 @@ def test_poll_new_orchestration_events_returns_empty_when_no_journal(tmp_path):
 
 
 def test_poll_new_orchestration_events_reads_new_events(tmp_path):
-    events_dir = tmp_path / ".openclaw" / "events"
+    events_dir = tmp_path / ".agent" / "events"
     events_dir.mkdir(parents=True)
     log_path = events_dir / "session_1_task_5.jsonl"
     log_path.write_text(
@@ -64,7 +64,7 @@ def test_poll_new_orchestration_events_reads_new_events(tmp_path):
 
 
 def test_poll_new_orchestration_events_respects_cursor(tmp_path):
-    events_dir = tmp_path / ".openclaw" / "events"
+    events_dir = tmp_path / ".agent" / "events"
     events_dir.mkdir(parents=True)
     log_path = events_dir / "session_2_task_3.jsonl"
     log_path.write_text(
@@ -109,7 +109,7 @@ def test_poll_new_orchestration_events_respects_cursor(tmp_path):
 
 
 def test_prepare_initial_orchestration_events_replays_recent_backlog_only(tmp_path):
-    events_dir = tmp_path / ".openclaw" / "events"
+    events_dir = tmp_path / ".agent" / "events"
     events_dir.mkdir(parents=True)
     log_path = events_dir / "session_3_task_9.jsonl"
     log_path.write_text(

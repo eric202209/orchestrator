@@ -13,7 +13,7 @@ from typing import Any
 def _event_path(project_dir: Path, session_id: int, task_id: int) -> Path:
     return (
         project_dir
-        / ".openclaw"
+        / ".agent"
         / "events"
         / f"session_{session_id}_task_{task_id}.jsonl"
     )

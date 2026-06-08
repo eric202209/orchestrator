@@ -102,7 +102,7 @@ def test_virtual_merge_gate_ignores_stale_unsynced_state_for_current_task_retry(
     db_session, tmp_path
 ):
     project_root = tmp_path / "legacy-retry"
-    state_dir = project_root / ".openclaw"
+    state_dir = project_root / ".agent"
     state_dir.mkdir(parents=True)
 
     project = Project(name="Legacy Retry", workspace_path=str(project_root))
@@ -139,7 +139,7 @@ def test_virtual_merge_gate_ignores_stale_unsynced_state_for_current_task_retry(
             project,
             current_task,
             "full_lifecycle",
-            lambda root: root / ".openclaw" / "state_manager.json",
+            lambda root: root / ".agent" / "state_manager.json",
         )
         is None
     )
@@ -147,7 +147,7 @@ def test_virtual_merge_gate_ignores_stale_unsynced_state_for_current_task_retry(
 
 def test_virtual_merge_gate_blocks_unsynced_prior_task(db_session, tmp_path):
     project_root = tmp_path / "prior-unsynced"
-    state_dir = project_root / ".openclaw"
+    state_dir = project_root / ".agent"
     state_dir.mkdir(parents=True)
 
     project = Project(name="Prior Unsynced", workspace_path=str(project_root))
@@ -179,7 +179,7 @@ def test_virtual_merge_gate_blocks_unsynced_prior_task(db_session, tmp_path):
     report_path = get_task_report_path(project_root, prior_task)
     report_path.parent.mkdir(parents=True)
     report_path.write_text("done\n", encoding="utf-8")
-    baseline_dir = project_root / ".openclaw" / "project_baseline"
+    baseline_dir = project_root / ".agent" / "project_baseline"
     baseline_dir.mkdir(parents=True)
     (baseline_dir / "index.html").write_text("<main></main>\n", encoding="utf-8")
     (state_dir / "state_manager.json").write_text(
@@ -198,7 +198,7 @@ def test_virtual_merge_gate_blocks_unsynced_prior_task(db_session, tmp_path):
         project,
         current_task,
         "full_lifecycle",
-        lambda root: root / ".openclaw" / "state_manager.json",
+        lambda root: root / ".agent" / "state_manager.json",
     )
 
     assert reason is not None
@@ -244,7 +244,7 @@ def test_virtual_merge_gate_scopes_prior_tasks_to_same_plan(db_session, tmp_path
             project,
             recovery_validation,
             "test_only",
-            lambda root: root / ".openclaw" / "state_manager.json",
+            lambda root: root / ".agent" / "state_manager.json",
         )
         is None
     )
@@ -283,7 +283,7 @@ def test_virtual_merge_gate_accepts_legacy_root_task_report(db_session, tmp_path
     (project_root / f"task_report_{prior_task.id}.md").write_text(
         "done\n", encoding="utf-8"
     )
-    baseline_dir = project_root / ".openclaw" / "project_baseline"
+    baseline_dir = project_root / ".agent" / "project_baseline"
     baseline_dir.mkdir(parents=True)
     (baseline_dir / "index.html").write_text("<main></main>\n", encoding="utf-8")
 
@@ -293,7 +293,7 @@ def test_virtual_merge_gate_accepts_legacy_root_task_report(db_session, tmp_path
             project,
             current_task,
             "full_lifecycle",
-            lambda root: root / ".openclaw" / "state_manager.json",
+            lambda root: root / ".agent" / "state_manager.json",
         )
         is None
     )

@@ -163,7 +163,7 @@ def python_test_files(project_dir: str | Path) -> list[str]:
         "venv",
         "node_modules",
         "__pycache__",
-        ".openclaw",
+        ".agent",
     }
     for path in root.rglob("*.py"):
         try:

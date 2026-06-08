@@ -49,7 +49,7 @@ def test_read_fingerprint_index_returns_none_when_expired(tmp_path):
     fp = {"session_id": 5, "anomaly_tags": []}
     write_session_fingerprint_index(tmp_path, 5, fp)
 
-    index_path = tmp_path / ".openclaw" / "fingerprints" / "session_5.json"
+    index_path = tmp_path / ".agent" / "fingerprints" / "session_5.json"
     data = json.loads(index_path.read_text())
     # Backdate by 10 minutes — beyond any reasonable TTL.
     old_ts = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
@@ -64,7 +64,7 @@ def test_read_fingerprint_index_max_age_zero_skips_ttl_check(tmp_path):
     fp = {"session_id": 7, "anomaly_tags": ["tool_failed"]}
     write_session_fingerprint_index(tmp_path, 7, fp)
 
-    index_path = tmp_path / ".openclaw" / "fingerprints" / "session_7.json"
+    index_path = tmp_path / ".agent" / "fingerprints" / "session_7.json"
     data = json.loads(index_path.read_text())
     old_ts = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
     data["indexed_at"] = old_ts
@@ -91,7 +91,7 @@ def test_fingerprint_index_stored_in_correct_location(tmp_path):
     write_session_fingerprint_index(
         tmp_path, 42, {"session_id": 42, "anomaly_tags": []}
     )
-    expected = tmp_path / ".openclaw" / "fingerprints" / "session_42.json"
+    expected = tmp_path / ".agent" / "fingerprints" / "session_42.json"
     assert expected.exists()
 
 
@@ -417,14 +417,14 @@ def test_divergence_compare_resolves_relative_project_workspace(
     expected = (
         workspace_root
         / "relative-project"
-        / ".openclaw"
+        / ".agent"
         / "fingerprints"
         / f"session_{session.id}.json"
     )
     wrong = (
         Path.cwd()
         / "relative-project"
-        / ".openclaw"
+        / ".agent"
         / "fingerprints"
         / f"session_{session.id}.json"
     )

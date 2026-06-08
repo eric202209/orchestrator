@@ -18,7 +18,7 @@ from app.services.task_service import TaskService
 
 
 def get_state_manager_path(project_root: Path) -> Path:
-    return project_root / ".openclaw" / "state_manager.json"
+    return project_root / ".agent" / "state_manager.json"
 
 
 def build_project_state_snapshot(

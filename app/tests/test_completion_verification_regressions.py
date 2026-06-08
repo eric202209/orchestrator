@@ -305,7 +305,7 @@ def test_vitest_completion_verification_excludes_openclaw_snapshots():
         "vitest run",
     )
 
-    assert command == "pnpm test -- --exclude=.openclaw/**"
+    assert command == "pnpm test -- --exclude=.agent/**"
 
 
 def test_jest_completion_verification_excludes_openclaw_snapshots():
@@ -314,7 +314,7 @@ def test_jest_completion_verification_excludes_openclaw_snapshots():
         "node --runInBand jest",
     )
 
-    assert command == "pnpm test -- --testPathIgnorePatterns=.openclaw/"
+    assert command == "pnpm test -- --testPathIgnorePatterns=.agent/"
 
 
 def test_python_completion_verification_detects_python_module_pytest(tmp_path):
@@ -495,7 +495,7 @@ def test_module_resolution_failure_is_treated_as_repairable_verification_issue()
     )
 
     verdict = _classify_completion_verification_failure(
-        command="pnpm test -- --exclude=.openclaw/**",
+        command="pnpm test -- --exclude=.agent/**",
         source="package.json test script via pnpm",
         verification_output=(
             "FAIL src/utils/format.spec.ts\n"
@@ -1710,8 +1710,8 @@ def test_canonical_root_completion_archives_task_path_metadata(
     del execution
     ctx.runs_in_canonical_baseline = True
     ctx.orchestration_state._project_dir_override = str(project_root)
-    (workspace_dir / ".openclaw" / "events").mkdir(parents=True)
-    (workspace_dir / ".openclaw" / "events" / "session.jsonl").write_text(
+    (workspace_dir / ".agent" / "events").mkdir(parents=True)
+    (workspace_dir / ".agent" / "events" / "session.jsonl").write_text(
         "{}\n", encoding="utf-8"
     )
 
@@ -1738,7 +1738,7 @@ def test_canonical_root_completion_archives_task_path_metadata(
 
     assert result["status"] == "completed"
     assert ctx.task.workspace_status == "promoted"
-    assert ctx.task.task_subfolder.startswith(".openclaw/promoted-workspace-archive/")
+    assert ctx.task.task_subfolder.startswith(".agent/promoted-workspace-archive/")
     assert not workspace_dir.exists()
     assert (project_root / ctx.task.task_subfolder).exists()
 

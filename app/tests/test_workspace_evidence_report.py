@@ -61,7 +61,7 @@ def test_workspace_evidence_report_merges_log_and_journal_evidence(tmp_path):
     conn.row_factory = sqlite3.Row
     _schema(conn)
     workspace = tmp_path / "project"
-    journal_dir = workspace / ".openclaw" / "events"
+    journal_dir = workspace / ".agent" / "events"
     journal_dir.mkdir(parents=True)
     journal = journal_dir / "session_10_task_20.jsonl"
     journal.write_text(
