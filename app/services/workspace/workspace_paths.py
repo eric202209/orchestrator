@@ -22,6 +22,9 @@ HYDRATION_EXCLUDED_NAMES = {
     ".pytest_cache",
     "site-packages",
     "venv",
+    # .gitignore is orchestrator scaffolding (written by ensure_project_gitignore_guard)
+    # and must not count as user content for the has_existing_files workspace review.
+    ".gitignore",
 }
 LEGACY_BASELINE_DIR_NAME = ".project-baseline"
 AUTO_SNAPSHOT_ROOT = ".agent/auto-snapshots"
