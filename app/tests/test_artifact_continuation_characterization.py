@@ -631,7 +631,7 @@ class TestPromptBudgetCap:
         block = build_project_artifact_block(p.id, db)
         # The requirements line must not contain all 500 Xs
         req_line = next(
-            (l for l in block.splitlines() if l.startswith("Requirements:")), ""
+            (line for line in block.splitlines() if l.startswith("Requirements:")), ""
         )
         req_content = req_line[len("Requirements:") :].strip()
         assert len(req_content) <= _ARTIFACT_BLOCK_REQUIREMENTS_CHARS, (
@@ -650,7 +650,12 @@ class TestPromptBudgetCap:
 
         block = build_project_artifact_block(p.id, db)
         impl_line = next(
-            (l for l in block.splitlines() if l.startswith("Implementation plan:")), ""
+            (
+                line
+                for line in block.splitlines()
+                if l.startswith("Implementation plan:")
+            ),
+            "",
         )
         impl_content = impl_line[len("Implementation plan:") :].strip()
         assert len(impl_content) <= _ARTIFACT_BLOCK_IMPL_PLAN_CHARS, (
