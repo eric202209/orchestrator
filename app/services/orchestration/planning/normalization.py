@@ -82,13 +82,19 @@ def _unique_existing_workspace_target(
     if not requested.name or not requested.suffix:
         return None
 
+    # Require at least one matching directory component when the requested path
+    # has an explicit directory prefix. A pure basename match (score=1) when the
+    # directories differ is a false positive: tests/__init__.py must not become
+    # src/__init__.py just because both share the __init__.py filename.
+    min_suffix_score = 2 if len(requested.parts) > 1 else 1
+
     scored: list[tuple[int, int, str]] = []
     for candidate_text in existing_files:
         candidate = PurePosixPath(candidate_text)
         if candidate.name != requested.name:
             continue
         suffix_score = _common_suffix_part_count(requested, candidate)
-        if suffix_score < 1:
+        if suffix_score < min_suffix_score:
             continue
         scored.append((suffix_score, len(candidate.parts), candidate_text))
     if not scored:

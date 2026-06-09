@@ -363,6 +363,79 @@ def test_existing_file_target_normalization_ignores_ambiguous_matches(tmp_path):
     assert normalized[0]["ops"][0]["path"] == "config.py"
 
 
+def test_existing_file_target_normalization_preserves_explicit_directory_component(
+    tmp_path,
+):
+    # When the plan requests tests/__init__.py (new file, new directory) and
+    # src/__init__.py already exists, the normalizer must NOT redirect
+    # tests/__init__.py -> src/__init__.py. The directories differ; a pure
+    # basename match is not sufficient when the requested path carries an
+    # explicit directory prefix.
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "__init__.py").write_text(
+        '__version__ = "0.1.0"\n', encoding="utf-8"
+    )
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create test package",
+            "commands": [],
+            "verification": "python -m pytest tests/ -v",
+            "rollback": None,
+            "expected_files": ["tests/__init__.py", "tests/test_main.py"],
+            "ops": [
+                {"op": "write_file", "path": "tests/__init__.py", "content": ""},
+                {
+                    "op": "write_file",
+                    "path": "tests/test_main.py",
+                    "content": "from src import __version__\n",
+                },
+            ],
+        }
+    ]
+
+    normalized, details = normalize_existing_file_target_plan(
+        plan,
+        project_dir=tmp_path,
+    )
+
+    assert (
+        details["changed"] is False
+    ), f"Normalizer must not rewrite tests/__init__.py to src/__init__.py; got {details}"
+    paths = [op["path"] for op in normalized[0]["ops"]]
+    assert "tests/__init__.py" in paths
+    assert "src/__init__.py" not in paths
+
+
+def test_existing_file_target_normalization_preserves_diffdir_explicit_path(tmp_path):
+    # lib/utils.py targeting an existing app/utils.py must not be rewritten.
+    # Different directory components share only the basename — insufficient for
+    # a path that already carries an explicit directory.
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "utils.py").write_text("# app utils\n", encoding="utf-8")
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create lib utils",
+            "commands": [],
+            "verification": "test -f lib/utils.py",
+            "rollback": None,
+            "expected_files": ["lib/utils.py"],
+            "ops": [
+                {"op": "write_file", "path": "lib/utils.py", "content": "# lib utils\n"}
+            ],
+        }
+    ]
+
+    normalized, details = normalize_existing_file_target_plan(
+        plan,
+        project_dir=tmp_path,
+    )
+
+    assert details["changed"] is False
+    assert normalized[0]["ops"][0]["path"] == "lib/utils.py"
+
+
 def test_frontend_python_content_probe_does_not_create_stack_conflict(tmp_path):
     plan = [
         _step(
