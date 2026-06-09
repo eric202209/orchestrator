@@ -15,6 +15,7 @@ from app.services.workspace.project_isolation_service import (
 
 HYDRATION_EXCLUDED_NAMES = {
     ".agent",
+    ".openclaw",  # legacy dir name; kept as migration guard for existing projects
     ".venv",
     "__pycache__",
     "node_modules",

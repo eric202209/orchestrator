@@ -256,7 +256,7 @@ def assess_plan_workspace_compatibility(
         if path.is_file()
         and path.suffix.lower() in SOURCE_EXTENSIONS
         and not any(
-            part in {"node_modules", "__pycache__", ".openclaw"}
+            part in {"node_modules", "__pycache__", ".openclaw", ".agent"}
             for part in path.relative_to(project_dir).parts
         )
     ]

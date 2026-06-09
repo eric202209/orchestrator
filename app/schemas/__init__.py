@@ -107,6 +107,12 @@ class TaskResponse(TaskBase):
     plan_id: Optional[int] = None
     status: TaskStatusEnum
     execution_profile: str = "full_lifecycle"
+
+    @field_validator("execution_profile", mode="before")
+    @classmethod
+    def coerce_execution_profile(cls, v: Any) -> str:
+        return v if v is not None else "full_lifecycle"
+
     workflow_stage: Optional[str] = None
     estimated_effort: Optional[str] = None
     plan_position: Optional[int] = None
@@ -243,6 +249,18 @@ class SessionResponse(SessionBase):
     status: str
     execution_mode: str
     default_execution_profile: str = "full_lifecycle"
+
+    @field_validator("execution_mode", "default_execution_profile", mode="before")
+    @classmethod
+    def coerce_session_str_fields(cls, v: Any, info: Any) -> str:
+        if v is not None:
+            return v
+        defaults = {
+            "execution_mode": "automatic",
+            "default_execution_profile": "full_lifecycle",
+        }
+        return defaults.get(info.field_name, "automatic")
+
     is_active: bool
     last_alert_level: Optional[str] = None
     last_alert_message: Optional[str] = None

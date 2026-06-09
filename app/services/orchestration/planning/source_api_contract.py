@@ -220,7 +220,15 @@ def _is_ignored_path(path: Path, root: Path) -> bool:
     rel = _relative_path(path, root)
     if rel is None:
         return True
-    ignored = {".git", ".venv", "venv", "node_modules", "__pycache__", ".openclaw"}
+    ignored = {
+        ".git",
+        ".venv",
+        "venv",
+        "node_modules",
+        "__pycache__",
+        ".openclaw",
+        ".agent",
+    }
     return bool(set(Path(rel).parts) & ignored)
 
 

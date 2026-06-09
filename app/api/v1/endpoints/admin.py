@@ -153,7 +153,7 @@ def get_outcome_rates(
         sys.path.insert(0, str(repo_root))
 
     try:
-        from scripts.session_outcome_report import (
+        from scripts.session_and_replay.session_outcome_report import (
             _outcome_rates,
             _operator_review_count,
             _rows,
