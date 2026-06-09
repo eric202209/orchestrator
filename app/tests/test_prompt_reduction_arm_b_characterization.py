@@ -316,13 +316,17 @@ class TestPromptSizeReduction:
             f"Arm A={len(arm_a)}c, Arm B={len(arm_b)}c"
         )
 
-    def test_arm_b_savings_at_least_2000c(self):
-        """Arm B must save at least 2000c vs Arm A (design target: ~3169c)."""
+    def test_arm_b_savings_at_least_1900c(self):
+        """Arm B must save at least 1900c vs Arm A.
+
+        Threshold lowered from 2000c after pilot run 2 revision added back a
+        compact ~260c verification example to fix the brittle_commands regression.
+        """
         arm_a = _build_arm_a()
         arm_b = _build_arm_b()
         savings = len(arm_a) - len(arm_b)
-        assert savings >= 2000, (
-            f"Arm B savings {savings}c below 2000c minimum "
+        assert savings >= 1900, (
+            f"Arm B savings {savings}c below 1900c minimum "
             f"(Arm A={len(arm_a)}c, Arm B={len(arm_b)}c)"
         )
 
@@ -451,3 +455,58 @@ class TestFeatureFlagDefaults:
         assert settings.PSS_CONTINUATION_INJECTION_ENABLED is False
         assert settings.ARTIFACT_CONTINUATION_ENABLED is False
         assert settings.WORKING_MEMORY_INJECTION_ENABLED is False
+
+
+# ---------------------------------------------------------------------------
+# Case: Compact example present in Arm B (added after pilot run 2 revision)
+# ---------------------------------------------------------------------------
+
+
+class TestCompactExampleInArmB:
+    """Verify the compact verification example added to fix the brittle_commands regression.
+
+    Pilot run 2 (2026-06-09) showed 75% repair rate for HTML/JSON/CSS tasks because
+    Arm B had no concrete example to anchor safe verification format. The 848c original
+    example was replaced with a ~260c compact example showing write_file + pathlib.Path.
+    """
+
+    def test_compact_example_block_present(self):
+        """Arm B must include the compact **Example:** label."""
+        result = _build_arm_b()
+        assert "**Example:**" in result
+
+    def test_compact_example_includes_write_file_op(self):
+        """Arm B example must contain a write_file op (teaches file-creation pattern)."""
+        result = _build_arm_b()
+        assert '"op":"write_file"' in result
+
+    def test_compact_example_includes_pathlib_verification(self):
+        """Arm B example must show safe pathlib.Path existence check."""
+        result = _build_arm_b()
+        assert "pathlib.Path" in result
+
+    def test_compact_example_no_heredoc(self):
+        """Arm B example must not use heredoc (<<) syntax."""
+        result = _build_arm_b()
+        assert "<<" not in result
+
+    def test_compact_example_no_nested_fstring(self):
+        """Arm B example must not use f-string assertions (the brittle pattern)."""
+        result = _build_arm_b()
+        assert "f'" not in result
+        assert 'f"' not in result
+
+    def test_old_848c_example_still_absent(self):
+        """The original 848c 'Valid Minimal JSON Example' block must remain absent from Arm B."""
+        result = _build_arm_b()
+        assert "Valid Minimal JSON Example" not in result
+
+    def test_arm_a_still_has_original_example(self):
+        """Arm A must still contain the original 'Valid Minimal JSON Example' block."""
+        result = _build_arm_a()
+        assert "Valid Minimal JSON Example" in result
+
+    def test_compact_example_absent_from_arm_a(self):
+        """The compact **Example:** block must NOT appear in Arm A (Arm A is unchanged)."""
+        result = _build_arm_a()
+        assert "**Example:**" not in result

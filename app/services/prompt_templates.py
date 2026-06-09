@@ -375,7 +375,9 @@ Return only a JSON array matching this shape. No markdown. No prose.
     # Req 13/operation_choice_contract (profile-gated).
     # Rules 2–4, 11 (UNKNOWN): compressed into one sentence.
     # Rules 1, 5, 6 and Reqs 1–11, 14 (REDUCE/REMOVE): omitted.
-    # JSON example block (848c): removed; inline schema replaces it.
+    # JSON example block (848c): removed; compact ~250c example added back after
+    # pilot run 2 regression (2026-06-09): without any example, Qwen generated
+    # nested f-string verification for non-Python files → brittle_commands.
     # Arm B static frame target: ~1,392c (vs 4,561c for Arm A).
     TASK_PLANNING_ARM_B = """Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
@@ -410,6 +412,9 @@ Do not implement anything.
 3. Keep `commands` for shell tasks such as installs, builds, tests, inspection, and verification. Never use heredoc syntax. Use `ops` for file bodies and deterministic file mutations.
 4. Include exactly one final meaningful verification/build step such as `npm run build`, `pytest`, or `python -m pytest`.
 5. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command, and must prove behavior or content using current workspace evidence.
+
+**Example:**
+[{{"step_number":1,"description":"Create file","ops":[{{"op":"write_file","path":"f.txt","content":"x"}}],"commands":[],"verification":"python -c \\"import pathlib; assert pathlib.Path('f.txt').exists()\\"","rollback":null,"expected_files":["f.txt"]}}]
 
 **Execution Profile Rules:**
 {execution_profile_rules}
