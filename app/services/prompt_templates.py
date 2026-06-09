@@ -369,6 +369,59 @@ Invalid: Objects like {{"steps": [...]}} instead of a top-level array.
 Return only a JSON array matching this shape. No markdown. No prose.
 """
 
+    # ── 1b. PLANNING — Arm B (Reduced, priority-8 experiment) ────────────────
+    # Rules classified KEEP: Rule 7 (ops preference), Rule 8 (heredoc ban),
+    # Rule 9 (verify step), Rule 10 (verify format), Req 12 (expected_files),
+    # Req 13/operation_choice_contract (profile-gated).
+    # Rules 2–4, 11 (UNKNOWN): compressed into one sentence.
+    # Rules 1, 5, 6 and Reqs 1–11, 14 (REDUCE/REMOVE): omitted.
+    # JSON example block (848c): removed; inline schema replaces it.
+    # Arm B static frame target: ~1,392c (vs 4,561c for Arm A).
+    TASK_PLANNING_ARM_B = """Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
+No prose. No markdown fences. No plan.json. No explanation.
+Do not implement anything.
+
+**Task:** {task_description}
+
+**Execution Profile:** {execution_profile}
+
+**Context:** {project_context}
+
+**Project Structure Capsule:**
+{project_structure_capsule}
+
+**Workspace:**
+- Root: {workspace_root}
+- Project: {project_dir}
+
+**Execution Boundary:**
+1. Working directory is already `{project_dir}`; every command runs there.
+2. Use relative paths only; no `..`, `~`, absolute paths, or sibling project folders.
+3. Execution expands planned file paths under `{project_dir}`.
+
+**Requirements:**
+1. Create 3 or 4 sequential steps maximum. Required step keys: step_number (int), description, commands (array), verification (string|null), rollback (string|null), expected_files (array); optional: ops (array).
+2. `expected_files` must always be present and must be a JSON array of relative path strings (or [])
+3. Supported file ops (relative `path` required): {supported_file_ops}
+{arm_b_operation_contract}
+**Planning Rules:**
+1. Work incrementally (dirs first, one file at a time, deps separate); use relative paths only; avoid background processes, &, nohup, or dev servers; run scaffold commands in the current workspace if genuinely required.
+2. For routine file changes, prefer `ops`: `[{{"op":"write_file","path":"relative/path","content":"file contents"}}]`; do not shell-quote file bodies. Use append_file for appends, replace_in_file for exact literal edits, mkdir for directories, and delete_file for file deletion.
+3. Keep `commands` for shell tasks such as installs, builds, tests, inspection, and verification. Never use heredoc syntax. Use `ops` for file bodies and deterministic file mutations.
+4. Include exactly one final meaningful verification/build step such as `npm run build`, `pytest`, or `python -m pytest`.
+5. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command, and must prove behavior or content using current workspace evidence.
+
+**Execution Profile Rules:**
+{execution_profile_rules}
+
+**Workflow Phases:**
+{workflow_guidance}
+
+Invalid: Objects like {{"steps": [...]}} instead of a top-level array.
+
+Return only a JSON array. No markdown. No prose.
+"""
+
     # ── 2. STEP EXECUTION (Concise) ───────────────────────────────────────────
 
     STEP_EXECUTION = """Execute this step.
@@ -815,6 +868,92 @@ Examples:
     # ── Class Methods ────────────────────────────────────────────────────────
 
     @classmethod
+    def _arm_b_operation_contract(cls, execution_profile: str) -> str:
+        """Profile-gated operation_choice_contract for Arm B.
+
+        Injected only for implementation-oriented profiles (full_lifecycle,
+        execute_only) where replace_in_file ops are commonly used. Returns an
+        empty string for read-only and non-implementation profiles so the
+        operation_choice_contract contributes 0c to those prompts.
+        """
+        if execution_profile in {"full_lifecycle", "execute_only"}:
+            return f"4. {render_operation_choice_contract()}\n"
+        return ""
+
+    @classmethod
+    def build_planning_prompt_arm_b(
+        cls,
+        task_description: str,
+        project_context: Optional[str] = None,
+        workspace_root: Optional[str] = None,
+        project_dir: Optional[str] = None,
+        execution_profile: str = "full_lifecycle",
+        workflow_profile: str = "default",
+        workflow_phases: Optional[List[str]] = None,
+        project_structure_capsule: Optional[str] = None,
+    ) -> str:
+        """Build a reduced planning prompt for the Arm B experiment (Priority 8).
+
+        Produces the same variable context as build_planning_prompt but renders
+        TASK_PLANNING_ARM_B instead of TASK_PLANNING. Arm B static frame target:
+        ~1,392c vs 4,561c for Arm A (69% reduction).
+        """
+        ws_root = workspace_root or str(get_effective_workspace_root())
+
+        import re
+
+        if project_context:
+            project_name = project_context.split()[0]
+            slug = re.sub(r"[^a-zA-Z0-9]+", "-", project_name.lower()).strip("-")
+        else:
+            slug = "project"
+
+        proj_dir = project_dir or f"{ws_root}/{slug}"
+
+        compact_task_description = " ".join((task_description or "").split())[:1600]
+        compact_project_context = (
+            project_context or "No additional context provided."
+        )[:850]
+        compact_project_structure_capsule = (
+            project_structure_capsule
+            or "No structural project index was available for this planning attempt."
+        )[:2200]
+        workflow_phases = workflow_phases or []
+        workflow_guidance = (
+            "No explicit phase structure. Use current default planning behavior."
+        )
+        if workflow_phases:
+            phase_lines = "\n".join(
+                f"{idx}. {phase}" for idx, phase in enumerate(workflow_phases, start=1)
+            )
+            workflow_guidance = (
+                f"Workflow profile: {workflow_profile}\n"
+                "Plan must respect this phase order:\n"
+                f"{phase_lines}\n"
+                "Keep steps grouped inside this sequence. Do not skip ahead.\n"
+                "Frontend+backend: use subdirs (frontend/, backend/) inside task root. No ../backend or sibling folders."
+            )
+
+        context = {
+            "task_description": compact_task_description,
+            "execution_profile": execution_profile,
+            "execution_profile_rules": cls.describe_execution_profile(
+                execution_profile
+            ),
+            "project_context": compact_project_context,
+            "project_structure_capsule": compact_project_structure_capsule,
+            "workspace_root": ws_root,
+            "project_dir": proj_dir,
+            "workflow_guidance": workflow_guidance,
+            "supported_file_ops": render_supported_file_ops(),
+            "arm_b_operation_contract": cls._arm_b_operation_contract(
+                execution_profile
+            ),
+        }
+
+        return cls.TASK_PLANNING_ARM_B.format(**context)
+
+    @classmethod
     def get_template(cls, template_name: str) -> Optional[str]:
         """Return a raw template string by name."""
         templates = {
@@ -882,6 +1021,20 @@ Examples:
         Returns:
             Planning prompt string ready for LLM call.
         """
+        from app.config import settings
+
+        if settings.REDUCED_PLANNING_PROMPT_ENABLED:
+            return cls.build_planning_prompt_arm_b(
+                task_description=task_description,
+                project_context=project_context,
+                workspace_root=workspace_root,
+                project_dir=project_dir,
+                execution_profile=execution_profile,
+                workflow_profile=workflow_profile,
+                workflow_phases=workflow_phases,
+                project_structure_capsule=project_structure_capsule,
+            )
+
         ws_root = workspace_root or str(get_effective_workspace_root())
 
         # Create a slug from project context (remove spaces, special chars)

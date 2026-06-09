@@ -220,6 +220,11 @@ class Settings(BaseSettings):
     # avoid duplication. Requires PSS_CONTINUATION_INJECTION_ENABLED=True for full
     # task-history + constraint-language coverage.
     ARTIFACT_CONTINUATION_ENABLED: bool = False
+    # Priority 8: Arm B reduced planning prompt experiment.
+    # When True, build_planning_prompt uses the Arm B template (69% static frame
+    # reduction). Off by default. No evaluation — implementation only.
+    # Arm A (current production) is unchanged when False.
+    REDUCED_PLANNING_PROMPT_ENABLED: bool = False
 
     @field_validator("AGENT_SECONDARY_BACKEND")
     @classmethod
