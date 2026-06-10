@@ -295,9 +295,13 @@ class Settings(BaseSettings):
     OLLAMA_PLANNING_TIMEOUT_SECONDS: int = 0
 
     # Execution profile: "standard", "medium", "low_resource", or "compact_local".
-    # Set low_resource for Windows / 16GB RAM / 6GB VRAM / Qwen3:8B deployments.
-    # Set compact_local for governed low-end local-lane validation.
-    # Set medium for mid-tier machines.
+    # Capability-based: low_resource for constrained deployments where local
+    # models and memory budgets are minimal; compact_local for governed
+    # low-end local-lane validation; medium for moderate-capacity deployments.
+    # NOTE: this profile covers execution/runtime capacity only. Planning/repair
+    # lane capability is a separate axis (conceptual "planning_lane_profile",
+    # It has no runtime effect unless the explicit lane env vars are set
+    # (PLANNING_BACKEND, PLANNING_REPAIR_BASE_URL/MODEL/API_KEY — which must move together).
     RUNTIME_PROFILE: str = "standard"
     MAX_PLAN_STEPS: int = 10
 
