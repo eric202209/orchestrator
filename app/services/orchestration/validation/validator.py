@@ -2720,6 +2720,56 @@ class ValidatorService:
 
             return False
 
+        read_only_command_heads = {
+            "cat",
+            "ls",
+            "head",
+            "tail",
+            "grep",
+            "find",
+            "test",
+            "stat",
+            "wc",
+            "diff",
+            "tree",
+        }
+
+        def command_is_read_only(command_text: str) -> bool:
+            text = command_text.strip()
+            if not text:
+                return True
+            if ">" in text:
+                return False
+            for segment in re.split(r"&&|\|\||;|\|", text):
+                tokens = segment.strip().split()
+                if not tokens:
+                    continue
+                if tokens[0] not in read_only_command_heads:
+                    return False
+            return True
+
+        def step_materializes_into(step: Dict[str, Any], root_name: str) -> bool:
+            for raw_operation in step.get("ops", []) or []:
+                if not isinstance(raw_operation, dict):
+                    continue
+                operation = normalize_file_op_shape(raw_operation)
+                raw_path = str(operation.get("path") or "").strip()
+                if not raw_path:
+                    continue
+                parts = Path(raw_path).parts
+                if parts and parts[0] == root_name:
+                    return True
+            reference_pattern = re.compile(
+                rf"(?<![\w@/.-]){re.escape(root_name)}(?![\w@.-])"
+            )
+            for command in step.get("commands", []) or []:
+                text = str(command or "")
+                if not reference_pattern.search(text):
+                    continue
+                if not command_is_read_only(text):
+                    return True
+            return False
+
         bad_steps: List[int] = []
         for step in plan:
             expected_files = [
@@ -2750,6 +2800,20 @@ class ValidatorService:
             # also create root-level deliverables like index.html or package.json.
             if len(suspicious) == 1 and not root_level_files:
                 nested_root = suspicious[0]
+                # An already-existing top-level directory (e.g. the package dir
+                # of a Python library workspace) is an in-place target, not a
+                # new nested project root.
+                if project_dir is not None:
+                    try:
+                        if (Path(project_dir) / nested_root).is_dir():
+                            continue
+                    except Exception:
+                        pass
+                # expected_files alone is not evidence of scaffold creation;
+                # the step must actually materialize into the folder via file
+                # ops or non-read-only commands.
+                if not step_materializes_into(step, nested_root):
+                    continue
                 nested_root_files = [
                     path_text
                     for path_text in expected_files
