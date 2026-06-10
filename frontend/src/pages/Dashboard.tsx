@@ -438,7 +438,10 @@ function Dashboard() {
                   />
                 ) : (
                   <div className="divide-y divide-[color:var(--oc-border-soft)]">
-                    {tasks.slice(-5).reverse().map((task) => (
+                    {[...tasks]
+                      .sort((a, b) => new Date(b.updated_at || b.created_at).getTime() - new Date(a.updated_at || a.created_at).getTime())
+                      .slice(0, 5)
+                      .map((task) => (
                       <div key={task.id} className="flex items-center justify-between py-3">
                         <div>
                           <p className="text-sm font-medium text-slate-200">{task.title}</p>
