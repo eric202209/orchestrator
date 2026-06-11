@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from enum import StrEnum
 import importlib.util
+import os
 from pathlib import Path
 import shlex
+import sys
 
 from app.services.orchestration.execution.execution_flow import (
     _inject_project_venv_path,
+    _strip_orchestrator_pip_shadow,
     execute_verification_command,
 )
 from app.services.orchestration.phases.completion_flow import (
@@ -443,3 +446,150 @@ def test_step_verification_non_pip_command_succeeds_with_venv_present(tmp_path):
 
     assert result["success"] is True
     assert "hello-from-venv-project" in result["output"]
+
+
+def _orchestrator_bin() -> str:
+    return str(Path(sys.executable).parent)
+
+
+def test_strip_orchestrator_pip_shadow_strips_for_bare_pip_without_venv(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    system_bin = tmp_path / "sysbin"
+    _make_fake_pip(system_bin, "SYSTEM_PIP_USED")
+    base_env = {"PATH": _orchestrator_bin() + os.pathsep + str(system_bin)}
+
+    result_env = _strip_orchestrator_pip_shadow(
+        project_dir, "pip show pathtools", base_env
+    )
+
+    assert result_env["PATH"] == str(system_bin)
+
+
+def test_strip_orchestrator_pip_shadow_keeps_path_when_project_venv_exists(tmp_path):
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    system_bin = tmp_path / "sysbin"
+    _make_fake_pip(system_bin, "SYSTEM_PIP_USED")
+    base_env = {"PATH": _orchestrator_bin() + os.pathsep + str(system_bin)}
+
+    result_env = _strip_orchestrator_pip_shadow(
+        tmp_path, "pip show pathtools", base_env
+    )
+
+    assert result_env == base_env
+
+
+def test_strip_orchestrator_pip_shadow_ignores_non_pip_command(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    system_bin = tmp_path / "sysbin"
+    _make_fake_pip(system_bin, "SYSTEM_PIP_USED")
+    base_env = {"PATH": _orchestrator_bin() + os.pathsep + str(system_bin)}
+
+    result_env = _strip_orchestrator_pip_shadow(project_dir, "pytest -q", base_env)
+
+    assert result_env == base_env
+
+
+def test_strip_orchestrator_pip_shadow_ignores_compound_command(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    system_bin = tmp_path / "sysbin"
+    _make_fake_pip(system_bin, "SYSTEM_PIP_USED")
+    base_env = {"PATH": _orchestrator_bin() + os.pathsep + str(system_bin)}
+
+    result_env = _strip_orchestrator_pip_shadow(
+        project_dir, "pip show pathtools && pytest", base_env
+    )
+
+    assert result_env == base_env
+
+
+def test_strip_orchestrator_pip_shadow_keeps_path_when_no_pip_remains(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    empty_bin = tmp_path / "emptybin"
+    empty_bin.mkdir()
+    base_env = {"PATH": _orchestrator_bin() + os.pathsep + str(empty_bin)}
+
+    result_env = _strip_orchestrator_pip_shadow(
+        project_dir, "pip show pathtools", base_env
+    )
+
+    assert result_env == base_env
+
+
+def test_strip_orchestrator_pip_shadow_does_not_mutate_input_env(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    system_bin = tmp_path / "sysbin"
+    _make_fake_pip(system_bin, "SYSTEM_PIP_USED")
+    original_path = _orchestrator_bin() + os.pathsep + str(system_bin)
+    base_env = {"PATH": original_path}
+
+    _strip_orchestrator_pip_shadow(project_dir, "pip show pathtools", base_env)
+
+    assert base_env["PATH"] == original_path
+
+
+def test_step_verification_no_venv_pip_show_uses_system_pip(tmp_path, monkeypatch):
+    """Pathtools recurrence: package installed via system pip (PEP 668
+    --break-system-packages), no project venv. `pip show <pkg>` must resolve to
+    the system pip, not the orchestrator's venv pip."""
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    system_bin = tmp_path / "sysbin"
+    _make_fake_pip(system_bin, "SYSTEM_PIP_USED")
+    monkeypatch.setenv("PATH", str(system_bin))
+
+    result = execute_verification_command(
+        project_dir=project_dir,
+        command="pip show pathtools",
+    )
+
+    assert result["success"] is True
+    assert "SYSTEM_PIP_USED" in result["output"]
+    assert result["command"] == "pip show pathtools"
+
+
+def test_step_verification_retry_uses_same_system_pip_environment(
+    tmp_path, monkeypatch
+):
+    """The debug-repair retry re-enters the same verification runner; both the
+    first attempt and the retry must resolve pip identically."""
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    system_bin = tmp_path / "sysbin"
+    _make_fake_pip(system_bin, "SYSTEM_PIP_USED")
+    monkeypatch.setenv("PATH", str(system_bin))
+
+    first = execute_verification_command(
+        project_dir=project_dir,
+        command="pip show pathtools",
+    )
+    retry = execute_verification_command(
+        project_dir=project_dir,
+        command="pip show pathtools",
+    )
+
+    assert first["success"] is True
+    assert retry["success"] is True
+    assert "SYSTEM_PIP_USED" in first["output"]
+    assert "SYSTEM_PIP_USED" in retry["output"]
+
+
+def test_step_verification_venv_pip_still_wins_over_system_pip(tmp_path, monkeypatch):
+    """When a project venv exists, the Step 2 injection still takes priority
+    over both the orchestrator pip and the system pip."""
+    _make_fake_pip(tmp_path / ".venv" / "bin", "VENV_PIP_USED")
+    system_bin = tmp_path / "sysbin"
+    _make_fake_pip(system_bin, "SYSTEM_PIP_USED")
+    monkeypatch.setenv("PATH", str(system_bin))
+
+    result = execute_verification_command(
+        project_dir=tmp_path,
+        command="pip show pathtools",
+    )
+
+    assert result["success"] is True
+    assert "VENV_PIP_USED" in result["output"]

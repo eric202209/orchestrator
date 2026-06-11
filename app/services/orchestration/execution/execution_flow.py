@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from typing import Any, Dict, List, Optional
@@ -305,6 +306,42 @@ def _inject_project_venv_path(project_dir: Path, env: Dict[str, str]) -> Dict[st
     return env
 
 
+def _strip_orchestrator_pip_shadow(
+    project_dir: Path, command: str, env: Dict[str, str]
+) -> Dict[str, str]:
+    """Drop the orchestrator's own interpreter dir from PATH for bare pip commands
+    when the project has no virtualenv.
+
+    Executing agents run with the plain system PATH; without a project venv they
+    install via the system pip (e.g. `pip install -e . --break-system-packages`
+    under PEP 668). The orchestrator's venv/bin — prepended to PATH for
+    verification — carries its own pip, which shadows the system pip and cannot
+    see those packages, so `pip show <pkg>` fails despite a successful install.
+    Only applies to a single bare pip/pip3 invocation; compound shell commands
+    and projects with a venv keep the existing PATH untouched.
+    """
+    tokens = command.split()
+    if not tokens or tokens[0] not in {"pip", "pip3"}:
+        return env
+    if any(ch in command for ch in (";", "&", "|")):
+        return env
+    for venv_bin in (project_dir / ".venv" / "bin", project_dir / "venv" / "bin"):
+        if venv_bin.is_dir():
+            return env
+    orchestrator_bin = os.path.normpath(str(Path(sys.executable).parent))
+    entries = env.get("PATH", "").split(os.pathsep)
+    stripped = [
+        entry for entry in entries if os.path.normpath(entry) != orchestrator_bin
+    ]
+    if len(stripped) == len(entries):
+        return env
+    if not shutil.which(tokens[0], path=os.pathsep.join(stripped)):
+        return env
+    env = dict(env)
+    env["PATH"] = os.pathsep.join(stripped)
+    return env
+
+
 def execute_verification_command(
     *,
     project_dir: Path,
@@ -351,6 +388,7 @@ def execute_verification_command(
         env["PATH"] = python_dir + os.pathsep + env.get("PATH", "")
         env = workspace_python_command_env(project_dir, raw_command, base_env=env)
         env = _inject_project_venv_path(project_dir, env)
+        env = _strip_orchestrator_pip_shadow(project_dir, raw_command, env)
         completed = subprocess.run(
             command_to_run,
             cwd=str(project_dir),
