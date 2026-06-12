@@ -544,6 +544,156 @@ def _normalize_completion_repair_step(
     }
 
 
+def _salvage_completion_repair_json_text(text: str) -> str:
+    """Close one unterminated commands array before a verification field."""
+
+    raw = str(text or "")
+    stripped = raw.strip()
+    if not stripped:
+        return raw
+    try:
+        json.loads(stripped)
+        return raw
+    except json.JSONDecodeError:
+        pass
+
+    stack: list[str] = []
+    commands_array_open = False
+    misplaced_verification_positions: list[tuple[int, int]] = []
+    top_level_verification_count = 0
+    index = 0
+
+    while index < len(stripped):
+        char = stripped[index]
+        if char == '"':
+            end = index + 1
+            escaped = False
+            while end < len(stripped):
+                current = stripped[end]
+                if escaped:
+                    escaped = False
+                elif current == "\\":
+                    escaped = True
+                elif current == '"':
+                    break
+                end += 1
+            if end >= len(stripped):
+                return raw
+            try:
+                token = json.loads(stripped[index : end + 1])
+            except json.JSONDecodeError:
+                return raw
+
+            after = end + 1
+            while after < len(stripped) and stripped[after].isspace():
+                after += 1
+            is_key = after < len(stripped) and stripped[after] == ":"
+            if is_key and token == "commands" and stack == ["{"]:
+                value_start = after + 1
+                while value_start < len(stripped) and stripped[value_start].isspace():
+                    value_start += 1
+                commands_array_open = (
+                    value_start < len(stripped) and stripped[value_start] == "["
+                )
+            elif is_key and token == "verification":
+                if stack == ["{"]:
+                    top_level_verification_count += 1
+                elif stack == ["{", "["] and commands_array_open:
+                    previous = index - 1
+                    while previous >= 0 and stripped[previous].isspace():
+                        previous -= 1
+                    if previous >= 0 and stripped[previous] == ",":
+                        misplaced_verification_positions.append((previous, index))
+            index = end + 1
+            continue
+
+        if char in "{[":
+            stack.append(char)
+        elif char == "}":
+            if not stack:
+                return raw
+            if stack[-1] == "{":
+                stack.pop()
+            elif not (
+                stack == ["{", "["]
+                and commands_array_open
+                and misplaced_verification_positions
+            ):
+                return raw
+        elif char == "]":
+            if not stack or stack[-1] != "[":
+                return raw
+            stack.pop()
+            if stack == ["{"]:
+                commands_array_open = False
+        index += 1
+
+    if top_level_verification_count or len(misplaced_verification_positions) != 1:
+        return raw
+
+    comma_position, key_position = misplaced_verification_positions[0]
+    corrected = stripped[:comma_position] + "]," + stripped[key_position:]
+
+    class _ObjectPairs(list):
+        pass
+
+    try:
+        parsed = json.loads(
+            corrected,
+            object_pairs_hook=lambda pairs: _ObjectPairs(pairs),
+        )
+    except json.JSONDecodeError:
+        return raw
+    if not isinstance(parsed, _ObjectPairs):
+        return raw
+
+    commands_values = [value for key, value in parsed if key == "commands"]
+    verification_values = [value for key, value in parsed if key == "verification"]
+    expected_files_values = [value for key, value in parsed if key == "expected_files"]
+    keys = {key for key, _value in parsed}
+    if not {
+        "description",
+        "commands",
+        "verification",
+        "expected_files",
+    }.issubset(keys):
+        return raw
+    if (
+        len(commands_values) != 1
+        or len(verification_values) != 1
+        or len(expected_files_values) != 1
+    ):
+        return raw
+
+    commands = commands_values[0]
+    verification = verification_values[0]
+    expected_files = expected_files_values[0]
+    if (
+        not isinstance(commands, list)
+        or isinstance(commands, _ObjectPairs)
+        or not commands
+        or not all(isinstance(command, str) and command.strip() for command in commands)
+        or not isinstance(verification, str)
+        or not verification.strip()
+        or not isinstance(expected_files, list)
+        or isinstance(expected_files, _ObjectPairs)
+        or not expected_files
+        or not all(
+            isinstance(path, str)
+            and path.strip()
+            and not path.strip().startswith(("/", "~"))
+            and ".." not in Path(path.strip().replace("\\", "/")).parts
+            for path in expected_files
+        )
+    ):
+        return raw
+    expected_path_set = {path.strip().replace("\\", "/") for path in expected_files}
+    created_files, _created_dirs = _collect_created_paths_from_commands(commands)
+    if created_files and not created_files.issubset(expected_path_set):
+        return raw
+    return corrected
+
+
 def _extract_completion_repair_step(
     parsed_data: Any, next_step_number: int
 ) -> Optional[Dict[str, Any]]:

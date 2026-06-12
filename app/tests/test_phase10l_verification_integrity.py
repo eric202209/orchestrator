@@ -6,6 +6,7 @@ from app.services.orchestration.validation.integrity import (
     classify_verification_command,
     compare_baseline,
     pre_existing_python_test_files,
+    scan_python_test_text,
     scan_test_file_changes,
 )
 from app.services.orchestration.validation.validator import ValidatorService
@@ -85,6 +86,72 @@ def test_scan_test_file_changes_flags_self_derived_expected_value(tmp_path: Path
     findings = scan_test_file_changes(["tests/test_calc.py"], project_dir)
 
     assert any(finding.code == "self_derived_expected_value" for finding in findings)
+
+
+def test_python_test_function_local_from_import_is_defined():
+    findings = scan_python_test_text(
+        "def test_version_defined():\n"
+        "    from strtools import __version__\n"
+        '    assert __version__ == "0.1.0"\n',
+        "tests/test_strtools.py",
+    )
+
+    assert not any(finding.code == "undefined_test_name" for finding in findings)
+
+
+def test_python_test_function_local_import_is_defined():
+    findings = scan_python_test_text(
+        "def test_version_defined():\n"
+        "    import strtools\n"
+        '    assert strtools.__version__ == "0.1.0"\n',
+        "tests/test_strtools.py",
+    )
+
+    assert not any(finding.code == "undefined_test_name" for finding in findings)
+
+
+def test_python_test_function_local_import_aliases_are_defined():
+    findings = scan_python_test_text(
+        "def test_version_defined():\n"
+        "    import strtools as st\n"
+        "    from package import name as alias\n"
+        "    assert st.__version__ == alias\n",
+        "tests/test_strtools.py",
+    )
+
+    assert not any(finding.code == "undefined_test_name" for finding in findings)
+
+
+def test_python_test_module_import_behavior_is_unchanged():
+    findings = scan_python_test_text(
+        "import strtools\n\n"
+        "def test_version_defined():\n"
+        '    assert strtools.__version__ == "0.1.0"\n',
+        "tests/test_strtools.py",
+    )
+
+    assert not any(finding.code == "undefined_test_name" for finding in findings)
+
+
+def test_python_test_real_undefined_name_is_still_rejected():
+    findings = scan_python_test_text(
+        "def test_bad():\n" "    assert missing_name == 1\n",
+        "tests/test_bad.py",
+    )
+
+    assert any(
+        finding.code == "undefined_test_name" and "missing_name" in finding.message
+        for finding in findings
+    )
+
+
+def test_python_test_function_local_assignment_is_defined():
+    findings = scan_python_test_text(
+        "def test_value():\n" "    expected = 1\n" "    assert expected == 1\n",
+        "tests/test_value.py",
+    )
+
+    assert not any(finding.code == "undefined_test_name" for finding in findings)
 
 
 def test_classify_verification_command_distinguishes_quality():

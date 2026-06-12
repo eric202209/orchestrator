@@ -202,6 +202,8 @@ Rules:
 6. Do not rewrite unrelated files or inspect broad workspace inventory.
 7. Use relative paths only; no absolute paths, `..`, or `~`.
 8. Commands execute from the workspace root ({workspace}). Do not cd into the workspace root or any path containing vault/projects; you are already there.
+9. `commands` must be a closed JSON array containing only shell command strings.
+10. `verification` must be one top-level shell command string or null; never place it inside `commands`.
 
 Output example:
 {{

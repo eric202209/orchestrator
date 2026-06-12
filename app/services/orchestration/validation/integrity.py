@@ -412,6 +412,7 @@ def _undefined_test_name_findings(
             local_defined.add(node.args.vararg.arg)
         if node.args.kwarg:
             local_defined.add(node.args.kwarg.arg)
+        local_defined.update(_function_imported_names(node))
 
         loaded_before_store: list[ast.Name] = []
         for child in ast.walk(node):
@@ -444,6 +445,41 @@ def _undefined_test_name_findings(
                 )
             )
     return findings
+
+
+def _function_imported_names(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> set[str]:
+    names: set[str] = set()
+
+    class ImportCollector(ast.NodeVisitor):
+        def visit_Import(self, import_node: ast.Import) -> None:
+            names.update(
+                alias.asname or alias.name.split(".")[0] for alias in import_node.names
+            )
+
+        def visit_ImportFrom(self, import_node: ast.ImportFrom) -> None:
+            names.update(alias.asname or alias.name for alias in import_node.names)
+
+        def visit_FunctionDef(self, function_node: ast.FunctionDef) -> None:
+            return
+
+        def visit_AsyncFunctionDef(
+            self,
+            function_node: ast.AsyncFunctionDef,
+        ) -> None:
+            return
+
+        def visit_ClassDef(self, class_node: ast.ClassDef) -> None:
+            return
+
+        def visit_Lambda(self, lambda_node: ast.Lambda) -> None:
+            return
+
+    collector = ImportCollector()
+    for statement in node.body:
+        collector.visit(statement)
+    return names
 
 
 def _statement_bound_names(node: ast.AST) -> set[str]:

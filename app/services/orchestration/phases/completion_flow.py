@@ -88,6 +88,7 @@ from app.services.orchestration.phases.completion_repair import (
     _extract_completion_repair_step,
     _extract_reported_changed_files,
     _repeats_prior_completion_failure,
+    _salvage_completion_repair_json_text,
 )
 from app.services.orchestration.phases.completion_summary import (
     _deterministic_task_summary,
@@ -451,12 +452,14 @@ def _attempt_completion_repair(
     repair_output = _extract_completion_repair_json_text(
         repair_plan_result.get("output", "{}")
     )
+    repair_output = _salvage_completion_repair_json_text(repair_output)
     success, repair_data, strategy_info = error_handler.attempt_json_parsing(
         repair_output, context="completion_repair"
     )
     if not success:
         fallback_output = extract_structured_text(repair_plan_result)
         if fallback_output and fallback_output != repair_output:
+            fallback_output = _salvage_completion_repair_json_text(fallback_output)
             success, repair_data, strategy_info = error_handler.attempt_json_parsing(
                 fallback_output, context="completion_repair"
             )
@@ -477,6 +480,7 @@ def _attempt_completion_repair(
             compliance_output = _extract_completion_repair_json_text(
                 compliance_result.get("output", "{}")
             )
+            compliance_output = _salvage_completion_repair_json_text(compliance_output)
             success, repair_data, strategy_info = error_handler.attempt_json_parsing(
                 compliance_output, context="completion_repair_compliance_retry"
             )
@@ -560,6 +564,9 @@ def _attempt_completion_repair(
         guarded_retry_output = extract_structured_text(
             guarded_retry_result.get("output", "{}")
         )
+        guarded_retry_output = _salvage_completion_repair_json_text(
+            guarded_retry_output
+        )
         retry_success, retry_data, retry_strategy_info = (
             error_handler.attempt_json_parsing(
                 guarded_retry_output, context="completion_repair"
@@ -568,6 +575,7 @@ def _attempt_completion_repair(
         if not retry_success:
             fallback_output = extract_structured_text(guarded_retry_result)
             if fallback_output and fallback_output != guarded_retry_output:
+                fallback_output = _salvage_completion_repair_json_text(fallback_output)
                 retry_success, retry_data, retry_strategy_info = (
                     error_handler.attempt_json_parsing(
                         fallback_output, context="completion_repair"
