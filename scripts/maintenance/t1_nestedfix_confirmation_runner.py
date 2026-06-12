@@ -24,19 +24,16 @@ Success criteria:
 - genuine backend capacity recurrence = 0
 """
 import copy
-import importlib.util
 import json
 import pathlib
 import sqlite3
 import sys
 from datetime import datetime
 
-sys.path.insert(0, "/root/.openclaw/workspace/vault/projects/orchestrator")
+from scripts.maintenance._runner_common import ensure_repo_on_syspath, load_sibling_module
 
-_RUNNER = pathlib.Path(__file__).parent / "t1_reliability_confirmation_runner.py"
-spec = importlib.util.spec_from_file_location("t1runner", str(_RUNNER))
-r = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(r)
+ensure_repo_on_syspath()
+r = load_sibling_module("t1runner", "t1_reliability_confirmation_runner.py")
 
 DB_PATH = r.DB_PATH
 WORKSPACE_BASE = r.WORKSPACE_BASE

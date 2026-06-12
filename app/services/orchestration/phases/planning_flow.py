@@ -84,6 +84,7 @@ from app.services.orchestration.phases.planning_task1_bootstrap import (
 
 
 from app.services.orchestration.phases.planning_support import (
+    BLOCKING_IMMEDIATE_REPAIR_ISSUE_KEYS,
     MAX_PLANNING_RETRIES,
     TRUNCATED_PLAN_REPAIR_REJECTION_REASON,
     _PlanningRetryState,
@@ -1274,20 +1275,10 @@ def execute_planning_phase(
                             project_dir=ctx.orchestration_state.project_dir,
                         )
                     )
-            blocking_issue_keys = (
-                "non_runnable_steps",
-                "background_process_steps",
-                "placeholder_only_steps",
-                "weak_verification_steps",
-                "stale_replace_ops_steps",
-                "empty_replace_old_text_steps",
-                "test_assertion_loss_ops_steps",
-                "test_deletion_ops_steps",
-            )
             blocking_repair_issues = {
                 key: value
                 for key, value in immediate_repair_issues.items()
-                if key in blocking_issue_keys and value
+                if key in BLOCKING_IMMEDIATE_REPAIR_ISSUE_KEYS and value
             }
             if blocking_repair_issues:
                 _record_repair_root_cause(

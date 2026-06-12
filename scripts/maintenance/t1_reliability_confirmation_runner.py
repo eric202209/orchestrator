@@ -23,8 +23,10 @@ import requests
 from datetime import datetime
 from urllib.parse import urlparse
 
-sys.path.insert(0, "/root/.openclaw/workspace/vault/projects/orchestrator")
-os.chdir("/root/.openclaw/workspace/vault/projects/orchestrator")
+from scripts.maintenance._runner_common import chdir_repo_root, ensure_repo_on_syspath
+
+ensure_repo_on_syspath()
+REPO_ROOT = chdir_repo_root()
 
 import redis as redis_lib  # noqa: E402
 from app.auth import create_access_token  # noqa: E402
@@ -41,7 +43,7 @@ PROJECT_TIMEOUT = 2400
 SLOT_POLL_INTERVAL = 15
 SLOT_KEY = "orchestrator:backend_slots:local_openclaw"
 WORKSPACE_BASE = pathlib.Path("/root/.openclaw/workspace/vault/projects")
-DB_PATH = pathlib.Path("/root/.openclaw/workspace/vault/projects/orchestrator/orchestrator.db")
+DB_PATH = REPO_ROOT / "orchestrator.db"
 
 TERMINAL_TASK = {"done", "failed", "paused", "cancelled"}
 TERMINAL_SESSION = {"completed", "failed", "cancelled", "paused", "error"}

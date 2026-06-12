@@ -2123,6 +2123,28 @@ def test_validator_still_rejects_standalone_weak_shell_verification(tmp_path):
     assert verdict.details["weak_verification_steps"] == [1]
 
 
+def test_python_sys_exit_zero_without_real_check_is_weak_verification(tmp_path):
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Create shell page",
+                "commands": ["printf '<!doctype html>' > index.html"],
+                "verification": "python3 -c 'import sys; sys.exit(0)'",
+                "rollback": "rm -f index.html",
+                "expected_files": ["index.html"],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Build a one-page site",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert verdict.repairable is True
+    assert verdict.details["weak_verification_steps"] == [1]
+
+
 def test_validator_stack_conflict_ignores_json_method_substring(tmp_path):
     plan = [
         {
@@ -6636,7 +6658,7 @@ def test_post_repair_weak_verification_gets_one_targeted_second_repair(
     assert result == {"status": "completed"}
     assert len(repair_calls) == 2
     assert repair_calls[1]["reason"].startswith("post_repair_weak_verification_steps")
-    assert "steps [2, 3]" in repair_calls[1]["rejection_reasons"][0]
+    assert "steps [2]" in repair_calls[1]["rejection_reasons"][0]
     assert ctx.orchestration_state.plan == second_repair_plan
 
 

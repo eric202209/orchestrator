@@ -18,6 +18,7 @@ def test_planning_verification_exports_all_helpers():
         "_python_exists_verification_command",
         "_python_file_contains_verification_command",
         "_grep_quiet_verification_target",
+        "_test_exists_verification_targets",
         "_commands_are_weak_expected_file_verification",
         "_strengthen_weak_expected_file_verifications",
     ):
@@ -66,6 +67,16 @@ def test_grep_quiet_verification_target_returns_none_for_bad_input():
 
     assert _grep_quiet_verification_target("ls -la") is None
     assert _grep_quiet_verification_target("") is None
+
+
+def test_test_exists_verification_targets_parses_chain():
+    from app.services.orchestration.phases.planning_verification import (
+        _test_exists_verification_targets,
+    )
+
+    result = _test_exists_verification_targets("test -f a.py && test -f ./b.py")
+
+    assert result == ["a.py", "b.py"]
 
 
 def test_commands_are_weak_returns_false_for_empty():

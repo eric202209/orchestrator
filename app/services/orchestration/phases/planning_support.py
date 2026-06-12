@@ -1558,6 +1558,17 @@ _REPLACE_FALLBACK_INCOMPATIBLE_KEYS: frozenset[str] = frozenset(
     }
 )
 
+BLOCKING_IMMEDIATE_REPAIR_ISSUE_KEYS: tuple[str, ...] = (
+    "non_runnable_steps",
+    "background_process_steps",
+    "placeholder_only_steps",
+    "weak_verification_steps",
+    "stale_replace_ops_steps",
+    "empty_replace_old_text_steps",
+    "test_assertion_loss_ops_steps",
+    "test_deletion_ops_steps",
+)
+
 
 def _get_targeted_second_repair_reason(
     *,

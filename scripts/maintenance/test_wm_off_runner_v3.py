@@ -4,8 +4,11 @@ No DB, Redis, or HTTP required.
 """
 import sys
 import os
-sys.path.insert(0, "/root/.openclaw/workspace/vault/projects/orchestrator")
-os.chdir("/root/.openclaw/workspace/vault/projects/orchestrator")
+
+from scripts.maintenance._runner_common import chdir_repo_root, ensure_repo_on_syspath
+
+ensure_repo_on_syspath()
+chdir_repo_root()
 
 import pytest
 

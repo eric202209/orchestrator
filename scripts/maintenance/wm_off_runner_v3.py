@@ -26,8 +26,10 @@ import requests
 from datetime import datetime
 from urllib.parse import urlparse
 
-sys.path.insert(0, "/root/.openclaw/workspace/vault/projects/orchestrator")
-os.chdir("/root/.openclaw/workspace/vault/projects/orchestrator")
+from scripts.maintenance._runner_common import chdir_repo_root, ensure_repo_on_syspath
+
+ensure_repo_on_syspath()
+REPO_ROOT = chdir_repo_root()
 
 import redis as redis_lib  # noqa: E402
 from app.auth import create_access_token  # noqa: E402
@@ -780,10 +782,7 @@ if __name__ == "__main__":
                 run_meta["auto_advance_stalls"] += 1
 
     # ── Save raw results ──────────────────────────────────────────────────────
-    out_path = pathlib.Path(
-        "docs/roadmap/reports/maintenance/"
-        f"wm-off-v3-raw-{run_ts}.json"
-    )
+    out_path = REPO_ROOT / "docs/roadmap/reports/maintenance" / f"wm-off-v3-raw-{run_ts}.json"
     out_path.write_text(json.dumps({"meta": run_meta, "results": all_results}, indent=2))
     print(f"\n\nRaw results saved: {out_path}")
 

@@ -33,6 +33,9 @@ from app.services.orchestration.planning.repair_arbitration import (
     classify_planning_repair_candidate,
 )
 from app.services.orchestration.planning.planner import PlannerService
+from app.services.orchestration.phases.planning_support import (
+    BLOCKING_IMMEDIATE_REPAIR_ISSUE_KEYS,
+)
 from app.services.orchestration.planning.repair_evidence import (
     write_failed_planning_repair_triplet,
 )
@@ -45,6 +48,9 @@ from app.services.orchestration.planning.slot_repair import (
 )
 from app.services.orchestration.planning.source_api_contract import (
     build_source_api_contract_capsule,
+)
+from app.services.orchestration.planning.source_materialization import (
+    is_concrete_source_materialization_path,
 )
 from app.services.orchestration.state.persistence import append_orchestration_event
 from app.services.orchestration.types import OrchestrationRunContext
@@ -94,9 +100,7 @@ def arbitrate_planning_repair_candidate(
     )
     arbitration["slot_repair_experiment"] = {
         **slot_repair_diagnostics,
-        "arbitration_result": arbitration.get("outcome")
-        or arbitration.get("status")
-        or "classified",
+        "arbitration_result": arbitration.get("outcome") or "classified",
         "arbitration_source_materialization_status": (
             (arbitration.get("source_materialization") or {}).get("status")
             if isinstance(arbitration.get("source_materialization"), dict)
@@ -142,7 +146,10 @@ def arbitrate_planning_repair_candidate(
             "plan": preserved_weak_verification_plan,
         }
 
-    materialization_regression_paths = _materialization_regression_paths(arbitration)
+    materialization_regression_paths = _materialization_regression_paths(
+        arbitration,
+        ctx.orchestration_state.project_dir,
+    )
     # C-1: VMA repairs are expected to remove source-write ops — the repair prompt
     # explicitly instructs the model to do exactly that.  Triggering the terminal
     # abort here would punish a correct repair.  Skip for VMA-triggered repairs;
@@ -279,7 +286,7 @@ def arbitrate_planning_repair_candidate(
         validation_severity=ctx.validation_severity,
         workflow_profile=ctx.workflow_profile,
         workflow_stage=ctx.workflow_stage,
-        is_first_ordered_task=getattr(ctx.task, "plan_position", None) == 1,
+        is_first_ordered_task=_is_first_ordered_task(ctx.task),
     )
     second_repair_reason = _get_targeted_second_repair_reason(
         retry_state=retry_state,
@@ -421,9 +428,6 @@ def _preserve_regressed_weak_verification_plan(
 ) -> list[dict[str, Any]] | None:
     if not isinstance(previous_plan, list):
         return None
-    labels = {
-        str(label or "").strip() for label in arbitration.get("regression_labels") or []
-    }
     bootstrap_regression = _is_first_ordered_task(
         ctx.task
     ) and _repair_drops_bootstrap_obligations(
@@ -443,7 +447,9 @@ def _preserve_regressed_weak_verification_plan(
         project_dir=ctx.orchestration_state.project_dir,
     )
     blocking_original_issues = {
-        key: value for key, value in original_issues.items() if value
+        key: value
+        for key, value in original_issues.items()
+        if key in BLOCKING_IMMEDIATE_REPAIR_ISSUE_KEYS and value
     }
     weak_steps = list(blocking_original_issues.get("weak_verification_steps") or [])
     if not weak_steps or set(blocking_original_issues) != {"weak_verification_steps"}:
@@ -549,7 +555,7 @@ def _repair_drops_bootstrap_obligations(
 
     def _expected_files(plan: list[Any]) -> set[str]:
         return {
-            str(path).strip()
+            str(path).strip().lstrip("./")
             for step in plan
             if isinstance(step, dict)
             for path in (step.get("expected_files") or [])
@@ -1007,7 +1013,10 @@ def _slot_repair_task_context(ctx: OrchestrationRunContext) -> SlotRepairTaskCon
     )
 
 
-def _materialization_regression_paths(arbitration: dict[str, Any]) -> list[str]:
+def _materialization_regression_paths(
+    arbitration: dict[str, Any],
+    project_dir: str | Path | None = None,
+) -> list[str]:
     materialization = arbitration.get("source_materialization")
     if not isinstance(materialization, dict):
         return []
@@ -1028,16 +1037,17 @@ def _materialization_regression_paths(arbitration: dict[str, Any]) -> list[str]:
     return [
         path
         for path in previous_paths
-        if path not in repaired_paths and _is_required_source_materialization_path(path)
+        if path not in repaired_paths
+        and _is_required_source_materialization_path(path, project_dir)
     ]
 
 
-def _is_required_source_materialization_path(path: str) -> bool:
-    normalized = str(path or "").strip().replace("\\", "/").lstrip("./")
+def _is_required_source_materialization_path(
+    path: str,
+    project_dir: str | Path | None = None,
+) -> bool:
+    normalized = str(path or "").strip()
     if not normalized:
         return False
-    if normalized.startswith(("tests/", "test/")):
-        return False
-    return normalized.startswith("src/") and normalized.endswith(
-        (".py", ".js", ".jsx", ".ts", ".tsx", ".css")
-    )
+    root = Path(str(project_dir or "."))
+    return is_concrete_source_materialization_path(normalized, root)

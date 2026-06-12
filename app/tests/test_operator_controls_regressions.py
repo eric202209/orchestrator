@@ -863,7 +863,7 @@ def test_policy_profiles_change_validation_outcomes():
 
 
 def test_policy_profiles_change_workspace_restore_behavior():
-    assert not should_restore_workspace_on_failure(
+    assert should_restore_workspace_on_failure(
         "planning parse error", policy_profile="balanced"
     )
     assert should_restore_workspace_on_failure(

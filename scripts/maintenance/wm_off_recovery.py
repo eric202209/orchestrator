@@ -13,8 +13,10 @@ import pathlib
 import requests
 from datetime import datetime
 
-sys.path.insert(0, "/root/.openclaw/workspace/vault/projects/orchestrator")
-os.chdir("/root/.openclaw/workspace/vault/projects/orchestrator")
+from scripts.maintenance._runner_common import chdir_repo_root, ensure_repo_on_syspath
+
+ensure_repo_on_syspath()
+REPO_ROOT = chdir_repo_root()
 
 from app.auth import create_access_token  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
@@ -312,8 +314,7 @@ for proj in PROJECTS:
 # Save raw results
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 out_path = pathlib.Path(
-    f"/root/.openclaw/workspace/vault/projects/orchestrator/docs/roadmap/reports/maintenance/"
-    f"wm-off-recovery-raw-{timestamp}.json"
+    REPO_ROOT / "docs/roadmap/reports/maintenance" / f"wm-off-recovery-raw-{timestamp}.json"
 )
 out_path.write_text(json.dumps(results, indent=2))
 print(f"\n\nRaw results saved: {out_path}")

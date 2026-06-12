@@ -18,15 +18,14 @@ This driver resumes instead of restarting:
 
 All slot/monitor/collection logic is imported from the runner unchanged.
 """
-import importlib.util
 import json
 import pathlib
 from datetime import datetime
 
-_RUNNER = pathlib.Path(__file__).parent / "t1_reliability_confirmation_runner.py"
-spec = importlib.util.spec_from_file_location("t1runner", str(_RUNNER))
-r = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(r)
+from scripts.maintenance._runner_common import ensure_repo_on_syspath, load_sibling_module
+
+ensure_repo_on_syspath()
+r = load_sibling_module("t1runner", "t1_reliability_confirmation_runner.py")
 
 CALCLIB_TASK_IDS = [707, 708, 709, 710, 711, 712]
 CALCLIB_RESUME_TASK = 709

@@ -17,18 +17,15 @@ Primary metrics:
 - nested_project_folder_command count = 0 expected
 """
 import copy
-import importlib.util
 import json
 import pathlib
 import sys
 from datetime import datetime
 
-sys.path.insert(0, "/root/.openclaw/workspace/vault/projects/orchestrator")
+from scripts.maintenance._runner_common import ensure_repo_on_syspath, load_sibling_module
 
-_PATHGUARD = pathlib.Path(__file__).parent / "t1_pathguard_telemetry_runner.py"
-spec = importlib.util.spec_from_file_location("pathguard", str(_PATHGUARD))
-pg = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(pg)
+ensure_repo_on_syspath()
+pg = load_sibling_module("pathguard", "t1_pathguard_telemetry_runner.py")
 
 r = pg.r
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 from typing import Any
 
@@ -45,6 +46,28 @@ def _grep_quiet_verification_target(command: str) -> tuple[str, str] | None:
     return path.lstrip("./"), needle
 
 
+def _test_exists_verification_targets(command: str) -> list[str] | None:
+    try:
+        segments = re.split(r"\s*(?:&&|\|\|)\s*", str(command or "").strip())
+    except re.error:
+        return None
+    if not segments:
+        return None
+    targets: list[str] = []
+    for segment in segments:
+        try:
+            tokens = shlex.split(segment, posix=True)
+        except ValueError:
+            return None
+        if len(tokens) != 3 or tokens[0] != "test" or tokens[1] not in {"-f", "-d"}:
+            return None
+        target = str(tokens[2] or "").strip()
+        if not target or target.startswith("-"):
+            return None
+        targets.append(target.lstrip("./"))
+    return targets or None
+
+
 def _commands_are_weak_expected_file_verification(commands: Any) -> bool:
     if not isinstance(commands, list) or not commands:
         return False
@@ -75,6 +98,13 @@ def _strengthen_weak_expected_file_verifications(
         if expected_files and ValidatorService._verification_is_weak(
             updated.get("verification")
         ):
+            test_targets = _test_exists_verification_targets(
+                str(updated.get("verification") or "")
+            )
+            if test_targets and set(test_targets).issubset(expected_files):
+                updated["verification"] = _python_exists_verification_command(
+                    test_targets
+                )
             grep_target = _grep_quiet_verification_target(
                 str(updated.get("verification") or "")
             )
@@ -86,7 +116,12 @@ def _strengthen_weak_expected_file_verifications(
         if (
             expected_files
             and _commands_are_weak_expected_file_verification(updated.get("commands"))
-            and grep_target
+            and (
+                grep_target
+                or _test_exists_verification_targets(
+                    str(step.get("verification") or "")
+                )
+            )
         ):
             updated["commands"] = [str(updated.get("verification") or "").strip()]
         strengthened.append(updated)

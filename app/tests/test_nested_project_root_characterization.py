@@ -94,6 +94,31 @@ def test_task_717_pathtools_inspection_step_not_flagged(tmp_path):
     assert not _nested_flagged(verdict)
 
 
+def test_cd_and_cat_inspection_of_new_dir_reference_not_flagged_as_nested(tmp_path):
+    verdict = ValidatorService.validate_plan(
+        [
+            {
+                "step_number": 1,
+                "description": "Inspect generated package paths",
+                "commands": ["cd mylib && cat mylib/core.py", "echo mylib"],
+                "verification": "test -f mylib/core.py",
+                "rollback": None,
+                "expected_files": [
+                    "mylib/__init__.py",
+                    "mylib/core.py",
+                    "mylib/utils.py",
+                ],
+            }
+        ],
+        output_text="[]",
+        task_prompt="Inspect generated package files",
+        execution_profile="full_lifecycle",
+        project_dir=tmp_path,
+    )
+
+    assert not _nested_flagged(verdict)
+
+
 def test_task_760_strtools_inspection_steps_not_flagged(tmp_path):
     """Task 760: read-only cat steps over existing tests/ and strtools/ dirs."""
     _make_python_package(tmp_path, "strtools", ["format", "transform", "validate"])

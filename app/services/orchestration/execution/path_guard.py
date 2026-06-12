@@ -26,10 +26,17 @@ def _looks_like_nested_project_scaffold(root_name: str, paths: List[str]) -> boo
     paths are relative to project_dir, e.g. ["mylib/__init__.py", "mylib/core.py"].
     root_name is the first path component, e.g. "mylib".
     """
-    root_level_files = [p for p in paths if len(Path(p).parts) == 2]
+    root_level_files = {Path(p).name for p in paths if len(Path(p).parts) == 2}
     second_level_dirs = {Path(p).parts[1] for p in paths if len(Path(p).parts) > 2}
+    project_marker_files = {
+        "package.json",
+        "pyproject.toml",
+        "setup.py",
+        "vite.config.ts",
+        "vite.config.js",
+    }
 
-    if root_level_files:
+    if root_level_files.intersection(project_marker_files):
         return True
 
     structural_dirs = second_level_dirs.intersection(NESTED_PROJECT_STRUCTURAL_DIRS)

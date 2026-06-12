@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import re
 import shlex
 import ast
@@ -671,6 +672,14 @@ class ValidatorService:
             re.search(r"\bpython(?:3)?\s+-c\b", text)
             and "unittest.main" in text
             and "discover" not in text
+        ):
+            return True
+        if (
+            re.search(r"\bpython(?:3)?\s+-c\b", text)
+            and "sys.exit(0)" in text
+            and "assert " not in text
+            and "pytest" not in text
+            and "unittest" not in text
         ):
             return True
         meaningful_markers = (
@@ -2722,6 +2731,8 @@ class ValidatorService:
 
         read_only_command_heads = {
             "cat",
+            "cd",
+            "echo",
             "ls",
             "head",
             "tail",
@@ -2738,12 +2749,18 @@ class ValidatorService:
             text = command_text.strip()
             if not text:
                 return True
-            if ">" in text:
-                return False
             for segment in re.split(r"&&|\|\||;|\|", text):
-                tokens = segment.strip().split()
+                stripped_segment = segment.strip()
+                if not stripped_segment:
+                    continue
+                try:
+                    tokens = shlex.split(stripped_segment, posix=True)
+                except ValueError:
+                    return False
                 if not tokens:
                     continue
+                if any(token in {">", ">>", "1>", "2>", "&>"} for token in tokens):
+                    return False
                 if tokens[0] not in read_only_command_heads:
                     return False
             return True
@@ -3433,6 +3450,7 @@ class ValidatorService:
         workflow_stage: Optional[str] = None,
         is_first_ordered_task: bool = False,
     ) -> PlanOutcome:
+        plan = copy.deepcopy(plan)
         profile = cls.infer_validation_profile(
             task_prompt, execution_profile, title=title, description=description
         )

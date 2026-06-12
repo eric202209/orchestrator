@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from app.services.orchestration.phases.planning_flow import (
@@ -328,6 +330,45 @@ def test_validate_workflow_stage_rejects_file_mutation():
 
     assert not verdict.accepted
     assert verdict.details["read_only_stage_mutation_steps"] == [1]
+
+
+def test_validate_plan_does_not_mutate_input_when_reordering_existence_check():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Check file before creation",
+            "commands": ["test -f app.py"],
+            "verification": "test -f app.py",
+            "rollback": "true",
+            "expected_files": ["app.py"],
+        },
+        {
+            "step_number": 2,
+            "description": "Create app file",
+            "commands": [],
+            "verification": "python -m py_compile app.py",
+            "rollback": "rm -f app.py",
+            "expected_files": ["app.py"],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "app.py",
+                    "content": "VALUE = 1\n",
+                }
+            ],
+        },
+    ]
+    original = json.loads(json.dumps(plan))
+
+    ValidatorService.validate_plan(
+        plan,
+        output_text="[]",
+        task_prompt="Create app.py",
+        execution_profile="full_lifecycle",
+        project_dir=Path("."),
+    )
+
+    assert plan == original
 
 
 def test_read_only_stage_fallback_plan_is_non_mutating():

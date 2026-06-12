@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from app.services.orchestration.phases.planning_repair_arbitration_control import (
+    _repair_drops_bootstrap_obligations,
     arbitrate_planning_repair_candidate,
 )
 from app.services.orchestration.phases.planning_support import _PlanningRetryState
@@ -568,3 +569,52 @@ def test_non_bootstrap_real_test_creation_with_test_rewrite_is_accepted(
 
     assert result["action"] == "none"
     assert ctx.orchestration_state.plan == candidate
+
+
+def test_preservation_ignores_non_blocking_original_advisories(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_repair_arbitration_control"
+        ".append_orchestration_event",
+        lambda *args, **kwargs: {},
+    )
+    original = _bootstrap_plan("pathtools")
+    original[0]["commands"] = [
+        "python -c \"from pathlib import Path; Path('pathtools/__init__.py').write_text('')\""
+    ]
+    original[0].pop("ops", None)
+    candidate = _collapsed_pathtools_repair()
+    ctx = _ctx(plan=candidate, project_dir=tmp_path, package="pathtools")
+    retry_state = _PlanningRetryState()
+    retry_state.repair_prompt_used = True
+    retry_state.last_repair_reason = "plan_contains_immediate_repair_issues"
+
+    result = arbitrate_planning_repair_candidate(
+        ctx=ctx,
+        retry_state=retry_state,
+        previous_plan=copy.deepcopy(original),
+        immediate_repair_issues={},
+        planning_phase_event=None,
+        output_text="[]",
+        planning_timeout_seconds=60,
+        prompt_profile=None,
+        repair_planning_output=lambda **kwargs: {"output": "[]"},
+    )
+
+    assert result["action"] == "replace"
+
+
+def test_bootstrap_obligation_path_compare_normalizes_dot_slash():
+    previous = [
+        {
+            "expected_files": ["./src/app.py", "tests/test_app.py"],
+            "commands": ["python -m venv .venv", "pip install -e .", "pytest -q"],
+        }
+    ]
+    candidate = [
+        {
+            "expected_files": ["src/app.py", "./tests/test_app.py"],
+            "commands": ["python -m venv .venv", "pip install -e .", "pytest -q"],
+        }
+    ]
+
+    assert _repair_drops_bootstrap_obligations(previous, candidate) is False

@@ -18,16 +18,15 @@ DEBUG_REPAIR_* unset (documented fallback to the same baseline lane),
 EXECUTION_BACKEND unset. Option A must remain rolled back.
 """
 import copy
-import importlib.util
 import json
 import pathlib
 import sqlite3
 from datetime import datetime
 
-_RUNNER = pathlib.Path(__file__).parent / "t1_reliability_confirmation_runner.py"
-spec = importlib.util.spec_from_file_location("t1runner", str(_RUNNER))
-r = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(r)
+from scripts.maintenance._runner_common import ensure_repo_on_syspath, load_sibling_module
+
+ensure_repo_on_syspath()
+r = load_sibling_module("t1runner", "t1_reliability_confirmation_runner.py")
 
 PYTHONPATH_KEYWORDS = [
     "pythonpath", "importerror", "modulenotfound", "venv", "import", "python",

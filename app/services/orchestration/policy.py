@@ -35,6 +35,8 @@ WORKSPACE_RESTORE_ALLOWED_REASON_MARKERS = (
     "planning json parse failure",  # planning_flow: "planning JSON parse failure"
     "planning parse error",  # planning_flow: "planning parse error"
     "planning validation failure",  # planning_flow: "planning validation failure"
+    "planning repair materialization regression",
+    "repair candidate rejected by bootstrap contract",
     "truncated multi-step plan",  # planning_flow: "truncated multi-step plan"
     "planning circuit breaker opened",  # planning_flow: circuit breaker abort
     # Execution failures — restore so half-written files don't persist
@@ -104,7 +106,7 @@ _POLICY_PROFILES = {
         workspace_restore_mode="preserve_resume_restore_failures",
         planning_mode="balanced",
         retry_mode="single_repair_then_relax",
-        restore_behavior_label="Restore only workspace-isolation failures by default",
+        restore_behavior_label="Preserve resumable stops; restore known orchestration failures to the pre-run snapshot",
         max_plan_revisions=1,
         allow_relaxed_mode=False,
     ),
@@ -182,6 +184,15 @@ def should_restore_workspace_on_failure(
         return True
 
     if profile.workspace_restore_mode == "restore_most_failures":
+        return (
+            any(
+                marker in normalized_reason
+                for marker in WORKSPACE_RESTORE_ALLOWED_REASON_MARKERS
+            )
+            or "completion validation failed" in normalized_reason
+        )
+
+    if profile.workspace_restore_mode == "preserve_resume_restore_failures":
         return (
             any(
                 marker in normalized_reason

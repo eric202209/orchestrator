@@ -161,6 +161,48 @@ def test_materialization_regression_block_ignores_html_stale_replace_path(
     assert _materialization_regression_paths(result) == []
 
 
+def test_materialization_regression_detects_package_root_source_path(
+    tmp_path: Path,
+):
+    package_dir = tmp_path / "pathtools"
+    package_dir.mkdir()
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+
+    previous_plan = [
+        {
+            "step_number": 1,
+            "description": "Create package root module",
+            "commands": [],
+            "verification": "python -m pytest tests/test_ops.py -q",
+            "expected_files": ["pathtools/core.py"],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "pathtools/core.py",
+                    "content": "def add(a, b):\n    return a + b\n",
+                }
+            ],
+        }
+    ]
+    repaired_plan = [
+        {
+            "step_number": 1,
+            "description": "Inspect workspace",
+            "commands": ["rg --files . | sort"],
+            "verification": None,
+            "expected_files": [],
+        }
+    ]
+
+    result = classify_planning_repair_candidate(
+        previous_plan=previous_plan,
+        repaired_plan=repaired_plan,
+        project_dir=tmp_path,
+    )
+
+    assert _materialization_regression_paths(result, tmp_path) == ["pathtools/core.py"]
+
+
 def test_arbitration_labels_stale_replace_and_test_rewrite(tmp_path: Path):
     repaired_plan = [
         {

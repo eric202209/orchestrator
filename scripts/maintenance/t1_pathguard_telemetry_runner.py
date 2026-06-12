@@ -15,20 +15,16 @@ No WM, no lane swap, no validator changes.
 Primary metric: nested_project_folder_created_advisory count = 0 expected.
 """
 import copy
-import importlib.util
 import json
 import pathlib
 import sqlite3
 import sys
 from datetime import datetime
 
-sys.path.insert(0, "/root/.openclaw/workspace/vault/projects/orchestrator")
+from scripts.maintenance._runner_common import ensure_repo_on_syspath, load_sibling_module
 
-# Import from nestedfix runner (which itself imports from reliability runner)
-_NESTEDFIX = pathlib.Path(__file__).parent / "t1_nestedfix_confirmation_runner.py"
-spec = importlib.util.spec_from_file_location("nestedfix", str(_NESTEDFIX))
-nf = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(nf)
+ensure_repo_on_syspath()
+nf = load_sibling_module("nestedfix", "t1_nestedfix_confirmation_runner.py")
 
 r = nf.r
 DB_PATH = r.DB_PATH

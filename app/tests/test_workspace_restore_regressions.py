@@ -73,12 +73,18 @@ def test_workspace_restore_policy_only_allows_isolation_failures():
     assert should_restore_workspace_on_failure("workspace isolation violation")
     assert should_restore_workspace_on_failure("debug workspace isolation violation")
 
-    assert not should_restore_workspace_on_failure("planning parse error")
-    assert not should_restore_workspace_on_failure("debug parse error")
-    assert not should_restore_workspace_on_failure("max step attempts reached")
+    assert should_restore_workspace_on_failure("planning parse error")
+    assert should_restore_workspace_on_failure("debug parse error")
+    assert should_restore_workspace_on_failure("max step attempts reached")
     assert not should_restore_workspace_on_failure("session paused")
-    assert not should_restore_workspace_on_failure("task exception")
-    assert not should_restore_workspace_on_failure("completion validation failed")
+    assert should_restore_workspace_on_failure("task exception")
+    assert should_restore_workspace_on_failure("completion validation failed")
+    assert should_restore_workspace_on_failure(
+        "planning repair materialization regression"
+    )
+    assert should_restore_workspace_on_failure(
+        "repair candidate rejected by Bootstrap Contract"
+    )
 
 
 def test_checkpoint_save_uses_atomic_file_and_leaves_no_temp_files(

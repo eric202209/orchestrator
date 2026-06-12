@@ -129,6 +129,26 @@ def test_weak_expected_file_verification_is_strengthened():
     assert strengthened[0]["commands"] == [strengthened[0]["verification"]]
 
 
+def test_test_f_expected_file_verification_is_strengthened():
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Verify generated files",
+            "commands": ["test -f about.html && test -f assets/app.css"],
+            "verification": "test -f about.html && test -f assets/app.css",
+            "rollback": None,
+            "expected_files": ["about.html", "assets/app.css"],
+        }
+    ]
+
+    strengthened = _strengthen_weak_expected_file_verifications(plan)
+
+    assert strengthened[0]["verification"].startswith("python -c ")
+    assert "about.html" in strengthened[0]["verification"]
+    assert "assets/app.css" in strengthened[0]["verification"]
+    assert strengthened[0]["commands"] == [strengthened[0]["verification"]]
+
+
 # ── start boundary conditions ─────────────────────────────────────────────────
 
 

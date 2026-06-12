@@ -9,17 +9,14 @@ This runner:
   3. Collects all results and produces the confirmation summary.
 """
 import copy
-import importlib.util
 import json
 import pathlib
 import sys
 
-sys.path.insert(0, "/root/.openclaw/workspace/vault/projects/orchestrator")
+from scripts.maintenance._runner_common import ensure_repo_on_syspath, load_sibling_module
 
-_RUNNER = pathlib.Path(__file__).parent / "t1_nestedfix_confirmation_runner.py"
-spec = importlib.util.spec_from_file_location("nestedfix", str(_RUNNER))
-nf = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(nf)
+ensure_repo_on_syspath()
+nf = load_sibling_module("nestedfix", "t1_nestedfix_confirmation_runner.py")
 
 # Re-export base runner as r for convenience
 r = nf.r

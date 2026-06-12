@@ -67,8 +67,8 @@ def test_no_advisory_for_write_multiple_files_into_existing_dir():
 # ── Scenario 2: new scaffold dir — advisory emitted ─────────────────────────
 
 
-def test_advisory_for_new_scaffold_dir_root_level_files():
-    """New top-level dir with root-level files is a scaffold — triggers advisory."""
+def test_no_advisory_for_new_python_package_shape():
+    """A plain new package directory is not a nested project scaffold by itself."""
     pre = _checksum_from_paths([])
     files_changed = [
         "mylib/__init__.py",
@@ -78,13 +78,24 @@ def test_advisory_for_new_scaffold_dir_root_level_files():
 
     result = detect_advisory_nested_scaffold(pre, files_changed)
 
+    assert result == []
+
+
+def test_advisory_for_new_scaffold_dir_project_markers():
+    """A new top-level dir with project markers still triggers advisory."""
+    pre = _checksum_from_paths([])
+    files_changed = [
+        "webapp/package.json",
+        "webapp/src/main.js",
+        "webapp/src/app.js",
+    ]
+
+    result = detect_advisory_nested_scaffold(pre, files_changed)
+
     assert len(result) == 1
     adv = result[0]
     assert isinstance(adv, PathGuardAdvisory)
-    assert adv.new_top_dir == "mylib"
-    assert adv.mode == "advisory"
-    assert adv.contract_violation_type == "nested_project_folder_created_advisory"
-    assert "mylib/__init__.py" in adv.files_written
+    assert adv.new_top_dir == "webapp"
 
 
 def test_advisory_for_new_scaffold_dir_with_structural_subdirs():
@@ -202,9 +213,9 @@ def test_advisory_metadata_fields():
     """Advisory carries exactly the fields expected by the emit_live call."""
     pre = _checksum_from_paths([])
     files_changed = [
-        "scaffold/__init__.py",
-        "scaffold/core.py",
-        "scaffold/utils.py",
+        "scaffold/package.json",
+        "scaffold/src/main.js",
+        "scaffold/src/utils.js",
     ]
 
     result = detect_advisory_nested_scaffold(pre, files_changed)

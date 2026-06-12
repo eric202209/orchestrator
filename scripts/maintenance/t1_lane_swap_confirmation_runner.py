@@ -17,15 +17,14 @@ local_high_capacity-style deployment (see lane profile addendum). Not a
 universal default.
 """
 import copy
-import importlib.util
 import json
 import pathlib
 from datetime import datetime
 
-_RUNNER = pathlib.Path(__file__).parent / "t1_reliability_confirmation_runner.py"
-spec = importlib.util.spec_from_file_location("t1runner", str(_RUNNER))
-r = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(r)
+from scripts.maintenance._runner_common import ensure_repo_on_syspath, load_sibling_module
+
+ensure_repo_on_syspath()
+r = load_sibling_module("t1runner", "t1_reliability_confirmation_runner.py")
 
 MIN_AVAILABLE_GIB = 3.0
 
