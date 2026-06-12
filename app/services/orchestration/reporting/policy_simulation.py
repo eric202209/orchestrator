@@ -12,7 +12,7 @@ import json
 from typing import Any, Dict, Iterable, List
 
 from ..events.event_types import EventType
-from ..policy import MAX_STEP_ATTEMPTS, get_policy_profile
+from ..policy import MAX_STEP_ATTEMPTS, PolicyProfile, get_policy_profile
 from .replay import COMPATIBILITY_VERSION, REDUCER_VERSION, TRANSITION_EVENT_TYPES
 
 SIMULATION_VERSION = "phase5a-sim-v1"
@@ -23,6 +23,14 @@ MAX_POLICY_EVIDENCE_EVENTS = 12
 MAX_POLICY_FINDINGS = 20
 MAX_POLICY_REASON_CODES = 5
 MAX_POLICY_EVIDENCE_GAPS = 10
+
+_POLICY_CHECKSUM_CANONICAL_RESTORE_LABELS = {
+    "balanced": "Restore only workspace-isolation failures by default",
+    "strict": "Restore most orchestration failures to the pre-run snapshot",
+    "recovery_friendly": (
+        "Preserve more workspace state to support replay and operator recovery"
+    ),
+}
 
 AUTHORITATIVE_POLICY_INPUTS = (
     "phase",
@@ -177,7 +185,7 @@ def simulate_policy_from_replay(
             "family": POLICY_FAMILY,
             "profile": profile.name,
             "version": f"{POLICY_FAMILY}:{profile.name}:v1",
-            "checksum": _policy_checksum(profile.to_dict()),
+            "checksum": _policy_checksum(_policy_checksum_payload(profile)),
         },
         "compatibility": compatibility,
         "policy_determinism": _policy_determinism(
@@ -366,6 +374,26 @@ def _policy_determinism(
 def _policy_checksum(payload: Dict[str, Any]) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def _policy_checksum_payload(profile: PolicyProfile) -> Dict[str, Any]:
+    """Return the v1 compatibility payload used for stable policy checksums.
+
+    The checksum is meant to identify behavioral policy semantics, not operator-
+    facing wording.  Preserve the original v1 restore labels so copy updates do
+    not churn every policy golden report.
+    """
+
+    payload = profile.to_dict()
+    canonical_restore_label = _POLICY_CHECKSUM_CANONICAL_RESTORE_LABELS.get(
+        profile.name
+    )
+    if canonical_restore_label:
+        payload["restore_behavior_label"] = canonical_restore_label
+        effects = payload.get("effects")
+        if isinstance(effects, dict):
+            effects["restore_behavior_label"] = canonical_restore_label
+    return payload
 
 
 def _bounded_unique(values: Iterable[Any], limit: int) -> List[str]:

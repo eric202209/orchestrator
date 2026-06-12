@@ -4,6 +4,7 @@ import copy
 
 import pytest
 
+from app.services.orchestration.policy import PolicyProfile, get_policy_profile
 from app.services.orchestration.reporting.policy_simulation import (
     MAX_POLICY_EVIDENCE_EVENTS,
     MAX_POLICY_FINDINGS,
@@ -151,3 +152,32 @@ def test_policy_evidence_budgets_are_enforced(replay_report):
 
 def test_simulation_safe_event_vocabulary_is_replay_compatible():
     assert_simulation_safe_vocabulary()
+
+
+def test_policy_checksum_is_stable_across_restore_label_copy_changes():
+    baseline = get_policy_profile("balanced")
+    relabeled = PolicyProfile(
+        name=baseline.name,
+        display_name=baseline.display_name,
+        description=baseline.description,
+        validation_severity=baseline.validation_severity,
+        completion_repair_budget=baseline.completion_repair_budget,
+        workspace_restore_mode=baseline.workspace_restore_mode,
+        planning_mode=baseline.planning_mode,
+        retry_mode=baseline.retry_mode,
+        restore_behavior_label=(
+            "Preserve resumable stops; restore known orchestration failures "
+            "to the pre-run snapshot"
+        ),
+        max_plan_revisions=baseline.max_plan_revisions,
+        allow_relaxed_mode=baseline.allow_relaxed_mode,
+    )
+
+    from app.services.orchestration.reporting.policy_simulation import (
+        _policy_checksum,
+        _policy_checksum_payload,
+    )
+
+    assert _policy_checksum(_policy_checksum_payload(relabeled)) == _policy_checksum(
+        _policy_checksum_payload(baseline)
+    )
