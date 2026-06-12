@@ -359,6 +359,7 @@ def build_bounded_debug_repair_prompt_with_metadata(
     """Render the bounded debug repair prompt with source/API metadata."""
 
     workspace = render_workspace_path_for_prompt(Path(envelope.workspace_path or "."))
+    zero_test_collect_only = _is_zero_test_collect_only_failure(envelope)
     excerpts = {
         "stdout_excerpt": envelope.stdout_excerpt,
         "stderr_excerpt": envelope.stderr_excerpt,
@@ -421,6 +422,14 @@ def build_bounded_debug_repair_prompt_with_metadata(
             "11. If workspace evidence names a missing Python module target, prefer creating that module file instead of editing only a package __init__.py.\n"
         )
     else:
+        zero_test_rule = ""
+        if zero_test_collect_only:
+            zero_test_rule = (
+                "11. Zero tests were collected. The command must create a non-empty "
+                "test_*.py file containing a def test_* function and at least one "
+                "assertion or target-package import; include that path in "
+                "expected_files. An empty file or touch command is invalid.\n"
+            )
         rules_section = (
             "Rules:\n"
             "1. Output exactly one JSON array containing one command_fix step object.\n"
@@ -433,6 +442,7 @@ def build_bounded_debug_repair_prompt_with_metadata(
             "8. Do not bypass validators, workspace boundaries, or verification.\n"
             "9. Do not request additional retries or describe policy.\n"
             "10. If workspace evidence names a missing Python module target, prefer creating that module file instead of editing only a package __init__.py.\n"
+            f"{zero_test_rule}"
         )
     prompt = (
         "Return a bare JSON array of one minimal debug repair step. "
@@ -1070,6 +1080,14 @@ def normalize_bounded_debug_repair_payload_detailed(
             return _debug_repair_normalization_rejected(
                 parsed_data, "semantic_string_edit_rejected"
             )
+        if fix_type == "command_fix" and not _zero_test_repair_creates_semantic_test(
+            normalized["fix"],
+            normalized.get("expected_files"),
+            envelope=envelope,
+        ):
+            return _debug_repair_normalization_rejected(
+                parsed_data, "zero_test_repair_missing_semantic_test"
+            )
         if fix_type in {"code_fix", "ops_fix"} and not any(
             key in normalized for key in ("expected_files", "verification", "ops")
         ):
@@ -1147,6 +1165,14 @@ def normalize_bounded_debug_repair_payload_detailed(
     if _semantic_pytest_string_edit_repair(command, envelope=envelope):
         return _debug_repair_normalization_rejected(
             parsed_data, "semantic_string_edit_rejected"
+        )
+    if not _zero_test_repair_creates_semantic_test(
+        command,
+        expected_files,
+        envelope=envelope,
+    ):
+        return _debug_repair_normalization_rejected(
+            parsed_data, "zero_test_repair_missing_semantic_test"
         )
 
     return DebugRepairNormalizationResult(
@@ -1432,5 +1458,80 @@ def _semantic_pytest_string_edit_repair(
             r"(^|[;&|]\s*)(?:sed|perl)\b|"
             r"\bpython3?\s+-c\s+['\"][^'\"]*(?:replace|write_text|sed)",
             lowered_command,
+        )
+    )
+
+
+def _is_zero_test_collect_only_failure(
+    envelope: Optional[DebugFeedbackEnvelope],
+) -> bool:
+    if envelope is None:
+        return False
+    failed_command = str(envelope.failed_command or "").lower()
+    if "pytest" not in failed_command or "--collect-only" not in failed_command:
+        return False
+    context = " ".join(
+        str(part or "")
+        for part in (
+            envelope.stdout_excerpt,
+            envelope.stderr_excerpt,
+            envelope.pytest_excerpt,
+            " ".join(envelope.validator_reasons or []),
+        )
+    ).lower()
+    return bool(
+        envelope.return_code == 5
+        or re.search(r"\bcollected\s+0\s+items?\b|\bno tests collected\b", context)
+    )
+
+
+def _zero_test_repair_creates_semantic_test(
+    command: str,
+    expected_files: Any,
+    *,
+    envelope: Optional[DebugFeedbackEnvelope],
+) -> bool:
+    if not _is_zero_test_collect_only_failure(envelope):
+        return True
+
+    normalized_command = str(command or "").replace("\\", "/")
+    semantic_command = str(command or "").replace("\\n", "\n")
+    test_paths = {
+        match.lstrip("./")
+        for match in re.findall(
+            r"(?:^|[\s'\"=])((?:tests?|[^\\s'\"=]+/tests?)/test_[A-Za-z0-9_.-]+\.py)\b",
+            normalized_command,
+        )
+    }
+    normalized_expected = {
+        str(path or "").strip().replace("\\", "/").lstrip("./")
+        for path in (expected_files or [])
+        if str(path or "").strip()
+    }
+    declared_test_paths = test_paths.intersection(normalized_expected)
+    if not declared_test_paths:
+        return False
+    if not any(
+        re.search(
+            rf"(?:>>?|tee(?:\s+-a)?)\s*['\"]?{re.escape(path)}\b",
+            normalized_command,
+        )
+        or re.search(
+            rf"(?:path\(\s*['\"]{re.escape(path)}['\"]\s*\)|"
+            rf"['\"]{re.escape(path)}['\"])\s*\.write_text\(",
+            normalized_command,
+            flags=re.IGNORECASE,
+        )
+        for path in declared_test_paths
+    ):
+        return False
+    if not re.search(r"\bdef\s+test_[A-Za-z0-9_]*\s*\(", semantic_command):
+        return False
+    return bool(
+        re.search(r"\bassert\b", semantic_command)
+        or re.search(
+            r"\b(?:from\s+[A-Za-z_][A-Za-z0-9_.]*\s+import|"
+            r"import\s+[A-Za-z_][A-Za-z0-9_.]*)\b",
+            semantic_command,
         )
     )

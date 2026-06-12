@@ -957,6 +957,94 @@ def test_bounded_debug_repair_payload_requires_single_json_array():
     assert normalize_bounded_debug_repair_payload([{"command": "echo bad"}]) is None
 
 
+def test_zero_test_collect_only_rejects_empty_test_file_command(tmp_path):
+    envelope = build_debug_feedback_envelope(
+        task_execution_id=821,
+        task_id=863,
+        step_index=3,
+        failure_phase="execution",
+        failed_command=".venv/bin/python3 -m pytest --collect-only",
+        stdout="pytest 9.0.3 collected 0 items; package import successful",
+        stderr="collected 0 items\nno tests collected in 0.01s",
+        workspace_path=tmp_path,
+    )
+
+    result = normalize_bounded_debug_repair_payload_detailed(
+        [
+            {
+                "title": "Create test file",
+                "command": "touch tests/test_strtools.py",
+                "verification_command": (".venv/bin/python3 -m pytest --collect-only"),
+            }
+        ],
+        envelope=envelope,
+    )
+
+    assert result.payload is None
+    assert result.rejection_reason == "zero_test_repair_missing_semantic_test"
+
+
+def test_zero_test_collect_only_accepts_real_test_file_command(tmp_path):
+    envelope = build_debug_feedback_envelope(
+        task_execution_id=821,
+        task_id=863,
+        step_index=3,
+        failure_phase="execution",
+        failed_command=".venv/bin/python3 -m pytest --collect-only",
+        stdout="pytest 9.0.3 collected 0 items; package import successful",
+        stderr="collected 0 items\nno tests collected in 0.01s",
+        workspace_path=tmp_path,
+    )
+    command = (
+        "printf 'import strtools\\n\\ndef test_version():\\n"
+        '    assert strtools.__version__ == "0.1.0"\\n\' '
+        "> tests/test_strtools.py"
+    )
+
+    result = normalize_bounded_debug_repair_payload_detailed(
+        [
+            {
+                "title": "Create minimal strtools smoke test",
+                "command": command,
+                "verification_command": (".venv/bin/python3 -m pytest --collect-only"),
+                "expected_files": ["tests/test_strtools.py"],
+            }
+        ],
+        envelope=envelope,
+    )
+
+    assert result.rejection_reason is None
+    assert result.payload["fix_type"] == "command_fix"
+    assert result.payload["fix"] == command
+    assert result.payload["expected_files"] == ["tests/test_strtools.py"]
+
+
+def test_non_zero_test_debug_repair_command_is_unaffected(tmp_path):
+    envelope = build_debug_feedback_envelope(
+        task_execution_id=900,
+        task_id=901,
+        step_index=2,
+        failure_phase="execution",
+        failed_command="python3 -m pytest -q",
+        stderr="1 failed, 4 passed",
+        workspace_path=tmp_path,
+    )
+
+    result = normalize_bounded_debug_repair_payload_detailed(
+        [
+            {
+                "title": "Create marker file",
+                "command": "touch tests/test_marker.py",
+                "verification_command": "python3 -m pytest -q",
+            }
+        ],
+        envelope=envelope,
+    )
+
+    assert result.rejection_reason is None
+    assert result.payload["fix"] == "touch tests/test_marker.py"
+
+
 def test_diff_scoped_compliance_retry_accepts_command_list_shape():
     result = normalize_diff_scoped_compliance_retry_command_list(
         json.dumps(
