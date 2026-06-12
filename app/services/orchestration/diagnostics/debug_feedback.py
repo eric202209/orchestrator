@@ -1036,6 +1036,13 @@ def normalize_bounded_debug_repair_payload_detailed(
                 for path in parsed_data.get("expected_files", [])
                 if str(path).strip()
             ]
+        if fix_type == "command_fix" and not normalized.get("expected_files"):
+            derived_expected_files = _derive_zero_test_expected_files(
+                normalized["fix"],
+                envelope=envelope,
+            )
+            if derived_expected_files:
+                normalized["expected_files"] = derived_expected_files
         if isinstance(parsed_data.get("verification"), str):
             normalized["verification"] = str(parsed_data.get("verification") or "")
         if isinstance(parsed_data.get("ops"), list):
@@ -1146,6 +1153,11 @@ def normalize_bounded_debug_repair_payload_detailed(
         )
 
     expected_files = _expected_files_from_item(item)
+    if not expected_files:
+        expected_files = _derive_zero_test_expected_files(
+            command,
+            envelope=envelope,
+        )
 
     if not is_runnable_shell_command_fix(command):
         return _debug_repair_normalization_rejected(parsed_data, "non_runnable_command")
@@ -1499,7 +1511,7 @@ def _zero_test_repair_creates_semantic_test(
     test_paths = {
         match.lstrip("./")
         for match in re.findall(
-            r"(?:^|[\s'\"=])((?:tests?|[^\\s'\"=]+/tests?)/test_[A-Za-z0-9_.-]+\.py)\b",
+            r"(?:^|[\s'\"=])(tests/test_[A-Za-z0-9_.-]+\.py)\b",
             normalized_command,
         )
     }
@@ -1535,3 +1547,52 @@ def _zero_test_repair_creates_semantic_test(
             semantic_command,
         )
     )
+
+
+def _derive_zero_test_expected_files(
+    command: str,
+    *,
+    envelope: Optional[DebugFeedbackEnvelope],
+) -> list[str]:
+    if not _is_zero_test_collect_only_failure(envelope):
+        return []
+
+    normalized_command = str(command or "").replace("\\", "/")
+    semantic_command = str(command or "").replace("\\n", "\n")
+    test_paths = {
+        match.lstrip("./")
+        for match in re.findall(
+            r"(?:^|[\s'\"=])(tests/test_[A-Za-z0-9_.-]+\.py)\b",
+            normalized_command,
+        )
+    }
+    if len(test_paths) != 1:
+        return []
+
+    path = next(iter(test_paths))
+    writes_path = bool(
+        re.search(
+            rf"(?:>>?|tee(?:\s+-a)?)\s*['\"]?{re.escape(path)}\b",
+            normalized_command,
+        )
+        or re.search(
+            rf"(?:path\(\s*['\"]{re.escape(path)}['\"]\s*\)|"
+            rf"['\"]{re.escape(path)}['\"])\s*\.write_text\(",
+            normalized_command,
+            flags=re.IGNORECASE,
+        )
+    )
+    if not writes_path:
+        return []
+    if not re.search(r"\bdef\s+test_[A-Za-z0-9_]*\s*\(", semantic_command):
+        return []
+    if not (
+        re.search(r"\bassert\b", semantic_command)
+        or re.search(
+            r"\b(?:from\s+[A-Za-z_][A-Za-z0-9_.]*\s+import|"
+            r"import\s+[A-Za-z_][A-Za-z0-9_.]*)\b",
+            semantic_command,
+        )
+    ):
+        return []
+    return [path]

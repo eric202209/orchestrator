@@ -1019,6 +1019,157 @@ def test_zero_test_collect_only_accepts_real_test_file_command(tmp_path):
     assert result.payload["expected_files"] == ["tests/test_strtools.py"]
 
 
+def test_zero_test_collect_only_derives_expected_file_for_real_test_command(tmp_path):
+    envelope = build_debug_feedback_envelope(
+        task_execution_id=822,
+        task_id=869,
+        step_index=3,
+        failure_phase="execution",
+        failed_command=".venv/bin/python3 -m pytest --collect-only",
+        stdout="pytest collected 0 items",
+        stderr="no tests collected in 0.01s",
+        workspace_path=tmp_path,
+    )
+    command = (
+        "echo 'import strtools\\ndef test_version():\\n"
+        '    assert strtools.__version__ == "0.1.0"\' '
+        "> tests/test_strtools.py"
+    )
+
+    result = normalize_bounded_debug_repair_payload_detailed(
+        [
+            {
+                "title": "Create minimal test file",
+                "command": command,
+                "verification_command": (
+                    ".venv/bin/python3 -m pytest tests/test_strtools.py -v"
+                ),
+            }
+        ],
+        envelope=envelope,
+    )
+
+    assert result.rejection_reason is None
+    assert result.payload["expected_files"] == ["tests/test_strtools.py"]
+
+
+def test_zero_test_collect_only_rejects_ambiguous_test_paths(tmp_path):
+    envelope = build_debug_feedback_envelope(
+        task_execution_id=822,
+        task_id=869,
+        step_index=3,
+        failure_phase="execution",
+        failed_command=".venv/bin/python3 -m pytest --collect-only",
+        stderr="collected 0 items",
+        workspace_path=tmp_path,
+    )
+    command = (
+        "echo 'import strtools\\ndef test_version():\\n"
+        "    assert strtools.__version__' > tests/test_strtools.py; "
+        "cp tests/test_strtools.py tests/test_version.py"
+    )
+
+    result = normalize_bounded_debug_repair_payload_detailed(
+        [
+            {
+                "title": "Create multiple test files",
+                "command": command,
+                "verification_command": ".venv/bin/python3 -m pytest --collect-only",
+            }
+        ],
+        envelope=envelope,
+    )
+
+    assert result.payload is None
+    assert result.rejection_reason == "zero_test_repair_missing_semantic_test"
+
+
+def test_zero_test_collect_only_rejects_non_test_write_path(tmp_path):
+    envelope = build_debug_feedback_envelope(
+        task_execution_id=822,
+        task_id=869,
+        step_index=3,
+        failure_phase="execution",
+        failed_command=".venv/bin/python3 -m pytest --collect-only",
+        stderr="collected 0 items",
+        workspace_path=tmp_path,
+    )
+
+    result = normalize_bounded_debug_repair_payload_detailed(
+        [
+            {
+                "title": "Write a non-test file",
+                "command": (
+                    "echo 'import strtools\\ndef test_version():\\n"
+                    "    assert strtools.__version__' > tests/strtools_check.py"
+                ),
+                "verification_command": ".venv/bin/python3 -m pytest --collect-only",
+            }
+        ],
+        envelope=envelope,
+    )
+
+    assert result.payload is None
+    assert result.rejection_reason == "zero_test_repair_missing_semantic_test"
+
+
+def test_zero_test_collect_only_rejects_test_without_function(tmp_path):
+    envelope = build_debug_feedback_envelope(
+        task_execution_id=822,
+        task_id=869,
+        step_index=3,
+        failure_phase="execution",
+        failed_command=".venv/bin/python3 -m pytest --collect-only",
+        stderr="collected 0 items",
+        workspace_path=tmp_path,
+    )
+
+    result = normalize_bounded_debug_repair_payload_detailed(
+        [
+            {
+                "title": "Write import-only test module",
+                "command": (
+                    "echo 'import strtools\\nassert strtools.__version__' "
+                    "> tests/test_strtools.py"
+                ),
+                "verification_command": ".venv/bin/python3 -m pytest --collect-only",
+            }
+        ],
+        envelope=envelope,
+    )
+
+    assert result.payload is None
+    assert result.rejection_reason == "zero_test_repair_missing_semantic_test"
+
+
+def test_zero_test_collect_only_rejects_test_without_assertion_or_import(tmp_path):
+    envelope = build_debug_feedback_envelope(
+        task_execution_id=822,
+        task_id=869,
+        step_index=3,
+        failure_phase="execution",
+        failed_command=".venv/bin/python3 -m pytest --collect-only",
+        stderr="collected 0 items",
+        workspace_path=tmp_path,
+    )
+
+    result = normalize_bounded_debug_repair_payload_detailed(
+        [
+            {
+                "title": "Write empty test function",
+                "command": (
+                    "echo 'def test_version():\\n    pass' " "> tests/test_strtools.py"
+                ),
+                "verification_command": ".venv/bin/python3 -m pytest --collect-only",
+            }
+        ],
+        envelope=envelope,
+    )
+
+    assert result.payload is None
+    assert result.rejection_reason == "zero_test_repair_missing_semantic_test"
+
+
 def test_non_zero_test_debug_repair_command_is_unaffected(tmp_path):
     envelope = build_debug_feedback_envelope(
         task_execution_id=900,
