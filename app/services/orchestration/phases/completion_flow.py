@@ -1088,6 +1088,7 @@ def finalize_successful_task(
         },
         validation_severity=ctx.validation_severity,
         workflow_stage=ctx.workflow_stage,
+        is_first_ordered_task=bool(task and task.plan_position == 1),
     )
     record_validation_verdict(
         db,
@@ -1123,6 +1124,7 @@ def finalize_successful_task(
                 },
                 validation_severity=ctx.validation_severity,
                 workflow_stage=ctx.workflow_stage,
+                is_first_ordered_task=bool(task and task.plan_position == 1),
             )
             record_validation_verdict(
                 db,
@@ -1633,6 +1635,7 @@ def finalize_successful_task(
             },
             validation_severity=ctx.validation_severity,
             workflow_stage=ctx.workflow_stage,
+            is_first_ordered_task=bool(task and task.plan_position == 1),
         )
         record_validation_verdict(
             db,

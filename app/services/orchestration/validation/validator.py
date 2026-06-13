@@ -732,6 +732,21 @@ class ValidatorService:
         )
 
     @staticmethod
+    def has_explicit_repair_intent(
+        task_prompt: str,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> bool:
+        combined = " ".join([task_prompt or "", title or "", description or ""])
+        return bool(
+            re.search(
+                r"\b(?:repair|fix|debug|regression|bug|failing|broken)\b",
+                combined,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
     def _normalize_failure_signature_parts(reasons: List[str]) -> List[str]:
         normalized: List[str] = []
         for reason in reasons:
@@ -4259,6 +4274,7 @@ class ValidatorService:
         completion_evidence: Optional[Dict[str, Any]] = None,
         validation_severity: str = "standard",
         workflow_stage: Optional[str] = None,
+        is_first_ordered_task: bool = False,
     ) -> ValidationVerdict:
         profile = cls.infer_validation_profile(
             task_prompt, execution_profile, title=title, description=description
@@ -4391,7 +4407,10 @@ class ValidatorService:
             key=lambda quality: command_quality_rank.get(str(quality), 0),
             default="missing",
         )
-        requires_independent_evidence = cls.repair_requires_independent_evidence(
+        repair_keyword_match = cls.repair_requires_independent_evidence(
+            task_prompt, title=title, description=description
+        )
+        explicit_repair_intent = cls.has_explicit_repair_intent(
             task_prompt, title=title, description=description
         )
         integrity_findings = scan_test_file_changes(
@@ -4410,6 +4429,29 @@ class ValidatorService:
         )
         has_independent_regression_test = (
             best_command_quality == "regression_test" and bool(pre_existing_tests)
+        )
+        added_files = {
+            str(path).replace("\\", "/").lstrip("./")
+            for path in ((change_set or {}).get("added_files") or [])
+        }
+        required_bootstrap_files = set(bootstrap_contract.required_source_files) | set(
+            bootstrap_contract.required_test_files
+        )
+        fresh_bootstrap_generated_test_evidence = bool(
+            repair_keyword_match
+            and not explicit_repair_intent
+            and is_first_ordered_task
+            and bootstrap_task_type
+            in {BootstrapTaskType.SOURCE_CODE, BootstrapTaskType.MIXED}
+            and bootstrap_contract.minimum_implementation_evidence
+            and bootstrap_contract.required_source_files
+            and bootstrap_contract.required_test_files
+            and not pre_existing_tests
+            and required_bootstrap_files.issubset(added_files)
+            and best_command_quality == "regression_test"
+        )
+        requires_independent_evidence = bool(
+            repair_keyword_match and not fresh_bootstrap_generated_test_evidence
         )
         integrity_payload = [finding.to_dict() for finding in integrity_findings]
         integrity_blockers = [
@@ -4435,6 +4477,12 @@ class ValidatorService:
             "command_quality_by_step": command_quality_by_step[:20],
             "integrity_findings": integrity_payload[:50],
             "semantic_violation_codes": sorted(set(semantic_violation_codes)),
+            "repair_keyword_match": repair_keyword_match,
+            "explicit_repair_intent": explicit_repair_intent,
+            "is_first_ordered_task": is_first_ordered_task,
+            "fresh_bootstrap_generated_test_evidence": (
+                fresh_bootstrap_generated_test_evidence
+            ),
             "requires_independent_evidence": requires_independent_evidence,
             "pre_existing_test_files": pre_existing_tests[:20],
             "has_independent_regression_test": has_independent_regression_test,

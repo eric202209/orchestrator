@@ -412,3 +412,287 @@ def test_behavior_baseline_can_satisfy_repair_independent_evidence(
     evidence = verdict.details["validation_evidence"]
     assert evidence["behavior_baseline_passed"] is True
     assert evidence["verification_insufficient"] is False
+
+
+def test_fresh_bootstrap_accepts_new_source_and_generated_tests(tmp_path: Path):
+    project_dir = tmp_path / "project"
+    source_file = project_dir / "src" / "calclib" / "parser.py"
+    init_file = source_file.parent / "__init__.py"
+    test_file = project_dir / "tests" / "test_parser.py"
+    source_file.parent.mkdir(parents=True)
+    test_file.parent.mkdir(parents=True)
+    init_file.write_text(
+        "from .parser import parse_amount\n",
+        encoding="utf-8",
+    )
+    source_file.write_text(
+        "def parse_amount(text: str) -> int:\n" "    return int(text.strip())\n",
+        encoding="utf-8",
+    )
+    test_file.write_text(
+        "from calclib.parser import parse_amount\n\n"
+        "def test_parse_amount():\n"
+        "    assert parse_amount(' 42 ') == 42\n",
+        encoding="utf-8",
+    )
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create parser source and tests for failure cases",
+            "verification": "PYTHONPATH=src python3 -m pytest tests/test_parser.py -q",
+            "expected_files": [
+                "src/calclib/__init__.py",
+                "src/calclib/parser.py",
+                "tests/test_parser.py",
+            ],
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": "src/calclib/__init__.py",
+                    "content": init_file.read_text(encoding="utf-8"),
+                },
+                {
+                    "op": "write_file",
+                    "path": "src/calclib/parser.py",
+                    "content": source_file.read_text(encoding="utf-8"),
+                },
+                {
+                    "op": "write_file",
+                    "path": "tests/test_parser.py",
+                    "content": test_file.read_text(encoding="utf-8"),
+                },
+            ],
+        }
+    ]
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=plan,
+        task_prompt="Create a parser and cover success and failure cases.",
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        title="Bootstrap parser",
+        is_first_ordered_task=True,
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": [
+                "src/calclib/__init__.py",
+                "src/calclib/parser.py",
+                "tests/test_parser.py",
+            ],
+            "completion_verification_command": (
+                "PYTHONPATH=src python3 -m pytest tests/test_parser.py -q"
+            ),
+            "change_set": {
+                "added_files": [
+                    "src/calclib/__init__.py",
+                    "src/calclib/parser.py",
+                    "tests/test_parser.py",
+                ],
+            },
+        },
+    )
+
+    assert verdict.accepted is True
+    evidence = verdict.details["validation_evidence"]
+    assert evidence["fresh_bootstrap_generated_test_evidence"] is True
+    assert evidence["requires_independent_evidence"] is False
+    assert evidence["verification_insufficient"] is False
+
+
+def test_wm_parser_t1_bootstrap_accepts_generated_contract_tests(tmp_path: Path):
+    project_dir = tmp_path / "project"
+    package_dir = project_dir / "src" / "calclib"
+    test_file = project_dir / "tests" / "test_parser.py"
+    package_dir.mkdir(parents=True)
+    test_file.parent.mkdir(parents=True)
+    init_file = package_dir / "__init__.py"
+    parser_file = package_dir / "parser.py"
+    init_file.write_text(
+        "from .parser import parse_amount\n",
+        encoding="utf-8",
+    )
+    parser_file.write_text(
+        "def parse_amount(text: str) -> dict:\n"
+        "    stripped = text.strip()\n"
+        "    if not stripped:\n"
+        "        return {'ok': False, 'code': 'EMPTY'}\n"
+        "    try:\n"
+        "        value = int(stripped)\n"
+        "    except ValueError:\n"
+        "        return {'ok': False, 'code': 'FORMAT'}\n"
+        "    if value < -999999 or value > 999999:\n"
+        "        return {'ok': False, 'code': 'OVERFLOW'}\n"
+        "    return {'ok': True, 'value': value}\n",
+        encoding="utf-8",
+    )
+    test_file.write_text(
+        "from calclib.parser import parse_amount\n\n"
+        "def test_empty():\n"
+        "    assert parse_amount('')['code'] == 'EMPTY'\n\n"
+        "def test_valid():\n"
+        "    assert parse_amount('42')['value'] == 42\n",
+        encoding="utf-8",
+    )
+    added_files = [
+        "src/calclib/__init__.py",
+        "src/calclib/parser.py",
+        "tests/test_parser.py",
+    ]
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create parse_amount parser and tests",
+            "verification": "PYTHONPATH=src python3 -m pytest tests/test_parser.py -q",
+            "expected_files": added_files,
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": path,
+                    "content": (project_dir / path).read_text(encoding="utf-8"),
+                }
+                for path in added_files
+            ],
+        }
+    ]
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=plan,
+        task_prompt=(
+            "Create parse_amount. Return a code for failure cases: EMPTY, "
+            "FORMAT, and OVERFLOW. Create tests and run pytest."
+        ),
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        title="Bootstrap parse_amount parser",
+        is_first_ordered_task=True,
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": added_files,
+            "completion_verification_command": (
+                "PYTHONPATH=src python3 -m pytest tests/test_parser.py -q"
+            ),
+            "change_set": {"added_files": added_files},
+        },
+    )
+
+    assert verdict.accepted is True
+    assert (
+        verdict.details["validation_evidence"][
+            "fresh_bootstrap_generated_test_evidence"
+        ]
+        is True
+    )
+
+
+def test_fresh_repair_task_still_requires_independent_evidence(tmp_path: Path):
+    project_dir = tmp_path / "project"
+    test_file = project_dir / "tests" / "test_app.py"
+    test_file.parent.mkdir(parents=True)
+    app_file = project_dir / "app.py"
+    app_file.write_text("def status():\n    return 'ready'\n", encoding="utf-8")
+    test_file.write_text(
+        "from app import status\n\n"
+        "def test_status():\n"
+        "    assert status() == 'ready'\n",
+        encoding="utf-8",
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=[
+            {
+                "step_number": 1,
+                "description": "Fix broken status behavior",
+                "verification": "python3 -m pytest tests/test_app.py -q",
+                "expected_files": ["app.py", "tests/test_app.py"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "app.py",
+                        "content": app_file.read_text(encoding="utf-8"),
+                    },
+                    {
+                        "op": "write_file",
+                        "path": "tests/test_app.py",
+                        "content": test_file.read_text(encoding="utf-8"),
+                    },
+                ],
+            }
+        ],
+        task_prompt="Fix the broken status regression.",
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        title="Fix status regression",
+        is_first_ordered_task=True,
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": ["app.py", "tests/test_app.py"],
+            "completion_verification_command": "python3 -m pytest tests/test_app.py -q",
+            "change_set": {
+                "added_files": ["app.py", "tests/test_app.py"],
+            },
+        },
+    )
+
+    assert verdict.accepted is False
+    evidence = verdict.details["validation_evidence"]
+    assert evidence["fresh_bootstrap_generated_test_evidence"] is False
+    assert evidence["requires_independent_evidence"] is True
+    assert evidence["verification_insufficient"] is True
+
+
+def test_mature_project_test_rewrite_remains_rejected(tmp_path: Path):
+    snapshot_dir = tmp_path / "snapshot"
+    project_dir = tmp_path / "project"
+    before_test = snapshot_dir / "tests" / "test_app.py"
+    after_test = project_dir / "tests" / "test_app.py"
+    before_test.parent.mkdir(parents=True)
+    after_test.parent.mkdir(parents=True)
+    before_test.write_text(
+        "def test_status():\n"
+        "    assert status() == 'ready'\n"
+        "    assert status() != 'broken'\n",
+        encoding="utf-8",
+    )
+    after_test.write_text(
+        "def test_status():\n" "    assert status() == 'ready'\n",
+        encoding="utf-8",
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=[
+            {
+                "step_number": 1,
+                "description": "Fix status regression",
+                "verification": "python3 -m pytest tests/test_app.py -q",
+                "expected_files": ["tests/test_app.py"],
+            }
+        ],
+        task_prompt="Fix the status regression without weakening tests.",
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        title="Fix mature project regression",
+        is_first_ordered_task=False,
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": ["tests/test_app.py"],
+            "completion_verification_command": "python3 -m pytest tests/test_app.py -q",
+            "change_set": {
+                "snapshot_path": str(snapshot_dir),
+                "target_path": str(project_dir),
+                "modified_files": ["tests/test_app.py"],
+            },
+        },
+    )
+
+    assert verdict.accepted is False
+    evidence = verdict.details["validation_evidence"]
+    assert evidence["requires_independent_evidence"] is True
+    assert "test_preservation_violation" in evidence["semantic_violation_codes"]
