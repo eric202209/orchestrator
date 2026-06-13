@@ -990,14 +990,6 @@ def _write_progress_notes(
         logger.info("[PROGRESS] Progress notes written to %s", notes_path)
     except Exception as e:
         logger.warning("[PROGRESS] Failed to write progress notes: %s", e)
-    from app.services.orchestration.working_memory import write_working_memory
-
-    write_working_memory(
-        orchestration_state=orchestration_state,
-        task=task,
-        summary=summary,
-        logger=logger,
-    )
 
     try:
         from app.services.orchestration.repo_memory import write_repo_memory
@@ -1061,6 +1053,8 @@ def finalize_successful_task(
         ctx=ctx,
         summary_prompt=summary_prompt,
     )
+    wm_summary = summary_result.get("output", "")
+    pn_summary = summary_result.get("pn_summary", wm_summary)
     reported_changed_files = list(
         dict.fromkeys(
             path
@@ -1735,7 +1729,7 @@ def finalize_successful_task(
             runtime_service=runtime_service,
             orchestration_state=orchestration_state,
             prompt=prompt,
-            summary=summary_result.get("output", ""),
+            summary=wm_summary,
             emit_live=emit_live,
             logger=logger,
         )
@@ -1914,19 +1908,37 @@ def finalize_successful_task(
                 if hasattr(task_service, "get_task_execution_change_set")
                 else None
             )
+
+    def _pn_write_fn(*, orchestration_state, task, prompt, summary, logger):
+        return _write_progress_notes(
+            orchestration_state=orchestration_state,
+            task=task,
+            prompt=prompt,
+            summary=pn_summary,
+            logger=logger,
+        )
+
     finalization = TaskCompletionFinalizer(
         db=db,
         task_service=task_service,
     ).finalize_success(
         ctx=ctx,
-        summary=summary_result.get("output", ""),
+        summary=wm_summary,
         baseline_publish_result=baseline_publish_result,
         completion_validation=completion_validation,
         write_project_state_snapshot_fn=write_project_state_snapshot_fn,
-        write_progress_notes_fn=_write_progress_notes,
+        write_progress_notes_fn=_pn_write_fn,
         get_next_pending_project_task_fn=get_next_pending_project_task_fn,
         get_latest_session_task_link_fn=get_latest_session_task_link_fn,
         execute_orchestration_task_delay_fn=execute_orchestration_task_delay_fn,
+    )
+    from app.services.orchestration.working_memory import write_working_memory
+
+    write_working_memory(
+        orchestration_state=orchestration_state,
+        task=task,
+        summary=wm_summary,
+        logger=logger,
     )
     promoted_workspace_archive_result = finalization.get(
         "promoted_workspace_archive_result"
@@ -1978,5 +1990,5 @@ def finalize_successful_task(
         "session_id": session_id,
         "steps_completed": len(orchestration_state.plan),
         "debug_attempts": len(orchestration_state.debug_attempts),
-        "summary": summary_result.get("output", "")[:500],
+        "summary": wm_summary[:500],
     }

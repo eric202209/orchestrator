@@ -86,9 +86,11 @@ def _generate_task_summary_with_fallback(
         "true",
         "yes",
     }:
+        det = _deterministic_task_summary(ctx.orchestration_state)
         return {
             "status": "completed",
-            "output": _deterministic_task_summary(ctx.orchestration_state),
+            "output": det,
+            "pn_summary": det,
             "fallback": True,
             "source": "deterministic",
         }
@@ -116,20 +118,28 @@ def _generate_task_summary_with_fallback(
         return {
             "status": "completed",
             "output": fallback_summary,
+            "pn_summary": fallback_summary,
             "fallback": True,
             "error": str(exc)[:500],
         }
 
     if not isinstance(summary_result, dict):
+        det = _deterministic_task_summary(ctx.orchestration_state)
         return {
             "status": "completed",
-            "output": _deterministic_task_summary(ctx.orchestration_state),
+            "output": det,
+            "pn_summary": det,
             "fallback": True,
             "error": "summary_result_not_dict",
         }
     if not str(summary_result.get("output") or "").strip():
         summary_result = dict(summary_result)
-        summary_result["output"] = _deterministic_task_summary(ctx.orchestration_state)
+        det = _deterministic_task_summary(ctx.orchestration_state)
+        summary_result["output"] = det
+        summary_result["pn_summary"] = det
         summary_result["fallback"] = True
         summary_result.setdefault("status", "completed")
+    else:
+        # LLM produced content: WM gets LLM output; progress_notes gets deterministic.
+        summary_result["pn_summary"] = _deterministic_task_summary(ctx.orchestration_state)
     return summary_result

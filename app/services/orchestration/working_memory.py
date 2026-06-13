@@ -13,7 +13,9 @@ from app.config import settings
 
 SCHEMA_VERSION = 1
 _FILENAME = "working_memory.json"
-_INJECTION_BUDGET = 2000  # max chars injected into project_context
+_INJECTION_BUDGET = 2000       # max chars injected into project_context
+_SUMMARY_STORAGE_LIMIT = 1200  # chars stored per implementation_strategy entry
+_SUMMARY_RENDER_LIMIT = 600    # chars rendered per implementation_strategy entry
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +127,7 @@ def _render_content(wm: Dict[str, Any]) -> str:
                 if title:
                     lines.append(f"  Task: {title}")
                 if summary:
-                    lines.append(f"  {summary[:200]}")
+                    lines.append(f"  {summary[:_SUMMARY_RENDER_LIMIT]}")
         lines.append("")
 
     lines.append("=== END WORKING MEMORY ===")
@@ -202,7 +204,7 @@ def write_working_memory(
         # implementation_strategy
         if summary:
             wm["implementation_strategy"].append(
-                {"task_id": task_id, "task_title": task_title, "summary": summary[:400]}
+                {"task_id": task_id, "task_title": task_title, "summary": summary[:_SUMMARY_STORAGE_LIMIT]}
             )
 
         path = openclaw_dir / _FILENAME
