@@ -6,8 +6,51 @@ import asyncio
 import os
 from typing import Any
 
+import httpx
+
+from app.config import settings
 from app.services.orchestration.policy import SUMMARY_TIMEOUT_SECONDS
 from app.services.orchestration.types import OrchestrationRunContext
+
+
+async def _call_planning_lane(prompt: str) -> str:
+    """Direct HTTP chat completion to the planning lane.
+
+    Uses settings.PLANNING_REPAIR_BASE_URL / MODEL — the same endpoint the
+    planning lane uses — so this works regardless of deployment configuration.
+    """
+    base_url = settings.PLANNING_REPAIR_BASE_URL.rstrip("/")
+    model = (settings.PLANNING_REPAIR_MODEL or "").strip() or "qwen-local"
+    api_key = (settings.PLANNING_REPAIR_API_KEY or "").strip()
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.0,
+        "max_tokens": 512,
+        "stream": False,
+        "think": False,
+        "enable_thinking": False,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    async with httpx.AsyncClient(timeout=float(SUMMARY_TIMEOUT_SECONDS)) as client:
+        resp = await client.post(
+            f"{base_url}/chat/completions", json=payload, headers=headers
+        )
+    resp.raise_for_status()
+    body = resp.json()
+    choices = body.get("choices") or []
+    if not choices:
+        return ""
+    message = choices[0].get("message") or {}
+    content = message.get("content") or ""
+    if isinstance(content, list):
+        content = "".join(
+            item.get("text", "") for item in content if isinstance(item, dict)
+        )
+    return str(content).strip()
 
 
 def _deterministic_task_summary(orchestration_state: Any) -> str:
@@ -51,11 +94,13 @@ def _generate_task_summary_with_fallback(
         }
 
     try:
-        summary_result = asyncio.run(
-            ctx.runtime_service.execute_task(
-                summary_prompt, timeout_seconds=SUMMARY_TIMEOUT_SECONDS
+        output = asyncio.run(
+            asyncio.wait_for(
+                _call_planning_lane(summary_prompt),
+                timeout=float(SUMMARY_TIMEOUT_SECONDS),
             )
         )
+        summary_result = {"status": "completed", "output": output}
     except Exception as exc:
         fallback_summary = _deterministic_task_summary(ctx.orchestration_state)
         ctx.emit_live(

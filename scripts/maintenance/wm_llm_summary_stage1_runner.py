@@ -34,7 +34,7 @@ from app.auth import create_access_token  # noqa: E402
 
 BASE_URL = "http://127.0.0.1:8080"
 USER_EMAIL = os.environ["ORCHESTRATOR_USER_EMAIL"]
-WORKSPACE_SLUG = "wm-summary-smoke-calclib"
+WORKSPACE_SLUG = "wm-summary-fix-calclib"
 REPORT_DIR = REPO_ROOT / "docs/roadmap/reports/maintenance"
 RAW_OUT = REPORT_DIR / f"wm-llm-summary-smoke-raw-{time.strftime('%Y%m%d_%H%M%S')}.json"
 SLOT_KEY = "orchestrator:backend_slots:local_openclaw"
