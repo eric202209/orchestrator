@@ -39,7 +39,7 @@ from app.config import settings  # noqa: E402
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 BASE_URL = "http://127.0.0.1:8080"
-USER_EMAIL = "REDACTED"
+USER_EMAIL = os.environ["ORCHESTRATOR_USER_EMAIL"]
 POLL_INTERVAL = 20          # seconds between polling cycles
 STALL_TIMEOUT = 120         # seconds before stall/block detection fires
 PROJECT_TIMEOUT = 2400      # per-project monitoring ceiling

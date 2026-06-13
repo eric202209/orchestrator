@@ -23,7 +23,7 @@ from app.models import Task, Project, TaskStatus  # noqa: E402
 from app.config import settings  # noqa: E402
 
 BASE_URL = "http://127.0.0.1:8080"
-USER_EMAIL = "REDACTED"
+USER_EMAIL = os.environ["ORCHESTRATOR_USER_EMAIL"]
 POLL_INTERVAL = 20   # seconds between status polls
 TASK_TIMEOUT = 600   # seconds max per task
 

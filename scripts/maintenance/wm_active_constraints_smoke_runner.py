@@ -19,6 +19,7 @@ Deliverable:
   docs/roadmap/reports/maintenance/working-memory-active-constraints-smoke-test-20260612.md
 """
 import json
+import os
 import pathlib
 import sys
 import time
@@ -39,7 +40,7 @@ from app.config import settings                              # noqa: E402
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 BASE_URL        = "http://127.0.0.1:8080"
-USER_EMAIL      = "REDACTED"
+USER_EMAIL      = os.environ["ORCHESTRATOR_USER_EMAIL"]
 POLL_INTERVAL   = 20
 STALL_TIMEOUT   = 120
 PROJECT_TIMEOUT = 3000
