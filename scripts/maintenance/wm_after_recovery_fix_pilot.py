@@ -36,7 +36,7 @@ SLOT_KEY = "orchestrator:backend_slots:local_openclaw"
 PLANNING_CONTEXT_CAP = 400
 DETERMINISTIC_PREFIX = "Task completed with verified execution evidence"
 
-SLUG_ON  = "wm-api-contract-parser-pilot-on-r5"
+SLUG_ON  = "wm-api-contract-parser-pilot-on-r5b"
 SLUG_OFF = "wm-api-contract-parser-pilot-off-r6"
 
 HEADERS: dict = {}
@@ -416,7 +416,7 @@ def check_log_events(task_id: int) -> dict:
         db.close()
 
 
-def run_arm(slug: str, wm_on: bool, worker_env: dict) -> dict:
+def run_arm(slug: str, wm_on: bool, worker_env: dict, existing_project_id: int | None = None) -> dict:
     workspace = WORKSPACE_BASE / slug
     wm_path = workspace / ".agent" / "working_memory.json"
     arm = "ON" if wm_on else "OFF"
@@ -424,13 +424,17 @@ def run_arm(slug: str, wm_on: bool, worker_env: dict) -> dict:
     init_auth()
     wait_slot()
 
-    proj = _api("POST", "/api/v1/projects", json={
-        "name": slug,
-        "description": f"WM API-contract pilot — {arm} arm ({slug})",
-        "workspace_path": str(workspace),
-    })
-    project_id = proj["id"]
-    print(f"[project] id={project_id} slug={slug}")
+    if existing_project_id:
+        project_id = existing_project_id
+        print(f"[project] reusing id={project_id} slug={slug}")
+    else:
+        proj = _api("POST", "/api/v1/projects", json={
+            "name": slug,
+            "description": f"WM API-contract pilot — {arm} arm ({slug})",
+            "workspace_path": str(workspace),
+        })
+        project_id = proj["id"]
+        print(f"[project] id={project_id} slug={slug}")
 
     t1 = _api("POST", "/api/v1/tasks", json={
         "project_id": project_id,
@@ -600,9 +604,9 @@ def main():
     _kill_workers()
     on_worker_env = _start_worker(wm_on=True)
 
-    on_result = run_arm(SLUG_ON, wm_on=True, worker_env=on_worker_env)
+    on_result = run_arm(SLUG_ON, wm_on=True, worker_env=on_worker_env, existing_project_id=645)
 
-    raw_on = RAW_DIR / f"wm-api-contract-after-recovery-fix-on-r5-raw-{timestamp}.json"
+    raw_on = RAW_DIR / f"wm-api-contract-after-recovery-fix-on-r5b-raw-{timestamp}.json"
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     raw_on.write_text(json.dumps(on_result, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n[raw ON] {raw_on}")

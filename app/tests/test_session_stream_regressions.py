@@ -135,10 +135,25 @@ def test_prepare_initial_orchestration_events_replays_recent_backlog_only(tmp_pa
     assert cursors[9] == 5
 
 
+def _iter_flat_routes(router: object):
+    """Yield leaf routes from a router, handling FastAPI 0.137+ _IncludedRouter wrappers."""
+    for route in getattr(router, "routes", []):
+        if hasattr(route, "effective_candidates"):
+            # FastAPI 0.137.0+: _IncludedRouter stores sub-routes lazily.
+            for ctx in route.effective_candidates():
+                sr = getattr(ctx, "starlette_route", None)
+                if sr is not None:
+                    yield sr
+                elif hasattr(ctx, "effective_candidates"):
+                    yield from _iter_flat_routes(ctx)
+        else:
+            yield route
+
+
 def test_session_logs_websocket_route_has_no_http_auth_dependency():
     websocket_route = next(
         route
-        for route in api_router.routes
+        for route in _iter_flat_routes(api_router)
         if isinstance(route, APIWebSocketRoute)
         and route.path == "/sessions/{session_id}/logs/stream"
     )
