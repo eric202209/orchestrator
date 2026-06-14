@@ -618,8 +618,8 @@ Task Summary:
 
 API Contract:
 - function: <name>(<params>) -> <return type>
-- success return: <exact dict/tuple/value shape with literal key names>
 - failure return: <exact dict/tuple/value shape with literal key names>
+- success return: <exact dict/tuple/value shape with literal key names>
 - keys/fields: <every key name exactly as it appears in code>
 - sentinel/error values: <every sentinel string or code value written literally>
 - exception behavior: <"raises ExceptionType" or "never raises for invalid input">

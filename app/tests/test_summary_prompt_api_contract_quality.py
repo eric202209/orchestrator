@@ -85,6 +85,15 @@ class TestPromptContainsApiContractSection:
         prompt = _build_prompt()
         assert "keys/fields:" in prompt
 
+    def test_failure_return_before_success_return(self):
+        prompt = _build_prompt()
+        failure_pos = prompt.index("failure return:")
+        success_pos = prompt.index("success return:")
+        assert failure_pos < success_pos, (
+            f"'failure return:' must appear before 'success return:' in prompt "
+            f"(failure at {failure_pos}, success at {success_pos})"
+        )
+
 
 # ---------------------------------------------------------------------------
 # 2. Prompt instructs preserving exact dict keys
