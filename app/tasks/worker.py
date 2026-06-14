@@ -490,7 +490,7 @@ def execute_orchestration_task(
         )
         if _should_force_review_execution_profile(
             execution_profile,
-            prompt,
+            task.description if task else None,
             task.title if task else None,
             task.description if task else None,
         ):

@@ -15,7 +15,11 @@ SCHEMA_VERSION = 1
 _FILENAME = "working_memory.json"
 _INJECTION_BUDGET = 2000  # max chars injected into project_context
 _SUMMARY_STORAGE_LIMIT = 1200  # chars stored per implementation_strategy entry
-_SUMMARY_RENDER_LIMIT = 600  # chars rendered per implementation_strategy entry
+_SUMMARY_RENDER_LIMIT = (
+    600  # chars rendered per implementation_strategy entry (no API Contract)
+)
+_API_CONTRACT_RENDER_LIMIT = 400  # chars for extracted API Contract block
+_SUMMARY_PROSE_RENDER_LIMIT = 120  # chars for prose rendered after API Contract
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +82,37 @@ def _extract_active_constraints(orchestration_state: Any) -> List[str]:
     return out[:20]
 
 
+def _extract_api_contract(summary: str) -> tuple:
+    """Split summary into (api_contract_block, prose_remainder).
+
+    Returns ("", summary) when no 'API Contract:' section is found, allowing
+    callers to fall back to the existing render path without change.
+
+    The api_contract_block includes the 'API Contract:' header line and all
+    subsequent bullet/indented lines. It ends at the first non-empty,
+    non-bullet, non-indented line (e.g. 'Changed Files:', 'Verification:').
+    prose_remainder is everything else joined together.
+    """
+    marker = "API Contract:"
+    idx = summary.find(marker)
+    if idx == -1:
+        return "", summary
+
+    rest_lines = summary[idx:].split("\n")
+    end_idx = len(rest_lines)
+    for i, line in enumerate(rest_lines[1:], 1):
+        stripped = line.strip()
+        if stripped and not stripped.startswith("-") and line[:1] not in (" ", "\t"):
+            end_idx = i
+            break
+
+    api_block = "\n".join(rest_lines[:end_idx]).strip()
+    before = summary[:idx].strip()
+    after = "\n".join(rest_lines[end_idx:]).strip()
+    prose = "\n".join(p for p in [before, after] if p)
+    return api_block, prose
+
+
 def _render_content(wm: Dict[str, Any]) -> str:
     """Build the === WORKING MEMORY === block from a loaded schema dict.
 
@@ -85,6 +120,10 @@ def _render_content(wm: Dict[str, Any]) -> str:
     Constraints second. Known Good Commands and Recent Files are stored in
     working_memory.json but omitted from render — they are redundant with
     workspace truth and progress_notes already injected into the planning prompt.
+
+    When the summary contains an 'API Contract:' section, that block is extracted
+    and rendered before the prose so critical API keys (failure return, code,
+    sentinels) survive the ~400-char planning context trim deterministically.
     """
     lines: List[str] = ["=== WORKING MEMORY ===", ""]
 
@@ -98,7 +137,20 @@ def _render_content(wm: Dict[str, Any]) -> str:
                 if title:
                     lines.append(f"  Task: {title}")
                 if summary:
-                    lines.append(f"  {summary[:_SUMMARY_RENDER_LIMIT]}")
+                    api_block, prose = _extract_api_contract(summary)
+                    if api_block:
+                        lines.append(f"  {api_block[:_API_CONTRACT_RENDER_LIMIT]}")
+                        if prose:
+                            prose_short = prose.strip()
+                            if prose_short.startswith("Task Summary:"):
+                                prose_short = prose_short[
+                                    len("Task Summary:") :
+                                ].strip()
+                            lines.append(
+                                f"  Summary: {prose_short[:_SUMMARY_PROSE_RENDER_LIMIT]}"
+                            )
+                    else:
+                        lines.append(f"  {summary[:_SUMMARY_RENDER_LIMIT]}")
         lines.append("")
 
     constraints: List = wm.get("active_constraints") or []

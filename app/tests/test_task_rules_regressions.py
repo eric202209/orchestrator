@@ -33,6 +33,104 @@ def test_do_not_force_review_profile_for_build_task_with_clean_architecture():
     )
 
 
+# --- Recovery-requeue false-positive regression tests ---
+# Before the fix, worker.py passed the full built prompt (including recovery
+# boilerplate that says "inspect") as task_prompt. After the fix it passes
+# task.description. These tests document both the pre-fix risk and the correct
+# post-fix behaviour, exercising the function with the two different inputs.
+
+_RECOVERY_PROMPT = (
+    "Bootstrap parse_amount parser with EMPTY/FORMAT/OVERFLOW codes.\n\n"
+    "Recovery instructions:\n"
+    "- The previous execution did not complete successfully.\n"
+    "- First inspect the real current workspace, tests, fixtures, and configs"
+    " before proposing new structure.\n"
+    "- Diagnose and fix the underlying mistake or bug instead of repeating the"
+    " same plan.\n"
+    "- Previous failure details: Plan validation failed after repair: Plan uses"
+    " weak verification for implementation-heavy work (steps: [1])\n\n"
+    "Automatic recovery requested: inspect the real workspace and repair the bug"
+    " instead of repeating the previous assumptions."
+)
+
+_IMPL_TITLE = "Bootstrap parse_amount parser"
+_IMPL_DESC = (
+    "Create a parse_amount(text: str) -> dict function that returns "
+    '{"ok": True, "value": int} on success and '
+    '{"ok": False, "code": str} where code is one of EMPTY, FORMAT, OVERFLOW. '
+    "Include pytest tests."
+)
+
+
+def test_recovery_boilerplate_triggers_false_positive_when_passed_as_full_prompt():
+    # Documents the pre-fix risk: passing the full recovery prompt as task_prompt
+    # returns True because "inspect" appears in the recovery instructions.
+    assert (
+        should_force_review_execution_profile(
+            "full_lifecycle",
+            _RECOVERY_PROMPT,
+            _IMPL_TITLE,
+            _IMPL_DESC,
+        )
+        is True
+    )
+
+
+def test_recovery_boilerplate_does_not_force_review_when_description_used_as_prompt():
+    # Post-fix calling convention: task_prompt = task.description (not full built prompt).
+    # No review markers in the original description → implementation profile preserved.
+    assert (
+        should_force_review_execution_profile(
+            "full_lifecycle",
+            _IMPL_DESC,
+            _IMPL_TITLE,
+            _IMPL_DESC,
+        )
+        is False
+    )
+
+
+def test_genuine_inspection_task_still_forces_review_with_description_as_prompt():
+    # Genuine inspection tasks whose description/title contain "inspect" must
+    # still be detected correctly under the new calling convention.
+    assert (
+        should_force_review_execution_profile(
+            "full_lifecycle",
+            "Inspect current codebase and produce an inventory of extension points.",
+            "Inspect and analyze current project",
+            "Inspect current codebase and produce an inventory of extension points.",
+        )
+        is True
+    )
+
+
+def test_genuine_review_task_still_forces_review_with_description_as_prompt():
+    assert (
+        should_force_review_execution_profile(
+            "full_lifecycle",
+            "Analyze the current project architecture and report findings.",
+            "Current project architecture analysis",
+            "Analyze the current project architecture and report findings.",
+        )
+        is True
+    )
+
+
+def test_recovery_prompt_inspect_does_not_fire_for_calclib_parser_task():
+    # Exact scenario from the WM pilot T1 instability: task 925 (on-r4c).
+    # title="Bootstrap parse_amount parser", description=implementation spec,
+    # task_prompt=task.description (post-fix convention) — must not be review_only.
+    assert (
+        should_force_review_execution_profile(
+            "full_lifecycle",
+            _IMPL_DESC,
+            _IMPL_TITLE,
+            _IMPL_DESC,
+        )
+        is False
+    )
+
+
 def test_fullstack_scaffold_task_resolves_workflow_profile():
     assert (
         get_workflow_profile(

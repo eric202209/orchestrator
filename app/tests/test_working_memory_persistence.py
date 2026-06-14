@@ -21,6 +21,7 @@ from app.services.orchestration.working_memory import (
     _FILENAME,
     _INJECTION_BUDGET,
     _extract_active_constraints,
+    _extract_api_contract,
     _extract_known_good_commands,
     _render_working_memory_content,
     inject_working_memory_into_context,
@@ -743,3 +744,273 @@ class TestStage6Visibility:
         # Known Good Commands and Recent Files must not appear in trimmed block
         assert "Known Good Commands" not in trimmed
         assert "Recent Files" not in trimmed
+
+
+# ---------------------------------------------------------------------------
+# API Contract render-first tests (Stage: render-first fix)
+# ---------------------------------------------------------------------------
+
+# Realistic parser summary matching actual LLM output from the calclib pilot.
+_PARSER_SUMMARY = (
+    "Task Summary:\n"
+    "Implemented `parse_amount` in `src/calclib/parser.py` with strict integer "
+    "validation, error codes, and boundary checks, along with package initialization, "
+    "pytest configuration, and comprehensive test suite.\n\n"
+    "API Contract:\n"
+    "- function: parse_amount(text: str) -> dict\n"
+    '- failure return: {"ok": False, "code": str}\n'
+    '- success return: {"ok": True, "value": int}\n'
+    "- keys/fields: ok, code, value\n"
+    '- sentinel/error values: "EMPTY", "FORMAT", "OVERFLOW"\n'
+    "- exception behavior: never raises for invalid input\n\n"
+    "Changed Files:\n"
+    "- src/calclib/__init__.py\n"
+    "- src/calclib/parser.py\n"
+    "- pytest.ini\n"
+    "- tests/test_parser.py\n"
+)
+
+
+def _trim_text_400(text: str) -> str:
+    """Replicate _shape_project_context._trim_text at 400-char planning cap."""
+    value = " ".join(str(text or "").split())
+    if len(value) <= 400:
+        return value
+    return value[:397].rstrip() + "..."
+
+
+class TestApiContractRenderFirst:
+    """Render-first fix: API Contract section appears before prose in WM block,
+    ensuring key fields survive the 400-char planning context trim."""
+
+    # ------------------------------------------------------------------
+    # _extract_api_contract unit tests
+    # ------------------------------------------------------------------
+
+    def test_extract_api_contract_found(self):
+        api_block, prose = _extract_api_contract(_PARSER_SUMMARY)
+        assert api_block.startswith("API Contract:")
+        assert '- failure return: {"ok": False, "code": str}' in api_block
+        assert '- success return: {"ok": True, "value": int}' in api_block
+        assert "EMPTY" in api_block
+        assert "FORMAT" in api_block
+        assert "OVERFLOW" in api_block
+
+    def test_extract_api_contract_ends_at_next_section(self):
+        api_block, prose = _extract_api_contract(_PARSER_SUMMARY)
+        # 'Changed Files:' is the next section header — must not appear in api_block
+        assert "Changed Files:" not in api_block
+
+    def test_extract_api_contract_prose_contains_task_summary(self):
+        api_block, prose = _extract_api_contract(_PARSER_SUMMARY)
+        assert "Implemented `parse_amount`" in prose
+
+    def test_extract_api_contract_not_present_returns_empty(self):
+        summary = "Used incremental approach for speed. No API details captured."
+        api_block, prose = _extract_api_contract(summary)
+        assert api_block == ""
+        assert prose == summary
+
+    def test_extract_api_contract_at_start_of_summary(self):
+        summary = (
+            "API Contract:\n"
+            "- function: f(x: int) -> bool\n"
+            "- failure return: False\n"
+        )
+        api_block, prose = _extract_api_contract(summary)
+        assert api_block.startswith("API Contract:")
+        assert "f(x: int) -> bool" in api_block
+
+    # ------------------------------------------------------------------
+    # _render_content ordering tests
+    # ------------------------------------------------------------------
+
+    def test_api_contract_renders_before_prose(self):
+        from app.services.orchestration.working_memory import _render_content
+
+        wm = {
+            "schema_version": SCHEMA_VERSION,
+            "implementation_strategy": [
+                {
+                    "task_id": 1,
+                    "task_title": "Bootstrap parse_amount parser",
+                    "summary": _PARSER_SUMMARY,
+                }
+            ],
+            "active_constraints": [],
+            "known_good_commands": [],
+            "files_by_task": {},
+            "unresolved_failures": [],
+        }
+        rendered = _render_content(wm)
+        api_pos = rendered.find("API Contract:")
+        prose_pos = rendered.find("Implemented `parse_amount`")
+        assert api_pos != -1, "API Contract: section missing from rendered block"
+        assert prose_pos != -1, "Prose summary missing from rendered block"
+        assert (
+            api_pos < prose_pos
+        ), f"API Contract ({api_pos}) must appear before prose ({prose_pos})"
+
+    def test_code_visible_within_250_chars(self):
+        from app.services.orchestration.working_memory import _render_content
+
+        wm = {
+            "schema_version": SCHEMA_VERSION,
+            "implementation_strategy": [
+                {
+                    "task_id": 1,
+                    "task_title": "Bootstrap parse_amount parser",
+                    "summary": _PARSER_SUMMARY,
+                }
+            ],
+            "active_constraints": [],
+            "known_good_commands": [],
+            "files_by_task": {},
+            "unresolved_failures": [],
+        }
+        rendered = _render_content(wm)
+        collapsed = " ".join(rendered.split())
+        code_pos = collapsed.find('"code"')
+        assert code_pos != -1, '"code" key not found in rendered block'
+        assert code_pos < 250, (
+            f'"code" key at char {code_pos} — must be within first 250 chars '
+            f"of collapsed rendered block (was {code_pos})"
+        )
+
+    def test_sentinels_visible_within_400_chars(self):
+        from app.services.orchestration.working_memory import _render_content
+
+        wm = {
+            "schema_version": SCHEMA_VERSION,
+            "implementation_strategy": [
+                {
+                    "task_id": 1,
+                    "task_title": "Bootstrap parse_amount parser",
+                    "summary": _PARSER_SUMMARY,
+                }
+            ],
+            "active_constraints": [],
+            "known_good_commands": [],
+            "files_by_task": {},
+            "unresolved_failures": [],
+        }
+        rendered = _render_content(wm)
+        collapsed = " ".join(rendered.split())
+        for sentinel in ("EMPTY", "FORMAT", "OVERFLOW"):
+            pos = collapsed.find(sentinel)
+            assert pos != -1, f"{sentinel} missing from rendered block"
+            assert pos < 400, (
+                f"{sentinel} at char {pos} — must be within first 400 chars "
+                f"of collapsed rendered block"
+            )
+
+    def test_no_api_contract_falls_back_to_existing_render(self):
+        from app.services.orchestration.working_memory import _render_content
+
+        summary = "Used incremental approach for speed. Created parser.py."
+        wm = {
+            "schema_version": SCHEMA_VERSION,
+            "implementation_strategy": [
+                {"task_id": 1, "task_title": "Bootstrap", "summary": summary}
+            ],
+            "active_constraints": [],
+            "known_good_commands": [],
+            "files_by_task": {},
+            "unresolved_failures": [],
+        }
+        rendered = _render_content(wm)
+        assert "API Contract:" not in rendered
+        assert "Used incremental approach for speed" in rendered
+        assert "Implementation Strategy" in rendered
+
+    def test_active_constraints_visible_near_top(self):
+        from app.services.orchestration.working_memory import _render_content
+
+        wm = {
+            "schema_version": SCHEMA_VERSION,
+            "implementation_strategy": [
+                {
+                    "task_id": 1,
+                    "task_title": "Bootstrap parse_amount parser",
+                    "summary": _PARSER_SUMMARY,
+                }
+            ],
+            "active_constraints": [
+                {
+                    "task_id": 1,
+                    "constraint": "use PYTHONPATH=src for pytest",
+                    "source": "validation_rejection",
+                }
+            ],
+            "known_good_commands": [],
+            "files_by_task": {},
+            "unresolved_failures": [],
+        }
+        rendered = _render_content(wm)
+        impl_pos = rendered.find("Implementation Strategy")
+        constraints_pos = rendered.find("use PYTHONPATH=src for pytest")
+        assert constraints_pos != -1, "Constraint missing from rendered block"
+        # Constraints render after Implementation Strategy (which contains API Contract)
+        assert impl_pos < constraints_pos
+        # Constraint is visible within 600 chars of collapsed block
+        collapsed = " ".join(rendered.split())
+        c_pos = collapsed.find("use PYTHONPATH=src for pytest")
+        assert c_pos < 600, f"Constraint at char {c_pos} — should be within 600 chars"
+
+    def test_known_good_commands_stored_not_rendered_with_api_contract(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "app.config.settings.WORKING_MEMORY_PERSISTENCE_ENABLED", True
+        )
+        monkeypatch.setattr("app.config.settings.WORKING_MEMORY_RENDER_ENABLED", True)
+        state = _make_orchestration_state(
+            str(tmp_path),
+            plan=[{"description": "Run tests", "commands": ["pytest tests/ -v"]}],
+        )
+        write_working_memory(
+            orchestration_state=state,
+            task=_make_task(task_id=1, title="Bootstrap"),
+            summary=_PARSER_SUMMARY,
+            logger=_make_logger(),
+        )
+        data = json.loads((tmp_path / ".agent" / _FILENAME).read_text())
+        # known_good_commands are stored
+        assert len(data["known_good_commands"]) == 1
+        # API contract is in stored summary
+        assert "API Contract:" in data["implementation_strategy"][0]["summary"]
+        # Rendered block: API Contract first, commands not rendered
+        rendered = render_working_memory(tmp_path, _make_logger())
+        assert "API Contract:" in rendered
+        assert "pytest tests/ -v" not in rendered
+
+    def test_400_char_trim_shows_failure_return_and_sentinels(self):
+        """End-to-end: after trim, failure return and sentinels are all visible."""
+        from app.services.orchestration.working_memory import _render_content
+
+        wm = {
+            "schema_version": SCHEMA_VERSION,
+            "implementation_strategy": [
+                {
+                    "task_id": 1,
+                    "task_title": "Bootstrap parse_amount parser",
+                    "summary": _PARSER_SUMMARY,
+                }
+            ],
+            "active_constraints": [],
+            "known_good_commands": [],
+            "files_by_task": {},
+            "unresolved_failures": [],
+        }
+        rendered = _render_content(wm)
+        trimmed = _trim_text_400(rendered)
+
+        assert "failure return" in trimmed, "failure return not in 400-char trim"
+        assert "EMPTY" in trimmed, "EMPTY sentinel not in 400-char trim"
+        assert "FORMAT" in trimmed, "FORMAT sentinel not in 400-char trim"
+        assert "OVERFLOW" in trimmed, "OVERFLOW sentinel not in 400-char trim"
+        # code key fully visible (not truncated)
+        code_idx = trimmed.find('"code"')
+        assert (
+            code_idx != -1 and code_idx < 250
+        ), f'"code" key at char {code_idx} in trimmed block — must be < 250'
