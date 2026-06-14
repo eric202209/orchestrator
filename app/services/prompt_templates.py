@@ -592,23 +592,50 @@ Return your analysis ONLY as JSON text in your response. The orchestrator reads 
 
     # ── 5. TASK SUMMARY (Concise) ─────────────────────────────────────────────
 
-    TASK_SUMMARY = """Summarize completed task.
+    TASK_SUMMARY = """Summarize this completed task. Follow the output format exactly.
 
 **Task:** {task_description}
 
 **Execution Profile:** {execution_profile}
 
-**Plan:** {plan_summary}
+**Plan executed:** {plan_summary}
 
-**Results:** {execution_results_summary}
+**Step results:** {execution_results_summary}
 
-**Files:** {changed_files}
+**Changed files:**
+{changed_files}
 
-**Debugs:** {num_debug_attempts}
+**Debug attempts:** {num_debug_attempts}
 
-**Status:** {final_status}
+**Final status:** {final_status}
 
-**Output:** Concise summary for human reviewer
+---
+
+Output the summary using this exact format:
+
+Task Summary:
+- <one sentence describing what was built or changed>
+
+API Contract:
+- function: <name>(<params>) -> <return type>
+- success return: <exact dict/tuple/value shape with literal key names>
+- failure return: <exact dict/tuple/value shape with literal key names>
+- keys/fields: <every key name exactly as it appears in code>
+- sentinel/error values: <every sentinel string or code value written literally>
+- exception behavior: <"raises ExceptionType" or "never raises for invalid input">
+
+Changed Files:
+- <one file per line>
+
+Verification:
+- <command> → <result, e.g. "16 passed">
+
+Rules (follow exactly):
+- Write every dict key name as it appears in code. Never substitute with prose.
+- Write every sentinel value as a literal string (e.g. "EMPTY", "FORMAT", "OVERFLOW"). Do not omit any.
+- Do not describe return shapes with phrases like "standardized result dictionary". Write the exact shape.
+- If the function never raises for invalid input, write "never raises for invalid input".
+- If no public function was implemented, write "N/A" for each API Contract field.
 """
 
     # ── Supporting Templates (Standalone) ────────────────────────────────────
