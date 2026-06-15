@@ -168,16 +168,30 @@ def _extract_api_contract(summary: str) -> tuple:
 def _render_content(wm: Dict[str, Any]) -> str:
     """Build the === WORKING MEMORY === block from a loaded schema dict.
 
-    Section order: Implementation Strategy first (survives planning context trim),
-    Constraints second. Known Good Commands and Recent Files are stored in
-    working_memory.json but omitted from render — they are redundant with
-    workspace truth and progress_notes already injected into the planning prompt.
+    Section order: Operator Guidance first (highest planning priority — must
+    survive the 400-char planning context trim), Implementation Strategy second
+    (API Contract rendered first within IS section), Constraints last. Known
+    Good Commands and Recent Files are stored in working_memory.json but omitted
+    from render — they are redundant with workspace truth and progress_notes
+    already injected into the planning prompt.
 
     When the summary contains an 'API Contract:' section, that block is extracted
     and rendered before the prose so critical API keys (failure return, code,
     sentinels) survive the ~400-char planning context trim deterministically.
     """
     lines: List[str] = ["=== WORKING MEMORY ===", ""]
+
+    guidance: List = wm.get("human_guidance") or []
+    if guidance:
+        lines.append("Operator Guidance")
+        for g in guidance[-_HUMAN_GUIDANCE_LIMIT:]:
+            if isinstance(g, dict):
+                msg = g.get("message", "")[:200]
+                if msg:
+                    lines.append(f"  - {msg}")
+            elif isinstance(g, str):
+                lines.append(f"  - {g[:200]}")
+        lines.append("")
 
     strategies: List = wm.get("implementation_strategy") or []
     if strategies:
@@ -203,18 +217,6 @@ def _render_content(wm: Dict[str, Any]) -> str:
                             )
                     else:
                         lines.append(f"  {summary[:_SUMMARY_RENDER_LIMIT]}")
-        lines.append("")
-
-    guidance: List = wm.get("human_guidance") or []
-    if guidance:
-        lines.append("Operator Guidance")
-        for g in guidance[-_HUMAN_GUIDANCE_LIMIT:]:
-            if isinstance(g, dict):
-                msg = g.get("message", "")[:200]
-                if msg:
-                    lines.append(f"  - {msg}")
-            elif isinstance(g, str):
-                lines.append(f"  - {g[:200]}")
         lines.append("")
 
     constraints: List = wm.get("active_constraints") or []

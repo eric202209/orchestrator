@@ -1145,7 +1145,7 @@ class TestHumanGuidance:
         data = json.loads((tmp_path / ".agent" / _FILENAME).read_text())
         assert len(data["human_guidance"]) == _HUMAN_GUIDANCE_LIMIT
 
-    # 6. human_guidance renders before active_constraints (after Implementation Strategy)
+    # 6. human_guidance renders before Implementation Strategy and active_constraints
     def test_human_guidance_renders_before_constraints(self):
         wm = {
             "schema_version": SCHEMA_VERSION,
@@ -1177,12 +1177,100 @@ class TestHumanGuidance:
         impl_pos = rendered.find("Implementation Strategy")
         assert guidance_pos != -1, "human_guidance message missing from render"
         assert constraint_pos != -1, "constraint missing from render"
-        assert impl_pos < guidance_pos < constraint_pos, (
-            f"Expected order: Implementation Strategy ({impl_pos}) < "
-            f"human_guidance ({guidance_pos}) < constraints ({constraint_pos})"
+        assert guidance_pos < impl_pos < constraint_pos, (
+            f"Expected order: human_guidance ({guidance_pos}) < "
+            f"Implementation Strategy ({impl_pos}) < constraints ({constraint_pos})"
         )
 
-    # 7. human_guidance is not rendered when render flag is off
+    # 7. HG is first section when present — visible within 250 chars of rendered block
+    def test_human_guidance_visible_within_250_chars(self):
+        """Regression: HG must survive the 400-char planning-context trim.
+
+        With a full 7-field API Contract in IS, the old IS-first order pushed
+        HG to char ~451 (collapsed) — past the 400-char budget, invisible.
+        The new HG-first order puts it at char ~42, well within 250.
+        """
+        full_summary = (
+            "Task Summary:\n"
+            "Created the `utiltools` Python package with a `normalize_name` function.\n\n"
+            "API Contract:\n"
+            "- function: normalize_name(name: str) -> str\n"
+            "- failure return: N/A\n"
+            "- success return: str\n"
+            "- keys/fields: N/A\n"
+            "- sentinel/error values: N/A\n"
+            "- exception behavior: never raises for invalid input\n\n"
+            "Changed Files:\n"
+            "- utiltools/__init__.py\n"
+            "- utiltools/core.py\n"
+        )
+        wm = {
+            "schema_version": SCHEMA_VERSION,
+            "implementation_strategy": [
+                {
+                    "task_id": 1,
+                    "task_title": "Create utiltools package",
+                    "summary": full_summary,
+                }
+            ],
+            "human_guidance": [
+                {
+                    "task_id": 1,
+                    "message": "use dataclasses for all structured records",
+                    "created_at": "",
+                    "source": "operator_guidance",
+                }
+            ],
+            "active_constraints": [],
+            "known_good_commands": [],
+            "files_by_task": {},
+            "unresolved_failures": [],
+        }
+        rendered = _render_content(wm)
+        collapsed = " ".join(rendered.split())
+        hg_pos = collapsed.find("use dataclasses for all structured records")
+        assert hg_pos != -1, "HG message missing from render"
+        assert hg_pos < 250, (
+            f"HG message at collapsed char {hg_pos} — must be < 250 to survive "
+            f"the 400-char planning context trim (WM header ~22 chars prefix)"
+        )
+
+    # 8. When HG absent, IS is still rendered first (API Contract pilot backwards-compat)
+    def test_implementation_strategy_first_when_no_human_guidance(self):
+        wm = {
+            "schema_version": SCHEMA_VERSION,
+            "implementation_strategy": [
+                {
+                    "task_id": 1,
+                    "task_title": "T1",
+                    "summary": "API Contract:\n- function: f() -> str\n",
+                }
+            ],
+            "human_guidance": [],
+            "active_constraints": [
+                {
+                    "task_id": 1,
+                    "constraint": "no mutable defaults",
+                    "source": "validation_rejection",
+                }
+            ],
+            "known_good_commands": [],
+            "files_by_task": {},
+            "unresolved_failures": [],
+        }
+        rendered = _render_content(wm)
+        is_pos = rendered.find("Implementation Strategy")
+        constraint_pos = rendered.find("no mutable defaults")
+        assert is_pos != -1, "Implementation Strategy missing"
+        assert constraint_pos != -1, "Constraint missing"
+        assert (
+            is_pos < constraint_pos
+        ), "IS must come before Constraints when HG is absent"
+        assert (
+            rendered.find("Operator Guidance") == -1
+        ), "Operator Guidance header must be absent when no HG"
+
+    # 9. human_guidance is not rendered when render flag is off
     def test_human_guidance_not_rendered_when_flag_off(self, tmp_path, monkeypatch):
         monkeypatch.setattr("app.config.settings.WORKING_MEMORY_RENDER_ENABLED", False)
         openclaw_dir = tmp_path / ".agent"
