@@ -48,8 +48,8 @@ OPERATOR_GUIDANCE = (
     "Use print() for runtime reporting."
 )
 
-SLUG_OFF = "wm-hg-s2-stdout-off-6"
-SLUG_ON  = "wm-hg-s2-stdout-on-1"
+SLUG_OFF = "wm-hg-s2-stdout-off-7"
+SLUG_ON  = "wm-hg-s2-stdout-on-2"
 
 HEADERS: dict = {}
 
@@ -69,9 +69,6 @@ normalize_result(text: str) -> str:
   normalize_result("  hello  ") == "HELLO"
   normalize_result("world") == "WORLD"
   normalize_result("  ") == ""
-
-In tests/test_core.py, import as: from strtools.core import normalize_result
-(The pytest.ini pythonpath = src setting handles the path — do NOT add sys.path in tests.)
 
 Verify with: PYTHONPATH=src python3 -m pytest tests/test_core.py -q\
 """
@@ -219,15 +216,25 @@ def _dispatch(task_id: int) -> None:
 
 
 def _poll(task_id: int, timeout: int = 1800, interval: int = 20) -> dict:
+    """Poll task to terminal state. Handles auto-retries (failed → running → done)."""
     deadline = time.time() + timeout
     elapsed = 0
+    consecutive_failed = 0
     while time.time() < deadline:
         t = _api("GET", f"/api/v1/tasks/{task_id}")
         st = t.get("status", "")
-        if st in ("done", "failed", "blocked_prior_task_failed"):
+        if st == "done" or st == "blocked_prior_task_failed":
             print(f"  [{st}] at {elapsed}s")
             return t
-        print(f"  [{st}] {elapsed}s", flush=True)
+        if st == "failed":
+            consecutive_failed += 1
+            if consecutive_failed >= 3:
+                print(f"  [failed] at {elapsed}s (no retry after 3 checks)")
+                return t
+            print(f"  [failed?] {elapsed}s — checking for retry...", flush=True)
+        else:
+            consecutive_failed = 0
+            print(f"  [{st}] {elapsed}s", flush=True)
         time.sleep(interval)
         elapsed += interval
     raise TimeoutError(f"Task {task_id} timed out after {timeout}s")
@@ -452,9 +459,17 @@ def run_arm(wm_on: bool, slug: str) -> dict:
     t2_pytest = {"passed": False, "stdout": ""}
     leakage_after_t2 = {}
 
-    t1_valid = (t1_status == "done" and t1_has_normalize)
+    # ON arm: dispatch T2 if WM guidance was persisted (core test signal is T2 behavior)
+    # OFF arm: require T1 to have implemented normalize_result correctly
+    if wm_on:
+        t1_valid = t1_status == "done" and hg_count > 0
+    else:
+        t1_valid = t1_status == "done" and t1_has_normalize
     if not t1_valid:
-        print(f"[T2] SKIP — T1 {'failed' if t1_status != 'done' else 'missing normalize_result'}")
+        if wm_on:
+            print(f"[T2] SKIP — T1 {'failed' if t1_status != 'done' else 'no WM guidance persisted'}")
+        else:
+            print(f"[T2] SKIP — T1 {'failed' if t1_status != 'done' else 'missing normalize_result'}")
     else:
         _wait_slot()
         t2 = _api("POST", "/api/v1/tasks", json={
