@@ -696,3 +696,442 @@ def test_mature_project_test_rewrite_remains_rejected(tmp_path: Path):
     evidence = verdict.details["validation_evidence"]
     assert evidence["requires_independent_evidence"] is True
     assert "test_preservation_violation" in evidence["semantic_violation_codes"]
+
+
+# ---------------------------------------------------------------------------
+# Recovery-cascade regression tests (bootstrap completion validator fix)
+# ---------------------------------------------------------------------------
+
+
+def test_recovery_boilerplate_in_prompt_does_not_trigger_repair_policy(tmp_path: Path):
+    """Recovery boilerplate injected by build_task_execution_prompt must not
+    cause repair_keyword_match / explicit_repair_intent to fire when the
+    original task title and description have no repair intent.
+
+    This is the root cause of the S3 ON-arm cascade: planning-repair recovery
+    rerun appended 'fix', 'bug', 'failure' via boilerplate and blocked the
+    fresh_bootstrap_generated_test_evidence exemption.
+    """
+    project_dir = tmp_path / "project"
+    source_file = project_dir / "neutraltools" / "core.py"
+    test_file = project_dir / "tests" / "test_core.py"
+    source_file.parent.mkdir(parents=True)
+    test_file.parent.mkdir(parents=True)
+    source_file.write_text(
+        "def normalize_name(name: str) -> str:\n" "    return name.strip().lower()\n",
+        encoding="utf-8",
+    )
+    test_file.write_text(
+        "from neutraltools.core import normalize_name\n\n"
+        "def test_normalize_name():\n"
+        "    assert normalize_name('  Hello ') == 'hello'\n",
+        encoding="utf-8",
+    )
+    added_files = ["neutraltools/core.py", "tests/test_core.py"]
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create normalize_name and tests",
+            "verification": "python3 -m pytest tests/test_core.py -q",
+            "expected_files": added_files,
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": path,
+                    "content": (project_dir / path).read_text(encoding="utf-8"),
+                }
+                for path in added_files
+            ],
+        }
+    ]
+    recovery_boilerplate = (
+        "Create a normalize_name function and add tests.\n\n"
+        "Recovery instructions:\n"
+        "- The previous execution did not complete successfully.\n"
+        "- First inspect the real current workspace, tests, fixtures, and configs"
+        " before proposing new structure.\n"
+        "- Diagnose and fix the underlying mistake or bug instead of repeating"
+        " the same plan.\n"
+        "- Reuse existing files when present and treat them as the source of truth.\n"
+        "- Previous failure details: plan_validation_failed_after_repair"
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=plan,
+        task_prompt=recovery_boilerplate,
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        title="Create normalize_name utility",
+        description="Build a normalize_name function in neutraltools.core and add pytest coverage.",
+        is_first_ordered_task=True,
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": added_files,
+            "completion_verification_command": "python3 -m pytest tests/test_core.py -q",
+            "change_set": {"added_files": added_files},
+        },
+    )
+
+    evidence = verdict.details["validation_evidence"]
+    assert (
+        evidence["fresh_bootstrap_generated_test_evidence"] is True
+    ), "Recovery boilerplate must not block fresh_bootstrap_generated_test_evidence"
+    assert evidence["requires_independent_evidence"] is False
+    assert verdict.accepted is True
+
+
+def test_recovery_rerun_fresh_bootstrap_passes_end_to_end(tmp_path: Path):
+    """Full end-to-end: fresh bootstrap task on recovery rerun must accept
+    newly-generated source + tests when title/description have no repair intent."""
+    project_dir = tmp_path / "project"
+    source_file = project_dir / "neutraltools" / "core.py"
+    test_file = project_dir / "tests" / "test_core.py"
+    source_file.parent.mkdir(parents=True)
+    test_file.parent.mkdir(parents=True)
+    source_file.write_text(
+        "def normalize_name(name: str) -> str:\n" "    return name.strip().lower()\n",
+        encoding="utf-8",
+    )
+    test_file.write_text(
+        "from neutraltools.core import normalize_name\n\n"
+        "def test_normalize_name():\n"
+        "    assert normalize_name('  Hello ') == 'hello'\n",
+        encoding="utf-8",
+    )
+    added_files = ["neutraltools/core.py", "tests/test_core.py"]
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create normalize_name and tests",
+            "verification": "python3 -m pytest tests/test_core.py -q",
+            "expected_files": added_files,
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": path,
+                    "content": (project_dir / path).read_text(encoding="utf-8"),
+                }
+                for path in added_files
+            ],
+        }
+    ]
+    prior_error = (
+        "plan_validation_failed_after_repair workspace lock prevented repair worker"
+    )
+    task_prompt = (
+        "Create a normalize_name function and add tests.\n\n"
+        "Recovery instructions:\n"
+        "- The previous execution did not complete successfully.\n"
+        "- Diagnose and fix the underlying mistake or bug instead of repeating the same plan.\n"
+        f"- Previous failure details: {prior_error}"
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=plan,
+        task_prompt=task_prompt,
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        title="Bootstrap neutraltools package",
+        description="Create neutraltools/core.py with normalize_name and tests.",
+        is_first_ordered_task=True,
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": added_files,
+            "completion_verification_command": "python3 -m pytest tests/test_core.py -q",
+            "change_set": {"added_files": added_files},
+        },
+    )
+
+    assert verdict.accepted is True
+    evidence = verdict.details["validation_evidence"]
+    assert evidence["fresh_bootstrap_generated_test_evidence"] is True
+    assert evidence["requires_independent_evidence"] is False
+    assert evidence["verification_insufficient"] is False
+
+
+def test_genuine_repair_task_still_requires_independent_evidence(tmp_path: Path):
+    """When the original task title/description explicitly say 'fix failing tests',
+    requires_independent_evidence must remain True even without recovery boilerplate.
+    The fix must preserve repair protection for genuine repair tasks."""
+    project_dir = tmp_path / "project"
+    test_file = project_dir / "tests" / "test_core.py"
+    test_file.parent.mkdir(parents=True)
+    app_file = project_dir / "core.py"
+    app_file.write_text("def normalize(s):\n    return s.strip()\n", encoding="utf-8")
+    test_file.write_text(
+        "from core import normalize\n\n"
+        "def test_normalize():\n"
+        "    assert normalize('  hi ') == 'hi'\n",
+        encoding="utf-8",
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=[
+            {
+                "step_number": 1,
+                "description": "Fix failing normalize tests",
+                "verification": "python3 -m pytest tests/test_core.py -q",
+                "expected_files": ["core.py", "tests/test_core.py"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "core.py",
+                        "content": app_file.read_text(encoding="utf-8"),
+                    },
+                    {
+                        "op": "write_file",
+                        "path": "tests/test_core.py",
+                        "content": test_file.read_text(encoding="utf-8"),
+                    },
+                ],
+            }
+        ],
+        task_prompt="Fix failing normalize tests.",
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        title="Fix failing normalize tests",
+        description="Debug and fix the normalize function so tests pass.",
+        is_first_ordered_task=True,
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": ["core.py", "tests/test_core.py"],
+            "completion_verification_command": "python3 -m pytest tests/test_core.py -q",
+            "change_set": {
+                "added_files": ["core.py", "tests/test_core.py"],
+            },
+        },
+    )
+
+    evidence = verdict.details["validation_evidence"]
+    assert evidence["fresh_bootstrap_generated_test_evidence"] is False
+    assert evidence["requires_independent_evidence"] is True
+
+
+def test_recovery_prompt_only_no_repair_in_title_or_description(tmp_path: Path):
+    """workspace_status=changes_requested-style recovery text in task_prompt alone
+    must not trigger repair policy when title and description are clean bootstrap."""
+    project_dir = tmp_path / "project"
+    source_file = project_dir / "mylib" / "utils.py"
+    test_file = project_dir / "tests" / "test_utils.py"
+    source_file.parent.mkdir(parents=True)
+    test_file.parent.mkdir(parents=True)
+    source_file.write_text(
+        "def slugify(text: str) -> str:\n"
+        "    return text.strip().lower().replace(' ', '-')\n",
+        encoding="utf-8",
+    )
+    test_file.write_text(
+        "from mylib.utils import slugify\n\n"
+        "def test_slugify():\n"
+        "    assert slugify('Hello World') == 'hello-world'\n",
+        encoding="utf-8",
+    )
+    added_files = ["mylib/utils.py", "tests/test_utils.py"]
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create slugify utility and tests",
+            "verification": "python3 -m pytest tests/test_utils.py -q",
+            "expected_files": added_files,
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": path,
+                    "content": (project_dir / path).read_text(encoding="utf-8"),
+                }
+                for path in added_files
+            ],
+        }
+    ]
+    # Simulate workspace_status="changes_requested" boilerplate injection
+    prompt_with_changes_requested = (
+        "Create a slugify utility and add tests.\n\n"
+        "Recovery instructions:\n"
+        "- The previous execution did not complete successfully.\n"
+        "- Reuse existing files when present and treat them as the source of truth.\n"
+        "- Previous failure details: plan_validation_failed_after_repair"
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=plan,
+        task_prompt=prompt_with_changes_requested,
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        title="Create slugify utility",
+        description="Build mylib/utils.py with slugify and pytest coverage.",
+        is_first_ordered_task=True,
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": added_files,
+            "completion_verification_command": "python3 -m pytest tests/test_utils.py -q",
+            "change_set": {"added_files": added_files},
+        },
+    )
+
+    evidence = verdict.details["validation_evidence"]
+    assert (
+        evidence["requires_independent_evidence"] is False
+    ), "Recovery boilerplate alone must not trigger repair-only policy"
+    assert evidence["fresh_bootstrap_generated_test_evidence"] is True
+
+
+def test_non_bootstrap_task_repair_detection_unaffected(tmp_path: Path):
+    """Repair detection for non-bootstrap tasks (is_first_ordered_task=False)
+    must still fire when recovery prompt contains repair keywords from prior error."""
+    project_dir = tmp_path / "project"
+    test_file = project_dir / "tests" / "test_api.py"
+    test_file.parent.mkdir(parents=True)
+    pre_existing = project_dir / "tests" / "test_existing.py"
+    pre_existing.write_text("def test_existing():\n    assert True\n", encoding="utf-8")
+    test_file.write_text("def test_api():\n    assert True\n", encoding="utf-8")
+    api_file = project_dir / "api.py"
+    api_file.write_text("def get():\n    return {}\n", encoding="utf-8")
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=[
+            {
+                "step_number": 1,
+                "description": "Fix broken API endpoint",
+                "verification": "python3 -m pytest tests/ -q",
+                "expected_files": ["api.py", "tests/test_api.py"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "api.py",
+                        "content": api_file.read_text(encoding="utf-8"),
+                    },
+                    {
+                        "op": "write_file",
+                        "path": "tests/test_api.py",
+                        "content": test_file.read_text(encoding="utf-8"),
+                    },
+                ],
+            }
+        ],
+        task_prompt="Fix the broken API endpoint.",
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        title="Fix broken API endpoint",
+        description="The GET endpoint returns 500 — find and fix the root cause.",
+        is_first_ordered_task=False,
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": ["api.py", "tests/test_api.py"],
+            "completion_verification_command": "python3 -m pytest tests/ -q",
+            "change_set": {
+                "added_files": ["tests/test_api.py"],
+                "modified_files": ["api.py"],
+            },
+        },
+    )
+
+    evidence = verdict.details["validation_evidence"]
+    # repair_keyword_match fires from title/description ("fix", "broken", "bug")
+    assert evidence["requires_independent_evidence"] is True
+
+
+def test_neutraltools_flat_layout_recovery_rerun_scenario3_t1_shape(tmp_path: Path):
+    """Regression for exact Scenario 3 T1 shape: neutraltools/core.py + tests/test_core.py,
+    flat layout, recovery rerun after planning-repair cascade.
+
+    Before the fix: recovery boilerplate 'fix'/'bug'/'failure' → explicit_repair_intent=True
+    → fresh_bootstrap_generated_test_evidence=False → requires_independent_evidence=True.
+    After the fix: only title/description are checked → exemption fires correctly.
+    """
+    project_dir = tmp_path / "project"
+    core_file = project_dir / "neutraltools" / "core.py"
+    test_file = project_dir / "tests" / "test_core.py"
+    core_file.parent.mkdir(parents=True)
+    test_file.parent.mkdir(parents=True)
+    core_file.write_text(
+        "def normalize_name(name: str) -> str:\n" "    return name.strip().lower()\n",
+        encoding="utf-8",
+    )
+    test_file.write_text(
+        "from neutraltools.core import normalize_name\n\n"
+        "def test_basic():\n"
+        "    assert normalize_name('  Hello ') == 'hello'\n\n"
+        "def test_empty():\n"
+        "    assert normalize_name('') == ''\n",
+        encoding="utf-8",
+    )
+    added_files = [
+        "neutraltools/__init__.py",
+        "neutraltools/core.py",
+        "tests/test_core.py",
+    ]
+    init_file = project_dir / "neutraltools" / "__init__.py"
+    init_file.write_text("", encoding="utf-8")
+
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Create neutraltools package with normalize_name and tests",
+            "verification": "python3 -m pytest tests/test_core.py -q",
+            "expected_files": added_files,
+            "ops": [
+                {
+                    "op": "write_file",
+                    "path": path,
+                    "content": (project_dir / path).read_text(encoding="utf-8"),
+                }
+                for path in added_files
+            ],
+        }
+    ]
+    # Exact recovery boilerplate from build_task_execution_prompt when
+    # workspace_status="changes_requested" after planning repair cascade
+    prior_error = (
+        "plan_validation_failed_after_repair: workspace lock prevented repair "
+        "worker from completing. failure details: planning contract violation."
+    )
+    task_prompt = (
+        "Create a neutraltools package with normalize_name utility.\n\n"
+        "Recovery instructions:\n"
+        "- The previous execution did not complete successfully.\n"
+        "- First inspect the real current workspace, tests, fixtures, and configs"
+        " before proposing new structure.\n"
+        "- Diagnose and fix the underlying mistake or bug instead of repeating"
+        " the same plan.\n"
+        "- Reuse existing files when present and treat them as the source of truth.\n"
+        f"- Previous failure details: {prior_error}"
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=plan,
+        task_prompt=task_prompt,
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        title="Create neutraltools package",
+        description=(
+            "Build neutraltools/core.py with normalize_name function and"
+            " add pytest coverage in tests/test_core.py."
+        ),
+        is_first_ordered_task=True,
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": added_files,
+            "completion_verification_command": "python3 -m pytest tests/test_core.py -q",
+            "change_set": {"added_files": added_files},
+        },
+    )
+
+    evidence = verdict.details["validation_evidence"]
+    assert (
+        evidence["fresh_bootstrap_generated_test_evidence"] is True
+    ), "Scenario 3 T1 recovery rerun must get fresh_bootstrap exemption"
+    assert evidence["requires_independent_evidence"] is False
+    assert evidence["verification_insufficient"] is False
+    assert verdict.accepted is True

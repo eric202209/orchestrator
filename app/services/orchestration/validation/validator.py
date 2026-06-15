@@ -4411,7 +4411,7 @@ class ValidatorService:
             task_prompt, title=title, description=description
         )
         explicit_repair_intent = cls.has_explicit_repair_intent(
-            task_prompt, title=title, description=description
+            "", title=title, description=description
         )
         integrity_findings = scan_test_file_changes(
             reported_changed_files,
