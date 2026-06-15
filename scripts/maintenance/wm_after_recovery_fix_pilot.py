@@ -36,52 +36,51 @@ SLOT_KEY = "orchestrator:backend_slots:local_openclaw"
 PLANNING_CONTEXT_CAP = 400
 DETERMINISTIC_PREFIX = "Task completed with verified execution evidence"
 
-SLUG_ON  = "wm-api-contract-parser-pilot-on-r5b"
+SLUG_ON  = "wm-api-contract-parser-pilot-on-r5d"
 SLUG_OFF = "wm-api-contract-parser-pilot-off-r6"
 
 HEADERS: dict = {}
 
 T1_TITLE = "Bootstrap parse_amount parser"
 T1_DESC = """\
-Create `src/calclib/parser.py` with `parse_amount(text: str) -> dict`.
+Create `src/textparser/amount.py` with the following EXACT function signature and return shape:
 
-Return `{"ok": True, "value": int}` when `text` is a valid integer string \
-(after stripping whitespace).
+```python
+def parse_amount(text: str) -> dict:
+    text = text.strip()
+    if not text:
+        return {"ok": False, "code": "EMPTY"}
+    try:
+        val = int(text)
+    except ValueError:
+        return {"ok": False, "code": "FORMAT"}
+    if val < -999999 or val > 999999:
+        return {"ok": False, "code": "OVERFLOW"}
+    return {"ok": True, "value": val}
+```
 
-Return `{"ok": False, "code": str}` for failure cases:
-- `"EMPTY"` for blank input
-- `"FORMAT"` for non-integer content
-- `"OVERFLOW"` for values outside -999999 to 999999 inclusive
+The function MUST:
+- Accept exactly one parameter `text: str`
+- Return a dict, never raise an exception
+- Return `{"ok": True, "value": int}` on success
+- Return `{"ok": False, "code": str}` on failure with code "EMPTY", "FORMAT", or "OVERFLOW"
 
-Never raise an exception for invalid input.
-
-Create `src/calclib/__init__.py` re-exporting `parse_amount`.
+Create `src/textparser/__init__.py` re-exporting `parse_amount`.
 
 Create `pytest.ini` at project root with `pythonpath = src`.
 
-Create `tests/test_parser.py` with at least 12 test cases:
-- empty input
-- format errors
-- overflow high
-- overflow low
-- positive integer
-- zero
-- negative integer
-- whitespace trimming
-
-Important test ordering: \
-Put code-revealing assertions early in the file (checking `result["code"] == "EMPTY"`, \
-`result["code"] == "FORMAT"`, `result["code"] == "OVERFLOW"`). \
-Put at least 4 padding assertions at the END of the test file \
-that only check `result["ok"]`, not `result["code"]` or `result["value"]`.
+Create `tests/test_parser.py` with at least 12 test cases.
+Put assertions checking `result["code"] == "EMPTY"`, \
+`result["code"] == "FORMAT"`, `result["code"] == "OVERFLOW"` EARLY in the file. \
+Put at least 4 assertions that only check `result["ok"]` at the END of the file.
 
 Verify with: `PYTHONPATH=src python3 -m pytest tests/test_parser.py -q`\
 """
 
 T2_TITLE = "Add format_amount formatter"
 T2_DESC = """\
-Add `format_amount(text: str) -> str` in `src/calclib/formatter.py`. \
-Import and use the parser from T1. \
+Add `format_amount(text: str) -> str` in `src/textparser/formatter.py`. \
+Import and use `parse_amount` from `textparser.amount`. \
 For a valid amount, return the parsed integer as a string. \
 For an invalid amount, return the error code that the parser reports. \
 Create `tests/test_formatter.py` with test cases for: \
@@ -236,7 +235,10 @@ def read_safe(path: Path) -> str:
 
 
 def check_impl(workspace: Path) -> dict:
-    p = workspace / "src" / "calclib" / "parser.py"
+    # Try new path first (r5d+), fall back to old calclib path
+    p = workspace / "src" / "textparser" / "amount.py"
+    if not p.exists():
+        p = workspace / "src" / "calclib" / "parser.py"
     if not p.exists():
         return {"exists": False, "defines_parse_amount": False, "returns_dict": False, "text": ""}
     text = read_safe(p)
@@ -256,7 +258,18 @@ def run_pytest(workspace: Path) -> dict:
             env={**os.environ, "PYTHONPATH": str(workspace / "src")},
             cwd=str(workspace),
         )
-        return {"returncode": r.returncode, "stdout": r.stdout[-600:], "passed": r.returncode == 0}
+        out = r.stdout[-600:]
+        if r.returncode != 0:
+            # Try running all tests if test_parser.py not found
+            r2 = subprocess.run(
+                ["python3", "-m", "pytest", "tests/", "-q", "--tb=short"],
+                capture_output=True, text=True, timeout=60,
+                env={**os.environ, "PYTHONPATH": str(workspace / "src")},
+                cwd=str(workspace),
+            )
+            out = r2.stdout[-600:]
+            return {"returncode": r2.returncode, "stdout": out, "passed": r2.returncode == 0}
+        return {"returncode": r.returncode, "stdout": out, "passed": r.returncode == 0}
     except Exception as e:
         return {"returncode": -1, "stdout": str(e), "passed": False}
 
@@ -529,7 +542,9 @@ def run_arm(slug: str, wm_on: bool, worker_env: dict, existing_project_id: int |
         t2_status = t2_result.get("status")
         print(f"[T2] {t2_status} in {t2_elapsed}s")
 
-        formatter_py = workspace / "src" / "calclib" / "formatter.py"
+        formatter_py = (workspace / "src" / "textparser" / "formatter.py"
+                        if (workspace / "src" / "textparser").exists()
+                        else workspace / "src" / "calclib" / "formatter.py")
         t2_final_text = read_safe(formatter_py) if formatter_py.exists() else ""
         t2_first_plan = extract_formatter_plan(t2_id)
         t2_first_fields = assess_fields(t2_first_plan)
@@ -604,9 +619,9 @@ def main():
     _kill_workers()
     on_worker_env = _start_worker(wm_on=True)
 
-    on_result = run_arm(SLUG_ON, wm_on=True, worker_env=on_worker_env, existing_project_id=645)
+    on_result = run_arm(SLUG_ON, wm_on=True, worker_env=on_worker_env)
 
-    raw_on = RAW_DIR / f"wm-api-contract-after-recovery-fix-on-r5b-raw-{timestamp}.json"
+    raw_on = RAW_DIR / f"wm-api-contract-after-recovery-fix-on-r5d-raw-{timestamp}.json"
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     raw_on.write_text(json.dumps(on_result, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n[raw ON] {raw_on}")
