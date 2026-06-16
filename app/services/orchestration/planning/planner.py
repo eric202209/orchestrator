@@ -36,6 +36,8 @@ from app.services.orchestration.operations.file_ops_contract import (
     validate_file_op_shape,
 )
 from app.services.orchestration.planning.prompt_contracts import (
+    OPERATOR_GUIDANCE_PRECEDENCE_LINE,
+    extract_operator_guidance_block,
     render_operation_choice_contract as _render_operation_choice_contract,
     render_ops_first_contract as _render_ops_first_contract,
     render_shell_fallback_limits as _render_shell_fallback_limits,
@@ -132,6 +134,13 @@ VERIFICATION_PROFILE_PLANNING_CONTRACT_LINE = (
     "Verification-profile task: use read-only inspection and verification "
     "commands only; do not alter project files."
 )
+
+
+def _render_operator_guidance_prompt_block(project_context: str | None) -> str:
+    guidance_block = extract_operator_guidance_block(project_context)
+    if not guidance_block:
+        return ""
+    return f"{OPERATOR_GUIDANCE_PRECEDENCE_LINE}\n\n{guidance_block}\n\n"
 
 
 def _render_knowledge_block(knowledge_context: Any) -> str:
@@ -2159,6 +2168,7 @@ class PlannerService:
         knowledge_context: Any = None,
         project_structure_capsule: Optional[str] = None,
         validation_profile: Optional[str] = None,
+        project_context: Optional[str] = None,
     ) -> str:
         concise_task = " ".join((task_description or "").split())[:1200]
         if str(validation_profile or "") == "verification":
@@ -2183,10 +2193,14 @@ class PlannerService:
             else PlannerService._build_project_structure_capsule(project_dir)
         )
         python_source_context = python_test_source_context_from_tests(project_dir)
+        operator_guidance_block = _render_operator_guidance_prompt_block(
+            project_context
+        )
         prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 Do not implement anything.
 
+{operator_guidance_block}\
 Task:
 {concise_task}
 
@@ -2254,6 +2268,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
         workflow_phases: Optional[List[str]] = None,
         workspace_has_existing_files: bool = False,
         validation_profile: Optional[str] = None,
+        project_context: Optional[str] = None,
     ) -> str:
         concise_task = " ".join((task_description or "").split())[:700]
         if str(validation_profile or "") == "verification":
@@ -2271,9 +2286,13 @@ Return only a JSON array matching this shape. No markdown. No prose.
         shell_fallback_limits = _render_shell_fallback_limits()
         verification_contract = _render_verification_contract()
         test_scaffold_contract = _render_test_scaffold_contract()
+        operator_guidance_block = _render_operator_guidance_prompt_block(
+            project_context
+        )
         prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 
+{operator_guidance_block}\
 Task:
 {concise_task}
 
@@ -2986,6 +3005,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
         workspace_has_existing_files: bool = False,
         knowledge_context: Any = None,
         validation_profile: Optional[str] = None,
+        project_context: Optional[str] = None,
     ) -> Dict[str, Any]:
         can_store_retry_guard = hasattr(runtime_service, "__dict__")
         if can_store_retry_guard:
@@ -3027,6 +3047,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
                 project_dir
             ),
             validation_profile=validation_profile,
+            project_context=project_context,
         )
         minimal_prompt_chars = len(minimal_prompt)
         minimal_prompt_estimated_tokens = _estimate_prompt_tokens(minimal_prompt)
@@ -3169,6 +3190,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
                         workflow_phases=workflow_phases,
                         workspace_has_existing_files=workspace_has_existing_files,
                         validation_profile=validation_profile,
+                        project_context=project_context,
                     ),
                     timeout_seconds=ultra_minimal_timeout,
                     reuse_task_session=False,

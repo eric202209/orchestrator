@@ -2477,6 +2477,7 @@ def __retry_with_minimal_prompt(
         ),
         knowledge_context=_usable_knowledge_context(knowledge_context),
         validation_profile=_planning_validation_profile(ctx),
+        project_context=ctx.orchestration_state.project_context,
     )
 
 

@@ -537,6 +537,77 @@ def test_initial_planning_prompt_contains_valid_json_contract_example():
     assert 'Objects like {"steps": [...]} instead of a top-level array' in prompt
 
 
+def test_planning_prompt_with_operator_guidance_includes_precedence_before_task():
+    from app.services.orchestration.planning.prompt_contracts import (
+        OPERATOR_GUIDANCE_PRECEDENCE_LINE,
+    )
+    from app.services.prompt_templates import PromptTemplates
+
+    prompt = PromptTemplates.build_planning_prompt(
+        "Add function add_label(label: str, labels: list[str] = []) -> list[str].",
+        project_context=(
+            "=== WORKING MEMORY ===\n\n"
+            "Operator Guidance\n"
+            "  - Never use mutable default arguments. Use None and initialize inside the function.\n"
+        ),
+        project_dir="/tmp/project",
+    )
+
+    assert OPERATOR_GUIDANCE_PRECEDENCE_LINE in prompt
+    assert prompt.index(OPERATOR_GUIDANCE_PRECEDENCE_LINE) < prompt.index("**Task:**")
+
+
+def test_planning_prompt_without_operator_guidance_omits_precedence_line():
+    from app.services.orchestration.planning.prompt_contracts import (
+        OPERATOR_GUIDANCE_PRECEDENCE_LINE,
+    )
+    from app.services.prompt_templates import PromptTemplates
+
+    prompt = PromptTemplates.build_planning_prompt(
+        "Build a small React page",
+        project_context="empty workspace",
+        project_dir="/tmp/project",
+    )
+
+    assert OPERATOR_GUIDANCE_PRECEDENCE_LINE not in prompt
+
+
+def test_minimal_planning_prompt_carries_operator_guidance_before_task(tmp_path):
+    from app.services.orchestration.planning.prompt_contracts import (
+        OPERATOR_GUIDANCE_PRECEDENCE_LINE,
+    )
+
+    prompt = PlannerService.build_minimal_planning_prompt(
+        "Add function add_label(label: str, labels: list[str] = []) -> list[str].",
+        project_dir=tmp_path,
+        project_context=(
+            "=== WORKING MEMORY ===\n\n"
+            "Operator Guidance\n"
+            "  - Never use mutable default arguments. Use None and initialize inside the function.\n"
+        ),
+    )
+
+    assert OPERATOR_GUIDANCE_PRECEDENCE_LINE in prompt
+    assert "Never use mutable default arguments" in prompt
+    assert prompt.index(OPERATOR_GUIDANCE_PRECEDENCE_LINE) < prompt.index("Task:")
+
+
+def test_minimal_planning_prompt_without_operator_guidance_omits_precedence_line(
+    tmp_path,
+):
+    from app.services.orchestration.planning.prompt_contracts import (
+        OPERATOR_GUIDANCE_PRECEDENCE_LINE,
+    )
+
+    prompt = PlannerService.build_minimal_planning_prompt(
+        "Build a small React page",
+        project_dir=tmp_path,
+        project_context="empty workspace",
+    )
+
+    assert OPERATOR_GUIDANCE_PRECEDENCE_LINE not in prompt
+
+
 def test_planning_repair_prompt_preserves_existing_source_materialization(tmp_path):
     (tmp_path / "src" / "small_cli").mkdir(parents=True)
     (tmp_path / "src" / "small_cli" / "__init__.py").write_text("")

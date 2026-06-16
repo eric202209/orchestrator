@@ -25,6 +25,7 @@ from app.services.orchestration.operations.file_ops_contract import (
     render_supported_file_ops,
 )
 from app.services.orchestration.planning.prompt_contracts import (
+    render_operator_guidance_precedence,
     render_operation_choice_contract,
 )
 from app.services.workspace.system_settings import get_effective_workspace_root
@@ -280,6 +281,7 @@ class PromptTemplates:
 No prose. No markdown fences. No plan.json. No explanation.
 Do not implement anything.
 
+{operator_guidance_precedence}\
 **Task:** {task_description}
 
 **Execution Profile:** {execution_profile}
@@ -973,6 +975,11 @@ Examples:
             "execution_profile_rules": cls.describe_execution_profile(
                 execution_profile
             ),
+            "operator_guidance_precedence": (
+                render_operator_guidance_precedence(project_context) + "\n\n"
+                if render_operator_guidance_precedence(project_context)
+                else ""
+            ),
             "project_context": compact_project_context,
             "project_structure_capsule": compact_project_structure_capsule,
             "workspace_root": ws_root,
@@ -1112,6 +1119,11 @@ Examples:
             "execution_profile": execution_profile,
             "execution_profile_rules": cls.describe_execution_profile(
                 execution_profile
+            ),
+            "operator_guidance_precedence": (
+                render_operator_guidance_precedence(project_context) + "\n\n"
+                if render_operator_guidance_precedence(project_context)
+                else ""
             ),
             "project_context": compact_project_context,
             "project_structure_capsule": compact_project_structure_capsule,

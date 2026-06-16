@@ -6,6 +6,38 @@ from app.services.orchestration.operations.file_ops_contract import (
     render_supported_file_ops,
 )
 
+OPERATOR_GUIDANCE_PRECEDENCE_LINE = (
+    "Operator Guidance is project-level instruction. If it conflicts with the "
+    "task description, follow Operator Guidance unless a validator/safety rule "
+    "forbids it."
+)
+
+
+def extract_operator_guidance_block(project_context: str | None) -> str:
+    """Return the rendered Operator Guidance block from project context, if any."""
+
+    lines = str(project_context or "").splitlines()
+    for idx, line in enumerate(lines):
+        if line.strip().lower() != "operator guidance":
+            continue
+        block = ["Operator Guidance"]
+        for candidate in lines[idx + 1 :]:
+            stripped = candidate.strip()
+            if not stripped:
+                break
+            if stripped.startswith(("  - ", "- ")):
+                block.append(candidate)
+                continue
+            break
+        return "\n".join(block) if len(block) > 1 else ""
+    return ""
+
+
+def render_operator_guidance_precedence(project_context: str | None) -> str:
+    if extract_operator_guidance_block(project_context):
+        return OPERATOR_GUIDANCE_PRECEDENCE_LINE
+    return ""
+
 
 def render_ops_first_contract() -> str:
     return (
