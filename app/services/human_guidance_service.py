@@ -1,14 +1,25 @@
-"""Human Guidance service — CRUD for HG-P1a."""
+"""Human Guidance service — CRUD (HG-P1a) + active collection and usage telemetry (HG-P1b)."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+import hashlib
+import logging
+from datetime import UTC, datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
+from sqlalchemy import and_, case, or_
 from sqlalchemy.orm import Session as DBSession
 
-from app.models import GuidanceStatus, HumanGuidance, HumanGuidanceRevision
+from app.models import (
+    GuidanceScope,
+    GuidanceStatus,
+    HumanGuidance,
+    HumanGuidanceRevision,
+    HumanGuidanceUsage,
+)
+
+logger = logging.getLogger(__name__)
 
 _UNSET = object()
 
@@ -176,3 +187,150 @@ def archive_guidance(db: DBSession, guidance_id: int) -> HumanGuidance:
     db.commit()
     db.refresh(entry)
     return entry
+
+
+# ── HG-P1b: active-guidance collection ───────────────────────────────────────
+
+_SCOPE_ORDER = case(
+    (HumanGuidance.scope == GuidanceScope.TASK, 0),
+    (HumanGuidance.scope == GuidanceScope.SESSION, 1),
+    (HumanGuidance.scope == GuidanceScope.PROJECT, 2),
+    (HumanGuidance.scope == GuidanceScope.GLOBAL, 3),
+    else_=4,
+)
+
+
+def collect_active_guidance(
+    db: DBSession,
+    *,
+    user_id: Optional[int],
+    project_id: Optional[int],
+    session_id: Optional[int],
+    task_id: Optional[int],
+    now: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    """Return active guidance applicable to this execution context in merge order.
+
+    Scope order (narrowest first): task > session > project > global.
+    Within scope: priority DESC, created_at ASC.
+    Excludes disabled, archived, expired entries.
+    Returns normalized dicts compatible with working_memory.json human_guidance entries.
+    """
+    if db is None:
+        return []
+    if now is None:
+        now = datetime.now(UTC)
+
+    scope_conditions = [HumanGuidance.scope == GuidanceScope.GLOBAL]
+    if project_id is not None:
+        scope_conditions.append(
+            and_(
+                HumanGuidance.scope == GuidanceScope.PROJECT,
+                HumanGuidance.project_id == project_id,
+            )
+        )
+    if session_id is not None:
+        scope_conditions.append(
+            and_(
+                HumanGuidance.scope == GuidanceScope.SESSION,
+                HumanGuidance.session_id == session_id,
+            )
+        )
+    if task_id is not None:
+        scope_conditions.append(
+            and_(
+                HumanGuidance.scope == GuidanceScope.TASK,
+                HumanGuidance.task_id == task_id,
+            )
+        )
+
+    try:
+        rows = (
+            db.query(HumanGuidance)
+            .filter(
+                HumanGuidance.user_id == user_id,
+                HumanGuidance.status == GuidanceStatus.ACTIVE,
+                or_(
+                    HumanGuidance.expires_at.is_(None),
+                    HumanGuidance.expires_at > now,
+                ),
+                or_(*scope_conditions),
+            )
+            .order_by(
+                _SCOPE_ORDER,
+                HumanGuidance.priority.desc(),
+                HumanGuidance.created_at.asc(),
+            )
+            .all()
+        )
+    except Exception as exc:
+        logger.warning("collect_active_guidance query failed: %s", exc)
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        scope_val = row.scope.value if hasattr(row.scope, "value") else str(row.scope)
+        status_val = (
+            row.status.value if hasattr(row.status, "value") else str(row.status)
+        )
+        created_at = ""
+        try:
+            ts = getattr(row, "created_at", None)
+            if ts is not None:
+                created_at = ts.isoformat()
+        except Exception:
+            pass
+        out.append(
+            {
+                "id": row.id,
+                "task_id": row.task_id,
+                "message": row.message,
+                "created_at": created_at,
+                "source": "operator_guidance",
+                "scope": scope_val,
+                "status": status_val,
+                "priority": row.priority,
+            }
+        )
+    return out
+
+
+def record_guidance_usage(
+    db: DBSession,
+    *,
+    entries: List[Dict[str, Any]],
+    project_id: Optional[int],
+    session_id: Optional[int],
+    task_id: Optional[int],
+) -> None:
+    """Write HumanGuidanceUsage rows for each guidance entry rendered into WM.
+
+    Never raises — telemetry failures must not fail task completion.
+    """
+    try:
+        for position, entry in enumerate(entries):
+            guidance_id = entry.get("id")
+            message = entry.get("message", "")
+            message_hash = (
+                hashlib.md5(message.encode("utf-8")).hexdigest() if message else None
+            )
+            row = HumanGuidanceUsage(
+                guidance_id=guidance_id,
+                project_id=project_id,
+                session_id=session_id,
+                task_id=task_id,
+                rendered=True,
+                trimmed=False,
+                source="human_guidance_table",
+                render_position=position,
+                rendered_chars=len(message),
+                message_hash=message_hash,
+            )
+            db.add(row)
+        db.commit()
+    except Exception as exc:
+        logger.warning("record_guidance_usage failed (non-fatal): %s", exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass

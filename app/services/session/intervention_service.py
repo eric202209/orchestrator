@@ -533,6 +533,40 @@ def add_operator_guidance(
         )
     )
     db.commit()
+
+    # HG-P1b: also write to HumanGuidance table when feature flag is enabled.
+    # LogEntry write above is preserved for audit; this is additive.
+    from app.config import settings
+
+    if settings.HUMAN_GUIDANCE_TABLE_ENABLED:
+        try:
+            from app.models import Project
+            from app.services.human_guidance_service import create_guidance
+
+            project_id = session.project_id
+            project = (
+                db.query(Project).filter(Project.id == project_id).first()
+                if project_id
+                else None
+            )
+            user_id = project.user_id if project else None
+            create_guidance(
+                db,
+                user_id=user_id,
+                project_id=project_id,
+                session_id=session_id,
+                task_id=resolved_task_id,
+                scope="session",
+                message=guidance_text,
+                created_by=operator_id,
+            )
+        except Exception as _hg_exc:
+            logger.warning(
+                "HumanGuidance table write failed for session %s (non-fatal): %s",
+                session_id,
+                _hg_exc,
+            )
+
     return {
         "session_id": session_id,
         "task_id": resolved_task_id,

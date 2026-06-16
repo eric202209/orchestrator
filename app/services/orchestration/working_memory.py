@@ -234,6 +234,107 @@ def _render_content(wm: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# HG-P1b: table-backed guidance helpers
+# ---------------------------------------------------------------------------
+
+
+def _resolve_session_context(db: Any, session_id: Any):
+    """Return (project_id, user_id) for a session, or (None, None) on failure."""
+    try:
+        from app.models import Project
+        from app.models import Session as SessionModel
+
+        numeric_sid = int(session_id)
+        session = db.query(SessionModel).filter(SessionModel.id == numeric_sid).first()
+        if not session:
+            return None, None
+        project = (
+            db.query(Project).filter(Project.id == session.project_id).first()
+            if session.project_id
+            else None
+        )
+        return (session.project_id, project.user_id if project else None)
+    except Exception:
+        return None, None
+
+
+def _wm_write_table_guidance(
+    *,
+    db: Any,
+    wm: Dict[str, Any],
+    session_id: Any,
+    task_id: Any,
+    logger: Any,
+) -> None:
+    """HG-P1b: populate wm['human_guidance'] from HumanGuidance table and record usage."""
+    try:
+        from app.services.human_guidance_service import (
+            collect_active_guidance,
+            record_guidance_usage,
+        )
+
+        project_id, user_id = _resolve_session_context(db, session_id)
+
+        numeric_session_id: Optional[int] = None
+        try:
+            numeric_session_id = int(session_id)
+        except (TypeError, ValueError):
+            pass
+
+        numeric_task_id: Optional[int] = None
+        try:
+            numeric_task_id = int(task_id) if task_id is not None else None
+        except (TypeError, ValueError):
+            pass
+
+        table_entries = collect_active_guidance(
+            db,
+            user_id=user_id,
+            project_id=project_id,
+            session_id=numeric_session_id,
+            task_id=numeric_task_id,
+        )
+
+        existing_guidance: List[Dict[str, Any]] = wm.get("human_guidance") or []
+        seen_messages = {
+            g.get("message", "") if isinstance(g, dict) else str(g)
+            for g in existing_guidance
+        }
+        to_add: List[Dict[str, Any]] = []
+        for g in table_entries:
+            msg = g.get("message", "")
+            if msg and msg not in seen_messages:
+                seen_messages.add(msg)
+                to_add.append(g)
+
+        if to_add:
+            all_guidance = existing_guidance + to_add
+            wm["human_guidance"] = all_guidance[-_HUMAN_GUIDANCE_LIMIT:]
+            rendered_entries = wm["human_guidance"]
+        else:
+            rendered_entries = []
+
+        if rendered_entries:
+            try:
+                record_guidance_usage(
+                    db,
+                    entries=rendered_entries,
+                    project_id=project_id,
+                    session_id=numeric_session_id,
+                    task_id=numeric_task_id,
+                )
+            except Exception as telemetry_exc:
+                logger.warning(
+                    "[WORKING_MEMORY] Guidance usage telemetry failed (non-fatal): %s",
+                    telemetry_exc,
+                )
+    except Exception as exc:
+        logger.warning(
+            "[WORKING_MEMORY] Table-backed guidance write failed (non-fatal): %s", exc
+        )
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -301,9 +402,19 @@ def write_working_memory(
                     }
                 )
 
-        # human_guidance — collect [OPERATOR_GUIDANCE] log entries, deduplicate, cap at 10
-        if db is not None:
-            session_id = getattr(orchestration_state, "session_id", None)
+        # human_guidance — two paths gated by HUMAN_GUIDANCE_TABLE_ENABLED
+        session_id = getattr(orchestration_state, "session_id", None)
+        if db is not None and settings.HUMAN_GUIDANCE_TABLE_ENABLED:
+            # HG-P1b: table-backed path
+            _wm_write_table_guidance(
+                db=db,
+                wm=wm,
+                session_id=session_id,
+                task_id=task_id,
+                logger=logger,
+            )
+        elif db is not None:
+            # Legacy LogEntry path (default)
             existing_guidance: List[Dict[str, Any]] = wm.get("human_guidance") or []
             seen_messages = {
                 g.get("message", "") if isinstance(g, dict) else str(g)

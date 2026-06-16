@@ -698,6 +698,25 @@ class HumanGuidanceRevision(Base):
     guidance = relationship("HumanGuidance", back_populates="revisions")
 
 
+class HumanGuidanceUsage(Base):
+    __tablename__ = "human_guidance_usage"
+
+    id = Column(Integer, primary_key=True, index=True)
+    guidance_id = Column(
+        Integer, ForeignKey("human_guidance.id"), nullable=True, index=True
+    )
+    project_id = Column(Integer, nullable=True, index=True)
+    session_id = Column(Integer, ForeignKey("sessions.id"), nullable=True, index=True)
+    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=True, index=True)
+    used_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    rendered = Column(Boolean, nullable=False, default=False)
+    trimmed = Column(Boolean, nullable=False, default=False)
+    source = Column(String(50), nullable=False, default="human_guidance_table")
+    render_position = Column(Integer, nullable=True)
+    rendered_chars = Column(Integer, nullable=True)
+    message_hash = Column(String(64), nullable=True)
+
+
 class KnowledgeUsageLog(Base):
     __tablename__ = "knowledge_usage_logs"
 
