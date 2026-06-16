@@ -301,6 +301,23 @@ def run_conflict_detection_if_enabled(
         return []
     if not settings.HUMAN_GUIDANCE_CONFLICT_DETECTION_ENABLED:
         return []
+
+    # P1f: check per-project/session activation (non-fatal, backward compat: no row = True)
+    try:
+        from app.services.human_guidance_activation_service import (
+            check_activation_flag as _check_act,
+        )
+
+        if not _check_act(
+            db,
+            project_id=project_id,
+            session_id=session_id,
+            flag="conflict_detection_enabled",
+        ):
+            return []
+    except Exception:
+        pass  # non-fatal: proceed with detection
+
     return detect_guidance_task_conflicts(
         db,
         project_id=project_id,

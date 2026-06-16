@@ -1721,11 +1721,36 @@ def execute_orchestration_task(
                     inject_working_memory_into_context,
                 )
 
-                inject_working_memory_into_context(
-                    orchestration_state=orchestration_state,
-                    task=task,
-                    logger=logger,
-                )
+                # P1f: check per-project/session injection activation (non-fatal)
+                _inject_ok = True
+                if project:
+                    try:
+                        from app.services.human_guidance_activation_service import (
+                            check_activation_flag as _check_act,
+                        )
+
+                        _inject_ok = _check_act(
+                            db,
+                            project_id=getattr(project, "id", None),
+                            session_id=session_id,
+                            flag="injection_enabled",
+                        )
+                    except Exception:
+                        pass
+
+                if _inject_ok:
+                    inject_working_memory_into_context(
+                        orchestration_state=orchestration_state,
+                        task=task,
+                        logger=logger,
+                    )
+                else:
+                    logger.info(
+                        "[HG_RUNTIME_PATH] wm_injection=off (activation disabled"
+                        " for project=%s session=%s)",
+                        getattr(project, "id", None),
+                        session_id,
+                    )
             if settings.REPO_MEMORY_INJECTION_ENABLED:
                 from app.services.orchestration.repo_memory import (
                     inject_repo_memory_into_context,

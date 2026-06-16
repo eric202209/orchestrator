@@ -270,6 +270,27 @@ def _resolve_session_context(db: Any, session_id: Any):
         return None, None
 
 
+def _wm_write_legacy_guidance(
+    db: Any, wm: Dict[str, Any], session_id: Any, task_id: Any
+) -> None:
+    """Write guidance from LogEntry into wm (legacy path, dedup by message)."""
+    existing_guidance: List[Dict[str, Any]] = wm.get("human_guidance") or []
+    seen_messages = {
+        g.get("message", "") if isinstance(g, dict) else str(g)
+        for g in existing_guidance
+    }
+    new_entries = _extract_operator_guidance(db, session_id, task_id)
+    to_add: List[Dict[str, Any]] = []
+    for g in new_entries:
+        msg = g.get("message", "")
+        if msg and msg not in seen_messages:
+            seen_messages.add(msg)
+            to_add.append(g)
+    if to_add:
+        all_guidance = existing_guidance + to_add
+        wm["human_guidance"] = all_guidance[-_HUMAN_GUIDANCE_LIMIT:]
+
+
 def _wm_write_table_guidance(
     *,
     db: Any,
@@ -414,34 +435,64 @@ def write_working_memory(
                     }
                 )
 
-        # human_guidance — two paths gated by HUMAN_GUIDANCE_TABLE_ENABLED
+        # human_guidance — two paths gated by HUMAN_GUIDANCE_TABLE_ENABLED + P1f activation
         session_id = getattr(orchestration_state, "session_id", None)
+
+        # P1f: resolve project_id for activation check
+        _project_id: Optional[int] = None
+        if db is not None and session_id is not None:
+            try:
+                _project_id, _ = _resolve_session_context(db, session_id)
+            except Exception:
+                pass
+
         if db is not None and settings.HUMAN_GUIDANCE_TABLE_ENABLED:
-            # HG-P1b: table-backed path
-            _wm_write_table_guidance(
-                db=db,
-                wm=wm,
-                session_id=session_id,
-                task_id=task_id,
-                logger=logger,
+            # P1f: check per-project/session activation (backward compat: no row = True)
+            _use_table = True
+            try:
+                from app.services.human_guidance_activation_service import (
+                    check_activation_flag as _check_act,
+                )
+
+                _numeric_sid: Optional[int] = None
+                try:
+                    _numeric_sid = int(session_id) if session_id is not None else None
+                except (TypeError, ValueError):
+                    pass
+                _use_table = _check_act(
+                    db,
+                    project_id=_project_id,
+                    session_id=_numeric_sid,
+                    flag="table_enabled",
+                )
+            except Exception:
+                pass
+
+            logger.info(
+                "[HG_ACTIVATION] project=%s session=%s table_path=%s",
+                _project_id,
+                session_id,
+                _use_table,
             )
+            logger.info(
+                "[HG_RUNTIME_PATH] wm_persistence=on wm_table=%s",
+                _use_table,
+            )
+
+            if _use_table:
+                # HG-P1b: table-backed path
+                _wm_write_table_guidance(
+                    db=db,
+                    wm=wm,
+                    session_id=session_id,
+                    task_id=task_id,
+                    logger=logger,
+                )
+            else:
+                _wm_write_legacy_guidance(db, wm, session_id, task_id)
         elif db is not None:
-            # Legacy LogEntry path (default)
-            existing_guidance: List[Dict[str, Any]] = wm.get("human_guidance") or []
-            seen_messages = {
-                g.get("message", "") if isinstance(g, dict) else str(g)
-                for g in existing_guidance
-            }
-            new_entries = _extract_operator_guidance(db, session_id, task_id)
-            to_add: List[Dict[str, Any]] = []
-            for g in new_entries:
-                msg = g.get("message", "")
-                if msg and msg not in seen_messages:
-                    seen_messages.add(msg)
-                    to_add.append(g)
-            if to_add:
-                all_guidance = existing_guidance + to_add
-                wm["human_guidance"] = all_guidance[-_HUMAN_GUIDANCE_LIMIT:]
+            # Global flag off: legacy LogEntry path
+            _wm_write_legacy_guidance(db, wm, session_id, task_id)
         elif "human_guidance" not in wm:
             wm["human_guidance"] = []
 

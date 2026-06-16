@@ -21,6 +21,10 @@ from sqlalchemy.orm import Session as DBSession
 
 logger = logging.getLogger(__name__)
 
+_WIRED_FLAGS = frozenset(
+    {"table_enabled", "injection_enabled", "conflict_detection_enabled"}
+)
+
 _CRITICAL_BLOCKERS = frozenset(
     {
         "global_table_flag_off",
@@ -132,6 +136,55 @@ def get_effective_activation(
             logger.warning("[HGA] session activation query failed: %s", exc)
 
     return {"requested": requested, "effective": _apply_global_bounds(requested)}
+
+
+def check_activation_flag(
+    db: DBSession,
+    *,
+    project_id: Optional[int],
+    session_id: Optional[int] = None,
+    flag: str,
+) -> bool:
+    """Return True if the named flag is effectively enabled for this project/session.
+
+    Backward-compat: if no activation row exists at all, returns True (runtime
+    falls back to global flag alone, identical to pre-P1f behavior). Returns
+    False only when an activation row explicitly disables the flag or activation
+    is disabled entirely.
+
+    Non-fatal: returns True on any DB error.
+    """
+    from app.models import HumanGuidanceActivation
+
+    try:
+        has_project_row = project_id is not None and (
+            db.query(HumanGuidanceActivation)
+            .filter(
+                HumanGuidanceActivation.project_id == project_id,
+                HumanGuidanceActivation.scope == "project",
+            )
+            .first()
+            is not None
+        )
+        has_session_row = session_id is not None and (
+            db.query(HumanGuidanceActivation)
+            .filter(
+                HumanGuidanceActivation.session_id == session_id,
+                HumanGuidanceActivation.scope == "session",
+            )
+            .first()
+            is not None
+        )
+        if not has_project_row and not has_session_row:
+            # No activation row: global flag controls (backward compat)
+            return True
+        activation = get_effective_activation(
+            db, project_id=project_id, session_id=session_id
+        )
+        return bool(activation["effective"].get(flag, False))
+    except Exception as exc:
+        logger.warning("[HGA] check_activation_flag error (non-fatal): %s", exc)
+        return True
 
 
 def set_project_activation(
@@ -345,12 +398,87 @@ def readiness_status(
 
     ready = not any(r in _CRITICAL_BLOCKERS for r in blocking_reasons)
 
+    # P1f: runtime_effective — what the runtime ACTUALLY uses (backward compat: no row = global flag)
+    runtime_effective = _compute_runtime_effective(
+        db,
+        project_id=project_id,
+        session_id=session_id,
+        activation=activation,
+        settings=settings,
+    )
+
     return {
         "project_id": project_id,
         "session_id": session_id,
         "requested": activation["requested"],
         "effective": activation["effective"],
+        "runtime_effective": runtime_effective,
         "global_flags": global_flags,
         "ready": ready,
         "blocking_reasons": blocking_reasons,
+    }
+
+
+def _compute_runtime_effective(
+    db: DBSession,
+    *,
+    project_id: Optional[int],
+    session_id: Optional[int],
+    activation: Dict[str, Any],
+    settings: Any,
+) -> Dict[str, Any]:
+    """Compute flags that match the actual runtime gating decisions.
+
+    When no activation row exists → runtime uses global flags only (backward compat).
+    When a row exists → runtime uses effective activation (same as ``effective``).
+    The ``mode`` field indicates which branch applies.
+    """
+    from app.models import HumanGuidanceActivation
+
+    try:
+        has_project_row = project_id is not None and (
+            db.query(HumanGuidanceActivation)
+            .filter(
+                HumanGuidanceActivation.project_id == project_id,
+                HumanGuidanceActivation.scope == "project",
+            )
+            .first()
+            is not None
+        )
+        has_session_row = session_id is not None and (
+            db.query(HumanGuidanceActivation)
+            .filter(
+                HumanGuidanceActivation.session_id == session_id,
+                HumanGuidanceActivation.scope == "session",
+            )
+            .first()
+            is not None
+        )
+    except Exception:
+        has_project_row = False
+        has_session_row = False
+
+    if not has_project_row and not has_session_row:
+        # No activation row: global flags control runtime (backward compat mode)
+        return {
+            "table_enabled": settings.HUMAN_GUIDANCE_TABLE_ENABLED,
+            "persistence_enabled": settings.WORKING_MEMORY_PERSISTENCE_ENABLED,
+            "render_enabled": settings.WORKING_MEMORY_RENDER_ENABLED,
+            "injection_enabled": settings.WORKING_MEMORY_INJECTION_ENABLED,
+            "conflict_detection_enabled": (
+                settings.HUMAN_GUIDANCE_TABLE_ENABLED
+                and settings.HUMAN_GUIDANCE_CONFLICT_DETECTION_ENABLED
+            ),
+            "mode": "global_flag_only",
+        }
+
+    # Activation row present: runtime uses effective activation
+    eff = activation["effective"]
+    return {
+        "table_enabled": eff["table_enabled"],
+        "persistence_enabled": eff["persistence_enabled"],
+        "render_enabled": eff["render_enabled"],
+        "injection_enabled": eff["injection_enabled"],
+        "conflict_detection_enabled": eff["conflict_detection_enabled"],
+        "mode": "activation_controlled",
     }
