@@ -226,6 +226,11 @@ class Settings(BaseSettings):
     # Arm A (current production) is unchanged when False.
     REDUCED_PLANNING_PROMPT_ENABLED: bool = False
 
+    # HG-P1a: dedicated HumanGuidance table.
+    # When False (default), the existing LogEntry path for operator-guidance is authoritative.
+    # When True, the new table is the authority (enabled in HG-P1b+).
+    HUMAN_GUIDANCE_TABLE_ENABLED: bool = False
+
     @field_validator("AGENT_SECONDARY_BACKEND")
     @classmethod
     def validate_agent_secondary_backend(cls, value: Optional[str]) -> Optional[str]:

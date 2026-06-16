@@ -639,6 +639,65 @@ class KnowledgeItem(Base):
     )
 
 
+class GuidanceScope(str, enum.Enum):
+    GLOBAL = "global"
+    PROJECT = "project"
+    SESSION = "session"
+    TASK = "task"
+
+
+class GuidanceStatus(str, enum.Enum):
+    ACTIVE = "active"
+    DISABLED = "disabled"
+    ARCHIVED = "archived"
+    EXPIRED = "expired"
+
+
+class HumanGuidance(Base):
+    __tablename__ = "human_guidance"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
+    session_id = Column(Integer, ForeignKey("sessions.id"), nullable=True, index=True)
+    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=True, index=True)
+    scope = Column(Enum(GuidanceScope), nullable=False, index=True)
+    message = Column(Text, nullable=False)
+    status = Column(
+        Enum(GuidanceStatus), nullable=False, default=GuidanceStatus.ACTIVE, index=True
+    )
+    priority = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    disabled_at = Column(DateTime(timezone=True), nullable=True)
+    archived_at = Column(DateTime(timezone=True), nullable=True)
+    created_by = Column(String(255), nullable=True)
+    revision = Column(Integer, nullable=False, default=1)
+
+    revisions = relationship(
+        "HumanGuidanceRevision",
+        back_populates="guidance",
+        cascade="all, delete-orphan",
+    )
+
+
+class HumanGuidanceRevision(Base):
+    __tablename__ = "human_guidance_revisions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    guidance_id = Column(
+        Integer, ForeignKey("human_guidance.id"), nullable=False, index=True
+    )
+    revision = Column(Integer, nullable=False)
+    message = Column(Text, nullable=False)
+    changed_by = Column(String(255), nullable=True)
+    changed_at = Column(DateTime(timezone=True), server_default=func.now())
+    change_reason = Column(Text, nullable=True)
+
+    guidance = relationship("HumanGuidance", back_populates="revisions")
+
+
 class KnowledgeUsageLog(Base):
     __tablename__ = "knowledge_usage_logs"
 
