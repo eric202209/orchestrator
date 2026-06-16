@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
-from sqlalchemy import and_, case, or_
+from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import Session as DBSession
 
 from app.models import (
@@ -269,6 +269,16 @@ def collect_active_guidance(
 
     out: List[Dict[str, Any]] = []
     for row in rows:
+        usage_count = 0
+        try:
+            usage_count = (
+                db.query(func.count(HumanGuidanceUsage.id))
+                .filter(HumanGuidanceUsage.guidance_id == row.id)
+                .scalar()
+                or 0
+            )
+        except Exception:
+            usage_count = 0
         scope_val = row.scope.value if hasattr(row.scope, "value") else str(row.scope)
         status_val = (
             row.status.value if hasattr(row.status, "value") else str(row.status)
@@ -290,6 +300,8 @@ def collect_active_guidance(
                 "scope": scope_val,
                 "status": status_val,
                 "priority": row.priority,
+                "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+                "usage_count": int(usage_count),
             }
         )
     return out
@@ -345,6 +357,7 @@ def record_guidance_usage(
     project_id: Optional[int],
     session_id: Optional[int],
     task_id: Optional[int],
+    trimmed_entries: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """Write HumanGuidanceUsage rows for each guidance entry rendered into WM.
 
@@ -363,10 +376,33 @@ def record_guidance_usage(
                 session_id=session_id,
                 task_id=task_id,
                 rendered=True,
+                selected=True,
                 trimmed=False,
+                selection_score=entry.get("selection_score"),
                 source="human_guidance_table",
                 render_position=position,
                 rendered_chars=len(message),
+                message_hash=message_hash,
+            )
+            db.add(row)
+        for entry in trimmed_entries or []:
+            guidance_id = entry.get("id")
+            message = entry.get("message", "")
+            message_hash = (
+                hashlib.md5(message.encode("utf-8")).hexdigest() if message else None
+            )
+            row = HumanGuidanceUsage(
+                guidance_id=guidance_id,
+                project_id=project_id,
+                session_id=session_id,
+                task_id=task_id,
+                rendered=False,
+                selected=False,
+                trimmed=True,
+                selection_score=entry.get("selection_score"),
+                source="human_guidance_table",
+                render_position=None,
+                rendered_chars=0,
                 message_hash=message_hash,
             )
             db.add(row)

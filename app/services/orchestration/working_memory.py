@@ -305,6 +305,9 @@ def _wm_write_table_guidance(
             collect_active_guidance,
             record_guidance_usage,
         )
+        from app.services.human_guidance_selection_service import (
+            select_guidance_for_injection,
+        )
 
         project_id, user_id = _resolve_session_context(db, session_id)
 
@@ -328,26 +331,12 @@ def _wm_write_table_guidance(
             task_id=numeric_task_id,
         )
 
-        existing_guidance: List[Dict[str, Any]] = wm.get("human_guidance") or []
-        seen_messages = {
-            g.get("message", "") if isinstance(g, dict) else str(g)
-            for g in existing_guidance
-        }
-        to_add: List[Dict[str, Any]] = []
-        for g in table_entries:
-            msg = g.get("message", "")
-            if msg and msg not in seen_messages:
-                seen_messages.add(msg)
-                to_add.append(g)
+        selection = select_guidance_for_injection(table_entries, _INJECTION_BUDGET)
+        rendered_entries = selection["selected"][-_HUMAN_GUIDANCE_LIMIT:]
+        trimmed_entries = selection["trimmed"]
+        wm["human_guidance"] = rendered_entries
 
-        if to_add:
-            all_guidance = existing_guidance + to_add
-            wm["human_guidance"] = all_guidance[-_HUMAN_GUIDANCE_LIMIT:]
-            rendered_entries = wm["human_guidance"]
-        else:
-            rendered_entries = []
-
-        if rendered_entries:
+        if rendered_entries or trimmed_entries:
             try:
                 record_guidance_usage(
                     db,
@@ -355,6 +344,7 @@ def _wm_write_table_guidance(
                     project_id=project_id,
                     session_id=numeric_session_id,
                     task_id=numeric_task_id,
+                    trimmed_entries=trimmed_entries,
                 )
             except Exception as telemetry_exc:
                 logger.warning(

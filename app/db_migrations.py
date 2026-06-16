@@ -829,6 +829,27 @@ def _migration_018_human_guidance_activations(engine: Engine) -> None:
                 connection.execute(text(ddl))
 
 
+def _migration_019_human_guidance_usage_selection(engine: Engine) -> None:
+    table_names = _table_names(engine)
+    if "human_guidance_usage" not in table_names:
+        return
+
+    statements = []
+    if not _has_column(engine, "human_guidance_usage", "selected"):
+        statements.append(
+            "ALTER TABLE human_guidance_usage ADD COLUMN selected BOOLEAN DEFAULT 0 NOT NULL"
+        )
+    if not _has_column(engine, "human_guidance_usage", "selection_score"):
+        statements.append(
+            "ALTER TABLE human_guidance_usage ADD COLUMN selection_score INTEGER"
+        )
+
+    if statements:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -919,6 +940,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="018_human_guidance_activations",
         description="Create human_guidance_activations table for per-project/session activation controls",
         upgrade=_migration_018_human_guidance_activations,
+    ),
+    Migration(
+        version="019_human_guidance_usage_selection",
+        description="Add selection metadata columns to human_guidance_usage",
+        upgrade=_migration_019_human_guidance_usage_selection,
     ),
 )
 

@@ -327,7 +327,7 @@ def readiness_status(
     blocking_reasons when requested but off, but do not block ready.
     """
     from app.config import settings
-    from app.models import GuidanceStatus, HumanGuidance
+    from app.models import GuidanceStatus, HumanGuidance, Project
 
     global_flags = {
         "HUMAN_GUIDANCE_TABLE_ENABLED": settings.HUMAN_GUIDANCE_TABLE_ENABLED,
@@ -339,6 +339,11 @@ def readiness_status(
 
     blocking_reasons = []
     activation = None
+    guidance_statistics = {
+        "active_guidance": 0,
+        "selected_guidance": 0,
+        "trimmed_guidance": 0,
+    }
 
     try:
         activation = get_effective_activation(
@@ -353,6 +358,7 @@ def readiness_status(
             "requested": None,
             "effective": None,
             "global_flags": global_flags,
+            "guidance_statistics": guidance_statistics,
             "ready": False,
             "blocking_reasons": blocking_reasons,
         }
@@ -396,6 +402,30 @@ def readiness_status(
         logger.warning("[HGA] guidance count failed: %s", exc)
         blocking_reasons.append("table_query_failed")
 
+    try:
+        from app.services.human_guidance_service import collect_active_guidance
+        from app.services.human_guidance_selection_service import (
+            select_guidance_for_injection,
+        )
+        from app.services.orchestration.working_memory import _INJECTION_BUDGET
+
+        project = db.query(Project).filter(Project.id == project_id).first()
+        entries = collect_active_guidance(
+            db,
+            user_id=getattr(project, "user_id", None),
+            project_id=project_id,
+            session_id=session_id,
+            task_id=None,
+        )
+        selection = select_guidance_for_injection(entries, _INJECTION_BUDGET)
+        guidance_statistics = {
+            "active_guidance": selection["selection_metadata"]["active_count"],
+            "selected_guidance": selection["selection_metadata"]["selected_count"],
+            "trimmed_guidance": selection["selection_metadata"]["trimmed_count"],
+        }
+    except Exception as exc:
+        logger.warning("[HGA] guidance statistics failed: %s", exc)
+
     ready = not any(r in _CRITICAL_BLOCKERS for r in blocking_reasons)
 
     # P1f: runtime_effective — what the runtime ACTUALLY uses (backward compat: no row = global flag)
@@ -414,6 +444,7 @@ def readiness_status(
         "effective": activation["effective"],
         "runtime_effective": runtime_effective,
         "global_flags": global_flags,
+        "guidance_statistics": guidance_statistics,
         "ready": ready,
         "blocking_reasons": blocking_reasons,
     }

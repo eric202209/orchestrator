@@ -337,6 +337,9 @@ def get_rendered_guidance(
         _INJECTION_BUDGET,
         render_guidance_block,
     )
+    from app.services.human_guidance_selection_service import (
+        select_guidance_for_injection,
+    )
 
     get_project_for_user(db, project_id, current_user)
 
@@ -348,7 +351,11 @@ def get_rendered_guidance(
         task_id=task_id,
     )
 
-    body_lines = render_guidance_block(entries)
+    selection = select_guidance_for_injection(entries, _INJECTION_BUDGET)
+    selected_entries = selection["selected"]
+    trimmed_entries = selection["trimmed"]
+
+    body_lines = render_guidance_block(selected_entries)
     if body_lines:
         block = "Operator Guidance\n" + "\n".join(body_lines)
     else:
@@ -356,7 +363,7 @@ def get_rendered_guidance(
 
     rendered_chars = len(block)
     max_chars = _INJECTION_BUDGET
-    trimmed = rendered_chars > max_chars
+    trimmed = bool(trimmed_entries) or rendered_chars > max_chars
     if trimmed:
         block = block[:max_chars]
 
@@ -365,6 +372,11 @@ def get_rendered_guidance(
         "rendered_chars": len(block),
         "max_chars": max_chars,
         "trimmed": trimmed,
+        "selected_count": len(selected_entries),
+        "trimmed_count": len(trimmed_entries),
+        "selected_ids": [entry.get("id") for entry in selected_entries],
+        "trimmed_ids": [entry.get("id") for entry in trimmed_entries],
+        "selection_metadata": selection["selection_metadata"],
         "block": block,
     }
 
