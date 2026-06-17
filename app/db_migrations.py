@@ -850,6 +850,25 @@ def _migration_019_human_guidance_usage_selection(engine: Engine) -> None:
                 connection.execute(text(statement))
 
 
+def _migration_020_human_guidance_backend_targets(engine: Engine) -> None:
+    if "human_guidance" not in _table_names(engine):
+        return
+    if not _has_column(engine, "human_guidance", "backend_targets"):
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE human_guidance"
+                    " ADD COLUMN backend_targets TEXT DEFAULT '[\"all\"]'"
+                )
+            )
+            connection.execute(
+                text(
+                    "UPDATE human_guidance SET backend_targets = '[\"all\"]'"
+                    " WHERE backend_targets IS NULL"
+                )
+            )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -945,6 +964,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="019_human_guidance_usage_selection",
         description="Add selection metadata columns to human_guidance_usage",
         upgrade=_migration_019_human_guidance_usage_selection,
+    ),
+    Migration(
+        version="020_human_guidance_backend_targets",
+        description="Add backend_targets column to human_guidance for per-backend guidance targeting",
+        upgrade=_migration_020_human_guidance_backend_targets,
     ),
 )
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from datetime import UTC, datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -22,6 +23,29 @@ from app.models import (
 logger = logging.getLogger(__name__)
 
 _UNSET = object()
+
+VALID_BACKENDS: frozenset[str] = frozenset(
+    {"all", "qwen", "local_openclaw", "claude", "gemini"}
+)
+
+
+def _parse_backend_targets(raw: Any) -> list[str]:
+    """Return backend_targets list from a DB column value. Defaults to ["all"]."""
+    if not raw:
+        return ["all"]
+    if isinstance(raw, list):
+        return raw
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, list) else ["all"]
+    except Exception:
+        return ["all"]
+
+
+def _backend_matches(row: Any, backend: str) -> bool:
+    """Return True if a HumanGuidance row targets the given backend."""
+    targets = _parse_backend_targets(getattr(row, "backend_targets", None))
+    return "all" in targets or backend in targets
 
 
 def _get_or_404(db: DBSession, guidance_id: int) -> HumanGuidance:
@@ -43,6 +67,7 @@ def create_guidance(
     priority: int = 0,
     expires_at: Optional[datetime] = None,
     created_by: Optional[str] = None,
+    backend_targets: Optional[List[str]] = None,
 ) -> Tuple[HumanGuidance, bool]:
     """Create a guidance entry. Returns (entry, created); created=False on dedup."""
     message = (message or "").strip()
@@ -52,6 +77,12 @@ def create_guidance(
         raise HTTPException(status_code=400, detail="message_too_long")
     if priority < 0 or priority > 100:
         raise HTTPException(status_code=400, detail="invalid_priority")
+
+    if backend_targets is None:
+        backend_targets = ["all"]
+    invalid = [b for b in backend_targets if b not in VALID_BACKENDS]
+    if invalid:
+        raise HTTPException(status_code=400, detail="invalid_backend_target")
 
     existing = (
         db.query(HumanGuidance)
@@ -81,6 +112,7 @@ def create_guidance(
         expires_at=expires_at,
         created_by=created_by,
         revision=1,
+        backend_targets=backend_targets,
     )
     db.add(entry)
     db.commit()
@@ -208,12 +240,15 @@ def collect_active_guidance(
     session_id: Optional[int],
     task_id: Optional[int],
     now: Optional[datetime] = None,
+    backend: str = "all",
 ) -> List[Dict[str, Any]]:
     """Return active guidance applicable to this execution context in merge order.
 
     Scope order (narrowest first): task > session > project > global.
     Within scope: priority DESC, created_at ASC.
     Excludes disabled, archived, expired entries.
+    When backend is specified (not "all"), only returns entries whose backend_targets
+    include "all" or the named backend.
     Returns normalized dicts compatible with working_memory.json human_guidance entries.
     """
     if db is None:
@@ -267,6 +302,9 @@ def collect_active_guidance(
         logger.warning("collect_active_guidance query failed: %s", exc)
         return []
 
+    if backend != "all":
+        rows = [r for r in rows if _backend_matches(r, backend)]
+
     out: List[Dict[str, Any]] = []
     for row in rows:
         usage_count = 0
@@ -302,6 +340,9 @@ def collect_active_guidance(
                 "priority": row.priority,
                 "expires_at": row.expires_at.isoformat() if row.expires_at else None,
                 "usage_count": int(usage_count),
+                "backend_targets": _parse_backend_targets(
+                    getattr(row, "backend_targets", None)
+                ),
             }
         )
     return out

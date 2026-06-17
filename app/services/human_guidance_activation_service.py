@@ -314,6 +314,7 @@ def readiness_status(
     *,
     project_id: int,
     session_id: Optional[int] = None,
+    backend: str = "all",
 ) -> Dict[str, Any]:
     """Compute Human Guidance readiness for a project (optionally session-scoped).
 
@@ -402,6 +403,11 @@ def readiness_status(
         logger.warning("[HGA] guidance count failed: %s", exc)
         blocking_reasons.append("table_query_failed")
 
+    backend_statistics: Dict[str, Any] = {
+        "backend": backend,
+        "matching_guidance": 0,
+        "filtered_guidance": 0,
+    }
     try:
         from app.services.human_guidance_service import collect_active_guidance
         from app.services.human_guidance_selection_service import (
@@ -410,13 +416,30 @@ def readiness_status(
         from app.services.orchestration.working_memory import _INJECTION_BUDGET
 
         project = db.query(Project).filter(Project.id == project_id).first()
-        entries = collect_active_guidance(
+        user_id = getattr(project, "user_id", None)
+        all_entries = collect_active_guidance(
             db,
-            user_id=getattr(project, "user_id", None),
+            user_id=user_id,
             project_id=project_id,
             session_id=session_id,
             task_id=None,
+            backend="all",
         )
+        if backend == "all":
+            entries = all_entries
+            backend_statistics["matching_guidance"] = len(all_entries)
+            backend_statistics["filtered_guidance"] = 0
+        else:
+            entries = collect_active_guidance(
+                db,
+                user_id=user_id,
+                project_id=project_id,
+                session_id=session_id,
+                task_id=None,
+                backend=backend,
+            )
+            backend_statistics["matching_guidance"] = len(entries)
+            backend_statistics["filtered_guidance"] = len(all_entries) - len(entries)
         selection = select_guidance_for_injection(entries, _INJECTION_BUDGET)
         guidance_statistics = {
             "active_guidance": selection["selection_metadata"]["active_count"],
@@ -445,6 +468,7 @@ def readiness_status(
         "runtime_effective": runtime_effective,
         "global_flags": global_flags,
         "guidance_statistics": guidance_statistics,
+        "backend_statistics": backend_statistics,
         "ready": ready,
         "blocking_reasons": blocking_reasons,
     }

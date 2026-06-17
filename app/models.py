@@ -675,6 +675,10 @@ class HumanGuidance(Base):
     created_by = Column(String(255), nullable=True)
     revision = Column(Integer, nullable=False, default=1)
 
+    backend_targets = Column(
+        JSON, nullable=True
+    )  # list[str]; None / missing treated as ["all"]
+
     revisions = relationship(
         "HumanGuidanceRevision",
         back_populates="guidance",

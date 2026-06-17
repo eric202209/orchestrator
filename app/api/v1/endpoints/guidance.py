@@ -18,6 +18,7 @@ from app.dependencies import get_current_active_user
 from app.models import GuidanceStatus, HumanGuidance
 from app.services.authz import get_project_for_user
 from app.services.human_guidance_service import (
+    VALID_BACKENDS,
     _UNSET,
     archive_guidance,
     collect_active_guidance,
@@ -40,6 +41,7 @@ class CreateGuidanceRequest(BaseModel):
     scope: str = "project"
     priority: int = Field(0, ge=0, le=100)
     expires_at: Optional[datetime] = None
+    backend_targets: Optional[List[str]] = None
 
 
 class PatchGuidanceRequest(BaseModel):
@@ -51,6 +53,8 @@ class PatchGuidanceRequest(BaseModel):
 
 
 def _serialize(g: HumanGuidance, *, full: bool = False) -> dict:
+    from app.services.human_guidance_service import _parse_backend_targets
+
     out = {
         "id": g.id,
         "project_id": g.project_id,
@@ -65,6 +69,7 @@ def _serialize(g: HumanGuidance, *, full: bool = False) -> dict:
         "expires_at": g.expires_at.isoformat() if g.expires_at else None,
         "created_by": g.created_by,
         "revision": g.revision,
+        "backend_targets": _parse_backend_targets(getattr(g, "backend_targets", None)),
     }
     if full:
         out["disabled_at"] = g.disabled_at.isoformat() if g.disabled_at else None
@@ -95,6 +100,11 @@ def create_project_guidance(
     if body.scope not in _VALID_SCOPES:
         raise HTTPException(status_code=400, detail="invalid_scope")
 
+    backend_targets = body.backend_targets or ["all"]
+    invalid_backends = [b for b in backend_targets if b not in VALID_BACKENDS]
+    if invalid_backends:
+        raise HTTPException(status_code=400, detail="invalid_backend_target")
+
     entry, created = create_guidance(
         db,
         user_id=current_user.id,
@@ -104,6 +114,7 @@ def create_project_guidance(
         priority=body.priority,
         expires_at=body.expires_at,
         created_by=getattr(current_user, "email", None),
+        backend_targets=backend_targets,
     )
     if not created:
         from fastapi.responses import JSONResponse
@@ -329,6 +340,7 @@ def get_rendered_guidance(
     project_id: int,
     session_id: Optional[int] = None,
     task_id: Optional[int] = None,
+    backend: str = "all",
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
@@ -343,13 +355,32 @@ def get_rendered_guidance(
 
     get_project_for_user(db, project_id, current_user)
 
-    entries = collect_active_guidance(
+    if backend not in VALID_BACKENDS:
+        raise HTTPException(status_code=400, detail="invalid_backend")
+
+    all_entries = collect_active_guidance(
         db,
         user_id=current_user.id,
         project_id=project_id,
         session_id=session_id,
         task_id=task_id,
+        backend="all",
     )
+    if backend == "all":
+        entries = all_entries
+        filtered_backend_ids: List[int] = []
+    else:
+        entries = collect_active_guidance(
+            db,
+            user_id=current_user.id,
+            project_id=project_id,
+            session_id=session_id,
+            task_id=task_id,
+            backend=backend,
+        )
+        all_ids = {e.get("id") for e in all_entries}
+        matched_ids = {e.get("id") for e in entries}
+        filtered_backend_ids = sorted(all_ids - matched_ids)
 
     selection = select_guidance_for_injection(entries, _INJECTION_BUDGET)
     selected_entries = selection["selected"]
@@ -378,6 +409,8 @@ def get_rendered_guidance(
         "trimmed_ids": [entry.get("id") for entry in trimmed_entries],
         "selection_metadata": selection["selection_metadata"],
         "block": block,
+        "backend": backend,
+        "filtered_backend_ids": filtered_backend_ids,
     }
 
 
@@ -487,6 +520,7 @@ def _serialize_activation_row(row: object) -> dict:
 def get_project_guidance_readiness(
     project_id: int,
     session_id: Optional[int] = None,
+    backend: str = "all",
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
@@ -494,7 +528,11 @@ def get_project_guidance_readiness(
     from app.services.human_guidance_activation_service import readiness_status
 
     get_project_for_user(db, project_id, current_user)
-    return readiness_status(db, project_id=project_id, session_id=session_id)
+    if backend not in VALID_BACKENDS:
+        raise HTTPException(status_code=400, detail="invalid_backend")
+    return readiness_status(
+        db, project_id=project_id, session_id=session_id, backend=backend
+    )
 
 
 @router.patch("/projects/{project_id}/guidance/activation")
@@ -536,6 +574,7 @@ def disable_project_activation(
 @router.get("/sessions/{session_id}/guidance/readiness")
 def get_session_guidance_readiness(
     session_id: int,
+    backend: str = "all",
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
@@ -544,7 +583,11 @@ def get_session_guidance_readiness(
     from app.services.human_guidance_activation_service import readiness_status
 
     session = get_session_for_user(db, session_id, current_user)
-    return readiness_status(db, project_id=session.project_id, session_id=session_id)
+    if backend not in VALID_BACKENDS:
+        raise HTTPException(status_code=400, detail="invalid_backend")
+    return readiness_status(
+        db, project_id=session.project_id, session_id=session_id, backend=backend
+    )
 
 
 @router.patch("/sessions/{session_id}/guidance/activation")
