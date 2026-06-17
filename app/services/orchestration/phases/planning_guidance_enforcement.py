@@ -49,6 +49,24 @@ def emit_hg_p2b_worker_coverage(
     )
 
 
+def collect_repair_guidance_block(ctx: Any) -> str:
+    """Return the active guidance block for inclusion in planning repair prompts.
+
+    Returns empty string when HG is disabled, no guidance exists, or any error occurs.
+    """
+    from app.services.human_guidance_plan_validator import (
+        render_active_guidance_for_repair as _render,
+    )
+
+    return _render(
+        ctx.db,
+        project_id=getattr(ctx.project, "id", None),
+        session_id=ctx.session_id,
+        task_id=ctx.task_id,
+        user_id=getattr(ctx.project, "user_id", None),
+    )
+
+
 def run_guidance_plan_enforcement(
     ctx: Any,
     *,

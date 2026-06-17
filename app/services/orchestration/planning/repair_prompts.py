@@ -182,6 +182,7 @@ def build_planning_repair_prompt(
     apply_prompt_profile: Any = None,
     knowledge_context: Any = None,
     project_structure_capsule: str | None = None,
+    guidance_block: str = "",
 ) -> str:
     return build_planning_repair_prompt_with_metadata(
         task_description=task_description,
@@ -192,6 +193,7 @@ def build_planning_repair_prompt(
         apply_prompt_profile=apply_prompt_profile,
         knowledge_context=knowledge_context,
         project_structure_capsule=project_structure_capsule,
+        guidance_block=guidance_block,
     ).prompt
 
 
@@ -204,6 +206,7 @@ def build_planning_repair_prompt_with_metadata(
     apply_prompt_profile: Any = None,
     knowledge_context: Any = None,
     project_structure_capsule: str | None = None,
+    guidance_block: str = "",
 ) -> PlanningRepairPromptBuildResult:
     broken_output = compact_invalid_output_excerpt(malformed_output)
     knowledge_block = render_repair_knowledge_block(knowledge_context)
@@ -265,6 +268,7 @@ def build_planning_repair_prompt_with_metadata(
                 apply_prompt_profile=None,
                 source_api_contract_block=fallback_source_api_block,
                 knowledge_block=knowledge_block,
+                guidance_block=guidance_block,
             )
             specialized_metadata.update(
                 _metadata_for_final_source_api_block(
@@ -304,6 +308,7 @@ def build_planning_repair_prompt_with_metadata(
                 or source_api_contract_block
             ),
             knowledge_block=knowledge_block,
+            guidance_block=guidance_block,
             compacted=bool(
                 source_api_contract_minimal_block or source_api_contract_compact_block
             ),
@@ -406,7 +411,7 @@ No prose. No markdown fences. No plan.json. No explanation.
 Do not create, edit, read, or write files during planning repair; return the JSON array as message text only.
 Repair the plan, not the task. Preserve valid steps.
 
-Bad:
+{guidance_block + chr(10) if guidance_block else ""}Bad:
 {broken_output}
 
 {validation_error or default_validation_error}
@@ -570,6 +575,7 @@ Rules:
                 apply_prompt_profile=None,
                 source_api_contract_block=candidate_block,
                 knowledge_block=knowledge_block,
+                guidance_block=guidance_block,
             )
             if len(candidate_prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS and (
                 not candidate_block or candidate_block in candidate_prompt
@@ -625,6 +631,7 @@ Rules:
             or source_api_contract_block
         ),
         knowledge_block=knowledge_block,
+        guidance_block=guidance_block,
         compacted=bool(
             source_api_contract_minimal_block or source_api_contract_compact_block
         ),
@@ -1547,6 +1554,7 @@ def build_compact_planning_repair_prompt(
     prompt_profile: str = "default",
     apply_prompt_profile: Any = None,
     source_api_contract_block: str = "",
+    guidance_block: str = "",
 ) -> str:
     ops_contract = render_ops_first_contract()
     operation_choice_contract = render_operation_choice_contract()
@@ -1620,7 +1628,7 @@ No prose. No markdown fences. No plan.json. No explanation.
 
 Repair this invalid plan into 3 to 4 executable steps.
 
-Validation errors:
+{guidance_block + chr(10) if guidance_block else ""}Validation errors:
 {reason_lines or "- malformed or non-runnable planning output"}
 
 {invalid_output_block}
@@ -1685,6 +1693,7 @@ def build_compact_stale_replace_repair_prompt(
     apply_prompt_profile: Any = None,
     source_api_contract_block: str = "",
     knowledge_block: str = "",
+    guidance_block: str = "",
 ) -> str:
     """Build a bounded repair prompt for stale replace_in_file plans.
 
@@ -1736,7 +1745,7 @@ No prose. No markdown fences. No plan.json. No explanation.
 Stale replace repair mode.
 Task: {task}
 
-Validation errors:
+{guidance_block + chr(10) if guidance_block else ""}Validation errors:
 {reason_lines or "- replace_in_file old text was not found in the current workspace"}
 
 Invalid plan excerpt:
@@ -1855,6 +1864,7 @@ def _apply_profile_or_compact_fallback_with_metadata(
     source_api_metadata: dict[str, Any],
     source_api_contract_block: str,
     knowledge_block: str = "",
+    guidance_block: str = "",
     compacted: bool = False,
     included_reason: str = "repair_context",
 ) -> tuple[str, dict[str, Any]]:
@@ -1873,6 +1883,7 @@ def _apply_profile_or_compact_fallback_with_metadata(
         apply_prompt_profile=apply_prompt_profile,
         source_api_contract_block=source_api_contract_block,
         knowledge_block=knowledge_block,
+        guidance_block=guidance_block,
     )
     source_api_in_fallback = bool(
         source_api_contract_block and source_api_contract_block in fallback_prompt
@@ -1890,6 +1901,7 @@ def _apply_profile_or_compact_fallback_with_metadata(
             apply_prompt_profile=apply_prompt_profile,
             source_api_contract_block="",
             knowledge_block=knowledge_block,
+            guidance_block=guidance_block,
         )
         return fallback_prompt, _metadata_for_final_source_api_block(
             source_api_metadata=source_api_metadata,
@@ -1925,6 +1937,7 @@ def _build_over_budget_compact_repair_prompt(
     apply_prompt_profile: Any,
     source_api_contract_block: str = "",
     knowledge_block: str = "",
+    guidance_block: str = "",
 ) -> str:
     if _is_stale_replace_repair(malformed_output, rejection_reasons):
         return build_compact_stale_replace_repair_prompt(
@@ -1936,6 +1949,7 @@ def _build_over_budget_compact_repair_prompt(
             apply_prompt_profile=apply_prompt_profile,
             source_api_contract_block=source_api_contract_block,
             knowledge_block=knowledge_block,
+            guidance_block=guidance_block,
         )
     return build_compact_planning_repair_prompt(
         malformed_output,
@@ -1943,6 +1957,7 @@ def _build_over_budget_compact_repair_prompt(
         prompt_profile=prompt_profile,
         apply_prompt_profile=apply_prompt_profile,
         source_api_contract_block=source_api_contract_block,
+        guidance_block=guidance_block,
     )
 
 

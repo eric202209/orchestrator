@@ -85,6 +85,7 @@ from app.services.orchestration.phases.planning_task1_bootstrap import (
 
 
 from app.services.orchestration.phases.planning_guidance_enforcement import (
+    collect_repair_guidance_block as _collect_repair_guidance,
     run_guidance_plan_enforcement as _run_guidance_plan_enforcement,
 )
 from app.services.orchestration.phases.planning_support import (
@@ -2535,6 +2536,7 @@ def __repair_planning_output(
         knowledge_context=knowledge_context,
         session_id=ctx.session_id,
         task_id=ctx.task_id,
+        guidance_block=_collect_repair_guidance(ctx),
     )
 
 

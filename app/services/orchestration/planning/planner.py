@@ -2955,6 +2955,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
         workflow_phases: Optional[List[str]] = None,
         workspace_has_existing_files: bool = False,
         knowledge_context: Any = None,
+        guidance_block: str = "",
     ):
         del workflow_profile, workflow_phases, workspace_has_existing_files
         return _build_planning_repair_prompt_with_metadata(
@@ -2966,6 +2967,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
             apply_prompt_profile=PlannerService.apply_prompt_profile,
             knowledge_context=knowledge_context,
             project_structure_capsule=cls._build_project_structure_capsule(project_dir),
+            guidance_block=guidance_block,
         )
 
     @staticmethod
@@ -2973,12 +2975,14 @@ Return only a JSON array matching this shape. No markdown. No prose.
         malformed_output: str,
         rejection_reasons: Optional[List[str]] = None,
         prompt_profile: str = "default",
+        guidance_block: str = "",
     ) -> str:
         return _build_compact_planning_repair_prompt(
             malformed_output=malformed_output,
             rejection_reasons=rejection_reasons,
             prompt_profile=prompt_profile,
             apply_prompt_profile=PlannerService.apply_prompt_profile,
+            guidance_block=guidance_block,
         )
 
     @staticmethod
@@ -3226,6 +3230,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
         _no_output_retry_used: bool = False,
         _repair_attempt_number: int = 1,
         _compact_no_output_retry: bool = False,
+        guidance_block: str = "",
     ) -> Dict[str, Any]:
         repair_build_started_at = time.monotonic()
         logger.warning(
@@ -3241,6 +3246,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
                 malformed_output,
                 rejection_reasons=rejection_reasons,
                 prompt_profile=prompt_profile,
+                guidance_block=guidance_block,
             )
             repair_prompt_metadata: Dict[str, Any] = {
                 "source_api_contract_available": False,
@@ -3260,6 +3266,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
                 workflow_phases=workflow_phases,
                 workspace_has_existing_files=workspace_has_existing_files,
                 knowledge_context=knowledge_context,
+                guidance_block=guidance_block,
             )
             repair_prompt = repair_prompt_result.prompt
             repair_prompt_metadata = dict(repair_prompt_result.metadata)
@@ -3651,6 +3658,7 @@ Return only a JSON array matching this shape. No markdown. No prose.
                         _no_output_retry_used=True,
                         _repair_attempt_number=_repair_attempt_number + 1,
                         _compact_no_output_retry=True,
+                        guidance_block=guidance_block,
                     )
                 timeout_exc = PlanningRepairNoOutputTimeout(
                     (

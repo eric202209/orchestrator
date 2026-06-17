@@ -13,6 +13,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+_REPAIR_GUIDANCE_HEADER = "## OPERATOR GUIDANCE (mandatory)"
+_REPAIR_GUIDANCE_AUTHORITY = "These Human Guidance rules are mandatory unless a validator/safety rule forbids them."
+_REPAIR_GUIDANCE_MAX_CHARS = 600
+
 # (pattern_name, guidance_keywords, plan_violation_keywords)
 # Same pattern_names as human_guidance_conflict_service._PATTERN_PAIRS for consistency.
 _PLAN_GUIDANCE_PATTERNS: List[Tuple[str, List[str], List[str]]] = [
@@ -142,3 +146,65 @@ def check_plan_guidance_violations_if_enabled(
     except Exception as exc:
         logger.warning("[GUIDANCE_PLAN_VALIDATION] Failed (non-fatal): %s", exc)
         return []
+
+
+def render_active_guidance_for_repair(
+    db: Any,
+    *,
+    project_id: Optional[int],
+    session_id: int,
+    task_id: Optional[int],
+    user_id: Optional[int],
+) -> str:
+    """Render active guidance as a concise block for inclusion in planning repair prompts.
+
+    Returns empty string when HG is disabled, no guidance exists, or any error occurs.
+    Never raises.
+    """
+    try:
+        from app.config import settings
+
+        if not settings.HUMAN_GUIDANCE_TABLE_ENABLED:
+            return ""
+        if not settings.HUMAN_GUIDANCE_CONFLICT_DETECTION_ENABLED:
+            return ""
+
+        try:
+            from app.services.human_guidance_activation_service import (
+                check_activation_flag as _check_act,
+            )
+
+            if not _check_act(
+                db,
+                project_id=project_id,
+                session_id=session_id,
+                flag="conflict_detection_enabled",
+            ):
+                return ""
+        except Exception:
+            pass  # non-fatal: proceed
+
+        from app.services.human_guidance_service import collect_active_guidance
+
+        guidance_entries = collect_active_guidance(
+            db,
+            user_id=user_id,
+            project_id=project_id,
+            session_id=session_id,
+            task_id=task_id,
+        )
+        if not guidance_entries:
+            return ""
+
+        lines = [_REPAIR_GUIDANCE_HEADER, _REPAIR_GUIDANCE_AUTHORITY]
+        for entry in guidance_entries:
+            message = str(entry.get("message") or "").strip()
+            if message:
+                lines.append(f"- {message}")
+        if len(lines) <= 2:
+            return ""
+        return "\n".join(lines)[:_REPAIR_GUIDANCE_MAX_CHARS]
+
+    except Exception as exc:
+        logger.warning("[GUIDANCE_REPAIR_RENDER] Failed (non-fatal): %s", exc)
+        return ""
