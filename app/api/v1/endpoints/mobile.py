@@ -10,9 +10,9 @@ Flow:
 import secrets
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import (
     APIRouter,
@@ -1745,3 +1745,358 @@ async def reject_mobile_permission(
         "status": "rejected",
         "message": "Permission rejected",
     }
+
+
+# ── HG-P4d: Mobile Human Guidance Routes ─────────────────────────────────────
+#
+# These routes mirror /api/v1/projects/{id}/guidance/* but use mobile gateway
+# key auth (require_mobile_gateway_key) instead of JWT (get_current_active_user).
+# Business logic delegates to the same services as the web endpoints.
+
+
+from app.api.v1.endpoints.guidance import (
+    ActivationPatchRequest,
+    CreateGuidanceRequest,
+    PatchConflictRequest,
+    PatchGuidanceRequest,
+    _VALID_SCOPES as _GUIDANCE_VALID_SCOPES,
+    _serialize as _serialize_guidance,
+    _serialize_activation_row,
+    _serialize_conflict_row,
+)
+from app.services.human_guidance_service import (
+    archive_guidance as _archive_guidance,
+    create_guidance as _create_guidance,
+    get_guidance as _get_guidance,
+    list_guidance as _list_guidance,
+    update_guidance as _update_guidance,
+)
+
+
+def _guidance_project_or_404(db: Session, project_id: int) -> Project:
+    project = (
+        db.query(Project)
+        .filter(Project.id == project_id, Project.deleted_at.is_(None))
+        .first()
+    )
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project
+
+
+@router.get("/mobile/projects/{project_id}/guidance/readiness")
+def mobile_get_guidance_readiness(
+    project_id: int,
+    db: Session = Depends(get_db),
+):
+    """Guidance readiness for a project — mobile gateway auth."""
+    from app.services.human_guidance_activation_service import readiness_status
+
+    _guidance_project_or_404(db, project_id)
+    return readiness_status(db, project_id=project_id, session_id=None)
+
+
+@router.get("/mobile/projects/{project_id}/guidance")
+def mobile_list_guidance(
+    project_id: int,
+    status: str = "active",
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    """List guidance entries for a project — mobile gateway auth."""
+    _guidance_project_or_404(db, project_id)
+    valid_statuses = {"active", "disabled", "archived", "expired", "all"}
+    if status not in valid_statuses:
+        raise HTTPException(status_code=400, detail="invalid_status")
+    items, total = _list_guidance(
+        db, project_id=project_id, status=status, scope=None, limit=limit, offset=offset
+    )
+    return {
+        "project_id": project_id,
+        "total": total,
+        "items": [_serialize_guidance(g) for g in items],
+    }
+
+
+@router.post(
+    "/mobile/projects/{project_id}/guidance", status_code=status.HTTP_201_CREATED
+)
+def mobile_create_guidance(
+    project_id: int,
+    body: CreateGuidanceRequest,
+    db: Session = Depends(get_db),
+):
+    """Create guidance entry — mobile gateway auth. Uses project owner as user context."""
+    from fastapi.responses import JSONResponse
+
+    project = _guidance_project_or_404(db, project_id)
+    if body.scope not in _GUIDANCE_VALID_SCOPES:
+        raise HTTPException(status_code=400, detail="invalid_scope")
+    entry, created = _create_guidance(
+        db,
+        user_id=project.user_id,
+        project_id=project_id,
+        scope=body.scope,
+        message=body.message,
+        priority=body.priority,
+        expires_at=body.expires_at,
+        created_by="mobile",
+        backend_targets=body.backend_targets or body.provider_targets,
+        model_targets=body.model_targets,
+        purpose_targets=body.purpose_targets,
+    )
+    if not created:
+        return JSONResponse(status_code=200, content=_serialize_guidance(entry))
+    return _serialize_guidance(entry)
+
+
+@router.patch("/mobile/guidance/{guidance_id}")
+def mobile_patch_guidance(
+    guidance_id: int,
+    body: PatchGuidanceRequest,
+    db: Session = Depends(get_db),
+):
+    """Update a guidance entry — mobile gateway auth."""
+    provided = body.model_fields_set
+    kwargs: dict = {}
+    if "message" in provided:
+        kwargs["message"] = body.message
+    if "status" in provided:
+        if body.status not in ("active", "disabled"):
+            raise HTTPException(status_code=422, detail="immutable_field")
+        kwargs["status"] = body.status
+    if "priority" in provided:
+        kwargs["priority"] = body.priority
+    if "expires_at" in provided:
+        kwargs["expires_at"] = body.expires_at
+    if "change_reason" in provided:
+        kwargs["change_reason"] = body.change_reason
+    updated = _update_guidance(db, guidance_id, changed_by="mobile", **kwargs)
+    return _serialize_guidance(updated, full=True)
+
+
+@router.delete("/mobile/guidance/{guidance_id}")
+def mobile_archive_guidance(
+    guidance_id: int,
+    db: Session = Depends(get_db),
+):
+    """Archive (soft-delete) a guidance entry — mobile gateway auth."""
+    archived = _archive_guidance(db, guidance_id)
+    return {
+        "id": archived.id,
+        "status": (
+            archived.status.value
+            if hasattr(archived.status, "value")
+            else archived.status
+        ),
+        "archived_at": (
+            archived.archived_at.isoformat() if archived.archived_at else None
+        ),
+        "message": "Archived. Guidance will no longer affect planning.",
+    }
+
+
+@router.get("/mobile/projects/{project_id}/guidance/rendered")
+def mobile_get_rendered_guidance(
+    project_id: int,
+    backend: str = "all",
+    model_family: str = "all",
+    purpose: str = "all",
+    db: Session = Depends(get_db),
+):
+    """Rendered guidance preview — mobile gateway auth."""
+    from app.services.human_guidance_selection_service import (
+        select_guidance_for_injection,
+    )
+    from app.services.human_guidance_service import collect_active_guidance
+    from app.services.orchestration.working_memory import (
+        _INJECTION_BUDGET,
+        render_guidance_block,
+    )
+
+    project = _guidance_project_or_404(db, project_id)
+    user_id = project.user_id
+
+    all_entries = collect_active_guidance(
+        db,
+        user_id=user_id,
+        project_id=project_id,
+        session_id=None,
+        task_id=None,
+        backend="all",
+        model_family="all",
+        purpose="all",
+    )
+    no_filters = backend == "all" and model_family == "all" and purpose == "all"
+    if no_filters:
+        entries = all_entries
+        filtered_target_ids: List[int] = []
+        filtered_purpose_ids: List[int] = []
+    else:
+        entries = collect_active_guidance(
+            db,
+            user_id=user_id,
+            project_id=project_id,
+            session_id=None,
+            task_id=None,
+            backend=backend,
+            model_family=model_family,
+            purpose=purpose,
+        )
+        all_ids = {e.get("id") for e in all_entries}
+        matched_ids = {e.get("id") for e in entries}
+        filtered_target_ids = sorted(all_ids - matched_ids)
+
+        backend_model_entries = collect_active_guidance(
+            db,
+            user_id=user_id,
+            project_id=project_id,
+            session_id=None,
+            task_id=None,
+            backend=backend,
+            model_family=model_family,
+            purpose="all",
+        )
+        backend_model_ids = {e.get("id") for e in backend_model_entries}
+        filtered_purpose_ids = sorted(backend_model_ids - matched_ids)
+
+    selection = select_guidance_for_injection(entries, _INJECTION_BUDGET)
+    selected_entries = selection["selected"]
+    trimmed_entries = selection["trimmed"]
+    body_lines = render_guidance_block(selected_entries)
+    block = ("Operator Guidance\n" + "\n".join(body_lines)) if body_lines else ""
+    rendered_chars = len(block)
+    max_chars = _INJECTION_BUDGET
+    trimmed = bool(trimmed_entries) or rendered_chars > max_chars
+    if trimmed:
+        block = block[:max_chars]
+
+    return {
+        "project_id": project_id,
+        "rendered_chars": len(block),
+        "max_chars": max_chars,
+        "trimmed": trimmed,
+        "selected_count": len(selected_entries),
+        "trimmed_count": len(trimmed_entries),
+        "selected_ids": [e.get("id") for e in selected_entries],
+        "trimmed_ids": [e.get("id") for e in trimmed_entries],
+        "selection_metadata": selection["selection_metadata"],
+        "block": block,
+        "backend": backend,
+        "model_family": model_family,
+        "purpose": purpose,
+        "filtered_backend_ids": filtered_target_ids,
+        "filtered_target_ids": filtered_target_ids,
+        "filtered_purpose_ids": filtered_purpose_ids,
+    }
+
+
+@router.get("/mobile/projects/{project_id}/guidance/conflicts")
+def mobile_list_guidance_conflicts(
+    project_id: int,
+    status: str = "open",
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    """List guidance conflicts — mobile gateway auth."""
+    from app.models import HumanGuidanceConflict
+
+    _guidance_project_or_404(db, project_id)
+    valid_statuses = {"open", "resolved", "ignored", "all"}
+    if status not in valid_statuses:
+        raise HTTPException(status_code=400, detail="invalid_status")
+    try:
+        query = db.query(HumanGuidanceConflict).filter(
+            HumanGuidanceConflict.project_id == project_id
+        )
+        if status != "all":
+            query = query.filter(HumanGuidanceConflict.status == status)
+        total = query.count()
+        rows = (
+            query.order_by(HumanGuidanceConflict.detected_at.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+        return {
+            "project_id": project_id,
+            "total": total,
+            "items": [_serialize_conflict_row(r) for r in rows],
+        }
+    except Exception as exc:
+        logger.warning("[MOBILE_GUIDANCE] Failed to read conflict table: %s", exc)
+        return {"project_id": project_id, "total": 0, "items": []}
+
+
+@router.patch("/mobile/projects/{project_id}/guidance/conflicts/{conflict_id}")
+def mobile_patch_guidance_conflict(
+    project_id: int,
+    conflict_id: int,
+    body: PatchConflictRequest,
+    db: Session = Depends(get_db),
+):
+    """Resolve/ignore/reopen a guidance conflict — mobile gateway auth."""
+    from app.models import HumanGuidanceConflict
+
+    _guidance_project_or_404(db, project_id)
+    valid_statuses = {"open", "resolved", "ignored"}
+    if body.status not in valid_statuses:
+        raise HTTPException(status_code=422, detail="invalid_status")
+
+    row = (
+        db.query(HumanGuidanceConflict)
+        .filter(
+            HumanGuidanceConflict.id == conflict_id,
+            HumanGuidanceConflict.project_id == project_id,
+        )
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="conflict_not_found")
+
+    row.status = body.status
+    if body.resolution_note is not None:
+        row.resolution_note = body.resolution_note
+    if body.status in ("resolved", "ignored"):
+        row.resolved_at = datetime.now(timezone.utc)
+        row.resolved_by = "mobile"
+    elif body.status == "open":
+        row.resolved_at = None
+        row.resolved_by = None
+    db.commit()
+    db.refresh(row)
+
+    out = _serialize_conflict_row(row)
+    out["resolved_at"] = row.resolved_at.isoformat() if row.resolved_at else None
+    out["resolved_by"] = row.resolved_by
+    out["resolution_note"] = getattr(row, "resolution_note", None)
+    return out
+
+
+@router.patch("/mobile/projects/{project_id}/guidance/activation")
+def mobile_patch_guidance_activation(
+    project_id: int,
+    body: ActivationPatchRequest,
+    db: Session = Depends(get_db),
+):
+    """Set project guidance activation flags — mobile gateway auth."""
+    from app.services.human_guidance_activation_service import set_project_activation
+
+    _guidance_project_or_404(db, project_id)
+    row = set_project_activation(db, project_id, body.model_dump(), enabled_by="mobile")
+    return _serialize_activation_row(row)
+
+
+@router.post("/mobile/projects/{project_id}/guidance/activation/disable")
+def mobile_disable_guidance_activation(
+    project_id: int,
+    db: Session = Depends(get_db),
+):
+    """Disable project guidance activation — mobile gateway auth."""
+    from app.services.human_guidance_activation_service import disable_activation
+
+    _guidance_project_or_404(db, project_id)
+    row = disable_activation(db, "project", project_id, disabled_by="mobile")
+    return _serialize_activation_row(row)
