@@ -3,6 +3,7 @@ import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { projectsAPI, tasksAPI, sessionsAPI } from '../api/client';
 import type { ChangeSetReviewDecision, Project, Task, Session } from '../types/api';
 import { ProjectPlannerPanel } from '../components/ProjectPlannerPanel';
+import { HumanGuidanceDashboard } from '../components/HumanGuidanceDashboard';
 import { isLegacyTaskExecutionSession } from '../lib/sessionIdentity';
 import { deriveRunStateFromTask, getRunStateDisplay } from '../lib/runState';
 import {
@@ -76,8 +77,8 @@ function ProjectDetail() {
     }>;
     ready_task_ids: number[];
   } | null>(null);
-  type ProjectTab = 'sessions' | 'tasks' | 'planner' | 'review';
-  const initialTab = (['sessions', 'tasks', 'planner', 'review'] as const).includes(
+  type ProjectTab = 'sessions' | 'tasks' | 'planner' | 'review' | 'guidance';
+  const initialTab = (['sessions', 'tasks', 'planner', 'review', 'guidance'] as const).includes(
     searchParams.get('tab') as ProjectTab
   )
     ? (searchParams.get('tab') as ProjectTab)
@@ -841,6 +842,7 @@ function ProjectDetail() {
           },
           { key: 'planner', label: 'Project Architect' },
           { key: 'sessions', label: 'Runs' },
+          { key: 'guidance', label: 'Guidance' },
         ].map((tab) => (
           <button
             key={tab.key}
@@ -866,6 +868,11 @@ function ProjectDetail() {
             setActiveTab('tasks');
           }}
         />
+      )}
+
+      {/* Guidance Tab */}
+      {activeTab === 'guidance' && (
+        <HumanGuidanceDashboard projectId={project.id} />
       )}
 
       {/* Review Queue Tab */}

@@ -34,6 +34,11 @@ import type {
   SessionRecoveryContext,
   SessionDigest,
   SessionNarrativeTimeline,
+  HumanGuidanceEntry,
+  HumanGuidanceActivation,
+  HumanGuidanceReadiness,
+  HumanGuidanceConflict,
+  HumanGuidanceRendered,
 } from "../types/api";
 
 const normalizeApiBaseUrl = (value: string): string => {
@@ -975,6 +980,130 @@ export const adminAPI = {
       gate_pass: boolean;
       stuck_sessions: Array<{ session_id: number; status: string; terminal_class: string }>;
     }>(`/admin/outcome-rates?limit=${limit}`),
+};
+
+export const guidanceAPI = {
+  getReadiness: (
+    projectId: number,
+    params?: { backend?: string; model_family?: string },
+  ) =>
+    apiClient.get<HumanGuidanceReadiness>(
+      `/projects/${projectId}/guidance/readiness`,
+      { params },
+    ),
+
+  patchActivation: (
+    projectId: number,
+    data: {
+      table_enabled: boolean;
+      persistence_enabled: boolean;
+      render_enabled: boolean;
+      injection_enabled: boolean;
+      conflict_detection_enabled: boolean;
+    },
+  ) =>
+    apiClient.patch<HumanGuidanceActivation>(
+      `/projects/${projectId}/guidance/activation`,
+      data,
+    ),
+
+  disableActivation: (projectId: number) =>
+    apiClient.post<HumanGuidanceActivation>(
+      `/projects/${projectId}/guidance/activation/disable`,
+    ),
+
+  list: (
+    projectId: number,
+    params?: { status?: string; limit?: number; offset?: number },
+  ) =>
+    apiClient.get<{ project_id: number; total: number; items: HumanGuidanceEntry[] }>(
+      `/projects/${projectId}/guidance`,
+      { params },
+    ),
+
+  create: (
+    projectId: number,
+    data: {
+      message: string;
+      scope?: string;
+      priority?: number;
+      expires_at?: string | null;
+      backend_targets?: string[] | null;
+      model_targets?: string[] | null;
+      purpose_targets?: string[] | null;
+    },
+  ) =>
+    apiClient.post<HumanGuidanceEntry>(
+      `/projects/${projectId}/guidance`,
+      data,
+    ),
+
+  patch: (
+    guidanceId: number,
+    data: {
+      message?: string;
+      status?: string;
+      priority?: number;
+      expires_at?: string | null;
+      change_reason?: string;
+    },
+  ) =>
+    apiClient.patch<HumanGuidanceEntry>(`/guidance/${guidanceId}`, data),
+
+  archive: (guidanceId: number) =>
+    apiClient.delete<{
+      id: number;
+      status: string;
+      archived_at: string | null;
+      message: string;
+    }>(`/guidance/${guidanceId}`),
+
+  getHistory: (guidanceId: number) =>
+    apiClient.get<{
+      id: number;
+      revisions: Array<{
+        revision: number;
+        message: string;
+        changed_by: string | null;
+        changed_at: string | null;
+        change_reason: string | null;
+      }>;
+    }>(`/guidance/${guidanceId}/history`),
+
+  getRendered: (
+    projectId: number,
+    params?: {
+      backend?: string;
+      model_family?: string;
+      purpose?: string;
+      session_id?: number;
+      task_id?: number;
+    },
+  ) =>
+    apiClient.get<HumanGuidanceRendered>(
+      `/projects/${projectId}/guidance/rendered`,
+      { params },
+    ),
+
+  listConflicts: (
+    projectId: number,
+    params?: { status?: string; limit?: number },
+  ) =>
+    apiClient.get<{
+      project_id: number;
+      total: number;
+      items: HumanGuidanceConflict[];
+    }>(`/projects/${projectId}/guidance/conflicts`, { params }),
+
+  patchConflict: (
+    projectId: number,
+    conflictId: number,
+    data: { status: string; resolution_note?: string },
+  ) =>
+    apiClient.patch(
+      `/projects/${projectId}/guidance/conflicts/${conflictId}`,
+      data,
+    ),
 };
 
 export const api = apiClient;

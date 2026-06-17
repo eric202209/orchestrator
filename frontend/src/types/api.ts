@@ -911,3 +911,97 @@ export interface SessionDigest {
   enrichment_error?: string | null;
   state_hash?: string | null;
 }
+
+// Human Guidance types (HG-P4a)
+export interface HumanGuidanceEntry {
+  id: number;
+  project_id: number | null;
+  session_id: number | null;
+  task_id: number | null;
+  scope: string;
+  message: string;
+  status: string;
+  priority: number;
+  created_at: string | null;
+  updated_at: string | null;
+  expires_at: string | null;
+  created_by: string | null;
+  revision: number;
+  backend_targets: string[];
+  model_targets: string[];
+  purpose_targets: string[];
+}
+
+export interface HumanGuidanceActivation {
+  id: number | null;
+  scope: string | null;
+  project_id: number | null;
+  session_id: number | null;
+  table_enabled: boolean;
+  persistence_enabled: boolean;
+  render_enabled: boolean;
+  injection_enabled: boolean;
+  conflict_detection_enabled: boolean;
+  status: string;
+  enabled_by: string | null;
+  disabled_at: string | null;
+  disabled_by: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface HumanGuidanceReadiness {
+  project_id: number;
+  active_guidance_count: number;
+  is_ready: boolean;
+  checks: Record<string, boolean | string>;
+  activation: HumanGuidanceActivation | null;
+  backend_statistics: {
+    backend: string;
+    model_family: string;
+    matching_guidance: number;
+    filtered_guidance: number;
+    filtered_ids: number[];
+  };
+  purpose_statistics: {
+    all: number;
+    planning: number;
+    execution: number;
+    repair: number;
+    validation: number;
+  };
+  warnings: string[];
+}
+
+export interface HumanGuidanceConflict {
+  id: number | null;
+  guidance_id: number | null;
+  guidance_message: string;
+  task_id: number | null;
+  task_title: string;
+  conflict_excerpt: string;
+  conflict_patterns: string[];
+  severity: string;
+  status: string;
+  detected_at: string | null;
+  resolved: boolean;
+}
+
+export interface HumanGuidanceRendered {
+  project_id: number;
+  rendered_chars: number;
+  max_chars: number;
+  trimmed: boolean;
+  selected_count: number;
+  trimmed_count: number;
+  selected_ids: number[];
+  trimmed_ids: number[];
+  selection_metadata: Record<string, unknown>;
+  block: string;
+  backend: string;
+  model_family: string;
+  purpose: string;
+  filtered_backend_ids: number[];
+  filtered_target_ids: number[];
+  filtered_purpose_ids: number[];
+}
