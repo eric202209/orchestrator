@@ -17,6 +17,19 @@ from app.services.orchestration.events.telemetry import emit_phase_event
 logger = logging.getLogger(__name__)
 
 
+def _guidance_target_kwargs(ctx: Any) -> Dict[str, str]:
+    """Return explicit runtime target kwargs without leaking MagicMock fallbacks."""
+    out: Dict[str, str] = {}
+    for attr, kwarg in (
+        ("guidance_backend", "backend"),
+        ("guidance_model_family", "model_family"),
+    ):
+        value = getattr(ctx, attr, None)
+        if isinstance(value, str) and value.strip():
+            out[kwarg] = value.strip()
+    return out
+
+
 def emit_hg_p2b_worker_coverage(
     *,
     execution_backend: str,
@@ -64,8 +77,7 @@ def collect_repair_guidance_block(ctx: Any) -> str:
         session_id=ctx.session_id,
         task_id=ctx.task_id,
         user_id=getattr(ctx.project, "user_id", None),
-        backend=getattr(ctx, "guidance_backend", "all"),
-        model_family=getattr(ctx, "guidance_model_family", "all"),
+        **_guidance_target_kwargs(ctx),
     )
 
 
@@ -103,8 +115,7 @@ def run_guidance_plan_enforcement(
         task_id=ctx.task_id,
         user_id=getattr(ctx.project, "user_id", None),
         plan_steps=plan_steps,
-        backend=getattr(ctx, "guidance_backend", "all"),
-        model_family=getattr(ctx, "guidance_model_family", "all"),
+        **_guidance_target_kwargs(ctx),
     )
 
     if not retry_state.repair_prompt_used:

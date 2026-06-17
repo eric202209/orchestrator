@@ -340,6 +340,31 @@ class TestCollectRepairGuidanceBlock:
             user_id=ctx.project.user_id,
         )
 
+    def test_passes_explicit_runtime_targets_to_render(self):
+        from app.services.orchestration.phases.planning_guidance_enforcement import (
+            collect_repair_guidance_block,
+        )
+
+        ctx = self._make_ctx()
+        ctx.guidance_backend = "direct_ollama"
+        ctx.guidance_model_family = "qwen"
+        with patch(
+            "app.services.human_guidance_plan_validator.render_active_guidance_for_repair",
+            return_value="mock_block",
+        ) as mock_render:
+            result = collect_repair_guidance_block(ctx)
+
+        assert result == "mock_block"
+        mock_render.assert_called_once_with(
+            ctx.db,
+            project_id=ctx.project.id,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            user_id=ctx.project.user_id,
+            backend="direct_ollama",
+            model_family="qwen",
+        )
+
     def test_returns_empty_string_on_render_error(self):
         from app.services.orchestration.phases.planning_guidance_enforcement import (
             collect_repair_guidance_block,
