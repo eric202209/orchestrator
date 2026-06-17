@@ -9,6 +9,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+try:
+    from app.services.file_lock import fcntl as _fcntl  # type: ignore[attr-defined]
+except Exception:
+    _fcntl = None  # type: ignore[assignment]
+
 from app.config import settings
 
 SCHEMA_VERSION = 1
@@ -403,121 +408,138 @@ def write_working_memory(
         task_title = getattr(task, "title", "") or ""
         task_key = str(task_id)
 
-        wm = _load(openclaw_dir, str(project_dir))
-        wm["last_updated"] = datetime.now(UTC).isoformat()
-        wm["project_dir"] = str(project_dir)
+        session_id = getattr(orchestration_state, "session_id", None)
 
-        # files_by_task
-        changed = list(getattr(orchestration_state, "changed_files", None) or [])
-        wm["files_by_task"][task_key] = {
-            "task_id": task_id,
-            "task_title": task_title,
-            "added": changed,
-            "modified": [],
-            "deleted": [],
-        }
+        lock_path = openclaw_dir / (_FILENAME + ".lock")
+        lock_fh = None
+        try:
+            if _fcntl is not None:
+                lock_fh = open(lock_path, "w")
+                _fcntl.flock(lock_fh.fileno(), _fcntl.LOCK_EX)
 
-        # known_good_commands
-        steps = _extract_known_good_commands(orchestration_state)
-        if steps:
-            wm["known_good_commands"].append(
-                {"task_id": task_id, "task_title": task_title, "steps": steps}
-            )
+            wm = _load(openclaw_dir, str(project_dir))
+            wm["last_updated"] = datetime.now(UTC).isoformat()
+            wm["project_dir"] = str(project_dir)
 
-        # active_constraints — deduplicate against existing
-        existing_constraints = {
-            c.get("constraint", "") if isinstance(c, dict) else str(c)
-            for c in (wm.get("active_constraints") or [])
-        }
-        for reason in _extract_active_constraints(orchestration_state):
-            if reason not in existing_constraints:
-                existing_constraints.add(reason)
-                wm["active_constraints"].append(
+            # files_by_task
+            changed = list(getattr(orchestration_state, "changed_files", None) or [])
+            wm["files_by_task"][task_key] = {
+                "task_id": task_id,
+                "task_title": task_title,
+                "added": changed,
+                "modified": [],
+                "deleted": [],
+            }
+
+            # known_good_commands
+            steps = _extract_known_good_commands(orchestration_state)
+            if steps:
+                wm["known_good_commands"].append(
+                    {"task_id": task_id, "task_title": task_title, "steps": steps}
+                )
+
+            # active_constraints — deduplicate against existing
+            existing_constraints = {
+                c.get("constraint", "") if isinstance(c, dict) else str(c)
+                for c in (wm.get("active_constraints") or [])
+            }
+            for reason in _extract_active_constraints(orchestration_state):
+                if reason not in existing_constraints:
+                    existing_constraints.add(reason)
+                    wm["active_constraints"].append(
+                        {
+                            "task_id": task_id,
+                            "constraint": reason,
+                            "source": "validation_rejection",
+                        }
+                    )
+
+            # human_guidance — two paths gated by HUMAN_GUIDANCE_TABLE_ENABLED + P1f activation
+            # P1f: resolve project_id for activation check
+            _project_id: Optional[int] = None
+            if db is not None and session_id is not None:
+                try:
+                    _project_id, _ = _resolve_session_context(db, session_id)
+                except Exception:
+                    pass
+
+            if db is not None and settings.HUMAN_GUIDANCE_TABLE_ENABLED:
+                # P1f: check per-project/session activation (backward compat: no row = True)
+                _use_table = True
+                try:
+                    from app.services.human_guidance_activation_service import (
+                        check_activation_flag as _check_act,
+                    )
+
+                    _numeric_sid: Optional[int] = None
+                    try:
+                        _numeric_sid = (
+                            int(session_id) if session_id is not None else None
+                        )
+                    except (TypeError, ValueError):
+                        pass
+                    _use_table = _check_act(
+                        db,
+                        project_id=_project_id,
+                        session_id=_numeric_sid,
+                        flag="table_enabled",
+                    )
+                except Exception:
+                    pass
+
+                logger.info(
+                    "[HG_ACTIVATION] project=%s session=%s table_path=%s",
+                    _project_id,
+                    session_id,
+                    _use_table,
+                )
+                logger.info(
+                    "[HG_RUNTIME_PATH] wm_persistence=on wm_table=%s",
+                    _use_table,
+                )
+
+                if _use_table:
+                    # HG-P1b: table-backed path
+                    _wm_write_table_guidance(
+                        db=db,
+                        wm=wm,
+                        session_id=session_id,
+                        task_id=task_id,
+                        logger=logger,
+                        backend=guidance_backend,
+                        model_family=guidance_model_family,
+                        purpose="execution",
+                    )
+                else:
+                    _wm_write_legacy_guidance(db, wm, session_id, task_id)
+            elif db is not None:
+                # Global flag off: legacy LogEntry path
+                _wm_write_legacy_guidance(db, wm, session_id, task_id)
+            elif "human_guidance" not in wm:
+                wm["human_guidance"] = []
+
+            # implementation_strategy
+            if summary:
+                wm["implementation_strategy"].append(
                     {
                         "task_id": task_id,
-                        "constraint": reason,
-                        "source": "validation_rejection",
+                        "task_title": task_title,
+                        "summary": summary[:_SUMMARY_STORAGE_LIMIT],
                     }
                 )
 
-        # human_guidance — two paths gated by HUMAN_GUIDANCE_TABLE_ENABLED + P1f activation
-        session_id = getattr(orchestration_state, "session_id", None)
-
-        # P1f: resolve project_id for activation check
-        _project_id: Optional[int] = None
-        if db is not None and session_id is not None:
-            try:
-                _project_id, _ = _resolve_session_context(db, session_id)
-            except Exception:
-                pass
-
-        if db is not None and settings.HUMAN_GUIDANCE_TABLE_ENABLED:
-            # P1f: check per-project/session activation (backward compat: no row = True)
-            _use_table = True
-            try:
-                from app.services.human_guidance_activation_service import (
-                    check_activation_flag as _check_act,
-                )
-
-                _numeric_sid: Optional[int] = None
+            path = openclaw_dir / _FILENAME
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(wm, fh, indent=2)
+            logger.info("[WORKING_MEMORY] Written to %s", path)
+        finally:
+            if lock_fh is not None:
                 try:
-                    _numeric_sid = int(session_id) if session_id is not None else None
-                except (TypeError, ValueError):
+                    if _fcntl is not None:
+                        _fcntl.flock(lock_fh.fileno(), _fcntl.LOCK_UN)
+                    lock_fh.close()
+                except Exception:
                     pass
-                _use_table = _check_act(
-                    db,
-                    project_id=_project_id,
-                    session_id=_numeric_sid,
-                    flag="table_enabled",
-                )
-            except Exception:
-                pass
-
-            logger.info(
-                "[HG_ACTIVATION] project=%s session=%s table_path=%s",
-                _project_id,
-                session_id,
-                _use_table,
-            )
-            logger.info(
-                "[HG_RUNTIME_PATH] wm_persistence=on wm_table=%s",
-                _use_table,
-            )
-
-            if _use_table:
-                # HG-P1b: table-backed path
-                _wm_write_table_guidance(
-                    db=db,
-                    wm=wm,
-                    session_id=session_id,
-                    task_id=task_id,
-                    logger=logger,
-                    backend=guidance_backend,
-                    model_family=guidance_model_family,
-                    purpose="execution",
-                )
-            else:
-                _wm_write_legacy_guidance(db, wm, session_id, task_id)
-        elif db is not None:
-            # Global flag off: legacy LogEntry path
-            _wm_write_legacy_guidance(db, wm, session_id, task_id)
-        elif "human_guidance" not in wm:
-            wm["human_guidance"] = []
-
-        # implementation_strategy
-        if summary:
-            wm["implementation_strategy"].append(
-                {
-                    "task_id": task_id,
-                    "task_title": task_title,
-                    "summary": summary[:_SUMMARY_STORAGE_LIMIT],
-                }
-            )
-
-        path = openclaw_dir / _FILENAME
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(wm, fh, indent=2)
-        logger.info("[WORKING_MEMORY] Written to %s", path)
     except Exception as exc:
         logger.warning("[WORKING_MEMORY] Failed to write working memory: %s", exc)
 

@@ -1305,6 +1305,7 @@ class _PlanningRetryState:
         self.persisted_failures = persisted_failures
         self.minimal_prompt_used = False
         self.repair_prompt_used = False
+        self.hg_repair_prompt_used = False
         self.post_repair_blocking_second_repair_used = False
         self.post_repair_stale_replace_second_repair_used = False
         self.post_repair_validation_second_repair_used = False

@@ -1784,6 +1784,32 @@ def _guidance_project_or_404(db: Session, project_id: int) -> Project:
     return project
 
 
+def _guidance_or_404_with_project_ownership(db: Session, guidance_id: int):
+    """Load a HumanGuidance row and verify its project is non-deleted.
+
+    Raises 404 when:
+    - the guidance row does not exist
+    - entry.project_id refers to a project that is deleted or missing
+
+    Mobile auth is server-wide, but this enforces that callers cannot mutate
+    guidance belonging to orphaned or soft-deleted projects.
+    """
+    from app.models import HumanGuidance
+
+    entry = db.query(HumanGuidance).filter(HumanGuidance.id == guidance_id).first()
+    if not entry:
+        raise HTTPException(status_code=404, detail="guidance_not_found")
+    if entry.project_id is not None:
+        project = (
+            db.query(Project)
+            .filter(Project.id == entry.project_id, Project.deleted_at.is_(None))
+            .first()
+        )
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+    return entry
+
+
 @router.get("/mobile/projects/{project_id}/guidance/readiness")
 def mobile_get_guidance_readiness(
     project_id: int,
@@ -1858,6 +1884,7 @@ def mobile_patch_guidance(
     db: Session = Depends(get_db),
 ):
     """Update a guidance entry — mobile gateway auth."""
+    _guidance_or_404_with_project_ownership(db, guidance_id)
     provided = body.model_fields_set
     kwargs: dict = {}
     if "message" in provided:
@@ -1882,6 +1909,7 @@ def mobile_archive_guidance(
     db: Session = Depends(get_db),
 ):
     """Archive (soft-delete) a guidance entry — mobile gateway auth."""
+    _guidance_or_404_with_project_ownership(db, guidance_id)
     archived = _archive_guidance(db, guidance_id)
     return {
         "id": archived.id,

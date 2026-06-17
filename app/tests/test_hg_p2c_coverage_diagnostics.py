@@ -48,6 +48,7 @@ def _make_ctx(plan_steps: list, project_id: int = 1) -> Any:
 def _make_retry_state(repair_prompt_used: bool = False) -> Any:
     rs = MagicMock()
     rs.repair_prompt_used = repair_prompt_used
+    rs.hg_repair_prompt_used = False  # HG has its own slot (hardening phase 1)
     return rs
 
 
@@ -87,7 +88,7 @@ def test_path_a_p2b_runs_on_nonempty_plan_and_finds_violation():
         "status": "repaired"
     }, "repair result must be returned when violation found"
     repair_fn.assert_called_once()
-    assert retry_state.repair_prompt_used is True
+    assert retry_state.hg_repair_prompt_used is True
 
 
 def test_path_a_p2b_runs_on_nonempty_plan_and_finds_compliant():

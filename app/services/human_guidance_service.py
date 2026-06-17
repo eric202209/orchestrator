@@ -461,18 +461,27 @@ def collect_active_guidance(
         and _purpose_matches(r, purpose)
     ]
 
+    # Fetch usage counts for all matching rows in a single grouped query.
+    usage_counts: Dict[int, int] = {}
+    if rows:
+        row_ids = [r.id for r in rows]
+        try:
+            usage_rows = (
+                db.query(
+                    HumanGuidanceUsage.guidance_id,
+                    func.count(HumanGuidanceUsage.id).label("cnt"),
+                )
+                .filter(HumanGuidanceUsage.guidance_id.in_(row_ids))
+                .group_by(HumanGuidanceUsage.guidance_id)
+                .all()
+            )
+            usage_counts = {gid: cnt for gid, cnt in usage_rows}
+        except Exception:
+            usage_counts = {}
+
     out: List[Dict[str, Any]] = []
     for row in rows:
-        usage_count = 0
-        try:
-            usage_count = (
-                db.query(func.count(HumanGuidanceUsage.id))
-                .filter(HumanGuidanceUsage.guidance_id == row.id)
-                .scalar()
-                or 0
-            )
-        except Exception:
-            usage_count = 0
+        usage_count = usage_counts.get(row.id, 0)
         scope_val = row.scope.value if hasattr(row.scope, "value") else str(row.scope)
         status_val = (
             row.status.value if hasattr(row.status, "value") else str(row.status)

@@ -180,8 +180,6 @@ def render_active_guidance_for_repair(
 
         if not settings.HUMAN_GUIDANCE_TABLE_ENABLED:
             return ""
-        if not settings.HUMAN_GUIDANCE_CONFLICT_DETECTION_ENABLED:
-            return ""
 
         try:
             from app.services.human_guidance_activation_service import (
@@ -192,7 +190,7 @@ def render_active_guidance_for_repair(
                 db,
                 project_id=project_id,
                 session_id=session_id,
-                flag="conflict_detection_enabled",
+                flag="injection_enabled",
             ):
                 return ""
         except Exception:

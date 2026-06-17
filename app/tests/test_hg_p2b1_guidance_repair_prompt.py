@@ -57,7 +57,11 @@ _STALE_REASON = [
 
 
 def _render(entries, *, table_enabled=True, conflict_enabled=True, activation=True):
-    """Helper: call render_active_guidance_for_repair with mocked dependencies."""
+    """Helper: call render_active_guidance_for_repair with mocked dependencies.
+
+    conflict_enabled is kept as a parameter for backward-compat call-sites but
+    is no longer checked by render_active_guidance_for_repair (fix: wrong gate).
+    """
     settings_mock = MagicMock()
     settings_mock.HUMAN_GUIDANCE_TABLE_ENABLED = table_enabled
     settings_mock.HUMAN_GUIDANCE_CONFLICT_DETECTION_ENABLED = conflict_enabled
@@ -87,11 +91,14 @@ class TestRenderActiveGuidanceForRepair:
         )
         assert result == ""
 
-    def test_returns_empty_when_conflict_detection_disabled(self):
+    def test_renders_when_conflict_detection_disabled(self):
+        # conflict_detection flag no longer gates repair guidance — table flag does.
         result = _render(
-            [{"message": "Do not use mutable defaults."}], conflict_enabled=False
+            [{"message": "Do not use mutable defaults."}],
+            table_enabled=True,
+            conflict_enabled=False,
         )
-        assert result == ""
+        assert "Do not use mutable defaults." in result
 
     def test_returns_empty_when_no_entries(self):
         result = _render([])

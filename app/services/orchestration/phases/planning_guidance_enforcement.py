@@ -118,7 +118,7 @@ def run_guidance_plan_enforcement(
         **_guidance_target_kwargs(ctx),
     )
 
-    if not retry_state.repair_prompt_used:
+    if not retry_state.hg_repair_prompt_used:
         if not violations:
             return None
         ctx.logger.warning(
@@ -152,7 +152,7 @@ def run_guidance_plan_enforcement(
             rejection_reasons=violations,
             prompt_profile=prompt_profile,
         )
-        retry_state.repair_prompt_used = True
+        retry_state.hg_repair_prompt_used = True
         retry_state.consecutive_failures += 1
         return planning_result
     else:
