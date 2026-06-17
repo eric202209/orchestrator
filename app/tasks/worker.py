@@ -1814,6 +1814,23 @@ def execute_orchestration_task(
                     "phase": "planning",
                 },
             ) as planning_phase_observation:
+                # HG-P2c: emit backend/HG coverage diagnostic before planning.
+                try:
+                    from app.services.orchestration.phases.planning_guidance_enforcement import (
+                        emit_hg_p2b_worker_coverage as _emit_hg_coverage,
+                    )
+                    from app.config import settings as _cfg
+
+                    _emit_hg_coverage(
+                        execution_backend=_resolved_execution_backend,
+                        resolved_planning_backend=resolved_planning_backend,
+                        use_configured_planning_runtime=use_configured_planning_runtime,
+                        hg_table_enabled=_cfg.HUMAN_GUIDANCE_TABLE_ENABLED,
+                        logger=logger,
+                    )
+                except Exception:
+                    pass  # diagnostic only — never block planning
+
                 original_runtime_service = run_ctx.runtime_service
                 if planning_runtime_service is not None:
                     run_ctx.runtime_service = planning_runtime_service
