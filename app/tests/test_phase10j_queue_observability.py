@@ -298,6 +298,33 @@ class TestOpsQueueLatencyEndpoint:
         # Only the one with latency should be counted
         assert body["executions_with_latency"] == 1
 
+    def test_null_rows_excluded_from_avg_and_max(
+        self,
+        authenticated_client: TestClient,
+        db_session: Session,
+        session: SessionModel,
+        task: Task,
+    ):
+        # One execution with latency, one with NULL — avg and max must reflect only
+        # the non-NULL row; the NULL row must not skew either calculation.
+        _make_execution(db_session, session, task, queue_latency_seconds=6.0)
+        ex2 = TaskExecution(
+            session_id=session.id,
+            task_id=task.id,
+            attempt_number=2,
+            status=TaskStatus.DONE,
+            queue_latency_seconds=None,
+        )
+        db_session.add(ex2)
+        db_session.commit()
+
+        resp = authenticated_client.get("/api/v1/ops/queue-latency")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["executions_with_latency"] == 1
+        assert abs(body["avg_queue_latency_seconds"] - 6.0) < 0.01
+        assert body["max_queue_latency_seconds"] == 6.0
+
     def test_window_days_param_accepted(self, authenticated_client: TestClient):
         resp = authenticated_client.get("/api/v1/ops/queue-latency?days=1")
         assert resp.status_code == 200
@@ -307,3 +334,145 @@ class TestOpsQueueLatencyEndpoint:
     def test_response_includes_computed_at(self, authenticated_client: TestClient):
         resp = authenticated_client.get("/api/v1/ops/queue-latency")
         assert "computed_at" in resp.json()
+
+
+# ── concurrent-session regression ─────────────────────────────────────────────
+
+
+class TestConcurrentSessionQueueLatency:
+    """Regression: queue latency aggregates must be correct when multiple
+    sessions contribute executions concurrently.  All non-NULL rows from all
+    sessions must be counted; NULL rows must never skew the result."""
+
+    def test_concurrent_sessions_aggregate_correctly(
+        self,
+        authenticated_client: TestClient,
+        db_session: Session,
+        project: Project,
+    ):
+        # Two independent sessions simulating concurrent execution
+        session_a = SessionModel(
+            project_id=project.id,
+            name="concurrent-a",
+            status="running",
+            is_active=True,
+            instance_id="concurrent-uuid-a",
+        )
+        session_b = SessionModel(
+            project_id=project.id,
+            name="concurrent-b",
+            status="running",
+            is_active=True,
+            instance_id="concurrent-uuid-b",
+        )
+        db_session.add_all([session_a, session_b])
+        db_session.commit()
+        db_session.refresh(session_a)
+        db_session.refresh(session_b)
+
+        task_a = Task(
+            project_id=project.id,
+            title="concurrent-task-a",
+            status=TaskStatus.RUNNING,
+        )
+        task_b = Task(
+            project_id=project.id,
+            title="concurrent-task-b",
+            status=TaskStatus.RUNNING,
+        )
+        db_session.add_all([task_a, task_b])
+        db_session.commit()
+        db_session.refresh(task_a)
+        db_session.refresh(task_b)
+
+        # Session A: two executions with latency (distinct attempt numbers)
+        ex_a1 = TaskExecution(
+            session_id=session_a.id,
+            task_id=task_a.id,
+            attempt_number=1,
+            status=TaskStatus.DONE,
+            queue_latency_seconds=4.0,
+        )
+        ex_a2 = TaskExecution(
+            session_id=session_a.id,
+            task_id=task_a.id,
+            attempt_number=2,
+            status=TaskStatus.DONE,
+            queue_latency_seconds=6.0,
+        )
+        db_session.add_all([ex_a1, ex_a2])
+        db_session.commit()
+        # Session B: one execution with latency, one NULL
+        ex_b1 = TaskExecution(
+            session_id=session_b.id,
+            task_id=task_b.id,
+            attempt_number=1,
+            status=TaskStatus.DONE,
+            queue_latency_seconds=2.0,
+        )
+        ex_null = TaskExecution(
+            session_id=session_b.id,
+            task_id=task_b.id,
+            attempt_number=2,
+            status=TaskStatus.RUNNING,
+            queue_latency_seconds=None,
+        )
+        db_session.add_all([ex_b1, ex_null])
+        db_session.add(ex_null)
+        db_session.commit()
+
+        resp = authenticated_client.get("/api/v1/ops/queue-latency")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        # 3 non-NULL rows across two sessions
+        assert body["executions_with_latency"] == 3
+        # avg(4, 6, 2) = 4.0
+        assert abs(body["avg_queue_latency_seconds"] - 4.0) < 0.01
+        # max = 6.0
+        assert body["max_queue_latency_seconds"] == 6.0
+
+    def test_null_only_session_returns_zero_count(
+        self,
+        authenticated_client: TestClient,
+        db_session: Session,
+        project: Project,
+    ):
+        """When every execution has NULL latency, count must be 0 and aggregates None."""
+        session_c = SessionModel(
+            project_id=project.id,
+            name="null-only-session",
+            status="running",
+            is_active=True,
+            instance_id="concurrent-uuid-c",
+        )
+        db_session.add(session_c)
+        db_session.commit()
+        db_session.refresh(session_c)
+
+        task_c = Task(
+            project_id=project.id,
+            title="null-only-task",
+            status=TaskStatus.RUNNING,
+        )
+        db_session.add(task_c)
+        db_session.commit()
+        db_session.refresh(task_c)
+
+        for attempt in range(1, 4):
+            ex = TaskExecution(
+                session_id=session_c.id,
+                task_id=task_c.id,
+                attempt_number=attempt,
+                status=TaskStatus.RUNNING,
+                queue_latency_seconds=None,
+            )
+            db_session.add(ex)
+        db_session.commit()
+
+        resp = authenticated_client.get("/api/v1/ops/queue-latency")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["executions_with_latency"] == 0
+        assert body["avg_queue_latency_seconds"] is None
+        assert body["max_queue_latency_seconds"] is None

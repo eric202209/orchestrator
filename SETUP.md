@@ -251,6 +251,115 @@ so ingest targets the active container runtime rather than a host-side database:
 ./wsl-start.sh --ingest-knowledge            # llama.cpp Windows device
 ```
 
+## 10J Operational Observability
+
+Three endpoints were added in Phase 10J to make pilot evidence queryable without SQL.
+All require admin authentication (`Authorization: Bearer $ADMIN_TOKEN`).
+
+### `GET /api/v1/ops/audit-events`
+
+Returns structured `LogEntry` rows — permission events, token usage, symbol verification
+failures, and other bracketed log entries.
+
+```bash
+# Latest 20 events across all sessions
+curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "http://localhost:8080/api/v1/ops/audit-events?limit=20&order=desc" \
+  | python3 -m json.tool
+
+# Permission events for a specific session
+curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "http://localhost:8080/api/v1/ops/audit-events?event_type=PERMISSION_APPROVED&session_id=42"
+
+# Symbol verification failures
+curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "http://localhost:8080/api/v1/ops/audit-events?event_type=COMPLETION_SYMBOL_VERIFICATION_FAILED"
+
+# All events for a project scoped by project_id
+curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "http://localhost:8080/api/v1/ops/audit-events?project_id=1&order=asc&limit=500"
+```
+
+Response shape:
+```json
+{
+  "total": 12,
+  "limit": 20,
+  "offset": 0,
+  "items": [
+    {
+      "id": 88,
+      "event_type": "PERMISSION_APPROVED",
+      "message": "[PERMISSION_APPROVED]",
+      "level": "INFO",
+      "session_id": 42,
+      "task_id": 7,
+      "session_instance_id": "uuid-string",
+      "created_at": "2026-06-18T14:47:00+00:00",
+      "metadata": { "permission_id": 3, "action": "approved" }
+    }
+  ]
+}
+```
+
+Supported `event_type` values: `PERMISSION_APPROVED`, `PERMISSION_DENIED`,
+`TOKEN_USAGE_RECORDED`, `COMPLETION_SYMBOL_VERIFICATION_FAILED`, `OPERATOR_GUIDANCE`,
+`CHECKPOINT`, `SECURITY`, `ORCHESTRATION`.
+
+Query params: `event_type`, `session_id`, `task_id`, `project_id`, `level` (INFO/WARN/ERROR),
+`since` (ISO 8601), `until` (ISO 8601), `limit` (1–500), `offset`, `order` (asc/desc).
+
+---
+
+### `GET /api/v1/ops/queue-latency`
+
+Returns aggregate queue latency statistics from `TaskExecution.queue_latency_seconds`.
+NULL rows (pre-10J executions or `local_openclaw` without dispatch) are excluded from
+all calculations.
+
+```bash
+curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "http://localhost:8080/api/v1/ops/queue-latency?days=7" \
+  | python3 -m json.tool
+```
+
+Response shape:
+```json
+{
+  "computed_at": "2026-06-18T15:00:00+00:00",
+  "window_days": 7,
+  "executions_with_latency": 5,
+  "avg_queue_latency_seconds": 1.842,
+  "max_queue_latency_seconds": 8.400
+}
+```
+
+`avg_queue_latency_seconds` and `max_queue_latency_seconds` are `null` when no executions
+have latency data in the window.
+
+---
+
+### Token Fields on `TaskExecution`
+
+Phase 10J-c added three nullable columns to every `TaskExecution` row:
+
+| Column | Type | Description |
+|---|---|---|
+| `tokens_in` | Integer (nullable) | Input tokens reported by the provider |
+| `tokens_out` | Integer (nullable) | Output tokens reported by the provider |
+| `token_source` | String (nullable) | Source label, e.g. `openai_usage` |
+
+These are populated when the backend reports token usage (OpenAI Responses API and
+compatible endpoints). `local_openclaw` and `direct_ollama` may not report tokens; rows
+for those executions will have NULL token fields.
+
+A `[TOKEN_USAGE_RECORDED]` log entry is written when token data is captured. Query via
+`GET /ops/audit-events?event_type=TOKEN_USAGE_RECORDED` to list all executions with token
+data; the `metadata` field on each row contains `tokens_in`, `tokens_out`, and
+`token_source`.
+
+---
+
 ## Evidence Capture After a Run
 
 Use these commands from the host (outside the Docker container), pointing at the

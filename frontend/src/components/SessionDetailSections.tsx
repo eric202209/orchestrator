@@ -1879,6 +1879,7 @@ interface SessionTasksPanelProps {
   onExecuteTask?: (task: Task) => void;
   session: Session;
   tasks: Task[];
+  dispatchWatchdog?: SessionDispatchWatchdogResponse | null;
 }
 
 export function SessionTasksPanel({
@@ -1888,7 +1889,14 @@ export function SessionTasksPanel({
   onExecuteTask,
   session,
   tasks,
+  dispatchWatchdog,
 }: SessionTasksPanelProps) {
+  const latencyByTaskId: Record<number, number> = {};
+  (dispatchWatchdog?.tasks ?? []).forEach((wt) => {
+    if (wt.queue_latency_seconds != null && Number.isFinite(wt.queue_latency_seconds)) {
+      latencyByTaskId[wt.task_id] = wt.queue_latency_seconds;
+    }
+  });
   return (
     <div className="space-y-4">
       <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
@@ -1981,6 +1989,11 @@ export function SessionTasksPanel({
               {task.completed_at && (
                 <span className="text-emerald-400">
                   Completed: {formatDateTime(task.completed_at)}
+                </span>
+              )}
+              {latencyByTaskId[task.id] != null && (
+                <span className="rounded border border-sky-500/20 bg-sky-500/10 px-1.5 py-0.5 text-[11px] text-sky-300">
+                  Q: {latencyByTaskId[task.id].toFixed(1)}s
                 </span>
               )}
             </div>

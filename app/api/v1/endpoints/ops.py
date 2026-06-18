@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 import json
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -540,12 +540,22 @@ def ops_audit_events(
     if level is not None:
         query = query.filter(LogEntry.level == level.upper())
 
-    since_dt = _parse_audit_datetime(since)
-    if since_dt is not None:
+    if since is not None:
+        since_dt = _parse_audit_datetime(since)
+        if since_dt is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Invalid 'since' datetime format. Use ISO 8601, e.g. '2026-01-01T00:00:00Z'.",
+            )
         query = query.filter(LogEntry.created_at >= since_dt)
 
-    until_dt = _parse_audit_datetime(until)
-    if until_dt is not None:
+    if until is not None:
+        until_dt = _parse_audit_datetime(until)
+        if until_dt is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Invalid 'until' datetime format. Use ISO 8601, e.g. '2026-01-01T00:00:00Z'.",
+            )
         query = query.filter(LogEntry.created_at <= until_dt)
 
     total = query.count()

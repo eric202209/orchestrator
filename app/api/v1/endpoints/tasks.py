@@ -1407,6 +1407,69 @@ def accept_task_workspace(
                 detail="Change set task_execution_id does not match request",
             )
 
+    # File deletion guard — require explicit PermissionRequest approval when the
+    # changeset contains deleted files before allowing promotion to proceed.
+    _changeset_for_guard = accepted_change_set or (
+        latest_change_set if _change_set_has_changes(latest_change_set) else None
+    )
+    _deleted_files: list = (_changeset_for_guard or {}).get("deleted_files") or []
+    if _deleted_files:
+        from app.models import PermissionRequest as _PermReq
+        from app.services.permission_service import PermissionService as _PermSvc
+        from fastapi.responses import JSONResponse as _JSONResponse
+
+        _existing_approval = (
+            db.query(_PermReq)
+            .filter(
+                _PermReq.task_id == task.id,
+                _PermReq.operation_type == "delete_file",
+                _PermReq.status == "approved",
+            )
+            .first()
+        )
+        if not _existing_approval:
+            _perm_req = _PermSvc(db).create_permission_request(
+                project_id=task.project_id,
+                task_id=task.id,
+                operation_type="delete_file",
+                target_path=", ".join(_deleted_files[:5]),
+                description=(
+                    f"Promotion blocked: {len(_deleted_files)} deleted file(s) require "
+                    "operator approval before workspace is accepted into baseline."
+                ),
+            )
+            db.add(
+                LogEntry(
+                    task_id=task.id,
+                    level="INFO",
+                    message=(
+                        f"[PERMISSION_REQUIRED] task={task.id} "
+                        f"delete_count={len(_deleted_files)} "
+                        f"permission_id={_perm_req.id}"
+                    ),
+                    log_metadata=json.dumps(
+                        {
+                            "deleted_files": _deleted_files,
+                            "permission_request_id": _perm_req.id,
+                        }
+                    ),
+                )
+            )
+            db.commit()
+            return _JSONResponse(
+                status_code=202,
+                content={
+                    "status": "pending_approval",
+                    "permission_request_id": _perm_req.id,
+                    "message": (
+                        f"Promotion blocked: {len(_deleted_files)} file deletion(s) "
+                        "require operator approval. Approve the permission request, "
+                        "then retry promotion."
+                    ),
+                    "deleted_files": _deleted_files[:10],
+                },
+            )
+
     task.workspace_status = "promoted"
     task.promoted_at = datetime.now(timezone.utc)
     task.promotion_note = (payload.note or "").strip() or None

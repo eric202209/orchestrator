@@ -2098,3 +2098,20 @@ def _count_prior_failed_planning_executions(ctx: OrchestrationRunContext) -> int
         return count if isinstance(count, int) else 0
     except Exception:
         return 0
+
+
+def build_planning_context(
+    base_context: str,
+    *,
+    extra_context: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Assemble a planning context dict from a base description and optional extras.
+
+    ``extra_context`` defaults to None rather than {} to avoid shared mutable
+    state across calls.
+    """
+    if extra_context is None:
+        extra_context = {}
+    result: Dict[str, Any] = {"base": base_context}
+    result.update(extra_context)
+    return result

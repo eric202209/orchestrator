@@ -2613,6 +2613,7 @@ export default function SessionDetail() {
             onExecuteTask={handleExecuteTask}
             session={session}
             tasks={tasks}
+            dispatchWatchdog={dispatchWatchdog}
           />
         )}
 

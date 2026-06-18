@@ -289,13 +289,21 @@ class TestDatetimeFilters:
         assert body["total"] == 1
         assert body["items"][0]["message"] == "[PERMISSION_APPROVED]"
 
-    def test_invalid_since_ignored_gracefully(
+    def test_invalid_since_returns_422(
         self, authenticated_client: TestClient, db_session: Session
     ):
         _add_log(db_session, "[PERMISSION_APPROVED]")
         resp = authenticated_client.get(URL, params={"since": "not-a-date"})
-        # Should still succeed — invalid since is silently ignored
-        assert resp.status_code == 200
+        assert resp.status_code == 422
+        assert "since" in resp.json()["detail"].lower()
+
+    def test_invalid_until_returns_422(
+        self, authenticated_client: TestClient, db_session: Session
+    ):
+        _add_log(db_session, "[PERMISSION_APPROVED]")
+        resp = authenticated_client.get(URL, params={"until": "garbage-value"})
+        assert resp.status_code == 422
+        assert "until" in resp.json()["detail"].lower()
 
 
 # ── pagination ─────────────────────────────────────────────────────────────────
