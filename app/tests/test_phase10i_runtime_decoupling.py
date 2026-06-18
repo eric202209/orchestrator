@@ -946,6 +946,9 @@ def test_runtime_backend_result_to_dict_is_contract_shape():
         "duration_seconds": 1.25,
         "failure_category": "backend_capacity_limit",
         "terminal_reason": "retry_later",
+        "tokens_in": None,
+        "tokens_out": None,
+        "token_source": None,
     }
 
 
