@@ -452,6 +452,82 @@ def test_wait_for_scoreable_event_journal_accepts_existing_task_completed(tmp_pa
     assert result["observed_terminal_event"] == "task_completed"
 
 
+def test_timeout_cancelled_after_terminal_state(tmp_path):
+    event_dir = tmp_path / ".agent/events"
+    event_dir.mkdir(parents=True)
+    event_path = event_dir / "session_11_task_21.jsonl"
+    event_path.write_text(
+        '{"event_type":"task_completed","details":{"steps_completed":2}}\n',
+        encoding="utf-8",
+    )
+
+    result = runner._wait_for_scoreable_event_journal(
+        workspace=tmp_path,
+        session_id=11,
+        task_id=21,
+        session_status="completed",
+        timeout_seconds=0,
+        stable_seconds=999,
+        poll_seconds=0,
+    )
+
+    assert result["observed_terminal_event"] == "task_completed"
+    assert result["stabilized"] is True
+
+
+def test_terminal_state_precedes_watchdog_for_paused_failure(tmp_path):
+    result = runner._wait_for_scoreable_event_journal(
+        workspace=tmp_path,
+        session_id=12,
+        task_id=22,
+        session_status="paused",
+        failure_category="planning_repair_missing_source_materialization",
+        timeout_seconds=999,
+        stable_seconds=999,
+        poll_seconds=0,
+    )
+
+    assert (
+        result["paused_failure_category"]
+        == "planning_repair_missing_source_materialization"
+    )
+    assert result["stabilized"] is True
+    assert result["required_terminal_event"] is None
+
+
+def test_success_then_timeout_impossible_for_completed_session(tmp_path, monkeypatch):
+    event_dir = tmp_path / ".agent/events"
+    event_dir.mkdir(parents=True)
+    event_path = event_dir / "session_13_task_23.jsonl"
+    event_path.write_text(
+        '{"event_type":"task_completed","details":{"steps_completed":1}}\n',
+        encoding="utf-8",
+    )
+
+    observed = []
+
+    original_event_types = runner._event_types
+
+    def wrapped_event_types(path):
+        observed.append(path)
+        return original_event_types(path)
+
+    monkeypatch.setattr(runner, "_event_types", wrapped_event_types)
+
+    result = runner._wait_for_scoreable_event_journal(
+        workspace=tmp_path,
+        session_id=13,
+        task_id=23,
+        session_status="completed",
+        timeout_seconds=0,
+        stable_seconds=999,
+        poll_seconds=0,
+    )
+
+    assert result["observed_terminal_event"] == "task_completed"
+    assert observed
+
+
 def test_run_case_refuses_to_score_completed_session_without_terminal_event(
     monkeypatch, tmp_path
 ):
