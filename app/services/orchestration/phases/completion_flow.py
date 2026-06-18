@@ -1099,6 +1099,44 @@ def finalize_successful_task(
     )
     db.commit()
 
+    # 10K-c: Emit LogEntry when symbol verification failed
+    _sym_check = completion_validation.details.get("symbol_verification") or {}
+    if (
+        _sym_check.get("applicable")
+        and not _sym_check.get("passed")
+        and _sym_check.get("missing")
+    ):
+        try:
+            import json as _json
+
+            from app.models import LogEntry
+
+            db.add(
+                LogEntry(
+                    session_id=session_id,
+                    task_id=task_id,
+                    level="WARNING",
+                    message=(
+                        f"[COMPLETION_SYMBOL_VERIFICATION_FAILED]"
+                        f" task={task_id}"
+                        f" missing_symbols={_sym_check['missing'][:8]}"
+                    ),
+                    log_metadata=_json.dumps(
+                        {
+                            "missing_symbols": _sym_check["missing"][:8],
+                            "required_symbols": _sym_check.get("required", [])[:8],
+                            "task_id": task_id,
+                            "reason": "requested_symbol_missing_from_workspace",
+                        }
+                    ),
+                )
+            )
+            db.commit()
+        except Exception as _exc:
+            logger.warning(
+                "[SYMBOL_VERIFICATION] LogEntry write failed (non-fatal): %s", _exc
+            )
+
     if completion_validation.repairable:
         repair_result = _attempt_completion_repair(
             ctx=ctx,

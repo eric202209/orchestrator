@@ -4660,6 +4660,30 @@ class ValidatorService:
                         "Workspace contains mixed Python and Node/JS implementation artifacts for one task"
                     )
 
+        # 10K-c: Requested symbol completion verification (non-fatal if check crashes)
+        try:
+            from app.services.orchestration.validation.completion_symbol_check import (
+                check_completion_symbol_presence,
+            )
+
+            _full_task_text = " ".join(
+                str(v or "") for v in (task_prompt, title, description)
+            )
+            symbol_check = check_completion_symbol_presence(
+                task_description=_full_task_text,
+                reported_changed_files=reported_changed_files,
+                project_dir=project_dir,
+                execution_profile=execution_profile,
+            )
+            details["symbol_verification"] = symbol_check
+            if symbol_check["applicable"] and not symbol_check["passed"]:
+                rejected.append(
+                    "requested_symbol_missing_from_workspace: "
+                    + ", ".join(symbol_check["missing"][:8])
+                )
+        except Exception:
+            pass
+
         failure_signature = cls.build_failure_signature(
             rejected + repairable + warnings
         )
