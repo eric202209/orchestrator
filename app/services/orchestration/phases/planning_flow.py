@@ -2589,17 +2589,3 @@ def __coerce_output_text(
     if isinstance(output_text, str):
         output_text = re.sub(r"^\s*```(?:json)?\s*|\s*```$", "", output_text.strip())
     return output_text
-
-
-def __build_planning_prompt(
-    *, prompt: str, orchestration_state: Any, execution_profile: str
-) -> str:
-    from app.services import PromptTemplates
-
-    return PromptTemplates.build_planning_prompt(
-        task_description=prompt,
-        project_context=orchestration_state.project_context,
-        workspace_root=str(orchestration_state.workspace_root),
-        project_dir=str(orchestration_state.project_dir),
-        execution_profile=execution_profile,
-    )
