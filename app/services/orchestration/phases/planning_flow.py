@@ -82,8 +82,6 @@ from app.services.orchestration.phases.planning_task1_bootstrap import (
     task1_bootstrap_contract_passed as _task1_bootstrap_contract_passed,
     task1_plan_failed_only_brittle_command_shape as _task1_plan_failed_only_brittle_command_shape,
 )
-
-
 from app.services.orchestration.phases.planning_guidance_enforcement import (
     collect_repair_guidance_block as _collect_repair_guidance,
     run_guidance_plan_enforcement as _run_guidance_plan_enforcement,
