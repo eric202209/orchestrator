@@ -785,6 +785,41 @@ def _latest_session_task_link(db: Session, session_id: int) -> SessionTask | Non
     )
 
 
+def _resolve_resume_task(
+    db: Session,
+    *,
+    session: SessionModel,
+    task_id: int | None,
+) -> Task | None:
+    if task_id is None:
+        return None
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        return None
+    if task.status == TaskStatus.DONE:
+        next_pending = TaskService(db).get_next_pending_task(session.project_id)
+        if next_pending and next_pending.id != task.id:
+            return next_pending
+    if task.status in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
+        next_pending = (
+            db.query(Task)
+            .filter(
+                Task.project_id == session.project_id,
+                Task.status == TaskStatus.PENDING,
+            )
+            .order_by(
+                Task.plan_position.asc().nullslast(),
+                Task.priority.desc(),
+                Task.created_at.asc().nullslast(),
+                Task.id.asc(),
+            )
+            .first()
+        )
+        if next_pending and next_pending.id != task.id:
+            return next_pending
+    return task
+
+
 def _maybe_resume_manual_session_work(
     db: Session,
     *,
@@ -1611,7 +1646,7 @@ async def resume_session_lifecycle(
                         )
                         break
 
-        task = db.query(Task).filter(Task.id == task_id).first() if task_id else None
+        task = _resolve_resume_task(db, session=session, task_id=task_id)
         if not task:
             raise HTTPException(
                 status_code=404, detail="No task found to resume from checkpoint"

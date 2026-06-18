@@ -64,6 +64,7 @@ from app.services import (
     get_session_execution_dag_payload as _get_session_execution_dag_payload,
     get_session_divergence_compare_payload as _get_session_divergence_compare_payload,
     get_session_dispatch_watchdog_payload as _get_session_dispatch_watchdog_payload,
+    get_session_reconciliation_audit_payload as _get_session_reconciliation_audit_payload,
     get_session_focus_mode_payload as _get_session_focus_mode_payload,
     get_session_mobile_interruptions_payload as _get_session_mobile_interruptions_payload,
     get_session_timeline_payload as _get_session_timeline_payload,
@@ -1648,6 +1649,17 @@ def get_session_dispatch_watchdog(
     if sync_alert:
         return _refresh_session_dispatch_watchdog_alert(db, session_id)
     return _get_session_dispatch_watchdog_payload(db, session_id)
+
+
+@router.get("/sessions/{session_id}/reconciliation-audit")
+def get_session_reconciliation_audit(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Explain why a session is paused, waiting, or stalled."""
+    _require_session_access(db, session_id, current_user)
+    return _get_session_reconciliation_audit_payload(db, session_id)
 
 
 @router.get("/sessions/{session_id}/prompts/{template_name}")

@@ -1968,6 +1968,30 @@ def _classify_planning_timeout_failure(
     return "planning_timeout"
 
 
+def classify_planning_failure_taxonomy(
+    *,
+    failure_type: str,
+    retry_state: _PlanningRetryState | None = None,
+    parse_success: bool | None = None,
+    repair_attempted: bool = False,
+    repair_prompt_used: bool = False,
+) -> str:
+    normalized = str(failure_type or "").strip().lower()
+    if normalized in {"planning_json_error", "planning_parse_error"}:
+        if repair_attempted and repair_prompt_used and parse_success is False:
+            return "PLAN_REPAIR_INVALID_JSON"
+        if repair_attempted and repair_prompt_used and parse_success is True:
+            return "PLAN_REPAIR_UNFAITHFUL"
+        if repair_attempted:
+            return "PLAN_VALIDATOR_REJECTED"
+        return "PLAN_FORMAT_INVALID"
+    if normalized in {"debug_parse_error"}:
+        return "PLAN_DEBUG_REPAIR_FAILED"
+    if retry_state and getattr(retry_state, "repair_prompt_used", False):
+        return "PLAN_REPAIR_TIMEOUT"
+    return "PLAN_VALIDATOR_REJECTED"
+
+
 def _finalize_planning_terminal_failure(
     *,
     ctx: OrchestrationRunContext,

@@ -16,6 +16,7 @@ from app.config import settings
 from app.models import (
     InterventionRequest,
     LogEntry,
+    PermissionRequest,
     Session as SessionModel,
     SessionTask,
     Task,
@@ -496,6 +497,127 @@ def get_session_dispatch_watchdog_payload(
         "failure_history_preview": sorted_failures[:5],
         "tasks": task_summaries,
         "stale_tasks": stale_tasks,
+    }
+
+
+def get_session_reconciliation_audit_payload(
+    db: Session,
+    session_id: int,
+) -> Dict[str, Any]:
+    session = get_inspectable_session_or_404(db, session_id)
+    active_task_executions = (
+        db.query(TaskExecution)
+        .filter(
+            TaskExecution.session_id == session_id,
+            TaskExecution.status == TaskStatus.RUNNING,
+        )
+        .order_by(TaskExecution.started_at.desc().nullslast(), TaskExecution.id.desc())
+        .all()
+    )
+    pending_tasks = (
+        db.query(Task)
+        .filter(
+            Task.project_id == session.project_id, Task.status == TaskStatus.PENDING
+        )
+        .order_by(Task.plan_position.asc().nullslast(), Task.id.asc())
+        .all()
+    )
+    intervention_requests = (
+        db.query(InterventionRequest)
+        .filter(
+            InterventionRequest.session_id == session_id,
+            InterventionRequest.status.in_(["pending", "awaiting_reply", "open"]),
+        )
+        .order_by(InterventionRequest.created_at.desc().nullslast())
+        .all()
+    )
+    permission_requests = (
+        db.query(PermissionRequest)
+        .filter(
+            PermissionRequest.session_id == session_id,
+            PermissionRequest.status.in_(["pending", "requested", "awaiting_approval"]),
+        )
+        .order_by(PermissionRequest.created_at.desc().nullslast())
+        .all()
+    )
+    reasons, category = _extract_stop_reasons(db, session)
+    explicit_reason = None
+    if session.status == "paused":
+        if intervention_requests:
+            explicit_reason = "waiting_intervention"
+        elif permission_requests:
+            explicit_reason = "waiting_permission"
+        elif active_task_executions:
+            explicit_reason = "waiting_operator"
+        elif pending_tasks:
+            explicit_reason = (
+                "blocked_dependency" if category != "operator_paused" else None
+            )
+
+    scheduler_bug = bool(
+        session.status == "paused" and pending_tasks and explicit_reason is None
+    )
+
+    return {
+        "session_id": session.id,
+        "session_status": session.status,
+        "session_is_active": session.is_active,
+        "project_id": session.project_id,
+        "active_task_execution_count": len(active_task_executions),
+        "pending_task_count": len(pending_tasks),
+        "intervention_request_count": len(intervention_requests),
+        "permission_request_count": len(permission_requests),
+        "stop_category": category,
+        "stop_reasons": reasons,
+        "explicit_pause_reason": explicit_reason,
+        "scheduler_bug": scheduler_bug,
+        "active_task_executions": [
+            {
+                "task_execution_id": execution.id,
+                "task_id": execution.task_id,
+                "task_status": (
+                    execution.status.value
+                    if hasattr(execution.status, "value")
+                    else str(execution.status)
+                ),
+                "started_at": (
+                    execution.started_at.isoformat() if execution.started_at else None
+                ),
+                "failure_category": execution.failure_category,
+            }
+            for execution in active_task_executions
+        ],
+        "pending_tasks": [
+            {
+                "task_id": task.id,
+                "title": task.title,
+                "plan_position": task.plan_position,
+                "status": (
+                    task.status.value
+                    if hasattr(task.status, "value")
+                    else str(task.status)
+                ),
+            }
+            for task in pending_tasks[:20]
+        ],
+        "intervention_requests": [
+            {
+                "intervention_id": req.id,
+                "task_id": req.task_id,
+                "status": req.status,
+                "intervention_type": req.intervention_type,
+            }
+            for req in intervention_requests[:10]
+        ],
+        "permission_requests": [
+            {
+                "permission_request_id": req.id,
+                "task_id": req.task_id,
+                "status": req.status,
+                "reason": getattr(req, "reason", None),
+            }
+            for req in permission_requests[:10]
+        ],
     }
 
 

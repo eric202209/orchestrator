@@ -14,6 +14,7 @@ import pytest
 
 from app.models import (
     LogEntry,
+    PermissionRequest,
     Project,
     Session as SessionModel,
     SessionTask,
@@ -30,6 +31,9 @@ from app.services.session.session_lifecycle_service import (
     stop_session_lifecycle,
 )
 from app.services.session import session_runtime_service
+from app.services.session.session_inspection_service import (
+    get_session_reconciliation_audit_payload,
+)
 from app.services.orchestration.phases.planning_flow import (
     _split_repaired_single_step_full_lifecycle_plan,
     _strengthen_weak_expected_file_verifications,
@@ -1912,3 +1916,374 @@ def test_resume_requested_checkpoint_does_not_silently_switch_to_fallback(
     )
 
     assert result["resolved_checkpoint_name"] == "paused_requested"
+
+
+def test_session_reconciliation_audit_explains_paused_session(db_session):
+    project = _make_project(db_session)
+    session = _make_session(
+        db_session,
+        project,
+        status="paused",
+        is_active=False,
+        execution_mode="automatic",
+    )
+    task = _make_task(db_session, project, status=TaskStatus.PENDING)
+    task.plan_position = 1
+    db_session.add(
+        PermissionRequest(
+            project_id=project.id,
+            session_id=session.id,
+            task_id=task.id,
+            operation_type="file_write",
+            status="pending",
+        )
+    )
+    db_session.commit()
+
+    audit = get_session_reconciliation_audit_payload(db_session, session.id)
+
+    assert audit["session_status"] == "paused"
+    assert audit["explicit_pause_reason"] == "waiting_permission"
+    assert audit["scheduler_bug"] is False
+    assert audit["pending_task_count"] == 1
+
+
+def test_resume_skips_done_task(db_session, monkeypatch):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="paused", is_active=True)
+    done_task = _make_task(db_session, project, status=TaskStatus.DONE)
+    pending_task = _make_task(db_session, project, status=TaskStatus.PENDING)
+    done_task.plan_position = 1
+    pending_task.plan_position = 2
+    db_session.add(
+        SessionTask(
+            session_id=session.id,
+            task_id=done_task.id,
+            status=TaskStatus.DONE,
+        )
+    )
+    db_session.commit()
+
+    captured = {}
+
+    class _FakeCheckpointService:
+        def __init__(self, db):
+            self.db = db
+
+        def load_resume_checkpoint(self, session_id, checkpoint_name=None):
+            return {
+                "_requested_checkpoint_name": checkpoint_name,
+                "_resolved_checkpoint_name": checkpoint_name or "autosave_latest",
+                "checkpoint_name": checkpoint_name or "autosave_latest",
+                "context": {
+                    "task_id": done_task.id,
+                    "task_description": done_task.description,
+                },
+                "orchestration_state": {
+                    "plan": [{"step_number": 1, "description": "done task"}],
+                    "execution_results": [],
+                    "current_step_index": 0,
+                },
+                "step_results": [],
+            }
+
+        def _checkpoint_restore_fidelity(self, data):
+            return {
+                "score": 100,
+                "status": "high",
+                "summary": "Checkpoint has strong replay state coverage",
+                "present_signals": ["task id", "execution plan"],
+                "warnings": [],
+            }
+
+    def fake_queue_task_for_session(*, db, session, task_id, timeout_seconds=1800):
+        captured["task_id"] = task_id
+        return {"celery_id": "celery-done-skip"}
+
+    class _FakeDelayResult:
+        id = "celery-done-skip"
+
+    class _FakeWorkerTask:
+        @staticmethod
+        def delay(**kwargs):
+            captured["task_id"] = kwargs["task_id"]
+            return _FakeDelayResult()
+
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.CheckpointService",
+        _FakeCheckpointService,
+    )
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.queue_task_for_session",
+        fake_queue_task_for_session,
+    )
+    monkeypatch.setattr(
+        "app.tasks.worker.execute_orchestration_task",
+        _FakeWorkerTask,
+    )
+
+    result = asyncio.run(resume_session_lifecycle(db_session, session.id))
+
+    assert result["status"] == "resumed"
+    assert captured["task_id"] == pending_task.id
+
+
+def test_resume_continues_next_pending_task(db_session, monkeypatch):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="paused", is_active=True)
+    first_task = _make_task(db_session, project, status=TaskStatus.DONE)
+    pending_task = _make_task(db_session, project, status=TaskStatus.PENDING)
+    first_task.plan_position = 1
+    pending_task.plan_position = 2
+    db_session.add(
+        SessionTask(
+            session_id=session.id,
+            task_id=first_task.id,
+            status=TaskStatus.DONE,
+        )
+    )
+    db_session.commit()
+
+    captured = {}
+
+    class _FakeCheckpointService:
+        def __init__(self, db):
+            self.db = db
+
+        def load_resume_checkpoint(self, session_id, checkpoint_name=None):
+            return {
+                "_requested_checkpoint_name": checkpoint_name,
+                "_resolved_checkpoint_name": checkpoint_name or "autosave_latest",
+                "checkpoint_name": checkpoint_name or "autosave_latest",
+                "context": {
+                    "task_id": first_task.id,
+                    "task_description": first_task.description,
+                },
+                "orchestration_state": {
+                    "plan": [{"step_number": 1, "description": "first task"}],
+                    "execution_results": [],
+                    "current_step_index": 0,
+                },
+                "step_results": [],
+            }
+
+        def _checkpoint_restore_fidelity(self, data):
+            return {
+                "score": 90,
+                "status": "high",
+                "summary": "Checkpoint has strong replay state coverage",
+                "present_signals": ["task id", "execution plan"],
+                "warnings": [],
+            }
+
+    def fake_queue_task_for_session(*, db, session, task_id, timeout_seconds=1800):
+        captured["task_id"] = task_id
+        return {"celery_id": "celery-next-pending"}
+
+    class _FakeDelayResult:
+        id = "celery-next-pending"
+
+    class _FakeWorkerTask:
+        @staticmethod
+        def delay(**kwargs):
+            captured["task_id"] = kwargs["task_id"]
+            return _FakeDelayResult()
+
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.CheckpointService",
+        _FakeCheckpointService,
+    )
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.queue_task_for_session",
+        fake_queue_task_for_session,
+    )
+    monkeypatch.setattr(
+        "app.tasks.worker.execute_orchestration_task",
+        _FakeWorkerTask,
+    )
+
+    result = asyncio.run(resume_session_lifecycle(db_session, session.id))
+
+    assert result["status"] == "resumed"
+    assert captured["task_id"] == pending_task.id
+
+
+def test_resume_after_pause_keeps_session_running_and_dispatches(
+    db_session, monkeypatch
+):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="paused", is_active=True)
+    task = _make_task(db_session, project, status=TaskStatus.PENDING)
+    captured = {}
+
+    class _FakeCheckpointService:
+        def __init__(self, db):
+            self.db = db
+
+        def load_resume_checkpoint(self, session_id, checkpoint_name=None):
+            return {
+                "_requested_checkpoint_name": checkpoint_name,
+                "_resolved_checkpoint_name": "autosave_latest",
+                "checkpoint_name": "autosave_latest",
+                "context": {
+                    "task_id": task.id,
+                    "task_description": task.description,
+                },
+                "orchestration_state": {
+                    "plan": [],
+                    "current_step_index": 0,
+                    "execution_results": [],
+                },
+                "step_results": [],
+            }
+
+        def _checkpoint_restore_fidelity(self, data):
+            return {
+                "score": 80,
+                "status": "high",
+                "summary": "ok",
+                "present_signals": [],
+                "warnings": [],
+            }
+
+    def fake_queue_task_for_session(*, db, session, task_id, timeout_seconds=1800):
+        captured["task_id"] = task_id
+        db.refresh(session)
+        captured["session_status"] = session.status
+        return {"celery_id": "celery-after-pause"}
+
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.CheckpointService",
+        _FakeCheckpointService,
+    )
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.queue_task_for_session",
+        fake_queue_task_for_session,
+    )
+
+    result = asyncio.run(resume_session_lifecycle(db_session, session.id))
+
+    assert result["status"] == "resumed"
+    assert captured["task_id"] == task.id
+    assert captured["session_status"] == "running"
+
+
+def test_resume_after_worker_restart_requeues_task(db_session, monkeypatch):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="paused", is_active=True)
+    task = _make_task(db_session, project, status=TaskStatus.PENDING)
+    captured = {}
+
+    class _FakeCheckpointService:
+        def __init__(self, db):
+            self.db = db
+
+        def load_resume_checkpoint(self, session_id, checkpoint_name=None):
+            return {
+                "_requested_checkpoint_name": checkpoint_name,
+                "_resolved_checkpoint_name": "autosave_latest",
+                "checkpoint_name": "autosave_latest",
+                "context": {"task_id": task.id, "task_description": task.description},
+                "orchestration_state": {
+                    "plan": [],
+                    "current_step_index": 0,
+                    "execution_results": [],
+                },
+                "step_results": [],
+            }
+
+        def _checkpoint_restore_fidelity(self, data):
+            return {
+                "score": 70,
+                "status": "high",
+                "summary": "ok",
+                "present_signals": [],
+                "warnings": [],
+            }
+
+    def fake_queue_task_for_session(*, db, session, task_id, timeout_seconds=1800):
+        captured["task_id"] = task_id
+        return {"celery_id": "celery-worker-restart"}
+
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.CheckpointService",
+        _FakeCheckpointService,
+    )
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.queue_task_for_session",
+        fake_queue_task_for_session,
+    )
+
+    result = asyncio.run(resume_session_lifecycle(db_session, session.id))
+
+    assert result["status"] == "resumed"
+    assert captured["task_id"] == task.id
+
+
+def test_resume_skips_failed_task_only_when_independent_or_policy_allows_it(
+    db_session, monkeypatch
+):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="paused", is_active=True)
+    failed_task = _make_task(db_session, project, status=TaskStatus.FAILED)
+    pending_task = _make_task(db_session, project, status=TaskStatus.PENDING)
+    failed_task.plan_position = 1
+    pending_task.plan_position = 2
+    db_session.add(
+        SessionTask(
+            session_id=session.id,
+            task_id=failed_task.id,
+            status=TaskStatus.FAILED,
+        )
+    )
+    db_session.commit()
+
+    captured = {}
+
+    class _FakeCheckpointService:
+        def __init__(self, db):
+            self.db = db
+
+        def load_resume_checkpoint(self, session_id, checkpoint_name=None):
+            return {
+                "_requested_checkpoint_name": checkpoint_name,
+                "_resolved_checkpoint_name": checkpoint_name or "autosave_latest",
+                "checkpoint_name": checkpoint_name or "autosave_latest",
+                "context": {
+                    "task_id": failed_task.id,
+                    "task_description": failed_task.description,
+                },
+                "orchestration_state": {
+                    "plan": [],
+                    "current_step_index": 0,
+                    "execution_results": [],
+                },
+                "step_results": [],
+            }
+
+        def _checkpoint_restore_fidelity(self, data):
+            return {
+                "score": 75,
+                "status": "high",
+                "summary": "ok",
+                "present_signals": [],
+                "warnings": [],
+            }
+
+    def fake_queue_task_for_session(*, db, session, task_id, timeout_seconds=1800):
+        captured["task_id"] = task_id
+        return {"celery_id": "celery-failed-skip"}
+
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.CheckpointService",
+        _FakeCheckpointService,
+    )
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.queue_task_for_session",
+        fake_queue_task_for_session,
+    )
+
+    result = asyncio.run(resume_session_lifecycle(db_session, session.id))
+
+    assert result["status"] == "resumed"
+    assert captured["task_id"] == pending_task.id

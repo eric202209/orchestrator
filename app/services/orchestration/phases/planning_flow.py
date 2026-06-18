@@ -99,6 +99,7 @@ from app.services.orchestration.phases.planning_support import (
     _build_reasoning_artifact,
     _build_repair_rejection_reasons,
     _classify_planning_timeout_failure,
+    classify_planning_failure_taxonomy,
     _compress_project_context_for_planning,
     _count_prior_failed_planning_executions,
     _emit_planning_diagnostics_contract_violation,
@@ -658,7 +659,16 @@ def execute_planning_phase(
                     level="ERROR",
                     phase="planning",
                     message=f"[ORCHESTRATION] Planning JSON parse failed: {strategy_info}",
-                    details={"reason": "planning_json_error"},
+                    details={
+                        "reason": "planning_json_error",
+                        "failure_taxonomy": classify_planning_failure_taxonomy(
+                            failure_type="planning_json_error",
+                            retry_state=retry_state,
+                            parse_success=False,
+                            repair_attempted=retry_state.repair_prompt_used,
+                            repair_prompt_used=retry_state.repair_prompt_used,
+                        ),
+                    },
                 )
                 _finalize_planning_terminal_failure(
                     ctx=ctx,

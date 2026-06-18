@@ -39,6 +39,14 @@ WORKSPACE_BASE = Path("/root/.openclaw/workspace/vault/projects")
 REPORT_DIR = REPO_ROOT / "docs/roadmap/reports/maintenance"
 REPORT_PATH = REPORT_DIR / "phase10k-p2-live-orchestrator-evidence-collection-20260618.md"
 JSON_PATH = REPORT_DIR / "phase10k-p2-live-orchestrator-evidence-collection-20260618.json"
+TERMINAL_TASK_STATUSES = {
+    "done",
+    "failed",
+    "rejected",
+    "blocked_prior_task_failed",
+    "cancelled",
+    "canceled",
+}
 
 
 TASKS: list[dict[str, str]] = [
@@ -144,6 +152,39 @@ def _counts(project_id: int) -> dict[str, int]:
         }
 
 
+def _task_status(token: str, task_id: int) -> str:
+    data = _api(token, "GET", f"/api/v1/tasks/{task_id}")
+    return str(data.get("status") or "").lower()
+
+
+def _dispatch_or_attach(token: str, task_id: int) -> str:
+    current_status = _task_status(token, task_id)
+    if current_status in {"running", "done", "failed", "blocked_prior_task_failed"}:
+        return current_status
+    try:
+        _api(token, "POST", f"/api/v1/tasks/{task_id}/retry", json={})
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 409:
+            return _task_status(token, task_id)
+        raise
+    return _task_status(token, task_id)
+
+
+def _wait_for_terminal_task_state(token: str, task_id: int, *, timeout_seconds: int = 7200) -> str:
+    deadline = time.monotonic() + timeout_seconds
+    last_status = None
+    while time.monotonic() < deadline:
+        last_status = _task_status(token, task_id)
+        if last_status in TERMINAL_TASK_STATUSES:
+            return last_status
+        time.sleep(15)
+    return str(last_status or "")
+
+
+def _should_continue_after_task(status: str) -> bool:
+    return status in {"done", "failed", "blocked_prior_task_failed", "rejected", "cancelled", "canceled"}
+
+
 def main() -> None:
     token = create_access_token({"sub": USER_EMAIL})
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -173,15 +214,9 @@ def main() -> None:
     for task in created_tasks:
         task_id = int(task["id"])
         print(f"[dispatch] task={task_id}")
-        _api(token, "POST", f"/api/v1/tasks/{task_id}/retry", json={})
-        deadline = time.monotonic() + 7200
-        last_status = None
-        while time.monotonic() < deadline:
-            current = _api(token, "GET", f"/api/v1/tasks/{task_id}")
-            last_status = str(current.get("status") or "")
-            if last_status in {"done", "failed", "blocked_prior_task_failed", "cancelled", "canceled"}:
-                break
-            time.sleep(15)
+        initial_status = _dispatch_or_attach(token, task_id)
+        print(f"[attach] task={task_id} status={initial_status}")
+        last_status = _wait_for_terminal_task_state(token, task_id)
         counts = _counts(project_id)
         report_rows.append({
             "task_id": task_id,
@@ -190,6 +225,8 @@ def main() -> None:
             "counts": counts,
         })
         print(f"[status] task={task_id} status={last_status} counts={counts}")
+        if not _should_continue_after_task(last_status):
+            break
 
     final_counts = _counts(project_id)
     summary = {

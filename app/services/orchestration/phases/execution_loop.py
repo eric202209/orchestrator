@@ -3178,6 +3178,7 @@ def execute_step_loop(
                     details={
                         "phase": "debugging",
                         "status": "debug_parse_error",
+                        "failure_taxonomy": "PLAN_DEBUG_REPAIR_FAILED",
                         "step_index": step_index + 1,
                     },
                 )
