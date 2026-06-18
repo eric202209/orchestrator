@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -26,6 +27,8 @@ from app.services.orchestration.workflow_profiles import get_workflow_phases
 from app.services.prompt_templates import PromptTemplates, StepResult
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 from app.services.workspace.system_settings import get_effective_adaptation_profile
+
+logger = logging.getLogger(__name__)
 
 _IGNORED_PARTS = {
     "node_modules",
@@ -402,6 +405,167 @@ def _recent_operator_guidance(
     return _trim_text("\n".join(lines), max_chars=max_chars)
 
 
+_HUMAN_GUIDANCE_SECTION_HEADER = "## HUMAN GUIDANCE"
+_HUMAN_GUIDANCE_SECTION_AUTHORITY = (
+    "These operator-provided rules are in effect for this task. Follow them "
+    "unless a safety or validator rule forbids them."
+)
+
+
+def render_active_human_guidance_section(
+    db,
+    project_id,
+    session_id,
+    task_id,
+    user_id,
+    backend,
+    model_family,
+    purpose,
+    max_chars,
+) -> str:
+    """Render active table-backed Human Guidance as a first-class prompt section.
+
+    Failure-safe by design: prompt assembly must continue even when Human
+    Guidance storage, activation, selection, or telemetry is unavailable.
+    """
+    try:
+        from app.config import settings
+
+        if not settings.HUMAN_GUIDANCE_TABLE_ENABLED:
+            return ""
+
+        try:
+            from app.services.human_guidance_activation_service import (
+                check_activation_flag,
+            )
+
+            if not check_activation_flag(
+                db,
+                project_id=project_id,
+                session_id=session_id,
+                flag="injection_enabled",
+            ):
+                return ""
+        except Exception as exc:
+            logger.debug("[HG_PROMPT_SECTION] activation check skipped: %s", exc)
+
+        from app.services.human_guidance_selection_service import (
+            select_guidance_for_injection,
+        )
+        from app.services.human_guidance_service import (
+            collect_active_guidance,
+            record_guidance_usage,
+        )
+
+        purpose_value = str(purpose or "all").strip().lower() or "all"
+        backend_value = str(backend or "all").strip().lower() or "all"
+        model_family_value = str(model_family or "all").strip().lower() or "all"
+
+        entries = collect_active_guidance(
+            db,
+            user_id=user_id,
+            project_id=project_id,
+            session_id=session_id,
+            task_id=task_id,
+            backend=backend_value,
+            model_family=model_family_value,
+            purpose=purpose_value,
+        )
+        if not entries:
+            logger.info(
+                "[HG_PROMPT_SECTION] purpose=%s backend=%s model_family=%s selected=0 trimmed=0 chars=0",
+                purpose_value,
+                backend_value,
+                model_family_value,
+            )
+            return ""
+
+        header = (
+            f"{_HUMAN_GUIDANCE_SECTION_HEADER}\n"
+            f"{_HUMAN_GUIDANCE_SECTION_AUTHORITY}\n"
+        )
+        try:
+            budget = max(0, int(max_chars or 0) - len(header))
+        except (TypeError, ValueError):
+            budget = 0
+        selection = select_guidance_for_injection(entries, budget)
+        selected = list(selection.get("selected") or [])
+        trimmed = list(selection.get("trimmed") or [])
+
+        lines = [header.rstrip()]
+        for entry in selected:
+            message = str(entry.get("message") or "").strip()
+            if message:
+                lines.append(f"- {message[:200]}")
+        rendered = "\n".join(lines).strip() if len(lines) > 1 else ""
+        if rendered and max_chars and len(rendered) > int(max_chars):
+            rendered = rendered[: max(0, int(max_chars) - 3)].rstrip() + "..."
+
+        if selected or trimmed:
+            try:
+                record_guidance_usage(
+                    db,
+                    entries=selected,
+                    project_id=project_id,
+                    session_id=session_id,
+                    task_id=task_id,
+                    trimmed_entries=trimmed,
+                )
+            except Exception as exc:
+                logger.debug("[HG_PROMPT_SECTION] usage telemetry skipped: %s", exc)
+
+        logger.info(
+            "[HG_PROMPT_SECTION] purpose=%s backend=%s model_family=%s selected=%d trimmed=%d chars=%d",
+            purpose_value,
+            backend_value,
+            model_family_value,
+            len(selected),
+            len(trimmed),
+            len(rendered),
+        )
+        return rendered
+    except Exception as exc:
+        try:
+            logger.warning("[HG_PROMPT_SECTION] render failed (non-fatal): %s", exc)
+        except Exception:
+            pass
+        return ""
+
+
+def _runtime_metadata(ctx: OrchestrationContext) -> Dict[str, Any]:
+    runtime_service = getattr(ctx, "runtime_service", None)
+    if runtime_service is None or not hasattr(runtime_service, "get_backend_metadata"):
+        return {}
+    try:
+        metadata = runtime_service.get_backend_metadata()
+        return metadata if isinstance(metadata, dict) else {}
+    except Exception:
+        return {}
+
+
+def _execution_guidance_target(ctx: OrchestrationContext) -> tuple[str, str]:
+    """Return backend/model family for the runtime receiving execution prompts."""
+    metadata = _runtime_metadata(ctx)
+    backend = (
+        str(metadata.get("backend") or getattr(ctx, "execution_backend", None) or "all")
+        .strip()
+        .lower()
+        or "all"
+    )
+    model_family = (
+        str(
+            metadata.get("model_family")
+            or metadata.get("model")
+            or metadata.get("model_name")
+            or "all"
+        )
+        .strip()
+        .lower()
+        or "all"
+    )
+    return backend, model_family
+
+
 def _state_session_id(orchestration_state: Any) -> Any:
     return getattr(orchestration_state, "session_id", None)
 
@@ -613,6 +777,21 @@ def assemble_execution_prompt(
         project_context=project_context,
         execution_profile=ctx.execution_profile,
     )
+    execution_backend, execution_model_family = _execution_guidance_target(ctx)
+    project = getattr(ctx, "project", None)
+    human_guidance_section = render_active_human_guidance_section(
+        ctx.db,
+        project_id=getattr(project, "id", None),
+        session_id=_state_session_id(ctx.orchestration_state),
+        task_id=getattr(ctx.orchestration_state, "task_id", None),
+        user_id=getattr(project, "user_id", None),
+        backend=execution_backend,
+        model_family=execution_model_family,
+        purpose="execution",
+        max_chars=900 if not compact else 450,
+    )
+    if human_guidance_section:
+        raw_prompt = human_guidance_section + "\n\n" + raw_prompt
     return render_adapted_runtime_prompt(
         ctx.db,
         objective=(
