@@ -1600,6 +1600,11 @@ def execute_planning_phase(
                 emit_diagnostics_fn=_emit_planning_diagnostics_contract_violation,
             )
             if _p2b is not None:
+                if isinstance(_p2b, dict) and _p2b.get("__faithfulness_failure__"):
+                    return {
+                        "status": "failed",
+                        "reason": "planning_repair_unfaithful_to_task_objective",
+                    }
                 planning_result = _p2b
                 continue
 

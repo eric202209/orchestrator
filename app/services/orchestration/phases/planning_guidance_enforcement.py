@@ -65,13 +65,18 @@ def emit_hg_p2b_worker_coverage(
 def collect_repair_guidance_block(ctx: Any) -> str:
     """Return the active guidance block for inclusion in planning repair prompts.
 
-    Returns empty string when HG is disabled, no guidance exists, or any error occurs.
+    Prepends faithfulness instructions when the task description names specific
+    artifacts (typed function signatures, class names).  Returns empty string
+    when HG is disabled, no guidance exists, or any error occurs.
     """
     from app.services.human_guidance_plan_validator import (
         render_active_guidance_for_repair as _render,
     )
+    from app.services.orchestration.planning.repair_faithfulness import (
+        build_faithfulness_prompt_block,
+    )
 
-    return _render(
+    guidance = _render(
         ctx.db,
         project_id=getattr(ctx.project, "id", None),
         session_id=ctx.session_id,
@@ -79,6 +84,11 @@ def collect_repair_guidance_block(ctx: Any) -> str:
         user_id=getattr(ctx.project, "user_id", None),
         **_guidance_target_kwargs(ctx),
     )
+    faithfulness = build_faithfulness_prompt_block(
+        str(getattr(ctx, "prompt", "") or "")
+    )
+    blocks = [b for b in (faithfulness, guidance) if b and b.strip()]
+    return "\n\n".join(blocks)
 
 
 def run_guidance_plan_enforcement(
@@ -156,6 +166,78 @@ def run_guidance_plan_enforcement(
         retry_state.consecutive_failures += 1
         return planning_result
     else:
+        # 10K-a: check that the repaired plan preserves the task objective.
+        repaired_plan = ctx.orchestration_state.plan or []
+        task_description = str(getattr(ctx, "prompt", "") or "")
+        if repaired_plan and task_description:
+            from app.services.orchestration.planning.repair_faithfulness import (
+                check_plan_faithfulness,
+            )
+
+            is_faithful, missing = check_plan_faithfulness(
+                task_description, repaired_plan
+            )
+            if not is_faithful:
+                ctx.logger.warning(
+                    "[PLANNING_REPAIR_FAITHFULNESS_REJECTION]"
+                    " task=%s missing_symbols=%s",
+                    ctx.task_id,
+                    missing,
+                )
+                emit_phase_event(
+                    ctx.orchestration_state,
+                    ctx.emit_live,
+                    level="WARN",
+                    phase="planning",
+                    message=(
+                        "[ORCHESTRATION] Planning repair rejected:"
+                        " unfaithful to task objective"
+                    ),
+                    details={
+                        "reason": "planning_repair_unfaithful_to_task_objective",
+                        "missing_symbols": missing[:8],
+                        "task_id": ctx.task_id,
+                    },
+                )
+                try:
+                    import json as _json
+
+                    from app.models import LogEntry
+
+                    log_msg = (
+                        f"[PLANNING_REPAIR_FAITHFULNESS_REJECTION]"
+                        f" task={ctx.task_id}"
+                        f" missing_symbols={missing[:8]}"
+                    )
+                    ctx.db.add(
+                        LogEntry(
+                            session_id=ctx.session_id,
+                            task_id=ctx.task_id,
+                            level="WARNING",
+                            message=log_msg,
+                            log_metadata=_json.dumps(
+                                {
+                                    "missing_symbols": missing[:8],
+                                    "task_id": ctx.task_id,
+                                    "reason": "planning_repair_unfaithful_to_task_objective",
+                                }
+                            ),
+                        )
+                    )
+                    ctx.db.commit()
+                except Exception as exc:
+                    try:
+                        ctx.logger.warning(
+                            "[FAITHFULNESS_REJECTION] LogEntry write failed (non-fatal): %s",
+                            exc,
+                        )
+                    except Exception:
+                        pass
+                return {
+                    "__faithfulness_failure__": True,
+                    "reason": "planning_repair_unfaithful_to_task_objective",
+                }
+
         if violations:
             ctx.logger.warning(
                 "[GUIDANCE_PLAN_VALIDATION] Plan still violates guidance after repair"
