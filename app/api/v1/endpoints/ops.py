@@ -19,7 +19,18 @@ from app.config import settings
 from app.dependencies import get_current_admin_user, get_db
 from sqlalchemy import func as sa_func
 
-from app.models import LogEntry, Project, Session as SessionModel, TaskExecution
+from app.models import (
+    HumanGuidance,
+    HumanGuidanceConflict,
+    HumanGuidanceUsage,
+    LogEntry,
+    PermissionRequest,
+    Project,
+    Session as SessionModel,
+    Task,
+    TaskExecution,
+    TaskStatus,
+)
 from app.services.build_identity import build_identity_payload
 from app.services.observability.metrics_collector import MetricsCollector
 from app.services.project.state_summary import build_project_state_summary
@@ -430,7 +441,7 @@ def ops_queue_latency(
     db: Session = Depends(get_db),
     days: int = 7,
 ) -> Dict[str, Any]:
-    """Aggregate queue latency stats (avg, max, count) over the last N days."""
+    """Aggregate queue latency stats (avg, max, p95, count) over the last N days."""
     from datetime import timedelta
 
     since = datetime.now(UTC) - timedelta(days=days)
@@ -446,6 +457,25 @@ def ops_queue_latency(
         )
         .one()
     )
+
+    # p95 — Python sort (SQLite percentile_cont is unavailable without extensions)
+    # Suppress for small samples where percentile is not meaningful.
+    _P95_MIN_SAMPLES = 20
+    p95: Optional[float] = None
+    if row.count >= _P95_MIN_SAMPLES:
+        values = [
+            float(v)
+            for (v,) in db.query(TaskExecution.queue_latency_seconds)
+            .filter(
+                TaskExecution.queue_latency_seconds.isnot(None),
+                TaskExecution.created_at >= since,
+            )
+            .all()
+        ]
+        if values:
+            values.sort()
+            p95 = round(values[int(0.95 * len(values))], 3)
+
     return {
         "computed_at": datetime.now(UTC).isoformat(),
         "window_days": days,
@@ -456,6 +486,7 @@ def ops_queue_latency(
         "max_queue_latency_seconds": (
             round(float(row.max_seconds), 3) if row.max_seconds is not None else None
         ),
+        "p95_queue_latency_seconds": p95,
     }
 
 
@@ -612,4 +643,319 @@ def ops_workflow_templates(
             }
             for t in templates
         ],
+    }
+
+
+# ── Pilot Evidence Dashboard endpoints ────────────────────────────────────────
+
+
+def _project_session_ids(db: Session, project_id: int) -> list[int]:
+    """Return all non-deleted session IDs for a project."""
+    rows = (
+        db.query(SessionModel.id)
+        .filter(
+            SessionModel.project_id == project_id,
+            SessionModel.deleted_at.is_(None),
+        )
+        .all()
+    )
+    return [r[0] for r in rows]
+
+
+@router.get("/pilot-summary")
+def ops_pilot_summary(
+    project_id: int = Query(..., description="Project ID"),
+    current_user=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Task execution counts, success/rejection/timeout rates, and symbol verification for a project."""
+    session_ids = _project_session_ids(db, project_id)
+
+    if not session_ids:
+        return {
+            "computed_at": datetime.now(UTC).isoformat(),
+            "project_id": project_id,
+            "task_executions": {
+                "total": 0,
+                "done": 0,
+                "failed": 0,
+                "pending": 0,
+                "running": 0,
+                "cancelled": 0,
+            },
+            "rates": {
+                "success_rate": None,
+                "rejection_rate": None,
+                "timeout_rate": None,
+            },
+            "symbol_verification": {"applicable_tasks": 0, "passed": None, "failed": 0},
+        }
+
+    executions = (
+        db.query(TaskExecution).filter(TaskExecution.session_id.in_(session_ids)).all()
+    )
+    total = len(executions)
+    counts: Dict[str, int] = {
+        "done": 0,
+        "failed": 0,
+        "pending": 0,
+        "running": 0,
+        "cancelled": 0,
+    }
+    rejection_count = 0
+    timeout_count = 0
+    for ex in executions:
+        status_val = ex.status.value if hasattr(ex.status, "value") else str(ex.status)
+        key = status_val.lower()
+        if key in counts:
+            counts[key] += 1
+        else:
+            counts["pending"] += 1
+        if ex.failure_category:
+            fc = ex.failure_category.lower()
+            if "reject" in fc:
+                rejection_count += 1
+            if "timeout" in fc:
+                timeout_count += 1
+
+    def _rate(n: int) -> Optional[float]:
+        return round(n / total, 4) if total > 0 else None
+
+    sym_failed = (
+        db.query(LogEntry)
+        .filter(
+            LogEntry.session_id.in_(session_ids),
+            LogEntry.message.like("[COMPLETION_SYMBOL_VERIFICATION_FAILED]%"),
+        )
+        .count()
+    )
+
+    return {
+        "computed_at": datetime.now(UTC).isoformat(),
+        "project_id": project_id,
+        "task_executions": {"total": total, **counts},
+        "rates": {
+            "success_rate": _rate(counts["done"]),
+            "rejection_rate": _rate(rejection_count),
+            "timeout_rate": _rate(timeout_count),
+        },
+        "symbol_verification": {
+            "applicable_tasks": total,
+            "passed": None,
+            "failed": sym_failed,
+        },
+    }
+
+
+@router.get("/pilot-guidance-stats")
+def ops_pilot_guidance_stats(
+    project_id: int = Query(..., description="Project ID"),
+    current_user=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """HumanGuidanceUsage injection stats and conflict summary for a project."""
+    usage_rows = (
+        db.query(HumanGuidanceUsage)
+        .filter(
+            HumanGuidanceUsage.project_id == project_id,
+            HumanGuidanceUsage.selected.is_(True),
+        )
+        .all()
+    )
+    total_injections = len(usage_rows)
+    total_rendered = sum(1 for r in usage_rows if r.rendered)
+    task_ids_with_guidance: set[int] = {
+        r.task_id for r in usage_rows if r.task_id is not None
+    }
+    tasks_with_guidance = len(task_ids_with_guidance)
+
+    from collections import Counter
+
+    injection_by_guidance: Counter = Counter(
+        r.guidance_id for r in usage_rows if r.guidance_id is not None
+    )
+    top_guidance_ids = [gid for gid, _ in injection_by_guidance.most_common(5)]
+    guidance_map: Dict[int, str] = {}
+    if top_guidance_ids:
+        rows = (
+            db.query(HumanGuidance.id, HumanGuidance.message)
+            .filter(HumanGuidance.id.in_(top_guidance_ids))
+            .all()
+        )
+        guidance_map = {r.id: (r.message or "")[:60] for r in rows}
+
+    top_entries = [
+        {
+            "guidance_id": gid,
+            "message_preview": guidance_map.get(gid, ""),
+            "injection_count": cnt,
+        }
+        for gid, cnt in injection_by_guidance.most_common(5)
+    ]
+
+    conflicts = (
+        db.query(HumanGuidanceConflict)
+        .filter(HumanGuidanceConflict.project_id == project_id)
+        .all()
+    )
+    conflict_total = len(conflicts)
+    conflict_open = sum(1 for c in conflicts if c.status == "open")
+    conflict_resolved = sum(1 for c in conflicts if c.status == "resolved")
+    conflict_rate = (
+        round(conflict_total / tasks_with_guidance, 4)
+        if tasks_with_guidance > 0
+        else None
+    )
+
+    return {
+        "computed_at": datetime.now(UTC).isoformat(),
+        "project_id": project_id,
+        "usage": {
+            "total_injections": total_injections,
+            "total_rendered": total_rendered,
+            "tasks_with_guidance": tasks_with_guidance,
+            "top_entries": top_entries,
+        },
+        "conflicts": {
+            "total": conflict_total,
+            "open": conflict_open,
+            "resolved": conflict_resolved,
+            "conflict_rate": conflict_rate,
+        },
+    }
+
+
+@router.get("/pilot-token-stats")
+def ops_pilot_token_stats(
+    project_id: int = Query(..., description="Project ID"),
+    current_user=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Token usage aggregates and top consumers for a project."""
+    session_ids = _project_session_ids(db, project_id)
+    if not session_ids:
+        return {
+            "computed_at": datetime.now(UTC).isoformat(),
+            "project_id": project_id,
+            "tasks_with_tokens": 0,
+            "token_availability_rate": None,
+            "avg_tokens_in": None,
+            "avg_tokens_out": None,
+            "total_tokens_in": None,
+            "total_tokens_out": None,
+            "top_consumers": [],
+        }
+
+    executions = (
+        db.query(TaskExecution).filter(TaskExecution.session_id.in_(session_ids)).all()
+    )
+    total = len(executions)
+    with_tokens = [
+        ex for ex in executions if ex.tokens_in is not None or ex.tokens_out is not None
+    ]
+    tasks_with_tokens = len(with_tokens)
+
+    token_availability_rate = round(tasks_with_tokens / total, 4) if total > 0 else None
+
+    tokens_in_vals = [ex.tokens_in for ex in with_tokens if ex.tokens_in is not None]
+    tokens_out_vals = [ex.tokens_out for ex in with_tokens if ex.tokens_out is not None]
+
+    avg_in = (
+        round(sum(tokens_in_vals) / len(tokens_in_vals), 1) if tokens_in_vals else None
+    )
+    avg_out = (
+        round(sum(tokens_out_vals) / len(tokens_out_vals), 1)
+        if tokens_out_vals
+        else None
+    )
+    total_in = sum(tokens_in_vals) if tokens_in_vals else None
+    total_out = sum(tokens_out_vals) if tokens_out_vals else None
+
+    top_raw = sorted(
+        with_tokens,
+        key=lambda ex: (ex.tokens_in or 0) + (ex.tokens_out or 0),
+        reverse=True,
+    )[:5]
+    task_ids_needed = [ex.task_id for ex in top_raw if ex.task_id is not None]
+    task_title_map: Dict[int, str] = {}
+    if task_ids_needed:
+        title_rows = (
+            db.query(Task.id, Task.title).filter(Task.id.in_(task_ids_needed)).all()
+        )
+        task_title_map = {r.id: (r.title or "") for r in title_rows}
+
+    top_consumers = [
+        {
+            "task_id": ex.task_id,
+            "task_title": task_title_map.get(ex.task_id, ""),
+            "tokens_in": ex.tokens_in,
+            "tokens_out": ex.tokens_out,
+        }
+        for ex in top_raw
+    ]
+
+    return {
+        "computed_at": datetime.now(UTC).isoformat(),
+        "project_id": project_id,
+        "tasks_with_tokens": tasks_with_tokens,
+        "token_availability_rate": token_availability_rate,
+        "avg_tokens_in": avg_in,
+        "avg_tokens_out": avg_out,
+        "total_tokens_in": total_in,
+        "total_tokens_out": total_out,
+        "top_consumers": top_consumers,
+    }
+
+
+@router.get("/pilot-permission-stats")
+def ops_pilot_permission_stats(
+    project_id: int = Query(..., description="Project ID"),
+    current_user=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Permission request counts and response time stats for a project."""
+    session_ids = _project_session_ids(db, project_id)
+
+    # Also include permission requests linked directly to project (no session)
+    perm_rows = (
+        db.query(PermissionRequest)
+        .filter(
+            or_(
+                PermissionRequest.session_id.in_(session_ids),
+                PermissionRequest.project_id == project_id,
+            )
+        )
+        .all()
+    )
+
+    approvals = sum(1 for p in perm_rows if p.status == "approved")
+    denials = sum(1 for p in perm_rows if p.status == "denied")
+    pending = sum(1 for p in perm_rows if p.status == "pending")
+
+    response_seconds: list[float] = []
+    for p in perm_rows:
+        if p.status == "approved" and p.approved_at and p.created_at:
+            delta = (p.approved_at - p.created_at).total_seconds()
+            if delta >= 0:
+                response_seconds.append(delta)
+        elif p.status == "denied" and p.updated_at and p.created_at:
+            delta = (p.updated_at - p.created_at).total_seconds()
+            if delta >= 0:
+                response_seconds.append(delta)
+
+    avg_response = (
+        round(sum(response_seconds) / len(response_seconds), 1)
+        if response_seconds
+        else None
+    )
+    max_response = round(max(response_seconds), 1) if response_seconds else None
+
+    return {
+        "computed_at": datetime.now(UTC).isoformat(),
+        "project_id": project_id,
+        "approvals": approvals,
+        "denials": denials,
+        "pending": pending,
+        "avg_response_seconds": avg_response,
+        "max_response_seconds": max_response,
     }

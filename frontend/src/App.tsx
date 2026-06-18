@@ -14,6 +14,7 @@ const TaskDetail = lazy(() => import('@/pages/TaskDetail'));
 const Login = lazy(() => import('@/pages/Login'));
 const Register = lazy(() => import('@/pages/Register'));
 const SettingsPage = lazy(() => import('@/pages/SettingsPage'));
+const AdminPilotDashboard = lazy(() => import('@/pages/AdminPilotDashboard'));
 
 function RouteFallback() {
   return (
@@ -41,6 +42,7 @@ function App() {
             <Route path="tasks" element={<TasksList />} />
             <Route path="projects/:projectId/tasks/:taskId" element={<TaskDetail />} />
             <Route path="settings" element={<SettingsPage />} />
+            <Route path="admin/pilot-dashboard" element={<AdminPilotDashboard />} />
           </Route>
         </Routes>
       </Suspense>

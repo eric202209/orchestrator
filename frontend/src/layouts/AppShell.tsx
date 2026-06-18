@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Outlet, Link, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, GitBranch, Terminal,
-  ListTodo, Menu, X, Activity, Settings
+  ListTodo, Menu, X, Activity, Settings, FlaskConical
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -11,6 +11,7 @@ const navItems = [
   { title: 'Projects',  href: '/projects',  icon: GitBranch },
   { title: 'Tasks',     href: '/tasks',     icon: ListTodo },
   { title: 'Sessions',  href: '/sessions',  icon: Terminal },
+  { title: 'Pilot',    href: '/admin/pilot-dashboard', icon: FlaskConical },
   { title: 'Settings',  href: '/settings',  icon: Settings },
 ];
 

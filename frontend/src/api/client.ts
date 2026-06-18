@@ -1106,5 +1106,133 @@ export const guidanceAPI = {
     ),
 };
 
+export interface PilotSummary {
+  computed_at: string;
+  project_id: number;
+  task_executions: {
+    total: number;
+    done: number;
+    failed: number;
+    pending: number;
+    running: number;
+    cancelled: number;
+  };
+  rates: {
+    success_rate: number | null;
+    rejection_rate: number | null;
+    timeout_rate: number | null;
+  };
+  symbol_verification: {
+    applicable_tasks: number;
+    passed: number | null;
+    failed: number;
+  };
+}
+
+export interface PilotGuidanceStats {
+  computed_at: string;
+  project_id: number;
+  usage: {
+    total_injections: number;
+    total_rendered: number;
+    tasks_with_guidance: number;
+    top_entries: Array<{
+      guidance_id: number;
+      message_preview: string;
+      injection_count: number;
+    }>;
+  };
+  conflicts: {
+    total: number;
+    open: number;
+    resolved: number;
+    conflict_rate: number | null;
+  };
+}
+
+export interface PilotTokenStats {
+  computed_at: string;
+  project_id: number;
+  tasks_with_tokens: number;
+  token_availability_rate: number | null;
+  avg_tokens_in: number | null;
+  avg_tokens_out: number | null;
+  total_tokens_in: number | null;
+  total_tokens_out: number | null;
+  top_consumers: Array<{
+    task_id: number | null;
+    task_title: string;
+    tokens_in: number | null;
+    tokens_out: number | null;
+  }>;
+}
+
+export interface PilotPermissionStats {
+  computed_at: string;
+  project_id: number;
+  approvals: number;
+  denials: number;
+  pending: number;
+  avg_response_seconds: number | null;
+  max_response_seconds: number | null;
+}
+
+export interface QueueLatencyStats {
+  computed_at: string;
+  window_days: number;
+  executions_with_latency: number;
+  avg_queue_latency_seconds: number | null;
+  max_queue_latency_seconds: number | null;
+  p95_queue_latency_seconds: number | null;
+}
+
+export interface AuditEventsResponse {
+  total: number;
+  limit: number;
+  offset: number;
+  items: Array<{
+    id: number;
+    event_type: string;
+    message: string;
+    level: string;
+    session_id: number | null;
+    task_id: number | null;
+    created_at: string | null;
+    metadata: unknown;
+  }>;
+}
+
+export const pilotAPI = {
+  getSummary: (projectId: number) =>
+    apiClient.get<PilotSummary>(`/ops/pilot-summary?project_id=${projectId}`),
+
+  getGuidanceStats: (projectId: number) =>
+    apiClient.get<PilotGuidanceStats>(
+      `/ops/pilot-guidance-stats?project_id=${projectId}`,
+    ),
+
+  getTokenStats: (projectId: number) =>
+    apiClient.get<PilotTokenStats>(
+      `/ops/pilot-token-stats?project_id=${projectId}`,
+    ),
+
+  getPermissionStats: (projectId: number) =>
+    apiClient.get<PilotPermissionStats>(
+      `/ops/pilot-permission-stats?project_id=${projectId}`,
+    ),
+
+  getQueueLatency: (days = 7) =>
+    apiClient.get<QueueLatencyStats>(`/ops/queue-latency?days=${days}`),
+
+  getAuditEvents: (params: {
+    project_id?: number;
+    event_type?: string;
+    limit?: number;
+    offset?: number;
+    order?: 'asc' | 'desc';
+  }) =>
+    apiClient.get<AuditEventsResponse>('/ops/audit-events', { params }),
+};
+
 export const api = apiClient;
 export default apiClient;
