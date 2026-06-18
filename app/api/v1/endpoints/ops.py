@@ -8,12 +8,18 @@ from datetime import UTC, datetime
 from typing import Any, Dict
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends
+import json
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.dependencies import get_current_admin_user, get_db
-from app.models import Project, TaskExecution
+from sqlalchemy import func as sa_func
+
+from app.models import LogEntry, Project, Session as SessionModel, TaskExecution
 from app.services.build_identity import build_identity_payload
 from app.services.observability.metrics_collector import MetricsCollector
 from app.services.project.state_summary import build_project_state_summary
@@ -415,6 +421,160 @@ def ops_backends_concurrency(
         "computed_at": datetime.now(UTC).isoformat(),
         "redis_available": redis_ok,
         "backends": snapshots,
+    }
+
+
+@router.get("/queue-latency")
+def ops_queue_latency(
+    current_user=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    days: int = 7,
+) -> Dict[str, Any]:
+    """Aggregate queue latency stats (avg, max, count) over the last N days."""
+    from datetime import timedelta
+
+    since = datetime.now(UTC) - timedelta(days=days)
+    row = (
+        db.query(
+            sa_func.count(TaskExecution.id).label("count"),
+            sa_func.avg(TaskExecution.queue_latency_seconds).label("avg_seconds"),
+            sa_func.max(TaskExecution.queue_latency_seconds).label("max_seconds"),
+        )
+        .filter(
+            TaskExecution.queue_latency_seconds.isnot(None),
+            TaskExecution.created_at >= since,
+        )
+        .one()
+    )
+    return {
+        "computed_at": datetime.now(UTC).isoformat(),
+        "window_days": days,
+        "executions_with_latency": row.count,
+        "avg_queue_latency_seconds": (
+            round(float(row.avg_seconds), 3) if row.avg_seconds is not None else None
+        ),
+        "max_queue_latency_seconds": (
+            round(float(row.max_seconds), 3) if row.max_seconds is not None else None
+        ),
+    }
+
+
+def _parse_audit_datetime(raw: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO 8601 datetime string; return None on any parse failure."""
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _extract_event_type(message: str) -> str:
+    """Extract bracket label from a structured message, e.g. '[FOO] bar' → 'FOO'."""
+    if message.startswith("["):
+        end = message.find("]")
+        if end > 1:
+            return message[1:end]
+    return message
+
+
+def _safe_metadata(raw: Optional[str]) -> Optional[object]:
+    """Parse log_metadata JSON; return None on failure (never 500)."""
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+@router.get("/audit-events")
+def ops_audit_events(
+    current_user=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    event_type: Optional[str] = Query(
+        None, description="e.g. PERMISSION_APPROVED (brackets optional)"
+    ),
+    session_id: Optional[int] = Query(None),
+    task_id: Optional[int] = Query(None),
+    project_id: Optional[int] = Query(None),
+    level: Optional[str] = Query(None),
+    since: Optional[str] = Query(None, description="ISO 8601 datetime"),
+    until: Optional[str] = Query(None, description="ISO 8601 datetime"),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
+) -> Dict[str, Any]:
+    """Read-only structured audit event log for operators."""
+    query = db.query(LogEntry)
+
+    # Structured event filter
+    if event_type:
+        normalized = event_type.strip().strip("[]")
+        query = query.filter(LogEntry.message.like(f"[{normalized}]%"))
+    else:
+        query = query.filter(
+            or_(
+                LogEntry.message.like("[%]%"),
+                LogEntry.log_metadata.isnot(None),
+            )
+        )
+
+    if session_id is not None:
+        query = query.filter(LogEntry.session_id == session_id)
+
+    if task_id is not None:
+        query = query.filter(LogEntry.task_id == task_id)
+
+    if project_id is not None:
+        session_ids = (
+            db.query(SessionModel.id)
+            .filter(
+                SessionModel.project_id == project_id,
+                SessionModel.deleted_at.is_(None),
+            )
+            .all()
+        )
+        query = query.filter(LogEntry.session_id.in_([s[0] for s in session_ids]))
+
+    if level is not None:
+        query = query.filter(LogEntry.level == level.upper())
+
+    since_dt = _parse_audit_datetime(since)
+    if since_dt is not None:
+        query = query.filter(LogEntry.created_at >= since_dt)
+
+    until_dt = _parse_audit_datetime(until)
+    if until_dt is not None:
+        query = query.filter(LogEntry.created_at <= until_dt)
+
+    total = query.count()
+
+    order_col = (
+        LogEntry.created_at.asc() if order == "asc" else LogEntry.created_at.desc()
+    )
+    rows = query.order_by(order_col).offset(offset).limit(limit).all()
+
+    items = [
+        {
+            "id": r.id,
+            "event_type": _extract_event_type(r.message),
+            "message": r.message,
+            "level": r.level,
+            "session_id": r.session_id,
+            "task_id": r.task_id,
+            "session_instance_id": r.session_instance_id,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "metadata": _safe_metadata(r.log_metadata),
+        }
+        for r in rows
+    ]
+
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "items": items,
     }
 
 

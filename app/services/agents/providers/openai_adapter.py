@@ -191,6 +191,7 @@ class OpenAIResponsesRuntime:
                 "response_id": body.get("id"),
                 "backend": self.backend_descriptor.name,
                 "model_family": model_name,
+                "usage": usage,
             }
 
     def _model_name(self) -> str:

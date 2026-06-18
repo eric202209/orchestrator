@@ -58,4 +58,7 @@ def normalize_openclaw_execution_result(
         duration_seconds=normalized.duration_seconds,
         failure_category=failure_category,
         terminal_reason=terminal_reason,
+        tokens_in=normalized.tokens_in,
+        tokens_out=normalized.tokens_out,
+        token_source=normalized.token_source,
     )

@@ -222,6 +222,32 @@ class PermissionApprovalService:
             # Create auto-approve rule (could be stored in separate table)
             logger.info(f"Auto-approve rule created for {request.operation_type}")
 
+        if request.session_id:
+            from app.models import LogEntry, Session as SessionModel
+
+            _session = (
+                self.db.query(SessionModel)
+                .filter(SessionModel.id == request.session_id)
+                .first()
+            )
+            self.db.add(
+                LogEntry(
+                    session_id=request.session_id,
+                    task_id=request.task_id,
+                    session_instance_id=_session.instance_id if _session else None,
+                    level="INFO",
+                    message="[PERMISSION_APPROVED]",
+                    log_metadata=json.dumps(
+                        {
+                            "permission_id": request_id,
+                            "session_id": request.session_id,
+                            "task_id": request.task_id,
+                            "action": "approved",
+                        }
+                    ),
+                )
+            )
+
         self.db.commit()
         self.db.refresh(request)
 
@@ -256,6 +282,32 @@ class PermissionApprovalService:
 
         request.status = PermissionStatus.DENIED.value
         request.denied_reason = reason
+
+        if request.session_id:
+            from app.models import LogEntry, Session as SessionModel
+
+            _session = (
+                self.db.query(SessionModel)
+                .filter(SessionModel.id == request.session_id)
+                .first()
+            )
+            self.db.add(
+                LogEntry(
+                    session_id=request.session_id,
+                    task_id=request.task_id,
+                    session_instance_id=_session.instance_id if _session else None,
+                    level="INFO",
+                    message="[PERMISSION_DENIED]",
+                    log_metadata=json.dumps(
+                        {
+                            "permission_id": request_id,
+                            "session_id": request.session_id,
+                            "task_id": request.task_id,
+                            "action": "denied",
+                        }
+                    ),
+                )
+            )
 
         self.db.commit()
         self.db.refresh(request)

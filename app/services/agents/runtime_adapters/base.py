@@ -46,6 +46,23 @@ def runtime_result_from_mapping(
         if success
         else (result.get("failure_category") or default_failure_category)
     )
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    token_source: str | None = None
+    usage = result.get("usage")
+    if isinstance(usage, dict):
+        raw_in = usage.get("input_tokens") or usage.get("prompt_tokens")
+        raw_out = usage.get("output_tokens") or usage.get("completion_tokens")
+        try:
+            tokens_in = int(raw_in) if raw_in is not None else None
+        except (TypeError, ValueError):
+            tokens_in = None
+        try:
+            tokens_out = int(raw_out) if raw_out is not None else None
+        except (TypeError, ValueError):
+            tokens_out = None
+        if tokens_in is not None or tokens_out is not None:
+            token_source = "openai_usage"
     return RuntimeBackendResult(
         backend_id=backend_id,
         role=role,
@@ -55,4 +72,7 @@ def runtime_result_from_mapping(
         duration_seconds=normalized_duration,
         failure_category=failure_category,
         terminal_reason=result.get("terminal_reason"),
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        token_source=token_source,
     )

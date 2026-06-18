@@ -50,6 +50,9 @@ class RuntimeBackendResult:
     duration_seconds: float
     failure_category: Optional[str] = None
     terminal_reason: Optional[str] = None
+    tokens_in: Optional[int] = None
+    tokens_out: Optional[int] = None
+    token_source: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

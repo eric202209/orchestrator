@@ -428,6 +428,45 @@ def _persist_runtime_backend_result(
     task_execution.backend_id = result.backend_id
     if not result.success and result.failure_category:
         task_execution.failure_category = result.failure_category
+    try:
+        if result.tokens_in is not None:
+            task_execution.tokens_in = result.tokens_in
+        if result.tokens_out is not None:
+            task_execution.tokens_out = result.tokens_out
+        if result.token_source:
+            task_execution.token_source = result.token_source
+    except Exception:
+        pass
+    if result.tokens_in is not None or result.tokens_out is not None:
+        try:
+            from app.models import LogEntry, Session as SessionModel
+
+            _session = (
+                db.query(SessionModel)
+                .filter(SessionModel.id == task_execution.session_id)
+                .first()
+            )
+            db.add(
+                LogEntry(
+                    session_id=task_execution.session_id,
+                    task_id=task_execution.task_id,
+                    session_instance_id=(_session.instance_id if _session else None),
+                    level="INFO",
+                    message="[TOKEN_USAGE_RECORDED]",
+                    log_metadata=json.dumps(
+                        {
+                            "task_execution_id": task_execution_id,
+                            "task_id": task_execution.task_id,
+                            "session_id": task_execution.session_id,
+                            "tokens_in": result.tokens_in,
+                            "tokens_out": result.tokens_out,
+                            "token_source": result.token_source,
+                        }
+                    ),
+                )
+            )
+        except Exception:
+            pass
     db.flush()
 
 

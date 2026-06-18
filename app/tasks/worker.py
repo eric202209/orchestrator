@@ -532,6 +532,7 @@ def execute_orchestration_task(
                 ).resolve()
 
         queued_event = None
+        queued_at = None
         queue_latency_seconds = None
         if dispatch_project_dir:
             queued_event = _find_queued_event_for_dispatch(
@@ -1057,6 +1058,14 @@ def execute_orchestration_task(
         )
         if task_execution is not None and hasattr(task_execution, "backend_id"):
             task_execution.backend_id = _resolved_execution_backend
+        if task_execution is not None:
+            try:
+                if queued_at is not None:
+                    task_execution.queued_at = queued_at
+                if queue_latency_seconds is not None:
+                    task_execution.queue_latency_seconds = queue_latency_seconds
+            except Exception:
+                pass
         db.commit()
         _write_project_state_snapshot(db, project, task, session_id)
 
