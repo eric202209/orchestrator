@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import os
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -11,6 +13,72 @@ import httpx
 from app.config import settings
 from app.services.orchestration.policy import SUMMARY_TIMEOUT_SECONDS
 from app.services.orchestration.types import OrchestrationRunContext
+
+_EVIDENCE_MAX_CHARS = 1500
+_EVIDENCE_MAX_FUNCS = 20
+_EVIDENCE_MAX_CLASSES = 10
+
+
+def _extract_python_symbols(file_path: Path) -> tuple[list[str], list[str]]:
+    """Return (functions, classes) defined at the top level of a Python source file."""
+    try:
+        source = file_path.read_text(encoding="utf-8", errors="replace")
+        tree = ast.parse(source, filename=str(file_path))
+    except Exception:
+        return [], []
+    functions = [
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    classes = [node.name for node in tree.body if isinstance(node, ast.ClassDef)]
+    return functions, classes
+
+
+def build_workspace_evidence_block(
+    changed_files: list[str],
+    project_dir: str | Path,
+    *,
+    max_chars: int = _EVIDENCE_MAX_CHARS,
+) -> str:
+    """Build a compact workspace evidence block listing confirmed symbols per file.
+
+    For Python files, lists top-level functions and classes actually present in
+    the file on disk.  Non-Python files are listed by path only.  Missing files
+    are noted so the LLM knows the evidence is incomplete.
+    """
+    root = Path(project_dir)
+    lines: list[str] = []
+    total_chars = 0
+
+    for rel_path in changed_files:
+        if total_chars >= max_chars:
+            break
+        p = Path(rel_path)
+        abs_path = p if p.is_absolute() else root / p
+
+        if not abs_path.exists():
+            entry = f"- {rel_path} (not found in workspace)"
+            lines.append(entry)
+            total_chars += len(entry)
+            continue
+
+        if abs_path.suffix == ".py":
+            functions, classes = _extract_python_symbols(abs_path)
+            func_str = (
+                ", ".join(functions[:_EVIDENCE_MAX_FUNCS]) if functions else "N/A"
+            )
+            cls_str = ", ".join(classes[:_EVIDENCE_MAX_CLASSES]) if classes else "N/A"
+            entry = f"- {rel_path}\n  functions: {func_str}\n  classes: {cls_str}"
+        else:
+            entry = f"- {rel_path}"
+
+        lines.append(entry)
+        total_chars += len(entry)
+
+    if not lines:
+        return "(no changed files recorded)"
+    return "\n".join(lines)
 
 
 async def _call_planning_lane(prompt: str) -> str:

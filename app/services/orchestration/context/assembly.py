@@ -1092,16 +1092,24 @@ def assemble_plan_revision_prompt(
 
 
 def assemble_task_summary_prompt(ctx: OrchestrationContext) -> str:
+    from app.services.orchestration.phases.completion_summary import (
+        build_workspace_evidence_block,
+    )
+
+    changed_files = list(ctx.orchestration_state.changed_files or [])
+    project_dir = ctx.orchestration_state.project_dir
+    workspace_evidence = build_workspace_evidence_block(changed_files, project_dir)
     raw_prompt = PromptTemplates.build_task_summary(
         task_description=ctx.prompt,
         plan_summary=_trim_text(
             json.dumps(ctx.orchestration_state.plan, indent=2), 3000
         ),
         execution_results_summary=ctx.orchestration_state.prior_results_summary(),
-        changed_files=ctx.orchestration_state.changed_files,
+        changed_files=changed_files,
         num_debug_attempts=len(ctx.orchestration_state.debug_attempts),
         final_status="success",
         execution_profile=ctx.execution_profile,
+        workspace_evidence=workspace_evidence,
     )
     return render_adapted_runtime_prompt(
         ctx.db,

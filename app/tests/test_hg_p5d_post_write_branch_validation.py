@@ -109,6 +109,7 @@ def test_post_write_branch_creates_conflict_and_remediation_prompt(
 ):
     monkeypatch.setattr(settings, "HUMAN_GUIDANCE_TABLE_ENABLED", True)
     monkeypatch.setattr(settings, "HUMAN_GUIDANCE_CONFLICT_DETECTION_ENABLED", True)
+    monkeypatch.setattr(settings, "WORKING_MEMORY_INJECTION_ENABLED", True)
 
     user = _make_user(db_session)
     project = _make_project(db_session, user.id, tmp_path)

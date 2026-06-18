@@ -607,6 +607,9 @@ Return your analysis ONLY as JSON text in your response. The orchestrator reads 
 **Changed files:**
 {changed_files}
 
+**Actual Workspace Evidence (symbols confirmed present in workspace files):**
+{workspace_evidence}
+
 **Debug attempts:** {num_debug_attempts}
 
 **Final status:** {final_status}
@@ -638,6 +641,9 @@ Rules (follow exactly):
 - Do not describe return shapes with phrases like "standardized result dictionary". Write the exact shape.
 - If the function never raises for invalid input, write "never raises for invalid input".
 - If no public function was implemented, write "N/A" for each API Contract field.
+- Only claim a function, class, or file was added if it appears in Actual Workspace Evidence above.
+- If the task requested a symbol but it is missing from evidence, write: "Requested symbol missing from final workspace: <symbol>"
+- Do not infer completion from task description alone. Prefer actual workspace files and symbols over execution prose.
 """
 
     # ── Supporting Templates (Standalone) ────────────────────────────────────
@@ -1401,22 +1407,10 @@ Examples:
         num_debug_attempts: int,
         final_status: str,
         execution_profile: str = "full_lifecycle",
+        workspace_evidence: str = "",
     ) -> str:
-        """
-        Build a prompt for task summary phase.
-
-        Args:
-            task_description: Original task description.
-            plan_summary: Summary of the plan executed.
-            execution_results_summary: Results of all steps.
-            changed_files: Files that were created/modified.
-            num_debug_attempts: Number of debug attempts made.
-            final_status: Final task status.
-
-        Returns:
-            Task summary prompt string.
-        """
         changed_files_text = "\n".join(f"- {f}" for f in changed_files)
+        evidence_text = workspace_evidence or "(no changed files recorded)"
 
         context = {
             "task_description": task_description,
@@ -1424,11 +1418,11 @@ Examples:
             "plan_summary": plan_summary,
             "execution_results_summary": execution_results_summary,
             "changed_files": changed_files_text,
+            "workspace_evidence": evidence_text,
             "num_debug_attempts": num_debug_attempts,
             "final_status": final_status,
         }
 
-        # Use the TASK_SUMMARY template
         return cls.TASK_SUMMARY.format(**context)
 
     @classmethod
