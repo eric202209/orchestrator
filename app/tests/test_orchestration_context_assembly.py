@@ -385,8 +385,27 @@ def test_progress_notes_filter_stale_file_references_against_live_workspace(tmp_
 
     assert "Verified src/utils/format.test.ts exists" not in sanitized
     assert "Ignore prior-note file references" in sanitized
-    assert "src/utils/format.test.ts" in sanitized
     assert "package.json restored to vitest run" in sanitized
+
+
+def test_progress_notes_filter_absolute_stale_file_references_against_live_workspace(
+    tmp_path,
+):
+    ctx = _make_ctx(tmp_path)
+    project_dir = ctx.orchestration_state.project_dir
+    (project_dir / "docs").mkdir()
+    (project_dir / "docs" / "README.md").write_text("ok\n", encoding="utf-8")
+
+    notes = """
+## Prior task
+- Read /root/.openclaw/workspace/docs/adr/0002-advisory-human-guidance-conflict-detection.md
+- Verified docs/README.md exists
+"""
+
+    sanitized = sanitize_progress_notes_for_workspace(notes, project_dir)
+
+    assert "0002-advisory-human-guidance-conflict-detection.md" not in sanitized
+    assert "docs/README.md exists" in sanitized
 
 
 def test_workspace_inventory_skips_ignored_directories_without_descending(tmp_path):

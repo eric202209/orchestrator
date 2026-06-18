@@ -836,6 +836,18 @@ def _abort_missing_source_materialization_repair(
     retry_state: Any,
     output_text: str,
 ) -> dict[str, str] | None:
+    task_text = " ".join(
+        str(value or "")
+        for value in (
+            getattr(ctx.task, "title", None),
+            getattr(ctx.task, "description", None),
+            getattr(ctx, "prompt", None),
+        )
+    ).lower()
+    task_is_test_focused = "test" in task_text and not any(
+        marker in task_text
+        for marker in ("implement", "fix", "build", "add source", "source edit")
+    )
     if not (
         retry_state.repair_prompt_used
         and retry_state.source_materialization_required_after_repair
@@ -844,6 +856,8 @@ def _abort_missing_source_materialization_repair(
             ctx.orchestration_state.project_dir,
         )
     ):
+        return None
+    if task_is_test_focused:
         return None
 
     failure_type = "planning_repair_missing_source_materialization"

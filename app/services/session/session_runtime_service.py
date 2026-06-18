@@ -924,11 +924,15 @@ def maybe_queue_next_automatic_task(
         return None
 
     task_service = TaskService(db)
-    next_task = task_service.get_next_pending_task(session.project_id)
+    next_task = task_service.get_next_pending_task(
+        session.project_id, allow_failed_prior_tasks=True
+    )
     if not next_task:
         recovered_task = reopen_failed_ordered_task_if_needed(db, session)
         if recovered_task:
-            next_task = task_service.get_next_pending_task(session.project_id)
+            next_task = task_service.get_next_pending_task(
+                session.project_id, allow_failed_prior_tasks=True
+            )
 
     if not next_task:
         pending_blocked_task = (

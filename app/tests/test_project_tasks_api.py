@@ -252,6 +252,42 @@ def test_legacy_null_position_task_blocks_new_positioned_task(db_session):
     assert TaskService(db_session).get_next_pending_task(project.id) is None
 
 
+def test_automatic_continuation_can_skip_failed_prior_tasks(db_session):
+    project = Project(
+        name="Automatic Continuation Order",
+        workspace_path="/tmp/automatic_continuation_order",
+        user_id=1,
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    failed_prior = Task(
+        project_id=project.id,
+        title="Failed prior task",
+        description="Blocked prior task",
+        status=TaskStatus.FAILED,
+        plan_position=1,
+    )
+    later_pending = Task(
+        project_id=project.id,
+        title="Later pending task",
+        description="Should continue",
+        status=TaskStatus.PENDING,
+        plan_position=2,
+    )
+    db_session.add_all([failed_prior, later_pending])
+    db_session.commit()
+
+    assert TaskService(db_session).get_next_pending_task(project.id) is None
+    assert (
+        TaskService(db_session)
+        .get_next_pending_task(project.id, allow_failed_prior_tasks=True)
+        .id
+        == later_pending.id
+    )
+
+
 def test_blocking_prior_tasks_are_scoped_to_same_plan(db_session):
     project = Project(
         name="Plan Scoped Order", workspace_path="/tmp/plan_scoped", user_id=1

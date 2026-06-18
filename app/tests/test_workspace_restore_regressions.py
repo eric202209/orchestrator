@@ -332,6 +332,38 @@ def test_checkpoint_apply_reconciles_execution_results_ahead_of_cursor(
     assert reconciliation_events[0]["details"]["reconciled_current_step_index"] == 2
 
 
+def test_checkpoint_apply_sanitizes_stale_absolute_project_context(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setattr(
+        checkpoint_support.ValidatorService,
+        "assess_plan_workspace_compatibility",
+        staticmethod(lambda **_kwargs: {"compatible": True}),
+    )
+
+    state = _CheckpointApplyState(tmp_path)
+    checkpoint = _checkpoint_payload(current_step_index=0, execution_result_count=0)
+    checkpoint["context"]["project_context"] = (
+        "Read /root/.openclaw/workspace/docs/adr/"
+        "0002-advisory-human-guidance-conflict-detection.md"
+    )
+
+    checkpoint_support._apply_checkpoint_payload(
+        checkpoint,
+        orchestration_state=state,
+        task=_CheckpointApplyTask(),
+        session_id=123,
+        task_id=456,
+        prompt="original",
+        emit_live=lambda *args, **kwargs: None,
+    )
+
+    assert (
+        "0002-advisory-human-guidance-conflict-detection.md"
+        not in state.project_context
+    )
+
+
 def test_checkpoint_api_exposes_recommended_resume_checkpoint(
     authenticated_client, db_session, tmp_path: Path
 ):

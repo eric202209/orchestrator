@@ -23,6 +23,7 @@ from app.services.orchestration.phases.planning_flow import (
     execute_planning_phase,
 )
 from app.services.orchestration.phases.planning_support import (
+    _abort_missing_source_materialization_repair,
     _repeated_physical_src_import_repair_details,
 )
 from app.services.orchestration.planning.planner import (
@@ -8053,6 +8054,35 @@ def test_post_repair_missing_materialization_rejects_inspect_only_plan(
     assert session_task_link.status == TaskStatus.FAILED
     assert session.status == "paused"
     assert session.is_active is False
+
+
+def test_test_focused_missing_materialization_repair_is_not_aborted(tmp_path):
+    ctx = MagicMock()
+    ctx.prompt = "Add a targeted test for queue latency null handling"
+    ctx.task = MagicMock(
+        title="Queue latency null handling test",
+        description=(
+            "Add a targeted test for GET /ops/queue-latency that verifies NULL "
+            "queue latency values are excluded from average and max calculations."
+        ),
+    )
+    ctx.orchestration_state = MagicMock()
+    ctx.orchestration_state.plan = [{"step_number": 1}]
+    ctx.orchestration_state.project_dir = tmp_path
+
+    retry_state = _PlanningRetryState()
+    retry_state.repair_prompt_used = True
+    retry_state.source_materialization_required_after_repair = True
+    retry_state.last_repair_reason = "missing_source_materialization"
+
+    assert (
+        _abort_missing_source_materialization_repair(
+            ctx=ctx,
+            retry_state=retry_state,
+            output_text="[]",
+        )
+        is None
+    )
 
 
 def test_minimal_first_timeout_is_finalized_without_outer_retry(tmp_path, monkeypatch):

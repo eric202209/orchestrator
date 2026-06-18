@@ -1351,8 +1351,14 @@ class TaskService:
         self.db.refresh(task)
         return task
 
-    def get_next_pending_task(self, project_id: int):
-        """Get the next pending task whose earlier ordered tasks are already done."""
+    def get_next_pending_task(
+        self, project_id: int, *, allow_failed_prior_tasks: bool = False
+    ):
+        """Get the next pending task whose earlier ordered tasks are already done.
+
+        When allow_failed_prior_tasks=True, earlier failed/cancelled tasks are
+        treated as non-blocking for automatic campaign continuation.
+        """
         tasks = (
             self.db.query(Task)
             .filter(Task.project_id == project_id)
@@ -1368,7 +1374,14 @@ class TaskService:
         for task in tasks:
             if task.status != TaskStatus.PENDING:
                 continue
-            if not self.get_blocking_prior_tasks(task):
+            blocking_prior_tasks = self.get_blocking_prior_tasks(task)
+            if allow_failed_prior_tasks:
+                blocking_prior_tasks = [
+                    prior
+                    for prior in blocking_prior_tasks
+                    if prior.status not in [TaskStatus.FAILED, TaskStatus.CANCELLED]
+                ]
+            if not blocking_prior_tasks:
                 return task
         return None
 

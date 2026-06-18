@@ -42,6 +42,9 @@ _IGNORED_PARTS = {
 _PATH_TOKEN_RE = re.compile(
     r"(?<![\w./-])([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+\.[A-Za-z0-9_.-]+)(?![\w./-])"
 )
+_ABS_PATH_TOKEN_RE = re.compile(
+    r"(?<![\w./-])(/(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+)(?![\w./-])"
+)
 
 
 @runtime_checkable
@@ -144,6 +147,7 @@ def identify_stale_path_references(
     max_files: int = 300,
     max_items: int = 20,
 ) -> List[str]:
+    project_dir = Path(project_dir)
     inventory = {
         path
         for path in collect_workspace_inventory_paths(project_dir, max_files=max_files)
@@ -156,7 +160,14 @@ def identify_stale_path_references(
         raw_token = match.group(1).strip().strip("`'\".,:;()[]{}")
         if not raw_token:
             continue
-        normalized = raw_token.replace("\\", "/").lstrip("./")
+        token_path = Path(raw_token)
+        if token_path.is_absolute():
+            try:
+                normalized = token_path.relative_to(project_dir).as_posix()
+            except ValueError:
+                normalized = raw_token.replace("\\", "/")
+        else:
+            normalized = raw_token.replace("\\", "/").lstrip("./")
         if not normalized or normalized in seen:
             continue
         if normalized.startswith("/") or normalized.startswith(".."):
@@ -169,6 +180,36 @@ def identify_stale_path_references(
         stale_paths.append(normalized)
         if len(stale_paths) >= max_items:
             break
+
+    if len(stale_paths) < max_items:
+        for match in _ABS_PATH_TOKEN_RE.finditer(str(text or "")):
+            raw_token = match.group(1).strip().strip("`'\".,:;()[]{}")
+            if not raw_token:
+                continue
+            token_path = Path(raw_token)
+            if token_path.is_absolute():
+                try:
+                    normalized = token_path.relative_to(project_dir).as_posix()
+                except ValueError:
+                    normalized = raw_token.replace("\\", "/")
+            else:
+                normalized = raw_token.replace("\\", "/").lstrip("./")
+            if not normalized or normalized in seen:
+                continue
+            if normalized.startswith("/") or normalized.startswith(".."):
+                seen.add(normalized)
+                stale_paths.append(normalized)
+                if len(stale_paths) >= max_items:
+                    break
+                continue
+            if any(part in _IGNORED_PARTS for part in Path(normalized).parts):
+                continue
+            if normalized in inventory:
+                continue
+            seen.add(normalized)
+            stale_paths.append(normalized)
+            if len(stale_paths) >= max_items:
+                break
 
     return stale_paths
 
@@ -201,8 +242,7 @@ def sanitize_progress_notes_for_workspace(
         sections.append(sanitized_notes)
     if stale_paths:
         sections.append(
-            "Ignore prior-note file references that are not present in the current workspace:\n"
-            + "\n".join(f"- {path}" for path in stale_paths[:12])
+            "Ignore prior-note file references that are not present in the current workspace."
         )
     if removed_lines:
         sections.append(

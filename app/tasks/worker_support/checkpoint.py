@@ -3,7 +3,12 @@
 import json
 from typing import Any, Dict
 
+from pathlib import Path
+
 from app.services.orchestration import ValidatorService
+from app.services.orchestration.context.assembly import (
+    sanitize_progress_notes_for_workspace,
+)
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.state.persistence import (
     append_orchestration_event as _append_orchestration_event,
@@ -33,6 +38,14 @@ def _apply_checkpoint_payload(
     orchestration_state.project_context = checkpoint_context.get(
         "project_context", orchestration_state.project_context
     )
+    project_dir = getattr(orchestration_state, "project_dir", None)
+    if project_dir and isinstance(orchestration_state.project_context, str):
+        sanitized_context = sanitize_progress_notes_for_workspace(
+            orchestration_state.project_context,
+            Path(str(project_dir)),
+        )
+        if sanitized_context:
+            orchestration_state.project_context = sanitized_context
     if checkpoint_context.get("task_subfolder"):
         orchestration_state._task_subfolder_override = checkpoint_context.get(
             "task_subfolder"
