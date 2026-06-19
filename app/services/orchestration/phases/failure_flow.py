@@ -11,6 +11,7 @@ from app.services.orchestration.events.telemetry import record_phase_event
 from app.services.orchestration.execution.runtime import write_project_state_snapshot
 from app.services.orchestration.state.persistence import (
     append_orchestration_event,
+    read_orchestration_events,
     record_live_log,
     save_orchestration_checkpoint,
 )
@@ -35,6 +36,16 @@ from app.services.prompt_templates import OrchestrationStatus
 
 DIRTY_RETRY_CHECKPOINT_NAME = "autosave_error"
 _KNOWLEDGE_HALT_MIN_CONFIDENCE = 0.95
+
+# Administrative events written by handle_task_failure before _prepare_retry_workspace
+# is called. They do not indicate planning-phase entry or source mutation.
+_HANDLE_TASK_FAILURE_ADMIN_EVENTS = frozenset(
+    {
+        EventType.TASK_FAILED,
+        EventType.CHECKPOINT_SAVED,
+        EventType.HEALTH_SCORE_UPDATED,
+    }
+)
 
 
 def _task_execution_for_context(
@@ -70,6 +81,38 @@ def _retry_request_kwargs(self_task: Any) -> Optional[dict[str, Any]]:
     if not isinstance(kwargs, dict):
         return None
     return dict(kwargs)
+
+
+def _has_no_orchestration_events_for_retry(
+    *,
+    orchestration_state: Any,
+    session_id: Optional[int],
+    task_id: Optional[int],
+) -> bool:
+    """Return True when no meaningful (planning/execution) events exist for this task.
+
+    snapshot_missing + no meaningful events = pre-planning setup failure, no source
+    mutation evidence. Admin events written by handle_task_failure itself
+    (TASK_FAILED, CHECKPOINT_SAVED, HEALTH_SCORE_UPDATED) are excluded because they
+    are always present before this check runs and carry no signal about source mutations.
+    Returns False on any read error so the existing blocking behavior is preserved.
+    """
+    if orchestration_state is None or session_id is None or task_id is None:
+        return False
+    try:
+        events = read_orchestration_events(
+            orchestration_state.project_dir,
+            session_id,
+            task_id,
+        )
+        meaningful_events = [
+            event
+            for event in events
+            if event.get("event_type") not in _HANDLE_TASK_FAILURE_ADMIN_EVENTS
+        ]
+        return len(meaningful_events) == 0
+    except Exception:
+        return False
 
 
 def _prepare_retry_workspace(
@@ -133,6 +176,33 @@ def _prepare_retry_workspace(
             metadata={**retry_details, "restore_result": restore_result},
         )
         return True, None, False
+
+    # snapshot_missing + zero events = pre-planning setup failure, no source mutation evidence.
+    # The workspace is identical to its pre-run state; direct retry is safe without restore.
+    if (
+        restore_result is not None
+        and not restore_result.get("restored")
+        and restore_result.get("reason") == "snapshot_missing"
+        and _has_no_orchestration_events_for_retry(
+            orchestration_state=orchestration_state,
+            session_id=session_id,
+            task_id=task_id,
+        )
+    ):
+        record_live_log_fn(
+            db,
+            session_id,
+            task_id,
+            "WARN",
+            "[ORCHESTRATION] snapshot_missing with no prior events; workspace unmodified — allowing direct retry",
+            session_instance_id=session.instance_id if session else None,
+            metadata={
+                **retry_details,
+                "restore_result": restore_result,
+                "retry_exemption": "snapshot_missing_no_events",
+            },
+        )
+        return False, None, False
 
     dirty_details = {
         **retry_details,

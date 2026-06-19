@@ -49,13 +49,15 @@ def _knowledge_ctx() -> KnowledgeContext:
     )
 
 
-def test_repair_knowledge_block_includes_failure_memory_and_debug_case():
+def test_repair_knowledge_block_includes_first_item_only():
     block = _render_repair_knowledge_block(_knowledge_ctx())
 
     assert "REPAIR KNOWLEDGE REFERENCES" in block
     assert "Planning repair produced non-runnable step" in block
-    assert "Use ops for package metadata rewrites" in block
     assert "commands: []" in block
+    # Only the first item is rendered (PLANNING_REPAIR_MAX_KNOWLEDGE_ITEMS=1).
+    # The second debug_case item must be absent.
+    assert "Use ops for package metadata rewrites" not in block
 
 
 def test_planning_repair_prompt_includes_bounded_knowledge_context():
@@ -71,11 +73,17 @@ def test_planning_repair_prompt_includes_bounded_knowledge_context():
     assert "Planning repair produced non-runnable step" in prompt
     assert "commands: []" in prompt
     assert len(prompt) <= 6000
+    # Only the first knowledge item should appear (PLANNING_REPAIR_MAX_KNOWLEDGE_ITEMS=1).
+    assert "Use ops for package metadata rewrites" not in prompt
 
 
 def test_planning_repair_prompt_preserves_knowledge_when_structure_is_large(
     tmp_path,
 ):
+    # E14: With MAX_KNOWLEDGE_ITEMS=1, the smaller knowledge block (1 item) allows
+    # the default fallback path to preserve knowledge WITHOUT needing the rescue
+    # block that also reintroduced the structure capsule (with 2 items).  The
+    # structure is dropped to stay under budget; knowledge is kept.
     (tmp_path / "src" / "ledger_app").mkdir(parents=True)
     (tmp_path / "tests").mkdir()
     for idx in range(120):
@@ -99,7 +107,6 @@ def test_planning_repair_prompt_preserves_knowledge_when_structure_is_large(
     assert len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
     assert "REPAIR KNOWLEDGE REFERENCES" in prompt
     assert "Planning repair produced non-runnable step" in prompt
-    assert "PROJECT STRUCTURE CAPSULE" in prompt
 
 
 def test_planning_repair_prompt_fits_duplicate_stale_replace_source_context(
@@ -294,14 +301,18 @@ def test_stale_replace_repair_over_budget_uses_compact_stale_prompt(
         knowledge_context=_knowledge_ctx(),
     )
 
+    # E14: With MAX_KNOWLEDGE_ITEMS=1, the single knowledge item (~628 chars) is small
+    # enough that the compact stale_replace prompt WITH knowledge fits under the patched
+    # cap (compact_without_knowledge + 20).  Previously (2 items, ~1257 chars) knowledge
+    # was always dropped in the compact fallback; now it is preserved.  The excerpt may
+    # be truncated to make room; we do not assert on specific function signatures.
     assert len(prompt) <= prompt_cap
     assert len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
     assert "Stale replace repair mode." in prompt
-    assert "REPAIR KNOWLEDGE REFERENCES" not in prompt
-    assert "Planning repair produced non-runnable step" not in prompt
+    assert "REPAIR KNOWLEDGE REFERENCES" in prompt
+    assert "Planning repair produced non-runnable step" in prompt
     assert "src/small_cli/cli.py" in prompt
     assert "Current file excerpt for src/small_cli/cli.py" in prompt
-    assert "def format_message(message: str) -> str" in prompt
     assert "Use a write_file op for `src/small_cli/cli.py`" in prompt
     assert "write_file.content and append_file.content must be JSON strings" in prompt
 
@@ -409,3 +420,92 @@ def test_specialized_repair_prompt_preserves_knowledge_when_structure_is_large(
     assert "REPAIR KNOWLEDGE REFERENCES" in prompt
     assert "Planning repair produced non-runnable step" in prompt
     assert "PROJECT STRUCTURE CAPSULE" in prompt
+
+
+# --- E14: budget fix tests ---
+
+
+def test_repair_knowledge_block_single_item_limit():
+    """With MAX_KNOWLEDGE_ITEMS=1, only the first item renders (E14 regression guard)."""
+    from app.services.orchestration.planning import repair_prompts
+
+    assert repair_prompts.PLANNING_REPAIR_MAX_KNOWLEDGE_ITEMS == 1
+    block = _render_repair_knowledge_block(_knowledge_ctx())
+    assert "[1]" in block
+    assert "[2]" not in block
+    assert "Planning repair produced non-runnable step" in block
+    assert "Use ops for package metadata rewrites" not in block
+
+
+def test_repair_prompt_group_a_shape_fits_budget():
+    """Repair prompt with Group A payload shape (665-char malformed, 240-char error,
+    one knowledge item) must fit under the 6000-char hard budget.
+
+    E13 Group A tasks failed because two knowledge items (1257 chars) pushed the
+    compact fallback prompt from ~5231 to 6488 chars.  With one item the expected
+    knowledge block is ~629 chars, targeting ~5860 chars total.
+    """
+    malformed_output = "x" * 665
+    rejection_reasons = ["Validation error: " + "e" * 220]
+
+    prompt = PlannerService.build_planning_repair_prompt(
+        task_description="Implement a queue-latency handler.",
+        malformed_output=malformed_output,
+        project_dir=Path("/tmp/project"),
+        rejection_reasons=rejection_reasons,
+        knowledge_context=_knowledge_ctx(),
+    )
+
+    assert len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS, (
+        f"Group A-shaped prompt is {len(prompt)} chars, expected <= 6000. "
+        "E14 constant change may not have taken effect."
+    )
+    assert "REPAIR KNOWLEDGE REFERENCES" in prompt
+
+
+def test_repair_prompt_no_knowledge_context_works():
+    """No knowledge context must produce a valid prompt under budget."""
+    prompt = PlannerService.build_planning_repair_prompt(
+        task_description="Fix the broken step.",
+        malformed_output='[{"step_number":1,"commands":[]}]',
+        project_dir=Path("/tmp/project"),
+        rejection_reasons=["commands must be a non-empty array"],
+        knowledge_context=None,
+    )
+
+    assert len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
+    assert "REPAIR KNOWLEDGE REFERENCES" not in prompt
+
+
+def test_repair_prompt_budget_rejection_still_fires(tmp_path, monkeypatch):
+    """PlanningRepairBudgetExceeded must still be raised when the assembled prompt
+    (after all fallbacks) exceeds the hard limit.  The E14 constant change must not
+    suppress this safety gate.
+    """
+    import pytest
+    from app.services.orchestration.planning import repair_prompts as repair_prompts_mod
+    from app.services.orchestration.planning import planner as planner_mod
+    from app.services.orchestration.planning.planner import PlanningRepairBudgetExceeded
+
+    oversized_output = "z" * 12000
+    rejection_reasons = ["schema violated " + "e" * 2000]
+
+    # Lower the budget constant in both modules so even the compact fallback fails.
+    monkeypatch.setattr(planner_mod, "PLANNING_REPAIR_PROMPT_MAX_CHARS", 200)
+    monkeypatch.setattr(repair_prompts_mod, "PLANNING_REPAIR_PROMPT_MAX_CHARS", 200)
+
+    with pytest.raises(PlanningRepairBudgetExceeded) as exc_info:
+        PlannerService.repair_output(
+            runtime_service=None,
+            task_description="Build a feature",
+            malformed_output=oversized_output,
+            project_dir=tmp_path,
+            timeout_seconds=300,
+            logger=__import__("logging").getLogger("test"),
+            emit_live=lambda *a, **kw: None,
+            reason="json_parse_failed",
+            rejection_reasons=rejection_reasons,
+            knowledge_context=None,
+        )
+
+    assert "exceeded safe budget" in str(exc_info.value)
