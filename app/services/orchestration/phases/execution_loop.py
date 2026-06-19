@@ -125,6 +125,12 @@ from app.services.orchestration.phases.execution_local_steps import (
 )
 from app.services.prompt_templates import OrchestrationStatus, StepResult
 from app.schemas.knowledge import KnowledgeContext
+from app.services.orchestration.recovery.execution_recovery_evidence import (
+    build_step_recovery_evidence,
+)
+from app.services.orchestration.recovery.execution_recovery_service import (
+    ExecutionRecoveryService,
+)
 
 _DEBUG_KNOWLEDGE_MIN_CONFIDENCE = 0.85
 
@@ -1721,6 +1727,32 @@ def execute_step_loop(
             max_attempts = MAX_STEP_ATTEMPTS + 1
 
         if current_attempt >= max_attempts:
+            # Phase 13B-S1: bounded execution recovery — attempt before aborting.
+            # In S1 (LLM patch disabled), recovery always falls through to the ABORT path
+            # below while emitting audit events for eligibility decisions.
+            _step_recovery_evidence = build_step_recovery_evidence(
+                failure_envelope=failure_envelope,
+                debug_feedback_envelope=debug_feedback_envelope,
+                step_record=step_record,
+                step_output=step_output,
+                task_title=getattr(task, "title", "") or "",
+                task_prompt=prompt,
+            )
+            _step_recovery_result = ExecutionRecoveryService.attempt_recovery(
+                project_dir=orchestration_state.project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                evidence=_step_recovery_evidence,
+                orchestration_state=orchestration_state,
+                scope="step",
+                step_index=step_index + 1,
+                parent_event_id=(debugging_phase_event or {}).get("event_id"),
+            )
+            if _step_recovery_result.get("status") == "success":
+                # Phase 13B-S1: unreachable (LLM patch disabled).
+                # Phase 13B-full: reset this step's debug_attempts and retry.
+                continue
+            # Existing ABORT path — unchanged:
             emit_live(
                 "ERROR",
                 f"[ORCHESTRATION] Step {step_index + 1} failed after {current_attempt} attempts, marking as failed",

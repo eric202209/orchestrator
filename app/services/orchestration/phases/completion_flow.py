@@ -99,6 +99,12 @@ from app.services.orchestration.phases.completion_workspace import (
     _scope_workspace_consistency_to_task_changes,
     _stack_set_for_paths,
 )
+from app.services.orchestration.recovery.execution_recovery_evidence import (
+    build_completion_recovery_evidence,
+)
+from app.services.orchestration.recovery.execution_recovery_service import (
+    ExecutionRecoveryService,
+)
 
 __all__ = [
     "_attempt_completion_repair",
@@ -1276,6 +1282,28 @@ def finalize_successful_task(
                 "reported_changed_files": reported_changed_files[:20],
             },
         )
+        # Phase 13B-S1: bounded execution recovery — attempt before aborting.
+        # In S1 (LLM patch disabled), recovery always falls through to the ABORT path
+        # below while emitting audit events for eligibility decisions.
+        _completion_recovery_evidence = build_completion_recovery_evidence(
+            completion_validation=completion_validation,
+            debug_feedback_envelope=debug_feedback_envelope,
+            orchestration_state=orchestration_state,
+            task_title=getattr(task, "title", "") or "",
+            task_prompt=prompt,
+        )
+        _completion_recovery_result = ExecutionRecoveryService.attempt_recovery(
+            project_dir=orchestration_state.project_dir,
+            session_id=session_id,
+            task_id=task_id,
+            evidence=_completion_recovery_evidence,
+            orchestration_state=orchestration_state,
+            scope="completion",
+            step_index=None,
+        )
+        # Phase 13B-S1: recovery result is always "skipped" or "failed" here.
+        # Phase 13B-full: if "success", re-validate and fall through to success path.
+        # Existing ABORT path — unchanged:
         completion_error = "Completion validation failed: " + "; ".join(
             completion_validation.reasons[:5]
         )

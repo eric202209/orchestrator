@@ -108,6 +108,9 @@ class OrchestrationState:
     relaxed_mode: bool = False
     completion_repair_attempts: int = 0
     debug_repair_task_execution_ids: List[int] = field(default_factory=list)
+    # Phase 13B: bounded execution recovery budget and repeated-failure tracking.
+    execution_recovery_attempts: int = 0
+    execution_recovery_signature_hashes: List[str] = field(default_factory=list)
     status: OrchestrationStatus = OrchestrationStatus.PLANNING
     abort_reason: str = ""
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())

@@ -683,6 +683,13 @@ def build_orchestration_state_snapshot(
         "debug_repair_task_execution_ids": list(
             getattr(orchestration_state, "debug_repair_task_execution_ids", []) or []
         )[:20],
+        "execution_recovery_attempts": int(
+            getattr(orchestration_state, "execution_recovery_attempts", 0) or 0
+        ),
+        "execution_recovery_signature_hashes": list(
+            getattr(orchestration_state, "execution_recovery_signature_hashes", [])
+            or []
+        )[:20],
     }
 
 
@@ -899,6 +906,13 @@ def save_orchestration_checkpoint(
             "completion_repair_attempts": orchestration_state.completion_repair_attempts,
             "debug_repair_task_execution_ids": (
                 orchestration_state.debug_repair_task_execution_ids
+            ),
+            "execution_recovery_attempts": int(
+                getattr(orchestration_state, "execution_recovery_attempts", 0) or 0
+            ),
+            "execution_recovery_signature_hashes": list(
+                getattr(orchestration_state, "execution_recovery_signature_hashes", [])
+                or []
             ),
             "execution_results": [
                 serialize_step_result(r) for r in orchestration_state.execution_results

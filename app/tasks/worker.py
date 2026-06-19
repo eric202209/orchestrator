@@ -1285,6 +1285,8 @@ def execute_orchestration_task(
             orchestration_state.execution_results = []
             orchestration_state.changed_files = []
             orchestration_state.completion_repair_attempts = 0
+            orchestration_state.execution_recovery_attempts = 0
+            orchestration_state.execution_recovery_signature_hashes = []
             orchestration_state.status = OrchestrationStatus.PLANNING
             orchestration_state.abort_reason = ""
             task.steps = None

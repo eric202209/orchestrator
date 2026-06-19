@@ -69,6 +69,12 @@ class EventType:
     REPAIR_REJECTED = "repair_rejected"
     EVALUATOR_RESULT = "evaluator_result"
 
+    # ── Phase 13B: bounded execution recovery ────────────────────────────────
+    EXECUTION_RECOVERY_ATTEMPTED = "execution_recovery_attempted"
+    EXECUTION_RECOVERY_SUCCEEDED = "execution_recovery_succeeded"
+    EXECUTION_RECOVERY_FAILED = "execution_recovery_failed"
+    EXECUTION_RECOVERY_SKIPPED = "execution_recovery_skipped"
+
     # ── Tier 3 — Counterfactual replay ───────────────────────────────────────
     COUNTERFACTUAL_REPLAY_STARTED = "counterfactual_replay_started"
 

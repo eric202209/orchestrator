@@ -83,6 +83,15 @@ def _apply_checkpoint_payload(
         for item in checkpoint_state.get("debug_repair_task_execution_ids", []) or []
         if str(item).isdigit()
     ]
+    # Phase 13B: bounded execution recovery — default to 0/[] for old checkpoints.
+    orchestration_state.execution_recovery_attempts = int(
+        checkpoint_state.get("execution_recovery_attempts", 0) or 0
+    )
+    orchestration_state.execution_recovery_signature_hashes = [
+        str(h)
+        for h in checkpoint_state.get("execution_recovery_signature_hashes", []) or []
+        if h
+    ]
     orchestration_state.execution_results = [
         _restore_step_result(item)
         for item in checkpoint_state.get(
