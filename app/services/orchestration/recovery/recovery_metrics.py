@@ -33,6 +33,173 @@ def collect_recovery_metrics(
     return _tally(events)
 
 
+def collect_recovery_ops_metrics(
+    db: Any,
+    *,
+    project_id: Optional[int] = None,
+    session_id: Optional[int] = None,
+    model: Optional[str] = None,
+    day: Optional[str] = None,
+    limit_sessions: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Aggregate recovery metrics across sessions/tasks for ops reporting.
+
+    This is read-only and derives all counts from the existing event journal.
+    Aggregation dimensions:
+    - project
+    - session
+    - model
+    - day
+    """
+    from app.models import Project, Session as SessionModel, Task
+    from app.services.session.session_runtime_service import (
+        resolve_event_log_project_dir,
+    )
+    from app.services.orchestration.state.persistence import read_orchestration_events
+
+    query = db.query(SessionModel).filter(SessionModel.deleted_at.is_(None))
+    if project_id is not None:
+        query = query.filter(SessionModel.project_id == project_id)
+    if session_id is not None:
+        query = query.filter(SessionModel.id == session_id)
+    sessions = query.order_by(SessionModel.created_at.asc()).all()
+    if limit_sessions is not None:
+        sessions = sessions[: max(0, int(limit_sessions))]
+
+    aggregate = {
+        "recovery_attempted_count": 0,
+        "recovery_succeeded_count": 0,
+        "recovery_failed_count": 0,
+        "recovery_skipped_count": 0,
+        "recovery_budget_exhausted_count": 0,
+        "recovery_false_success_count": 0,
+        "recovery_by_scope": {},
+        "recovery_by_failure_class": {},
+        "by_project": {},
+        "by_session": {},
+        "by_model": {},
+        "by_day": {},
+    }
+
+    def _bucket(target: Dict[str, Any], key: str) -> Dict[str, Any]:
+        return target.setdefault(
+            key,
+            {
+                "recovery_attempted_count": 0,
+                "recovery_succeeded_count": 0,
+                "recovery_failed_count": 0,
+                "recovery_skipped_count": 0,
+                "recovery_budget_exhausted_count": 0,
+                "recovery_false_success_count": 0,
+                "recovered_success_rate": 0.0,
+                "recovery_by_scope": {},
+                "recovery_by_failure_class": {},
+            },
+        )
+
+    for sess in sessions:
+        if project_id is not None and sess.project_id != project_id:
+            continue
+        project = (
+            db.query(Project)
+            .filter(Project.id == sess.project_id, Project.deleted_at.is_(None))
+            .first()
+        )
+        project_key = f"{sess.project_id}:{getattr(project, 'name', 'unknown')}"
+        model_key = (
+            str(getattr(sess, "model_lane_label", None) or "")
+            or str(
+                (getattr(sess, "model_lane_metadata", {}) or {}).get("model_family")
+                or ""
+            )
+            or "unknown"
+        )
+        if model is not None and model_key != model:
+            continue
+        day_key = None
+        created_at = getattr(sess, "created_at", None)
+        if created_at is not None:
+            day_key = created_at.date().isoformat()
+        if day is not None and day_key != day:
+            continue
+
+        tasks = db.query(Task).filter(Task.project_id == sess.project_id).all()
+        for task in tasks:
+            event_project_dir = resolve_event_log_project_dir(db, sess, task.id)
+            if not event_project_dir:
+                continue
+            events = read_orchestration_events(event_project_dir, sess.id, task.id)
+            task_metrics = _tally(events)
+
+            for metric_key in (
+                "recovery_attempted_count",
+                "recovery_succeeded_count",
+                "recovery_failed_count",
+                "recovery_skipped_count",
+                "recovery_budget_exhausted_count",
+                "recovery_false_success_count",
+            ):
+                aggregate[metric_key] += task_metrics.get(metric_key, 0)
+                project_bucket = _bucket(aggregate["by_project"], project_key)
+                session_bucket = _bucket(aggregate["by_session"], str(sess.id))
+                model_bucket = _bucket(aggregate["by_model"], model_key)
+                day_bucket = _bucket(aggregate["by_day"], day_key or "unknown")
+                for bucket in (
+                    project_bucket,
+                    session_bucket,
+                    model_bucket,
+                    day_bucket,
+                ):
+                    bucket[metric_key] += task_metrics.get(metric_key, 0)
+
+            for scope, count in task_metrics.get("recovery_by_scope", {}).items():
+                aggregate["recovery_by_scope"][scope] = (
+                    aggregate["recovery_by_scope"].get(scope, 0) + count
+                )
+                for bucket in (
+                    _bucket(aggregate["by_project"], project_key),
+                    _bucket(aggregate["by_session"], str(sess.id)),
+                    _bucket(aggregate["by_model"], model_key),
+                    _bucket(aggregate["by_day"], day_key or "unknown"),
+                ):
+                    bucket["recovery_by_scope"][scope] = (
+                        bucket["recovery_by_scope"].get(scope, 0) + count
+                    )
+
+            for fc, count in task_metrics.get("recovery_by_failure_class", {}).items():
+                aggregate["recovery_by_failure_class"][fc] = (
+                    aggregate["recovery_by_failure_class"].get(fc, 0) + count
+                )
+                for bucket in (
+                    _bucket(aggregate["by_project"], project_key),
+                    _bucket(aggregate["by_session"], str(sess.id)),
+                    _bucket(aggregate["by_model"], model_key),
+                    _bucket(aggregate["by_day"], day_key or "unknown"),
+                ):
+                    bucket["recovery_by_failure_class"][fc] = (
+                        bucket["recovery_by_failure_class"].get(fc, 0) + count
+                    )
+
+    def _finalize(bucket: Dict[str, Any]) -> None:
+        total_terminal = (
+            bucket["recovery_succeeded_count"]
+            + bucket["recovery_failed_count"]
+            + bucket["recovery_skipped_count"]
+        )
+        bucket["recovered_success_rate"] = (
+            round(bucket["recovery_succeeded_count"] / total_terminal, 3)
+            if total_terminal > 0
+            else 0.0
+        )
+        bucket["total_terminal_outcomes"] = total_terminal
+
+    _finalize(aggregate)
+    for section in ("by_project", "by_session", "by_model", "by_day"):
+        for bucket in aggregate[section].values():
+            _finalize(bucket)
+    return aggregate
+
+
 def aggregate_metrics(all_metrics: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Merge metrics from multiple runs into a single aggregate dict."""
     totals: Dict[str, Any] = {

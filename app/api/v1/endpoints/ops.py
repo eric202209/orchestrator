@@ -32,6 +32,9 @@ from app.models import (
     TaskStatus,
 )
 from app.services.build_identity import build_identity_payload
+from app.services.orchestration.recovery.recovery_metrics import (
+    collect_recovery_ops_metrics,
+)
 from app.services.observability.metrics_collector import MetricsCollector
 from app.services.project.state_summary import build_project_state_summary
 from app.services.workspace.system_settings import diagnose_runtime_lane
@@ -616,6 +619,34 @@ def ops_audit_events(
         "limit": limit,
         "offset": offset,
         "items": items,
+    }
+
+
+@router.get("/recovery-summary")
+def ops_recovery_summary(
+    current_user=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    project_id: Optional[int] = Query(None),
+    session_id: Optional[int] = Query(None),
+    model: Optional[str] = Query(None, description="Session model lane label"),
+    day: Optional[str] = Query(None, description="ISO date YYYY-MM-DD"),
+) -> Dict[str, Any]:
+    """Read-only recovery rollup for operators."""
+    return {
+        "computed_at": datetime.now(UTC).isoformat(),
+        "filters": {
+            "project_id": project_id,
+            "session_id": session_id,
+            "model": model,
+            "day": day,
+        },
+        "metrics": collect_recovery_ops_metrics(
+            db,
+            project_id=project_id,
+            session_id=session_id,
+            model=model,
+            day=day,
+        ),
     }
 
 
