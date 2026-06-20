@@ -216,7 +216,10 @@ def test_phase10o_stale_replace_second_pass_preserves_source_targets(
     assert "src/medium_cli/store.py" in prompt
     assert "src/medium_cli/cli.py" in prompt
     assert "Do not invent unseen test files" in prompt
-    assert "Keep simple scalar verification on final pytest/test steps" in prompt
+    assert (
+        'REQUIRED: the final step MUST include a non-empty "verification" field'
+        in prompt
+    )
 
 
 def test_phase10o_python_test_repair_prompt_includes_imported_source_excerpt(

@@ -1890,7 +1890,7 @@ Stale replace second-pass target preservation:
 - Only convert stale replace_in_file ops for the same target into grounded write_file or valid ops for that same target.
 - Preserve all required source targets named by tests/source context.
 - Do not invent unseen test files or add expected_files entries for files not present in workspace evidence.
-- Keep simple scalar verification on final pytest/test steps, for example `python3 -m pytest -q`.
+- REQUIRED: the final step MUST include a non-empty "verification" field containing a real project test command. A missing, empty, or null verification field will cause this repaired plan to be rejected. Use `python3 -m pytest -q` or the equivalent project test command.
 - Make only the requested behavior change, then verify with a real project test command.
 - Return 3 steps: inspect current workspace, write the corrected file, run verification.
 - Each step must contain: step_number, description, commands, verification, rollback, expected_files; optional ops.
