@@ -477,6 +477,100 @@ def test_repair_prompt_no_knowledge_context_works():
     assert "REPAIR KNOWLEDGE REFERENCES" not in prompt
 
 
+# --- E18: always-on rule tests ---
+
+
+def test_brittle_command_rule_always_present():
+    """Rule 15 (heredoc/inline-python prohibition) must appear in the repair prompt
+    even when the rejection reason contains no brittle-command marker, so the model
+    receives the constraint unconditionally.
+    """
+    prompt = PlannerService.build_planning_repair_prompt(
+        task_description="Fix the broken step.",
+        malformed_output='[{"step_number":1,"commands":[]}]',
+        project_dir=Path("/tmp/project"),
+        rejection_reasons=["commands must be a non-empty array"],
+        knowledge_context=None,
+    )
+
+    assert "No heredocs, multiline shell file bodies" in prompt
+    assert len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
+
+
+def test_placeholder_stub_rule_always_present():
+    """Rule 16 (placeholder/stub prohibition) must appear in the repair prompt even
+    when the rejection reason does not mention placeholder or stub implementations.
+    """
+    prompt = PlannerService.build_planning_repair_prompt(
+        task_description="Fix the broken step.",
+        malformed_output='[{"step_number":1,"commands":[]}]',
+        project_dir=Path("/tmp/project"),
+        rejection_reasons=["commands must be a non-empty array"],
+        knowledge_context=None,
+    )
+
+    assert "write_file content must be behaviorally complete" in prompt
+    assert len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
+
+
+def test_test_preservation_rule_always_present():
+    """Rule 18 (test assertion preservation) must appear in the repair prompt even
+    when the rejection reason does not mention test assertions.
+    """
+    prompt = PlannerService.build_planning_repair_prompt(
+        task_description="Fix the broken step.",
+        malformed_output='[{"step_number":1,"commands":[]}]',
+        project_dir=Path("/tmp/project"),
+        rejection_reasons=["commands must be a non-empty array"],
+        knowledge_context=None,
+    )
+
+    assert "Do not remove, comment out, or weaken existing test assertions" in prompt
+    assert len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
+
+
+def test_e18_rules_present_in_compact_path(monkeypatch):
+    """Rules 15, 16, and 18 must appear in the compact-path prompt (generic compact
+    fallback) so they remain always-on when the default prompt is over budget.
+    """
+    from app.services.orchestration.planning import repair_prompts
+
+    prompt = PlannerService.build_compact_planning_repair_prompt(
+        malformed_output='[{"step_number":1,"commands":[]}]',
+        rejection_reasons=["commands must be a non-empty array"],
+    )
+
+    assert "no heredocs, multiline shell file bodies" in prompt
+    assert "write_file content must be behaviorally complete" in prompt
+    assert "do not remove, comment out, or weaken existing test assertions" in prompt
+    assert len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
+
+
+def test_e18_group_a_shape_still_fits_budget():
+    """Group A prompt shape (665-char malformed output, 240-char validation error,
+    one knowledge item) must still fit under the 6000-char hard budget after E18
+    rules are added.
+    """
+    malformed_output = "x" * 665
+    rejection_reasons = ["Validation error: " + "e" * 220]
+
+    prompt = PlannerService.build_planning_repair_prompt(
+        task_description="Implement a queue-latency handler.",
+        malformed_output=malformed_output,
+        project_dir=Path("/tmp/project"),
+        rejection_reasons=rejection_reasons,
+        knowledge_context=_knowledge_ctx(),
+    )
+
+    assert (
+        len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
+    ), f"Group A-shaped prompt is {len(prompt)} chars after E18, expected <= 6000."
+    assert "REPAIR KNOWLEDGE REFERENCES" in prompt
+    assert "No heredocs, multiline shell file bodies" in prompt
+    assert "write_file content must be behaviorally complete" in prompt
+    assert "Do not remove, comment out, or weaken existing test assertions" in prompt
+
+
 def test_repair_prompt_budget_rejection_still_fires(tmp_path, monkeypatch):
     """PlanningRepairBudgetExceeded must still be raised when the assembled prompt
     (after all fallbacks) exceeds the hard limit.  The E14 constant change must not

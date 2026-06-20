@@ -443,7 +443,10 @@ Rules:
 12. No /root/write_file.py, /tmp helpers, absolute helper scripts, outside files.
 13. If scaffolding is required, run it in the current workspace and use ops for follow-up edits.
 14. Stale replace fixes: use only identifiers/paths present in current evidence. Do not invent helper variables.
+15. No heredocs, multiline shell file bodies, or nested python -c one-liners for file writes; use ops.write_file or ops.replace_in_file instead; prefer python3 -m pytest -q or python3 -m py_compile <file> for verification.
+16. No pass, TODO, empty function stubs, or comment-only bodies; write_file content must be behaviorally complete; if full repair is impossible in one pass, make the first implementation step concrete.
 17. Each step is a separate JSON object. Never merge steps.
+18. Do not remove, comment out, or weaken existing test assertions; test-modifying ops must preserve all original assertions unless the task explicitly requests test changes.
 """
 
     prompt_metadata: dict[str, Any] = {
@@ -1648,7 +1651,9 @@ Rules:
 - {json_content_contract}
 - verification must be one real command using `python -c`, `python -m`, `node -e`, `npm run build`, or a project test command.
 - expected_files must be relative paths only.
-- expected_files steps must write real content; no touch-only, TODO, pass, stub, or placeholder-only implementation.
+- expected_files steps must write real content; no touch-only, pass, empty function stubs, or placeholder-only implementation; write_file content must be behaviorally complete.
+- no heredocs, multiline shell file bodies, or nested python -c one-liners for file writes; use ops.write_file or ops.replace_in_file instead; prefer python3 -m pytest -q for verification.
+- do not remove, comment out, or weaken existing test assertions; test-modifying ops must preserve all original assertions.
 - no nested project folder; run directly in the task workspace and do not `cd` into a new app/backend/frontend root.
 - no duplicated path roots like frontend/src/frontend/src or backend/src/backend/src.
 - no background processes, dev servers, absolute paths, prose, markdown, or extra keys beyond optional ops.
@@ -1771,6 +1776,8 @@ Stale replace second-pass target preservation:
 - Each step must contain: step_number, description, commands, verification, rollback, expected_files; optional ops.
 - {json_content_contract}
 - Relative paths only. No absolute paths, parent traversal, background processes, prose commands, markdown, or extra keys.
+- No heredocs, multiline shell file bodies, or nested python -c one-liners for file writes.
+- Do not remove, comment out, or weaken existing test assertions; preserve all original assertions unless the task explicitly requests test changes.
 """
 
     compact_attempts = [

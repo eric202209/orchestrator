@@ -273,7 +273,15 @@ def test_stale_replace_normalization_does_not_mutate_when_old_text_absent_from_l
 
 
 def test_repair_prompt_with_capsule_stays_within_budget(tmp_path: Path):
-    """Repair prompt including capsule and model-lane stop context must stay below 6000 chars."""
+    """Repair prompt for a large stale-replace project must stay below 6000 chars.
+
+    Before E18 the default path included a PROJECT STRUCTURE CAPSULE for this
+    50-file project shape and stayed under budget. After E18 the additional
+    always-on rules in _compose_prompt push the default prompt over budget for
+    this large-project shape, so the compact stale-replace fallback is used.
+    The 6000-char budget invariant holds either way; the compact path includes
+    the E18 heredoc/no-file-bodies rule via build_compact_stale_replace_repair_prompt.
+    """
     (tmp_path / "src" / "ledger_app").mkdir(parents=True)
     for i in range(50):
         (tmp_path / "src" / "ledger_app" / f"m{i}.py").write_text("")
@@ -296,8 +304,7 @@ def test_repair_prompt_with_capsule_stays_within_budget(tmp_path: Path):
     )
 
     assert len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
-    assert "PROJECT STRUCTURE CAPSULE" in prompt
-    assert "`replace_in_file` is only for exact old text" in prompt
+    assert "No heredocs, multiline shell file bodies" in prompt
 
 
 # --- V3: Rerun payload evidence ---
