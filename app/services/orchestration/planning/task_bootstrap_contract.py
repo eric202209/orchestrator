@@ -278,6 +278,36 @@ def _has_explicit_code_test_intent(task_prompt: str) -> bool:
     )
 
 
+def _has_explicit_new_test_writing_intent(task_prompt: str) -> bool:
+    """Strict check for prompts that explicitly ask to WRITE new test files.
+
+    Used only when existing tests are already present. Stricter than
+    `_has_explicit_code_test_intent` to avoid false positives from:
+      - verification commands ("verify with python3 -m pytest -q")
+      - references to the existing test suite ("so the existing tests pass")
+      - directory scope instructions ("scoped to the src/ and tests/ files")
+
+    Only matches unambiguous new-test-writing directives such as
+    "with unit tests", "add tests", "include test coverage", "tests for X".
+    """
+    prompt_lower = str(task_prompt or "").lower()
+    positive_text = re.sub(
+        r"\b(?:do not|don't|without)\s+"
+        r"(?:create|write|add|implement|include|use|update|provide)\b"
+        r"[^.;\n]*(?:tests?|pytest|unit\s+tests?|test\s+files?)",
+        " ",
+        prompt_lower,
+    )
+    strict_patterns = [
+        # "add tests", "with unit tests", "include test coverage", etc.
+        r"\b(?:with|include|add|write|create|update|provide)\s+"
+        r"(?:pytest|unit\s+tests?|tests?|test\s+files?|test\s+coverage)\b",
+        # "tests for the feature", "tests that verify", etc.
+        r"\btests?\s+(?:for|that|cover|exercise|import)\b",
+    ]
+    return any(re.search(pattern, positive_text) for pattern in strict_patterns)
+
+
 def _expected_test_reason(
     *,
     bootstrap_task_type: BootstrapTaskType,
@@ -286,10 +316,25 @@ def _expected_test_reason(
     existing_files: set[str],
     source_candidates: list[str],
 ) -> str | None:
-    if any(_is_test_path(path) for path in existing_files):
+    existing_tests_present = any(_is_test_path(path) for path in existing_files)
+    has_explicit_test_intent = _has_explicit_code_test_intent(task_prompt)
+
+    # When existing tests are present, only override to EXPLICIT_CODE_TEST_INTENT
+    # if the prompt unambiguously asks to WRITE new tests (not just run them).
+    # Verification commands ("python3 -m pytest -q") and references to the
+    # existing suite ("so the existing tests pass") must not trigger enforcement.
+    if existing_tests_present and bootstrap_task_type in {
+        BootstrapTaskType.SOURCE_CODE,
+        BootstrapTaskType.MIXED,
+    }:
+        if _has_explicit_new_test_writing_intent(task_prompt):
+            return EXPECTED_TEST_REASON_EXPLICIT_CODE_TEST_INTENT
         return EXPECTED_TEST_REASON_EXISTING_PROJECT_TESTS_PRESENT
 
-    has_explicit_test_intent = _has_explicit_code_test_intent(task_prompt)
+    # Existing tests present but task type is ARTIFACT_ONLY or UNKNOWN.
+    if existing_tests_present:
+        return EXPECTED_TEST_REASON_EXISTING_PROJECT_TESTS_PRESENT
+
     if has_explicit_test_intent and bootstrap_task_type in {
         BootstrapTaskType.SOURCE_CODE,
         BootstrapTaskType.MIXED,
@@ -518,6 +563,8 @@ def validate_task1_bootstrap_contract(
         contract.expected_test_reason
         and contract.expected_test_reason
         != EXPECTED_TEST_REASON_ARTIFACT_ONLY_NO_CODE_TEST_INTENT
+        and contract.expected_test_reason
+        != EXPECTED_TEST_REASON_EXISTING_PROJECT_TESTS_PRESENT
         and not contract.expected_test_files
     ):
         violations.append(

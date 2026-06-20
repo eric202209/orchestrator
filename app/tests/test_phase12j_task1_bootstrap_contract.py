@@ -170,7 +170,11 @@ def test_task1_artifact_checklist_test_lifecycle_word_does_not_require_test_file
     )
 
 
-def test_task1_existing_project_tests_keep_test_requirement(tmp_path):
+def test_task1_existing_project_tests_source_fix_does_not_require_test_materialization(
+    tmp_path,
+):
+    # E29: existing tests are verification assets for source-fix tasks; the plan
+    # must NOT be rejected for lacking test file ops when it has source + verification.
     tests_dir = tmp_path / "tests"
     tests_dir.mkdir()
     (tests_dir / "test_app.py").write_text("def test_existing():\n    assert True\n")
@@ -197,9 +201,11 @@ def test_task1_existing_project_tests_keep_test_requirement(tmp_path):
     )
 
     contract = verdict.details["task1_bootstrap_contract"]
-    assert not verdict.accepted
+    assert verdict.accepted
     assert contract["expected_test_reason"] == "existing_project_tests_present"
-    assert "task1_bootstrap_missing_expected_test_files" in contract["violation_codes"]
+    assert (
+        "task1_bootstrap_missing_expected_test_files" not in contract["violation_codes"]
+    )
 
 
 def test_task1_unknown_type_with_explicit_tests_remains_conservative(tmp_path):

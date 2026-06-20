@@ -1892,7 +1892,9 @@ Stale replace second-pass target preservation:
 - Do not invent unseen test files or add expected_files entries for files not present in workspace evidence.
 - REQUIRED: the final step MUST include a non-empty "verification" field containing a real project test command. A missing, empty, or null verification field will cause this repaired plan to be rejected. Use `python3 -m pytest -q` or the equivalent project test command.
 - Make only the requested behavior change, then verify with a real project test command.
-- Return 3 steps: inspect current workspace, write the corrected file, run verification.
+- Return the minimum number of steps required; do not assume a fixed number of steps.
+- Preserve every valid source-file materialization operation (write_file, append_file, replace_in_file) from the rejected plan; if the rejected plan modified N source files, the repaired plan must modify those same N source files.
+- Do not simplify a multi-file implementation into a single-file implementation; dropping source-file materialization operations is plan corruption unless the rejection reason explicitly requires it.
 - Each step must contain: step_number, description, commands, verification, rollback, expected_files; optional ops.
 - {json_content_contract}
 - Relative paths only. No absolute paths, parent traversal, background processes, prose commands, markdown, or extra keys.
