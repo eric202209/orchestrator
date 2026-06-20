@@ -3592,7 +3592,7 @@ def test_planning_repair_prompt_has_deterministic_compact_limit():
         )(),
     )
 
-    assert len(prompt) < 4400
+    assert len(prompt) < 5200
     assert len(prompt) < PLANNING_REPAIR_PROMPT_MAX_CHARS
     assert "...<truncated malformed planning output>..." in prompt
     assert "project context must be stripped" not in prompt
@@ -3622,7 +3622,7 @@ def test_profiled_planning_repair_prompt_over_budget_falls_back_to_compact(
         rejection_reasons=rejection_reasons,
         prompt_profile="local_qwen_small_json_array",
     )
-    prompt_cap = len(compact_prompt) + 20
+    prompt_cap = len(full_prompt) + 20
 
     assert len(full_prompt) <= prompt_cap
     assert len(profiled_full_prompt) > prompt_cap

@@ -510,6 +510,18 @@ Rules:
             active_source_api_contract_block,
             "",
         )
+    if (
+        len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS
+        and source_context_block
+        and source_api_contract_minimal_block
+        and source_api_contract_minimal_block != active_source_api_contract_block
+    ):
+        prompt = _compose_prompt(
+            "",
+            active_source_context_block,
+            source_api_contract_minimal_block,
+            "",
+        )
     if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS and source_context_block:
         prompt = _compose_prompt(
             "",
