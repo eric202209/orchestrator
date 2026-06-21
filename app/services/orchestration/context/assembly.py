@@ -1050,6 +1050,12 @@ def assemble_debugging_prompt(
         project_dir=prompt_project_dir,
         compact=inputs.compact,
     )
+    python_source_context = python_test_source_context_from_tests(
+        Path(ctx.orchestration_state.project_dir),
+        max_chars=600,
+    )
+    if python_source_context:
+        raw_prompt = raw_prompt + "\n\n" + python_source_context
     knowledge_block = render_knowledge_references_block(inputs.knowledge_context)
     if knowledge_block:
         raw_prompt = knowledge_block + "\n" + raw_prompt

@@ -412,7 +412,7 @@ def render_python_test_contract_summary(
     behavior_lines = _expected_behavior_lines(contract)
     if behavior_lines:
         lines.append("Expected behavior:")
-        lines.extend(f"- {item}" for item in behavior_lines[:3])
+        lines.extend(f"- {item}" for item in behavior_lines[:5])
     if contract.truncated:
         lines.append("- Summary truncated to stay within planning budget.")
 
@@ -442,7 +442,7 @@ def _expected_behavior_lines(contract: PythonTestContract) -> list[str]:
         if line and line not in seen:
             result.append(line)
             seen.add(line)
-        if len(result) >= 3:
+        if len(result) >= 5:
             break
     return list(reversed(result))
 
