@@ -149,6 +149,142 @@ def _safe_read_text(path: Path) -> str:
         return path.read_text(encoding="utf-8", errors="ignore")
 
 
+def _render_annotation(annotation: ast.expr | None) -> str:
+    if annotation is None:
+        return ""
+    return ast.unparse(annotation)
+
+
+def _render_stub_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    """Render a compact, source-faithful function signature from AST nodes."""
+
+    def render_arg(arg: ast.arg, default: ast.expr | None = None) -> str:
+        rendered = arg.arg
+        annotation = _render_annotation(arg.annotation)
+        if annotation:
+            rendered += f": {annotation}"
+        if default is not None:
+            rendered += f" = {ast.unparse(default)}"
+        return rendered
+
+    positional = [*node.args.posonlyargs, *node.args.args]
+    default_offset = len(positional) - len(node.args.defaults)
+    rendered_args: list[str] = []
+    for index, arg in enumerate(positional):
+        default = (
+            node.args.defaults[index - default_offset]
+            if index >= default_offset
+            else None
+        )
+        rendered_args.append(render_arg(arg, default))
+        if node.args.posonlyargs and index == len(node.args.posonlyargs) - 1:
+            rendered_args.append("/")
+    if node.args.vararg is not None:
+        rendered_args.append("*" + render_arg(node.args.vararg))
+    elif node.args.kwonlyargs:
+        rendered_args.append("*")
+    for arg, default in zip(node.args.kwonlyargs, node.args.kw_defaults):
+        rendered_args.append(render_arg(arg, default))
+    if node.args.kwarg is not None:
+        rendered_args.append("**" + render_arg(node.args.kwarg))
+
+    signature = f"{node.name}({', '.join(rendered_args)})"
+    return_annotation = _render_annotation(node.returns)
+    if return_annotation:
+        signature += f" -> {return_annotation}"
+    return signature
+
+
+def _stub_body_kind(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
+    """Return the recognised placeholder kind, ignoring a leading docstring."""
+
+    body = list(node.body)
+    docstring = ast.get_docstring(node, clean=False)
+    if docstring is not None and body and isinstance(body[0], ast.Expr):
+        body = body[1:]
+
+    if len(body) == 1 and isinstance(body[0], ast.Raise):
+        exc = body[0].exc
+        if isinstance(exc, ast.Call) and isinstance(exc.func, ast.Name):
+            if exc.func.id == "NotImplementedError":
+                return "not_implemented"
+        elif isinstance(exc, ast.Name) and exc.id == "NotImplementedError":
+            return "not_implemented"
+    if len(body) == 1 and isinstance(body[0], ast.Pass):
+        return "pass"
+    if not body and docstring and "todo" in docstring.lower():
+        return "todo"
+    return None
+
+
+def _iter_source_stub_nodes(
+    tree: ast.Module,
+) -> list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]]:
+    """Yield top-level functions and class methods that are recognised stubs."""
+
+    stubs: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]] = []
+    function_types = (ast.FunctionDef, ast.AsyncFunctionDef)
+    for node in tree.body:
+        if isinstance(node, function_types) and _stub_body_kind(node):
+            stubs.append((node.name, node))
+        elif isinstance(node, ast.ClassDef):
+            for member in node.body:
+                if isinstance(member, function_types) and _stub_body_kind(member):
+                    stubs.append((f"{node.name}.{member.name}", member))
+    return stubs
+
+
+def _truncate_stub_block(text: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 3:
+        return text[:max_chars]
+    return text[: max_chars - 3].rstrip() + "..."
+
+
+def render_source_stub_block(project_dir: Path, *, max_chars: int = 1200) -> str:
+    """Render a bounded list of incomplete Python source functions under ``src/``.
+
+    This intentionally identifies only unmistakable placeholders: a sole
+    ``raise NotImplementedError``, a sole ``pass``, or a TODO-only docstring.
+    Syntax errors and non-Python layouts are ignored so prompt assembly remains
+    a safe no-op for unrelated projects.
+    """
+
+    project_dir = Path(project_dir)
+    src_dir = project_dir / "src"
+    if not src_dir.is_dir() or max_chars <= 0:
+        return ""
+
+    root = project_dir.resolve()
+    stubs: list[str] = []
+    for source_path in sorted(src_dir.rglob("*.py")):
+        relative = _relative_to_root(source_path, root)
+        if relative is None or set(Path(relative).parts) & _IGNORED_PARTS:
+            continue
+        try:
+            tree = ast.parse(_safe_read_text(source_path))
+        except (OSError, SyntaxError):
+            continue
+        for qualified_name, node in _iter_source_stub_nodes(tree):
+            stubs.append(
+                f"- {relative} :: {qualified_name}{_render_stub_signature(node)[len(node.name):]}"
+            )
+
+    if not stubs:
+        return ""
+    rendered = "\n".join(
+        [
+            "## SOURCE STUBS REQUIRING IMPLEMENTATION",
+            "These functions are incomplete and must be implemented:",
+            *stubs,
+        ]
+    )
+    return _truncate_stub_block(rendered, max_chars)
+
+
 def _source_import_missing_targets(
     project_dir: Path,
     source_path: Path,

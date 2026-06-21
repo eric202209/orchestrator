@@ -19,7 +19,10 @@ from app.services.project.index_service import (
     build_project_index,
     render_project_structure_capsule,
 )
-from app.services.project.source_imports import python_test_source_context_from_tests
+from app.services.project.source_imports import (
+    python_test_source_context_from_tests,
+    render_source_stub_block,
+)
 from app.services.orchestration.context.hitl_sentinel import (
     render as render_hitl_sentinel,
 )
@@ -867,6 +870,11 @@ def assemble_planning_prompt(
     )
     if python_source_context:
         raw_prompt = raw_prompt + "\n\n" + python_source_context
+    source_stub_context = render_source_stub_block(
+        Path(ctx.orchestration_state.project_dir)
+    )
+    if source_stub_context:
+        raw_prompt = raw_prompt + "\n\n" + source_stub_context
     knowledge_block = _render_knowledge_block(knowledge_context)
     if knowledge_block:
         raw_prompt = knowledge_block + "\n" + raw_prompt
@@ -1056,6 +1064,11 @@ def assemble_debugging_prompt(
     )
     if python_source_context:
         raw_prompt = raw_prompt + "\n\n" + python_source_context
+    source_stub_context = render_source_stub_block(
+        Path(ctx.orchestration_state.project_dir)
+    )
+    if source_stub_context:
+        raw_prompt = raw_prompt + "\n\n" + source_stub_context
     knowledge_block = render_knowledge_references_block(inputs.knowledge_context)
     if knowledge_block:
         raw_prompt = knowledge_block + "\n" + raw_prompt
