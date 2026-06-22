@@ -69,7 +69,7 @@ function Dashboard() {
 
   const fetchOutcomeRates = useCallback(async () => {
     try {
-      const response = await adminAPI.getOutcomeRates(50);
+      const response = await adminAPI.getOutcomeRates(500);
       setOutcomeRates(response.data);
     } catch {
       // non-critical — silently ignore
@@ -78,7 +78,7 @@ function Dashboard() {
 
   const fetchTasks = useCallback(async () => {
     try {
-      const tasksResponse = await tasksAPI.getAll({ limit: 500 });
+      const tasksResponse = await tasksAPI.getAll({ limit: 5000 });
       setTasks(tasksResponse.data);
     } catch (error) {
       const axiosError = error as { code?: string; message?: string };

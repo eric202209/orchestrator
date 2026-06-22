@@ -152,6 +152,7 @@ class Settings(BaseSettings):
     EXECUTION_BACKEND: Optional[str] = None
     DEBUG_REPAIR_BACKEND: Optional[str] = None
     REPAIR_BACKEND: Optional[str] = None
+    COMPLETION_REPAIR_BACKEND: Optional[str] = None
     LOCAL_OPENCLAW_MAX_PARALLEL_SESSIONS: int = 1
     ENABLE_TEST_RUNTIME_BACKENDS: bool = False
     AGENT_MODEL: str = "local"

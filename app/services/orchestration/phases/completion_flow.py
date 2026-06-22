@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from datetime import UTC, datetime
 from typing import Any, Callable, Dict, Optional
@@ -115,6 +116,15 @@ __all__ = [
     "_run_evaluator",
     "finalize_successful_task",
 ]
+
+
+def _create_completion_repair_runtime(db, session_id, task_id):
+    """Create a fast runtime for completion-repair generation. Deferred import avoids circular dependency."""
+    from app.services.agents.agent_runtime import BackendRole, create_agent_runtime
+
+    return create_agent_runtime(
+        db, session_id, task_id, role=BackendRole.COMPLETION_REPAIR
+    )
 
 
 _OPENCLAW_DIAGNOSTIC_KEYS = {
@@ -451,11 +461,79 @@ def _attempt_completion_repair(
         expected_output="JSON object describing one repair step.",
         direct=True,
     )
-    repair_plan_result = asyncio.run(
-        ctx.runtime_service.execute_task(
-            repair_prompt, timeout_seconds=COMPLETION_REPAIR_TIMEOUT_SECONDS
+    _cr_prompt_chars = len(repair_prompt)
+    _cr_started_at = datetime.now(UTC).isoformat()
+    _cr_start_mono = time.monotonic()
+    _cr_fast_runtime = None
+    _cr_fast_profile = None
+    _cr_fast_fallback = False
+
+    _cr_configured_backend = getattr(settings, "COMPLETION_REPAIR_BACKEND", None)
+    if _cr_configured_backend:
+        try:
+            _cr_fast_runtime = _create_completion_repair_runtime(
+                ctx.db, ctx.session_id, ctx.task_id
+            )
+            _cr_fast_profile = _cr_configured_backend
+        except Exception as _cr_fast_err:
+            logger.warning(
+                "[COMPLETION_REPAIR] Fast runtime unavailable, falling back to default: %s",
+                _cr_fast_err,
+            )
+            _cr_fast_fallback = True
+
+    _cr_active_runtime = _cr_fast_runtime if _cr_fast_runtime else ctx.runtime_service
+    _cr_active_profile = _cr_fast_profile if _cr_fast_profile else "default"
+
+    try:
+        repair_plan_result = asyncio.run(
+            _cr_active_runtime.execute_task(
+                repair_prompt, timeout_seconds=COMPLETION_REPAIR_TIMEOUT_SECONDS
+            )
         )
-    )
+        _cr_duration = round(time.monotonic() - _cr_start_mono, 2)
+        _cr_output_chars = len(str(repair_plan_result.get("output", "") or ""))
+        emit_live(
+            "INFO",
+            "[COMPLETION_REPAIR] LLM generation completed",
+            metadata={
+                "phase": "completion_repair",
+                "completion_repair_prompt_chars": _cr_prompt_chars,
+                "completion_repair_timeout_seconds": COMPLETION_REPAIR_TIMEOUT_SECONDS,
+                "completion_repair_runtime_profile": _cr_active_profile,
+                "completion_repair_started_at": _cr_started_at,
+                "completion_repair_duration_seconds": _cr_duration,
+                "completion_repair_timed_out": False,
+                "completion_repair_output_chars": _cr_output_chars,
+                "completion_repair_fast_profile_selected": bool(_cr_fast_runtime),
+                "completion_repair_fast_profile_fallback": _cr_fast_fallback,
+            },
+        )
+    except Exception as _cr_exc:
+        _cr_duration = round(time.monotonic() - _cr_start_mono, 2)
+        _cr_exc_type = type(_cr_exc).__name__
+        _cr_timed_out = (
+            isinstance(_cr_exc, asyncio.TimeoutError)
+            or "timeout" in _cr_exc_type.lower()
+        )
+        emit_live(
+            "ERROR",
+            "[COMPLETION_REPAIR] LLM generation failed",
+            metadata={
+                "phase": "completion_repair",
+                "completion_repair_prompt_chars": _cr_prompt_chars,
+                "completion_repair_timeout_seconds": COMPLETION_REPAIR_TIMEOUT_SECONDS,
+                "completion_repair_runtime_profile": _cr_active_profile,
+                "completion_repair_started_at": _cr_started_at,
+                "completion_repair_duration_seconds": _cr_duration,
+                "completion_repair_timed_out": _cr_timed_out,
+                "completion_repair_exception_type": _cr_exc_type,
+                "completion_repair_fast_profile_selected": bool(_cr_fast_runtime),
+                "completion_repair_fast_profile_fallback": _cr_fast_fallback,
+            },
+        )
+        raise
+
     repair_output = _extract_completion_repair_json_text(
         repair_plan_result.get("output", "{}")
     )

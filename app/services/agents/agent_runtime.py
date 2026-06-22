@@ -26,6 +26,7 @@ class BackendRole(str, enum.Enum):
     EXECUTION = "execution"
     DEBUG_REPAIR = "debug_repair"
     REPAIR = "repair"
+    COMPLETION_REPAIR = "completion_repair"
 
 
 _TEST_RUNTIME_BACKENDS = {"stub_success", "stub_capacity"}
@@ -47,6 +48,7 @@ def resolve_backend_name_for_role(db: Session, role: BackendRole) -> str:
         BackendRole.DEBUG_REPAIR: settings.DEBUG_REPAIR_BACKEND
         or settings.REPAIR_BACKEND,
         BackendRole.REPAIR: settings.REPAIR_BACKEND,
+        BackendRole.COMPLETION_REPAIR: settings.COMPLETION_REPAIR_BACKEND,
     }.get(role)
     if role_setting:
         return role_setting.strip()

@@ -346,4 +346,8 @@ def outcome_class(
     if failure_summary_generated:
         return "failed_but_actionable"
 
+    # Paused sessions with no failure evidence are intentionally paused, not stuck
+    if session_status == "paused":
+        return "in_progress"
+
     return "stuck_or_manual_db_cleanup"
