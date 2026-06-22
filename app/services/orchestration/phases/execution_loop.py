@@ -47,6 +47,7 @@ from app.services.orchestration.diagnostics.public_api_guard import (
 )
 from app.services.orchestration.diagnostics.signature_guard import (
     BOUNDED_DEBUG_REPAIR_SIGNATURE_VIOLATION_REASON,
+    build_duplicate_definition_retry_instruction,
     check_bounded_debug_repair_signature_contract,
     signature_violation_event_details,
 )
@@ -3146,6 +3147,128 @@ def execute_step_loop(
                         project_dir=Path(orchestration_state.project_dir),
                         ops=debug_data.get("ops"),
                     )
+                    if sig_violations:
+                        # E54: guard-triggered single retry for duplicate_definition violations
+                        _e54_dup_violations = [
+                            v
+                            for v in sig_violations
+                            if v.violation_type == "duplicate_definition"
+                        ]
+                        if _e54_dup_violations and all(
+                            v.violation_type == "duplicate_definition"
+                            for v in sig_violations
+                        ):
+                            _e54_qname = _e54_dup_violations[0].qualified_name
+                            _e54_retry_telemetry: dict[str, Any] = {
+                                "bounded_execution_debug_repair_signature_retry_invoked": True,
+                                "bounded_execution_debug_repair_signature_retry_reason": "duplicate_definition",
+                                "bounded_execution_debug_repair_signature_retry_violation_type": "duplicate_definition",
+                                "bounded_execution_debug_repair_signature_retry_qualified_name": _e54_qname,
+                            }
+                            try:
+                                append_orchestration_event(
+                                    project_dir=orchestration_state.project_dir,
+                                    session_id=session_id,
+                                    task_id=task_id,
+                                    event_type=EventType.DEBUG_REPAIR_ATTEMPTED,
+                                    parent_event_id=(debugging_phase_event or {}).get(
+                                        "event_id"
+                                    ),
+                                    details={
+                                        "phase": "execution",
+                                        "step_index": step_index + 1,
+                                        "task_execution_id": task_execution_id,
+                                        "bounded_execution_debug_repair_signature_retry_success": False,
+                                        **_e54_retry_telemetry,
+                                    },
+                                )
+                            except Exception:
+                                pass
+                            _e54_retry_prompt = (
+                                debug_prompt
+                                + "\n\n"
+                                + build_duplicate_definition_retry_instruction(
+                                    _e54_dup_violations
+                                )
+                            )
+                            _e54_retry_kwargs = dict(debug_runtime_kwargs)
+                            if _e54_retry_kwargs.get("diagnostic_metadata"):
+                                _e54_retry_kwargs["diagnostic_metadata"] = {
+                                    **_e54_retry_kwargs["diagnostic_metadata"],
+                                    "bounded_execution_debug_repair_signature_retry": True,
+                                }
+                            try:
+                                _e54_retry_llm = _run_coroutine(
+                                    runtime_service.execute_task(
+                                        _e54_retry_prompt,
+                                        timeout_seconds=DEBUG_TIMEOUT_SECONDS,
+                                        **_e54_retry_kwargs,
+                                    )
+                                )
+                                _e54_retry_raw = extract_structured_text(
+                                    _e54_retry_llm.get("output", "{}")
+                                )
+                                _e54_retry_ok, _e54_retry_parsed, _ = (
+                                    error_handler.attempt_json_parsing(
+                                        _e54_retry_raw,
+                                        context=BOUNDED_DEBUG_REPAIR_CONTEXT,
+                                    )
+                                )
+                                _e54_retry_src_ctx = is_bounded_debug_repair_mode(
+                                    debug_prompt_mode
+                                ) and _bounded_debug_repair_source_edit_context(
+                                    step, debug_feedback_envelope
+                                )
+                                _e54_retry_norm = (
+                                    normalize_bounded_debug_repair_payload_detailed(
+                                        _e54_retry_parsed,
+                                        envelope=debug_feedback_envelope,
+                                        source_edit_context=_e54_retry_src_ctx,
+                                    )
+                                    if _e54_retry_ok
+                                    else None
+                                )
+                                _e54_retry_data = (
+                                    _e54_retry_norm.payload
+                                    if _e54_retry_norm is not None
+                                    else None
+                                )
+                                if (
+                                    _e54_retry_data is not None
+                                    and _e54_retry_data.get("fix_type") == "ops_fix"
+                                ):
+                                    _e54_retry_sig_violations = (
+                                        check_bounded_debug_repair_signature_contract(
+                                            project_dir=Path(
+                                                orchestration_state.project_dir
+                                            ),
+                                            ops=_e54_retry_data.get("ops"),
+                                        )
+                                    )
+                                    if not _e54_retry_sig_violations:
+                                        debug_data = _e54_retry_data
+                                        sig_violations = []
+                                        try:
+                                            append_orchestration_event(
+                                                project_dir=orchestration_state.project_dir,
+                                                session_id=session_id,
+                                                task_id=task_id,
+                                                event_type=EventType.DEBUG_REPAIR_ATTEMPTED,
+                                                parent_event_id=(
+                                                    debugging_phase_event or {}
+                                                ).get("event_id"),
+                                                details={
+                                                    "phase": "execution",
+                                                    "step_index": step_index + 1,
+                                                    "task_execution_id": task_execution_id,
+                                                    "bounded_execution_debug_repair_signature_retry_success": True,
+                                                    **_e54_retry_telemetry,
+                                                },
+                                            )
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
                     if sig_violations:
                         reason = BOUNDED_DEBUG_REPAIR_SIGNATURE_VIOLATION_REASON
                         violation_details = signature_violation_event_details(

@@ -127,6 +127,45 @@ def signature_violation_event_details(
     }
 
 
+def build_duplicate_definition_retry_instruction(
+    violations: list[SignatureViolation],
+) -> str:
+    """Build a guard-triggered retry instruction for duplicate_definition violations.
+
+    Returns a correction block to append to the repair prompt so the model
+    removes wrong-signature duplicate definitions instead of preserving both.
+    Only violations with violation_type == "duplicate_definition" are processed.
+    """
+    dup_violations = [
+        v for v in violations if v.violation_type == "duplicate_definition"
+    ]
+    if not dup_violations:
+        return ""
+
+    lines: list[str] = [
+        "SIGNATURE GUARD CORRECTION: Your previous repair output contained duplicate"
+        " function definitions. This violates the signature contract.",
+        "",
+        "For each function listed below:",
+        "  1. Remove the wrong-signature definition entirely.",
+        "  2. Keep exactly one definition with the correct original signature.",
+        "  3. Implement only the function body — do not change any parameter list.",
+        "",
+        "Duplicates to fix:",
+    ]
+    for v in dup_violations:
+        correct_sig = v.pre_signature or ""
+        all_post_sigs = [s.strip() for s in (v.post_signature or "").split("|")]
+        wrong_sigs = [s for s in all_post_sigs if s != correct_sig]
+        lines.append(f"  File:     {v.path}")
+        lines.append(f"  Function: {v.qualified_name}")
+        lines.append(f"  Keep:     {v.qualified_name}{correct_sig}")
+        for ws in wrong_sigs:
+            lines.append(f"  Remove:   {v.qualified_name}{ws}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
 def _candidate_python_contents(
     project_dir: Path,
     ops: Any,
