@@ -433,6 +433,7 @@ def build_bounded_debug_repair_prompt_with_metadata(
             "9. Do not bypass validators, workspace boundaries, or verification.\n"
             "10. Do not request additional retries or describe policy.\n"
             "11. If workspace evidence names a missing Python module target, prefer creating that module file instead of editing only a package __init__.py.\n"
+            "12. If a function whose definition appears in the source excerpts above raises NotImplementedError, implement its body only. Do not change its parameter list, annotations, return annotation, or call convention.\n"
         )
     else:
         zero_test_rule = ""
@@ -443,6 +444,12 @@ def build_bounded_debug_repair_prompt_with_metadata(
                 "assertion or target-package import; include that path in "
                 "expected_files. An empty file or touch command is invalid.\n"
             )
+        _no_src_sig_rule_num = 12 if zero_test_collect_only else 11
+        _no_src_sig_rule = (
+            f"{_no_src_sig_rule_num}. If a function whose definition appears in the source "
+            "excerpts above raises NotImplementedError, implement its body only. Do not change "
+            "its parameter list, annotations, return annotation, or call convention.\n"
+        )
         rules_section = (
             "Rules:\n"
             "1. Output exactly one JSON array containing one command_fix step object.\n"
@@ -456,6 +463,7 @@ def build_bounded_debug_repair_prompt_with_metadata(
             "9. Do not request additional retries or describe policy.\n"
             "10. If workspace evidence names a missing Python module target, prefer creating that module file instead of editing only a package __init__.py.\n"
             f"{zero_test_rule}"
+            f"{_no_src_sig_rule}"
         )
     prompt = (
         "Return a bare JSON array of one minimal debug repair step. "
@@ -521,7 +529,7 @@ def build_bounded_debug_repair_changed_file_context(
 
     lines = [
         "## CURRENT CONTENT OF IMPLICATED SOURCE FILES",
-        "Treat these files as the current source truth. Preserve existing APIs unless the failure requires a change.",
+        "Treat these files as the current source truth. Existing function signatures shown here are authoritative. Do not change parameter names, types, order, or count unless the task explicitly requests an API change. If a function body raises NotImplementedError, implement the body while keeping the exact signature. Do not redesign the API.",
     ]
     included_paths: list[str] = []
     for relative_path in ordered_paths:
