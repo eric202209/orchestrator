@@ -498,7 +498,7 @@ def _normalize_completion_repair_step(
     if not isinstance(expected_files, list):
         expected_files = []
 
-    return {
+    normalized = {
         "step_number": raw_step.get("step_number") or next_step_number,
         "description": str(
             raw_step.get("description") or "Apply minimal completion repair"
@@ -512,6 +512,11 @@ def _normalize_completion_repair_step(
             str(path).strip() for path in expected_files if str(path).strip()
         ],
     }
+    # Completion repair remains command-oriented. Preserve explicitly supplied
+    # deterministic file ops only so pre-apply guards can preview them safely.
+    if isinstance(raw_step.get("ops"), list):
+        normalized["ops"] = raw_step["ops"]
+    return normalized
 
 
 def _salvage_completion_repair_json_text(text: str) -> str:

@@ -358,7 +358,7 @@ def _run_scorer(
     _make_shared_workspace_path(output.parent)
     cmd = [
         python,
-        str(repo_root / "scripts/score_orchestrator_eval_case.py"),
+        str(repo_root / "scripts/maintenance/score_orchestrator_eval_case.py"),
         "--manifest",
         str(manifest),
         "--case-id",
@@ -1207,6 +1207,22 @@ def main() -> int:
         for case_id in case_ids:
             case_results = []
             for run_index in range(1, args.repeat + 1):
+                if case_results:
+                    previous = case_results[-1]
+                    print(
+                        "TERMINAL_DISPATCH_GATE "
+                        + json.dumps(
+                            {
+                                "case_id": case_id,
+                                "next_run_index": run_index,
+                                "previous_task_id": previous["task_id"],
+                                "previous_session_id": previous["session_id"],
+                                "previous_terminal_db_status": previous["session_status"],
+                            },
+                            sort_keys=True,
+                        ),
+                        flush=True,
+                    )
                 case_results.append(
                     _run_case(
                         args=args,

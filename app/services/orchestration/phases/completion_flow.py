@@ -18,6 +18,11 @@ from app.services.orchestration.diagnostics.debug_feedback import (
     build_debug_feedback_envelope,
     persist_debug_feedback_envelope,
 )
+from app.services.orchestration.diagnostics.signature_guard import (
+    COMPLETION_REPAIR_SIGNATURE_VIOLATION_REASON,
+    check_completion_repair_signature_contract,
+    completion_repair_signature_violation_event_details,
+)
 from app.services.orchestration.diagnostics.evidence_capsule import (
     collect_workspace_evidence,
 )
@@ -700,6 +705,80 @@ def _attempt_completion_repair(
                 + ", ".join(invalid_paths[:10]),
             }
         strategy_info = retry_strategy_info
+
+    signature_guard_result = check_completion_repair_signature_contract(
+        project_dir=Path(orchestration_state.project_dir),
+        ops=repair_step.get("ops"),
+    )
+    signature_guard_details = completion_repair_signature_violation_event_details(
+        signature_guard_result
+    )
+    if signature_guard_result.violations:
+        logger.warning(
+            "[ORCHESTRATION] Completion repair rejected by signature guard: %s",
+            signature_guard_details["completion_repair_signature_violation_types"],
+        )
+        append_orchestration_event(
+            project_dir=orchestration_state.project_dir,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            event_type=EventType.REPAIR_REJECTED,
+            details={
+                "phase": "completion_repair",
+                "reason": COMPLETION_REPAIR_SIGNATURE_VIOLATION_REASON,
+                **signature_guard_details,
+            },
+        )
+        orchestration_state.status = OrchestrationStatus.ABORTED
+        orchestration_state.abort_reason = COMPLETION_REPAIR_SIGNATURE_VIOLATION_REASON
+        task.error_message = COMPLETION_REPAIR_SIGNATURE_VIOLATION_REASON
+        task_execution = (
+            db.query(TaskExecution)
+            .filter(TaskExecution.id == ctx.task_execution_id)
+            .first()
+            if ctx.task_execution_id
+            else None
+        )
+        mark_task_attempt_failed(
+            task=task,
+            session_task_link=ctx.session_task_link,
+            task_execution=task_execution,
+            error_message=COMPLETION_REPAIR_SIGNATURE_VIOLATION_REASON,
+            completed_at=datetime.now(UTC),
+            workspace_status="blocked",
+        )
+        if session:
+            mark_session_paused(
+                session,
+                alert_level="error",
+                alert_message=COMPLETION_REPAIR_SIGNATURE_VIOLATION_REASON,
+            )
+        save_orchestration_checkpoint_fn(
+            db, ctx.session_id, ctx.task_id, ctx.prompt, orchestration_state
+        )
+        db.commit()
+        emit_live(
+            "ERROR",
+            "[ORCHESTRATION] Completion repair rejected before execution by signature contract guard",
+            metadata={
+                "phase": "completion_repair",
+                "reason": COMPLETION_REPAIR_SIGNATURE_VIOLATION_REASON,
+                **signature_guard_details,
+            },
+        )
+        return {
+            "status": "failed",
+            "reason": COMPLETION_REPAIR_SIGNATURE_VIOLATION_REASON,
+        }
+
+    emit_live(
+        "INFO",
+        "[ORCHESTRATION] Completion repair signature guard completed before execution",
+        metadata={
+            "phase": "completion_repair",
+            **signature_guard_details,
+        },
+    )
 
     orchestration_state.plan.append(repair_step)
     task.steps = json.dumps(orchestration_state.plan)
