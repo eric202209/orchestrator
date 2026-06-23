@@ -194,24 +194,32 @@ Last execution step:
 {capsule.last_step_summary or "No execution results recorded."}{evidence_section}
 
 Rules:
-1. Return a single JSON object with keys: step_number, description, commands, verification, rollback, expected_files.
-2. Use step_number {next_step_number}.
-3. Keep the fix atomic and minimal.
-4. Do not return prose, markdown, comments, or fenced code.
-5. Touch only relevant existing files unless commands explicitly create a required missing file.
-6. Do not rewrite unrelated files or inspect broad workspace inventory.
-7. Use relative paths only; no absolute paths, `..`, or `~`.
-8. Commands execute from the workspace root ({workspace}). Do not cd into the workspace root or any path containing vault/projects; you are already there.
-9. `commands` must be a closed JSON array containing only shell command strings.
-10. `verification` must be one top-level shell command string or null; never place it inside `commands`.
+1. Return a single JSON object with keys: step_number, repair_type, description, ops, verification, expected_files.
+2. Set repair_type to "ops_fix". Use step_number {next_step_number}.
+3. ops must be a non-empty JSON array of structured file operations.
+4. Each op must have "op" (write_file, append_file, or replace_in_file), "path" (relative to workspace root), and op-specific fields: "content" for write_file/append_file; "old" and "new" for replace_in_file.
+5. verification must be one top-level shell command string or null. No shell metacharacters.
+6. Do not use a "commands" key. Use ops only.
+7. Prefer replace_in_file for targeted in-place edits; use write_file only to create or fully overwrite a file.
+8. Use relative paths only; no absolute paths, "..", or "~".
+9. Do not return prose, markdown, comments, or fenced code.
+10. Touch only files that appear in the relevant existing files list, unless ops explicitly create a new required file.
+11. expected_files must list every file path that ops write to.
 
 Output example:
 {{
   "step_number": {next_step_number},
-  "description": "Fix missing completion artifact and verify it loads",
-  "commands": ["python3 - <<'PY'\\nfrom pathlib import Path\\nPath('src/main.py').write_text('print(1)\\\\n')\\nPY"],
-  "verification": "python3 -m py_compile src/main.py",
-  "rollback": null,
-  "expected_files": ["src/main.py"]
+  "repair_type": "ops_fix",
+  "description": "Fix format_summary signature to match pre-run contract",
+  "ops": [
+    {{
+      "op": "replace_in_file",
+      "path": "src/medium_cli/formatting.py",
+      "old": "def format_summary(*, total: int = 0, completed: int = 0) -> str:",
+      "new": "def format_summary(total: int, completed: int) -> str:"
+    }}
+  ],
+  "verification": "python -m pytest -q",
+  "expected_files": ["src/medium_cli/formatting.py"]
 }}
 """

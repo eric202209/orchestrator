@@ -19,9 +19,12 @@ from app.services.orchestration.diagnostics.debug_feedback import (
     persist_debug_feedback_envelope,
 )
 from app.services.orchestration.diagnostics.signature_guard import (
+    COMPLETION_REPAIR_POST_DIFF_VIOLATION_REASON,
     COMPLETION_REPAIR_SIGNATURE_VIOLATION_REASON,
     check_completion_repair_signature_contract,
+    check_post_execution_signature_drift,
     completion_repair_signature_violation_event_details,
+    snapshot_public_python_signatures,
 )
 from app.services.orchestration.diagnostics.evidence_capsule import (
     collect_workspace_evidence,
@@ -86,6 +89,7 @@ from app.services.workspace.permissions import ensure_shared_permissions
 from app.services.workspace.system_settings import get_effective_workspace_review_policy
 from app.services.prompt_templates import OrchestrationStatus, StepResult
 from app.services.orchestration.phases.completion_repair import (
+    _apply_completion_repair_ops_direct,
     _augment_completion_verification_command,
     _classify_completion_verification_failure,
     _completion_failure_signature,
@@ -608,8 +612,8 @@ def _attempt_completion_repair(
             "reason": "repair_step_missing_step_object",
         }
 
-    if not repair_step.get("commands"):
-        return {"status": "failed", "reason": "repair_step_missing_commands"}
+    if not repair_step.get("commands") and not repair_step.get("ops"):
+        return {"status": "failed", "reason": "repair_step_missing_commands_or_ops"}
 
     invalid_paths = _completion_repair_invalid_paths(
         repair_step=repair_step,
@@ -798,33 +802,139 @@ def _attempt_completion_repair(
         },
     )
 
-    execution_prompt = assemble_execution_prompt(ctx, repair_step)
-    step_timeout_seconds = determine_step_timeout(
-        timeout_seconds=ctx.timeout_seconds,
-        total_steps=len(orchestration_state.plan),
-        execution_profile=ctx.execution_profile,
-        step_description=repair_step["description"],
-        task_prompt=ctx.prompt,
-    )
     step_started_at = datetime.now(UTC)
-    repair_exec_result = asyncio.run(
-        ctx.runtime_service.execute_task(
-            execution_prompt,
-            timeout_seconds=step_timeout_seconds,
+    _pre_sig_snapshot: dict = {}
+    if repair_step.get("ops"):
+        # Direct ops application: apply structured file ops in-process, bypass OpenClaw.
+        _ops_result = _apply_completion_repair_ops_direct(
+            repair_step["ops"], Path(orchestration_state.project_dir)
         )
-    )
-    repair_exec_result = coerce_execution_step_result(
-        repair_exec_result,
-        expected_files=repair_step.get("expected_files", []),
-        extract_structured_text=extract_structured_text,
-    )
-    reported_changed_files = _extract_reported_changed_files(
-        str(repair_exec_result.get("output", "")),
-        Path(orchestration_state.project_dir),
-    )
-    if reported_changed_files:
-        repair_exec_result["files_changed"] = reported_changed_files
-        repair_step["expected_files"] = reported_changed_files
+        if not repair_step.get("expected_files"):
+            repair_step["expected_files"] = _ops_result["applied"]
+        repair_exec_result: dict = {
+            "status": "completed" if _ops_result["success"] else "failed",
+            "output": (
+                "Direct ops applied: " + ", ".join(_ops_result["applied"])
+                if _ops_result["success"]
+                else "Ops application errors: " + "; ".join(_ops_result["errors"][:5])
+            ),
+            "files_changed": _ops_result["applied"],
+        }
+        if not _ops_result["success"]:
+            repair_exec_result["error"] = "; ".join(_ops_result["errors"][:5])
+    else:
+        # Command-only path: pre-snapshot Python signatures for post-diff guard.
+        _post_diff_py_paths = [
+            str(f or "").strip().lstrip("./")
+            for f in (repair_step.get("expected_files") or [])
+            if str(f or "").strip().endswith(".py")
+        ]
+        if signature_guard_result.candidate_unavailable and _post_diff_py_paths:
+            _pre_sig_snapshot = snapshot_public_python_signatures(
+                Path(orchestration_state.project_dir), _post_diff_py_paths
+            )
+
+        execution_prompt = assemble_execution_prompt(ctx, repair_step)
+        step_timeout_seconds = determine_step_timeout(
+            timeout_seconds=ctx.timeout_seconds,
+            total_steps=len(orchestration_state.plan),
+            execution_profile=ctx.execution_profile,
+            step_description=repair_step["description"],
+            task_prompt=ctx.prompt,
+        )
+        repair_exec_result = asyncio.run(
+            ctx.runtime_service.execute_task(
+                execution_prompt,
+                timeout_seconds=step_timeout_seconds,
+            )
+        )
+        repair_exec_result = coerce_execution_step_result(
+            repair_exec_result,
+            expected_files=repair_step.get("expected_files", []),
+            extract_structured_text=extract_structured_text,
+        )
+        reported_changed_files = _extract_reported_changed_files(
+            str(repair_exec_result.get("output", "")),
+            Path(orchestration_state.project_dir),
+        )
+        if reported_changed_files:
+            repair_exec_result["files_changed"] = reported_changed_files
+            repair_step["expected_files"] = reported_changed_files
+
+        if _pre_sig_snapshot:
+            _post_diff_result = check_post_execution_signature_drift(
+                _pre_sig_snapshot, Path(orchestration_state.project_dir)
+            )
+            _post_diff_event_details = (
+                completion_repair_signature_violation_event_details(_post_diff_result)
+            )
+            emit_live(
+                "ERROR" if _post_diff_result.violations else "INFO",
+                "[COMPLETION_REPAIR] Post-execution signature diff guard completed",
+                metadata={"phase": "completion_repair", **_post_diff_event_details},
+            )
+            if _post_diff_result.violations:
+                logger.warning(
+                    "[ORCHESTRATION] Command-only completion repair rejected by post-execution signature diff guard: %s",
+                    _post_diff_event_details[
+                        "completion_repair_signature_violation_types"
+                    ],
+                )
+                append_orchestration_event(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=ctx.session_id,
+                    task_id=ctx.task_id,
+                    event_type=EventType.REPAIR_REJECTED,
+                    details={
+                        "phase": "completion_repair",
+                        "reason": COMPLETION_REPAIR_POST_DIFF_VIOLATION_REASON,
+                        **_post_diff_event_details,
+                    },
+                )
+                orchestration_state.status = OrchestrationStatus.ABORTED
+                orchestration_state.abort_reason = (
+                    COMPLETION_REPAIR_POST_DIFF_VIOLATION_REASON
+                )
+                task.error_message = COMPLETION_REPAIR_POST_DIFF_VIOLATION_REASON
+                _post_diff_task_execution = (
+                    db.query(TaskExecution)
+                    .filter(TaskExecution.id == ctx.task_execution_id)
+                    .first()
+                    if ctx.task_execution_id
+                    else None
+                )
+                mark_task_attempt_failed(
+                    task=task,
+                    session_task_link=ctx.session_task_link,
+                    task_execution=_post_diff_task_execution,
+                    error_message=COMPLETION_REPAIR_POST_DIFF_VIOLATION_REASON,
+                    completed_at=datetime.now(UTC),
+                    workspace_status="blocked",
+                )
+                if session:
+                    mark_session_paused(
+                        session,
+                        alert_level="error",
+                        alert_message=COMPLETION_REPAIR_POST_DIFF_VIOLATION_REASON,
+                    )
+                save_orchestration_checkpoint_fn(
+                    db, ctx.session_id, ctx.task_id, ctx.prompt, orchestration_state
+                )
+                db.commit()
+                emit_live(
+                    "ERROR",
+                    "[ORCHESTRATION] Command-only completion repair rejected after execution by post-diff signature drift guard",
+                    metadata={
+                        "phase": "completion_repair",
+                        "reason": COMPLETION_REPAIR_POST_DIFF_VIOLATION_REASON,
+                        **_post_diff_event_details,
+                    },
+                )
+                return {
+                    "status": "failed",
+                    "reason": COMPLETION_REPAIR_POST_DIFF_VIOLATION_REASON,
+                }
+
     assessment = assess_step_execution(
         db=db,
         session_id=ctx.session_id,

@@ -20,6 +20,7 @@ from app.services.orchestration.policy import COMPLETION_VERIFICATION_TIMEOUT_SE
 from app.services.orchestration.types import FailureEnvelope, ValidationVerdict
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.workspace.path_display import render_workspace_path_for_prompt
+from app.services.workspace.permissions import ensure_shared_permissions
 
 RELATIVE_PATH_TOKEN_RE = re.compile(
     r"(?<![\w./-])("
@@ -417,6 +418,83 @@ def _classify_completion_verification_failure(
     )
 
 
+def _apply_completion_repair_ops_direct(
+    ops: list[Dict[str, Any]],
+    project_dir: Path,
+) -> Dict[str, Any]:
+    """Apply structured file ops directly without going through the external runtime.
+
+    Returns {"applied": [...], "errors": [...], "success": bool}.
+    Supported ops: write_file, append_file, replace_in_file.
+    """
+    applied: list[str] = []
+    errors: list[str] = []
+    project_root = project_dir.resolve()
+    for op in ops:
+        if not isinstance(op, dict):
+            continue
+        op_name = str(op.get("op") or "").strip()
+        raw_path = str(op.get("path") or "").strip().replace("\\", "/")
+        if not raw_path or not op_name:
+            errors.append(f"op missing 'op' or 'path': {op}")
+            continue
+        # Reject traversal before normalizing leading ./
+        if ".." in raw_path.split("/"):
+            errors.append(f"path traversal not allowed: {raw_path}")
+            continue
+        path_str = raw_path.lstrip("./")
+        if not path_str:
+            errors.append(f"path resolves to empty after normalization: {raw_path}")
+            continue
+        abs_path = (project_dir / path_str).resolve()
+        try:
+            abs_path.relative_to(project_root)
+        except ValueError:
+            errors.append(f"path escapes project dir: {raw_path}")
+            continue
+        if op_name == "write_file":
+            content = str(op.get("content") or "")
+            abs_path.parent.mkdir(parents=True, exist_ok=True)
+            abs_path.write_text(content, encoding="utf-8")
+            try:
+                ensure_shared_permissions(abs_path)
+            except Exception:
+                pass
+            applied.append(path_str)
+        elif op_name == "replace_in_file":
+            old = str(op.get("old") or "")
+            new = str(op.get("new") or "")
+            if not abs_path.exists():
+                errors.append(f"replace_in_file: file not found: {path_str}")
+                continue
+            if not old:
+                errors.append(f"replace_in_file: 'old' is empty for {path_str}")
+                continue
+            text = abs_path.read_text(encoding="utf-8")
+            if old not in text:
+                errors.append(f"replace_in_file: 'old' text not found in {path_str}")
+                continue
+            abs_path.write_text(text.replace(old, new, 1), encoding="utf-8")
+            try:
+                ensure_shared_permissions(abs_path)
+            except Exception:
+                pass
+            applied.append(path_str)
+        elif op_name == "append_file":
+            content = str(op.get("content") or "")
+            abs_path.parent.mkdir(parents=True, exist_ok=True)
+            existing = abs_path.read_text(encoding="utf-8") if abs_path.exists() else ""
+            abs_path.write_text(existing + content, encoding="utf-8")
+            try:
+                ensure_shared_permissions(abs_path)
+            except Exception:
+                pass
+            applied.append(path_str)
+        else:
+            errors.append(f"unsupported op: {op_name}")
+    return {"applied": applied, "errors": errors, "success": not errors}
+
+
 def _build_completion_repair_prompt(
     *,
     task_prompt: str,
@@ -458,27 +536,33 @@ Current workspace inventory:
 {workspace_inventory[:5000]}
 
 Rules:
-1. Return a single JSON object with keys: step_number, description, commands, verification, rollback, expected_files
-2. Keep the fix atomic and minimal
-3. Use relative shell paths only
-4. Do not use `..`, `~`, or absolute paths in commands
-5. Do not create documentation files unless explicitly required
-6. Do not create a new top-level project folder
-7. Prefer fixing misplaced files, missing core files, or weak structure over rewriting the whole project
-8. commands must be a non-empty JSON array
-9. expected_files must list the files this repair should materialize or normalize
-10. Use the workspace inventory above as the source of truth; do not assume older file names or architectures that are not present
-11. Prefer renaming, moving, or normalizing existing files over creating parallel replacements
-12. Do not read or modify a guessed file path unless it appears in the workspace inventory or your commands create it first
+1. Return a single JSON object with keys: step_number, repair_type, description, ops, verification, expected_files.
+2. Set repair_type to "ops_fix". Use step_number {next_step_number}.
+3. ops must be a non-empty JSON array of structured file operations.
+4. Each op must have "op" (write_file, append_file, or replace_in_file), "path" (relative), and op-specific fields: "content" for write_file/append_file; "old" and "new" for replace_in_file.
+5. verification must be one top-level shell command string or null. Do not use shell metacharacters.
+6. Do not use a "commands" key. Use ops only.
+7. Prefer replace_in_file for targeted edits; use write_file only to create or fully overwrite a file.
+8. Use relative paths only. No absolute paths, "..", or "~".
+9. Do not create documentation files unless explicitly required.
+10. Use the workspace inventory as the source of truth; only touch files that appear there or that ops create.
+11. expected_files must list the file paths this repair writes or modifies.
 
 Output example:
 {{
   "step_number": {next_step_number},
-  "description": "Move generated test files into the workspace root and verify they load",
-  "commands": ["mkdir -p tests", "mv nested/tests/*.spec.js tests/"],
-  "verification": "test -f tests/event-chain.spec.js",
-  "rollback": null,
-  "expected_files": ["tests/event-chain.spec.js"]
+  "repair_type": "ops_fix",
+  "description": "Fix format_summary signature to match pre-run contract",
+  "ops": [
+    {{
+      "op": "replace_in_file",
+      "path": "src/medium_cli/formatting.py",
+      "old": "def format_summary(*, total: int = 0, completed: int = 0) -> str:",
+      "new": "def format_summary(total: int, completed: int) -> str:"
+    }}
+  ],
+  "verification": "python -m pytest -q",
+  "expected_files": ["src/medium_cli/formatting.py"]
 }}
 """
 
@@ -498,6 +582,9 @@ def _normalize_completion_repair_step(
     if not isinstance(expected_files, list):
         expected_files = []
 
+    # verification_command is the ops-fix schema alias for verification.
+    verification = raw_step.get("verification") or raw_step.get("verification_command")
+
     normalized = {
         "step_number": raw_step.get("step_number") or next_step_number,
         "description": str(
@@ -506,16 +593,21 @@ def _normalize_completion_repair_step(
         "commands": [
             str(command).strip() for command in commands if str(command).strip()
         ],
-        "verification": raw_step.get("verification"),
+        "verification": verification,
         "rollback": raw_step.get("rollback"),
         "expected_files": [
             str(path).strip() for path in expected_files if str(path).strip()
         ],
     }
-    # Completion repair remains command-oriented. Preserve explicitly supplied
-    # deterministic file ops only so pre-apply guards can preview them safely.
     if isinstance(raw_step.get("ops"), list):
         normalized["ops"] = raw_step["ops"]
+        # Derive expected_files from ops paths when not explicitly supplied.
+        if not normalized["expected_files"]:
+            normalized["expected_files"] = [
+                str(op.get("path") or "").strip().lstrip("./")
+                for op in raw_step["ops"]
+                if isinstance(op, dict) and str(op.get("path") or "").strip()
+            ]
     return normalized
 
 
@@ -678,8 +770,11 @@ def _extract_completion_repair_step(
             "description",
             "commands",
             "verification",
+            "verification_command",
             "rollback",
             "expected_files",
+            "ops",
+            "repair_type",
         }
         if step_like_keys.intersection(parsed_data.keys()):
             return _normalize_completion_repair_step(parsed_data, next_step_number)

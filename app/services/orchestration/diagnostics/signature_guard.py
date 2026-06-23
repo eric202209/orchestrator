@@ -15,6 +15,9 @@ BOUNDED_DEBUG_REPAIR_SIGNATURE_VIOLATION_REASON = (
 COMPLETION_REPAIR_SIGNATURE_VIOLATION_REASON = (
     "completion_repair_signature_contract_violation"
 )
+COMPLETION_REPAIR_POST_DIFF_VIOLATION_REASON = (
+    "completion_repair_post_execution_signature_drift_violation"
+)
 
 
 @dataclass(frozen=True)
@@ -450,4 +453,97 @@ def _ast_representation(node: ast.AST | None) -> str | None:
         ast.dump(node, annotate_fields=True, include_attributes=False)
         if node is not None
         else None
+    )
+
+
+def snapshot_public_python_signatures(
+    project_dir: Path,
+    rel_paths: list[str],
+) -> dict[str, dict[str, list[str]]]:
+    """Fingerprint public Python functions in the given relative paths.
+
+    Returns {rel_path: {qualified_name: [fingerprint]}} for each existing .py
+    file.  Skips missing files and files that fail to parse silently.
+    """
+    snapshot: dict[str, dict[str, list[str]]] = {}
+    for raw in rel_paths:
+        clean = str(raw or "").strip().replace("\\", "/").lstrip("./")
+        if not clean.endswith(".py"):
+            continue
+        abs_path = project_dir / clean
+        try:
+            content = abs_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            continue
+        sigs = _collect_strict_function_sigs(tree)
+        if sigs:
+            snapshot[clean] = sigs
+    return snapshot
+
+
+def check_post_execution_signature_drift(
+    pre_snapshot: dict[str, dict[str, list[str]]],
+    project_dir: Path,
+) -> CompletionRepairSignatureGuardResult:
+    """Compare pre-execution signature snapshot against current workspace state.
+
+    Used as a fallback guard for command-only completion repairs where E59 could
+    not preview structured file ops (candidate_unavailable=True).  Fires after
+    the repair has already been applied by the external runtime.
+    """
+    violations: list[SignatureViolation] = []
+    files_checked = 0
+    for rel_path, pre_sigs in pre_snapshot.items():
+        abs_path = project_dir / rel_path
+        try:
+            content = abs_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            continue
+        files_checked += 1
+        post_sigs = _collect_strict_function_sigs(tree)
+        for qualified_name, pre_fingerprints in pre_sigs.items():
+            pre_fingerprint = pre_fingerprints[0]
+            post_fingerprints = post_sigs.get(qualified_name, [])
+            if not post_fingerprints:
+                violations.append(
+                    SignatureViolation(
+                        path=rel_path,
+                        qualified_name=qualified_name,
+                        violation_type="missing_existing_definition",
+                        pre_signature=pre_fingerprint,
+                        post_signature=None,
+                    )
+                )
+            elif len(post_fingerprints) > 1:
+                violations.append(
+                    SignatureViolation(
+                        path=rel_path,
+                        qualified_name=qualified_name,
+                        violation_type="duplicate_definition",
+                        pre_signature=pre_fingerprint,
+                        post_signature=" | ".join(post_fingerprints),
+                    )
+                )
+            elif post_fingerprints[0] != pre_fingerprint:
+                violations.append(
+                    SignatureViolation(
+                        path=rel_path,
+                        qualified_name=qualified_name,
+                        violation_type="signature_changed",
+                        pre_signature=pre_fingerprint,
+                        post_signature=post_fingerprints[0],
+                    )
+                )
+    return CompletionRepairSignatureGuardResult(
+        checked=files_checked > 0,
+        candidate_unavailable=False,
+        violations=violations,
     )
