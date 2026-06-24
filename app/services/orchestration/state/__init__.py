@@ -1,5 +1,7 @@
 """State persistence and session-state helpers for orchestration."""
 
+from .execution_states import OrchestrationPhase, TerminalReason
+from .transition_table import LEGAL_TRANSITIONS, TERMINAL_PHASES
 from .persistence import (
     CheckpointContext,
     CheckpointData,
@@ -28,6 +30,10 @@ from .session_state import (
 )
 
 __all__ = [
+    "LEGAL_TRANSITIONS",
+    "OrchestrationPhase",
+    "TERMINAL_PHASES",
+    "TerminalReason",
     "CheckpointContext",
     "CheckpointData",
     "append_orchestration_event",

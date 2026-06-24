@@ -26,6 +26,7 @@ from app.runtime_naming import (
     bounded_debug_repair_timeout_alias_details,
     is_bounded_debug_repair_mode,
 )
+from app.services.orchestration.state.execution_states import OrchestrationPhase
 from app.services.orchestration.state.session_state import (
     mark_session_paused,
     mark_session_running,
@@ -254,7 +255,7 @@ def _is_bounded_debug_repair_timeout(
         is_bounded_debug_repair = is_bounded_debug_repair_mode(debug_prompt_mode)
     if not is_bounded_debug_repair:
         return False
-    if runtime_diagnostics.get("failure_phase") != "debug_repair":
+    if runtime_diagnostics.get("failure_phase") != OrchestrationPhase.DEBUG_REPAIR:
         return False
     if runtime_diagnostics.get("debug_failure_class") != "source_step_validation":
         return False

@@ -90,6 +90,10 @@ from app.services.orchestration.run_state import (
     mark_task_attempt_cancelled,
     mark_task_attempt_failed,
 )
+from app.services.orchestration.state.execution_states import (
+    OrchestrationPhase,
+    TerminalReason,
+)
 from app.services.orchestration.state.persistence import (
     append_orchestration_event,
     attach_failure_envelope,
@@ -440,7 +444,7 @@ def _mark_bounded_debug_repair_timeout_if_applicable(
     ):
         diagnostics.update(
             {
-                "failure_phase": "debug_repair",
+                "failure_phase": OrchestrationPhase.DEBUG_REPAIR,
                 **debug_prompt_mode_alias_details(debug_prompt_mode),
                 "debug_failure_class": debug_failure_class,
                 **bounded_debug_repair_timeout_alias_details(True),
@@ -764,7 +768,10 @@ def execute_step_loop(
         db.commit()
         restore_workspace_snapshot_if_needed("reasoning artifact gate failed")
         write_project_state_snapshot_fn(db, project, task, session_id)
-        return {"status": "failed", "reason": "reasoning_artifact_gate_failed"}
+        return {
+            "status": "failed",
+            "reason": TerminalReason.REASONING_ARTIFACT_GATE_FAILED,
+        }
 
     orchestration_state.status = OrchestrationStatus.EXECUTING
     logger.info(
@@ -932,7 +939,10 @@ def execute_step_loop(
                 db.commit()
                 restore_workspace_snapshot_if_needed("manual review gate")
                 write_project_state_snapshot_fn(db, project, task, session_id)
-                return {"status": "failed", "reason": "manual_review_required"}
+                return {
+                    "status": "failed",
+                    "reason": TerminalReason.MANUAL_REVIEW_REQUIRED,
+                }
 
             step_description = step.get("description", f"Step {step_index + 1}")
             step_commands = step.get("commands", [])
@@ -1723,7 +1733,7 @@ def execute_step_loop(
             )
             restore_workspace_snapshot_if_needed("repeated tool/path failures")
             write_project_state_snapshot_fn(db, project, task, session_id)
-            return {"status": "failed", "reason": "manual_review_required"}
+            return {"status": "failed", "reason": TerminalReason.MANUAL_REVIEW_REQUIRED}
 
         if (
             step_status == "failed"
@@ -1964,7 +1974,7 @@ def execute_step_loop(
                 pass
             restore_workspace_snapshot_if_needed("max step attempts reached")
             write_project_state_snapshot_fn(db, project, task, session_id)
-            return {"status": "failed", "reason": "max_attempts_reached"}
+            return {"status": "failed", "reason": TerminalReason.MAX_ATTEMPTS_REACHED}
 
         debug_inputs = DebugPromptInputs(
             step_description=step_description + extra_context,
@@ -2019,7 +2029,7 @@ def execute_step_loop(
                     "terminal_message_architecture": (
                         "Bounded execution debug repair budget exhausted for this TaskExecution"
                     ),
-                    "debug_repair_terminal_reason": "debug_repair_budget_exhausted",
+                    "debug_repair_terminal_reason": TerminalReason.DEBUG_REPAIR_BUDGET_EXHAUSTED,
                     "debug_failure_class": debug_feedback_envelope.failure_class,
                     "task_execution_id": task_execution_id,
                 },
@@ -2033,13 +2043,13 @@ def execute_step_loop(
                     parent_event_id=(debugging_phase_event or {}).get("event_id"),
                     details={
                         "phase": "execution",
-                        "reason": "debug_repair_budget_exhausted",
+                        "reason": TerminalReason.DEBUG_REPAIR_BUDGET_EXHAUSTED,
                         "debug_repair_scope": "bounded_execution_debug_repair",
                         "terminal_message_architecture": (
                             "Bounded execution debug repair budget exhausted for this TaskExecution"
                         ),
                         "debug_repair_terminal_reason": (
-                            "debug_repair_budget_exhausted"
+                            TerminalReason.DEBUG_REPAIR_BUDGET_EXHAUSTED
                         ),
                         "debug_repair_attempted": False,
                         "debug_repair_used": True,
@@ -2062,7 +2072,10 @@ def execute_step_loop(
             db.commit()
             restore_workspace_snapshot_if_needed("debug repair budget exhausted")
             write_project_state_snapshot_fn(db, project, task, session_id)
-            return {"status": "failed", "reason": "debug_repair_budget_exhausted"}
+            return {
+                "status": "failed",
+                "reason": TerminalReason.DEBUG_REPAIR_BUDGET_EXHAUSTED,
+            }
 
         if bounded_debug_repair_allowed:
             _evidence_capsule = collect_workspace_evidence(
@@ -2798,7 +2811,10 @@ def execute_step_loop(
                 emit_live(
                     "ERROR",
                     f"[ORCHESTRATION] Plan revision cap ({max_plan_revisions}) reached; aborting",
-                    metadata={"phase": "plan_revision", "step_index": step_index + 1},
+                    metadata={
+                        "phase": OrchestrationPhase.PLAN_REVISION,
+                        "step_index": step_index + 1,
+                    },
                 )
                 orchestration_state.status = OrchestrationStatus.ABORTED
                 orchestration_state.abort_reason = f"Plan revision cap ({max_plan_revisions}) reached after step {step_index + 1}"
@@ -2812,7 +2828,10 @@ def execute_step_loop(
                 db.commit()
                 restore_workspace_snapshot_if_needed("max step attempts reached")
                 write_project_state_snapshot_fn(db, project, task, session_id)
-                return {"status": "failed", "reason": "plan_revision_cap_reached"}
+                return {
+                    "status": "failed",
+                    "reason": TerminalReason.PLAN_REVISION_CAP_REACHED,
+                }
 
             if fix_type == "revise_plan":
                 plan_revision_count += 1
@@ -2822,7 +2841,10 @@ def execute_step_loop(
                 emit_live(
                     "WARN",
                     "[ORCHESTRATION] Plan revision needed, entering PLAN_REVISION phase",
-                    metadata={"phase": "plan_revision", "step_index": step_index + 1},
+                    metadata={
+                        "phase": OrchestrationPhase.PLAN_REVISION,
+                        "step_index": step_index + 1,
+                    },
                 )
                 try:
                     append_orchestration_event(
@@ -2848,7 +2870,7 @@ def execute_step_loop(
                         event_type=EventType.PHASE_STARTED,
                         parent_event_id=(debugging_phase_event or {}).get("event_id"),
                         details={
-                            "phase": "plan_revision",
+                            "phase": OrchestrationPhase.PLAN_REVISION,
                             "step_index": step_index + 1,
                         },
                     )
@@ -2930,7 +2952,7 @@ def execute_step_loop(
                         "ERROR",
                         "[ORCHESTRATION] Revised plan failed validation",
                         metadata={
-                            "phase": "plan_revision",
+                            "phase": OrchestrationPhase.PLAN_REVISION,
                             "validation_status": revised_plan_verdict.status,
                             "reasons": revised_plan_verdict.reasons[:10],
                         },
@@ -2946,7 +2968,7 @@ def execute_step_loop(
                                 "event_id"
                             ),
                             details={
-                                "phase": "plan_revision",
+                                "phase": OrchestrationPhase.PLAN_REVISION,
                                 "status": "revised_plan_validation_failed",
                                 "step_index": step_index + 1,
                             },
@@ -2967,7 +2989,7 @@ def execute_step_loop(
                     write_project_state_snapshot_fn(db, project, task, session_id)
                     return {
                         "status": "failed",
-                        "reason": "revised_plan_validation_failed",
+                        "reason": TerminalReason.REVISED_PLAN_VALIDATION_FAILED,
                     }
 
                 logger.info(
@@ -2978,7 +3000,7 @@ def execute_step_loop(
                     "INFO",
                     f"[ORCHESTRATION] Plan revised, {len(orchestration_state.plan)} steps",
                     metadata={
-                        "phase": "plan_revision",
+                        "phase": OrchestrationPhase.PLAN_REVISION,
                         "steps": len(orchestration_state.plan),
                         "strategy": strategy_info,
                     },
@@ -3010,7 +3032,7 @@ def execute_step_loop(
                             "event_id"
                         ),
                         details={
-                            "phase": "plan_revision",
+                            "phase": OrchestrationPhase.PLAN_REVISION,
                             "status": "completed",
                             "step_index": step_index + 1,
                         },
@@ -3540,7 +3562,7 @@ def execute_step_loop(
             except Exception:
                 pass
             restore_workspace_snapshot_if_needed("operation contract violation")
-            return {"status": "failed", "reason": "op_contract_violation"}
+            return {"status": "failed", "reason": TerminalReason.OP_CONTRACT_VIOLATION}
         except workspace_violation_error_cls as exc:
             orchestration_state.status = OrchestrationStatus.ABORTED
             orchestration_state.abort_reason = f"Workspace isolation violation: {exc}"
@@ -3576,7 +3598,10 @@ def execute_step_loop(
             except Exception:
                 pass
             restore_workspace_snapshot_if_needed("debug workspace isolation violation")
-            return {"status": "failed", "reason": "workspace_isolation_violation"}
+            return {
+                "status": "failed",
+                "reason": TerminalReason.WORKSPACE_ISOLATION_VIOLATION,
+            }
         except Exception as exc:
             logger.error("[ORCHESTRATION] Debug parsing failed: %s", exc)
             orchestration_state.status = OrchestrationStatus.ABORTED
@@ -3614,7 +3639,7 @@ def execute_step_loop(
             except Exception:
                 pass
             restore_workspace_snapshot_if_needed("debug parse error")
-            return {"status": "failed", "reason": "debug_parse_error"}
+            return {"status": "failed", "reason": TerminalReason.DEBUG_PARSE_ERROR}
 
     try:
         phase_finished_event = append_orchestration_event(

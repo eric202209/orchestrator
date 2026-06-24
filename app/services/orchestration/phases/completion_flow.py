@@ -68,6 +68,10 @@ from app.services.orchestration.review_policy import decide_change_set_review
 from app.services.orchestration.run_state import (
     mark_task_attempt_failed,
 )
+from app.services.orchestration.state.execution_states import (
+    OrchestrationPhase,
+    TerminalReason,
+)
 from app.services.orchestration.state.session_state import (
     mark_session_paused,
 )
@@ -218,7 +222,7 @@ def _attempt_completion_repair(
     failure_envelope = FailureEnvelope(
         session_id=ctx.session_id,
         task_id=ctx.task_id,
-        phase="completion_repair",
+        phase=OrchestrationPhase.COMPLETION_REPAIR,
         step_index=len(orchestration_state.plan) + 1,
         model_id=":".join(
             part
@@ -296,7 +300,7 @@ def _attempt_completion_repair(
             "ERROR",
             f"[ORCHESTRATION] Repair churn limit reached ({churn_trigger}); routing to operator review",
             metadata={
-                "phase": "completion_repair",
+                "phase": OrchestrationPhase.COMPLETION_REPAIR,
                 "repair_churn_trigger": churn_trigger,
                 "completion_repair_attempts": orchestration_state.completion_repair_attempts,
             },
@@ -305,11 +309,14 @@ def _attempt_completion_repair(
             ctx.orchestration_state,
             ctx.emit_live,
             level="ERROR",
-            phase="completion_repair",
+            phase=OrchestrationPhase.COMPLETION_REPAIR,
             message="Repair churn limit reached — operator review required",
             details={"repair_churn_trigger": churn_trigger},
         )
-        return {"status": "failed", "reason": "repair_churn_limit"}
+        return {
+            "status": "failed",
+            "reason": TerminalReason.COMPLETION_REPAIR_CHURN_LIMIT,
+        }
 
     if (
         orchestration_state.completion_repair_attempts > 0
@@ -322,7 +329,7 @@ def _attempt_completion_repair(
             "ERROR",
             "[ORCHESTRATION] Completion validation failed with the same root-cause signature after a prior repair; stopping instead of looping",
             metadata={
-                "phase": "completion_repair",
+                "phase": OrchestrationPhase.COMPLETION_REPAIR,
                 "failure_signature": repeated_signature,
                 "attempt": orchestration_state.completion_repair_attempts,
             },
@@ -334,7 +341,7 @@ def _attempt_completion_repair(
             event_type=EventType.REPAIR_REJECTED,
             details=attach_failure_envelope(
                 {
-                    "phase": "completion_repair",
+                    "phase": OrchestrationPhase.COMPLETION_REPAIR,
                     "reason": "repeat_completion_failure_signature",
                     "failure_signature": repeated_signature,
                 },
@@ -374,7 +381,7 @@ def _attempt_completion_repair(
             task_id=ctx.task_id,
             event_type=EventType.WORKSPACE_EVIDENCE_COLLECTED,
             details={
-                "phase": "completion_repair",
+                "phase": OrchestrationPhase.COMPLETION_REPAIR,
                 "failure_class": debug_feedback_envelope.failure_class,
                 "evidence_chars_total": _evidence_capsule.total_chars,
                 "evidence_files_inspected": _evidence_capsule.files_inspected,
@@ -388,14 +395,14 @@ def _attempt_completion_repair(
         "WARN",
         "[ORCHESTRATION] Completion validation is repairable; generating a minimal repair step",
         metadata={
-            "phase": "completion_repair",
+            "phase": OrchestrationPhase.COMPLETION_REPAIR,
             "attempt": orchestration_state.completion_repair_attempts,
             "reasons": completion_validation.reasons[:10],
         },
     )
     repair_generated_details = attach_failure_envelope(
         {
-            "phase": "completion_repair",
+            "phase": OrchestrationPhase.COMPLETION_REPAIR,
             "attempt": orchestration_state.completion_repair_attempts,
             "reasons": completion_validation.reasons[:10],
             **completion_repair_prompt_mode_alias_details(),
@@ -506,7 +513,7 @@ def _attempt_completion_repair(
             "INFO",
             "[COMPLETION_REPAIR] LLM generation completed",
             metadata={
-                "phase": "completion_repair",
+                "phase": OrchestrationPhase.COMPLETION_REPAIR,
                 "completion_repair_prompt_chars": _cr_prompt_chars,
                 "completion_repair_timeout_seconds": COMPLETION_REPAIR_TIMEOUT_SECONDS,
                 "completion_repair_runtime_profile": _cr_active_profile,
@@ -529,7 +536,7 @@ def _attempt_completion_repair(
             "ERROR",
             "[COMPLETION_REPAIR] LLM generation failed",
             metadata={
-                "phase": "completion_repair",
+                "phase": OrchestrationPhase.COMPLETION_REPAIR,
                 "completion_repair_prompt_chars": _cr_prompt_chars,
                 "completion_repair_timeout_seconds": COMPLETION_REPAIR_TIMEOUT_SECONDS,
                 "completion_repair_runtime_profile": _cr_active_profile,
@@ -629,7 +636,7 @@ def _attempt_completion_repair(
             "WARN",
             "[ORCHESTRATION] Completion repair step referenced paths that are not present in the current workspace inventory; requesting one guarded retry",
             metadata={
-                "phase": "completion_repair",
+                "phase": OrchestrationPhase.COMPLETION_REPAIR,
                 "invalid_paths": invalid_paths[:10],
             },
         )
@@ -639,7 +646,7 @@ def _attempt_completion_repair(
             task_id=ctx.task_id,
             event_type=EventType.REPAIR_REJECTED,
             details={
-                "phase": "completion_repair",
+                "phase": OrchestrationPhase.COMPLETION_REPAIR,
                 "reason": "inventory_guard",
                 "invalid_paths": invalid_paths[:10],
             },
@@ -698,7 +705,7 @@ def _attempt_completion_repair(
                 task_id=ctx.task_id,
                 event_type=EventType.REPAIR_REJECTED,
                 details={
-                    "phase": "completion_repair",
+                    "phase": OrchestrationPhase.COMPLETION_REPAIR,
                     "reason": "inventory_guard_retry_rejected",
                     "invalid_paths": invalid_paths[:10],
                 },
@@ -728,7 +735,7 @@ def _attempt_completion_repair(
             task_id=ctx.task_id,
             event_type=EventType.REPAIR_REJECTED,
             details={
-                "phase": "completion_repair",
+                "phase": OrchestrationPhase.COMPLETION_REPAIR,
                 "reason": COMPLETION_REPAIR_SIGNATURE_VIOLATION_REASON,
                 **signature_guard_details,
             },
@@ -765,7 +772,7 @@ def _attempt_completion_repair(
             "ERROR",
             "[ORCHESTRATION] Completion repair rejected before execution by signature contract guard",
             metadata={
-                "phase": "completion_repair",
+                "phase": OrchestrationPhase.COMPLETION_REPAIR,
                 "reason": COMPLETION_REPAIR_SIGNATURE_VIOLATION_REASON,
                 **signature_guard_details,
             },
@@ -779,7 +786,7 @@ def _attempt_completion_repair(
         "INFO",
         "[ORCHESTRATION] Completion repair signature guard completed before execution",
         metadata={
-            "phase": "completion_repair",
+            "phase": OrchestrationPhase.COMPLETION_REPAIR,
             **signature_guard_details,
         },
     )
@@ -796,7 +803,7 @@ def _attempt_completion_repair(
         "INFO",
         f"[ORCHESTRATION] Executing completion repair step {next_step_number}: {repair_step['description']}",
         metadata={
-            "phase": "completion_repair",
+            "phase": OrchestrationPhase.COMPLETION_REPAIR,
             "step_index": next_step_number,
             "strategy": strategy_info,
         },
@@ -871,7 +878,10 @@ def _attempt_completion_repair(
             emit_live(
                 "ERROR" if _post_diff_result.violations else "INFO",
                 "[COMPLETION_REPAIR] Post-execution signature diff guard completed",
-                metadata={"phase": "completion_repair", **_post_diff_event_details},
+                metadata={
+                    "phase": OrchestrationPhase.COMPLETION_REPAIR,
+                    **_post_diff_event_details,
+                },
             )
             if _post_diff_result.violations:
                 logger.warning(
@@ -886,7 +896,7 @@ def _attempt_completion_repair(
                     task_id=ctx.task_id,
                     event_type=EventType.REPAIR_REJECTED,
                     details={
-                        "phase": "completion_repair",
+                        "phase": OrchestrationPhase.COMPLETION_REPAIR,
                         "reason": COMPLETION_REPAIR_POST_DIFF_VIOLATION_REASON,
                         **_post_diff_event_details,
                     },
@@ -925,7 +935,7 @@ def _attempt_completion_repair(
                     "ERROR",
                     "[ORCHESTRATION] Command-only completion repair rejected after execution by post-diff signature drift guard",
                     metadata={
-                        "phase": "completion_repair",
+                        "phase": OrchestrationPhase.COMPLETION_REPAIR,
                         "reason": COMPLETION_REPAIR_POST_DIFF_VIOLATION_REASON,
                         **_post_diff_event_details,
                     },
@@ -980,7 +990,10 @@ def _attempt_completion_repair(
         emit_live(
             "INFO",
             f"[ORCHESTRATION] Completion repair step {next_step_number} completed successfully",
-            metadata={"phase": "completion_repair", "step_index": next_step_number},
+            metadata={
+                "phase": OrchestrationPhase.COMPLETION_REPAIR,
+                "step_index": next_step_number,
+            },
         )
         append_orchestration_event(
             project_dir=orchestration_state.project_dir,
@@ -988,7 +1001,7 @@ def _attempt_completion_repair(
             task_id=ctx.task_id,
             event_type=EventType.REPAIR_APPLIED,
             details={
-                "phase": "completion_repair",
+                "phase": OrchestrationPhase.COMPLETION_REPAIR,
                 "step_index": next_step_number,
                 "expected_files": repair_step.get("expected_files", [])[:20],
             },
@@ -1011,7 +1024,7 @@ def _attempt_completion_repair(
         "ERROR",
         f"[ORCHESTRATION] Completion repair step {next_step_number} failed",
         metadata={
-            "phase": "completion_repair",
+            "phase": OrchestrationPhase.COMPLETION_REPAIR,
             "step_index": next_step_number,
             "error": assessment.error_message[:1000],
         },
@@ -1022,7 +1035,7 @@ def _attempt_completion_repair(
         task_id=ctx.task_id,
         event_type=EventType.REPAIR_REJECTED,
         details={
-            "phase": "completion_repair",
+            "phase": OrchestrationPhase.COMPLETION_REPAIR,
             "reason": assessment.error_message[:400],
             "step_index": next_step_number,
         },
@@ -1482,7 +1495,7 @@ def finalize_successful_task(
                 "ERROR",
                 f"[ORCHESTRATION] Completion repair failed: {completion_failure_reason}",
                 metadata={
-                    "phase": "completion_repair",
+                    "phase": OrchestrationPhase.COMPLETION_REPAIR,
                     "reason": completion_failure_reason,
                 },
             )
@@ -1501,7 +1514,10 @@ def finalize_successful_task(
                 },
             )
             write_project_state_snapshot_fn(db, project, task, session_id)
-            return {"status": "failed", "reason": "completion_repair_failed"}
+            return {
+                "status": "failed",
+                "reason": TerminalReason.COMPLETION_REPAIR_FAILED,
+            }
 
     if completion_validation.warning:
         emit_live(
@@ -1520,7 +1536,7 @@ def finalize_successful_task(
             task_execution_id=ctx.task_execution_id,
             task_id=task_id,
             step_index=len(orchestration_state.plan),
-            failure_phase="completion_validation",
+            failure_phase=OrchestrationPhase.COMPLETION_VALIDATION,
             failed_command="",
             stdout="",
             stderr="; ".join(completion_validation.reasons[:10]),
@@ -1702,7 +1718,10 @@ def finalize_successful_task(
                 db, session_id, task_id, prompt, orchestration_state
             )
             write_project_state_snapshot_fn(db, project, task, session_id)
-            return {"status": "failed", "reason": "completion_validation_failed"}
+            return {
+                "status": "failed",
+                "reason": TerminalReason.COMPLETION_VALIDATION_FAILED,
+            }
         # else: recovery succeeded and re-validation accepted — fall through to success path.
 
     completion_verification_command, completion_verification_source = (
@@ -1750,7 +1769,7 @@ def finalize_successful_task(
                         "INFO",
                         "[ORCHESTRATION] Completion verification repair applied, rerunning verification",
                         metadata={
-                            "phase": "completion_repair",
+                            "phase": OrchestrationPhase.COMPLETION_REPAIR,
                             "command": completion_verification_command,
                         },
                     )
@@ -1812,7 +1831,7 @@ def finalize_successful_task(
                         "ERROR",
                         f"[ORCHESTRATION] Completion repair failed: {completion_failure_reason}",
                         metadata={
-                            "phase": "completion_repair",
+                            "phase": OrchestrationPhase.COMPLETION_REPAIR,
                             "reason": completion_failure_reason,
                         },
                     )
@@ -1831,7 +1850,10 @@ def finalize_successful_task(
                         },
                     )
                     write_project_state_snapshot_fn(db, project, task, session_id)
-                    return {"status": "failed", "reason": "completion_repair_failed"}
+                    return {
+                        "status": "failed",
+                        "reason": TerminalReason.COMPLETION_REPAIR_FAILED,
+                    }
 
             if not completion_verification.get("success", False):
                 verification_error = (
@@ -1920,7 +1942,7 @@ def finalize_successful_task(
                             "INFO",
                             "[ORCHESTRATION] Final verification repair applied, rerunning verification",
                             metadata={
-                                "phase": "completion_repair",
+                                "phase": OrchestrationPhase.COMPLETION_REPAIR,
                                 "completion_repair_source": (
                                     "final_completion_verification"
                                 ),
@@ -2012,7 +2034,7 @@ def finalize_successful_task(
                     write_project_state_snapshot_fn(db, project, task, session_id)
                     return {
                         "status": "failed",
-                        "reason": "completion_verification_failed",
+                        "reason": TerminalReason.COMPLETION_VERIFICATION_FAILED,
                     }
 
     task_change_set = None
@@ -2126,7 +2148,7 @@ def finalize_successful_task(
             write_project_state_snapshot_fn(db, project, task, session_id)
             return {
                 "status": "failed",
-                "reason": "verification_integrity_failed",
+                "reason": TerminalReason.VERIFICATION_INTEGRITY_FAILED,
             }
 
     nontrivial_change_flags = list((task_change_set or {}).get("warning_flags") or [])
