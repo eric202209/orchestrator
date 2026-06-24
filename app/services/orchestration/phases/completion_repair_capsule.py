@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +13,9 @@ from app.services.workspace.path_display import render_workspace_path_for_prompt
 MAX_RELEVANT_FILES = 25
 MAX_LAST_STEP_CHARS = 400
 MAX_TASK_PROMPT_EXCERPT_CHARS = 800
+MAX_SOURCE_CONTENT_PER_FILE_CHARS = 800
+MAX_SOURCE_CONTENT_TOTAL_CHARS = 2000
+_SOURCE_TRUNCATED_MARKER = "... [truncated]"
 _PATH_TOKEN_RE = re.compile(
     r"(?<![\w./:-])([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.[A-Za-z0-9_.-]+)(?![\w./:-])"
 )
@@ -26,6 +29,7 @@ class CompletionRepairCapsule:
     workspace_path: str
     task_prompt_excerpt: str
     schema_version: int = 1
+    source_file_contents: dict[str, str] = field(default_factory=dict)
 
 
 def _trim(text: Any, max_chars: int) -> str:
@@ -121,6 +125,40 @@ def _workspace_existing_files(project_dir: Path, candidates: list[str]) -> list[
     return kept
 
 
+def _read_bounded_source_contents(
+    project_dir: Path,
+    rel_paths: list[str],
+) -> dict[str, str]:
+    """Read bounded current content for each relevant file.
+
+    Returns {rel_path: content} preserving rel_paths order.
+    Per-file cap: MAX_SOURCE_CONTENT_PER_FILE_CHARS. Total cap: MAX_SOURCE_CONTENT_TOTAL_CHARS.
+    Content exceeding the per-file cap is truncated and suffixed with _SOURCE_TRUNCATED_MARKER.
+    """
+    contents: dict[str, str] = {}
+    total_chars = 0
+    root = project_dir.resolve()
+    for rel_path in rel_paths:
+        if total_chars >= MAX_SOURCE_CONTENT_TOTAL_CHARS:
+            break
+        abs_path = (root / rel_path).resolve()
+        try:
+            if not abs_path.is_relative_to(root) or not abs_path.is_file():
+                continue
+            text = abs_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        remaining = MAX_SOURCE_CONTENT_TOTAL_CHARS - total_chars
+        cap = min(MAX_SOURCE_CONTENT_PER_FILE_CHARS, remaining)
+        if len(text) > cap:
+            content = text[:cap] + _SOURCE_TRUNCATED_MARKER
+        else:
+            content = text
+        contents[rel_path] = content
+        total_chars += len(content)
+    return contents
+
+
 def build_completion_repair_capsule(
     *,
     task_prompt: str,
@@ -144,12 +182,14 @@ def build_completion_repair_capsule(
         candidates.extend(_step_files_changed(result))
 
     project_dir = Path(getattr(orchestration_state, "project_dir"))
+    relevant_files = _workspace_existing_files(project_dir, candidates)
     return CompletionRepairCapsule(
         validation_reasons=reasons,
-        relevant_files=_workspace_existing_files(project_dir, candidates),
+        relevant_files=relevant_files,
         last_step_summary=_last_step_summary(orchestration_state),
         workspace_path=str(project_dir),
         task_prompt_excerpt=str(task_prompt or "")[:MAX_TASK_PROMPT_EXCERPT_CHARS],
+        source_file_contents=_read_bounded_source_contents(project_dir, relevant_files),
     )
 
 
@@ -176,6 +216,13 @@ def build_bounded_completion_repair_prompt(
         if rendered:
             evidence_section = f"\n{rendered}\n"
 
+    source_content_section = ""
+    if capsule.source_file_contents:
+        blocks = []
+        for rel_path, content in capsule.source_file_contents.items():
+            blocks.append(f"--- {rel_path} ---\n{content}")
+        source_content_section = "\n\nCURRENT FILE CONTENT:\n" + "\n\n".join(blocks)
+
     return f"""Return one minimal JSON completion repair step. Output JSON object only.
 
 Task excerpt:
@@ -191,7 +238,7 @@ Relevant existing files:
 {relevant_files}
 
 Last execution step:
-{capsule.last_step_summary or "No execution results recorded."}{evidence_section}
+{capsule.last_step_summary or "No execution results recorded."}{evidence_section}{source_content_section}
 
 Rules:
 1. Return a single JSON object with keys: step_number, repair_type, description, ops, verification, expected_files.
@@ -205,6 +252,8 @@ Rules:
 9. Do not return prose, markdown, comments, or fenced code.
 10. Touch only files that appear in the relevant existing files list, unless ops explicitly create a new required file.
 11. expected_files must list every file path that ops write to.
+12. For replace_in_file, copy the "old" value character-for-character from CURRENT FILE CONTENT above — same whitespace, indentation, quotes, and line breaks. Do not reconstruct from memory or training data.
+13. If the exact text to replace is not shown in CURRENT FILE CONTENT, use write_file with the complete corrected file instead of replace_in_file. Do not invent or guess "old" text.
 
 Output example:
 {{

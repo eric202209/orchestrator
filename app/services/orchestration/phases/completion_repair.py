@@ -472,7 +472,11 @@ def _apply_completion_repair_ops_direct(
                 continue
             text = abs_path.read_text(encoding="utf-8")
             if old not in text:
-                errors.append(f"replace_in_file: 'old' text not found in {path_str}")
+                old_preview = old[:200].replace("\n", "\\n") if old else ""
+                errors.append(
+                    f"replace_in_file: 'old' text not found in {path_str}"
+                    + (f" (attempted: {old_preview!r})" if old_preview else "")
+                )
                 continue
             abs_path.write_text(text.replace(old, new, 1), encoding="utf-8")
             try:
