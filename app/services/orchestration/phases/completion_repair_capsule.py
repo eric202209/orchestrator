@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,66 @@ _SOURCE_TRUNCATED_MARKER = "... [truncated]"
 _PATH_TOKEN_RE = re.compile(
     r"(?<![\w./:-])([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.[A-Za-z0-9_.-]+)(?![\w./:-])"
 )
+
+
+def _format_arg(arg: ast.arg) -> str:
+    if arg.annotation is not None:
+        return f"{arg.arg}: {ast.unparse(arg.annotation)}"
+    return arg.arg
+
+
+def _format_func_sig_from_ast(
+    func_name: str,
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> str:
+    """Return 'func_name(arg: type, ...) -> return' from an AST function node."""
+    a = node.args
+    parts: list[str] = []
+    parts.extend(_format_arg(x) for x in a.args)
+    if a.vararg is not None:
+        parts.append(f"*{_format_arg(a.vararg)}")
+    elif a.kwonlyargs:
+        parts.append("*")
+    parts.extend(_format_arg(x) for x in a.kwonlyargs)
+    if a.kwarg is not None:
+        parts.append(f"**{_format_arg(a.kwarg)}")
+    sig = f"{func_name}({', '.join(parts)})"
+    if node.returns is not None:
+        sig += f" -> {ast.unparse(node.returns)}"
+    return sig
+
+
+def _extract_source_api_contract(source_file_contents: dict[str, str]) -> str:
+    """Extract compact function/method signatures from Python source_file_contents.
+
+    Returns a formatted multi-line string listing per-file signatures.
+    Non-Python files and files that fail to parse are silently skipped.
+    Truncation markers are stripped before parsing so partial files still yield signatures.
+    """
+    sections: list[str] = []
+    for rel_path, content in source_file_contents.items():
+        if not rel_path.endswith(".py"):
+            continue
+        parse_content = content
+        if parse_content.endswith(_SOURCE_TRUNCATED_MARKER):
+            parse_content = parse_content[: -len(_SOURCE_TRUNCATED_MARKER)]
+        try:
+            tree = ast.parse(parse_content)
+        except SyntaxError:
+            continue
+        lines: list[str] = []
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                lines.append(f"  - {_format_func_sig_from_ast(node.name, node)}")
+            elif isinstance(node, ast.ClassDef):
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        lines.append(
+                            f"  - {_format_func_sig_from_ast(f'{node.name}.{item.name}', item)}"
+                        )
+        if lines:
+            sections.append(f"- {rel_path}\n" + "\n".join(lines))
+    return "\n".join(sections)
 
 
 @dataclass
@@ -223,6 +284,16 @@ def build_bounded_completion_repair_prompt(
             blocks.append(f"--- {rel_path} ---\n{content}")
         source_content_section = "\n\nCURRENT FILE CONTENT:\n" + "\n\n".join(blocks)
 
+    api_contract_section = ""
+    if capsule.source_file_contents:
+        contract = _extract_source_api_contract(capsule.source_file_contents)
+        if contract:
+            api_contract_section = (
+                "\n\nSOURCE API CONTRACT"
+                " (derived from files above — these are the ONLY valid APIs):\n"
+                + contract
+            )
+
     return f"""Return one minimal JSON completion repair step. Output JSON object only.
 
 Task excerpt:
@@ -238,7 +309,7 @@ Relevant existing files:
 {relevant_files}
 
 Last execution step:
-{capsule.last_step_summary or "No execution results recorded."}{evidence_section}{source_content_section}
+{capsule.last_step_summary or "No execution results recorded."}{evidence_section}{source_content_section}{api_contract_section}
 
 Rules:
 1. Return a single JSON object with keys: step_number, repair_type, description, ops, verification, expected_files.
@@ -254,6 +325,10 @@ Rules:
 11. expected_files must list every file path that ops write to.
 12. For replace_in_file, copy the "old" value character-for-character from CURRENT FILE CONTENT above — same whitespace, indentation, quotes, and line breaks. Do not reconstruct from memory or training data.
 13. If the exact text to replace is not shown in CURRENT FILE CONTENT, use write_file with the complete corrected file instead of replace_in_file. Do not invent or guess "old" text.
+14. Generate ops for every file that must change to make the failing tests pass. The repair may include multiple ops across multiple files. Do not restrict the repair to the file named in the error traceback if another file in CURRENT FILE CONTENT contains the missing or broken implementation.
+15. Use only methods, attributes, and function signatures listed in SOURCE API CONTRACT and CURRENT FILE CONTENT. Do not invent or assume the existence of attributes (such as .tasks) or methods not shown there.
+16. Do not call functions or methods with argument shapes different from their signatures in SOURCE API CONTRACT. If a signature shows (total: int, completed: int), call it with two integer arguments — not with a single object argument.
+17. If a function body in CURRENT FILE CONTENT raises NotImplementedError, generate an op to implement that body with the exact same signature. Do not route around an unimplemented stub by calling it with incorrect arguments or skipping its implementation.
 
 Output example:
 {{

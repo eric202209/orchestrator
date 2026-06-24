@@ -90,11 +90,8 @@ function Dashboard() {
 
   const fetchProjects = useCallback(async () => {
     try {
-      const [projectsResponse] = await Promise.all([
-        projectsAPI.getAll({ limit: 500 }),
-      ]);
+      const projectsResponse = await projectsAPI.getAll({ limit: 500 });
       setProjects(projectsResponse.data);
-      await fetchTasks();
     } catch (error) {
       const axiosError = error as { code?: string; message?: string };
       if (axiosError.code !== 'ECONNABORTED' && axiosError.code !== 'ERR_BAD_RESPONSE') {
@@ -103,24 +100,28 @@ function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }, [fetchTasks]);
+  }, []);
 
   // Only fetch projects after auth is confirmed
   useEffect(() => {
     if (isAuthChecked && user) {
       fetchProjects();
+      fetchTasks();
       fetchOutcomeRates();
     } else if (isAuthChecked && !user) {
       setLoading(false);
     }
-  }, [isAuthChecked, user, fetchProjects, fetchOutcomeRates]);
+  }, [isAuthChecked, user, fetchProjects, fetchTasks, fetchOutcomeRates]);
 
-  // Refresh tasks every 30s so running status stays current
+  // Refresh tasks and projects every 30s so counts stay current
   useEffect(() => {
     if (!isAuthChecked || !user) return;
-    const id = setInterval(fetchTasks, 30_000);
+    const id = setInterval(() => {
+      fetchTasks();
+      fetchProjects();
+    }, 30_000);
     return () => clearInterval(id);
-  }, [isAuthChecked, user, fetchTasks]);
+  }, [isAuthChecked, user, fetchTasks, fetchProjects]);
 
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
