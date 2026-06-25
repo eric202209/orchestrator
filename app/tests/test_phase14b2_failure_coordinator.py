@@ -30,7 +30,10 @@ from app.services.orchestration.phases.failure_flow import handle_task_failure
 from app.services.orchestration.types import OrchestrationRunContext
 
 _LOG = logging.getLogger(__name__)
-_NOOP = lambda *a, **k: None
+
+
+def _NOOP(*a, **k):
+    return None
 
 
 # ---------------------------------------------------------------------------

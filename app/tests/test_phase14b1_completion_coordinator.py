@@ -143,7 +143,8 @@ def _make_ctx(tmp_path):
     return ctx
 
 
-_NOOP_FN = lambda *args, **kwargs: None
+def _NOOP_FN(*args, **kwargs):
+    return None
 
 
 def _patch_coordinator_delegates(

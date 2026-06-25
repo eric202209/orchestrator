@@ -26,6 +26,8 @@ AUDITED_LIFECYCLE_FILES = [
     "app/services/orchestration/run_state/transitions.py",
     "app/services/orchestration/state/session_state.py",
     "app/services/orchestration/lifecycle/completion.py",
+    "app/services/orchestration/coordinators/completion_coordinator.py",
+    "app/services/orchestration/coordinators/failure_coordinator.py",
     "app/services/orchestration/phases/planning_flow.py",
     "app/services/orchestration/phases/execution_loop.py",
     "app/services/orchestration/phases/completion_flow.py",
@@ -66,12 +68,15 @@ EXPECTED_SESSION_CALLS = {
         "mark_session_paused": 3,
         "mark_session_running": 1,
     },
-    "app/services/orchestration/phases/completion_flow.py": {
-        "mark_session_paused": 9,
+    "app/services/orchestration/coordinators/completion_coordinator.py": {
+        "mark_session_paused": 6,
     },
-    "app/services/orchestration/phases/failure_flow.py": {
+    "app/services/orchestration/coordinators/failure_coordinator.py": {
         "mark_session_paused": 3,
         "mark_session_running": 3,
+    },
+    "app/services/orchestration/phases/completion_flow.py": {
+        "mark_session_paused": 3,
     },
     "app/services/orchestration/phases/planning_support.py": {
         "mark_session_paused": 1,
@@ -116,12 +121,18 @@ EXPECTED_TASK_ATTEMPT_CALLS = {
     "app/services/orchestration/lifecycle/completion.py": {
         "mark_task_attempt_pending": 2,
     },
+    "app/services/orchestration/coordinators/completion_coordinator.py": {
+        "mark_task_attempt_failed": 6,
+    },
+    "app/services/orchestration/coordinators/failure_coordinator.py": {
+        "mark_task_attempt_failed": 3,
+        "mark_task_attempt_pending": 2,
+    },
     "app/services/orchestration/phases/completion_flow.py": {
-        "mark_task_attempt_failed": 8,
+        "mark_task_attempt_failed": 2,
     },
     "app/services/orchestration/phases/failure_flow.py": {
-        "mark_task_attempt_failed": 4,
-        "mark_task_attempt_pending": 2,
+        "mark_task_attempt_failed": 1,
     },
     "app/services/orchestration/phases/planning_support.py": {
         "mark_task_attempt_failed": 1,
