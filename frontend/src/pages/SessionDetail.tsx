@@ -2156,32 +2156,46 @@ export default function SessionDetail() {
   const getActionButtons = () => {
     if (!session) return null;
 
+    // When orchestration_state is present, allowed_actions is authoritative.
+    // Fall back to status-based logic when orchestration_state is absent.
+    const isActionAllowed = (action: string): boolean => {
+      const allowed = session.orchestration_state?.allowed_actions;
+      if (!allowed) return true;
+      return allowed.includes(action);
+    };
+
     switch (session.status) {
       case 'running':
         return (
           <div className="flex flex-col gap-2">
             <div className="flex items-center gap-2">
-              <button
-                onClick={handlePauseSession}
-                className="flex items-center gap-2 px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg text-sm transition-colors"
-              >
-                <Pause className="h-4 w-4" />
-                Pause
-              </button>
-              <button
-                onClick={() => handleStopSession(false)}
-                className="flex items-center gap-2 px-4 py-2 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] text-slate-300 hover:border-[color:var(--oc-border)] hover:text-white rounded-lg text-sm transition-colors"
-              >
-                <Square className="h-4 w-4" />
-                Stop
-              </button>
-              <button
-                onClick={() => handleStopSession(true)}
-                className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm transition-colors"
-              >
-                <XCircle className="h-4 w-4" />
-                Force Stop
-              </button>
+              {isActionAllowed('pause_session') && (
+                <button
+                  onClick={handlePauseSession}
+                  className="flex items-center gap-2 px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg text-sm transition-colors"
+                >
+                  <Pause className="h-4 w-4" />
+                  Pause
+                </button>
+              )}
+              {isActionAllowed('stop_session') && (
+                <>
+                  <button
+                    onClick={() => handleStopSession(false)}
+                    className="flex items-center gap-2 px-4 py-2 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface-deep)] text-slate-300 hover:border-[color:var(--oc-border)] hover:text-white rounded-lg text-sm transition-colors"
+                  >
+                    <Square className="h-4 w-4" />
+                    Stop
+                  </button>
+                  <button
+                    onClick={() => handleStopSession(true)}
+                    className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm transition-colors"
+                  >
+                    <XCircle className="h-4 w-4" />
+                    Force Stop
+                  </button>
+                </>
+              )}
             </div>
           </div>
         );
@@ -2193,7 +2207,7 @@ export default function SessionDetail() {
               <MessageCircle className="h-4 w-4" />
               Waiting for Operator
             </span>
-            {pendingAgentInterventions.length > 0 && (
+            {pendingAgentInterventions.length > 0 && isActionAllowed('submit_guidance') && (
               <button
                 onClick={() => setShowAgentInterventionModal(true)}
                 className="flex items-center gap-2 px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm transition-colors"
@@ -2202,42 +2216,22 @@ export default function SessionDetail() {
                 Open Request
               </button>
             )}
-            <button
-              onClick={() => handleStopSession(true)}
+            {isActionAllowed('stop_session') && (
+              <button
+                onClick={() => handleStopSession(true)}
                 className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm transition-colors"
               >
-              <XCircle className="h-4 w-4" />
-              Force Stop
-            </button>
+                <XCircle className="h-4 w-4" />
+                Force Stop
+              </button>
+            )}
           </div>
         );
 
       case 'paused':
         return (
           <div className="flex items-center gap-2">
-            <button
-              onClick={handleResumeSession}
-              disabled={Boolean(executionAction)}
-              className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm transition-colors"
-            >
-              <Play className="h-4 w-4" />
-              {executionAction === 'resume' ? 'Resuming...' : 'Resume'}
-            </button>
-            <button
-              onClick={() => handleStopSession(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm transition-colors"
-            >
-              <XCircle className="h-4 w-4" />
-              Stop
-            </button>
-          </div>
-        );
-
-      case 'stopped':
-      default:
-        return (
-          <div className="flex items-center gap-2">
-            {checkpointCount > 0 && (
+            {isActionAllowed('resume_session') && (
               <button
                 onClick={handleResumeSession}
                 disabled={Boolean(executionAction)}
@@ -2247,14 +2241,42 @@ export default function SessionDetail() {
                 {executionAction === 'resume' ? 'Resuming...' : 'Resume'}
               </button>
             )}
-            <button
-              onClick={handleStartSession}
-              disabled={Boolean(executionAction)}
-              className="flex items-center gap-2 px-4 py-2 border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] rounded-lg text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <Play className="h-4 w-4" />
-              {executionAction === 'start' ? 'Starting...' : 'Start'}
-            </button>
+            {isActionAllowed('stop_session') && (
+              <button
+                onClick={() => handleStopSession(true)}
+                className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm transition-colors"
+              >
+                <XCircle className="h-4 w-4" />
+                Stop
+              </button>
+            )}
+          </div>
+        );
+
+      case 'stopped':
+      default:
+        return (
+          <div className="flex items-center gap-2">
+            {checkpointCount > 0 && isActionAllowed('resume_session') && (
+              <button
+                onClick={handleResumeSession}
+                disabled={Boolean(executionAction)}
+                className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm transition-colors"
+              >
+                <Play className="h-4 w-4" />
+                {executionAction === 'resume' ? 'Resuming...' : 'Resume'}
+              </button>
+            )}
+            {isActionAllowed('start_session') && (
+              <button
+                onClick={handleStartSession}
+                disabled={Boolean(executionAction)}
+                className="flex items-center gap-2 px-4 py-2 border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] text-white hover:bg-[color:var(--oc-action-hover)] rounded-lg text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Play className="h-4 w-4" />
+                {executionAction === 'start' ? 'Starting...' : 'Start'}
+              </button>
+            )}
           </div>
         );
     }
