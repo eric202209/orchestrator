@@ -8,6 +8,7 @@ import type {
   IntegrityFinding,
   InterventionRequest,
   KnowledgeUsageEntry,
+  OrchestrationState,
   Project,
   RecoveryAction,
   Session,
@@ -679,6 +680,126 @@ export function SessionStats({
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+const PHASE_LABELS: Record<string, string> = {
+  step_executing: 'Executing',
+  awaiting_input: 'Awaiting Input',
+  completion_repair: 'Fixing Output',
+  repair_churn_limit: 'Completion Repair Limit',
+  cancelled: 'Cancelled',
+  failed: 'Failed',
+  done: 'Complete',
+};
+
+const TERMINAL_REASON_LABELS: Record<string, string> = {
+  completion_repair: 'Fixing output',
+  repair_churn_limit: 'Completion repair churn limit hit',
+};
+
+const ACTION_LABELS: Record<string, string> = {
+  view_logs: 'View Logs',
+  view_timeline: 'View Timeline',
+  start_session: 'Start',
+  pause_session: 'Pause',
+  stop_session: 'Stop',
+  resume_session: 'Resume',
+  submit_guidance: 'Submit Guidance',
+  retry_task: 'Retry Task',
+};
+
+const humanizeToken = (value: string): string =>
+  value.replace(/[_-]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+
+const phaseColorClass = (phase: string | null): string => {
+  switch (phase) {
+    case 'step_executing':
+      return 'bg-blue-900/40 text-blue-300 border border-blue-700/40';
+    case 'awaiting_input':
+      return 'bg-amber-900/40 text-amber-300 border border-amber-700/40';
+    case 'cancelled':
+    case 'failed':
+      return 'bg-red-900/40 text-red-300 border border-red-700/40';
+    case 'done':
+      return 'bg-emerald-900/40 text-emerald-300 border border-emerald-700/40';
+    default:
+      return 'bg-slate-800/60 text-slate-400 border border-[color:var(--oc-border-soft)]';
+  }
+};
+
+interface OperatorStatePanelProps {
+  state: OrchestrationState | null | undefined;
+}
+
+export function OperatorStatePanel({ state }: OperatorStatePanelProps) {
+  if (!state) return null;
+
+  const phaseLabel = state.current_phase
+    ? (PHASE_LABELS[state.current_phase] ?? humanizeToken(state.current_phase))
+    : '—';
+
+  const terminalReasonLabel = state.terminal_reason
+    ? (TERMINAL_REASON_LABELS[state.terminal_reason] ?? humanizeToken(state.terminal_reason))
+    : null;
+
+  return (
+    <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
+      <p className="mb-3 text-xs font-medium uppercase tracking-wide text-slate-400">Orchestration State</p>
+      <div className="flex flex-wrap gap-4">
+        <div className="min-w-[80px]">
+          <p className="mb-1 text-xs text-slate-500">Phase</p>
+          <span
+            data-testid="operator-state-phase"
+            className={cn('inline-block rounded px-2 py-0.5 text-xs font-medium', phaseColorClass(state.current_phase))}
+          >
+            {phaseLabel}
+          </span>
+        </div>
+        <div className="min-w-[80px]">
+          <p className="mb-1 text-xs text-slate-500">State</p>
+          <span
+            data-testid="operator-state-terminal"
+            className={cn(
+              'inline-block rounded px-2 py-0.5 text-xs font-medium border',
+              state.is_terminal
+                ? 'bg-red-900/40 text-red-300 border-red-700/40'
+                : 'bg-emerald-900/40 text-emerald-300 border-emerald-700/40'
+            )}
+          >
+            {state.is_terminal ? 'Terminal' : 'Active'}
+          </span>
+        </div>
+        {state.coordinator && (
+          <div className="min-w-[120px]">
+            <p className="mb-1 text-xs text-slate-500">Coordinator</p>
+            <p data-testid="operator-state-coordinator" className="text-xs text-slate-300">{state.coordinator}</p>
+          </div>
+        )}
+        {terminalReasonLabel && (
+          <div className="min-w-[120px]">
+            <p className="mb-1 text-xs text-slate-500">Why it stopped</p>
+            <p data-testid="operator-state-terminal-reason" className="text-xs text-slate-300">{terminalReasonLabel}</p>
+          </div>
+        )}
+      </div>
+      {state.allowed_actions.length > 0 && (
+        <div className="mt-3 border-t border-[color:var(--oc-border-soft)] pt-3">
+          <p className="mb-2 text-xs text-slate-500">Available actions</p>
+          <div data-testid="operator-state-actions" className="flex flex-wrap gap-1.5">
+            {state.allowed_actions.map((action) => (
+              <span
+                key={action}
+                data-testid={`operator-action-${action}`}
+                className="rounded border border-[color:var(--oc-border-soft)] px-2 py-0.5 text-xs text-slate-400"
+              >
+                {ACTION_LABELS[action] ?? humanizeToken(action)}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

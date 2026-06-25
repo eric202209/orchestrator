@@ -26,6 +26,7 @@ import { Alert, LoadingSpinner } from '@/components/ui';
 import {
   FailureSummaryPanel,
   HumanInterventionPanel,
+  OperatorStatePanel,
   SessionConnectionNotice,
   SessionDigestPanel,
   SessionHeader,
@@ -2521,6 +2522,8 @@ export default function SessionDetail() {
         session={session}
         tasksCount={tasks.length}
       />
+
+      <OperatorStatePanel state={session.orchestration_state} />
 
       <SessionTabs
         activeTab={activeTab}

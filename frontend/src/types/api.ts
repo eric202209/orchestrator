@@ -107,6 +107,7 @@ export interface Session {
   // Instance tracking for preventing ID reuse issues
   instance_id?: string | null;
   deleted_at?: string | null;
+  orchestration_state?: OrchestrationState | null;
   model_lane_label?: string | null;
   model_lane_metadata?: {
     label?: string;
@@ -204,6 +205,14 @@ export type SessionStatus =
   | "stopped"
   | "completed"
   | "awaiting_input";
+
+export interface OrchestrationState {
+  current_phase: string | null;
+  terminal_reason: string | null;
+  coordinator: string | null;
+  is_terminal: boolean;
+  allowed_actions: string[];
+}
 
 export interface InterventionRequest {
   id: number;
