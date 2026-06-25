@@ -40,12 +40,8 @@ from app.services.orchestration import (
     TaskWorkspaceViolationError,
     ValidatorService,
     build_task_report_payload as _build_task_report_payload,
-    execute_planning_phase,
-    execute_step_loop,
-    finalize_successful_task,
     extract_plan_steps as _extract_plan_steps,
     extract_structured_text as _extract_structured_text,
-    handle_task_failure,
     looks_like_truncated_multistep_plan as _looks_like_truncated_multistep_plan,
     normalize_plan_with_live_logging as _normalize_plan_with_live_logging,
     normalize_step as _normalize_step,
@@ -53,6 +49,18 @@ from app.services.orchestration import (
     run_virtual_merge_gate as _run_virtual_merge_gate,
     should_execute_in_canonical_project_root as _should_execute_in_canonical_project_root,
     should_force_review_execution_profile as _should_force_review_execution_profile,
+)
+from app.services.orchestration.coordinators.completion_coordinator import (
+    CompletionCoordinator as _CompletionCoordinator,
+)
+from app.services.orchestration.coordinators.failure_coordinator import (
+    FailureCoordinator as _FailureCoordinator,
+)
+from app.services.orchestration.coordinators.execution_coordinator import (
+    ExecutionCoordinator as _ExecutionCoordinator,
+)
+from app.services.orchestration.coordinators.planning_coordinator import (
+    PlanningCoordinator as _PlanningCoordinator,
 )
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.state.persistence import (
@@ -1875,22 +1883,17 @@ def execute_orchestration_task(
                 except Exception:
                     pass  # diagnostic only — never block planning
 
-                original_runtime_service = run_ctx.runtime_service
-                if planning_runtime_service is not None:
-                    run_ctx.runtime_service = planning_runtime_service
-                try:
-                    if not _incremental_route_taken:
-                        planning_phase_result = execute_planning_phase(
-                            ctx=run_ctx,
-                            workspace_review=workspace_review,
-                            extract_structured_text=_extract_structured_text,
-                            extract_plan_steps=_extract_plan_steps,
-                            looks_like_truncated_multistep_plan=_looks_like_truncated_multistep_plan,
-                            normalize_plan_with_live_logging=_normalize_plan_with_live_logging,
-                            workspace_violation_error_cls=TaskWorkspaceViolationError,
-                        )
-                finally:
-                    run_ctx.runtime_service = original_runtime_service
+                if not _incremental_route_taken:
+                    planning_phase_result = _PlanningCoordinator().run_planning(
+                        ctx=run_ctx,
+                        workspace_review=workspace_review,
+                        extract_structured_text=_extract_structured_text,
+                        extract_plan_steps=_extract_plan_steps,
+                        looks_like_truncated_multistep_plan=_looks_like_truncated_multistep_plan,
+                        normalize_plan_with_live_logging=_normalize_plan_with_live_logging,
+                        workspace_violation_error_cls=TaskWorkspaceViolationError,
+                        planning_runtime_service=planning_runtime_service,
+                    )
                 if not _incremental_route_taken:
                     update_langfuse_observation(
                         planning_phase_observation,
@@ -1988,7 +1991,7 @@ def execute_orchestration_task(
                 "phase": "executing",
             },
         ) as execution_phase_observation:
-            step_loop_result = execute_step_loop(
+            step_loop_result = _ExecutionCoordinator().run_execution(
                 ctx=run_ctx,
                 extract_structured_text=_extract_structured_text,
                 normalize_step=_normalize_step,
@@ -2028,7 +2031,7 @@ def execute_orchestration_task(
                     "execution_profile": execution_profile,
                 },
             ) as task_summary_observation:
-                step_loop_result = finalize_successful_task(
+                step_loop_result = _CompletionCoordinator().complete_task(
                     ctx=run_ctx,
                     write_project_state_snapshot_fn=_write_project_state_snapshot,
                     get_next_pending_project_task_fn=_get_next_pending_project_task,
@@ -2112,7 +2115,7 @@ def execute_orchestration_task(
             level="ERROR",
             status_message=str(exc)[:500],
         )
-        handle_task_failure(
+        _FailureCoordinator().handle_failure(
             self_task=self,
             ctx=(
                 run_ctx
