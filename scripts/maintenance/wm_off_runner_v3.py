@@ -39,7 +39,7 @@ from app.config import settings  # noqa: E402
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 BASE_URL = "http://127.0.0.1:8080"
-USER_EMAIL = os.environ["ORCHESTRATOR_USER_EMAIL"]
+USER_EMAIL = os.environ.get("ORCHESTRATOR_USER_EMAIL", "")
 POLL_INTERVAL = 20          # seconds between polling cycles
 STALL_TIMEOUT = 120         # seconds before stall/block detection fires
 PROJECT_TIMEOUT = 2400      # per-project monitoring ceiling
@@ -59,6 +59,9 @@ REDIS = None  # type: ignore[assignment]
 def _init_runtime() -> None:
     """Verify flags, create auth token and Redis client.  Called by __main__ only."""
     global TOKEN, HEADERS, REDIS
+
+    if not USER_EMAIL:
+        raise RuntimeError("ORCHESTRATOR_USER_EMAIL must be set")
 
     assert not settings.WORKING_MEMORY_PERSISTENCE_ENABLED, "WORKING_MEMORY_PERSISTENCE_ENABLED must be False"
     assert not settings.WORKING_MEMORY_RENDER_ENABLED,      "WORKING_MEMORY_RENDER_ENABLED must be False"
