@@ -19,6 +19,8 @@ It is safe to remove old one-off runner generations when:
 - a later runner replaced them;
 - no `app/tests/` module imports them;
 - no active eval harness calls them.
+- archived docs do not depend on the exact script path for reproducibility, or
+  those docs are updated to mark the runner as retired.
 
 Do not delete scripts from `scripts/evals/fixtures/` casually. Those fixtures are
 reusable corpus data for future eval runs and several tests assume the eval

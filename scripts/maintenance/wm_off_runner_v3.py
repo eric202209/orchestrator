@@ -39,7 +39,6 @@ from app.config import settings  # noqa: E402
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 BASE_URL = "http://127.0.0.1:8080"
-USER_EMAIL = os.environ.get("ORCHESTRATOR_USER_EMAIL", "")
 POLL_INTERVAL = 20          # seconds between polling cycles
 STALL_TIMEOUT = 120         # seconds before stall/block detection fires
 PROJECT_TIMEOUT = 2400      # per-project monitoring ceiling
@@ -60,7 +59,8 @@ def _init_runtime() -> None:
     """Verify flags, create auth token and Redis client.  Called by __main__ only."""
     global TOKEN, HEADERS, REDIS
 
-    if not USER_EMAIL:
+    user_email = os.environ.get("ORCHESTRATOR_USER_EMAIL", "")
+    if not user_email:
         raise RuntimeError("ORCHESTRATOR_USER_EMAIL must be set")
 
     assert not settings.WORKING_MEMORY_PERSISTENCE_ENABLED, "WORKING_MEMORY_PERSISTENCE_ENABLED must be False"
@@ -70,7 +70,7 @@ def _init_runtime() -> None:
     assert not settings.LANGFUSE_ENABLED,                   "LANGFUSE_ENABLED must be False"
     print("✓ All flags confirmed OFF")
 
-    TOKEN = create_access_token({"sub": USER_EMAIL})
+    TOKEN = create_access_token({"sub": user_email})
     HEADERS = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
 
     _url = urlparse(settings.CELERY_BROKER_URL)

@@ -485,6 +485,8 @@ def _attempt_completion_repair(
     _cr_fast_fallback = False
 
     _cr_configured_backend = getattr(settings, "COMPLETION_REPAIR_BACKEND", None)
+    if str(runtime_metadata.get("backend") or "").strip().lower() == "fake":
+        _cr_configured_backend = None
     if _cr_configured_backend:
         try:
             _cr_fast_runtime = _create_completion_repair_runtime(

@@ -6,7 +6,7 @@ Corpus and mechanics: identical to the Step 2 confirmation runner
 (t1_reliability_confirmation_runner.py, imported unchanged), with fresh
 workspaces t1-baseline-gate-{calclib,pathtools,strtools}.
 
-Metrics mirror the retained WM OFF runner family definitions:
+Metrics mirror the historical WM OFF runner eligibility rules:
   - eligible T2+ = plan_position > 1, terminal done/failed, execution_reached
   - debug_repair_rate_baseline = eligible tasks with >=1 debug repair / eligible
   - constraint rediscovery = eligible task whose repair classes/reasons match

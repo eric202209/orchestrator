@@ -323,6 +323,46 @@ def _patch_python_verification_cmd(command: str) -> str:
     return command
 
 
+def _normalize_unittest_module_command(command: str, project_dir: Path) -> str:
+    """Run unittest module references through discovery when tests/ is not a package."""
+    normalized = " ".join(str(command or "").strip().split())
+    try:
+        tokens = shlex.split(normalized, posix=True)
+    except ValueError:
+        return command
+
+    if len(tokens) != 4 or tokens[:3] not in (
+        ["python", "-m", "unittest"],
+        ["python3", "-m", "unittest"],
+    ):
+        return command
+
+    module_name = tokens[3]
+    if module_name.startswith("-") or "/" in module_name or "\\" in module_name:
+        return command
+
+    path_parts = module_name.split(".")
+    if len(path_parts) < 2:
+        return command
+
+    candidate = project_dir.joinpath(*path_parts).with_suffix(".py")
+    try:
+        candidate.relative_to(project_dir.resolve())
+    except ValueError:
+        return command
+
+    tests_dir = project_dir / path_parts[0]
+    if not candidate.is_file() or (tests_dir / "__init__.py").exists():
+        return command
+
+    pattern = candidate.name
+    return (
+        f"{tokens[0]} -m unittest discover "
+        f"-s {shlex.quote(str(tests_dir.relative_to(project_dir)))} "
+        f"-p {shlex.quote(pattern)}"
+    )
+
+
 def _node_eval_script(command: str) -> str | None:
     normalized = " ".join(str(command or "").strip().split())
     if not normalized.startswith("node -e "):
@@ -653,6 +693,7 @@ def _execute_simple_verification_step(
         command_to_run = command
     else:
         return None
+    command_to_run = _normalize_unittest_module_command(command_to_run, project_dir)
     command_to_run = _patch_python_verification_cmd(command_to_run)
     if not _is_simple_verification_command(command_to_run, project_dir=project_dir):
         return None
