@@ -48,12 +48,36 @@ class _LegacyModuleAlias(_types.ModuleType):
     def __getattr__(self, name: str):
         return getattr(self._load(), name)
 
+    def __setattr__(self, name: str, value: object) -> None:
+        self.__dict__[name] = value
+        # When _load() has replaced us in sys.modules with the real module,
+        # proxy attribute writes so that patch() mocks land on the real module.
+        if "_target_name" in self.__dict__:
+            our_name = self.__dict__.get("__name__")
+            if our_name:
+                real = _sys.modules.get(our_name)
+                if real is not None and real is not self:
+                    setattr(real, name, value)
+
 
 for _legacy_name, _target_name in _LEGACY_MODULE_ALIASES.items():
     _full_legacy_name = f"{__name__}.{_legacy_name}"
     _sys.modules.setdefault(
         _full_legacy_name, _LegacyModuleAlias(_full_legacy_name, _target_name)
     )
+
+
+def __getattr__(name: str) -> object:
+    """Expose legacy alias sub-modules as attributes of app.services.
+
+    Required so that monkeypatch.setattr("app.services.<alias>.…") can resolve
+    the <alias> step via getattr(app.services, alias).
+    """
+    _full_name = f"app.services.{name}"
+    if _full_name in _sys.modules:
+        return _sys.modules[_full_name]
+    raise AttributeError(f"module 'app.services' has no attribute {name!r}")
+
 
 from .agents import (
     AgentRuntime,

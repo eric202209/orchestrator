@@ -895,7 +895,7 @@ class TestObservabilityLogs:
             }
         ]
         with caplog.at_level(
-            logging.DEBUG, logger="app.services.human_guidance_plan_validator"
+            logging.DEBUG, logger="app.services.human_guidance.plan_validator"
         ):
             check_plan_guidance_violations_if_enabled(
                 db_session,
@@ -919,7 +919,7 @@ class TestObservabilityLogs:
         self, db_session, user, project, session_row, guidance_matrix, caplog
     ):
         with caplog.at_level(
-            logging.DEBUG, logger="app.services.human_guidance_conflict_service"
+            logging.DEBUG, logger="app.services.human_guidance.conflicts"
         ):
             detect_guidance_task_conflicts(
                 db_session,
@@ -954,7 +954,7 @@ class TestObservabilityLogs:
         monkeypatch.setattr(settings, "HUMAN_GUIDANCE_CONFLICT_DETECTION_ENABLED", True)
 
         with caplog.at_level(
-            logging.DEBUG, logger="app.services.human_guidance_plan_validator"
+            logging.DEBUG, logger="app.services.human_guidance.plan_validator"
         ):
             render_active_guidance_for_repair(
                 db_session,
