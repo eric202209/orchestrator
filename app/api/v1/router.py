@@ -19,6 +19,7 @@ from app.api.v1.endpoints.knowledge import router as knowledge_router
 from app.api.v1.endpoints.project_logs import router as project_logs_router
 from app.api.v1.endpoints.ops import router as ops_router
 from app.api.v1.endpoints.guidance import router as guidance_router
+from app.api.v1.endpoints.analytics import router as analytics_router
 from app.dependencies import get_current_active_user
 from app.services.health import api_root_payload, health_payload
 
@@ -166,3 +167,6 @@ api_router.include_router(
     tags=["human-guidance"],
     dependencies=[Depends(get_current_active_user)],
 )
+
+# Operational Analytics (Phase 15A-2) — admin-only, read-only
+api_router.include_router(analytics_router)
