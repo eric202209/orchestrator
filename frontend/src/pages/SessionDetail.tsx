@@ -20,6 +20,7 @@ import type {
   SessionRecoveryContext,
   SessionStateDiffResponse,
   Task,
+  Page,
 } from '@/types/api';
 import type { TerminalLogEntry } from '@/components/TerminalViewer';
 import { Alert, LoadingSpinner } from '@/components/ui';
@@ -98,6 +99,9 @@ const MAX_TIMELINE_EVENTS = 150;
 const MAX_LOG_MESSAGE_PARSE_CHARS = 1_000_000;
 const MAX_BUFFERED_LOGS = 300;
 const TERMINAL_SESSION_STATUSES = new Set(['stopped', 'failed', 'cancelled', 'canceled']);
+
+const pageItems = <T,>(data: Page<T> | T[] | null | undefined): T[] =>
+  Array.isArray(data) ? data : data?.items ?? [];
 
 const cleanJsonLogMessage = (message: string): string => {
   const trimmed = message.trim();
@@ -1596,9 +1600,10 @@ export default function SessionDetail() {
       setSession(updated.data);
       if (updated.data.project_id) {
         const tasksRes = await tasksAPI.getByProject(updated.data.project_id);
-        setTasks(tasksRes.data || []);
-        await loadTimelineEvents(updated.data.id, tasksRes.data || []);
-        await loadStateDiff(updated.data.id, tasksRes.data || []);
+        const taskItems = pageItems<Task>(tasksRes.data);
+        setTasks(taskItems);
+        await loadTimelineEvents(updated.data.id, taskItems);
+        await loadStateDiff(updated.data.id, taskItems);
       }
       await loadCheckpointCount(Number(sessionId));
       if (!wsRef.current && updated.data.status === 'running') {
@@ -1659,10 +1664,11 @@ export default function SessionDetail() {
         if (abortController.signal.aborted) return;
 
         setSession(sessionRes.data);
-        setTasks(tasksRes.data || []);
+        const taskItems = pageItems<Task>(tasksRes.data);
+        setTasks(taskItems);
         setProject(projectRes.data);
         await loadCheckpointCount(Number(sessionId));
-        await loadTimelineEvents(sessionRes.data.id, tasksRes.data || []);
+        await loadTimelineEvents(sessionRes.data.id, taskItems);
         await loadDecisionTimeline(sessionRes.data.id);
         await loadNarrativeTimeline(sessionRes.data.id);
         await loadReplayInvestigation(sessionRes.data.id);
@@ -1674,7 +1680,7 @@ export default function SessionDetail() {
           setKnowledgeUsage({});
         }
         if (sessionRes.data.status === 'running') {
-          await loadStateDiff(sessionRes.data.id, tasksRes.data || []);
+          await loadStateDiff(sessionRes.data.id, taskItems);
         }
 
         if (abortController.signal.aborted) return;
@@ -1745,13 +1751,14 @@ export default function SessionDetail() {
 
         if (currentSession.data.project_id) {
           const currentTasks = await tasksAPI.getByProject(currentSession.data.project_id);
-          setTasks(currentTasks.data || []);
+          const taskItems = pageItems<Task>(currentTasks.data);
+          setTasks(taskItems);
           if (currentStatus === 'running') {
-            await loadStateDiff(Number(sessionId), currentTasks.data || []);
+            await loadStateDiff(Number(sessionId), taskItems);
             const now = Date.now();
             if (now - lastTimelineRefreshAt > 30_000) {
               lastTimelineRefreshAt = now;
-              await loadTimelineEvents(Number(sessionId), currentTasks.data || []);
+              await loadTimelineEvents(Number(sessionId), taskItems);
               await loadDecisionTimeline(Number(sessionId));
               await loadNarrativeTimeline(Number(sessionId));
             }
@@ -1825,9 +1832,10 @@ export default function SessionDetail() {
       setSession(updated.data);
       if (updated.data.project_id) {
         const tasksRes = await tasksAPI.getByProject(updated.data.project_id);
-        setTasks(tasksRes.data || []);
-        await loadTimelineEvents(updated.data.id, tasksRes.data || []);
-        await loadStateDiff(updated.data.id, tasksRes.data || []);
+        const taskItems = pageItems<Task>(tasksRes.data);
+        setTasks(taskItems);
+        await loadTimelineEvents(updated.data.id, taskItems);
+        await loadStateDiff(updated.data.id, taskItems);
       }
       await loadCheckpointCount(Number(sessionId));
       if (updated.data.status === 'running') {
@@ -1967,8 +1975,9 @@ export default function SessionDetail() {
       setSession(updated.data);
       if (updated.data.project_id) {
         const tasksRes = await tasksAPI.getByProject(updated.data.project_id);
-        setTasks(tasksRes.data || []);
-        await loadTimelineEvents(updated.data.id, tasksRes.data || []);
+        const taskItems = pageItems<Task>(tasksRes.data);
+        setTasks(taskItems);
+        await loadTimelineEvents(updated.data.id, taskItems);
       }
       await loadCheckpointCount(Number(sessionId));
       if (!wsRef.current && updated.data.status === 'running') {
@@ -2024,8 +2033,9 @@ export default function SessionDetail() {
         tasksAPI.getByProject(task.project_id),
       ]);
       setSession(updatedSession.data);
-      setTasks(updatedTasks.data || []);
-      await loadStateDiff(Number(sessionId), updatedTasks.data || []);
+      const taskItems = pageItems<Task>(updatedTasks.data);
+      setTasks(taskItems);
+      await loadStateDiff(Number(sessionId), taskItems);
       if (!wsRef.current) {
         scheduleWebSocketConnect(Number(sessionId), 800);
       }

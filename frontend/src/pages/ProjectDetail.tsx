@@ -23,6 +23,9 @@ import {
 import { formatDistanceToNow } from 'date-fns';
 import { StatusBadge, EmptyState } from '../components/ui';
 
+const pageItems = <T,>(data: Page<T> | T[] | null | undefined): T[] =>
+  Array.isArray(data) ? data : data?.items ?? [];
+
 function ProjectDetail() {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
@@ -136,7 +139,7 @@ function ProjectDetail() {
         setProject(projectRes.data);
         setProjectDescriptionDraft(projectRes.data.description || '');
         setProjectRulesDraft(projectRes.data.project_rules || '');
-        setTasks((tasksRes.data as Task[]) || []);
+        setTasks(pageItems<Task>(tasksRes.data));
         const sessionsData = sessionsRes.data as Page<Session>;
         setSessions(sessionsData.items ?? []);
         setSessionTotal(sessionsData.total ?? 0);
@@ -179,7 +182,7 @@ function ProjectDetail() {
         tasksAPI.getByProject(Number(id)),
         projectsAPI.getWorkspaceOverview(Number(id)),
       ]);
-      setTasks(response.data || []);
+      setTasks(pageItems<Task>(response.data));
       setWorkspaceOverview(workspaceResponse.data || null);
     } catch (error) {
       console.error('Failed to fetch tasks:', error);
@@ -443,7 +446,7 @@ function ProjectDetail() {
         tasksAPI.getByProject(Number(id)),
         projectsAPI.getWorkspaceOverview(Number(id)),
       ]);
-      setTasks(tasksRes.data);
+      setTasks(pageItems<Task>(tasksRes.data));
       setWorkspaceOverview(workspaceRes.data);
       alert(`Archived ${result.data.deleted_count} retained workspace folder(s).`);
     } catch (error) {
@@ -470,7 +473,7 @@ function ProjectDetail() {
         tasksAPI.getByProject(Number(id)),
         projectsAPI.getWorkspaceOverview(Number(id)),
       ]);
-      setTasks(tasksRes.data);
+      setTasks(pageItems<Task>(tasksRes.data));
       setWorkspaceOverview(workspaceRes.data);
     } catch (error) {
       console.error('Failed to restore archived workspace:', error);
@@ -492,7 +495,7 @@ function ProjectDetail() {
         tasksAPI.getByProject(Number(id)),
         projectsAPI.getWorkspaceOverview(Number(id)),
       ]);
-      setTasks(tasksRes.data);
+      setTasks(pageItems<Task>(tasksRes.data));
       setWorkspaceOverview(workspaceRes.data);
     } catch (error) {
       console.error('Failed to roll back changes:', error);

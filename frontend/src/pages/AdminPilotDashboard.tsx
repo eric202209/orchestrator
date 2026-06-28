@@ -11,7 +11,7 @@ import {
   type QueueLatencyStats,
   type AuditEventsResponse,
 } from '@/api/client';
-import type { Project } from '@/types/api';
+import type { Page, Project } from '@/types/api';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -38,6 +38,9 @@ function secsAgo(iso: string): string {
   if (diff < 60) return `${diff}s ago`;
   return `${Math.floor(diff / 60)}m ago`;
 }
+
+const pageItems = <T,>(data: Page<T> | T[] | null | undefined): T[] =>
+  Array.isArray(data) ? data : data?.items ?? [];
 
 // ── Decision Card ─────────────────────────────────────────────────────────────
 
@@ -580,8 +583,9 @@ export default function AdminPilotDashboard() {
     let cancelled = false;
     projectsAPI.getAll({ limit: 100 }).then((r) => {
       if (cancelled) return;
-      setProjects(r.data);
-      setSelectedProjectId((prev) => prev ?? r.data[0]?.id ?? null);
+      const projectItems = pageItems(r.data);
+      setProjects(projectItems);
+      setSelectedProjectId((prev) => prev ?? projectItems[0]?.id ?? null);
     });
     return () => {
       cancelled = true;

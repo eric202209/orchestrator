@@ -98,7 +98,7 @@ EXPECTED_TASK_ATTEMPT_CALLS = {
     },
     "app/services/session/session_lifecycle_service.py": {
         "mark_task_attempt_cancelled": 1,
-        "mark_task_attempt_pending": 5,
+        "mark_task_attempt_pending": 6,
     },
     "app/services/session/session_execution_service.py": {
         "mark_task_attempt_cancelled": 1,

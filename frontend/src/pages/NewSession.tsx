@@ -8,7 +8,7 @@ import {
   X,
   Settings
 } from 'lucide-react';
-import type { ExecutionProfile } from '../types/api';
+import type { ExecutionProfile, Page, Project } from '../types/api';
 
 const executionProfiles: Array<{ value: ExecutionProfile; label: string; description: string }> = [
   { value: 'full_lifecycle', label: 'Full Lifecycle', description: 'Plan, implement, verify, and summarize by default.' },
@@ -17,6 +17,9 @@ const executionProfiles: Array<{ value: ExecutionProfile; label: string; descrip
   { value: 'debug_only', label: 'Debug Only', description: 'Reproduce, diagnose, fix, and verify issues.' },
   { value: 'review_only', label: 'Review Only', description: 'Inspect and report findings without implementation-first behavior.' },
 ];
+
+const pageItems = <T,>(data: Page<T> | T[] | null | undefined): T[] =>
+  Array.isArray(data) ? data : data?.items ?? [];
 
 function NewSession() {
   const navigate = useNavigate();
@@ -33,12 +36,13 @@ function NewSession() {
     try {
       setLoading(true); // Show loading while fetching
       const response = await projectsAPI.getAll();
-      setProjects(response.data);
+      const projectItems = pageItems<Project>(response.data);
+      setProjects(projectItems);
       
       // Check if we have a project_id in the URL
       const projectId = searchParams.get('project_id');
-      if (projectId && response.data) {
-        const project = response.data.find((p: { id: number }) => p.id === Number(projectId));
+      if (projectId && projectItems.length > 0) {
+        const project = projectItems.find((p) => p.id === Number(projectId));
         if (!project) {
           console.error(`Project with ID ${projectId} not found`);
           alert(`Project with ID ${projectId} not found. Please select a valid project.`);

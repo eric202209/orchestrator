@@ -1,7 +1,7 @@
 import { useCallback, useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { projectsAPI, tasksAPI } from '../api/client';
-import type { Project, Task } from '../types/api';
+import type { Page, Project, Task } from '../types/api';
 import {
   GitBranch,
   Plus,
@@ -16,6 +16,9 @@ import { EmptyState, Skeleton } from '../components/ui';
 
 const taskNeedsReview = (task: Task): boolean =>
   task.workspace_status === 'ready' || task.workspace_status === 'changes_requested';
+
+const pageItems = <T,>(data: Page<T> | T[] | null | undefined): T[] =>
+  Array.isArray(data) ? data : data?.items ?? [];
 
 function ProjectsList() {
   const navigate = useNavigate();
@@ -86,10 +89,10 @@ function ProjectsList() {
         projectsAPI.getAll(),
         tasksAPI.getAll(),
       ]);
-      setProjects(projectsResponse.data);
+      setProjects(pageItems<Project>(projectsResponse.data));
       const counts: Record<number, number> = {};
       const tCounts: Record<number, number> = {};
-      (tasksResponse.data || []).forEach((task) => {
+      pageItems<Task>(tasksResponse.data).forEach((task) => {
         tCounts[task.project_id] = (tCounts[task.project_id] || 0) + 1;
         if (!taskNeedsReview(task)) return;
         counts[task.project_id] = (counts[task.project_id] || 0) + 1;
