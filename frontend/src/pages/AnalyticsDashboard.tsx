@@ -18,6 +18,9 @@ import {
   WindowSelector,
   LoadingPanel,
   ErrorPanel,
+  SimpleBarChart,
+  DistributionBarChart,
+  RateComparisonChart,
 } from '@/components/analytics';
 
 // ── formatters ────────────────────────────────────────────────────────────────
@@ -64,6 +67,7 @@ function OperationalSection({
   if (!data) return null;
 
   const w = data.windows[win];
+  const fmtRate = (v: number | null) => fmtPct(v);
   return (
     <div className="space-y-4">
       <MetricGrid>
@@ -80,6 +84,28 @@ function OperationalSection({
           <MetricCard label="Sessions Failed" value={fmtNum(w.sessions_failed)} />
         </div>
       </MetricGrid>
+      <div className="mt-4 pt-4 border-t border-[color:var(--oc-border-soft)] grid grid-cols-1 sm:grid-cols-2 gap-6">
+        <SimpleBarChart
+          title="Session Success Rate by Window"
+          bars={[
+            { label: '7d', value: data.windows['7d'].session_success_rate },
+            { label: '30d', value: data.windows['30d'].session_success_rate },
+            { label: 'All', value: data.windows['all_time'].session_success_rate },
+          ]}
+          max={1}
+          formatValue={fmtRate}
+        />
+        <SimpleBarChart
+          title="First-Attempt Success Rate by Window"
+          bars={[
+            { label: '7d', value: data.windows['7d'].first_attempt_success_rate },
+            { label: '30d', value: data.windows['30d'].first_attempt_success_rate },
+            { label: 'All', value: data.windows['all_time'].first_attempt_success_rate },
+          ]}
+          max={1}
+          formatValue={fmtRate}
+        />
+      </div>
       {Object.keys(w.failure_category_distribution).length > 0 && (
         <div className="mt-4 pt-4 border-t border-[color:var(--oc-border-soft)]">
           <DistributionTable
@@ -126,6 +152,24 @@ function FailureSection({
           <MetricCard label="Repair Churn" value={fmtNum(w.churn_guard_activations)} />
         </div>
       </MetricGrid>
+      <div className="mt-4 pt-4 border-t border-[color:var(--oc-border-soft)] grid grid-cols-1 sm:grid-cols-2 gap-6">
+        <SimpleBarChart
+          title="Recovery Success Rate by Window"
+          bars={[
+            { label: '7d', value: data.windows['7d'].recovery_success_rate },
+            { label: '30d', value: data.windows['30d'].recovery_success_rate },
+            { label: 'All', value: data.windows['all_time'].recovery_success_rate },
+          ]}
+          max={1}
+          formatValue={fmtPct}
+        />
+        {Object.keys(w.failure_category_distribution).length > 0 && (
+          <DistributionBarChart
+            title="Failure Category Distribution"
+            data={w.failure_category_distribution}
+          />
+        )}
+      </div>
       {Object.keys(w.failure_category_distribution).length > 0 && (
         <div className="mt-4 pt-4 border-t border-[color:var(--oc-border-soft)]">
           <DistributionTable
@@ -170,6 +214,27 @@ function KnowledgeSection({
           <MetricCard label="Knowledge Effectiveness" value={fmtPct(w.effectiveness_rate)} />
         </div>
       </MetricGrid>
+      <div className="mt-4 pt-4 border-t border-[color:var(--oc-border-soft)] grid grid-cols-1 sm:grid-cols-2 gap-6">
+        <SimpleBarChart
+          title="Knowledge Hit Rate by Window"
+          bars={[
+            { label: '7d', value: data.windows['7d'].knowledge_hit_rate },
+            { label: '30d', value: data.windows['30d'].knowledge_hit_rate },
+            { label: 'All', value: data.windows['all_time'].knowledge_hit_rate },
+          ]}
+          max={1}
+          formatValue={fmtPct}
+        />
+        <SimpleBarChart
+          title="Top Items by Retrieval Count"
+          bars={w.top_items.map((item) => ({
+            label: (item.title || item.knowledge_item_id).slice(0, 16),
+            value: item.retrieval_count,
+          }))}
+          formatValue={fmtNum}
+          emptyText="No knowledge items"
+        />
+      </div>
       {(w.top_items.length > 0 || w.low_effectiveness_items.length > 0) && (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4 pt-4 border-t border-[color:var(--oc-border-soft)]">
           <TopItemsTable
@@ -230,6 +295,37 @@ function ExecutionSection({
           />
         </div>
       </MetricGrid>
+      <div className="mt-4 pt-4 border-t border-[color:var(--oc-border-soft)] grid grid-cols-1 sm:grid-cols-2 gap-6">
+        <RateComparisonChart
+          title="Queue Latency: P50 vs P95 by Window"
+          groups={[
+            {
+              label: '7d',
+              a: data.windows['7d'].queue_latency_p50_seconds,
+              b: data.windows['7d'].queue_latency_p95_seconds,
+            },
+            {
+              label: '30d',
+              a: data.windows['30d'].queue_latency_p50_seconds,
+              b: data.windows['30d'].queue_latency_p95_seconds,
+            },
+            {
+              label: 'All',
+              a: data.windows['all_time'].queue_latency_p50_seconds,
+              b: data.windows['all_time'].queue_latency_p95_seconds,
+            },
+          ]}
+          labelA="P50"
+          labelB="P95"
+          formatValue={fmtSec}
+        />
+        {Object.keys(w.backend_distribution).length > 0 && (
+          <DistributionBarChart
+            title="Backend Distribution"
+            data={w.backend_distribution}
+          />
+        )}
+      </div>
       {Object.keys(w.backend_distribution).length > 0 && (
         <div className="mt-4 pt-4 border-t border-[color:var(--oc-border-soft)]">
           <DistributionTable title="Backend Distribution" data={w.backend_distribution} />
@@ -281,6 +377,24 @@ function OperatorSection({
           />
         </div>
       </MetricGrid>
+      <div className="mt-4 pt-4 border-t border-[color:var(--oc-border-soft)] grid grid-cols-1 sm:grid-cols-2 gap-6">
+        <SimpleBarChart
+          title="Autonomy Rate by Window"
+          bars={[
+            { label: '7d', value: data.windows['7d'].autonomy_rate },
+            { label: '30d', value: data.windows['30d'].autonomy_rate },
+            { label: 'All', value: data.windows['all_time'].autonomy_rate },
+          ]}
+          max={1}
+          formatValue={fmtPct}
+        />
+        {Object.keys(w.intervention_type_distribution).length > 0 && (
+          <DistributionBarChart
+            title="Intervention Type Distribution"
+            data={w.intervention_type_distribution}
+          />
+        )}
+      </div>
       {Object.keys(w.intervention_type_distribution).length > 0 && (
         <div className="mt-4 pt-4 border-t border-[color:var(--oc-border-soft)]">
           <DistributionTable

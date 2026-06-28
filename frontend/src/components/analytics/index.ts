@@ -6,3 +6,6 @@ export { TopItemsTable } from './TopItemsTable';
 export { WindowSelector } from './WindowSelector';
 export { LoadingPanel } from './LoadingPanel';
 export { ErrorPanel } from './ErrorPanel';
+export { SimpleBarChart } from './SimpleBarChart';
+export { DistributionBarChart } from './DistributionBarChart';
+export { RateComparisonChart } from './RateComparisonChart';
