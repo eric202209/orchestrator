@@ -39,6 +39,11 @@ import type {
   HumanGuidanceReadiness,
   HumanGuidanceConflict,
   HumanGuidanceRendered,
+  OperationalAnalytics,
+  FailureAnalytics,
+  KnowledgeAnalytics,
+  ExecutionAnalytics,
+  OperatorAnalytics,
 } from "../types/api";
 
 const normalizeApiBaseUrl = (value: string): string => {
@@ -1232,6 +1237,14 @@ export const pilotAPI = {
     order?: 'asc' | 'desc';
   }) =>
     apiClient.get<AuditEventsResponse>('/ops/audit-events', { params }),
+};
+
+export const analyticsAPI = {
+  getOperational: () => apiClient.get<OperationalAnalytics>('/analytics/operational'),
+  getFailures: () => apiClient.get<FailureAnalytics>('/analytics/failures'),
+  getKnowledge: () => apiClient.get<KnowledgeAnalytics>('/analytics/knowledge'),
+  getExecution: () => apiClient.get<ExecutionAnalytics>('/analytics/execution'),
+  getOperators: () => apiClient.get<OperatorAnalytics>('/analytics/operators'),
 };
 
 export const api = apiClient;

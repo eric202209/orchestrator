@@ -1002,6 +1002,116 @@ export interface HumanGuidanceConflict {
   resolved: boolean;
 }
 
+// Analytics types — Phase 15B-1
+
+export interface OperationalWindow {
+  session_success_rate: number | null;
+  first_attempt_success_rate: number | null;
+  failure_category_distribution: Record<string, number>;
+  sessions_started: number;
+  sessions_completed: number;
+  sessions_failed: number;
+}
+
+export interface OperationalAnalytics {
+  windows: { '7d': OperationalWindow; '30d': OperationalWindow; all_time: OperationalWindow };
+  generated_at: string;
+  metrics_version: number;
+}
+
+export interface FailureWindow {
+  recovery_attempts: number;
+  recovery_successes: number;
+  recovery_failures: number;
+  recovery_success_rate: number | null;
+  budget_exhaustion_count: number;
+  churn_guard_activations: number;
+  failure_category_distribution: Record<string, number>;
+  failure_category_recovery: Record<string, unknown>;
+}
+
+export interface FailureAnalytics {
+  windows: { '7d': FailureWindow; '30d': FailureWindow; all_time: FailureWindow };
+  generated_at: string;
+  metrics_version: number;
+}
+
+export interface KnowledgeItem {
+  knowledge_item_id: string;
+  title: string | null;
+  retrieval_count: number;
+  used_in_prompt_count: number;
+  hit_rate: number | null;
+  effectiveness_rate: number | null;
+  avg_confidence: number | null;
+}
+
+export interface KnowledgeLowEffItem {
+  knowledge_item_id: string;
+  title: string | null;
+  retrieval_count: number;
+  used_in_prompt_count: number;
+  effectiveness_rate: number;
+  avg_confidence: number | null;
+}
+
+export interface KnowledgeWindow {
+  retrieval_count: number;
+  used_in_prompt_count: number;
+  knowledge_hit_rate: number | null;
+  effectiveness_rate: number | null;
+  phase_utilization: Record<string, number>;
+  top_items: KnowledgeItem[];
+  low_effectiveness_items: KnowledgeLowEffItem[];
+}
+
+export interface KnowledgeAnalytics {
+  windows: { '7d': KnowledgeWindow; '30d': KnowledgeWindow; all_time: KnowledgeWindow };
+  generated_at: string;
+  metrics_version: number;
+}
+
+export interface ExecutionWindow {
+  execution_count: number;
+  mean_execution_duration_seconds: number | null;
+  queue_latency_p50_seconds: number | null;
+  queue_latency_p95_seconds: number | null;
+  tokens_in_total: number;
+  tokens_out_total: number;
+  backend_distribution: Record<string, number>;
+  phase_duration_seconds: Record<string, { count: number; mean_seconds: number }>;
+}
+
+export interface ExecutionAnalytics {
+  windows: { '7d': ExecutionWindow; '30d': ExecutionWindow; all_time: ExecutionWindow };
+  generated_at: string;
+  metrics_version: number;
+}
+
+export interface OperatorWindow {
+  intervention_requests: number;
+  intervention_responses: number;
+  intervention_response_rate: number | null;
+  mean_response_seconds: number | null;
+  median_response_seconds: number | null;
+  sessions_with_intervention: number;
+  sessions_without_intervention: number;
+  autonomy_rate: number | null;
+  pause_count: number;
+  resume_count: number;
+  stop_count: number;
+  intervention_type_distribution: Record<string, number>;
+  phase_intervention_distribution: Record<string, number>;
+}
+
+export interface OperatorAnalytics {
+  windows: { '7d': OperatorWindow; '30d': OperatorWindow; all_time: OperatorWindow };
+  generated_at: string;
+  metrics_version: number;
+}
+
+export type AnalyticsWindow = '7d' | '30d' | 'all_time';
+
 export interface HumanGuidanceRendered {
   project_id: number;
   rendered_chars: number;
