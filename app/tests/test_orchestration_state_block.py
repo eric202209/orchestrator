@@ -259,7 +259,9 @@ def test_allowed_actions_for_done(db_session):
     project = _make_project(db_session)
     session = _make_session(db_session, project, status="done")
     block = derive_orchestration_state_block(db_session, session)
-    assert block["allowed_actions"] == ["view_logs", "view_timeline"]
+    assert "view_logs" in block["allowed_actions"]
+    assert "view_timeline" in block["allowed_actions"]
+    assert "start_session" in block["allowed_actions"]
 
 
 # ── dashboard endpoint includes orchestration_state ───────────────────────────

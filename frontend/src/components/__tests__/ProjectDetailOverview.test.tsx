@@ -109,6 +109,18 @@ const makeWorkspaceOverview = (overrides = {}) => ({
   ...overrides,
 });
 
+function makeSessionPage(sessions: ReturnType<typeof makeSession>[]) {
+  return {
+    items: sessions,
+    page: 1,
+    per_page: 25,
+    total: sessions.length,
+    total_pages: 1,
+    has_next: false,
+    has_previous: false,
+  };
+}
+
 function setupMocks({
   project = makeProject(),
   sessions = [makeSession()],
@@ -122,7 +134,7 @@ function setupMocks({
 } = {}) {
   (projectsAPI.getById as Mock).mockResolvedValue({ data: project });
   (tasksAPI.getByProject as Mock).mockResolvedValue({ data: tasks });
-  (sessionsAPI.getByProject as Mock).mockResolvedValue({ data: sessions });
+  (sessionsAPI.getByProject as Mock).mockResolvedValue({ data: makeSessionPage(sessions) });
   (projectsAPI.getWorkspaceOverview as Mock).mockResolvedValue({ data: workspace });
 }
 
@@ -285,6 +297,78 @@ describe('ProjectDetail — Review summary notification', () => {
     await render();
     const summary = container.querySelector('[data-testid="review-summary"]');
     expect(summary?.textContent).toContain('Open Review Queue');
+  });
+
+  it('shows task and execution ids in review queue cards', async () => {
+    setupMocks({
+      tasks: [
+        makeTask({
+          id: 7,
+          title: 'Reviewable Task',
+          status: 'done',
+          workspace_status: 'ready',
+          task_subfolder: 'task-7',
+        }),
+      ],
+      workspace: makeWorkspaceOverview({
+        pending_change_sets: [{
+          task_id: 7,
+          title: 'Reviewable Task',
+          workspace_status: 'ready',
+          task_execution_id: 44,
+          change_set: {
+            changed_count: 2,
+            added_count: 1,
+            modified_count: 1,
+            deleted_count: 0,
+            added_files: [],
+            modified_files: [],
+            deleted_files: [],
+            warning_flags: [],
+          },
+        }],
+      }),
+    });
+    await render();
+    const btn = container.querySelector('[data-testid="review-count-btn"]') as HTMLButtonElement;
+    await act(async () => { btn.click(); });
+    expect(container.textContent).toContain('Task #7');
+    expect(container.textContent).toContain('Execution 44');
+  });
+
+  it('offers a direct review queue action from the tasks tab review block', async () => {
+    setupMocks({
+      workspace: makeWorkspaceOverview({
+        pending_change_sets: [{
+          task_id: 1,
+          title: 'Task One',
+          workspace_status: 'ready',
+          task_execution_id: 11,
+          change_set: {
+            changed_count: 1,
+            added_count: 1,
+            modified_count: 0,
+            deleted_count: 0,
+            added_files: [],
+            modified_files: [],
+            deleted_files: [],
+            warning_flags: [],
+          },
+        }],
+      }),
+    });
+    await render();
+    const tasksTab = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Tasks',
+    ) as HTMLButtonElement;
+    await act(async () => { tasksTab.click(); });
+    expect(container.textContent).toContain('Runs needing review');
+    const reviewButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Open Review Queue',
+    ) as HTMLButtonElement;
+    expect(reviewButton).not.toBeNull();
+    await act(async () => { reviewButton.click(); });
+    expect(container.textContent).toContain('Review Queue');
   });
 
   it('falls back to ready tasks when workspace overview omits pending change sets', async () => {

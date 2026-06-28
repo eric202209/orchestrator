@@ -12,7 +12,7 @@ from fastapi import (
 from fastapi.requests import Request
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
-from typing import List, Optional, Any, Dict
+from typing import List, Optional, Any, Dict, Union
 from datetime import datetime, timezone
 import json
 import logging
@@ -39,6 +39,7 @@ from app.schemas import (
     SessionResponse,
     TaskExecuteRequest,
 )
+from app.schemas.pagination import paginate
 from app.services import (
     PromptTemplates,
     add_operator_guidance as _add_operator_guidance,
@@ -232,17 +233,105 @@ def create_session(
     return db_session
 
 
-@router.get("/sessions", response_model=List[SessionResponse])
+_SESSION_ORDER_COLUMNS = {
+    "created_at": SessionModel.created_at,
+    "updated_at": SessionModel.updated_at,
+    "status": SessionModel.status,
+    "name": SessionModel.name,
+    "started_at": SessionModel.started_at,
+}
+
+_SESSION_ATTENTION_STATUSES = ("failed", "awaiting_input", "stopped")
+
+
+def _apply_session_filters(
+    query,
+    *,
+    status: Optional[str],
+    needs_attention: Optional[bool],
+    project_id: Optional[int],
+    search: Optional[str],
+    created_before: Optional[str],
+    created_after: Optional[str],
+    is_active: Optional[bool],
+):
+    if project_id is not None:
+        query = query.filter(SessionModel.project_id == project_id)
+    if is_active is not None:
+        query = query.filter(SessionModel.is_active == is_active)
+    if status:
+        query = query.filter(SessionModel.status == status)
+    if needs_attention is True:
+        query = query.filter(SessionModel.status.in_(_SESSION_ATTENTION_STATUSES))
+    if search:
+        query = query.filter(SessionModel.name.ilike(f"%{search}%"))
+    if created_after:
+        try:
+            dt = datetime.fromisoformat(created_after)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            query = query.filter(SessionModel.created_at >= dt)
+        except ValueError:
+            raise HTTPException(
+                status_code=400, detail="Invalid created_after date format"
+            )
+    if created_before:
+        try:
+            dt = datetime.fromisoformat(created_before)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            query = query.filter(SessionModel.created_at <= dt)
+        except ValueError:
+            raise HTTPException(
+                status_code=400, detail="Invalid created_before date format"
+            )
+    return query
+
+
+def _apply_session_ordering(query, *, order_by: str, order_dir: str):
+    col = _SESSION_ORDER_COLUMNS.get(order_by, SessionModel.created_at)
+    if order_dir.lower() == "asc":
+        query = query.order_by(col.asc().nullslast())
+    else:
+        query = query.order_by(col.desc().nullslast())
+    return query
+
+
+@router.get("/sessions")
 def list_sessions(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
+    # Legacy skip/limit — preserved until Phase 15E-4
+    # TODO(Phase15E-4): remove legacy skip/limit mode
     skip: int = 0,
     limit: int = 100,
+    # Paginated mode — activated when page is provided
+    page: Optional[int] = None,
+    per_page: int = 25,
+    # Filters
     status: Optional[str] = None,
+    needs_attention: Optional[bool] = None,
     is_active: Optional[bool] = None,
     project_id: Optional[int] = None,
+    search: Optional[str] = None,
+    created_before: Optional[str] = None,
+    created_after: Optional[str] = None,
+    # Ordering
+    order_by: str = "created_at",
+    order_dir: str = "desc",
 ):
-    """List sessions across projects for authenticated dashboard use."""
+    """List sessions across projects.
+
+    Legacy mode (no page param): returns List[SessionResponse] with skip/limit.
+    Paginated mode (page param present): returns Page[SessionResponse].
+    """
+    if page is not None and page < 1:
+        raise HTTPException(status_code=422, detail="page must be >= 1")
+    if per_page < 1 or per_page > 200:
+        raise HTTPException(
+            status_code=422, detail="per_page must be between 1 and 200"
+        )
+
     query = (
         db.query(SessionModel)
         .join(Project, Project.id == SessionModel.project_id)
@@ -252,19 +341,34 @@ def list_sessions(
             project_access_filter(db, current_user),
         )
     )
-
-    if project_id is not None:
-        query = query.filter(SessionModel.project_id == project_id)
-    if is_active is not None:
-        query = query.filter(SessionModel.is_active == is_active)
-    if status:
-        query = query.filter(SessionModel.status == status)
-
-    sessions = (
-        query.order_by(SessionModel.created_at.desc()).offset(skip).limit(limit).all()
+    query = _apply_session_filters(
+        query,
+        status=status,
+        needs_attention=needs_attention,
+        project_id=project_id,
+        search=search,
+        created_before=created_before,
+        created_after=created_after,
+        is_active=is_active,
     )
-    reconcile_terminal_running_sessions(db, sessions)
-    return sessions
+
+    if page is None:
+        # Legacy mode — preserve original skip/limit behaviour
+        sessions = (
+            query.order_by(SessionModel.created_at.desc())
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
+        reconcile_terminal_running_sessions(db, sessions)
+        return [SessionResponse.model_validate(s) for s in sessions]
+
+    # Paginated mode
+    query = _apply_session_ordering(query, order_by=order_by, order_dir=order_dir)
+    page_data = paginate(query, page, per_page)
+    reconcile_terminal_running_sessions(db, page_data["items"])
+    page_data["items"] = [SessionResponse.model_validate(s) for s in page_data["items"]]
+    return page_data
 
 
 class StuckSessionInfo(BaseModel):
@@ -345,28 +449,74 @@ def list_stuck_sessions(
     return result
 
 
-@router.get("/projects/{project_id}/sessions", response_model=List[SessionResponse])
+@router.get("/projects/{project_id}/sessions")
 def get_project_sessions(
     project_id: int,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
+    # Legacy — TODO(Phase15E-4): remove legacy skip/limit mode
     skip: int = 0,
     limit: int = 100,
+    # Paginated mode
+    page: Optional[int] = None,
+    per_page: int = 25,
+    # Filters
+    status: Optional[str] = None,
+    needs_attention: Optional[bool] = None,
     is_active: Optional[bool] = None,
+    search: Optional[str] = None,
+    created_before: Optional[str] = None,
+    created_after: Optional[str] = None,
+    # Ordering
+    order_by: str = "created_at",
+    order_dir: str = "desc",
 ):
-    """Get all sessions for a project with filtering"""
+    """Get sessions for a project.
+
+    Legacy mode (no page): returns List[SessionResponse].
+    Paginated mode (page param): returns Page[SessionResponse].
+    """
+    if page is not None and page < 1:
+        raise HTTPException(status_code=422, detail="page must be >= 1")
+    if per_page < 1 or per_page > 200:
+        raise HTTPException(
+            status_code=422, detail="per_page must be between 1 and 200"
+        )
+
     get_project_for_user(db, project_id, current_user)
 
     query = db.query(SessionModel).filter(
         SessionModel.project_id == project_id,
         SessionModel.deleted_at.is_(None),
     )
-    if is_active is not None:
-        query = query.filter(SessionModel.is_active == is_active)
+    query = _apply_session_filters(
+        query,
+        status=status,
+        needs_attention=needs_attention,
+        project_id=None,  # already scoped via URL param
+        search=search,
+        created_before=created_before,
+        created_after=created_after,
+        is_active=is_active,
+    )
 
-    sessions = query.offset(skip).limit(limit).all()
-    reconcile_terminal_running_sessions(db, sessions)
-    return sessions
+    if page is None:
+        # Legacy mode
+        sessions = (
+            query.order_by(SessionModel.created_at.desc())
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
+        reconcile_terminal_running_sessions(db, sessions)
+        return [SessionResponse.model_validate(s) for s in sessions]
+
+    # Paginated mode
+    query = _apply_session_ordering(query, order_by=order_by, order_dir=order_dir)
+    page_data = paginate(query, page, per_page)
+    reconcile_terminal_running_sessions(db, page_data["items"])
+    page_data["items"] = [SessionResponse.model_validate(s) for s in page_data["items"]]
+    return page_data
 
 
 @router.get("/sessions/{session_id}", response_model=SessionResponse)

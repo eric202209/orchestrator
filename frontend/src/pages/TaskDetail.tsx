@@ -256,8 +256,7 @@ function TaskDetail() {
   const latestChangeSet = changeSet?.change_set || null;
   const reviewDecision = changeSet?.review_decision || null;
   const heldForReview = Boolean(
-    task?.status === 'done' &&
-      task?.workspace_status === 'ready' &&
+    task?.workspace_status === 'ready' &&
       latestChangeSet &&
       reviewDecision?.held_for_review
   );
@@ -575,7 +574,7 @@ function TaskDetail() {
                     </label>
                   </div>
                 )}
-                {task.status === 'done' && task.task_subfolder && task.workspace_status !== 'promoted' && (
+                {task.task_subfolder && task.workspace_status === 'ready' && (
                   <Button size="sm" onClick={handleAccept}>
                     Accept Changes
                   </Button>
@@ -675,6 +674,13 @@ function TaskDetail() {
                     className="text-sm text-primary-300 hover:text-primary-200"
                   >
                     Session {task.session_id}
+                  </Link>
+                ) : task.project_id ? (
+                  <Link
+                    to={`/projects/${task.project_id}`}
+                    className="text-sm text-slate-400 hover:text-primary-300"
+                  >
+                    View project sessions
                   </Link>
                 ) : (
                   <p className="text-slate-400 text-sm">N/A</p>

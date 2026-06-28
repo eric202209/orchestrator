@@ -80,6 +80,56 @@ def _reset_running_session_tasks(
     )
 
 
+def _reset_orphan_running_project_tasks_for_session_stop(
+    db: Session,
+    *,
+    session: SessionModel,
+    next_status: TaskStatus = TaskStatus.PENDING,
+) -> int:
+    """Clear project tasks stuck running without a live session/execution owner."""
+
+    if not session.project_id:
+        return 0
+
+    running_tasks = (
+        db.query(Task)
+        .filter(
+            Task.project_id == session.project_id,
+            Task.status == TaskStatus.RUNNING,
+        )
+        .all()
+    )
+    updated = 0
+    for task in running_tasks:
+        active_link = (
+            db.query(SessionTask)
+            .filter(
+                SessionTask.task_id == task.id,
+                SessionTask.status == TaskStatus.RUNNING,
+            )
+            .first()
+        )
+        if active_link:
+            continue
+        active_execution = (
+            db.query(TaskExecution)
+            .filter(
+                TaskExecution.task_id == task.id,
+                TaskExecution.status.in_([TaskStatus.PENDING, TaskStatus.RUNNING]),
+            )
+            .first()
+        )
+        if active_execution:
+            continue
+        mark_task_attempt_pending(
+            task=task,
+            reset_started_at=True,
+            error_message=None,
+        )
+        updated += 1
+    return updated
+
+
 def _explicit_task_id_from_session(session: SessionModel) -> int | None:
     text = " ".join(
         part for part in [session.name or "", session.description or ""] if part
@@ -1260,7 +1310,7 @@ async def stop_session_lifecycle(
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    if session.status not in ["running", "paused", "active"]:
+    if session.status not in ["running", "paused", "active", "awaiting_input"]:
         raise HTTPException(status_code=400, detail="Session is not running")
     stop_transition = resolve_session_transition(
         "running" if session.status == "active" else session.status,
@@ -1325,6 +1375,11 @@ async def stop_session_lifecycle(
             session_id=session_id,
             next_status=TaskStatus.PENDING,
         )
+        orphan_reset_count = _reset_orphan_running_project_tasks_for_session_stop(
+            db,
+            session=session,
+            next_status=TaskStatus.PENDING,
+        )
         db.commit()
 
         db.add(
@@ -1342,6 +1397,7 @@ async def stop_session_lifecycle(
                         "revoked_task_ids": revoked_ids,
                         "checkpoint_name": checkpoint_name,
                         "reset_running_tasks": reset_count,
+                        "reset_orphan_running_tasks": orphan_reset_count,
                     }
                 ),
             )

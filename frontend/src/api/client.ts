@@ -18,6 +18,9 @@ import type {
   ProjectLogsResponse,
   WorkspaceInfo,
   SessionFilters,
+  TaskFilters,
+  Page,
+  DashboardAttention,
   Checkpoint,
   CheckpointInspection,
   OrchestrationEvent,
@@ -45,6 +48,8 @@ import type {
   ExecutionAnalytics,
   OperatorAnalytics,
 } from "../types/api";
+
+export type { Page, DashboardAttention };
 
 const normalizeApiBaseUrl = (value: string): string => {
   const raw = value.trim().replace(/\/+$/, "");
@@ -190,8 +195,8 @@ export const settingsAPI = {
 
 // Projects API
 export const projectsAPI = {
-  getAll: (params?: { limit?: number; skip?: number }) =>
-    apiClient.get<Project[]>("/projects", { params }),
+  getAll: (params?: { limit?: number; skip?: number; page?: number; per_page?: number; search?: string; order_by?: string; order_dir?: string }) =>
+    apiClient.get<Project[] | Page<Project>>("/projects", { params }),
 
   getById: (id: number) => apiClient.get<Project>(`/projects/${id}`),
 
@@ -209,8 +214,8 @@ export const projectsAPI = {
 
   delete: (id: number) => apiClient.delete(`/projects/${id}`),
 
-  getSessions: (projectId: number) =>
-    apiClient.get<Session[]>(`/projects/${projectId}/sessions`),
+  getSessions: (projectId: number, params?: SessionFilters) =>
+    apiClient.get<Session[] | Page<Session>>(`/projects/${projectId}/sessions`, { params }),
   getPlans: (projectId: number) =>
     apiClient.get<Plan[]>(`/projects/${projectId}/plans`),
   getWorkspaceOverview: (projectId: number) =>
@@ -455,8 +460,8 @@ export const planningAPI = {
 
 // Tasks API
 export const tasksAPI = {
-  getAll: (params?: { limit?: number; skip?: number; status?: string }) =>
-    apiClient.get<Task[]>("/tasks", { params }),
+  getAll: (params?: TaskFilters & { limit?: number; skip?: number }) =>
+    apiClient.get<Task[] | Page<Task>>("/tasks", { params }),
 
   create: (data: {
     project_id: number;
@@ -465,8 +470,8 @@ export const tasksAPI = {
     priority?: number;
   }) => apiClient.post<Task>("/tasks", data),
 
-  getByProject: (projectId: number) =>
-    apiClient.get<Task[]>(`/projects/${projectId}/tasks`),
+  getByProject: (projectId: number, params?: TaskFilters) =>
+    apiClient.get<Task[] | Page<Task>>(`/projects/${projectId}/tasks`, { params }),
 
   getById: (id: number) => apiClient.get<Task>(`/tasks/${id}`),
 
@@ -542,7 +547,7 @@ export const tasksAPI = {
 // Sessions API
 export const sessionsAPI = {
   getAll: (params?: SessionFilters) =>
-    apiClient.get<Session[]>("/sessions", { params }),
+    apiClient.get<Session[] | Page<Session>>("/sessions", { params }),
 
   create: (data: {
     project_id: number;
@@ -552,8 +557,8 @@ export const sessionsAPI = {
     default_execution_profile?: ExecutionProfile;
   }) => apiClient.post<Session>("/sessions", data),
 
-  getByProject: (projectId: number) =>
-    apiClient.get<Session[]>(`/projects/${projectId}/sessions`),
+  getByProject: (projectId: number, params?: SessionFilters) =>
+    apiClient.get<Session[] | Page<Session>>(`/projects/${projectId}/sessions`, { params }),
 
   getById: (id: number) => apiClient.get<Session>(`/sessions/${id}`),
 
@@ -962,6 +967,10 @@ export const sessionsAPI = {
       },
     );
   },
+};
+
+export const dashboardAPI = {
+  getAttention: () => apiClient.get<DashboardAttention>("/dashboard/attention"),
 };
 
 export const adminAPI = {

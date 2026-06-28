@@ -65,6 +65,12 @@ _SESSION_TRANSITION_POLICY: dict[tuple[str, str], SessionTransition] = {
         is_active=False,
         timestamp_policy="stopped_at",
     ),
+    ("awaiting_input", "stop"): SessionTransition(
+        allowed=True,
+        result_status="stopped",
+        is_active=False,
+        timestamp_policy="stopped_at",
+    ),
     ("running", "complete"): SessionTransition(
         allowed=True,
         result_status="completed",

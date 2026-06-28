@@ -15,6 +15,7 @@ from app.api.v1.endpoints import (
     admin,
 )
 from app.api.v1.endpoints import isolation, permissions, context
+from app.api.v1.endpoints.dashboard import router as dashboard_router
 from app.api.v1.endpoints.knowledge import router as knowledge_router
 from app.api.v1.endpoints.project_logs import router as project_logs_router
 from app.api.v1.endpoints.ops import router as ops_router
@@ -170,3 +171,10 @@ api_router.include_router(
 
 # Operational Analytics (Phase 15A-2) — admin-only, read-only
 api_router.include_router(analytics_router)
+
+# Dashboard — operator action center (Phase 15E-2)
+api_router.include_router(
+    dashboard_router,
+    tags=["dashboard"],
+    dependencies=[Depends(get_current_active_user)],
+)

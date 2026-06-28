@@ -550,6 +550,63 @@ def test_recover_stale_running_session_stops_shell_without_active_task(db_sessio
     assert session.last_alert_level == "warn"
 
 
+def test_force_stop_awaiting_input_session_without_task_links(db_session, monkeypatch):
+    project = _make_project(db_session)
+    session = _make_session(
+        db_session,
+        project,
+        status="awaiting_input",
+        is_active=False,
+        execution_mode="automatic",
+    )
+
+    def fail_runtime_creation(*args, **kwargs):
+        raise AssertionError("force stop should not create an agent runtime")
+
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.create_agent_runtime",
+        fail_runtime_creation,
+    )
+
+    result = asyncio.run(stop_session_lifecycle(db_session, session.id, force=True))
+
+    db_session.refresh(session)
+    assert result["status"] == "stopped"
+    assert session.status == "stopped"
+    assert session.is_active is False
+    assert session.stopped_at is not None
+
+
+def test_force_stop_clears_orphan_running_project_task_without_links(
+    db_session,
+    monkeypatch,
+):
+    project = _make_project(db_session)
+    session = _make_session(
+        db_session,
+        project,
+        status="awaiting_input",
+        is_active=False,
+        execution_mode="automatic",
+    )
+    task = _make_task(db_session, project, status=TaskStatus.RUNNING)
+
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.create_agent_runtime",
+        lambda *args, **kwargs: pytest.fail("force stop should not create runtime"),
+    )
+
+    result = asyncio.run(stop_session_lifecycle(db_session, session.id, force=True))
+
+    db_session.refresh(session)
+    db_session.refresh(task)
+    assert result["status"] == "stopped"
+    assert session.status == "stopped"
+    assert task.status == TaskStatus.PENDING
+    assert task.started_at is None
+    assert task.workspace_status != "in_progress"
+
+
 def test_maybe_queue_next_automatic_task_ignores_pending_links(db_session, monkeypatch):
     project = _make_project(db_session)
     session = _make_session(

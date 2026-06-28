@@ -106,12 +106,18 @@ _STATUS_TO_ALLOWED_ACTIONS: Dict[str, List[str]] = {
     "running": ["view_logs", "view_timeline", "pause_session", "stop_session"],
     "paused": ["view_logs", "view_timeline", "resume_session", "stop_session"],
     "awaiting_input": ["view_logs", "view_timeline", "submit_guidance", "stop_session"],
-    "stopped": ["view_logs", "view_timeline", "resume_session"],
-    "cancelled": ["view_logs", "view_timeline", "resume_session"],
-    "canceled": ["view_logs", "view_timeline", "resume_session"],
-    "failed": ["view_logs", "view_timeline", "resume_session", "retry_task"],
-    "done": ["view_logs", "view_timeline"],
-    "completed": ["view_logs", "view_timeline"],
+    "stopped": ["view_logs", "view_timeline", "resume_session", "start_session"],
+    "cancelled": ["view_logs", "view_timeline", "resume_session", "start_session"],
+    "canceled": ["view_logs", "view_timeline", "resume_session", "start_session"],
+    "failed": [
+        "view_logs",
+        "view_timeline",
+        "resume_session",
+        "retry_task",
+        "start_session",
+    ],
+    "done": ["view_logs", "view_timeline", "start_session"],
+    "completed": ["view_logs", "view_timeline", "start_session"],
 }
 
 

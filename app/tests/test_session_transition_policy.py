@@ -16,6 +16,7 @@ from app.services.orchestration.state.session_state import resolve_session_trans
         ("running", "await_input", "awaiting_input", True, None),
         ("running", "stop", "stopped", False, "stopped_at"),
         ("paused", "stop", "stopped", False, "stopped_at"),
+        ("awaiting_input", "stop", "stopped", False, "stopped_at"),
         ("running", "complete", "completed", False, "stopped_at"),
     ],
 )

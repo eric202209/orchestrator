@@ -743,22 +743,75 @@ export interface AppSettings {
   };
 }
 
+export interface Page<T> {
+  items: T[];
+  page: number;
+  per_page: number;
+  total: number;
+  total_pages: number;
+  has_next: boolean;
+  has_previous: boolean;
+}
+
+export interface DashboardAttention {
+  pending_interventions: Array<{
+    id: number;
+    session_id: number;
+    task_id: number | null;
+    project_id: number;
+    project_name: string;
+    intervention_type: string;
+    initiated_by: string;
+    prompt: string;
+    status: string;
+    created_at: string | null;
+    expires_at: string | null;
+  }>;
+  sessions_needing_attention: number;
+  tasks_pending_review: number;
+  running_sessions: number;
+  active_sessions: number;
+  total_projects: number;
+  total_tasks: number;
+  completed_tasks: number;
+}
+
 export interface SessionFilters {
   status?: string;
   is_active?: boolean;
   project_id?: number;
   skip?: number;
   limit?: number;
+  // Pagination (Phase 15E-2+)
+  page?: number;
+  per_page?: number;
+  needs_attention?: boolean;
+  search?: string;
+  order_by?: string;
+  order_dir?: string;
+  created_after?: string;
+  created_before?: string;
 }
 
 export interface TaskFilters {
   status?: TaskStatus;
   project_id?: number;
   search?: string;
+  // Pagination (Phase 15E-2+)
+  page?: number;
+  per_page?: number;
+  needs_review?: boolean;
+  workspace_status?: string;
+  order_by?: string;
+  order_dir?: string;
 }
 
 export interface ProjectFilters {
   search?: string;
+  page?: number;
+  per_page?: number;
+  order_by?: string;
+  order_dir?: string;
 }
 
 export type Log = LogEntry;

@@ -1,18 +1,17 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import { sessionsAPI, projectsAPI, tasksAPI } from '../api/client';
-import type { Session, Project, Task } from '../types/api';
-import { isLegacyTaskExecutionSession } from '../lib/sessionIdentity';
+import { sessionsAPI, projectsAPI } from '../api/client';
+import type { Session, Project, Page } from '../types/api';
 import { deriveRunStateFromSession, getRunStateDisplay } from '../lib/runState';
 import {
   Terminal,
   Clock,
   Search,
-  Activity,
   CheckCircle2,
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { EmptyState, Skeleton } from '../components/ui';
+import { PaginationControls } from '../components/PaginationControls';
 
 const sessionAccentClasses: Record<string, string> = {
   done: 'border-l-emerald-500/80',
@@ -29,8 +28,6 @@ const sessionAccentClasses: Record<string, string> = {
 };
 
 const mutedSessionStatuses = new Set(['stopped', 'cancelled', 'canceled']);
-const activeSessionStatuses = new Set(['running', 'paused', 'awaiting_input', 'pending']);
-const terminalProblemStatuses = new Set(['failed', 'error']);
 
 type SessionFilter = 'all' | 'active' | 'needs_attention' | 'completed' | 'stopped';
 
@@ -59,122 +56,92 @@ const formatModelLane = (session: Session): string => {
   return label.replace(/_/g, ' ');
 };
 
-const activeSortRank = (session: Session, tasks: Task[]): number => {
-  const statusKey = session.status?.toLowerCase() || '';
-  const sessionTasks = tasks.filter((task) => task.session_id === session.id);
-  if (sessionTasks.some((task) => task.status === 'running')) return 0;
-  if (statusKey === 'running') return 1;
-  if (statusKey === 'pending' || sessionTasks.some((task) => task.status === 'pending')) return 2;
-  if (statusKey === 'awaiting_input') return 3;
-  if (statusKey === 'paused') return 4;
-  return 5;
-};
-
-const getSessionActivityDisplay = (session: Session, tasks: Task[]) => {
-  const statusKey = session.status?.toLowerCase() || '';
-  const sessionTasks = tasks.filter((task) => task.session_id === session.id);
-  const runningTask = sessionTasks.find((task) => task.status === 'running');
-  const queuedTask = sessionTasks.find((task) => task.status === 'pending');
-  const baseRunState = deriveRunStateFromSession(session);
-  const baseDisplay = getRunStateDisplay(baseRunState);
-
-  if (runningTask) {
-    return {
-      ...baseDisplay,
-      label: 'Running',
-      description: runningTask.title,
-    };
+function filterToParams(filter: SessionFilter): Record<string, unknown> {
+  switch (filter) {
+    case 'needs_attention': return { needs_attention: true };
+    case 'active': return { is_active: true };
+    case 'completed': return { status: 'completed' };
+    case 'stopped': return { status: 'stopped' };
+    default: return {};
   }
+}
 
-  if (statusKey === 'running') {
-    return {
-      ...baseDisplay,
-      label: queuedTask ? 'Queued' : 'Running',
-      description: queuedTask?.title || 'Worker is preparing the next task.',
-    };
-  }
-
-  if (statusKey === 'pending' || queuedTask) {
-    return {
-      ...baseDisplay,
-      label: 'Queued',
-      description: queuedTask?.title || 'Waiting for execution to start.',
-    };
-  }
-
-  return baseDisplay;
-};
-
-const matchesSessionFilter = (session: Session, filter: SessionFilter): boolean => {
-  const statusKey = session.status?.toLowerCase() || '';
-  if (filter === 'active') return activeSessionStatuses.has(statusKey);
-  if (filter === 'needs_attention') {
-    return terminalProblemStatuses.has(statusKey) || statusKey === 'awaiting_input';
-  }
-  if (filter === 'completed') return ['done', 'completed'].includes(statusKey);
-  if (filter === 'stopped') return mutedSessionStatuses.has(statusKey);
-  return true;
-};
+const PER_PAGE = 25;
 
 function SessionsList() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [projects, setProjects] = useState<Record<number, Project>>({});
-  const [tasksByProject, setTasksByProject] = useState<Record<number, Task[]>>({});
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<SessionFilter>('all');
   const [query, setQuery] = useState('');
+  const [page, setPage] = useState(1);
+  const [pageData, setPageData] = useState<Omit<Page<Session>, 'items'>>({
+    page: 1,
+    per_page: PER_PAGE,
+    total: 0,
+    total_pages: 1,
+    has_next: false,
+    has_previous: false,
+  });
 
-  const fetchData = async (initial = false) => {
+  const fetchSessions = useCallback(async (currentPage: number, currentFilter: SessionFilter, currentQuery: string) => {
     try {
-      const [projectsResponse, sessionsResponse, tasksResponse] = await Promise.all([
-        projectsAPI.getAll({ limit: 500 }),
-        sessionsAPI.getAll({ limit: 500 }),
-        tasksAPI.getAll({ limit: 500 }),
-      ]);
-
-      const projectMap: Record<number, Project> = {};
-      (projectsResponse.data || []).forEach(project => {
-        projectMap[project.id] = project;
+      const filterParams = filterToParams(currentFilter);
+      const res = await sessionsAPI.getAll({
+        page: currentPage,
+        per_page: PER_PAGE,
+        order_by: 'updated_at',
+        order_dir: 'desc',
+        ...(currentQuery.trim() ? { search: currentQuery.trim() } : {}),
+        ...filterParams,
+      } as Record<string, unknown>);
+      const data = res.data as Page<Session>;
+      setSessions(data.items ?? []);
+      setPageData({
+        page: data.page,
+        per_page: data.per_page,
+        total: data.total,
+        total_pages: data.total_pages,
+        has_next: data.has_next,
+        has_previous: data.has_previous,
       });
-      setProjects(projectMap);
-      setSessions(sessionsResponse.data || []);
-
-      const tasksByProjectMap: Record<number, Task[]> = {};
-      (tasksResponse.data || []).forEach(task => {
-        if (!tasksByProjectMap[task.project_id]) {
-          tasksByProjectMap[task.project_id] = [];
-        }
-        tasksByProjectMap[task.project_id].push(task);
-      });
-      setTasksByProject(tasksByProjectMap);
     } catch (error) {
       console.error('Failed to fetch sessions:', error);
-    } finally {
-      if (initial) setLoading(false);
     }
-  };
-
-  useEffect(() => {
-    fetchData(true);
-    const id = setInterval(() => fetchData(false), 30_000);
-    return () => clearInterval(id);
   }, []);
 
-  const visibleSessions = sessions
-    .filter((session) => {
-      if (!matchesSessionFilter(session, filter)) return false;
-      const project = projects[session.project_id || 0];
-      const haystack =
-        `${session.name || ''} ${session.description || ''} ${project?.name || ''}`.toLowerCase();
-      return !query.trim() || haystack.includes(query.trim().toLowerCase());
-    })
-    .sort((a, b) => {
-      const aTasks = tasksByProject[a.project_id] || [];
-      const bTasks = tasksByProject[b.project_id] || [];
-      const rankDelta = activeSortRank(a, aTasks) - activeSortRank(b, bTasks);
-      if (rankDelta !== 0) return rankDelta;
-      return getSessionTime(b) - getSessionTime(a);
-    });
+  // Initial projects fetch (small — used for project name display only)
+  useEffect(() => {
+    projectsAPI.getAll().then((res) => {
+      const data = res.data;
+      const list = Array.isArray(data) ? data : (data as Page<Project>).items ?? [];
+      const map: Record<number, Project> = {};
+      list.forEach((p) => { map[p.id] = p; });
+      setProjects(map);
+    }).catch(() => {});
+  }, []);
+
+  // Re-fetch sessions when filter or search changes → reset to page 1
+  useEffect(() => {
+    setPage(1);
+  }, [filter, query]);
+
+  // Fetch sessions when page, filter, or query changes
+  useEffect(() => {
+    const load = async () => {
+      setLoading(true);
+      await fetchSessions(page, filter, query);
+      setLoading(false);
+    };
+    load();
+    const id = setInterval(() => fetchSessions(page, filter, query), 30_000);
+    return () => clearInterval(id);
+  }, [page, filter, query, fetchSessions]);
+
+  const handleFilterChange = (newFilter: SessionFilter) => {
+    setFilter(newFilter);
+    // page reset happens via the effect above
+  };
 
   return (
     <div className="space-y-6">
@@ -182,7 +149,7 @@ function SessionsList() {
         <div>
           <h1 className="text-lg font-semibold text-white">Runs</h1>
           <p className="mt-0.5 text-xs text-slate-400">
-            {sessions.length} run{sessions.length !== 1 ? 's' : ''} · {Object.keys(projects).length} project{Object.keys(projects).length !== 1 ? 's' : ''}
+            {pageData.total} run{pageData.total !== 1 ? 's' : ''}
           </p>
         </div>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -201,12 +168,11 @@ function SessionsList() {
       <div className="flex flex-wrap gap-2">
         {sessionFilterLabels.map((item) => {
           const selected = filter === item.key;
-          const count = sessions.filter((session) => matchesSessionFilter(session, item.key)).length;
           return (
             <button
               key={item.key}
               type="button"
-              onClick={() => setFilter(item.key)}
+              onClick={() => handleFilterChange(item.key)}
               className={`rounded-full border px-3 py-1 text-xs transition-colors ${
                 selected
                   ? 'border-primary-500 bg-primary-500/10 text-white'
@@ -214,7 +180,9 @@ function SessionsList() {
               }`}
             >
               {item.label}
-              <span className={selected ? 'ml-1 text-primary-200/80' : 'ml-1 text-slate-400'}>{count}</span>
+              {selected && pageData.total > 0 && (
+                <span className="ml-1 text-primary-200/80">{pageData.total}</span>
+              )}
             </button>
           );
         })}
@@ -231,13 +199,7 @@ function SessionsList() {
             </div>
           ))}
         </div>
-      ) : sessions.length === 0 ? (
-        <EmptyState
-          icon={Terminal}
-          title="No runs yet"
-          description="Runs are created from a project so each execution stays tied to project context."
-        />
-      ) : visibleSessions.length === 0 ? (
+      ) : pageData.total === 0 && page === 1 ? (
         filter === 'needs_attention' && !query.trim() ? (
           <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-8 text-center">
             <CheckCircle2 className="mx-auto mb-3 h-8 w-8 text-emerald-500/50" />
@@ -245,13 +207,19 @@ function SessionsList() {
             <p className="mt-1 text-sm text-slate-400">
               <button
                 type="button"
-                onClick={() => setFilter('all')}
+                onClick={() => handleFilterChange('all')}
                 className="text-primary-400 hover:text-primary-300 transition-colors"
               >
                 View all sessions
               </button>
             </p>
           </div>
+        ) : sessions.length === 0 && filter === 'all' && !query.trim() ? (
+          <EmptyState
+            icon={Terminal}
+            title="No runs yet"
+            description="Runs are created from a project so each execution stays tied to project context."
+          />
         ) : (
           <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-8 text-center">
             <Terminal className="mx-auto mb-3 h-8 w-8 text-slate-500" />
@@ -262,83 +230,79 @@ function SessionsList() {
           </div>
         )
       ) : (
-        <div className="overflow-hidden rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] divide-y divide-[color:var(--oc-border-soft)]">
-          {visibleSessions.map((session) => {
-            const project = projects[session.project_id || 0];
-            const isLegacySession = isLegacyTaskExecutionSession(
-              session,
-              (tasksByProject[session.project_id] || []).map((task) => task.title)
-            );
-            const statusKey = session.status?.toLowerCase() || '';
-            const accentClass = sessionAccentClasses[statusKey] || 'border-l-slate-600';
-            const isMuted = mutedSessionStatuses.has(statusKey);
-            const sessionTasks = tasksByProject[session.project_id] || [];
-            const runDisplay = getSessionActivityDisplay(session, sessionTasks);
-            return (
-              <Link
-                key={session.id}
-                to={`/sessions/${session.id}`}
-                className={`group grid gap-3 border-l-[3px] px-4 py-3 transition-colors md:grid-cols-[minmax(0,1.4fr)_minmax(160px,0.8fr)_minmax(120px,0.5fr)] md:items-center ${accentClass} ${
-                  isMuted
-                    ? 'opacity-70 hover:bg-[color:var(--oc-surface-raised)] hover:opacity-100'
-                    : 'hover:bg-[color:var(--oc-surface-raised)]'
-                }`}
-              >
-                <div className="min-w-0">
-                  <div className="mb-1 flex flex-wrap items-center gap-2">
-                    <span className={`rounded-full border px-2.5 py-0.5 text-xs font-medium ${runDisplay.badgeClass}`}>
-                      {runDisplay.label}
-                    </span>
-                    {runDisplay.label === 'Running' && (
-                      <span className="inline-flex items-center gap-1 rounded-full border border-sky-400/30 bg-sky-400/10 px-2 py-0.5 text-[11px] font-medium text-sky-200">
-                        <Activity className="h-3 w-3" />
-                        Current
+        <>
+          <div className="overflow-hidden rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] divide-y divide-[color:var(--oc-border-soft)]">
+            {sessions.map((session) => {
+              const project = projects[session.project_id || 0];
+              const statusKey = session.status?.toLowerCase() || '';
+              const accentClass = sessionAccentClasses[statusKey] || 'border-l-slate-600';
+              const isMuted = mutedSessionStatuses.has(statusKey);
+              const runDisplay = getRunStateDisplay(deriveRunStateFromSession(session));
+              return (
+                <Link
+                  key={session.id}
+                  to={`/sessions/${session.id}`}
+                  className={`group grid gap-3 border-l-[3px] px-4 py-3 transition-colors md:grid-cols-[minmax(0,1.4fr)_minmax(160px,0.8fr)_minmax(120px,0.5fr)] md:items-center ${accentClass} ${
+                    isMuted
+                      ? 'opacity-70 hover:bg-[color:var(--oc-surface-raised)] hover:opacity-100'
+                      : 'hover:bg-[color:var(--oc-surface-raised)]'
+                  }`}
+                >
+                  <div className="min-w-0">
+                    <div className="mb-1 flex flex-wrap items-center gap-2">
+                      <span className={`rounded-full border px-2.5 py-0.5 text-xs font-medium ${runDisplay.badgeClass}`}>
+                        {runDisplay.label}
                       </span>
+                      <span className="rounded-full border border-[color:var(--oc-border-soft)] px-2 py-0.5 text-xs text-slate-400">
+                        Run #{session.id}
+                      </span>
+                    </div>
+                    <h3 className="truncate text-sm font-medium text-slate-100 transition-colors group-hover:text-white">
+                      {session.name}
+                    </h3>
+                    {session.description && (
+                      <p className="mt-1 line-clamp-1 text-xs text-slate-400">
+                        {session.description}
+                      </p>
                     )}
-                    {isLegacySession && (
-                      <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-300">
-                        Diagnostics
+                  </div>
+
+                  <div className="min-w-0 text-xs text-slate-400">
+                    <p className="truncate text-slate-300">{project?.name || 'Unknown project'}</p>
+                    <p className="mt-1 text-slate-400">
+                      {session.execution_mode ? `${session.execution_mode} mode` : 'workflow session'}
+                    </p>
+                    <p className="mt-1 truncate text-slate-500">
+                      {formatModelLane(session)}
+                    </p>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3 text-xs text-slate-400 md:justify-end">
+                    <span>{formatDistanceToNow(new Date(getSessionTime(session) || session.created_at), { addSuffix: true })}</span>
+                    {session.started_at && (
+                      <span className="flex items-center gap-1">
+                        <Clock className="h-3 w-3" />
+                        Started
                       </span>
                     )}
                   </div>
-                  <h3 className="truncate text-sm font-medium text-slate-100 transition-colors group-hover:text-white">
-                    {session.name}
-                  </h3>
-                  {session.description && (
-                    <p className="mt-1 line-clamp-1 text-xs text-slate-400">
-                      {session.description}
-                    </p>
-                  )}
-                  {activeSessionStatuses.has(statusKey) && runDisplay.description && (
-                    <p className="mt-1 truncate text-xs text-sky-200/80">
-                      {runDisplay.description}
-                    </p>
-                  )}
-                </div>
-
-                <div className="min-w-0 text-xs text-slate-400">
-                  <p className="truncate text-slate-300">{project?.name || 'Unknown project'}</p>
-                  <p className="mt-1 text-slate-400">
-                    {session.execution_mode ? `${session.execution_mode} mode` : 'workflow session'}
-                  </p>
-                  <p className="mt-1 truncate text-slate-500">
-                    {formatModelLane(session)}
-                  </p>
-                </div>
-
-                <div className="flex items-center justify-between gap-3 text-xs text-slate-400 md:justify-end">
-                  <span>{formatDistanceToNow(new Date(getSessionTime(session) || session.created_at), { addSuffix: true })}</span>
-                  {session.started_at && (
-                    <span className="flex items-center gap-1">
-                      <Clock className="h-3 w-3" />
-                      Started
-                    </span>
-                  )}
-                </div>
-              </Link>
-            );
-          })}
-        </div>
+                </Link>
+              );
+            })}
+          </div>
+          {pageData.total_pages > 1 && (
+            <PaginationControls
+              page={pageData.page}
+              total_pages={pageData.total_pages}
+              has_next={pageData.has_next}
+              has_previous={pageData.has_previous}
+              total={pageData.total}
+              per_page={pageData.per_page}
+              onPrev={() => setPage((p) => p - 1)}
+              onNext={() => setPage((p) => p + 1)}
+            />
+          )}
+        </>
       )}
     </div>
   );

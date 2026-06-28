@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
+from app.schemas.pagination import paginate
 
 from app.database import get_db
 from app.models import Task, TaskStatus, Project, LogEntry, SessionTask, TaskExecution
@@ -674,36 +675,112 @@ def _queue_task_retry(
     }
 
 
-@router.get("/tasks", response_model=List[TaskResponse])
-def get_all_tasks(
-    skip: int = 0,
-    limit: int = 100,
-    status: Optional[str] = None,
-    db: Session = Depends(get_db),
-    current_user=Depends(get_current_active_user),
-):
-    """Get all tasks across all projects"""
-    query = (
-        db.query(Task)
-        .join(Project, Project.id == Task.project_id)
-        .filter(Project.deleted_at.is_(None), project_access_filter(db, current_user))
-    )
+_TASK_ORDER_COLUMNS = {
+    "created_at": Task.created_at,
+    "updated_at": Task.updated_at,
+    "status": Task.status,
+    "title": Task.title,
+    "plan_position": Task.plan_position,
+}
 
+
+def _apply_task_filters(
+    query,
+    *,
+    status: Optional[str],
+    workspace_status: Optional[str],
+    needs_review: Optional[bool],
+    project_id: Optional[int],
+    search: Optional[str],
+    db: Session,
+    current_user,
+):
+    if project_id is not None:
+        query = query.filter(Task.project_id == project_id)
     if status:
         try:
             task_status = TaskStatus[status.upper()]
             query = query.filter(Task.status == task_status)
         except KeyError:
             raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+    if workspace_status:
+        query = query.filter(Task.workspace_status == workspace_status)
+    if needs_review is True:
+        query = query.filter(Task.workspace_status == "ready")
+    if search:
+        query = query.filter(Task.title.ilike(f"%{search}%"))
+    return query
 
-    tasks = query.order_by(Task.created_at.desc()).offset(skip).limit(limit).all()
-    task_service = TaskService(db)
-    changed = False
-    for task in tasks:
-        changed = task_service.sync_workspace_status(task, commit=False) or changed
-    if changed:
-        db.commit()
-    return tasks
+
+def _apply_task_ordering(query, *, order_by: str, order_dir: str):
+    col = _TASK_ORDER_COLUMNS.get(order_by, Task.created_at)
+    if order_dir.lower() == "asc":
+        return query.order_by(col.asc().nullslast())
+    return query.order_by(col.desc().nullslast())
+
+
+@router.get("/tasks")
+def get_all_tasks(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+    # Legacy — TODO(Phase15E-4): remove legacy skip/limit mode
+    skip: int = 0,
+    limit: int = 100,
+    # Paginated mode
+    page: Optional[int] = None,
+    per_page: int = 25,
+    # Filters
+    status: Optional[str] = None,
+    workspace_status: Optional[str] = None,
+    needs_review: Optional[bool] = None,
+    project_id: Optional[int] = None,
+    search: Optional[str] = None,
+    # Ordering
+    order_by: str = "created_at",
+    order_dir: str = "desc",
+):
+    """Get all tasks across all projects.
+
+    GET is now read-only — workspace status sync has been moved out of this path.
+
+    Legacy mode (no page): returns List[TaskResponse] with skip/limit.
+    Paginated mode (page param): returns Page[TaskResponse].
+    """
+    if page is not None and page < 1:
+        raise HTTPException(status_code=422, detail="page must be >= 1")
+    if per_page < 1 or per_page > 200:
+        raise HTTPException(
+            status_code=422, detail="per_page must be between 1 and 200"
+        )
+
+    query = (
+        db.query(Task)
+        .join(Project, Project.id == Task.project_id)
+        .filter(Project.deleted_at.is_(None), project_access_filter(db, current_user))
+    )
+    query = _apply_task_filters(
+        query,
+        status=status,
+        workspace_status=workspace_status,
+        needs_review=needs_review,
+        project_id=project_id,
+        search=search,
+        db=db,
+        current_user=current_user,
+    )
+
+    if page is None:
+        # Legacy mode — preserve exact prior behaviour (skip/limit, no sync side-effect)
+        tasks = query.order_by(Task.created_at.desc()).offset(skip).limit(limit).all()
+        return tasks
+
+    # Paginated mode
+    query = _apply_task_ordering(query, order_by=order_by, order_dir=order_dir)
+    page_data = paginate(query, page, per_page)
+    from app.schemas import TaskResponse as _TaskResponse
+
+    page_data["items"] = [_TaskResponse.model_validate(t) for t in page_data["items"]]
+    return page_data
 
 
 @router.post("/tasks", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
@@ -747,30 +824,8 @@ def create_task(
     return db_task
 
 
-@router.get("/projects/{project_id}/tasks", response_model=List[TaskResponse])
-def get_project_tasks(
-    project_id: int,
-    skip: int = 0,
-    limit: int = 100,
-    db: Session = Depends(get_db),
-    current_user=Depends(get_current_active_user),
-):
-    """Get all tasks for a project"""
-    # Verify project exists and belongs to the current user.
-    project = (
-        db.query(Project)
-        .filter(
-            Project.id == project_id,
-            Project.deleted_at.is_(None),
-            project_access_filter(db, current_user),
-        )
-        .first()
-    )
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    task_service = TaskService(db)
-    tasks = task_service.get_project_tasks(project_id)[skip : skip + limit]
+def _enrich_tasks_with_session_ids(db: Session, tasks: list) -> list:
+    """Attach the latest session_id to each task (used in project task list views)."""
     task_ids = [task.id for task in tasks]
     latest_session_links: dict[int, int] = {}
     if task_ids:
@@ -787,13 +842,90 @@ def get_project_tasks(
         )
         for link in session_links:
             latest_session_links.setdefault(link.task_id, link.session_id)
+    return [
+        {**task.__dict__, "session_id": latest_session_links.get(task.id)}
+        for task in tasks
+    ]
 
-    response_tasks = []
-    for task in tasks:
-        task_dict = task.__dict__.copy()
-        task_dict["session_id"] = latest_session_links.get(task.id)
-        response_tasks.append(task_dict)
-    return response_tasks
+
+@router.get("/projects/{project_id}/tasks")
+def get_project_tasks(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+    # Legacy — TODO(Phase15E-4): remove legacy skip/limit mode
+    skip: int = 0,
+    limit: int = 100,
+    # Paginated mode
+    page: Optional[int] = None,
+    per_page: int = 25,
+    # Filters
+    status: Optional[str] = None,
+    workspace_status: Optional[str] = None,
+    needs_review: Optional[bool] = None,
+    search: Optional[str] = None,
+    # Ordering
+    order_by: str = "plan_position",
+    order_dir: str = "asc",
+):
+    """Get tasks for a project.
+
+    Legacy mode (no page): returns List[TaskResponse] ordered by plan_position,
+    with SQL-level skip/limit (previously was Python-level slicing).
+    Paginated mode (page param): returns Page[TaskResponse].
+    """
+    if page is not None and page < 1:
+        raise HTTPException(status_code=422, detail="page must be >= 1")
+    if per_page < 1 or per_page > 200:
+        raise HTTPException(
+            status_code=422, detail="per_page must be between 1 and 200"
+        )
+
+    project = (
+        db.query(Project)
+        .filter(
+            Project.id == project_id,
+            Project.deleted_at.is_(None),
+            project_access_filter(db, current_user),
+        )
+        .first()
+    )
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    query = db.query(Task).filter(Task.project_id == project_id)
+    query = _apply_task_filters(
+        query,
+        status=status,
+        workspace_status=workspace_status,
+        needs_review=needs_review,
+        project_id=None,  # already scoped via URL param
+        search=search,
+        db=db,
+        current_user=current_user,
+    )
+
+    if page is None:
+        # Legacy mode — SQL-level pagination (was Python-level slicing before)
+        tasks = (
+            query.order_by(
+                Task.plan_position.asc().nullslast(),
+                Task.created_at.asc().nullslast(),
+            )
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
+        return _enrich_tasks_with_session_ids(db, tasks)
+
+    # Paginated mode
+    query = _apply_task_ordering(query, order_by=order_by, order_dir=order_dir)
+    page_data = paginate(query, page, per_page)
+    enriched = _enrich_tasks_with_session_ids(db, page_data["items"])
+    from app.schemas import TaskResponse as _TaskResponse
+
+    page_data["items"] = [_TaskResponse.model_validate(t) for t in enriched]
+    return page_data
 
 
 @router.post("/tasks/{task_id}/execute")

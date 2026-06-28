@@ -9,7 +9,7 @@ import json
 from typing import Optional, Generator, Dict, Any, List
 from datetime import datetime
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from app.models import LogEntry, Session as SessionModel
 
 logger = logging.getLogger(__name__)
@@ -244,9 +244,14 @@ class LogStreamService:
         # Build query
         query = self.db.query(LogEntry).filter(LogEntry.session_id == session_id)
 
-        # Filter by instance_id if provided (critical for preventing ID reuse)
+        # Filter by instance_id when provided, but also include legacy logs with no instance_id
         if instance_id:
-            query = query.filter(LogEntry.session_instance_id == instance_id)
+            query = query.filter(
+                or_(
+                    LogEntry.session_instance_id == instance_id,
+                    LogEntry.session_instance_id.is_(None),
+                )
+            )
 
         # Order by timestamp descending
         logs = query.order_by(LogEntry.created_at.desc()).limit(limit).all()

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect, status
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.auth import verify_token
@@ -393,7 +394,11 @@ async def stream_session_logs(
                     )
                     if current_session.instance_id:
                         query = query.filter(
-                            LogEntry.session_instance_id == current_session.instance_id
+                            or_(
+                                LogEntry.session_instance_id
+                                == current_session.instance_id,
+                                LogEntry.session_instance_id.is_(None),
+                            )
                         )
                     else:
                         query = query.filter(LogEntry.session_instance_id.is_(None))

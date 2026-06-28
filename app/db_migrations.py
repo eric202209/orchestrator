@@ -869,6 +869,68 @@ def _migration_020_human_guidance_backend_targets(engine: Engine) -> None:
             )
 
 
+def _migration_021_pagination_indexes(engine: Engine) -> None:
+    """Add indexes required for efficient paginated list queries (Phase 15E-2)."""
+    table_names = _table_names(engine)
+
+    if "sessions" in table_names:
+        with engine.begin() as connection:
+            for index_name, ddl in [
+                (
+                    "ix_sessions_status",
+                    "CREATE INDEX ix_sessions_status ON sessions (status)",
+                ),
+                (
+                    "ix_sessions_created_at",
+                    "CREATE INDEX ix_sessions_created_at ON sessions (created_at)",
+                ),
+                (
+                    "ix_sessions_project_id_created_at",
+                    "CREATE INDEX ix_sessions_project_id_created_at ON sessions (project_id, created_at)",
+                ),
+            ]:
+                if not _has_index(engine, "sessions", index_name):
+                    connection.execute(text(ddl))
+
+    if "tasks" in table_names:
+        with engine.begin() as connection:
+            for index_name, ddl in [
+                (
+                    "ix_tasks_workspace_status",
+                    "CREATE INDEX ix_tasks_workspace_status ON tasks (workspace_status)",
+                ),
+                (
+                    "ix_tasks_created_at",
+                    "CREATE INDEX ix_tasks_created_at ON tasks (created_at)",
+                ),
+                (
+                    "ix_tasks_project_id_created_at",
+                    "CREATE INDEX ix_tasks_project_id_created_at ON tasks (project_id, created_at)",
+                ),
+                (
+                    "ix_tasks_project_id_plan_position",
+                    "CREATE INDEX ix_tasks_project_id_plan_position ON tasks (project_id, plan_position)",
+                ),
+            ]:
+                if not _has_index(engine, "tasks", index_name):
+                    connection.execute(text(ddl))
+
+    if "projects" in table_names:
+        with engine.begin() as connection:
+            for index_name, ddl in [
+                (
+                    "ix_projects_name",
+                    "CREATE INDEX ix_projects_name ON projects (name)",
+                ),
+                (
+                    "ix_projects_updated_at",
+                    "CREATE INDEX ix_projects_updated_at ON projects (updated_at)",
+                ),
+            ]:
+                if not _has_index(engine, "projects", index_name):
+                    connection.execute(text(ddl))
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -969,6 +1031,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="020_human_guidance_backend_targets",
         description="Add backend_targets column to human_guidance for per-backend guidance targeting",
         upgrade=_migration_020_human_guidance_backend_targets,
+    ),
+    Migration(
+        version="021_pagination_indexes",
+        description="Add performance indexes for paginated list queries (Phase 15E-2)",
+        upgrade=_migration_021_pagination_indexes,
     ),
 )
 

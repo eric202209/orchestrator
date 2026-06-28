@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { projectsAPI, tasksAPI, sessionsAPI } from '../api/client';
-import type { ChangeSetReviewDecision, Project, Task, Session } from '../types/api';
+import type { ChangeSetReviewDecision, Project, Task, Session, Page } from '../types/api';
 import { ProjectPlannerPanel } from '../components/ProjectPlannerPanel';
 import { HumanGuidanceDashboard } from '../components/HumanGuidanceDashboard';
 import { isLegacyTaskExecutionSession } from '../lib/sessionIdentity';
@@ -31,6 +31,7 @@ function ProjectDetail() {
   const [project, setProject] = useState<Project | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [sessionTotal, setSessionTotal] = useState(0);
   const [workspaceOverview, setWorkspaceOverview] = useState<{
     counts: Record<string, number>;
     baseline: {
@@ -128,15 +129,17 @@ function ProjectDetail() {
         const [projectRes, tasksRes, sessionsRes] = await Promise.all([
           projectsAPI.getById(Number(id)),
           tasksAPI.getByProject(Number(id)),
-          sessionsAPI.getByProject(Number(id))
+          sessionsAPI.getByProject(Number(id), { page: 1, per_page: 25, order_by: 'created_at', order_dir: 'desc' }),
         ]);
         const workspaceRes = await projectsAPI.getWorkspaceOverview(Number(id));
 
         setProject(projectRes.data);
         setProjectDescriptionDraft(projectRes.data.description || '');
         setProjectRulesDraft(projectRes.data.project_rules || '');
-        setTasks(tasksRes.data || []);
-        setSessions(sessionsRes.data || []);
+        setTasks((tasksRes.data as Task[]) || []);
+        const sessionsData = sessionsRes.data as Page<Session>;
+        setSessions(sessionsData.items ?? []);
+        setSessionTotal(sessionsData.total ?? 0);
         setWorkspaceOverview(workspaceRes.data || null);
 
       } catch (err) {
@@ -273,8 +276,8 @@ function ProjectDetail() {
   const { readinessVerdict, readinessCriteria }: { readinessVerdict: ReadinessVerdict; readinessCriteria: ReadinessCriterion[] } = (() => {
     const criteria: ReadinessCriterion[] = [];
     criteria.push({
-      label: sessions.length > 0 ? `Runs recorded: ${sessions.length}` : 'Runs recorded: none',
-      state: sessions.length > 0 ? 'pass' : 'warn',
+      label: sessionTotal > 0 ? `Runs recorded: ${sessionTotal}` : 'Runs recorded: none',
+      state: sessionTotal > 0 ? 'pass' : 'warn',
     });
     criteria.push({
       label: reviewCount > 0 ? `Review queue: ${reviewCount} pending` : 'Review queue: clear',
@@ -1202,7 +1205,7 @@ function ProjectDetail() {
                         {item.title}
                       </Link>
                       <p className="mt-1 text-xs text-slate-500">
-                        Execution {item.task_execution_id || 'latest'} · Diagnostics: {formatDiagnosticStatus(item.workspace_status)}
+                        Task #{item.task_id} · Execution {item.task_execution_id || 'latest'} · Diagnostics: {formatDiagnosticStatus(item.workspace_status)}
                       </p>
                       {item.review_decision?.reason && (
                         <p className="mt-1 text-xs text-amber-300">
@@ -1470,6 +1473,13 @@ function ProjectDetail() {
                         <span className="text-xs text-amber-200/80">
                           {pendingChangeSetFileCount} changed file{pendingChangeSetFileCount === 1 ? '' : 's'}
                         </span>
+                        <button
+                          type="button"
+                          onClick={() => setActiveTab('review')}
+                          className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-200 transition-colors hover:bg-amber-500/15"
+                        >
+                          Open Review Queue
+                        </button>
                       </div>
                       <div className="mt-2 grid gap-2 lg:grid-cols-2">
                         {reviewItems.slice(0, 4).map((item) => (
@@ -1487,7 +1497,7 @@ function ProjectDetail() {
                               </span>
                             </div>
                             <p className="mt-1 text-xs text-slate-500">
-                              Changes: +{item.change_set.added_count} / ~{item.change_set.modified_count} / -{item.change_set.deleted_count}
+                              Task #{item.task_id} · Execution {item.task_execution_id || 'latest'} · Changes: +{item.change_set.added_count} / ~{item.change_set.modified_count} / -{item.change_set.deleted_count}
                               {item.review_decision?.reason ? ` · ${item.review_decision.reason.replace(/_/g, ' ')}` : ''}
                             </p>
                           </Link>
@@ -1512,12 +1522,15 @@ function ProjectDetail() {
                   return (
                   <div key={task.id} className="px-4 py-4 hover:bg-[color:var(--oc-surface-raised)] transition-colors">
                     <div className="flex items-start justify-between gap-4">
-                      <div className="flex items-start gap-3 flex-1 min-w-0">
+                      <Link
+                        to={`/projects/${project.id}/tasks/${task.id}`}
+                        className="flex items-start gap-3 flex-1 min-w-0 group"
+                      >
                         <div className={`p-1.5 rounded-md mt-0.5 shrink-0 ${getTaskIconColors(task.status)}`}>
                           <Activity className="h-4 w-4" />
                         </div>
                         <div className="flex-1 min-w-0">
-                          <h3 className="text-sm font-medium text-white">{task.title}</h3>
+                          <h3 className="text-sm font-medium text-white group-hover:text-primary-200 transition-colors">{task.title}</h3>
                           {task.description && (
                             <p className="text-xs text-slate-400 mt-0.5 line-clamp-2">{task.description}</p>
                           )}
@@ -1543,6 +1556,17 @@ function ProjectDetail() {
                               {formatDistanceToNow(new Date(task.created_at), { addSuffix: true })}
                             </span>
                             {task.current_step > 0 && <span>Step {task.current_step}</span>}
+                            {task.session_id && (
+                              <span className="flex items-center gap-1 text-slate-500">
+                                <Terminal className="h-3 w-3" />
+                                <span
+                                  onClick={(e) => { e.preventDefault(); navigate(`/sessions/${task.session_id}`); }}
+                                  className="hover:text-primary-300 cursor-pointer transition-colors"
+                                >
+                                  Session {task.session_id}
+                                </span>
+                              </span>
+                            )}
                           </div>
                           {task.promotion_note && (
                             <p className="mt-2 text-xs text-slate-400">
@@ -1550,7 +1574,7 @@ function ProjectDetail() {
                             </p>
                           )}
                         </div>
-                      </div>
+                      </Link>
                       <div className="flex items-center gap-2 shrink-0">
                         <StatusBadge status={task.status} size="sm" />
                         {task.status !== 'running' && (
