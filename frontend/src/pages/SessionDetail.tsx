@@ -27,6 +27,8 @@ import {
   FailureSummaryPanel,
   HumanInterventionPanel,
   OperatorStatePanel,
+  ReviewReadyBlock,
+  SessionCompleteBlock,
   SessionConnectionNotice,
   SessionDigestPanel,
   SessionHeader,
@@ -208,6 +210,9 @@ export default function SessionDetail() {
 
   const pendingInterventions = interventions.filter((i) => i.status === 'pending');
   const pendingAgentInterventions = pendingInterventions.filter((i) => i.initiated_by !== 'human');
+  const reviewableTasks = tasks.filter((t) => t.workspace_status === 'ready');
+  const isSessionComplete =
+    TERMINAL_SESSION_STATUSES.has(session?.status ?? '') || session?.status === 'completed';
   const agentInterventionTimeline = interventions
     .filter((i) => i.initiated_by !== 'human')
     .slice()
@@ -2549,6 +2554,7 @@ export default function SessionDetail() {
 
       <SessionTabs
         activeTab={activeTab}
+        interventionCount={pendingInterventions.length}
         onChange={setActiveTab}
         tasksCount={tasks.length}
       />
@@ -2556,6 +2562,9 @@ export default function SessionDetail() {
       <div className="min-h-[400px] min-w-0 overflow-x-hidden">
         {activeTab === 'summary' && (
           <div className="space-y-4">
+            {reviewableTasks.length > 0 && (
+              <ReviewReadyBlock count={reviewableTasks.length} />
+            )}
             {(session.status === 'awaiting_input' || pendingInterventions.length > 0) && (
               <HumanInterventionPanel
                 interventions={interventions}
@@ -2585,6 +2594,14 @@ export default function SessionDetail() {
                   }
                 }}
                 onReplan={handleReplan}
+              />
+            )}
+            {isSessionComplete && (
+              <SessionCompleteBlock
+                reviewCount={reviewableTasks.length}
+                projectId={project?.id}
+                sessionStatus={session.status}
+                onOpenLogs={() => setActiveTab('logs')}
               />
             )}
           </div>

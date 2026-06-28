@@ -14,7 +14,7 @@ type TaskStatusFilter = 'all' | 'review' | 'pending' | 'running' | 'done' | 'fai
 
 const statusFilters: Array<{ key: TaskStatusFilter; label: string }> = [
   { key: 'all', label: 'All' },
-  { key: 'review', label: 'Review' },
+  { key: 'review', label: 'Needs Review' },
   { key: 'failed', label: 'Failed' },
   { key: 'pending', label: 'Pending' },
   { key: 'running', label: 'Running' },
@@ -86,7 +86,7 @@ function TasksList() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-lg font-semibold text-white">Tasks</h1>
+          <h1 className="text-lg font-semibold text-white">Review Queue</h1>
           <p className="text-xs text-slate-400 mt-0.5">
             {tasks.length} task{tasks.length !== 1 ? 's' : ''} · {Object.keys(projects).length} project{Object.keys(projects).length !== 1 ? 's' : ''}
           </p>
@@ -136,11 +136,19 @@ function TasksList() {
       {filteredTasks.length === 0 ? (
         <EmptyState
           icon={ListTodo}
-          title={searchQuery || statusFilter !== 'all' ? 'No matching tasks' : 'No tasks yet'}
+          title={
+            statusFilter === 'review' && !searchQuery
+              ? 'No tasks need review'
+              : searchQuery || statusFilter !== 'all'
+                ? 'No matching tasks'
+                : 'No tasks yet'
+          }
           description={
-            searchQuery || statusFilter !== 'all'
-              ? 'Try adjusting your filters or search query'
-              : 'Tasks will appear here when you start working on projects'
+            statusFilter === 'review' && !searchQuery
+              ? 'Task outputs appear here when ready for operator approval.'
+              : searchQuery || statusFilter !== 'all'
+                ? 'Try adjusting your filters or search query'
+                : 'Tasks will appear here when you start working on projects'
           }
         />
       ) : (

@@ -1,0 +1,474 @@
+import { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
+
+import { Route, Routes } from 'react-router-dom';
+import ProjectDetail from '@/pages/ProjectDetail';
+import { projectsAPI, tasksAPI, sessionsAPI, pilotAPI } from '@/api/client';
+
+vi.mock('@/api/client', () => ({
+  projectsAPI: {
+    getById: vi.fn(),
+    getWorkspaceOverview: vi.fn(),
+    update: vi.fn(),
+    rebuildBaseline: vi.fn(),
+    cleanupWorkspaces: vi.fn(),
+    restoreWorkspaceArchive: vi.fn(),
+  },
+  tasksAPI: {
+    getByProject: vi.fn(),
+    create: vi.fn(),
+    delete: vi.fn(),
+    update: vi.fn(),
+    retry: vi.fn(),
+    acceptWorkspace: vi.fn(),
+    requestWorkspaceChanges: vi.fn(),
+    rejectChangeSet: vi.fn(),
+  },
+  sessionsAPI: {
+    getByProject: vi.fn(),
+    delete: vi.fn(),
+    generateSteps: vi.fn(),
+  },
+  pilotAPI: {
+    getSummary: vi.fn(),
+    getGuidanceStats: vi.fn(),
+    getPermissionStats: vi.fn(),
+    getAuditEvents: vi.fn(),
+  },
+  guidanceAPI: {
+    getReadiness: vi.fn(),
+  },
+}));
+
+// ── fixtures ──────────────────────────────────────────────────────────────────
+
+const makeProject = (overrides = {}) => ({
+  id: 1,
+  name: 'Test Project',
+  branch: 'main',
+  description: 'A test project',
+  project_rules: null,
+  github_url: null,
+  created_at: '2026-06-01T00:00:00Z',
+  updated_at: '2026-06-27T00:00:00Z',
+  ...overrides,
+});
+
+const makeSession = (overrides: Partial<{
+  id: number;
+  name: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}> = {}) => ({
+  id: 10,
+  name: 'Run #1',
+  status: 'completed',
+  description: null,
+  is_active: false,
+  execution_mode: 'automatic' as const,
+  default_execution_profile: 'full_lifecycle' as const,
+  model_lane_label: null,
+  model_lane_metadata: null,
+  created_at: '2026-06-27T10:00:00Z',
+  updated_at: '2026-06-27T10:30:00Z',
+  started_at: '2026-06-27T10:00:00Z',
+  stopped_at: null,
+  paused_at: null,
+  resumed_at: null,
+  last_alert_message: null,
+  last_alert_at: null,
+  ...overrides,
+});
+
+const makeTask = (overrides = {}) => ({
+  id: 1,
+  project_id: 1,
+  title: 'Task One',
+  description: null,
+  status: 'pending' as const,
+  execution_profile: 'full_lifecycle' as const,
+  priority: 0,
+  steps: null,
+  current_step: 0,
+  error_message: null,
+  workspace_status: 'not_created' as const,
+  promotion_note: null,
+  promoted_at: null,
+  created_at: '2026-06-27T00:00:00Z',
+  updated_at: '2026-06-27T00:00:00Z',
+  started_at: null,
+  completed_at: null,
+  session_id: null,
+  task_subfolder: null,
+  ...overrides,
+});
+
+const makeWorkspaceOverview = (overrides = {}) => ({
+  counts: { ready: 0, promoted: 0, changes_requested: 0, blocked: 0 },
+  baseline: { exists: false, file_count: 0, promoted_task_count: 0, path: null },
+  promoted_tasks: [],
+  pending_change_sets: [],
+  ready_task_ids: [],
+  ...overrides,
+});
+
+const makePilotSummary = (overrides = {}) => ({
+  computed_at: '2026-06-27T00:00:00Z',
+  project_id: 1,
+  task_executions: { total: 5, done: 4, failed: 1, pending: 0, running: 0, cancelled: 0 },
+  rates: { success_rate: 0.8, rejection_rate: 0.1, timeout_rate: 0.0 },
+  symbol_verification: { applicable_tasks: 5, passed: 4, failed: 1 },
+  ...overrides,
+});
+
+function setupMocks({
+  project = makeProject(),
+  sessions = [makeSession()],
+  tasks = [makeTask()],
+  workspace = makeWorkspaceOverview(),
+  pilotSummary = makePilotSummary(),
+  pilotGuidance = null,
+  pilotPerms = null,
+  pilotAudit = null,
+}: {
+  project?: ReturnType<typeof makeProject>;
+  sessions?: ReturnType<typeof makeSession>[];
+  tasks?: ReturnType<typeof makeTask>[];
+  workspace?: ReturnType<typeof makeWorkspaceOverview>;
+  pilotSummary?: ReturnType<typeof makePilotSummary> | null;
+  pilotGuidance?: unknown;
+  pilotPerms?: unknown;
+  pilotAudit?: unknown;
+} = {}) {
+  (projectsAPI.getById as Mock).mockResolvedValue({ data: project });
+  (tasksAPI.getByProject as Mock).mockResolvedValue({ data: tasks });
+  (sessionsAPI.getByProject as Mock).mockResolvedValue({ data: sessions });
+  (projectsAPI.getWorkspaceOverview as Mock).mockResolvedValue({ data: workspace });
+  if (pilotSummary) {
+    (pilotAPI.getSummary as Mock).mockResolvedValue({ data: pilotSummary });
+  } else {
+    (pilotAPI.getSummary as Mock).mockRejectedValue(new Error('no data'));
+  }
+  if (pilotGuidance) {
+    (pilotAPI.getGuidanceStats as Mock).mockResolvedValue({ data: pilotGuidance });
+  } else {
+    (pilotAPI.getGuidanceStats as Mock).mockRejectedValue(new Error('no data'));
+  }
+  if (pilotPerms) {
+    (pilotAPI.getPermissionStats as Mock).mockResolvedValue({ data: pilotPerms });
+  } else {
+    (pilotAPI.getPermissionStats as Mock).mockRejectedValue(new Error('no data'));
+  }
+  if (pilotAudit) {
+    (pilotAPI.getAuditEvents as Mock).mockResolvedValue({ data: pilotAudit });
+  } else {
+    (pilotAPI.getAuditEvents as Mock).mockRejectedValue(new Error('no data'));
+  }
+}
+
+// ── test harness ──────────────────────────────────────────────────────────────
+
+let container: HTMLDivElement;
+let root: Root;
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+});
+
+afterEach(() => {
+  act(() => { root.unmount(); });
+  container.remove();
+  vi.clearAllMocks();
+  vi.useRealTimers();
+});
+
+async function render(projectId = '1') {
+  await act(async () => {
+    root.render(
+      <MemoryRouter initialEntries={[`/projects/${projectId}`]}>
+        <Routes>
+          <Route path="/projects/:projectId" element={<ProjectDetail />} />
+          <Route path="/sessions/new" element={<div />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  });
+}
+
+// ── Project Overview section ──────────────────────────────────────────────────
+
+describe('ProjectDetail — Project Overview section', () => {
+  it('renders the project overview grid', async () => {
+    setupMocks({ sessions: [makeSession({ id: 10, name: 'Run #10', status: 'running' })] });
+    await render();
+    const overview = container.querySelector('[data-testid="project-overview"]');
+    expect(overview).not.toBeNull();
+  });
+
+  it('shows latest session name with a link to session detail', async () => {
+    setupMocks({ sessions: [makeSession({ id: 42, name: 'Run #42', status: 'completed' })] });
+    await render();
+    const link = container.querySelector('[data-testid="latest-session-link"]') as HTMLAnchorElement;
+    expect(link).not.toBeNull();
+    expect(link.textContent).toContain('Run #42');
+    expect(link.getAttribute('href')).toContain('/sessions/42');
+  });
+
+  it('shows "None yet" when there are no sessions', async () => {
+    setupMocks({ sessions: [] });
+    await render();
+    const overview = container.querySelector('[data-testid="project-overview"]');
+    expect(overview?.textContent).toContain('None yet');
+  });
+
+  it('shows sessions-needing-attention count', async () => {
+    setupMocks({
+      sessions: [
+        makeSession({ id: 1, status: 'failed' }),
+        makeSession({ id: 2, status: 'stopped' }),
+        makeSession({ id: 3, status: 'completed' }),
+      ],
+    });
+    await render();
+    const link = container.querySelector('[data-testid="needs-attention-link"]');
+    expect(link).not.toBeNull();
+    expect(link?.textContent).toContain('2');
+  });
+
+  it('shows 0 (green) when no sessions need attention', async () => {
+    setupMocks({ sessions: [makeSession({ id: 1, status: 'completed' })] });
+    await render();
+    expect(container.querySelector('[data-testid="needs-attention-link"]')).toBeNull();
+    const overview = container.querySelector('[data-testid="project-overview"]');
+    expect(overview?.textContent).toContain('0');
+  });
+
+  it('shows tasks-awaiting-review count when ready count > 0', async () => {
+    setupMocks({
+      workspace: makeWorkspaceOverview({ counts: { ready: 3, promoted: 0, changes_requested: 0, blocked: 0 } }),
+    });
+    await render();
+    const btn = container.querySelector('[data-testid="review-count-btn"]');
+    expect(btn).not.toBeNull();
+    expect(btn?.textContent).toContain('3');
+  });
+
+  it('shows last activity relative time', async () => {
+    setupMocks({
+      sessions: [makeSession({ updated_at: '2026-06-27T09:00:00Z' })],
+    });
+    await render();
+    const overview = container.querySelector('[data-testid="project-overview"]');
+    // Some relative time string should appear
+    expect(overview?.textContent?.length).toBeGreaterThan(0);
+  });
+
+  it('shows "No activity" when there are no sessions', async () => {
+    setupMocks({ sessions: [] });
+    await render();
+    const overview = container.querySelector('[data-testid="project-overview"]');
+    expect(overview?.textContent).toContain('No activity');
+  });
+});
+
+// ── Review summary notification ───────────────────────────────────────────────
+
+describe('ProjectDetail — Review summary notification', () => {
+  it('shows review summary when there are pending change sets', async () => {
+    setupMocks({
+      workspace: makeWorkspaceOverview({
+        pending_change_sets: [{
+          task_id: 1,
+          title: 'Task One',
+          workspace_status: 'ready',
+          task_execution_id: null,
+          change_set: {
+            changed_count: 3,
+            added_count: 2,
+            modified_count: 1,
+            deleted_count: 0,
+            added_files: [],
+            modified_files: [],
+            deleted_files: [],
+            warning_flags: [],
+          },
+        }],
+      }),
+    });
+    await render();
+    const summary = container.querySelector('[data-testid="review-summary"]');
+    expect(summary).not.toBeNull();
+    expect(summary?.textContent).toContain('1 task output awaiting review');
+  });
+
+  it('hides review summary when no pending change sets', async () => {
+    setupMocks({ workspace: makeWorkspaceOverview({ pending_change_sets: [] }) });
+    await render();
+    expect(container.querySelector('[data-testid="review-summary"]')).toBeNull();
+  });
+
+  it('shows "Open Review Queue →" in the review summary', async () => {
+    setupMocks({
+      workspace: makeWorkspaceOverview({
+        pending_change_sets: [{
+          task_id: 1,
+          title: 'Task One',
+          workspace_status: 'ready',
+          task_execution_id: null,
+          change_set: { changed_count: 1, added_count: 1, modified_count: 0, deleted_count: 0, added_files: [], modified_files: [], deleted_files: [], warning_flags: [] },
+        }],
+      }),
+    });
+    await render();
+    const summary = container.querySelector('[data-testid="review-summary"]');
+    expect(summary?.textContent).toContain('Open Review Queue');
+  });
+});
+
+// ── Overview tab — default and Recent Sessions ────────────────────────────────
+
+describe('ProjectDetail — Overview tab (default)', () => {
+  it('renders overview tab by default', async () => {
+    setupMocks();
+    await render();
+    const overviewTab = container.querySelector('[data-testid="overview-tab"]');
+    expect(overviewTab).not.toBeNull();
+  });
+
+  it('shows recent sessions list when sessions exist', async () => {
+    setupMocks({
+      sessions: [
+        makeSession({ id: 10, name: 'Run #10', created_at: '2026-06-27T10:00:00Z' }),
+        makeSession({ id: 11, name: 'Run #11', created_at: '2026-06-27T09:00:00Z' }),
+      ],
+    });
+    await render();
+    const list = container.querySelector('[data-testid="recent-sessions-list"]');
+    expect(list).not.toBeNull();
+    expect(list?.textContent).toContain('Run #10');
+    expect(list?.textContent).toContain('Run #11');
+  });
+
+  it('shows at most 5 recent sessions', async () => {
+    setupMocks({
+      sessions: Array.from({ length: 8 }, (_, i) =>
+        makeSession({ id: i + 1, name: `Run #${i + 1}`, created_at: `2026-06-2${i % 7 + 1}T10:00:00Z` })
+      ),
+    });
+    await render();
+    const links = container.querySelectorAll('[data-testid^="recent-session-"]');
+    expect(links.length).toBeLessThanOrEqual(5);
+  });
+
+  it('each recent session row links to session detail', async () => {
+    setupMocks({
+      sessions: [makeSession({ id: 99, name: 'Run #99' })],
+    });
+    await render();
+    const link = container.querySelector('[data-testid="recent-session-99"]') as HTMLAnchorElement;
+    expect(link).not.toBeNull();
+    expect(link.getAttribute('href')).toContain('/sessions/99');
+  });
+
+  it('shows "No sessions yet" when there are no sessions', async () => {
+    setupMocks({ sessions: [] });
+    await render();
+    const overviewTab = container.querySelector('[data-testid="overview-tab"]');
+    expect(overviewTab?.textContent).toContain('No sessions yet');
+  });
+});
+
+// ── Readiness section ─────────────────────────────────────────────────────────
+
+describe('ProjectDetail — Readiness section', () => {
+  it('renders the readiness section', async () => {
+    setupMocks();
+    await render();
+    const section = container.querySelector('[data-testid="readiness-section"]');
+    expect(section).not.toBeNull();
+  });
+
+  it('shows READY verdict when all criteria pass', async () => {
+    setupMocks({
+      pilotSummary: makePilotSummary({ rates: { success_rate: 0.8, rejection_rate: 0.1, timeout_rate: 0.0 } }),
+      pilotGuidance: { computed_at: '', project_id: 1, total: 5, conflicts: { total: 0, conflict_rate: 0.0 }, applied: 5 },
+      pilotAudit: { total: 10, limit: 20, offset: 0, items: [] },
+      pilotPerms: { computed_at: '', project_id: 1, approvals: 5, denials: 0, pending: 0, avg_response_seconds: 1, max_response_seconds: 1 },
+    });
+    await render();
+    const verdict = container.querySelector('[data-testid="readiness-verdict"]');
+    expect(verdict?.textContent).toContain('READY');
+  });
+
+  it('shows NOT_READY verdict when success rate < 50%', async () => {
+    setupMocks({
+      pilotSummary: makePilotSummary({ rates: { success_rate: 0.3, rejection_rate: 0.5, timeout_rate: 0.0 } }),
+    });
+    await render();
+    const verdict = container.querySelector('[data-testid="readiness-verdict"]');
+    expect(verdict?.textContent).toContain('NOT READY');
+  });
+
+  it('shows criteria items', async () => {
+    setupMocks();
+    await render();
+    const criteria = container.querySelector('[data-testid="readiness-criteria"]');
+    expect(criteria).not.toBeNull();
+    expect((criteria?.querySelectorAll('div') ?? []).length).toBeGreaterThan(0);
+  });
+
+  it('shows a note when no pilot data is available', async () => {
+    setupMocks({ pilotSummary: null });
+    await render();
+    const overviewTab = container.querySelector('[data-testid="overview-tab"]');
+    expect(overviewTab?.textContent).toContain('Run at least one session');
+  });
+
+  it('shows Pilot-equivalent information (success rate)', async () => {
+    setupMocks({
+      pilotSummary: makePilotSummary({ rates: { success_rate: 0.75, rejection_rate: 0.1, timeout_rate: 0.0 } }),
+    });
+    await render();
+    const section = container.querySelector('[data-testid="readiness-section"]');
+    expect(section?.textContent).toContain('Success rate');
+    expect(section?.textContent).toContain('75%');
+  });
+});
+
+// ── Empty project ─────────────────────────────────────────────────────────────
+
+describe('ProjectDetail — empty project', () => {
+  it('renders without errors when project has no sessions or tasks', async () => {
+    setupMocks({ sessions: [], tasks: [] });
+    await render();
+    expect(container.querySelector('[data-testid="project-overview"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="overview-tab"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="review-summary"]')).toBeNull();
+  });
+});
+
+// ── Navigation links ──────────────────────────────────────────────────────────
+
+describe('ProjectDetail — navigation links', () => {
+  it('sessions-needing-attention links to /sessions', async () => {
+    setupMocks({
+      sessions: [makeSession({ id: 1, status: 'failed' })],
+    });
+    await render();
+    const link = container.querySelector('[data-testid="needs-attention-link"]') as HTMLAnchorElement;
+    expect(link?.getAttribute('href')).toBe('/sessions');
+  });
+
+  it('latest session link goes to /sessions/:id', async () => {
+    setupMocks({ sessions: [makeSession({ id: 7, name: 'Run #7' })] });
+    await render();
+    const link = container.querySelector('[data-testid="latest-session-link"]') as HTMLAnchorElement;
+    expect(link?.getAttribute('href')).toContain('/sessions/7');
+  });
+});

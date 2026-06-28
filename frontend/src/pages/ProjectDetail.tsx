@@ -1,6 +1,12 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { projectsAPI, tasksAPI, sessionsAPI } from '../api/client';
+import { projectsAPI, tasksAPI, sessionsAPI, pilotAPI } from '../api/client';
+import type {
+  PilotSummary,
+  PilotGuidanceStats,
+  PilotPermissionStats,
+  AuditEventsResponse,
+} from '../api/client';
 import type { ChangeSetReviewDecision, Project, Task, Session } from '../types/api';
 import { ProjectPlannerPanel } from '../components/ProjectPlannerPanel';
 import { HumanGuidanceDashboard } from '../components/HumanGuidanceDashboard';
@@ -77,12 +83,12 @@ function ProjectDetail() {
     }>;
     ready_task_ids: number[];
   } | null>(null);
-  type ProjectTab = 'sessions' | 'tasks' | 'planner' | 'review' | 'guidance';
-  const initialTab = (['sessions', 'tasks', 'planner', 'review', 'guidance'] as const).includes(
+  type ProjectTab = 'overview' | 'sessions' | 'tasks' | 'planner' | 'review' | 'guidance';
+  const initialTab = (['overview', 'sessions', 'tasks', 'planner', 'review', 'guidance'] as const).includes(
     searchParams.get('tab') as ProjectTab
   )
     ? (searchParams.get('tab') as ProjectTab)
-    : 'tasks';
+    : 'overview';
   const [activeTab, setActiveTab] = useState<ProjectTab>(initialTab);
   const [loading, setLoading] = useState(true);
   const [showCreateTask, setShowCreateTask] = useState(false);
@@ -114,6 +120,11 @@ function ProjectDetail() {
   const [rejectingChangeSetTaskId, setRejectingChangeSetTaskId] = useState<number | null>(null);
   const [queueingTaskId, setQueueingTaskId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pilotSummary, setPilotSummary] = useState<PilotSummary | null>(null);
+  const [pilotGuidance, setPilotGuidance] = useState<PilotGuidanceStats | null>(null);
+  const [pilotPerms, setPilotPerms] = useState<PilotPermissionStats | null>(null);
+  const [pilotAudit, setPilotAudit] = useState<AuditEventsResponse | null>(null);
+  const [pilotLoading, setPilotLoading] = useState(false);
 
   useEffect(() => {
     setError(null);
@@ -138,6 +149,20 @@ function ProjectDetail() {
         setTasks(tasksRes.data || []);
         setSessions(sessionsRes.data || []);
         setWorkspaceOverview(workspaceRes.data || null);
+
+        // Fetch readiness data in parallel (non-blocking — failures silently degrade)
+        setPilotLoading(true);
+        const [ps, pg, pp, pa] = await Promise.allSettled([
+          pilotAPI.getSummary(Number(id)),
+          pilotAPI.getGuidanceStats(Number(id)),
+          pilotAPI.getPermissionStats(Number(id)),
+          pilotAPI.getAuditEvents({ project_id: Number(id), limit: 20, order: 'desc' }),
+        ]);
+        if (ps.status === 'fulfilled') setPilotSummary(ps.value.data);
+        if (pg.status === 'fulfilled') setPilotGuidance(pg.value.data);
+        if (pp.status === 'fulfilled') setPilotPerms(pp.value.data);
+        if (pa.status === 'fulfilled') setPilotAudit(pa.value.data);
+        setPilotLoading(false);
       } catch (err) {
         console.error('Failed to load project data:', err);
         setError(err instanceof Error ? err.message : 'Failed to load project data');
@@ -216,6 +241,57 @@ function ProjectDetail() {
     0
   );
   const activeProjectTask = tasks.find((task) => task.status === 'running') || null;
+
+  // ── Operational overview derivations ──────────────────────────────────────
+  const sortedSessions = [...sessions].sort(
+    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+  );
+  const latestSession = sortedSessions[0] ?? null;
+  const recentSessions = sortedSessions.slice(0, 5);
+  const sessionsNeedingAttentionCount = sessions.filter((s) =>
+    ['failed', 'stopped', 'awaiting_input'].includes(s.status)
+  ).length;
+  const reviewCount = (workspaceOverview?.counts?.ready ?? 0) || pendingChangeSets.length;
+  const lastActivityAt = latestSession?.updated_at ?? latestSession?.created_at ?? null;
+
+  // ── Readiness verdict (mirrors AdminPilotDashboard logic) ─────────────────
+  type ReadinessVerdict = 'READY' | 'CAUTION' | 'NOT_READY' | 'LOADING';
+  interface ReadinessCriterion { label: string; state: 'pass' | 'warn' | 'fail' | 'unknown' }
+
+  const fmtPct = (v: number | null): string => v == null ? '—' : `${Math.round(v * 100)}%`;
+
+  const { readinessVerdict, readinessCriteria }: { readinessVerdict: ReadinessVerdict; readinessCriteria: ReadinessCriterion[] } = (() => {
+    if (pilotLoading && !pilotSummary) return { readinessVerdict: 'LOADING', readinessCriteria: [] };
+    const criteria: ReadinessCriterion[] = [];
+    const successRate = pilotSummary?.rates.success_rate ?? null;
+    criteria.push({
+      label: `Success rate: ${fmtPct(successRate)}`,
+      state: successRate == null ? 'unknown' : successRate >= 0.7 ? 'pass' : successRate >= 0.5 ? 'warn' : 'fail',
+    });
+    const conflictRate = pilotGuidance?.conflicts.conflict_rate ?? null;
+    criteria.push({
+      label: `Guidance conflicts: ${fmtPct(conflictRate)}`,
+      state: conflictRate == null ? 'unknown' : conflictRate < 0.3 ? 'pass' : conflictRate < 0.5 ? 'warn' : 'fail',
+    });
+    const auditTotal = pilotAudit?.total ?? null;
+    criteria.push({
+      label: `Audit trail: ${auditTotal == null ? '—' : auditTotal > 0 ? `${auditTotal} events` : 'empty'}`,
+      state: auditTotal == null ? 'unknown' : auditTotal > 0 ? 'pass' : 'warn',
+    });
+    const pending = pilotPerms?.pending ?? 0;
+    const maxResp = pilotPerms?.max_response_seconds ?? 0;
+    criteria.push({
+      label: `Permissions: ${pilotPerms == null ? '—' : pending === 0 ? 'clear' : `${pending} pending`}`,
+      state: pilotPerms == null ? 'unknown' : pending > 0 && maxResp > 300 ? 'fail' : 'pass',
+    });
+    const hasNotReady = criteria.some((c) => c.state === 'fail');
+    const hasCaution = criteria.some((c) => c.state === 'warn' || c.state === 'unknown');
+    return {
+      readinessVerdict: hasNotReady ? 'NOT_READY' : hasCaution ? 'CAUTION' : 'READY',
+      readinessCriteria: criteria,
+    };
+  })();
+
   const getTaskIconColors = (status: string) => {
     switch (status) {
       case 'done': return 'text-emerald-400 bg-emerald-400/10';
@@ -832,9 +908,92 @@ function ProjectDetail() {
         </span>
       </div>
 
+      {/* Project Overview */}
+      <div
+        data-testid="project-overview"
+        className="grid grid-cols-2 gap-3 md:grid-cols-4"
+      >
+        <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-3">
+          <p className="mb-1 text-xs text-slate-500">Latest session</p>
+          {latestSession ? (
+            <Link
+              to={`/sessions/${latestSession.id}`}
+              data-testid="latest-session-link"
+              className="group"
+            >
+              <p className="truncate text-sm font-medium text-slate-200 group-hover:text-white">
+                {latestSession.name}
+              </p>
+              <StatusBadge status={latestSession.status} size="sm" />
+            </Link>
+          ) : (
+            <p className="text-sm text-slate-500">None yet</p>
+          )}
+        </div>
+        <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-3">
+          <p className="mb-1 text-xs text-slate-500">Needs attention</p>
+          {sessionsNeedingAttentionCount > 0 ? (
+            <Link
+              to="/sessions"
+              data-testid="needs-attention-link"
+              className="text-lg font-semibold text-amber-300 hover:text-amber-200"
+            >
+              {sessionsNeedingAttentionCount}
+            </Link>
+          ) : (
+            <p className="text-lg font-semibold text-emerald-400">0</p>
+          )}
+          <p className="text-xs text-slate-500">session{sessionsNeedingAttentionCount !== 1 ? 's' : ''}</p>
+        </div>
+        <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-3">
+          <p className="mb-1 text-xs text-slate-500">Awaiting review</p>
+          {reviewCount > 0 ? (
+            <button
+              type="button"
+              onClick={() => setActiveTab('review')}
+              data-testid="review-count-btn"
+              className="text-lg font-semibold text-primary-300 hover:text-primary-200"
+            >
+              {reviewCount}
+            </button>
+          ) : (
+            <p className="text-lg font-semibold text-slate-400">0</p>
+          )}
+          <p className="text-xs text-slate-500">task output{reviewCount !== 1 ? 's' : ''}</p>
+        </div>
+        <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-3">
+          <p className="mb-1 text-xs text-slate-500">Last activity</p>
+          <p className="text-sm font-medium text-slate-200">
+            {lastActivityAt
+              ? formatDistanceToNow(new Date(lastActivityAt), { addSuffix: true })
+              : 'No activity'}
+          </p>
+        </div>
+      </div>
+
+      {/* Review summary notification */}
+      {pendingChangeSets.length > 0 && (
+        <div
+          data-testid="review-summary"
+          className="flex items-center justify-between rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3"
+        >
+          <p className="text-sm text-amber-200">
+            {pendingChangeSets.length} task output{pendingChangeSets.length !== 1 ? 's' : ''} awaiting review
+          </p>
+          <button
+            type="button"
+            onClick={() => setActiveTab('review')}
+            className="text-sm font-medium text-amber-300 hover:text-amber-200 transition-colors"
+          >
+            Open Review Queue →
+          </button>
+        </div>
+      )}
+
       {/* Tabs */}
       <div className="flex gap-0 border-b border-[color:var(--oc-border-soft)]">
         {[
+          { key: 'overview', label: 'Overview' },
           { key: 'tasks', label: 'Tasks' },
           {
             key: 'review',
@@ -858,6 +1017,125 @@ function ProjectDetail() {
           </button>
         ))}
       </div>
+
+      {/* Overview Tab */}
+      {activeTab === 'overview' && (
+        <div className="space-y-5" data-testid="overview-tab">
+          {/* Recent Sessions */}
+          <div>
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-sm font-medium text-white">Recent Sessions</h2>
+              <Link
+                to={`/sessions/new?project_id=${id}`}
+                className="flex items-center gap-1.5 rounded-md border border-[color:var(--oc-action-hover)] bg-[color:var(--oc-action)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[color:var(--oc-action-hover)]"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                New Run
+              </Link>
+            </div>
+            {recentSessions.length === 0 ? (
+              <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-6 text-center">
+                <Terminal className="mx-auto mb-2 h-6 w-6 text-slate-600" />
+                <p className="text-sm text-slate-400">No sessions yet</p>
+                <p className="mt-1 text-xs text-slate-500">Start a run when this project has work ready.</p>
+              </div>
+            ) : (
+              <div
+                data-testid="recent-sessions-list"
+                className="divide-y divide-[color:var(--oc-border-soft)] rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)]"
+              >
+                {recentSessions.map((session) => (
+                  <Link
+                    key={session.id}
+                    to={`/sessions/${session.id}`}
+                    className="flex items-center gap-4 px-4 py-3 transition-colors hover:bg-[color:var(--oc-surface-raised)]"
+                    data-testid={`recent-session-${session.id}`}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium text-slate-200">{session.name}</p>
+                      <p className="mt-0.5 text-xs text-slate-500">
+                        {formatDistanceToNow(new Date(session.created_at), { addSuffix: true })}
+                      </p>
+                    </div>
+                    <StatusBadge status={session.status} size="sm" />
+                  </Link>
+                ))}
+              </div>
+            )}
+            {sessions.length > 5 && (
+              <button
+                type="button"
+                onClick={() => setActiveTab('sessions')}
+                className="mt-2 text-xs text-slate-500 hover:text-slate-300 transition-colors"
+              >
+                View all {sessions.length} runs →
+              </button>
+            )}
+          </div>
+
+          {/* Project Readiness */}
+          <div data-testid="readiness-section">
+            <h2 className="mb-3 text-sm font-medium text-white">Project Readiness</h2>
+            {pilotLoading && !pilotSummary ? (
+              <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
+                <p className="text-sm text-slate-500">Loading readiness data…</p>
+              </div>
+            ) : (
+              <div
+                className={`rounded-lg border p-4 ${
+                  readinessVerdict === 'READY'
+                    ? 'border-emerald-500/30 bg-emerald-500/10'
+                    : readinessVerdict === 'CAUTION'
+                      ? 'border-amber-500/30 bg-amber-500/10'
+                      : readinessVerdict === 'NOT_READY'
+                        ? 'border-red-500/30 bg-red-500/10'
+                        : 'border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)]'
+                }`}
+              >
+                <p
+                  data-testid="readiness-verdict"
+                  className={`mb-3 text-sm font-semibold ${
+                    readinessVerdict === 'READY'
+                      ? 'text-emerald-400'
+                      : readinessVerdict === 'CAUTION'
+                        ? 'text-amber-400'
+                        : readinessVerdict === 'NOT_READY'
+                          ? 'text-red-400'
+                          : 'text-slate-400'
+                  }`}
+                >
+                  {readinessVerdict === 'READY' ? '● READY'
+                    : readinessVerdict === 'CAUTION' ? '⚠ CAUTION'
+                    : readinessVerdict === 'NOT_READY' ? '✗ NOT READY'
+                    : '— LOADING'}
+                </p>
+                <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2" data-testid="readiness-criteria">
+                  {readinessCriteria.map((c) => (
+                    <div key={c.label} className="flex items-center gap-2 text-xs">
+                      <span
+                        className={
+                          c.state === 'pass' ? 'text-emerald-400'
+                            : c.state === 'warn' ? 'text-amber-400'
+                            : c.state === 'fail' ? 'text-red-400'
+                            : 'text-slate-500'
+                        }
+                      >
+                        {c.state === 'pass' ? '✓' : c.state === 'warn' ? '⚠' : c.state === 'fail' ? '✗' : '—'}
+                      </span>
+                      <span className="text-slate-300">{c.label}</span>
+                    </div>
+                  ))}
+                </div>
+                {!pilotSummary && !pilotLoading && (
+                  <p className="mt-3 text-xs text-slate-500">
+                    Run at least one session against this project to populate readiness data.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Planner Tab */}
       {activeTab === 'planner' && (

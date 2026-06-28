@@ -23,15 +23,18 @@ import type {
   Task,
 } from '@/types/api';
 import type { TerminalLogEntry } from '@/components/TerminalViewer';
+import { Link } from 'react-router-dom';
 import { TerminalViewer } from '@/components/TerminalViewer';
 import { StatusBadge } from '@/components/ui';
 import { deriveRunStateFromTask, getRunStateDisplay } from '@/lib/runState';
 import {
   Activity,
   AlertTriangle,
+  ArrowRight,
   CheckCircle2,
   ChevronDown,
   Circle,
+  ClipboardList,
   Clock,
   ExternalLink,
   FileText,
@@ -808,12 +811,14 @@ export type SessionDetailTab = 'summary' | 'timeline' | 'tasks' | 'logs' | 'sett
 
 interface SessionTabsProps {
   activeTab: SessionDetailTab;
+  interventionCount?: number;
   onChange: (tab: SessionDetailTab) => void;
   tasksCount: number;
 }
 
 export function SessionTabs({
   activeTab,
+  interventionCount = 0,
   onChange,
   tasksCount,
 }: SessionTabsProps) {
@@ -823,13 +828,18 @@ export function SessionTabs({
         <button
           onClick={() => onChange('summary')}
           className={cn(
-            'px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors',
+            'flex items-center gap-1 px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors',
             activeTab === 'summary'
               ? 'border-primary-500 text-white'
               : 'border-transparent text-slate-500 hover:text-slate-300'
           )}
         >
           Summary
+          {interventionCount > 0 && (
+            <span className="ml-1 inline-flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-bold text-white">
+              {interventionCount}
+            </span>
+          )}
         </button>
         <button
           onClick={() => onChange('timeline')}
@@ -2055,15 +2065,26 @@ export function SessionTasksPanel({
           >
             <div className="mb-2 flex items-start justify-between">
               <div>
-                <h3 className="font-semibold text-white">{task.title}</h3>
+                {task.workspace_status === 'ready' && session.project_id ? (
+                  <Link
+                    to={`/projects/${session.project_id}/tasks/${task.id}`}
+                    className="font-semibold text-white hover:text-primary-300 transition-colors"
+                  >
+                    {task.title}
+                  </Link>
+                ) : (
+                  <h3 className="font-semibold text-white">{task.title}</h3>
+                )}
                 <p className="mt-1 text-xs text-slate-400">
                   Order: {task.plan_position ?? 'manual'} • Priority: {task.priority ?? 0}
                 </p>
-                {task.workspace_status && (
+                {task.workspace_status === 'ready' ? (
+                  <p className="mt-1 text-xs text-emerald-400">Ready for review</p>
+                ) : task.workspace_status ? (
                   <p className="mt-1 text-xs capitalize text-slate-500">
-                    Diagnostics: {task.workspace_status.replace(/_/g, ' ')}
+                    {task.workspace_status.replace(/_/g, ' ')}
                   </p>
-                )}
+                ) : null}
               </div>
               <div className="flex items-center gap-2">
                 <span
@@ -3495,6 +3516,136 @@ export function SessionDigestPanel({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── ReviewReadyBlock ──────────────────────────────────────────────────────────
+
+interface ReviewReadyBlockProps {
+  count: number;
+}
+
+export function ReviewReadyBlock({ count }: ReviewReadyBlockProps) {
+  return (
+    <div className="rounded-lg border border-emerald-500/30 bg-emerald-900/10 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <ClipboardList className="h-4 w-4 text-emerald-400 flex-shrink-0" />
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-white">
+              {count === 1 ? '1 task ready for review' : `${count} tasks ready for review`}
+            </p>
+            <p className="text-xs text-slate-400 mt-0.5">
+              {count === 1
+                ? 'This task output is waiting for operator approval.'
+                : 'These task outputs are waiting for operator approval.'}
+            </p>
+          </div>
+        </div>
+        <Link
+          to="/tasks"
+          className="flex-shrink-0 rounded-md border border-emerald-700/50 bg-emerald-900/30 px-3 py-1.5 text-xs font-medium text-emerald-400 hover:bg-emerald-900/50 transition-colors"
+        >
+          Open Review Queue →
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+// ── SessionCompleteBlock ──────────────────────────────────────────────────────
+
+const SESSION_COMPLETE_HEADINGS: Record<string, string> = {
+  completed: 'Session complete',
+  stopped: 'Session stopped',
+  failed: 'Session failed',
+  cancelled: 'Session cancelled',
+  canceled: 'Session cancelled',
+};
+
+const SESSION_STATUS_LABELS: Record<string, string> = {
+  completed: 'Completed',
+  stopped: 'Stopped',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+  canceled: 'Cancelled',
+};
+
+interface SessionCompleteBlockProps {
+  reviewCount: number;
+  projectId?: number | null;
+  sessionStatus?: string | null;
+  onOpenLogs?: () => void;
+}
+
+export function SessionCompleteBlock({ reviewCount, projectId, sessionStatus, onOpenLogs }: SessionCompleteBlockProps) {
+  const status = sessionStatus ?? '';
+  const isCompleted = status === 'completed';
+  const heading = SESSION_COMPLETE_HEADINGS[status] ?? 'Session ended';
+  const statusLabel = SESSION_STATUS_LABELS[status] ?? null;
+
+  const linkClass =
+    'flex items-center justify-between rounded-md border border-[color:var(--oc-border-soft)] px-3 py-2 text-sm text-slate-300 hover:text-white hover:border-[color:var(--oc-border)] transition-colors group';
+  const arrowClass = 'h-3.5 w-3.5 text-slate-500 group-hover:text-slate-300 transition-colors';
+
+  return (
+    <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
+      <div className="mb-3">
+        <p className="text-sm font-medium text-slate-200">{heading}</p>
+        {statusLabel && (
+          <p className="mt-0.5 text-xs text-slate-500">Status: {statusLabel}</p>
+        )}
+      </div>
+      <p className="text-xs font-medium uppercase tracking-wider text-slate-500 mb-2">What next?</p>
+      <div className="space-y-1.5">
+        {isCompleted ? (
+          <>
+            {reviewCount > 0 && (
+              <Link to="/tasks" className={linkClass}>
+                <span>Review Queue — {reviewCount} task {reviewCount === 1 ? 'output' : 'outputs'}</span>
+                <ArrowRight className={arrowClass} />
+              </Link>
+            )}
+            <Link to="/analytics" className={linkClass}>
+              <span>Check system health</span>
+              <ArrowRight className={arrowClass} />
+            </Link>
+            {projectId != null ? (
+              <Link to={`/projects/${projectId}`} className={linkClass}>
+                <span>Start next session</span>
+                <ArrowRight className={arrowClass} />
+              </Link>
+            ) : (
+              <Link to="/sessions" className={linkClass}>
+                <span>Return to Sessions</span>
+                <ArrowRight className={arrowClass} />
+              </Link>
+            )}
+          </>
+        ) : (
+          <>
+            {onOpenLogs && (
+              <button
+                type="button"
+                onClick={onOpenLogs}
+                className={`${linkClass} w-full text-left`}
+              >
+                <span>Open logs</span>
+                <ArrowRight className={arrowClass} />
+              </button>
+            )}
+            <Link to="/analytics" className={linkClass}>
+              <span>Check system health</span>
+              <ArrowRight className={arrowClass} />
+            </Link>
+            <Link to="/sessions" className={linkClass}>
+              <span>Return to Sessions</span>
+              <ArrowRight className={arrowClass} />
+            </Link>
+          </>
+        )}
+      </div>
     </div>
   );
 }

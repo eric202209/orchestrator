@@ -9,6 +9,7 @@ import {
   Clock,
   Search,
   Activity,
+  CheckCircle2,
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { EmptyState, Skeleton } from '../components/ui';
@@ -120,7 +121,7 @@ function SessionsList() {
   const [projects, setProjects] = useState<Record<number, Project>>({});
   const [tasksByProject, setTasksByProject] = useState<Record<number, Task[]>>({});
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState<SessionFilter>('all');
+  const [filter, setFilter] = useState<SessionFilter>('needs_attention');
   const [query, setQuery] = useState('');
 
   const fetchData = async (initial = false) => {
@@ -237,13 +238,29 @@ function SessionsList() {
           description="Runs are created from a project so each execution stays tied to project context."
         />
       ) : visibleSessions.length === 0 ? (
-        <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-8 text-center">
-          <Terminal className="mx-auto mb-3 h-8 w-8 text-slate-500" />
-          <h2 className="text-sm font-medium text-white">No matching runs</h2>
-          <p className="mt-1 text-sm text-slate-400">
-            Adjust the status filter or search text to inspect another run.
-          </p>
-        </div>
+        filter === 'needs_attention' && !query.trim() ? (
+          <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-8 text-center">
+            <CheckCircle2 className="mx-auto mb-3 h-8 w-8 text-emerald-500/50" />
+            <h2 className="text-sm font-medium text-white">No sessions need attention.</h2>
+            <p className="mt-1 text-sm text-slate-400">
+              <button
+                type="button"
+                onClick={() => setFilter('all')}
+                className="text-primary-400 hover:text-primary-300 transition-colors"
+              >
+                View all sessions
+              </button>
+            </p>
+          </div>
+        ) : (
+          <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-8 text-center">
+            <Terminal className="mx-auto mb-3 h-8 w-8 text-slate-500" />
+            <h2 className="text-sm font-medium text-white">No matching runs</h2>
+            <p className="mt-1 text-sm text-slate-400">
+              Adjust the status filter or search text to inspect another run.
+            </p>
+          </div>
+        )
       ) : (
         <div className="overflow-hidden rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] divide-y divide-[color:var(--oc-border-soft)]">
           {visibleSessions.map((session) => {
