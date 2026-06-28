@@ -78,28 +78,28 @@ async function render() {
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
-describe('SessionsList — default filter (needs_attention)', () => {
-  it('defaults to needs_attention: shows failed sessions without switching filter', async () => {
+describe('SessionsList — default filter (all)', () => {
+  it('defaults to all: shows failed and running sessions without switching filter', async () => {
     setupMocks([
       makeSession({ id: 1, name: 'Failed Run', status: 'failed' }),
       makeSession({ id: 2, name: 'Running Run', status: 'running' }),
     ]);
     await render();
     expect(container.textContent).toContain('Failed Run');
-    expect(container.textContent).not.toContain('Running Run');
+    expect(container.textContent).toContain('Running Run');
   });
 
-  it('defaults to needs_attention: shows awaiting_input sessions', async () => {
+  it('defaults to all: shows completed sessions with logs/checkpoints reachable', async () => {
     setupMocks([
       makeSession({ id: 3, name: 'Blocked Session', status: 'awaiting_input' }),
       makeSession({ id: 4, name: 'Completed Session', status: 'done' }),
     ]);
     await render();
     expect(container.textContent).toContain('Blocked Session');
-    expect(container.textContent).not.toContain('Completed Session');
+    expect(container.textContent).toContain('Completed Session');
   });
 
-  it('defaults to needs_attention: shows error sessions', async () => {
+  it('defaults to all: shows error sessions', async () => {
     setupMocks([
       makeSession({ id: 5, name: 'Error Run', status: 'error' }),
     ]);
@@ -107,13 +107,13 @@ describe('SessionsList — default filter (needs_attention)', () => {
     expect(container.textContent).toContain('Error Run');
   });
 
-  it('the needs_attention filter button is visually selected on load', async () => {
+  it('the all filter button is visually selected on load', async () => {
     setupMocks([]);
     await render();
     const buttons = Array.from(container.querySelectorAll('button[type="button"]'));
-    const attentionBtn = buttons.find((b) => b.textContent?.includes('Needs attention'));
-    expect(attentionBtn).not.toBeNull();
-    expect(attentionBtn?.className).toContain('border-primary-500');
+    const allBtn = buttons.find((b) => b.textContent?.startsWith('All'));
+    expect(allBtn).not.toBeNull();
+    expect(allBtn?.className).toContain('border-primary-500');
   });
 });
 
@@ -124,12 +124,22 @@ describe('SessionsList — needs_attention empty state', () => {
       makeSession({ id: 2, status: 'done' }),
     ]);
     await render();
+    const attentionBtn = Array.from(container.querySelectorAll('button[type="button"]')).find(
+      (b) => b.textContent?.includes('Needs attention'),
+    );
+    expect(attentionBtn).not.toBeNull();
+    await act(async () => { (attentionBtn as HTMLElement).click(); });
     expect(container.textContent).toContain('No sessions need attention.');
   });
 
   it('shows "View all sessions" in the needs_attention empty state', async () => {
     setupMocks([makeSession({ id: 1, status: 'running' })]);
     await render();
+    const attentionBtn = Array.from(container.querySelectorAll('button[type="button"]')).find(
+      (b) => b.textContent?.includes('Needs attention'),
+    );
+    expect(attentionBtn).not.toBeNull();
+    await act(async () => { (attentionBtn as HTMLElement).click(); });
     expect(container.textContent).toContain('View all sessions');
   });
 
@@ -144,6 +154,11 @@ describe('SessionsList — needs_attention empty state', () => {
       makeSession({ id: 1, name: 'Running Run', status: 'running' }),
     ]);
     await render();
+    const attentionBtn = Array.from(container.querySelectorAll('button[type="button"]')).find(
+      (b) => b.textContent?.includes('Needs attention'),
+    );
+    expect(attentionBtn).not.toBeNull();
+    await act(async () => { (attentionBtn as HTMLElement).click(); });
     // confirm the needs_attention empty state is showing
     expect(container.textContent).toContain('No sessions need attention.');
 

@@ -48,3 +48,15 @@ export function isNoisySessionLogMessage(message?: string | null): boolean {
 
   return NOISY_LOG_PATTERNS.some((pattern) => pattern.test(trimmed));
 }
+
+export function selectRenderableSessionLogs<T extends { message?: string | null }>(
+  logs: T[],
+  verbosity: 'clean' | 'verbose',
+): T[] {
+  if (verbosity === 'verbose') {
+    return logs;
+  }
+
+  const cleanLogs = logs.filter((log) => !isNoisySessionLogMessage(log.message));
+  return cleanLogs.length > 0 || logs.length === 0 ? cleanLogs : logs;
+}

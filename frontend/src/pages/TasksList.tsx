@@ -30,7 +30,7 @@ function TasksList() {
   const [projects, setProjects] = useState<Record<number, Project>>({});
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<TaskStatusFilter>('all');
+  const [statusFilter, setStatusFilter] = useState<TaskStatusFilter>('review');
 
   useEffect(() => {
     fetchTasks();

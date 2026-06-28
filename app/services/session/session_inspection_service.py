@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -1027,7 +1028,10 @@ def get_session_logs_payload(
     logs_query = db.query(LogEntry).filter(LogEntry.session_id == session_id)
     if session.instance_id:
         logs_query = logs_query.filter(
-            LogEntry.session_instance_id == session.instance_id
+            or_(
+                LogEntry.session_instance_id == session.instance_id,
+                LogEntry.session_instance_id.is_(None),
+            )
         )
 
     logs = (
@@ -1052,10 +1056,16 @@ def get_sorted_logs_payload(
     session = get_inspectable_session_or_404(db, session_id)
     effective_limit = min(limit if limit else 100, 1000)
 
-    logs_query = db.query(LogEntry).filter(
-        LogEntry.session_id == session_id,
-        LogEntry.session_instance_id == session.instance_id,
-    )
+    logs_query = db.query(LogEntry).filter(LogEntry.session_id == session_id)
+    if session.instance_id:
+        logs_query = logs_query.filter(
+            or_(
+                LogEntry.session_instance_id == session.instance_id,
+                LogEntry.session_instance_id.is_(None),
+            )
+        )
+    else:
+        logs_query = logs_query.filter(LogEntry.session_instance_id.is_(None))
     if level:
         logs_query = logs_query.filter(LogEntry.level == level)
 

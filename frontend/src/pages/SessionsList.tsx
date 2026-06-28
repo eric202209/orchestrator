@@ -121,7 +121,7 @@ function SessionsList() {
   const [projects, setProjects] = useState<Record<number, Project>>({});
   const [tasksByProject, setTasksByProject] = useState<Record<number, Task[]>>({});
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState<SessionFilter>('needs_attention');
+  const [filter, setFilter] = useState<SessionFilter>('all');
   const [query, setQuery] = useState('');
 
   const fetchData = async (initial = false) => {

@@ -52,8 +52,9 @@ describe('deriveRunState', () => {
   });
 
   it('does not map completed sessions to running', () => {
-    expect(deriveRunStateFromSession({ status: 'completed' })).toBe('accepted');
-    expect(deriveRunState({ sessionStatus: 'done' })).toBe('accepted');
+    expect(deriveRunStateFromSession({ status: 'completed' })).toBe('completed');
+    expect(deriveRunState({ sessionStatus: 'done' })).toBe('completed');
+    expect(getRunStateDisplay('completed').label).toBe('Completed');
   });
 
   it('maps task data without exposing change-set terms', () => {

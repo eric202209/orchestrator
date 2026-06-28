@@ -1,12 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { projectsAPI, tasksAPI, sessionsAPI, pilotAPI } from '../api/client';
-import type {
-  PilotSummary,
-  PilotGuidanceStats,
-  PilotPermissionStats,
-  AuditEventsResponse,
-} from '../api/client';
+import { projectsAPI, tasksAPI, sessionsAPI } from '../api/client';
 import type { ChangeSetReviewDecision, Project, Task, Session } from '../types/api';
 import { ProjectPlannerPanel } from '../components/ProjectPlannerPanel';
 import { HumanGuidanceDashboard } from '../components/HumanGuidanceDashboard';
@@ -120,11 +114,6 @@ function ProjectDetail() {
   const [rejectingChangeSetTaskId, setRejectingChangeSetTaskId] = useState<number | null>(null);
   const [queueingTaskId, setQueueingTaskId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [pilotSummary, setPilotSummary] = useState<PilotSummary | null>(null);
-  const [pilotGuidance, setPilotGuidance] = useState<PilotGuidanceStats | null>(null);
-  const [pilotPerms, setPilotPerms] = useState<PilotPermissionStats | null>(null);
-  const [pilotAudit, setPilotAudit] = useState<AuditEventsResponse | null>(null);
-  const [pilotLoading, setPilotLoading] = useState(false);
 
   useEffect(() => {
     setError(null);
@@ -150,19 +139,6 @@ function ProjectDetail() {
         setSessions(sessionsRes.data || []);
         setWorkspaceOverview(workspaceRes.data || null);
 
-        // Fetch readiness data in parallel (non-blocking — failures silently degrade)
-        setPilotLoading(true);
-        const [ps, pg, pp, pa] = await Promise.allSettled([
-          pilotAPI.getSummary(Number(id)),
-          pilotAPI.getGuidanceStats(Number(id)),
-          pilotAPI.getPermissionStats(Number(id)),
-          pilotAPI.getAuditEvents({ project_id: Number(id), limit: 20, order: 'desc' }),
-        ]);
-        if (ps.status === 'fulfilled') setPilotSummary(ps.value.data);
-        if (pg.status === 'fulfilled') setPilotGuidance(pg.value.data);
-        if (pp.status === 'fulfilled') setPilotPerms(pp.value.data);
-        if (pa.status === 'fulfilled') setPilotAudit(pa.value.data);
-        setPilotLoading(false);
       } catch (err) {
         console.error('Failed to load project data:', err);
         setError(err instanceof Error ? err.message : 'Failed to load project data');
@@ -236,6 +212,38 @@ function ProjectDetail() {
       )
     : 0;
   const pendingChangeSets = workspaceOverview?.pending_change_sets || [];
+  const taskNeedsReview = (task: Task): boolean =>
+    task.workspace_status === 'ready' || task.workspace_status === 'changes_requested';
+  const pendingChangeSetTaskIds = new Set(pendingChangeSets.map((item) => item.task_id));
+  const taskOnlyReviewItems = tasks
+    .filter((task) => taskNeedsReview(task) && !pendingChangeSetTaskIds.has(task.id))
+    .map((task) => ({
+      task_id: task.id,
+      title: task.title,
+      workspace_status: task.workspace_status,
+      task_execution_id: null,
+      change_set: {
+        changed_count: 0,
+        added_count: 0,
+        modified_count: 0,
+        deleted_count: 0,
+        added_files: [],
+        modified_files: [],
+        deleted_files: [],
+        warning_flags: ['diff_unavailable'],
+      },
+      review_decision:
+        task.workspace_status === 'ready'
+          ? {
+              workspace_review_policy: 'unknown',
+              held_for_review: true,
+              reason: 'workspace_ready',
+              changed_count: 0,
+              warning_flags: ['diff_unavailable'],
+            }
+          : undefined,
+    }));
+  const reviewItems = [...pendingChangeSets, ...taskOnlyReviewItems];
   const pendingChangeSetFileCount = pendingChangeSets.reduce(
     (total, item) => total + (item.change_set?.changed_count || 0),
     0
@@ -251,38 +259,36 @@ function ProjectDetail() {
   const sessionsNeedingAttentionCount = sessions.filter((s) =>
     ['failed', 'stopped', 'awaiting_input'].includes(s.status)
   ).length;
-  const reviewCount = (workspaceOverview?.counts?.ready ?? 0) || pendingChangeSets.length;
+  const reviewCount = Math.max(
+    workspaceOverview?.counts?.ready ?? 0,
+    reviewItems.length,
+    tasks.filter(taskNeedsReview).length
+  );
   const lastActivityAt = latestSession?.updated_at ?? latestSession?.created_at ?? null;
 
   // ── Readiness verdict (mirrors AdminPilotDashboard logic) ─────────────────
   type ReadinessVerdict = 'READY' | 'CAUTION' | 'NOT_READY' | 'LOADING';
   interface ReadinessCriterion { label: string; state: 'pass' | 'warn' | 'fail' | 'unknown' }
 
-  const fmtPct = (v: number | null): string => v == null ? '—' : `${Math.round(v * 100)}%`;
-
   const { readinessVerdict, readinessCriteria }: { readinessVerdict: ReadinessVerdict; readinessCriteria: ReadinessCriterion[] } = (() => {
-    if (pilotLoading && !pilotSummary) return { readinessVerdict: 'LOADING', readinessCriteria: [] };
     const criteria: ReadinessCriterion[] = [];
-    const successRate = pilotSummary?.rates.success_rate ?? null;
     criteria.push({
-      label: `Success rate: ${fmtPct(successRate)}`,
-      state: successRate == null ? 'unknown' : successRate >= 0.7 ? 'pass' : successRate >= 0.5 ? 'warn' : 'fail',
+      label: sessions.length > 0 ? `Runs recorded: ${sessions.length}` : 'Runs recorded: none',
+      state: sessions.length > 0 ? 'pass' : 'warn',
     });
-    const conflictRate = pilotGuidance?.conflicts.conflict_rate ?? null;
     criteria.push({
-      label: `Guidance conflicts: ${fmtPct(conflictRate)}`,
-      state: conflictRate == null ? 'unknown' : conflictRate < 0.3 ? 'pass' : conflictRate < 0.5 ? 'warn' : 'fail',
+      label: reviewCount > 0 ? `Review queue: ${reviewCount} pending` : 'Review queue: clear',
+      state: reviewCount > 0 ? 'warn' : 'pass',
     });
-    const auditTotal = pilotAudit?.total ?? null;
     criteria.push({
-      label: `Audit trail: ${auditTotal == null ? '—' : auditTotal > 0 ? `${auditTotal} events` : 'empty'}`,
-      state: auditTotal == null ? 'unknown' : auditTotal > 0 ? 'pass' : 'warn',
+      label: activeProjectTask ? `Active task: ${activeProjectTask.title}` : 'Active task: none',
+      state: activeProjectTask ? 'warn' : 'pass',
     });
-    const pending = pilotPerms?.pending ?? 0;
-    const maxResp = pilotPerms?.max_response_seconds ?? 0;
     criteria.push({
-      label: `Permissions: ${pilotPerms == null ? '—' : pending === 0 ? 'clear' : `${pending} pending`}`,
-      state: pilotPerms == null ? 'unknown' : pending > 0 && maxResp > 300 ? 'fail' : 'pass',
+      label: workspaceOverview?.baseline?.exists
+        ? `Baseline: ${workspaceOverview.baseline.file_count} files`
+        : 'Baseline: not built',
+      state: workspaceOverview?.baseline?.exists ? 'pass' : 'warn',
     });
     const hasNotReady = criteria.some((c) => c.state === 'fail');
     const hasCaution = criteria.some((c) => c.state === 'warn' || c.state === 'unknown');
@@ -972,13 +978,13 @@ function ProjectDetail() {
       </div>
 
       {/* Review summary notification */}
-      {pendingChangeSets.length > 0 && (
+      {reviewItems.length > 0 && (
         <div
           data-testid="review-summary"
           className="flex items-center justify-between rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3"
         >
           <p className="text-sm text-amber-200">
-            {pendingChangeSets.length} task output{pendingChangeSets.length !== 1 ? 's' : ''} awaiting review
+            {reviewItems.length} task output{reviewItems.length !== 1 ? 's' : ''} awaiting review
           </p>
           <button
             type="button"
@@ -997,7 +1003,7 @@ function ProjectDetail() {
           { key: 'tasks', label: 'Tasks' },
           {
             key: 'review',
-            label: pendingChangeSets.length > 0 ? `Review (${pendingChangeSets.length})` : 'Review',
+            label: reviewItems.length > 0 ? `Review (${reviewItems.length})` : 'Review',
           },
           { key: 'planner', label: 'Project Architect' },
           { key: 'sessions', label: 'Runs' },
@@ -1076,63 +1082,52 @@ function ProjectDetail() {
           {/* Project Readiness */}
           <div data-testid="readiness-section">
             <h2 className="mb-3 text-sm font-medium text-white">Project Readiness</h2>
-            {pilotLoading && !pilotSummary ? (
-              <div className="rounded-lg border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-4">
-                <p className="text-sm text-slate-500">Loading readiness data…</p>
-              </div>
-            ) : (
-              <div
-                className={`rounded-lg border p-4 ${
+            <div
+              className={`rounded-lg border p-4 ${
+                readinessVerdict === 'READY'
+                  ? 'border-emerald-500/30 bg-emerald-500/10'
+                  : readinessVerdict === 'CAUTION'
+                    ? 'border-amber-500/30 bg-amber-500/10'
+                    : readinessVerdict === 'NOT_READY'
+                      ? 'border-red-500/30 bg-red-500/10'
+                      : 'border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)]'
+              }`}
+            >
+              <p
+                data-testid="readiness-verdict"
+                className={`mb-3 text-sm font-semibold ${
                   readinessVerdict === 'READY'
-                    ? 'border-emerald-500/30 bg-emerald-500/10'
+                    ? 'text-emerald-400'
                     : readinessVerdict === 'CAUTION'
-                      ? 'border-amber-500/30 bg-amber-500/10'
+                      ? 'text-amber-400'
                       : readinessVerdict === 'NOT_READY'
-                        ? 'border-red-500/30 bg-red-500/10'
-                        : 'border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)]'
+                        ? 'text-red-400'
+                        : 'text-slate-400'
                 }`}
               >
-                <p
-                  data-testid="readiness-verdict"
-                  className={`mb-3 text-sm font-semibold ${
-                    readinessVerdict === 'READY'
-                      ? 'text-emerald-400'
-                      : readinessVerdict === 'CAUTION'
-                        ? 'text-amber-400'
-                        : readinessVerdict === 'NOT_READY'
-                          ? 'text-red-400'
-                          : 'text-slate-400'
-                  }`}
-                >
-                  {readinessVerdict === 'READY' ? '● READY'
-                    : readinessVerdict === 'CAUTION' ? '⚠ CAUTION'
-                    : readinessVerdict === 'NOT_READY' ? '✗ NOT READY'
-                    : '— LOADING'}
-                </p>
-                <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2" data-testid="readiness-criteria">
-                  {readinessCriteria.map((c) => (
-                    <div key={c.label} className="flex items-center gap-2 text-xs">
-                      <span
-                        className={
-                          c.state === 'pass' ? 'text-emerald-400'
-                            : c.state === 'warn' ? 'text-amber-400'
-                            : c.state === 'fail' ? 'text-red-400'
-                            : 'text-slate-500'
-                        }
-                      >
-                        {c.state === 'pass' ? '✓' : c.state === 'warn' ? '⚠' : c.state === 'fail' ? '✗' : '—'}
-                      </span>
-                      <span className="text-slate-300">{c.label}</span>
-                    </div>
-                  ))}
-                </div>
-                {!pilotSummary && !pilotLoading && (
-                  <p className="mt-3 text-xs text-slate-500">
-                    Run at least one session against this project to populate readiness data.
-                  </p>
-                )}
+                {readinessVerdict === 'READY' ? 'READY'
+                  : readinessVerdict === 'CAUTION' ? 'CAUTION'
+                  : readinessVerdict === 'NOT_READY' ? 'NOT READY'
+                  : 'LOADING'}
+              </p>
+              <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2" data-testid="readiness-criteria">
+                {readinessCriteria.map((c) => (
+                  <div key={c.label} className="flex items-center gap-2 text-xs">
+                    <span
+                      className={
+                        c.state === 'pass' ? 'text-emerald-400'
+                          : c.state === 'warn' ? 'text-amber-400'
+                          : c.state === 'fail' ? 'text-red-400'
+                          : 'text-slate-500'
+                      }
+                    >
+                      {c.state === 'pass' ? 'OK' : c.state === 'warn' ? 'Watch' : c.state === 'fail' ? 'Block' : 'Unknown'}
+                    </span>
+                    <span className="text-slate-300">{c.label}</span>
+                  </div>
+                ))}
               </div>
-            )}
+            </div>
           </div>
         </div>
       )}
@@ -1162,7 +1157,7 @@ function ProjectDetail() {
               Runs with generated changes waiting for an operator decision.
             </p>
           </div>
-          {pendingChangeSets.length === 0 ? (
+          {reviewItems.length === 0 ? (
             <EmptyState
               icon={FileText}
               title="No runs need review"
@@ -1170,7 +1165,7 @@ function ProjectDetail() {
             />
           ) : (
             <div className="grid gap-3">
-              {pendingChangeSets.map((item) => {
+              {reviewItems.map((item) => {
                 const reviewTask = tasks.find((task) => task.id === item.task_id) || null;
                 const canShowAccept = Boolean(
                   reviewTask?.status === 'done' &&
@@ -1466,7 +1461,7 @@ function ProjectDetail() {
                       )}
                     </div>
                   )}
-                  {pendingChangeSets.length > 0 && (
+                  {reviewItems.length > 0 && (
                     <div className="mt-3 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <p className="text-xs font-medium uppercase tracking-wide text-amber-200">
@@ -1477,7 +1472,7 @@ function ProjectDetail() {
                         </span>
                       </div>
                       <div className="mt-2 grid gap-2 lg:grid-cols-2">
-                        {pendingChangeSets.slice(0, 4).map((item) => (
+                        {reviewItems.slice(0, 4).map((item) => (
                           <Link
                             key={`${item.task_id}-${item.task_execution_id || 'latest'}`}
                             to={`/projects/${project.id}/tasks/${item.task_id}`}
@@ -1506,7 +1501,7 @@ function ProjectDetail() {
               <div className="bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)] divide-y divide-[color:var(--oc-border-soft)]">
                 {tasks.map((task) => {
                   const queueingTask = queueingTaskId === task.id;
-                  const pendingRunChanges = pendingChangeSets.find(
+                  const pendingRunChanges = reviewItems.find(
                     (item) => item.task_id === task.id
                   );
                   const runDisplay = productRunDisplayForTask(

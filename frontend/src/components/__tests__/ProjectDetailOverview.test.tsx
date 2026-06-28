@@ -5,7 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { Route, Routes } from 'react-router-dom';
 import ProjectDetail from '@/pages/ProjectDetail';
-import { projectsAPI, tasksAPI, sessionsAPI, pilotAPI } from '@/api/client';
+import { projectsAPI, tasksAPI, sessionsAPI } from '@/api/client';
 
 vi.mock('@/api/client', () => ({
   projectsAPI: {
@@ -30,12 +30,6 @@ vi.mock('@/api/client', () => ({
     getByProject: vi.fn(),
     delete: vi.fn(),
     generateSteps: vi.fn(),
-  },
-  pilotAPI: {
-    getSummary: vi.fn(),
-    getGuidanceStats: vi.fn(),
-    getPermissionStats: vi.fn(),
-    getAuditEvents: vi.fn(),
   },
   guidanceAPI: {
     getReadiness: vi.fn(),
@@ -115,58 +109,21 @@ const makeWorkspaceOverview = (overrides = {}) => ({
   ...overrides,
 });
 
-const makePilotSummary = (overrides = {}) => ({
-  computed_at: '2026-06-27T00:00:00Z',
-  project_id: 1,
-  task_executions: { total: 5, done: 4, failed: 1, pending: 0, running: 0, cancelled: 0 },
-  rates: { success_rate: 0.8, rejection_rate: 0.1, timeout_rate: 0.0 },
-  symbol_verification: { applicable_tasks: 5, passed: 4, failed: 1 },
-  ...overrides,
-});
-
 function setupMocks({
   project = makeProject(),
   sessions = [makeSession()],
   tasks = [makeTask()],
   workspace = makeWorkspaceOverview(),
-  pilotSummary = makePilotSummary(),
-  pilotGuidance = null,
-  pilotPerms = null,
-  pilotAudit = null,
 }: {
   project?: ReturnType<typeof makeProject>;
   sessions?: ReturnType<typeof makeSession>[];
   tasks?: ReturnType<typeof makeTask>[];
   workspace?: ReturnType<typeof makeWorkspaceOverview>;
-  pilotSummary?: ReturnType<typeof makePilotSummary> | null;
-  pilotGuidance?: unknown;
-  pilotPerms?: unknown;
-  pilotAudit?: unknown;
 } = {}) {
   (projectsAPI.getById as Mock).mockResolvedValue({ data: project });
   (tasksAPI.getByProject as Mock).mockResolvedValue({ data: tasks });
   (sessionsAPI.getByProject as Mock).mockResolvedValue({ data: sessions });
   (projectsAPI.getWorkspaceOverview as Mock).mockResolvedValue({ data: workspace });
-  if (pilotSummary) {
-    (pilotAPI.getSummary as Mock).mockResolvedValue({ data: pilotSummary });
-  } else {
-    (pilotAPI.getSummary as Mock).mockRejectedValue(new Error('no data'));
-  }
-  if (pilotGuidance) {
-    (pilotAPI.getGuidanceStats as Mock).mockResolvedValue({ data: pilotGuidance });
-  } else {
-    (pilotAPI.getGuidanceStats as Mock).mockRejectedValue(new Error('no data'));
-  }
-  if (pilotPerms) {
-    (pilotAPI.getPermissionStats as Mock).mockResolvedValue({ data: pilotPerms });
-  } else {
-    (pilotAPI.getPermissionStats as Mock).mockRejectedValue(new Error('no data'));
-  }
-  if (pilotAudit) {
-    (pilotAPI.getAuditEvents as Mock).mockResolvedValue({ data: pilotAudit });
-  } else {
-    (pilotAPI.getAuditEvents as Mock).mockRejectedValue(new Error('no data'));
-  }
 }
 
 // ── test harness ──────────────────────────────────────────────────────────────
@@ -329,6 +286,32 @@ describe('ProjectDetail — Review summary notification', () => {
     const summary = container.querySelector('[data-testid="review-summary"]');
     expect(summary?.textContent).toContain('Open Review Queue');
   });
+
+  it('falls back to ready tasks when workspace overview omits pending change sets', async () => {
+    setupMocks({
+      tasks: [
+        makeTask({
+          id: 7,
+          title: 'Ready task with retained workspace',
+          status: 'done',
+          workspace_status: 'ready',
+          task_subfolder: 'tasks/task-7',
+        }),
+      ],
+      workspace: makeWorkspaceOverview({
+        counts: { ready: 0, promoted: 0, changes_requested: 0, blocked: 0 },
+        pending_change_sets: [],
+      }),
+    });
+    await render();
+
+    const btn = container.querySelector('[data-testid="review-count-btn"]');
+    expect(btn).not.toBeNull();
+    expect(btn?.textContent).toContain('1');
+    expect(container.querySelector('[data-testid="review-summary"]')?.textContent).toContain(
+      '1 task output awaiting review',
+    );
+  });
 });
 
 // ── Overview tab — default and Recent Sessions ────────────────────────────────
@@ -394,25 +377,28 @@ describe('ProjectDetail — Readiness section', () => {
     expect(section).not.toBeNull();
   });
 
-  it('shows READY verdict when all criteria pass', async () => {
+  it('shows READY verdict when local project criteria pass', async () => {
     setupMocks({
-      pilotSummary: makePilotSummary({ rates: { success_rate: 0.8, rejection_rate: 0.1, timeout_rate: 0.0 } }),
-      pilotGuidance: { computed_at: '', project_id: 1, total: 5, conflicts: { total: 0, conflict_rate: 0.0 }, applied: 5 },
-      pilotAudit: { total: 10, limit: 20, offset: 0, items: [] },
-      pilotPerms: { computed_at: '', project_id: 1, approvals: 5, denials: 0, pending: 0, avg_response_seconds: 1, max_response_seconds: 1 },
+      sessions: [makeSession({ id: 1, status: 'completed' })],
+      tasks: [makeTask({ id: 1, status: 'done', workspace_status: 'promoted' })],
+      workspace: makeWorkspaceOverview({
+        counts: { ready: 0, promoted: 1, changes_requested: 0, blocked: 0 },
+        baseline: { exists: true, file_count: 4, promoted_task_count: 1, path: '/tmp/baseline' },
+      }),
     });
     await render();
     const verdict = container.querySelector('[data-testid="readiness-verdict"]');
     expect(verdict?.textContent).toContain('READY');
   });
 
-  it('shows NOT_READY verdict when success rate < 50%', async () => {
+  it('shows CAUTION verdict when review is pending', async () => {
     setupMocks({
-      pilotSummary: makePilotSummary({ rates: { success_rate: 0.3, rejection_rate: 0.5, timeout_rate: 0.0 } }),
+      tasks: [makeTask({ id: 1, status: 'done', workspace_status: 'ready', task_subfolder: 'tasks/task-1' })],
+      workspace: makeWorkspaceOverview({ counts: { ready: 1, promoted: 0, changes_requested: 0, blocked: 0 } }),
     });
     await render();
     const verdict = container.querySelector('[data-testid="readiness-verdict"]');
-    expect(verdict?.textContent).toContain('NOT READY');
+    expect(verdict?.textContent).toContain('CAUTION');
   });
 
   it('shows criteria items', async () => {
@@ -423,21 +409,21 @@ describe('ProjectDetail — Readiness section', () => {
     expect((criteria?.querySelectorAll('div') ?? []).length).toBeGreaterThan(0);
   });
 
-  it('shows a note when no pilot data is available', async () => {
-    setupMocks({ pilotSummary: null });
+  it('shows a local runs criterion when no sessions are available', async () => {
+    setupMocks({ sessions: [] });
     await render();
     const overviewTab = container.querySelector('[data-testid="overview-tab"]');
-    expect(overviewTab?.textContent).toContain('Run at least one session');
+    expect(overviewTab?.textContent).toContain('Runs recorded: none');
   });
 
-  it('shows Pilot-equivalent information (success rate)', async () => {
+  it('shows local readiness information without pilot metrics', async () => {
     setupMocks({
-      pilotSummary: makePilotSummary({ rates: { success_rate: 0.75, rejection_rate: 0.1, timeout_rate: 0.0 } }),
+      sessions: [makeSession({ id: 1, status: 'completed' })],
     });
     await render();
     const section = container.querySelector('[data-testid="readiness-section"]');
-    expect(section?.textContent).toContain('Success rate');
-    expect(section?.textContent).toContain('75%');
+    expect(section?.textContent).toContain('Runs recorded');
+    expect(section?.textContent).toContain('Review queue');
   });
 });
 

@@ -2,6 +2,7 @@ import type { ChangeSetReviewDecision, Session, Task } from '@/types/api';
 
 export type ProductRunState =
   | 'running'
+  | 'completed'
   | 'failed'
   | 'needs_review'
   | 'accepted'
@@ -80,8 +81,12 @@ export function deriveRunState(input: RunStateInput): ProductRunState {
     return 'failed';
   }
 
-  if (completedStatuses.has(taskStatus) || completedStatuses.has(sessionStatus)) {
+  if (completedStatuses.has(taskStatus)) {
     return 'accepted';
+  }
+
+  if (completedStatuses.has(sessionStatus)) {
+    return 'completed';
   }
 
   return 'failed';
@@ -113,6 +118,12 @@ export function getRunStateDisplay(state: ProductRunState): ProductRunStateDispl
       return {
         label: 'Accepted',
         description: 'Changes are accepted into the project workspace.',
+        badgeClass: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
+      };
+    case 'completed':
+      return {
+        label: 'Completed',
+        description: 'The run completed. Review logs, checkpoints, and task output for details.',
         badgeClass: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
       };
     case 'rejected':

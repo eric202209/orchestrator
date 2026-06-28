@@ -46,7 +46,7 @@ import {
   type TimelineSpan,
 } from '@/components/SessionDetailSections';
 import { MessageCircle, Pause, Play, Square, XCircle } from 'lucide-react';
-import { isNoisySessionLogMessage } from './sessionLogNoise';
+import { isNoisySessionLogMessage, selectRenderableSessionLogs } from './sessionLogNoise';
 
 type TimelineEventType =
   | 'planning'
@@ -318,14 +318,9 @@ export default function SessionDetail() {
     timestamp: formatLogTimestamp(log.timestamp || log.created_at),
   }), [formatLogTimestamp, logVerbosity]);
 
-  const shouldDisplayLog = useCallback(
-    (log: SessionLogItem) => logVerbosity === 'verbose' || !isNoisySessionLogMessage(log.message),
-    [logVerbosity]
-  );
-
   const visibleLogs = useCallback(
-    (logs: SessionLogItem[]) => logs.filter(shouldDisplayLog),
-    [shouldDisplayLog]
+    (logs: SessionLogItem[]) => selectRenderableSessionLogs(logs, logVerbosity),
+    [logVerbosity]
   );
 
   const applyLogView = useCallback((sourceLogs: TerminalLogEntry[], mode: string) => {
