@@ -1,12 +1,18 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import { BarChart2, RefreshCw } from 'lucide-react';
 import { analyticsAPI } from '@/api/client';
 import type {
   OperationalAnalytics,
+  OperationalWindow,
   FailureAnalytics,
+  FailureWindow,
   KnowledgeAnalytics,
+  KnowledgeWindow,
   ExecutionAnalytics,
+  ExecutionWindow,
   OperatorAnalytics,
+  OperatorWindow,
   AnalyticsWindow,
 } from '@/types/api';
 import {
@@ -49,6 +55,56 @@ function secsAgo(iso: string): string {
   return `${Math.floor(diff / 60)}m ago`;
 }
 
+function fmtGeneratedAt(iso: string): string {
+  const d = new Date(iso);
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const month = months[d.getUTCMonth()];
+  const day = d.getUTCDate();
+  const h = String(d.getUTCHours()).padStart(2, '0');
+  const min = String(d.getUTCMinutes()).padStart(2, '0');
+  return `${month} ${day} at ${h}:${min} UTC`;
+}
+
+// ── section summaries ─────────────────────────────────────────────────────────
+
+function operationalSummary(w: OperationalWindow): string {
+  if (w.session_success_rate == null) return 'No sessions recorded in this window.';
+  if (w.session_success_rate >= 0.9) return 'Session reliability is high this window.';
+  if (w.session_success_rate >= 0.7) return 'Session reliability is moderate — some sessions are failing.';
+  return 'Session failure rate is elevated — review recent failures.';
+}
+
+function failureSummary(w: FailureWindow): string {
+  if (w.recovery_success_rate == null) return 'No failure recovery data in this window.';
+  if (w.recovery_success_rate >= 0.8) return 'Recovery is performing well this window.';
+  if (w.recovery_success_rate >= 0.5) return 'Recovery success is moderate — some failures are unresolved.';
+  return 'Low recovery success rate — failures are not being resolved.';
+}
+
+function knowledgeSummary(w: KnowledgeWindow): string {
+  if (w.knowledge_hit_rate == null) return 'No knowledge retrievals in this window.';
+  if (w.knowledge_hit_rate >= 0.7) return 'Knowledge base is actively used and frequently included in prompts.';
+  if (w.knowledge_hit_rate >= 0.4) return 'Knowledge base is used, but many retrievals do not reach prompts.';
+  return 'Knowledge base has low prompt inclusion — most retrievals are filtered out.';
+}
+
+function executionSummary(w: ExecutionWindow): string {
+  if (w.queue_latency_p95_seconds == null) {
+    if (w.execution_count === 0) return 'No executions in this window.';
+    return 'Execution timing data unavailable for this window.';
+  }
+  if (w.queue_latency_p95_seconds <= 5) return 'Queue latency is low — jobs are starting quickly.';
+  if (w.queue_latency_p95_seconds <= 30) return 'Queue latency is moderate.';
+  return 'High P95 queue latency — some jobs are waiting a long time.';
+}
+
+function operatorSummary(w: OperatorWindow): string {
+  if (w.autonomy_rate == null) return 'No operator session data in this window.';
+  if (w.autonomy_rate >= 0.8) return 'System is operating with high autonomy.';
+  if (w.autonomy_rate >= 0.5) return 'Moderate operator involvement — some sessions need guidance.';
+  return 'High operator intervention rate — many sessions require attention.';
+}
+
 // ── Section: Operational Health ───────────────────────────────────────────────
 
 function OperationalSection({
@@ -70,12 +126,21 @@ function OperationalSection({
   const fmtRate = (v: number | null) => fmtPct(v);
   return (
     <div className="space-y-4">
+      <p className="text-xs text-slate-500">{operationalSummary(w)}</p>
       <MetricGrid>
         <div className="pl-0 pr-4">
-          <MetricCard label="Session Success Rate" value={fmtPct(w.session_success_rate)} />
+          <MetricCard
+            label="Session Success Rate"
+            value={fmtPct(w.session_success_rate)}
+            hint={w.session_success_rate == null ? 'Not enough data yet' : 'Sessions that reached a successful outcome'}
+          />
         </div>
         <div className="pl-4 pr-4">
-          <MetricCard label="First Attempt Success" value={fmtPct(w.first_attempt_success_rate)} />
+          <MetricCard
+            label="First Attempt Success"
+            value={fmtPct(w.first_attempt_success_rate)}
+            hint={w.first_attempt_success_rate == null ? 'Not enough data yet' : 'No repair or retry was needed'}
+          />
         </div>
         <div className="pl-4 pr-4">
           <MetricCard label="Sessions Started" value={fmtNum(w.sessions_started)} />
@@ -114,6 +179,9 @@ function OperationalSection({
           />
         </div>
       )}
+      <p className="text-[10px] text-slate-700 pt-2 border-t border-[color:var(--oc-border-soft)]">
+        Data as of {fmtGeneratedAt(data.generated_at)}
+      </p>
     </div>
   );
 }
@@ -138,18 +206,31 @@ function FailureSection({
   const w = data.windows[win];
   return (
     <div className="space-y-4">
+      <p className="text-xs text-slate-500">{failureSummary(w)}</p>
       <MetricGrid>
         <div className="pl-0 pr-4">
-          <MetricCard label="Recovery Success Rate" value={fmtPct(w.recovery_success_rate)} />
+          <MetricCard
+            label="Recovery Success Rate"
+            value={fmtPct(w.recovery_success_rate)}
+            hint={w.recovery_success_rate == null ? 'Not enough data yet' : 'Failed sessions recovered by the repair system'}
+          />
         </div>
         <div className="pl-4 pr-4">
           <MetricCard label="Recovery Attempts" value={fmtNum(w.recovery_attempts)} />
         </div>
         <div className="pl-4 pr-4">
-          <MetricCard label="Budget Exhaustions" value={fmtNum(w.budget_exhaustion_count)} />
+          <MetricCard
+            label="Budget Exhaustions"
+            value={fmtNum(w.budget_exhaustion_count)}
+            hint="Sessions where all repair attempts were used up"
+          />
         </div>
         <div className="pl-4">
-          <MetricCard label="Repair Churn" value={fmtNum(w.churn_guard_activations)} />
+          <MetricCard
+            label="Repair Churn"
+            value={fmtNum(w.churn_guard_activations)}
+            hint="Sessions stopped by the churn guard"
+          />
         </div>
       </MetricGrid>
       <div className="mt-4 pt-4 border-t border-[color:var(--oc-border-soft)] grid grid-cols-1 sm:grid-cols-2 gap-6">
@@ -175,9 +256,19 @@ function FailureSection({
           <DistributionTable
             title="Failure Category Distribution"
             data={w.failure_category_distribution}
+            emptyText="No categorized failures in this window"
           />
         </div>
       )}
+      <div className="flex items-center justify-between pt-2 border-t border-[color:var(--oc-border-soft)]">
+        <p className="text-[10px] text-slate-700">Data as of {fmtGeneratedAt(data.generated_at)}</p>
+        <Link
+          to="/sessions"
+          className="text-[10px] text-[color:var(--oc-accent)] hover:underline"
+        >
+          View sessions →
+        </Link>
+      </div>
     </div>
   );
 }
@@ -202,16 +293,22 @@ function KnowledgeSection({
   const w = data.windows[win];
   return (
     <div className="space-y-4">
+      <p className="text-xs text-slate-500">{knowledgeSummary(w)}</p>
       <MetricGrid cols={2}>
         <div className="pl-0 pr-4">
           <MetricCard
             label="Knowledge Hit Rate"
             value={fmtPct(w.knowledge_hit_rate)}
             sub={`${fmtNum(w.used_in_prompt_count)} / ${fmtNum(w.retrieval_count)} retrievals`}
+            hint={w.knowledge_hit_rate == null ? 'Not enough data yet' : 'Retrievals included in a prompt'}
           />
         </div>
         <div className="pl-4">
-          <MetricCard label="Knowledge Effectiveness" value={fmtPct(w.effectiveness_rate)} />
+          <MetricCard
+            label="Knowledge Effectiveness"
+            value={fmtPct(w.effectiveness_rate)}
+            hint={w.effectiveness_rate == null ? 'Not enough data yet' : 'Retrieved items that aided task completion'}
+          />
         </div>
       </MetricGrid>
       <div className="mt-4 pt-4 border-t border-[color:var(--oc-border-soft)] grid grid-cols-1 sm:grid-cols-2 gap-6">
@@ -232,7 +329,7 @@ function KnowledgeSection({
             value: item.retrieval_count,
           }))}
           formatValue={fmtNum}
-          emptyText="No knowledge items"
+          emptyText="No knowledge retrievals in this window"
         />
       </div>
       {(w.top_items.length > 0 || w.low_effectiveness_items.length > 0) && (
@@ -240,15 +337,18 @@ function KnowledgeSection({
           <TopItemsTable
             title="Top Knowledge Items"
             items={w.top_items}
-            emptyText="No knowledge items"
+            emptyText="No knowledge retrievals in this window"
           />
           <TopItemsTable
             title="Low Effectiveness Items"
             items={w.low_effectiveness_items}
-            emptyText="No low-effectiveness items"
+            emptyText="No low-effectiveness items in this window"
           />
         </div>
       )}
+      <p className="text-[10px] text-slate-700 pt-2 border-t border-[color:var(--oc-border-soft)]">
+        Data as of {fmtGeneratedAt(data.generated_at)}
+      </p>
     </div>
   );
 }
@@ -274,18 +374,28 @@ function ExecutionSection({
   const totalTokens = (w.tokens_in_total ?? 0) + (w.tokens_out_total ?? 0);
   return (
     <div className="space-y-4">
+      <p className="text-xs text-slate-500">{executionSummary(w)}</p>
       <MetricGrid>
         <div className="pl-0 pr-4">
           <MetricCard
             label="Mean Runtime"
             value={fmtSec(w.mean_execution_duration_seconds)}
+            hint={w.mean_execution_duration_seconds == null ? 'Not enough data yet' : undefined}
           />
         </div>
         <div className="pl-4 pr-4">
-          <MetricCard label="Queue P50" value={fmtSec(w.queue_latency_p50_seconds)} />
+          <MetricCard
+            label="Queue P50"
+            value={fmtSec(w.queue_latency_p50_seconds)}
+            hint={w.queue_latency_p50_seconds == null ? 'Not enough data yet' : 'Half of jobs waited less than this'}
+          />
         </div>
         <div className="pl-4 pr-4">
-          <MetricCard label="Queue P95" value={fmtSec(w.queue_latency_p95_seconds)} />
+          <MetricCard
+            label="Queue P95"
+            value={fmtSec(w.queue_latency_p95_seconds)}
+            hint={w.queue_latency_p95_seconds == null ? 'Not enough data yet' : '95% of jobs waited less than this'}
+          />
         </div>
         <div className="pl-4">
           <MetricCard
@@ -328,9 +438,16 @@ function ExecutionSection({
       </div>
       {Object.keys(w.backend_distribution).length > 0 && (
         <div className="mt-4 pt-4 border-t border-[color:var(--oc-border-soft)]">
-          <DistributionTable title="Backend Distribution" data={w.backend_distribution} />
+          <DistributionTable
+            title="Backend Distribution"
+            data={w.backend_distribution}
+            emptyText="No executions in this window"
+          />
         </div>
       )}
+      <p className="text-[10px] text-slate-700 pt-2 border-t border-[color:var(--oc-border-soft)]">
+        Data as of {fmtGeneratedAt(data.generated_at)}
+      </p>
     </div>
   );
 }
@@ -355,16 +472,20 @@ function OperatorSection({
   const w = data.windows[win];
   return (
     <div className="space-y-4">
+      <p className="text-xs text-slate-500">{operatorSummary(w)}</p>
       <MetricGrid>
         <div className="pl-0 pr-4">
-          <MetricCard label="Autonomy Rate" value={fmtPct(w.autonomy_rate)} />
+          <MetricCard
+            label="Autonomy Rate"
+            value={fmtPct(w.autonomy_rate)}
+            hint={w.autonomy_rate == null ? 'Not enough data yet' : 'Sessions completed without operator action'}
+          />
         </div>
         <div className="pl-4 pr-4">
           <MetricCard
             label="Intervention Rate"
-            value={fmtPct(
-              w.autonomy_rate != null ? 1 - w.autonomy_rate : null,
-            )}
+            value={fmtPct(w.autonomy_rate != null ? 1 - w.autonomy_rate : null)}
+            hint={w.autonomy_rate == null ? 'Not enough data yet' : 'Sessions that needed at least one operator action'}
           />
         </div>
         <div className="pl-4 pr-4">
@@ -400,9 +521,13 @@ function OperatorSection({
           <DistributionTable
             title="Intervention Types"
             data={w.intervention_type_distribution}
+            emptyText="No operator interventions in this window"
           />
         </div>
       )}
+      <p className="text-[10px] text-slate-700 pt-2 border-t border-[color:var(--oc-border-soft)]">
+        Data as of {fmtGeneratedAt(data.generated_at)}
+      </p>
     </div>
   );
 }

@@ -507,8 +507,8 @@ describe('charts tolerate empty and null data', () => {
     (analyticsAPI.getExecution as Mock).mockResolvedValue({ data: execution });
     (analyticsAPI.getOperators as Mock).mockResolvedValue({ data: operators });
     await renderDashboard();
-    // Chart shows empty state text
-    expect(container.textContent).toContain('No knowledge items');
+    // Chart shows improved empty state text
+    expect(container.textContent).toContain('No knowledge retrievals in this window');
   });
 
   it('renders gracefully when queue latency values are null', async () => {
