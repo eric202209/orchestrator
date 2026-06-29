@@ -12,6 +12,7 @@ import type {
   KnowledgeAnalytics,
   ExecutionAnalytics,
   OperatorAnalytics,
+  DecisionAnalytics,
 } from '@/types/api';
 
 vi.mock('@/api/client', () => ({
@@ -21,6 +22,7 @@ vi.mock('@/api/client', () => ({
     getKnowledge: vi.fn(),
     getExecution: vi.fn(),
     getOperators: vi.fn(),
+    getDecision: vi.fn(),
   },
 }));
 
@@ -123,6 +125,21 @@ const operators: OperatorAnalytics = {
   metrics_version: 1,
 };
 
+const decisionWindow = {
+  successful_recovery_strategies: [],
+  repeated_failures: [],
+  knowledge_effectiveness: [],
+  coordinator_reliability: [],
+  project_reliability: [],
+  improvement_opportunities: [],
+};
+
+const decision: DecisionAnalytics = {
+  windows: { '7d': decisionWindow, '30d': decisionWindow, all_time: decisionWindow },
+  generated_at: '2026-06-27T00:00:00Z',
+  metrics_version: 1,
+};
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 function setupAllMocks() {
@@ -131,6 +148,7 @@ function setupAllMocks() {
   (analyticsAPI.getKnowledge as Mock).mockResolvedValue({ data: knowledge });
   (analyticsAPI.getExecution as Mock).mockResolvedValue({ data: execution });
   (analyticsAPI.getOperators as Mock).mockResolvedValue({ data: operators });
+  (analyticsAPI.getDecision as Mock).mockResolvedValue({ data: decision });
 }
 
 let container: HTMLDivElement;
@@ -141,6 +159,7 @@ beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
+  (analyticsAPI.getDecision as Mock).mockResolvedValue({ data: decision });
 });
 
 afterEach(() => {
@@ -542,8 +561,8 @@ describe('footer metadata', () => {
     setupAllMocks();
     await render();
     const occurrences = (container.textContent ?? '').split('Data as of').length - 1;
-    // Five sections each get a footer
-    expect(occurrences).toBe(5);
+    // Six sections each get a footer
+    expect(occurrences).toBe(6);
   });
 });
 
@@ -594,5 +613,6 @@ describe('no extra backend calls from polish additions', () => {
     expect((analyticsAPI.getKnowledge as Mock).mock.calls.length).toBe(1);
     expect((analyticsAPI.getExecution as Mock).mock.calls.length).toBe(1);
     expect((analyticsAPI.getOperators as Mock).mock.calls.length).toBe(1);
+    expect((analyticsAPI.getDecision as Mock).mock.calls.length).toBe(1);
   });
 });

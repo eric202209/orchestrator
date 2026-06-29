@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.dependencies import get_current_admin_user, get_db
+from app.services.analytics.decision_analytics_service import DecisionAnalyticsService
 from app.services.analytics.execution_analytics_service import ExecutionAnalyticsService
 from app.services.analytics.failure_analytics_service import FailureAnalyticsService
 from app.services.analytics.knowledge_analytics_service import KnowledgeAnalyticsService
@@ -88,3 +89,36 @@ def get_operator_analytics(
     Sources: intervention_requests, sessions only.
     """
     return OperatorAnalyticsService(db).compute()
+
+
+@router.get("/decision")
+def get_decision_analytics(
+    current_user=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Recommendation-oriented analytics derived only from existing evidence.
+
+    Read-only. No writes. No caching. No background jobs.
+    Sources: sessions, projects, task_executions, interventions, knowledge usage,
+    and orchestration event journals.
+    """
+    return DecisionAnalyticsService(db).compute()
+
+
+@router.get("/decision/drilldown")
+def get_decision_analytics_drilldown(
+    kind: str,
+    target: str,
+    window: Optional[str] = "all_time",
+    current_user=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Deterministic evidence drilldown for one decision analytics item.
+
+    Read-only. No writes. No caching. No background jobs.
+    """
+    return DecisionAnalyticsService(db).drilldown(
+        kind=kind,
+        target=target,
+        window=window or "all_time",
+    )

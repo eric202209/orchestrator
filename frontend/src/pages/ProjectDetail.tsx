@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { projectsAPI, tasksAPI, sessionsAPI } from '../api/client';
 import type { ChangeSetReviewDecision, Project, Task, Session, Page } from '../types/api';
@@ -157,7 +157,7 @@ function ProjectDetail() {
     return items;
   };
 
-  const loadReviewTaskDetails = async (
+  const loadReviewTaskDetails = useCallback(async (
     workspace: typeof workspaceOverview,
     visibleTasks: Task[],
   ) => {
@@ -191,7 +191,7 @@ function ProjectDetail() {
           .map((task) => [task.id, task]),
       ),
     );
-  };
+  }, []);
 
   const taskPageParams = (page: number) => ({
     page,
@@ -237,7 +237,7 @@ function ProjectDetail() {
     };
 
     loadProjectData();
-  }, [id, navigate]);
+  }, [id, navigate, loadReviewTaskDetails]);
 
   if (error) {
     return (

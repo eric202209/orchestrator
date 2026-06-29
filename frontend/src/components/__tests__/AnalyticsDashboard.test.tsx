@@ -12,6 +12,7 @@ import type {
   KnowledgeAnalytics,
   ExecutionAnalytics,
   OperatorAnalytics,
+  DecisionAnalytics,
 } from '@/types/api';
 
 vi.mock('@/api/client', () => ({
@@ -21,6 +22,7 @@ vi.mock('@/api/client', () => ({
     getKnowledge: vi.fn(),
     getExecution: vi.fn(),
     getOperators: vi.fn(),
+    getDecision: vi.fn(),
   },
 }));
 
@@ -135,6 +137,65 @@ const operators: OperatorAnalytics = {
   metrics_version: 1,
 };
 
+const decisionWindow = {
+  successful_recovery_strategies: [
+    { repair_type: 'planning_repair', attempts: 5, successes: 3, success_rate: 0.6 },
+  ],
+  repeated_failures: [
+    { failure_signature: 'Context Overflow', occurrences: 37, projects: 2, sessions: 5 },
+  ],
+  knowledge_effectiveness: [
+    {
+      knowledge_item_id: 'ki-1',
+      title: 'Python typing guide',
+      retrievals: 8,
+      success_contribution: 4,
+      confidence: 0.9,
+      effectiveness: 0.67,
+      score: 0.603,
+    },
+  ],
+  coordinator_reliability: [
+    {
+      coordinator: 'PlanningCoordinator',
+      invocations: 10,
+      failures: 4,
+      recovery_rate: 0.42,
+      average_duration_seconds: 12.5,
+    },
+  ],
+  project_reliability: [],
+  improvement_opportunities: [
+    {
+      kind: 'coordinator',
+      target: 'PlanningCoordinator',
+      metric_label: 'Failure rate',
+      metric_value: 0.4,
+      confidence: 1,
+      recommendation: 'Review PlanningCoordinator prompt and recovery policy.',
+      rationale: 'Coordinator failures are high relative to observed invocations.',
+      severity: 'high',
+      evidence: {
+        sample_size: 10,
+        affected_projects: [1, 2],
+        affected_sessions: [11, 12, 13],
+        supporting_metrics: {
+          invocations: 10,
+          failures: 4,
+          failure_rate: 0.4,
+          recovery_rate: 0.42,
+        },
+      },
+    },
+  ],
+};
+
+const decision: DecisionAnalytics = {
+  windows: { '7d': decisionWindow, '30d': decisionWindow, all_time: decisionWindow },
+  generated_at: '2026-06-27T00:00:00Z',
+  metrics_version: 1,
+};
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 function setupAllMocks() {
@@ -143,6 +204,7 @@ function setupAllMocks() {
   (analyticsAPI.getKnowledge as Mock).mockResolvedValue({ data: knowledge });
   (analyticsAPI.getExecution as Mock).mockResolvedValue({ data: execution });
   (analyticsAPI.getOperators as Mock).mockResolvedValue({ data: operators });
+  (analyticsAPI.getDecision as Mock).mockResolvedValue({ data: decision });
 }
 
 function setupPendingMocks() {
@@ -152,6 +214,7 @@ function setupPendingMocks() {
   (analyticsAPI.getKnowledge as Mock).mockReturnValue(pending);
   (analyticsAPI.getExecution as Mock).mockReturnValue(pending);
   (analyticsAPI.getOperators as Mock).mockReturnValue(pending);
+  (analyticsAPI.getDecision as Mock).mockReturnValue(pending);
 }
 
 let container: HTMLDivElement;
@@ -162,6 +225,7 @@ beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
+  (analyticsAPI.getDecision as Mock).mockResolvedValue({ data: decision });
 });
 
 afterEach(() => {
@@ -199,15 +263,40 @@ describe('AnalyticsDashboard', () => {
       expect(skeletons.length).toBeGreaterThan(0);
     });
 
-    it('shows all five section headings after data loads', async () => {
+    it('shows all six section headings after data loads', async () => {
       setupAllMocks();
       await render();
       const text = container.textContent ?? '';
+      expect(text).toContain('Decision Intelligence');
       expect(text).toContain('Operational Health');
       expect(text).toContain('Failure Analytics');
       expect(text).toContain('Knowledge Analytics');
       expect(text).toContain('Execution Analytics');
       expect(text).toContain('Operator Analytics');
+    });
+  });
+
+  describe('decision intelligence section', () => {
+    it('expands recommendation evidence with confidence, samples, and supporting metrics', async () => {
+      setupAllMocks();
+      await render();
+
+      expect(container.textContent).toContain('10 samples · 100% confidence');
+      const evidenceButton = Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent?.includes('Evidence'),
+      );
+      expect(evidenceButton).toBeTruthy();
+
+      await act(async () => {
+        evidenceButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+
+      const text = container.textContent ?? '';
+      expect(text).toContain('Coordinator failures are high relative to observed invocations.');
+      expect(text).toContain('Affected Projects');
+      expect(text).toContain('Affected Sessions');
+      expect(text).toContain('failure rate');
+      expect(text).toContain('40%');
     });
   });
 
@@ -614,6 +703,16 @@ describe('AnalyticsDashboard', () => {
       (analyticsAPI.getKnowledge as Mock).mockResolvedValue({ data: emptyKn });
       (analyticsAPI.getExecution as Mock).mockResolvedValue({ data: execution });
       (analyticsAPI.getOperators as Mock).mockResolvedValue({ data: operators });
+      (analyticsAPI.getDecision as Mock).mockResolvedValue({
+        data: {
+          ...decision,
+          windows: {
+            '7d': { ...decisionWindow, knowledge_effectiveness: [] },
+            '30d': { ...decisionWindow, knowledge_effectiveness: [] },
+            all_time: { ...decisionWindow, knowledge_effectiveness: [] },
+          },
+        },
+      });
       await render();
       // Tables section not rendered when both lists are empty
       expect(container.textContent).not.toContain('Python typing guide');
@@ -621,14 +720,16 @@ describe('AnalyticsDashboard', () => {
   });
 
   describe('all endpoints fail', () => {
-    it('shows all five error panels', async () => {
+    it('shows all six error panels', async () => {
       const err = new Error('Network');
       (analyticsAPI.getOperational as Mock).mockRejectedValue(err);
       (analyticsAPI.getFailures as Mock).mockRejectedValue(err);
       (analyticsAPI.getKnowledge as Mock).mockRejectedValue(err);
       (analyticsAPI.getExecution as Mock).mockRejectedValue(err);
       (analyticsAPI.getOperators as Mock).mockRejectedValue(err);
+      (analyticsAPI.getDecision as Mock).mockRejectedValue(err);
       await render();
+      expect(container.textContent).toContain('Failed to load decision intelligence');
       expect(container.textContent).toContain('Failed to load operational data');
       expect(container.textContent).toContain('Failed to load failure data');
       expect(container.textContent).toContain('Failed to load knowledge data');
@@ -638,7 +739,7 @@ describe('AnalyticsDashboard', () => {
   });
 
   describe('API contract compatibility', () => {
-    it('calls all five analytics endpoints on mount', async () => {
+    it('calls all six analytics endpoints on mount', async () => {
       setupAllMocks();
       await render();
       expect(analyticsAPI.getOperational).toHaveBeenCalledTimes(1);
@@ -646,6 +747,7 @@ describe('AnalyticsDashboard', () => {
       expect(analyticsAPI.getKnowledge).toHaveBeenCalledTimes(1);
       expect(analyticsAPI.getExecution).toHaveBeenCalledTimes(1);
       expect(analyticsAPI.getOperators).toHaveBeenCalledTimes(1);
+      expect(analyticsAPI.getDecision).toHaveBeenCalledTimes(1);
     });
 
     it('calls endpoints with no arguments', async () => {
@@ -656,6 +758,7 @@ describe('AnalyticsDashboard', () => {
       expect((analyticsAPI.getKnowledge as Mock).mock.calls[0]).toHaveLength(0);
       expect((analyticsAPI.getExecution as Mock).mock.calls[0]).toHaveLength(0);
       expect((analyticsAPI.getOperators as Mock).mock.calls[0]).toHaveLength(0);
+      expect((analyticsAPI.getDecision as Mock).mock.calls[0]).toHaveLength(0);
     });
   });
 });

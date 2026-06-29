@@ -15,6 +15,7 @@ import type {
   KnowledgeAnalytics,
   ExecutionAnalytics,
   OperatorAnalytics,
+  DecisionAnalytics,
 } from '@/types/api';
 
 vi.mock('@/api/client', () => ({
@@ -24,6 +25,7 @@ vi.mock('@/api/client', () => ({
     getKnowledge: vi.fn(),
     getExecution: vi.fn(),
     getOperators: vi.fn(),
+    getDecision: vi.fn(),
   },
 }));
 
@@ -126,6 +128,21 @@ const operators: OperatorAnalytics = {
   metrics_version: 1,
 };
 
+const decisionWindow = {
+  successful_recovery_strategies: [],
+  repeated_failures: [],
+  knowledge_effectiveness: [],
+  coordinator_reliability: [],
+  project_reliability: [],
+  improvement_opportunities: [],
+};
+
+const decision: DecisionAnalytics = {
+  windows: { '7d': decisionWindow, '30d': decisionWindow, all_time: decisionWindow },
+  generated_at: '2026-06-27T00:00:00Z',
+  metrics_version: 1,
+};
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 function setupAllMocks() {
@@ -134,6 +151,7 @@ function setupAllMocks() {
   (analyticsAPI.getKnowledge as Mock).mockResolvedValue({ data: knowledge });
   (analyticsAPI.getExecution as Mock).mockResolvedValue({ data: execution });
   (analyticsAPI.getOperators as Mock).mockResolvedValue({ data: operators });
+  (analyticsAPI.getDecision as Mock).mockResolvedValue({ data: decision });
 }
 
 let container: HTMLDivElement;
@@ -144,6 +162,7 @@ beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
+  (analyticsAPI.getDecision as Mock).mockResolvedValue({ data: decision });
 });
 
 afterEach(() => {
@@ -613,9 +632,9 @@ describe('window switching updates current-window chart data', () => {
   });
 });
 
-// ── Dashboard integration: five sections render independently ─────────────────
+// ── Dashboard integration: analytics sections render independently ────────────
 
-describe('all five sections render independently after chart additions', () => {
+describe('all analytics sections render independently after chart additions', () => {
   it('knowledge section renders even if operational fails', async () => {
     (analyticsAPI.getOperational as Mock).mockRejectedValue(new Error('Network'));
     (analyticsAPI.getFailures as Mock).mockResolvedValue({ data: failures });

@@ -47,6 +47,9 @@ import type {
   KnowledgeAnalytics,
   ExecutionAnalytics,
   OperatorAnalytics,
+  DecisionAnalytics,
+  DecisionDrilldown,
+  AnalyticsWindow,
 } from "../types/api";
 
 export type { Page, DashboardAttention };
@@ -1254,6 +1257,12 @@ export const analyticsAPI = {
   getKnowledge: () => apiClient.get<KnowledgeAnalytics>('/analytics/knowledge'),
   getExecution: () => apiClient.get<ExecutionAnalytics>('/analytics/execution'),
   getOperators: () => apiClient.get<OperatorAnalytics>('/analytics/operators'),
+  getDecision: () => apiClient.get<DecisionAnalytics>('/analytics/decision'),
+  getDecisionDrilldown: (params: {
+    kind: string;
+    target: string;
+    window?: AnalyticsWindow;
+  }) => apiClient.get<DecisionDrilldown>('/analytics/decision/drilldown', { params }),
 };
 
 export const api = apiClient;

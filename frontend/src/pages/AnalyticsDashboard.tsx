@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
-import { BarChart2, RefreshCw } from 'lucide-react';
+import { BarChart2, ChevronDown, RefreshCw } from 'lucide-react';
 import { analyticsAPI } from '@/api/client';
 import type {
   OperationalAnalytics,
@@ -13,7 +13,9 @@ import type {
   ExecutionWindow,
   OperatorAnalytics,
   OperatorWindow,
+  DecisionAnalytics,
   AnalyticsWindow,
+  DecisionImprovementOpportunity,
 } from '@/types/api';
 import {
   AnalyticsCard,
@@ -103,6 +105,200 @@ function operatorSummary(w: OperatorWindow): string {
   if (w.autonomy_rate >= 0.8) return 'System is operating with high autonomy.';
   if (w.autonomy_rate >= 0.5) return 'Moderate operator involvement — some sessions need guidance.';
   return 'High operator intervention rate — many sessions require attention.';
+}
+
+function fmtDecisionMetric(label: string, value: number | null | undefined): string {
+  if (value == null) return '—';
+  if (label.toLowerCase().includes('rate') || label.toLowerCase().includes('effectiveness')) {
+    return fmtPct(value);
+  }
+  return fmtNum(value);
+}
+
+function decisionSummary(data: DecisionAnalytics, win: AnalyticsWindow): string {
+  const w = data.windows[win];
+  const count = w.improvement_opportunities.length;
+  if (count === 0) return 'No recommendation candidates in this window.';
+  return `${count} evidence-backed improvement ${count === 1 ? 'candidate' : 'candidates'} in this window.`;
+}
+
+function fmtUnknownMetric(value: unknown): string {
+  if (value == null) return '—';
+  if (typeof value === 'number') {
+    if (value >= 0 && value <= 1) return fmtPct(value);
+    return fmtNum(value);
+  }
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  return String(value);
+}
+
+function EvidencePanel({ item }: { item: DecisionImprovementOpportunity }) {
+  const metrics = Object.entries(item.evidence.supporting_metrics);
+  return (
+    <div className="mt-3 rounded-md border border-[color:var(--oc-border-soft)] bg-black/10 p-3 space-y-3">
+      <p className="text-xs text-slate-300">{item.rationale}</p>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <MetricCard label="Confidence" value={fmtPct(item.confidence)} />
+        <MetricCard label="Sample Size" value={fmtNum(item.evidence.sample_size)} />
+        <MetricCard label="Projects" value={fmtNum(item.evidence.affected_projects.length)} />
+        <MetricCard label="Sessions" value={fmtNum(item.evidence.affected_sessions.length)} />
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <p className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Affected Projects</p>
+          <p className="text-xs text-slate-300 break-words">
+            {item.evidence.affected_projects.length > 0 ? item.evidence.affected_projects.join(', ') : 'None recorded'}
+          </p>
+        </div>
+        <div>
+          <p className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Affected Sessions</p>
+          <p className="text-xs text-slate-300 break-words">
+            {item.evidence.affected_sessions.length > 0 ? item.evidence.affected_sessions.join(', ') : 'None recorded'}
+          </p>
+        </div>
+      </div>
+      <div>
+        <p className="text-[10px] uppercase tracking-wide text-slate-500 mb-2">Supporting Metrics</p>
+        {metrics.length > 0 ? (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1">
+            {metrics.map(([key, value]) => (
+              <div key={key} className="flex items-center justify-between gap-3 text-xs">
+                <span className="text-slate-500 truncate">{key.replace(/_/g, ' ')}</span>
+                <span className="text-slate-300 tabular-nums">{fmtUnknownMetric(value)}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs text-slate-600">No supporting metrics recorded.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DecisionSection({
+  data,
+  loading,
+  error,
+  window: win,
+}: {
+  data: DecisionAnalytics | null;
+  loading: boolean;
+  error: boolean;
+  window: AnalyticsWindow;
+}) {
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  if (loading) return <LoadingPanel />;
+  if (error) return <ErrorPanel message="Failed to load decision intelligence" />;
+  if (!data) return null;
+
+  const w = data.windows[win];
+  const topOpportunities = w.improvement_opportunities.slice(0, 4);
+  const topRecovery = w.successful_recovery_strategies.slice(0, 3);
+  const topKnowledge = w.knowledge_effectiveness.slice(0, 3);
+
+  return (
+    <div className="space-y-4">
+      <p className="text-xs text-slate-500">{decisionSummary(data, win)}</p>
+      {topOpportunities.length > 0 ? (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+          {topOpportunities.map((item) => (
+            <div
+              key={`${item.kind}-${item.target}-${item.metric_label}`}
+              className="border border-[color:var(--oc-border-soft)] rounded-md p-3 bg-[color:var(--oc-surface-muted)]"
+            >
+              {(() => {
+                const itemKey = `${item.kind}-${item.target}-${item.metric_label}`;
+                const isExpanded = expanded === itemKey;
+                return (
+                  <>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-slate-200 truncate">{item.target}</p>
+                  <p className="text-[10px] uppercase tracking-wide text-slate-500">{item.kind.replace('_', ' ')}</p>
+                </div>
+                <span className={`text-[10px] uppercase ${item.severity === 'high' ? 'text-red-300' : 'text-amber-300'}`}>
+                  {item.severity}
+                </span>
+              </div>
+              <div className="mt-3 grid grid-cols-[1fr_auto] items-end gap-3">
+                <div>
+                  <p className="text-xs text-slate-500">{item.metric_label}</p>
+                  <p className="text-xl font-semibold text-white tabular-nums">
+                    {fmtDecisionMetric(item.metric_label, item.metric_value)}
+                  </p>
+                </div>
+                <p className="text-lg text-slate-500">↓</p>
+              </div>
+              <p className="mt-2 text-xs text-slate-300">{item.recommendation}</p>
+              <div className="mt-2 flex items-center justify-between gap-3">
+                <p className="text-[10px] text-slate-600">
+                  {fmtNum(item.evidence.sample_size)} samples · {fmtPct(item.confidence)} confidence
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setExpanded(isExpanded ? null : itemKey)}
+                  className="inline-flex items-center gap-1 text-[10px] text-[color:var(--oc-accent)] hover:underline"
+                  aria-expanded={isExpanded}
+                >
+                  Evidence
+                  <ChevronDown className={`h-3 w-3 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                </button>
+              </div>
+              {isExpanded && <EvidencePanel item={item} />}
+                  </>
+                );
+              })()}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="text-xs text-slate-500">No improvement opportunities in this window.</p>
+      )}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 pt-4 border-t border-[color:var(--oc-border-soft)]">
+        <div>
+          <h3 className="text-xs font-semibold text-slate-300 mb-2">Recovery Strategies</h3>
+          <div className="space-y-2">
+            {topRecovery.map((item) => (
+              <div key={item.repair_type} className="flex items-center justify-between gap-2 text-xs">
+                <span className="text-slate-400 truncate">{item.repair_type}</span>
+                <span className="text-slate-200 tabular-nums">{fmtPct(item.success_rate)}</span>
+              </div>
+            ))}
+            {topRecovery.length === 0 && <p className="text-xs text-slate-600">No recovery evidence.</p>}
+          </div>
+        </div>
+        <div>
+          <h3 className="text-xs font-semibold text-slate-300 mb-2">Knowledge Leaderboard</h3>
+          <div className="space-y-2">
+            {topKnowledge.map((item) => (
+              <div key={item.knowledge_item_id} className="flex items-center justify-between gap-2 text-xs">
+                <span className="text-slate-400 truncate">{item.title || item.knowledge_item_id}</span>
+                <span className="text-slate-200 tabular-nums">{fmtPct(item.effectiveness)}</span>
+              </div>
+            ))}
+            {topKnowledge.length === 0 && <p className="text-xs text-slate-600">No knowledge evidence.</p>}
+          </div>
+        </div>
+        <div>
+          <h3 className="text-xs font-semibold text-slate-300 mb-2">Repeated Failures</h3>
+          <div className="space-y-2">
+            {w.repeated_failures.slice(0, 3).map((item) => (
+              <div key={item.failure_signature} className="flex items-center justify-between gap-2 text-xs">
+                <span className="text-slate-400 truncate">{item.failure_signature}</span>
+                <span className="text-slate-200 tabular-nums">{fmtNum(item.occurrences)}</span>
+              </div>
+            ))}
+            {w.repeated_failures.length === 0 && <p className="text-xs text-slate-600">No repeated failures.</p>}
+          </div>
+        </div>
+      </div>
+      <p className="text-[10px] text-slate-700 pt-2 border-t border-[color:var(--oc-border-soft)]">
+        Data as of {fmtGeneratedAt(data.generated_at)}
+      </p>
+    </div>
+  );
 }
 
 // ── Section: Operational Health ───────────────────────────────────────────────
@@ -560,12 +756,17 @@ export default function AnalyticsDashboard() {
   const [operatorsLoading, setOperatorsLoading] = useState(true);
   const [operatorsError, setOperatorsError] = useState(false);
 
+  const [decision, setDecision] = useState<DecisionAnalytics | null>(null);
+  const [decisionLoading, setDecisionLoading] = useState(true);
+  const [decisionError, setDecisionError] = useState(false);
+
   const anyLoading =
     operationalLoading ||
     failuresLoading ||
     knowledgeLoading ||
     executionLoading ||
-    operatorsLoading;
+    operatorsLoading ||
+    decisionLoading;
 
   const fetchAll = useCallback(async () => {
     setOperationalLoading(true);
@@ -573,13 +774,15 @@ export default function AnalyticsDashboard() {
     setKnowledgeLoading(true);
     setExecutionLoading(true);
     setOperatorsLoading(true);
+    setDecisionLoading(true);
 
-    const [op, fa, kn, ex, oa] = await Promise.allSettled([
+    const [op, fa, kn, ex, oa, di] = await Promise.allSettled([
       analyticsAPI.getOperational(),
       analyticsAPI.getFailures(),
       analyticsAPI.getKnowledge(),
       analyticsAPI.getExecution(),
       analyticsAPI.getOperators(),
+      analyticsAPI.getDecision(),
     ]);
 
     if (op.status === 'fulfilled') {
@@ -622,6 +825,14 @@ export default function AnalyticsDashboard() {
     }
     setOperatorsLoading(false);
 
+    if (di.status === 'fulfilled') {
+      setDecision(di.value.data);
+      setDecisionError(false);
+    } else {
+      setDecisionError(true);
+    }
+    setDecisionLoading(false);
+
     setLastRefreshed(new Date().toISOString());
   }, []);
 
@@ -656,6 +867,16 @@ export default function AnalyticsDashboard() {
           </button>
         </div>
       </div>
+
+      {/* Decision Intelligence */}
+      <AnalyticsCard title="Decision Intelligence">
+        <DecisionSection
+          data={decision}
+          loading={decisionLoading}
+          error={decisionError}
+          window={window}
+        />
+      </AnalyticsCard>
 
       {/* Operational Health */}
       <AnalyticsCard title="Operational Health">

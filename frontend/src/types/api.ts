@@ -1163,6 +1163,102 @@ export interface OperatorAnalytics {
   metrics_version: number;
 }
 
+export interface DecisionRecoveryStrategy {
+  repair_type: string;
+  attempts: number;
+  successes: number;
+  success_rate: number | null;
+  affected_project_ids?: number[];
+  affected_session_ids?: number[];
+}
+
+export interface DecisionRepeatedFailure {
+  failure_signature: string;
+  occurrences: number;
+  projects: number;
+  sessions: number;
+  affected_project_ids?: number[];
+  affected_session_ids?: number[];
+}
+
+export interface DecisionKnowledgeEffectiveness {
+  knowledge_item_id: string;
+  title: string | null;
+  retrievals: number;
+  success_contribution: number;
+  confidence: number | null;
+  effectiveness: number | null;
+  score: number;
+  affected_project_ids?: number[];
+  affected_session_ids?: number[];
+}
+
+export interface DecisionCoordinatorReliability {
+  coordinator: string;
+  invocations: number;
+  failures: number;
+  recovery_rate: number | null;
+  average_duration_seconds: number | null;
+  affected_project_ids?: number[];
+  affected_session_ids?: number[];
+}
+
+export interface DecisionProjectReliability {
+  project_id: number;
+  project_name: string;
+  session_success_rate: number | null;
+  intervention_rate: number | null;
+  autonomy_rate: number | null;
+  recovery_rate: number | null;
+  repair_churn: number;
+  terminal_sessions?: number;
+  affected_project_ids?: number[];
+  affected_session_ids?: number[];
+}
+
+export interface DecisionEvidence {
+  sample_size: number;
+  affected_projects: number[];
+  affected_sessions: number[];
+  supporting_metrics: Record<string, unknown>;
+}
+
+export interface DecisionImprovementOpportunity {
+  kind: 'knowledge' | 'coordinator' | 'project' | 'failure_signature' | string;
+  target: string;
+  metric_label: string;
+  metric_value: number | null;
+  confidence: number;
+  recommendation: string;
+  rationale: string;
+  severity: 'high' | 'medium' | 'low' | string;
+  evidence: DecisionEvidence;
+}
+
+export interface DecisionDrilldown {
+  kind: string;
+  target: string;
+  window: AnalyticsWindow;
+  found: boolean;
+  item: Record<string, unknown> | null;
+  evidence: DecisionEvidence;
+}
+
+export interface DecisionWindow {
+  successful_recovery_strategies: DecisionRecoveryStrategy[];
+  repeated_failures: DecisionRepeatedFailure[];
+  knowledge_effectiveness: DecisionKnowledgeEffectiveness[];
+  coordinator_reliability: DecisionCoordinatorReliability[];
+  project_reliability: DecisionProjectReliability[];
+  improvement_opportunities: DecisionImprovementOpportunity[];
+}
+
+export interface DecisionAnalytics {
+  windows: { '7d': DecisionWindow; '30d': DecisionWindow; all_time: DecisionWindow };
+  generated_at: string;
+  metrics_version: number;
+}
+
 export type AnalyticsWindow = '7d' | '30d' | 'all_time';
 
 export interface HumanGuidanceRendered {
