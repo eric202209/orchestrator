@@ -84,7 +84,7 @@ function TasksList() {
 
   // Projects fetch (small, used for project name display)
   useEffect(() => {
-    projectsAPI.getAll().then((res) => {
+    projectsAPI.getAll({ page: 1, per_page: 200, order_by: 'name', order_dir: 'asc' }).then((res) => {
       const data = res.data;
       const list = Array.isArray(data) ? data : (data as Page<Project>).items ?? [];
       const map: Record<number, Project> = {};

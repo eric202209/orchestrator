@@ -35,7 +35,7 @@ function NewSession() {
   const fetchProjects = useCallback(async () => {
     try {
       setLoading(true); // Show loading while fetching
-      const response = await projectsAPI.getAll();
+      const response = await projectsAPI.getAll({ page: 1, per_page: 200, order_by: 'name', order_dir: 'asc' });
       const projectItems = pageItems<Project>(response.data);
       setProjects(projectItems);
       

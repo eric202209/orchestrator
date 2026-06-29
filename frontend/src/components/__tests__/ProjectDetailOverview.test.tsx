@@ -16,9 +16,10 @@ vi.mock('@/api/client', () => ({
     cleanupWorkspaces: vi.fn(),
     restoreWorkspaceArchive: vi.fn(),
   },
-  tasksAPI: {
-    getByProject: vi.fn(),
-    create: vi.fn(),
+	  tasksAPI: {
+	    getByProject: vi.fn(),
+	    getById: vi.fn(),
+	    create: vi.fn(),
     delete: vi.fn(),
     update: vi.fn(),
     retry: vi.fn(),
@@ -121,6 +122,18 @@ function makeSessionPage(sessions: ReturnType<typeof makeSession>[]) {
   };
 }
 
+function makeTaskPage(tasks: ReturnType<typeof makeTask>[], overrides?: { total?: number; page?: number; total_pages?: number }) {
+  return {
+    items: tasks,
+    page: overrides?.page ?? 1,
+    per_page: 25,
+    total: overrides?.total ?? tasks.length,
+    total_pages: overrides?.total_pages ?? 1,
+    has_next: (overrides?.page ?? 1) < (overrides?.total_pages ?? 1),
+    has_previous: (overrides?.page ?? 1) > 1,
+  };
+}
+
 function setupMocks({
   project = makeProject(),
   sessions = [makeSession()],
@@ -133,7 +146,11 @@ function setupMocks({
   workspace?: ReturnType<typeof makeWorkspaceOverview>;
 } = {}) {
   (projectsAPI.getById as Mock).mockResolvedValue({ data: project });
-  (tasksAPI.getByProject as Mock).mockResolvedValue({ data: tasks });
+  (tasksAPI.getByProject as Mock).mockResolvedValue({ data: makeTaskPage(tasks) });
+  (tasksAPI.getById as Mock).mockImplementation((taskId: number) => {
+    const task = tasks.find((item) => item.id === taskId) || makeTask({ id: taskId });
+    return Promise.resolve({ data: task });
+  });
   (sessionsAPI.getByProject as Mock).mockResolvedValue({ data: makeSessionPage(sessions) });
   (projectsAPI.getWorkspaceOverview as Mock).mockResolvedValue({ data: workspace });
 }
@@ -448,6 +465,75 @@ describe('ProjectDetail — Overview tab (default)', () => {
     await render();
     const overviewTab = container.querySelector('[data-testid="overview-tab"]');
     expect(overviewTab?.textContent).toContain('No sessions yet');
+  });
+});
+
+// ── Tasks tab pagination ───────────────────────────────────────────────────────
+
+describe('ProjectDetail — Tasks tab pagination', () => {
+  it('loads project tasks in paginated mode with project ordering', async () => {
+    setupMocks({ tasks: [makeTask({ id: 1, title: 'Ordered Task' })] });
+    await render();
+    expect(tasksAPI.getByProject).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({
+        page: 1,
+        per_page: 25,
+        order_by: 'plan_position',
+        order_dir: 'asc',
+      }),
+    );
+  });
+
+  it('shows pagination controls when task count exceeds one page', async () => {
+    setupMocks({ tasks: [makeTask({ id: 1, title: 'Page One Task' })] });
+    (tasksAPI.getByProject as Mock).mockResolvedValueOnce({
+      data: makeTaskPage([makeTask({ id: 1, title: 'Page One Task' })], {
+        total: 30,
+        page: 1,
+        total_pages: 2,
+      }),
+    });
+    await render();
+    const tasksTab = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Tasks',
+    ) as HTMLButtonElement;
+    await act(async () => { tasksTab.click(); });
+    expect(container.textContent).toContain('Page 1 of 2');
+    expect(container.textContent).toContain('Next');
+  });
+
+  it('fetches the next task page from the backend', async () => {
+    setupMocks({ tasks: [makeTask({ id: 1, title: 'Page One Task' })] });
+    (tasksAPI.getByProject as Mock)
+      .mockResolvedValueOnce({
+        data: makeTaskPage([makeTask({ id: 1, title: 'Page One Task' })], {
+          total: 30,
+          page: 1,
+          total_pages: 2,
+        }),
+      })
+      .mockResolvedValueOnce({
+        data: makeTaskPage([makeTask({ id: 26, title: 'Page Two Task' })], {
+          total: 30,
+          page: 2,
+          total_pages: 2,
+        }),
+      });
+    await render();
+    const tasksTab = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Tasks',
+    ) as HTMLButtonElement;
+    await act(async () => { tasksTab.click(); });
+    const nextButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Next',
+    ) as HTMLButtonElement;
+    await act(async () => { nextButton.click(); });
+    expect(tasksAPI.getByProject).toHaveBeenLastCalledWith(
+      1,
+      expect.objectContaining({ page: 2, per_page: 25 }),
+    );
+    expect(container.textContent).toContain('Page Two Task');
   });
 });
 

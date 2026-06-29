@@ -86,8 +86,8 @@ function ProjectsList() {
   const fetchProjects = useCallback(async () => {
     try {
       const [projectsResponse, tasksResponse] = await Promise.all([
-        projectsAPI.getAll(),
-        tasksAPI.getAll(),
+        projectsAPI.getAll({ page: 1, per_page: 200, order_by: 'created_at', order_dir: 'desc' }),
+        tasksAPI.getAll({ page: 1, per_page: 200, order_by: 'created_at', order_dir: 'desc' }),
       ]);
       setProjects(pageItems<Project>(projectsResponse.data));
       const counts: Record<number, number> = {};

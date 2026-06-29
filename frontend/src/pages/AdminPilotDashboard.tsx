@@ -581,7 +581,7 @@ export default function AdminPilotDashboard() {
 
   useEffect(() => {
     let cancelled = false;
-    projectsAPI.getAll({ limit: 100 }).then((r) => {
+    projectsAPI.getAll({ page: 1, per_page: 100, order_by: 'name', order_dir: 'asc' }).then((r) => {
       if (cancelled) return;
       const projectItems = pageItems(r.data);
       setProjects(projectItems);

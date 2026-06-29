@@ -103,6 +103,13 @@ const TERMINAL_SESSION_STATUSES = new Set(['stopped', 'failed', 'cancelled', 'ca
 const pageItems = <T,>(data: Page<T> | T[] | null | undefined): T[] =>
   Array.isArray(data) ? data : data?.items ?? [];
 
+const SESSION_TASK_LOOKUP_PARAMS = {
+  page: 1,
+  per_page: 200,
+  order_by: 'plan_position',
+  order_dir: 'asc',
+} as const;
+
 const cleanJsonLogMessage = (message: string): string => {
   const trimmed = message.trim();
   if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) {
@@ -1599,7 +1606,7 @@ export default function SessionDetail() {
       const updated = await sessionsAPI.getById(Number(sessionId));
       setSession(updated.data);
       if (updated.data.project_id) {
-        const tasksRes = await tasksAPI.getByProject(updated.data.project_id);
+        const tasksRes = await tasksAPI.getByProject(updated.data.project_id, SESSION_TASK_LOOKUP_PARAMS);
         const taskItems = pageItems<Task>(tasksRes.data);
         setTasks(taskItems);
         await loadTimelineEvents(updated.data.id, taskItems);
@@ -1658,7 +1665,7 @@ export default function SessionDetail() {
     const loadSessionData = async () => {
       try {
         const sessionRes = await sessionsAPI.getById(Number(sessionId));
-        const tasksRes = await tasksAPI.getByProject(sessionRes.data.project_id || 0);
+        const tasksRes = await tasksAPI.getByProject(sessionRes.data.project_id || 0, SESSION_TASK_LOOKUP_PARAMS);
         const projectRes = await projectsAPI.getById(sessionRes.data.project_id || 0);
 
         if (abortController.signal.aborted) return;
@@ -1750,7 +1757,7 @@ export default function SessionDetail() {
         });
 
         if (currentSession.data.project_id) {
-          const currentTasks = await tasksAPI.getByProject(currentSession.data.project_id);
+          const currentTasks = await tasksAPI.getByProject(currentSession.data.project_id, SESSION_TASK_LOOKUP_PARAMS);
           const taskItems = pageItems<Task>(currentTasks.data);
           setTasks(taskItems);
           if (currentStatus === 'running') {
@@ -1831,7 +1838,7 @@ export default function SessionDetail() {
       console.log('Updated session:', updated.data);
       setSession(updated.data);
       if (updated.data.project_id) {
-        const tasksRes = await tasksAPI.getByProject(updated.data.project_id);
+        const tasksRes = await tasksAPI.getByProject(updated.data.project_id, SESSION_TASK_LOOKUP_PARAMS);
         const taskItems = pageItems<Task>(tasksRes.data);
         setTasks(taskItems);
         await loadTimelineEvents(updated.data.id, taskItems);
@@ -1974,7 +1981,7 @@ export default function SessionDetail() {
       const updated = await sessionsAPI.getById(Number(sessionId));
       setSession(updated.data);
       if (updated.data.project_id) {
-        const tasksRes = await tasksAPI.getByProject(updated.data.project_id);
+        const tasksRes = await tasksAPI.getByProject(updated.data.project_id, SESSION_TASK_LOOKUP_PARAMS);
         const taskItems = pageItems<Task>(tasksRes.data);
         setTasks(taskItems);
         await loadTimelineEvents(updated.data.id, taskItems);
@@ -2030,7 +2037,7 @@ export default function SessionDetail() {
       pushTimelineEvent(`Queued task ${task.id}: ${task.title}`, 'INFO');
       const [updatedSession, updatedTasks] = await Promise.all([
         sessionsAPI.getById(Number(sessionId)),
-        tasksAPI.getByProject(task.project_id),
+        tasksAPI.getByProject(task.project_id, SESSION_TASK_LOOKUP_PARAMS),
       ]);
       setSession(updatedSession.data);
       const taskItems = pageItems<Task>(updatedTasks.data);

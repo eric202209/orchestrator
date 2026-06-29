@@ -22,9 +22,12 @@ import {
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { StatusBadge, EmptyState } from '../components/ui';
+import { PaginationControls } from '../components/PaginationControls';
 
 const pageItems = <T,>(data: Page<T> | T[] | null | undefined): T[] =>
   Array.isArray(data) ? data : data?.items ?? [];
+
+const TASKS_PER_PAGE = 25;
 
 function ProjectDetail() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -33,6 +36,16 @@ function ProjectDetail() {
   const id = projectId;
   const [project, setProject] = useState<Project | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [taskPage, setTaskPage] = useState(1);
+  const [taskPageData, setTaskPageData] = useState<Omit<Page<Task>, 'items'>>({
+    page: 1,
+    per_page: TASKS_PER_PAGE,
+    total: 0,
+    total_pages: 1,
+    has_next: false,
+    has_previous: false,
+  });
+  const [reviewTaskDetails, setReviewTaskDetails] = useState<Record<number, Task>>({});
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionTotal, setSessionTotal] = useState(0);
   const [workspaceOverview, setWorkspaceOverview] = useState<{
@@ -119,6 +132,74 @@ function ProjectDetail() {
   const [queueingTaskId, setQueueingTaskId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const applyTaskPageResponse = (data: Page<Task> | Task[] | null | undefined) => {
+    const items = pageItems<Task>(data);
+    setTasks(items);
+    if (Array.isArray(data) || !data) {
+      setTaskPageData({
+        page: 1,
+        per_page: TASKS_PER_PAGE,
+        total: items.length,
+        total_pages: 1,
+        has_next: false,
+        has_previous: false,
+      });
+    } else {
+      setTaskPageData({
+        page: data.page,
+        per_page: data.per_page,
+        total: data.total,
+        total_pages: data.total_pages,
+        has_next: data.has_next,
+        has_previous: data.has_previous,
+      });
+    }
+    return items;
+  };
+
+  const loadReviewTaskDetails = async (
+    workspace: typeof workspaceOverview,
+    visibleTasks: Task[],
+  ) => {
+    const visibleTaskIds = new Set(visibleTasks.map((task) => task.id));
+    const neededIds = Array.from(
+      new Set([
+        ...(workspace?.pending_change_sets || []).map((item) => item.task_id),
+        ...(workspace?.ready_task_ids || []),
+      ]),
+    ).filter((taskId) => !visibleTaskIds.has(taskId));
+
+    if (neededIds.length === 0) {
+      setReviewTaskDetails({});
+      return;
+    }
+
+    const loaded = await Promise.all(
+      neededIds.map(async (taskId) => {
+        try {
+          const response = await tasksAPI.getById(taskId);
+          return response.data;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    setReviewTaskDetails(
+      Object.fromEntries(
+        loaded
+          .filter((task): task is Task => Boolean(task))
+          .map((task) => [task.id, task]),
+      ),
+    );
+  };
+
+  const taskPageParams = (page: number) => ({
+    page,
+    per_page: TASKS_PER_PAGE,
+    order_by: 'plan_position',
+    order_dir: 'asc',
+  } as const);
+
   useEffect(() => {
     setError(null);
     if (!id) {
@@ -131,7 +212,7 @@ function ProjectDetail() {
       try {
         const [projectRes, tasksRes, sessionsRes] = await Promise.all([
           projectsAPI.getById(Number(id)),
-          tasksAPI.getByProject(Number(id)),
+          tasksAPI.getByProject(Number(id), taskPageParams(1)),
           sessionsAPI.getByProject(Number(id), { page: 1, per_page: 25, order_by: 'created_at', order_dir: 'desc' }),
         ]);
         const workspaceRes = await projectsAPI.getWorkspaceOverview(Number(id));
@@ -139,11 +220,12 @@ function ProjectDetail() {
         setProject(projectRes.data);
         setProjectDescriptionDraft(projectRes.data.description || '');
         setProjectRulesDraft(projectRes.data.project_rules || '');
-        setTasks(pageItems<Task>(tasksRes.data));
+        const taskItems = applyTaskPageResponse(tasksRes.data);
         const sessionsData = sessionsRes.data as Page<Session>;
         setSessions(sessionsData.items ?? []);
         setSessionTotal(sessionsData.total ?? 0);
         setWorkspaceOverview(workspaceRes.data || null);
+        await loadReviewTaskDetails(workspaceRes.data || null, taskItems);
 
       } catch (err) {
         console.error('Failed to load project data:', err);
@@ -175,15 +257,18 @@ function ProjectDetail() {
     );
   }
 
-  const fetchTasks = async () => {
+  const fetchTasks = async (nextPage = taskPage) => {
     if (!id) return;
     try {
       const [response, workspaceResponse] = await Promise.all([
-        tasksAPI.getByProject(Number(id)),
+        tasksAPI.getByProject(Number(id), taskPageParams(nextPage)),
         projectsAPI.getWorkspaceOverview(Number(id)),
       ]);
-      setTasks(pageItems<Task>(response.data));
-      setWorkspaceOverview(workspaceResponse.data || null);
+      const taskItems = applyTaskPageResponse(response.data);
+      setTaskPage(nextPage);
+      const workspace = workspaceResponse.data || null;
+      setWorkspaceOverview(workspace);
+      await loadReviewTaskDetails(workspace, taskItems);
     } catch (error) {
       console.error('Failed to fetch tasks:', error);
     }
@@ -254,7 +339,14 @@ function ProjectDetail() {
     (total, item) => total + (item.change_set?.changed_count || 0),
     0
   );
-  const activeProjectTask = tasks.find((task) => task.status === 'running') || null;
+  const reviewTaskList = Object.values(reviewTaskDetails);
+  const knownTasks = [
+    ...tasks,
+    ...reviewTaskList.filter(
+      (reviewTask) => !tasks.some((task) => task.id === reviewTask.id),
+    ),
+  ];
+  const activeProjectTask = knownTasks.find((task) => task.status === 'running') || null;
 
   // ── Operational overview derivations ──────────────────────────────────────
   const sortedSessions = [...sessions].sort(
@@ -268,7 +360,7 @@ function ProjectDetail() {
   const reviewCount = Math.max(
     workspaceOverview?.counts?.ready ?? 0,
     reviewItems.length,
-    tasks.filter(taskNeedsReview).length
+    knownTasks.filter(taskNeedsReview).length
   );
   const lastActivityAt = latestSession?.updated_at ?? latestSession?.created_at ?? null;
 
@@ -443,11 +535,12 @@ function ProjectDetail() {
       }
       const result = await projectsAPI.cleanupWorkspaces(Number(id), { dry_run: false });
       const [tasksRes, workspaceRes] = await Promise.all([
-        tasksAPI.getByProject(Number(id)),
+        tasksAPI.getByProject(Number(id), taskPageParams(taskPage)),
         projectsAPI.getWorkspaceOverview(Number(id)),
       ]);
-      setTasks(pageItems<Task>(tasksRes.data));
+      const taskItems = applyTaskPageResponse(tasksRes.data);
       setWorkspaceOverview(workspaceRes.data);
+      await loadReviewTaskDetails(workspaceRes.data, taskItems);
       alert(`Archived ${result.data.deleted_count} retained workspace folder(s).`);
     } catch (error) {
       console.error('Failed to clean up retained workspaces:', error);
@@ -470,11 +563,12 @@ function ProjectDetail() {
         archive_path: archivePath,
       });
       const [tasksRes, workspaceRes] = await Promise.all([
-        tasksAPI.getByProject(Number(id)),
+        tasksAPI.getByProject(Number(id), taskPageParams(taskPage)),
         projectsAPI.getWorkspaceOverview(Number(id)),
       ]);
-      setTasks(pageItems<Task>(tasksRes.data));
+      const taskItems = applyTaskPageResponse(tasksRes.data);
       setWorkspaceOverview(workspaceRes.data);
+      await loadReviewTaskDetails(workspaceRes.data, taskItems);
     } catch (error) {
       console.error('Failed to restore archived workspace:', error);
       alert('Failed to restore archived workspace. Please try again.');
@@ -492,11 +586,12 @@ function ProjectDetail() {
         note: note.trim() || 'operator_rejected_change_set',
       });
       const [tasksRes, workspaceRes] = await Promise.all([
-        tasksAPI.getByProject(Number(id)),
+        tasksAPI.getByProject(Number(id), taskPageParams(taskPage)),
         projectsAPI.getWorkspaceOverview(Number(id)),
       ]);
-      setTasks(pageItems<Task>(tasksRes.data));
+      const taskItems = applyTaskPageResponse(tasksRes.data);
       setWorkspaceOverview(workspaceRes.data);
+      await loadReviewTaskDetails(workspaceRes.data, taskItems);
     } catch (error) {
       console.error('Failed to roll back changes:', error);
       alert('Failed to roll back these changes. Please try again.');
@@ -1172,7 +1267,7 @@ function ProjectDetail() {
           ) : (
             <div className="grid gap-3">
               {reviewItems.map((item) => {
-                const reviewTask = tasks.find((task) => task.id === item.task_id) || null;
+                const reviewTask = knownTasks.find((task) => task.id === item.task_id) || null;
                 const canShowAccept = Boolean(
                   reviewTask?.status === 'done' &&
                     reviewTask?.task_subfolder &&
@@ -1648,11 +1743,23 @@ function ProjectDetail() {
                     </div>
                   </div>
                   );
-                })}
-              </div>
-            </div>
-          )}
-        </div>
+	                })}
+	              </div>
+              {taskPageData.total_pages > 1 && (
+                <PaginationControls
+                  page={taskPageData.page}
+                  total_pages={taskPageData.total_pages}
+                  has_next={taskPageData.has_next}
+                  has_previous={taskPageData.has_previous}
+                  total={taskPageData.total}
+                  per_page={taskPageData.per_page}
+                  onPrev={() => fetchTasks(taskPageData.page - 1)}
+                  onNext={() => fetchTasks(taskPageData.page + 1)}
+                />
+              )}
+	            </div>
+	          )}
+	        </div>
       )}
 
       {/* Accept Changes Modal */}
