@@ -17,6 +17,9 @@ from app.api.v1.endpoints import (
 from app.api.v1.endpoints import isolation, permissions, context
 from app.api.v1.endpoints.dashboard import router as dashboard_router
 from app.api.v1.endpoints.knowledge import router as knowledge_router
+from app.api.v1.endpoints.knowledge_lifecycle import (
+    router as knowledge_lifecycle_router,
+)
 from app.api.v1.endpoints.project_logs import router as project_logs_router
 from app.api.v1.endpoints.ops import router as ops_router
 from app.api.v1.endpoints.guidance import router as guidance_router
@@ -156,6 +159,12 @@ api_router.include_router(
     knowledge_router,
     prefix="/knowledge",
     tags=["knowledge"],
+    dependencies=[Depends(get_current_active_user)],
+)
+
+# Knowledge Lifecycle (Phase 16A-1)
+api_router.include_router(
+    knowledge_lifecycle_router,
     dependencies=[Depends(get_current_active_user)],
 )
 

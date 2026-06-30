@@ -1279,3 +1279,93 @@ export interface HumanGuidanceRendered {
   filtered_target_ids: number[];
   filtered_purpose_ids: number[];
 }
+
+// Knowledge Library (Phase 16A / 16B)
+
+export interface KnowledgeLibraryItem {
+  id: string;
+  title: string;
+  content: string;
+  source_path: string | null;
+  knowledge_type: string;
+  tags: unknown[] | null;
+  project_scope: string | null;
+  applies_to: unknown[] | null;
+  failure_signature: string | null;
+  tool_name: string | null;
+  priority: number;
+  is_active: boolean;
+  version: number;
+  checksum: string;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface KnowledgeLibraryPage {
+  items: KnowledgeLibraryItem[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface KnowledgeUsageSummary {
+  knowledge_item_id: string;
+  retrieval_count: number;
+  used_in_prompt_count: number;
+  effective_count: number;
+  knowledge_hit_rate: number | null;
+  effectiveness_rate: number | null;
+  avg_confidence: number | null;
+  phase_distribution: Record<string, number>;
+  recent_sessions: number[];
+  recent_tasks: number[];
+}
+
+export interface KnowledgeRevision {
+  id: number;
+  knowledge_item_id: string;
+  version: number;
+  previous_version: number;
+  changed_fields: string[];
+  before_snapshot: Record<string, unknown>;
+  after_snapshot: Record<string, unknown>;
+  change_reason: string | null;
+  created_by: string | null;
+  created_at: string | null;
+}
+
+export interface KnowledgeLifecycleEvent {
+  id: number;
+  knowledge_item_id: string;
+  event_type: string;
+  payload: unknown | null;
+  actor: string | null;
+  reason: string | null;
+  created_at: string | null;
+}
+
+export interface KnowledgeRevisionsPage {
+  items: KnowledgeRevision[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface KnowledgeEventsPage {
+  items: KnowledgeLifecycleEvent[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface KnowledgeUpdatePayload {
+  title?: string;
+  content?: string;
+  knowledge_type?: string;
+  tags?: string[];
+  priority?: number;
+  applies_to?: string[];
+  tool_name?: string | null;
+  failure_signature?: string | null;
+  reason: string;
+}

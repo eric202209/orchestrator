@@ -16,6 +16,7 @@ const Register = lazy(() => import('@/pages/Register'));
 const SettingsPage = lazy(() => import('@/pages/SettingsPage'));
 const AdminPilotDashboard = lazy(() => import('@/pages/AdminPilotDashboard'));
 const AnalyticsDashboard = lazy(() => import('@/pages/AnalyticsDashboard'));
+const KnowledgeLibrary = lazy(() => import('@/pages/KnowledgeLibrary'));
 
 function RouteFallback() {
   return (
@@ -45,6 +46,7 @@ function App() {
             <Route path="settings" element={<SettingsPage />} />
             <Route path="admin/pilot-dashboard" element={<AdminPilotDashboard />} />
             <Route path="analytics" element={<AnalyticsDashboard />} />
+            <Route path="knowledge" element={<KnowledgeLibrary />} />
           </Route>
         </Routes>
       </Suspense>

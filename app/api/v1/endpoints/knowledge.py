@@ -7,6 +7,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -158,14 +159,26 @@ def ingest_knowledge_item(
 )
 def list_knowledge_items(
     knowledge_type: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    include_retired: bool = Query(True),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
     _current_user=Depends(get_current_active_user),
 ):
-    q = db.query(KnowledgeItem).filter(KnowledgeItem.is_active.is_(True))
+    q = db.query(KnowledgeItem)
+    if not include_retired:
+        q = q.filter(KnowledgeItem.is_active.is_(True))
     if knowledge_type:
         q = q.filter(KnowledgeItem.knowledge_type == knowledge_type)
+    if search:
+        pattern = f"%{search.strip()}%"
+        q = q.filter(
+            or_(
+                KnowledgeItem.title.ilike(pattern),
+                KnowledgeItem.content.ilike(pattern),
+            )
+        )
     total = q.count()
     items = q.offset((page - 1) * page_size).limit(page_size).all()
     return PaginatedKnowledgeItems(

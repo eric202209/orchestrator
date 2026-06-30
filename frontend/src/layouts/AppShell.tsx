@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Outlet, Link, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, GitBranch, Terminal,
-  ClipboardList, Menu, X, Activity, Settings, BarChart2
+  ClipboardList, Menu, X, Activity, Settings, BarChart2, BookOpen
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -12,6 +12,7 @@ const navItems = [
   { title: 'Sessions',  href: '/sessions',  icon: Terminal },
   { title: 'Review',    href: '/tasks',     icon: ClipboardList },
   { title: 'Analytics', href: '/analytics', icon: BarChart2 },
+  { title: 'Knowledge', href: '/knowledge', icon: BookOpen },
   { title: 'Settings',  href: '/settings',  icon: Settings },
 ];
 

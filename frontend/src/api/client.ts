@@ -50,6 +50,12 @@ import type {
   DecisionAnalytics,
   DecisionDrilldown,
   AnalyticsWindow,
+  KnowledgeLibraryItem,
+  KnowledgeLibraryPage,
+  KnowledgeUsageSummary,
+  KnowledgeRevisionsPage,
+  KnowledgeEventsPage,
+  KnowledgeUpdatePayload,
 } from "../types/api";
 
 export type { Page, DashboardAttention };
@@ -1263,6 +1269,32 @@ export const analyticsAPI = {
     target: string;
     window?: AnalyticsWindow;
   }) => apiClient.get<DecisionDrilldown>('/analytics/decision/drilldown', { params }),
+};
+
+export const knowledgeLibraryAPI = {
+  list: (params?: { page?: number; page_size?: number; knowledge_type?: string; search?: string; include_retired?: boolean }) =>
+    apiClient.get<KnowledgeLibraryPage>('/knowledge/items', { params }),
+
+  getById: (id: string) =>
+    apiClient.get<KnowledgeLibraryItem>(`/knowledge/${id}`),
+
+  getUsageSummary: (id: string) =>
+    apiClient.get<KnowledgeUsageSummary>(`/knowledge/${id}/usage/summary`),
+
+  getRevisions: (id: string, params?: { page?: number; page_size?: number }) =>
+    apiClient.get<KnowledgeRevisionsPage>(`/knowledge/${id}/revisions`, { params }),
+
+  getEvents: (id: string, params?: { page?: number; page_size?: number }) =>
+    apiClient.get<KnowledgeEventsPage>(`/knowledge/${id}/events`, { params }),
+
+  patch: (id: string, payload: KnowledgeUpdatePayload) =>
+    apiClient.patch<KnowledgeLibraryItem>(`/knowledge/${id}`, payload),
+
+  retire: (id: string, reason?: string) =>
+    apiClient.post<KnowledgeLibraryItem>(`/knowledge/${id}/retire`, { reason }),
+
+  restore: (id: string, reason?: string) =>
+    apiClient.post<KnowledgeLibraryItem>(`/knowledge/${id}/restore`, { reason }),
 };
 
 export const api = apiClient;

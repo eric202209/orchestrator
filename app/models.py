@@ -642,6 +642,53 @@ class KnowledgeItem(Base):
         back_populates="knowledge_item",
         cascade="all, delete-orphan",
     )
+    revisions = relationship(
+        "KnowledgeItemRevision",
+        back_populates="knowledge_item",
+        cascade="all, delete-orphan",
+        order_by="KnowledgeItemRevision.version",
+    )
+    lifecycle_events = relationship(
+        "KnowledgeLifecycleEvent",
+        back_populates="knowledge_item",
+        cascade="all, delete-orphan",
+        order_by="KnowledgeLifecycleEvent.created_at",
+    )
+
+
+class KnowledgeItemRevision(Base):
+    __tablename__ = "knowledge_item_revisions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    knowledge_item_id = Column(
+        String(36), ForeignKey("knowledge_items.id"), nullable=False, index=True
+    )
+    version = Column(Integer, nullable=False)
+    previous_version = Column(Integer, nullable=False)
+    changed_fields = Column(JSON, nullable=False)
+    before_snapshot = Column(JSON, nullable=False)
+    after_snapshot = Column(JSON, nullable=False)
+    change_reason = Column(Text, nullable=True)
+    created_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    knowledge_item = relationship("KnowledgeItem", back_populates="revisions")
+
+
+class KnowledgeLifecycleEvent(Base):
+    __tablename__ = "knowledge_lifecycle_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    knowledge_item_id = Column(
+        String(36), ForeignKey("knowledge_items.id"), nullable=False, index=True
+    )
+    event_type = Column(String(50), nullable=False)
+    payload = Column(JSON, nullable=True)
+    actor = Column(String(255), nullable=True)
+    reason = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    knowledge_item = relationship("KnowledgeItem", back_populates="lifecycle_events")
 
 
 class GuidanceScope(str, enum.Enum):
