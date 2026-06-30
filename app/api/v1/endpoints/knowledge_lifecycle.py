@@ -12,11 +12,17 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.dependencies import get_current_active_user
 from app.models import User
+from app.config import settings
 from app.services.knowledge.knowledge_lifecycle_service import (
     ImmutableFieldError,
     KnowledgeLifecycleService,
     KnowledgeNotFoundError,
     UnknownFieldError,
+)
+from app.services.knowledge.knowledge_service import KnowledgeService
+from app.services.knowledge.knowledge_sync_service import (
+    KnowledgeSyncError,
+    KnowledgeSyncService,
 )
 from app.services.knowledge.knowledge_usage_drilldown_service import (
     KnowledgeUsageDrilldownService,
@@ -26,6 +32,14 @@ router = APIRouter()
 
 _service = KnowledgeLifecycleService()
 _drilldown = KnowledgeUsageDrilldownService()
+
+
+def _build_sync_service() -> KnowledgeSyncService:
+    ksvc = KnowledgeService(
+        qdrant_url=settings.QDRANT_URL,
+        collection_name=settings.QDRANT_COLLECTION_NAME,
+    )
+    return KnowledgeSyncService(ksvc)
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +62,10 @@ class KnowledgeLifecycleItemResponse(BaseModel):
     is_active: bool
     version: int
     checksum: str
+    sync_status: str
+    sync_required_at: Optional[datetime]
+    last_synced_at: Optional[datetime]
+    last_sync_error: Optional[str]
     created_at: Optional[datetime]
     updated_at: Optional[datetime]
 
@@ -258,6 +276,29 @@ def restore_knowledge_item(
         )
     except KnowledgeNotFoundError:
         raise _not_found(knowledge_id)
+    return item
+
+
+@router.post(
+    "/knowledge/{knowledge_id}/sync",
+    response_model=KnowledgeLifecycleItemResponse,
+    tags=["knowledge-lifecycle"],
+)
+def sync_knowledge_item(
+    knowledge_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    svc = _build_sync_service()
+    try:
+        item = svc.sync(db, knowledge_id, actor=_actor(current_user))
+    except KnowledgeNotFoundError:
+        raise _not_found(knowledge_id)
+    except KnowledgeSyncError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Sync failed: {exc}",
+        )
     return item
 
 

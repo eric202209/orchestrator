@@ -39,13 +39,13 @@ export interface TaskExecutionChangeSet {
   schema: string;
   project_id: number;
   task_id: number;
-  task_execution_id: number;
-  snapshot_key: string;
-  snapshot_path: string;
+  task_execution_id: number | null;
+  snapshot_key: string | null;
+  snapshot_path: string | null;
   snapshot_exists: boolean;
-  target_path: string;
+  target_path: string | null;
   status?: string | null;
-  captured_at: string;
+  captured_at: string | null;
   added_files: string[];
   modified_files: string[];
   deleted_files: string[];
@@ -1300,6 +1300,10 @@ export interface KnowledgeLibraryItem {
   checksum: string;
   created_at: string | null;
   updated_at: string | null;
+  sync_status: 'synced' | 'dirty' | 'syncing' | 'failed';
+  sync_required_at: string | null;
+  last_synced_at: string | null;
+  last_sync_error: string | null;
 }
 
 export interface KnowledgeLibraryPage {

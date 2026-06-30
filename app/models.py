@@ -634,6 +634,10 @@ class KnowledgeItem(Base):
     is_active = Column(Boolean, default=True)
     version = Column(Integer, default=1)
     checksum = Column(String(64), nullable=False)
+    sync_status = Column(String(20), nullable=False, default="synced")
+    sync_required_at = Column(DateTime(timezone=True), nullable=True)
+    last_synced_at = Column(DateTime(timezone=True), nullable=True)
+    last_sync_error = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

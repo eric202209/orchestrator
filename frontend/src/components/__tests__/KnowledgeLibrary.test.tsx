@@ -17,6 +17,7 @@ vi.mock('@/api/client', () => ({
     patch: vi.fn(),
     retire: vi.fn(),
     restore: vi.fn(),
+    sync: vi.fn(),
   },
 }));
 
@@ -29,6 +30,10 @@ function makeItem(overrides: Partial<{
   is_active: boolean;
   priority: number;
   version: number;
+  sync_status: 'synced' | 'dirty' | 'syncing' | 'failed';
+  sync_required_at: string | null;
+  last_synced_at: string | null;
+  last_sync_error: string | null;
 }> = {}) {
   return {
     id: 'item-1',
@@ -47,6 +52,10 @@ function makeItem(overrides: Partial<{
     checksum: 'abc123def456abc123def456',
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-06-01T00:00:00Z',
+    sync_status: 'synced' as const,
+    sync_required_at: null,
+    last_synced_at: '2026-06-01T00:00:00Z',
+    last_sync_error: null,
     ...overrides,
   };
 }
@@ -392,7 +401,7 @@ describe('KnowledgeLibrary — audit events render', () => {
     await act(async () => { evTab!.click(); });
 
     expect(knowledgeLibraryAPI.getEvents).toHaveBeenCalledWith(item.id, expect.any(Object));
-    expect(container.textContent).toContain('retired');
+    expect(container.textContent).toContain('Retired');
     expect(container.textContent).toContain('Outdated content');
   });
 });
@@ -1054,5 +1063,343 @@ describe('KnowledgeLibrary — decision context activates usage tab', () => {
     );
     await act(async () => { listBtn!.click(); });
     expect(knowledgeLibraryAPI.getUsageList).not.toHaveBeenCalled();
+  });
+});
+
+// ── sync helpers ──────────────────────────────────────────────────────────────
+
+async function openDetailItem(item: ReturnType<typeof makeItem>) {
+  setupList([item]);
+  setupDetail(item);
+  setupRevisions();
+  setupEvents();
+  await render();
+  const btn = Array.from(container.querySelectorAll('button')).find(b =>
+    b.textContent?.includes(item.title)
+  );
+  await act(async () => { btn!.click(); });
+}
+
+function getSyncNowButton() {
+  return Array.from(container.querySelectorAll('button')).find(b =>
+    b.getAttribute('aria-label') === 'Sync Now'
+  );
+}
+
+// ── sync badge in list ────────────────────────────────────────────────────────
+
+describe('KnowledgeLibrary — sync badge in list', () => {
+  it('shows Dirty badge in list for dirty items on initial load', async () => {
+    const item = makeItem({ sync_status: 'dirty' });
+    setupList([item]);
+    await render();
+    // Verify badge appears without needing to click/select the item
+    expect(container.textContent).toContain('Dirty');
+  });
+
+  it('shows Failed badge in list for failed items on initial load', async () => {
+    const item = makeItem({ sync_status: 'failed' });
+    setupList([item]);
+    await render();
+    expect(container.textContent).toContain('Failed');
+  });
+
+  it('shows Syncing badge in list for syncing items on initial load', async () => {
+    const item = makeItem({ sync_status: 'syncing' });
+    setupList([item]);
+    await render();
+    expect(container.textContent).toContain('Syncing');
+  });
+
+  it('does not show sync badge in list for synced items', async () => {
+    const item = makeItem({ sync_status: 'synced' });
+    setupList([item]);
+    await render();
+    // The list should not render a sync badge for synced (clean state)
+    const badges = Array.from(container.querySelectorAll('span')).filter(s =>
+      s.textContent?.trim() === 'Synced' && s.className?.includes('emerald')
+    );
+    expect(badges.length).toBe(0);
+  });
+
+  it('shows dirty badge in list without requiring item selection', async () => {
+    const item = makeItem({ sync_status: 'dirty', title: 'Dirty Knowledge Item' });
+    setupList([item]);
+    await render();
+    // Item is not selected — dirty badge should still be visible in the list row
+    expect(container.querySelector('[class*="amber"]')).not.toBeNull();
+  });
+});
+
+// ── sync status in detail ─────────────────────────────────────────────────────
+
+describe('KnowledgeLibrary — sync status in detail panel', () => {
+  it('shows Synced badge in detail header for synced items', async () => {
+    const item = makeItem({ sync_status: 'synced' });
+    await openDetailItem(item);
+    const spans = Array.from(container.querySelectorAll('span')).filter(s =>
+      s.textContent?.trim() === 'Synced'
+    );
+    expect(spans.length).toBeGreaterThan(0);
+  });
+
+  it('shows Dirty badge in detail header for dirty items', async () => {
+    const item = makeItem({ sync_status: 'dirty' });
+    await openDetailItem(item);
+    const spans = Array.from(container.querySelectorAll('span')).filter(s =>
+      s.textContent?.trim() === 'Dirty'
+    );
+    expect(spans.length).toBeGreaterThan(0);
+  });
+
+  it('shows sync metadata section in Metadata tab', async () => {
+    const item = makeItem({
+      sync_status: 'synced',
+      last_synced_at: '2026-06-15T00:00:00Z',
+    });
+    await openDetailItem(item);
+    expect(container.textContent).toContain('Sync Status');
+    expect(container.textContent).toContain('Last Synced');
+  });
+});
+
+// ── dirty warning ─────────────────────────────────────────────────────────────
+
+describe('KnowledgeLibrary — dirty warning', () => {
+  it('shows dirty warning when sync_status is dirty', async () => {
+    const item = makeItem({ sync_status: 'dirty' });
+    await openDetailItem(item);
+    expect(container.textContent).toContain('unsynchronized changes');
+    expect(container.textContent).toContain('stale embeddings');
+  });
+
+  it('does not show dirty warning when sync_status is synced', async () => {
+    const item = makeItem({ sync_status: 'synced' });
+    await openDetailItem(item);
+    expect(container.textContent).not.toContain('unsynchronized changes');
+  });
+});
+
+// ── failed error ──────────────────────────────────────────────────────────────
+
+describe('KnowledgeLibrary — failed error', () => {
+  it('shows failed error message when sync_status is failed', async () => {
+    const item = makeItem({ sync_status: 'failed', last_sync_error: 'Qdrant timeout' });
+    await openDetailItem(item);
+    expect(container.textContent).toContain('Last sync failed');
+    expect(container.textContent).toContain('Qdrant timeout');
+  });
+
+  it('shows generic failed message without last_sync_error', async () => {
+    const item = makeItem({ sync_status: 'failed', last_sync_error: null });
+    await openDetailItem(item);
+    expect(container.textContent).toContain('Last sync failed');
+  });
+
+  it('does not show failed error when sync_status is synced', async () => {
+    const item = makeItem({ sync_status: 'synced' });
+    await openDetailItem(item);
+    expect(container.textContent).not.toContain('Last sync failed');
+  });
+});
+
+// ── Sync Now visibility ───────────────────────────────────────────────────────
+
+describe('KnowledgeLibrary — Sync Now button visibility', () => {
+  it('shows Sync Now for dirty items', async () => {
+    const item = makeItem({ sync_status: 'dirty' });
+    await openDetailItem(item);
+    expect(getSyncNowButton()).toBeTruthy();
+  });
+
+  it('shows Sync Now for failed items', async () => {
+    const item = makeItem({ sync_status: 'failed' });
+    await openDetailItem(item);
+    expect(getSyncNowButton()).toBeTruthy();
+  });
+
+  it('hides Sync Now for synced items', async () => {
+    const item = makeItem({ sync_status: 'synced' });
+    await openDetailItem(item);
+    expect(getSyncNowButton()).toBeUndefined();
+  });
+
+  it('shows disabled Syncing button when sync_status is syncing', async () => {
+    const item = makeItem({ sync_status: 'syncing' });
+    await openDetailItem(item);
+    const btn = getSyncNowButton();
+    expect(btn).toBeTruthy();
+    expect((btn as HTMLButtonElement).disabled).toBe(true);
+    expect(btn?.textContent).toContain('Syncing');
+  });
+});
+
+// ── Sync Now action ───────────────────────────────────────────────────────────
+
+describe('KnowledgeLibrary — Sync Now action', () => {
+  it('calls sync API when Sync Now is clicked', async () => {
+    const item = makeItem({ sync_status: 'dirty' });
+    const synced = { ...item, sync_status: 'synced' as const };
+    setupList([item]);
+    setupDetail(item);
+    setupRevisions();
+    setupEvents();
+    (knowledgeLibraryAPI.sync as Mock).mockResolvedValue({ data: synced });
+    await render();
+    const btn = Array.from(container.querySelectorAll('button')).find(b =>
+      b.textContent?.includes(item.title)
+    );
+    await act(async () => { btn!.click(); });
+
+    const syncBtn = getSyncNowButton();
+    expect(syncBtn).toBeTruthy();
+    await act(async () => { syncBtn!.click(); });
+
+    expect(knowledgeLibraryAPI.sync).toHaveBeenCalledWith(item.id);
+  });
+
+  it('shows success message and refreshes detail after sync succeeds', async () => {
+    const item = makeItem({ sync_status: 'dirty' });
+    const synced = { ...item, sync_status: 'synced' as const };
+    setupList([item]);
+    setupDetail(item);
+    setupRevisions();
+    setupEvents();
+    (knowledgeLibraryAPI.sync as Mock).mockResolvedValue({ data: synced });
+    await render();
+    const listBtn = Array.from(container.querySelectorAll('button')).find(b =>
+      b.textContent?.includes(item.title)
+    );
+    await act(async () => { listBtn!.click(); });
+    await act(async () => { getSyncNowButton()!.click(); });
+
+    expect(container.textContent).toContain('Sync completed');
+    // unsynchronized changes warning should be gone (item refreshed to synced)
+    expect(container.textContent).not.toContain('unsynchronized changes');
+  });
+
+  it('shows error message when sync fails', async () => {
+    const item = makeItem({ sync_status: 'dirty' });
+    const failed = { ...item, sync_status: 'failed' as const, last_sync_error: 'Qdrant unavailable' };
+    setupList([item]);
+    setupDetail(item);
+    setupRevisions();
+    setupEvents();
+    (knowledgeLibraryAPI.sync as Mock).mockRejectedValue(new Error('503'));
+    (knowledgeLibraryAPI.getById as Mock)
+      .mockResolvedValueOnce({ data: item })
+      .mockResolvedValueOnce({ data: failed });
+    await render();
+    const listBtn = Array.from(container.querySelectorAll('button')).find(b =>
+      b.textContent?.includes(item.title)
+    );
+    await act(async () => { listBtn!.click(); });
+    await act(async () => { getSyncNowButton()!.click(); });
+
+    expect(container.textContent).toContain('Sync failed');
+  });
+
+  it('refreshes audit events after sync succeeds', async () => {
+    const item = makeItem({ sync_status: 'dirty' });
+    const synced = { ...item, sync_status: 'synced' as const };
+    setupList([item]);
+    setupDetail(item);
+    setupRevisions();
+    setupEvents();
+    (knowledgeLibraryAPI.sync as Mock).mockResolvedValue({ data: synced });
+    await render();
+    const listBtn = Array.from(container.querySelectorAll('button')).find(b =>
+      b.textContent?.includes(item.title)
+    );
+    await act(async () => { listBtn!.click(); });
+    await act(async () => { getSyncNowButton()!.click(); });
+
+    // Navigate to Audit Events tab to trigger reload with new key
+    const evTab = Array.from(container.querySelectorAll('button')).find(b =>
+      b.textContent?.trim() === 'Audit Events'
+    );
+    await act(async () => { evTab!.click(); });
+    expect(knowledgeLibraryAPI.getEvents).toHaveBeenCalled();
+  });
+});
+
+// ── edit result shows dirty state ─────────────────────────────────────────────
+
+describe('KnowledgeLibrary — edit result shows dirty state', () => {
+  it('shows dirty warning after successful edit returns dirty sync_status', async () => {
+    const item = makeItem({ sync_status: 'synced', title: 'Original' });
+    const updated = { ...item, title: 'Updated', sync_status: 'dirty' as const };
+    (knowledgeLibraryAPI.patch as Mock).mockResolvedValue({ data: updated });
+    await openDetailItem(item);
+
+    await act(async () => { getEditButton()!.click(); });
+    await act(async () => { setInputValue(getEditFieldInput('Title')!, 'Updated'); });
+    await act(async () => { setInputValue(getEditFieldInput('Reason')!, 'Changed title'); });
+    await act(async () => { getSaveButton()!.click(); });
+
+    expect(container.textContent).toContain('unsynchronized changes');
+  });
+});
+
+// ── audit event labels ────────────────────────────────────────────────────────
+
+describe('KnowledgeLibrary — audit event labels for sync events', () => {
+  it('shows "Synced" label for synced events', async () => {
+    const item = makeItem();
+    setupList([item]);
+    setupDetail(item);
+    setupRevisions();
+    setupEvents([{
+      id: 10,
+      knowledge_item_id: item.id,
+      event_type: 'synced',
+      payload: null,
+      actor: null,
+      reason: null,
+      created_at: '2026-06-20T00:00:00Z',
+    }]);
+    await render();
+
+    const listBtn = Array.from(container.querySelectorAll('button')).find(b =>
+      b.textContent?.includes(item.title)
+    );
+    await act(async () => { listBtn!.click(); });
+
+    const evTab = Array.from(container.querySelectorAll('button')).find(b =>
+      b.textContent?.trim() === 'Audit Events'
+    );
+    await act(async () => { evTab!.click(); });
+
+    expect(container.textContent).toContain('Synced');
+  });
+
+  it('shows "Sync Failed" label for sync_failed events', async () => {
+    const item = makeItem();
+    setupList([item]);
+    setupDetail(item);
+    setupRevisions();
+    setupEvents([{
+      id: 11,
+      knowledge_item_id: item.id,
+      event_type: 'sync_failed',
+      payload: null,
+      actor: null,
+      reason: 'Qdrant timeout',
+      created_at: '2026-06-20T00:00:00Z',
+    }]);
+    await render();
+
+    const listBtn = Array.from(container.querySelectorAll('button')).find(b =>
+      b.textContent?.includes(item.title)
+    );
+    await act(async () => { listBtn!.click(); });
+
+    const evTab = Array.from(container.querySelectorAll('button')).find(b =>
+      b.textContent?.trim() === 'Audit Events'
+    );
+    await act(async () => { evTab!.click(); });
+
+    expect(container.textContent).toContain('Sync Failed');
+    expect(container.textContent).toContain('Qdrant timeout');
   });
 });

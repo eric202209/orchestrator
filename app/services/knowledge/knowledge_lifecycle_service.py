@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
 from app.models import KnowledgeItem, KnowledgeItemRevision, KnowledgeLifecycleEvent
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 _EDITABLE_FIELDS = frozenset(
@@ -99,6 +104,9 @@ class KnowledgeLifecycleService:
         if changed:
             previous_version = item.version
             item.version = previous_version + 1
+            item.sync_status = "dirty"
+            item.sync_required_at = _utcnow()
+            item.last_sync_error = None
             after = _snapshot(item)
 
             revision = KnowledgeItemRevision(

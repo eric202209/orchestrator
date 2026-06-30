@@ -115,6 +115,21 @@ def _setup_replay_session(db_session):
     return tmpdir, session, task
 
 
+def test_session_replay_endpoint_returns_no_content_without_task(
+    authenticated_client,
+    db_session,
+):
+    tmpdir = tempfile.TemporaryDirectory()
+    with tmpdir:
+        project = _make_replay_project(db_session, workspace_path=tmpdir.name)
+        session = _make_replay_session(db_session, project)
+
+        response = authenticated_client.get(f"/api/v1/sessions/{session.id}/replay")
+
+        assert response.status_code == 204
+        assert response.content == b""
+
+
 def test_session_replay_endpoint_is_read_only(authenticated_client, db_session):
     tmpdir, session, task = _setup_replay_session(db_session)
     with tmpdir:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -54,6 +55,10 @@ class KnowledgeItemResponse(BaseModel):
     is_active: bool
     version: int
     checksum: str
+    sync_status: str
+    sync_required_at: Optional[datetime]
+    last_synced_at: Optional[datetime]
+    last_sync_error: Optional[str]
 
     model_config = ConfigDict(from_attributes=True)
 

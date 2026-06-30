@@ -250,7 +250,14 @@ class KnowledgeService:
 
         items: list[KnowledgeItem] = []
         if db is not None:
-            items = db.query(KnowledgeItem).filter(KnowledgeItem.id.in_(ids)).all()
+            items = (
+                db.query(KnowledgeItem)
+                .filter(
+                    KnowledgeItem.id.in_(ids),
+                    KnowledgeItem.is_active.is_(True),
+                )
+                .all()
+            )
         # Preserve scores alongside items for budget sorting
         scored = [
             (item, hit_scores.get(item.id, 0.0))
@@ -397,9 +404,10 @@ class KnowledgeService:
         rows = (
             db.query(KnowledgeItem)
             .filter(
+                KnowledgeItem.is_active.is_(True),
                 KnowledgeItem.knowledge_type.in_(
                     _knowledge_type_values(knowledge_types)
-                )
+                ),
             )
             .order_by(KnowledgeItem.priority.desc(), KnowledgeItem.updated_at.desc())
             .all()

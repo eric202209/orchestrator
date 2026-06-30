@@ -191,6 +191,7 @@ export default function SessionDetail() {
   const [compareMatches, setCompareMatches] = useState<SessionDivergenceCompareResponse | null>(null);
   const [dispatchWatchdog, setDispatchWatchdog] = useState<SessionDispatchWatchdogResponse | null>(null);
   const [replayInvestigation, setReplayInvestigation] = useState<SessionReplayResponse | null>(null);
+  const replayInvestigationUnavailableRef = useRef(false);
   const [stateDiff, setStateDiff] = useState<SessionStateDiffResponse | null>(null);
   const [interventions, setInterventions] = useState<InterventionRequest[]>([]);
   const [failureSummary, setFailureSummary] = useState<ExecutionFailureSummary | null>(null);
@@ -869,11 +870,21 @@ export default function SessionDetail() {
   }, []);
 
   const loadReplayInvestigation = useCallback(async (currentSessionId: number) => {
+    if (replayInvestigationUnavailableRef.current) {
+      return;
+    }
     try {
       const response = await sessionsAPI.getReplay(currentSessionId);
+      if (response.status === 204) {
+        replayInvestigationUnavailableRef.current = true;
+        setReplayInvestigation(null);
+        return;
+      }
+      replayInvestigationUnavailableRef.current = false;
       setReplayInvestigation(response.data);
     } catch (loadError) {
       console.debug('Replay investigation unavailable:', loadError);
+      replayInvestigationUnavailableRef.current = true;
       setReplayInvestigation(null);
     }
   }, []);
@@ -1660,6 +1671,7 @@ export default function SessionDetail() {
       return;
     }
 
+    replayInvestigationUnavailableRef.current = false;
     const abortController = new AbortController();
 
     const loadSessionData = async () => {
@@ -1769,6 +1781,9 @@ export default function SessionDetail() {
               await loadDecisionTimeline(Number(sessionId));
               await loadNarrativeTimeline(Number(sessionId));
             }
+          }
+          if (currentStatus === 'running') {
+            replayInvestigationUnavailableRef.current = false;
           }
           await loadReplayInvestigation(Number(sessionId));
         }

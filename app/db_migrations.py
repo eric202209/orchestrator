@@ -931,6 +931,30 @@ def _migration_021_pagination_indexes(engine: Engine) -> None:
                     connection.execute(text(ddl))
 
 
+def _migration_022_knowledge_sync_state(engine: Engine) -> None:
+    if "knowledge_items" not in _table_names(engine):
+        return
+    statements: list[str] = []
+    if not _has_column(engine, "knowledge_items", "sync_status"):
+        statements.append(
+            "ALTER TABLE knowledge_items ADD COLUMN sync_status VARCHAR(20) NOT NULL DEFAULT 'synced'"
+        )
+    if not _has_column(engine, "knowledge_items", "sync_required_at"):
+        statements.append(
+            "ALTER TABLE knowledge_items ADD COLUMN sync_required_at DATETIME"
+        )
+    if not _has_column(engine, "knowledge_items", "last_synced_at"):
+        statements.append(
+            "ALTER TABLE knowledge_items ADD COLUMN last_synced_at DATETIME"
+        )
+    if not _has_column(engine, "knowledge_items", "last_sync_error"):
+        statements.append("ALTER TABLE knowledge_items ADD COLUMN last_sync_error TEXT")
+    if statements:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -1036,6 +1060,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="021_pagination_indexes",
         description="Add performance indexes for paginated list queries (Phase 15E-2)",
         upgrade=_migration_021_pagination_indexes,
+    ),
+    Migration(
+        version="022_knowledge_sync_state",
+        description="Add sync_status, sync_required_at, last_synced_at, last_sync_error to knowledge_items",
+        upgrade=_migration_022_knowledge_sync_state,
     ),
 )
 

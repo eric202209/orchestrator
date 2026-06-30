@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
-import { BookOpen, Search, ChevronRight, RefreshCw, Archive, RotateCcw, Pencil, X, Info } from 'lucide-react';
+import { BookOpen, Search, ChevronRight, RefreshCw, Archive, RotateCcw, Pencil, X, Info, AlertTriangle } from 'lucide-react';
 import { knowledgeLibraryAPI } from '@/api/client';
 import type {
   KnowledgeLibraryItem,
@@ -58,6 +58,28 @@ function ActiveBadge({ isActive }: { isActive: boolean }) {
     <Badge className="bg-emerald-500/15 text-emerald-300">Active</Badge>
   ) : (
     <Badge className="bg-slate-500/10 text-slate-400">Retired</Badge>
+  );
+}
+
+const SYNC_BADGE_STYLES: Record<string, string> = {
+  synced: 'bg-emerald-500/15 text-emerald-400',
+  dirty: 'bg-amber-500/15 text-amber-300',
+  syncing: 'bg-blue-500/15 text-blue-300',
+  failed: 'bg-red-500/15 text-red-400',
+};
+
+const SYNC_BADGE_LABELS: Record<string, string> = {
+  synced: 'Synced',
+  dirty: 'Dirty',
+  syncing: 'Syncing',
+  failed: 'Failed',
+};
+
+function SyncBadge({ status }: { status: string }) {
+  return (
+    <Badge className={SYNC_BADGE_STYLES[status] ?? 'bg-slate-500/10 text-slate-400'}>
+      {SYNC_BADGE_LABELS[status] ?? status}
+    </Badge>
   );
 }
 
@@ -493,6 +515,16 @@ const EVENT_COLORS: Record<string, string> = {
   updated: 'text-blue-300',
   retired: 'text-amber-300',
   restored: 'text-emerald-300',
+  synced: 'text-emerald-400',
+  sync_failed: 'text-red-400',
+};
+
+const EVENT_LABELS: Record<string, string> = {
+  updated: 'Updated',
+  retired: 'Retired',
+  restored: 'Restored',
+  synced: 'Synced',
+  sync_failed: 'Sync Failed',
 };
 
 function AuditEventsPanel({ itemId }: { itemId: string }) {
@@ -524,8 +556,8 @@ function AuditEventsPanel({ itemId }: { itemId: string }) {
       <div className="space-y-2">
         {items.map(ev => (
           <div key={ev.id} className="flex items-start gap-3 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-3">
-            <span className={cn('mt-0.5 text-xs font-medium capitalize w-16 flex-shrink-0', EVENT_COLORS[ev.event_type] ?? 'text-slate-300')}>
-              {ev.event_type}
+            <span className={cn('mt-0.5 text-xs font-medium w-20 flex-shrink-0', EVENT_COLORS[ev.event_type] ?? 'text-slate-300')}>
+              {EVENT_LABELS[ev.event_type] ?? ev.event_type}
             </span>
             <div className="min-w-0 flex-1">
               {ev.actor && <p className="text-[11px] text-slate-400">by {ev.actor}</p>}
@@ -756,12 +788,17 @@ function DetailPanel({ item, onRefresh, fromDecision }: DetailPanelProps) {
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [revKey, setRevKey] = useState(0);
   const [evKey, setEvKey] = useState(0);
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
 
   // Reset edit mode when the selected item changes
   useEffect(() => {
     setIsEditing(false);
     setSuccessMsg(null);
     setActionError(null);
+    setSyncMsg(null);
+    setSyncError(null);
   }, [item.id]);
 
   const handleRetire = async () => {
@@ -800,6 +837,27 @@ function DetailPanel({ item, onRefresh, fromDecision }: DetailPanelProps) {
     setEvKey(k => k + 1);
   };
 
+  const handleSync = async () => {
+    setSyncLoading(true);
+    setSyncMsg(null);
+    setSyncError(null);
+    try {
+      const r = await knowledgeLibraryAPI.sync(item.id);
+      onRefresh(r.data);
+      setEvKey(k => k + 1);
+      setSyncMsg('Sync completed.');
+    } catch {
+      try {
+        const r = await knowledgeLibraryAPI.getById(item.id);
+        onRefresh(r.data);
+      } catch { /* best-effort refresh */ }
+      setEvKey(k => k + 1);
+      setSyncError('Sync failed.');
+    } finally {
+      setSyncLoading(false);
+    }
+  };
+
   const tagList = Array.isArray(item.tags) ? item.tags.map(String) : [];
   const appliesToList = Array.isArray(item.applies_to) ? item.applies_to.map(String) : [];
 
@@ -826,7 +884,28 @@ function DetailPanel({ item, onRefresh, fromDecision }: DetailPanelProps) {
           <Badge className="bg-slate-500/10 text-slate-300">{typeLabel(item.knowledge_type)}</Badge>
           <Badge className="bg-slate-500/10 text-slate-400">Priority {item.priority}</Badge>
           <Badge className="bg-slate-500/10 text-slate-400">v{item.version}</Badge>
+          <SyncBadge status={item.sync_status} />
         </div>
+
+        {/* Dirty warning */}
+        {item.sync_status === 'dirty' && (
+          <div className="mt-3 flex items-start gap-2.5 rounded-md border border-amber-500/25 bg-amber-500/8 px-3.5 py-2.5">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-amber-400" />
+            <p className="text-xs text-amber-300">
+              This item has unsynchronized changes. Runtime retrieval may still use stale embeddings.
+            </p>
+          </div>
+        )}
+
+        {/* Failed error */}
+        {item.sync_status === 'failed' && (
+          <div className="mt-3 flex items-start gap-2.5 rounded-md border border-red-500/25 bg-red-500/8 px-3.5 py-2.5">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-red-400" />
+            <p className="text-xs text-red-300">
+              Last sync failed{item.last_sync_error ? `: ${item.last_sync_error}` : '.'}
+            </p>
+          </div>
+        )}
 
         {/* Actions */}
         <div className="mt-3 flex items-center gap-2 flex-wrap">
@@ -864,9 +943,24 @@ function DetailPanel({ item, onRefresh, fromDecision }: DetailPanelProps) {
               </button>
             )
           )}
+
+          {/* Sync Now — visible for dirty/failed; disabled while syncing */}
+          {!isEditing && item.sync_status !== 'synced' && (
+            <button
+              onClick={handleSync}
+              disabled={syncLoading || item.sync_status === 'syncing'}
+              aria-label="Sync Now"
+              className="flex items-center gap-1.5 rounded-md border border-blue-500/30 bg-blue-500/10 px-3 py-1.5 text-xs text-blue-300 transition-colors hover:bg-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              {syncLoading || item.sync_status === 'syncing' ? 'Syncing…' : 'Sync Now'}
+            </button>
+          )}
         </div>
         {actionError && <p className="mt-2 text-xs text-red-400">{actionError}</p>}
         {successMsg && <p className="mt-2 text-xs text-emerald-400">{successMsg}</p>}
+        {syncError && <p className="mt-2 text-xs text-red-400">{syncError}</p>}
+        {syncMsg && <p className="mt-2 text-xs text-emerald-400">{syncMsg}</p>}
         {fromDecision && !isEditing && (
           <p className="mt-2 text-[11px] text-slate-500">
             Recommended actions: inspect usage, edit content, or retire if obsolete.
@@ -919,6 +1013,20 @@ function DetailPanel({ item, onRefresh, fromDecision }: DetailPanelProps) {
                   <MetaRow label="Created" value={fmtDate(item.created_at)} />
                   <MetaRow label="Updated" value={fmtDate(item.updated_at)} />
                 </div>
+
+                {(
+                  <>
+                    <SectionHeader title="Sync" />
+                    <div className="mb-4 rounded-md border border-[color:var(--oc-border-soft)] bg-[color:var(--oc-surface)] p-3">
+                      <MetaRow label="Sync Status" value={<SyncBadge status={item.sync_status} />} />
+                      <MetaRow label="Sync Required" value={fmtDate(item.sync_required_at)} />
+                      <MetaRow label="Last Synced" value={fmtDate(item.last_synced_at)} />
+                      {item.last_sync_error && (
+                        <MetaRow label="Last Error" value={<span className="text-red-400">{item.last_sync_error}</span>} />
+                      )}
+                    </div>
+                  </>
+                )}
 
                 {tagList.length > 0 && (
                   <>
@@ -1015,6 +1123,9 @@ function KnowledgeListItem({
         <ActiveBadge isActive={item.is_active} />
         {item.priority > 0 && (
           <Badge className="bg-slate-500/10 text-slate-500">p{item.priority}</Badge>
+        )}
+        {item.sync_status !== 'synced' && (
+          <SyncBadge status={item.sync_status} />
         )}
       </div>
     </button>

@@ -1169,12 +1169,44 @@ def get_latest_task_change_set(
     current_user=Depends(get_current_active_user),
 ):
     """Return the latest deterministic workspace change set for a task."""
-    _get_task_for_user(db, task_id, current_user)
+    task = _get_task_for_user(db, task_id, current_user)
 
     task_service = TaskService(db)
     latest_change_set = task_service.get_latest_task_change_set_for_task(task_id)
     if not latest_change_set:
-        raise HTTPException(status_code=404, detail="No change set recorded for task")
+        change_set = {
+            "schema": "openclaw.task_execution_change_set.v1",
+            "project_id": task.project_id,
+            "task_id": task_id,
+            "task_execution_id": None,
+            "snapshot_key": None,
+            "snapshot_path": None,
+            "snapshot_exists": False,
+            "target_path": None,
+            "status": "not_recorded",
+            "captured_at": None,
+            "added_files": [],
+            "modified_files": [],
+            "deleted_files": [],
+            "added_count": 0,
+            "modified_count": 0,
+            "deleted_count": 0,
+            "changed_count": 0,
+            "warning_flags": [],
+        }
+        return {
+            "task_id": task_id,
+            "task_execution_id": None,
+            "change_set": change_set,
+            "review_decision": task_service.change_set_review_decision(
+                change_set,
+                workspace_review_policy=get_effective_workspace_review_policy(
+                    settings.WORKSPACE_REVIEW_POLICY,
+                    db=db,
+                ),
+            ),
+            "recorded_at": None,
+        }
     change_set = latest_change_set.get("change_set") or {}
     review_decision = latest_change_set.get("review_decision")
     if not review_decision:

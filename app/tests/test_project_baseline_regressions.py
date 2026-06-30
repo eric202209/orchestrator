@@ -79,6 +79,43 @@ def test_rebuild_project_baseline_uses_only_promoted_workspaces(
     assert not (project_root / "unreviewed.txt").exists()
 
 
+def test_task_change_set_endpoint_returns_empty_payload_when_none_recorded(
+    authenticated_client,
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "change-set-empty"
+    project_root.mkdir(parents=True)
+    project = Project(
+        name="change-set-empty",
+        workspace_path=str(project_root),
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task = Task(
+        project_id=project.id,
+        title="No change set",
+        description="Task has no recorded workspace changes",
+        status=TaskStatus.PENDING,
+    )
+    db_session.add(task)
+    db_session.commit()
+    db_session.refresh(task)
+
+    response = authenticated_client.get(f"/api/v1/tasks/{task.id}/change-set")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["task_id"] == task.id
+    assert body["task_execution_id"] is None
+    assert body["recorded_at"] is None
+    assert body["change_set"]["status"] == "not_recorded"
+    assert body["change_set"]["changed_count"] == 0
+    assert body["review_decision"]["changed_count"] == 0
+
+
 def test_project_gitignore_guard_creates_runtime_exclusions(
     db_session,
     tmp_path: Path,

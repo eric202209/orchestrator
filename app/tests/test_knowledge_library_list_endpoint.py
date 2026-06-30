@@ -90,3 +90,47 @@ def test_knowledge_library_list_supports_type_filter(
     ids = {item["id"] for item in response.json()["items"]}
     assert match.id in ids
     assert miss.id not in ids
+
+
+def test_knowledge_library_list_includes_sync_fields(
+    authenticated_client,
+    db_session,
+):
+    _make_item(db_session, title="Sync field item")
+
+    response = authenticated_client.get("/api/v1/knowledge/items")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert "sync_status" in item
+    assert "sync_required_at" in item
+    assert "last_synced_at" in item
+    assert "last_sync_error" in item
+
+
+def test_knowledge_library_list_sync_status_defaults_to_synced(
+    authenticated_client,
+    db_session,
+):
+    _make_item(db_session, title="New item")
+
+    response = authenticated_client.get("/api/v1/knowledge/items")
+
+    assert response.status_code == 200
+    item = next(i for i in response.json()["items"] if i["title"] == "New item")
+    assert item["sync_status"] == "synced"
+
+
+def test_knowledge_library_list_reflects_dirty_sync_status(
+    authenticated_client,
+    db_session,
+):
+    item = _make_item(db_session, title="Dirty item")
+    item.sync_status = "dirty"
+    db_session.commit()
+
+    response = authenticated_client.get("/api/v1/knowledge/items")
+
+    assert response.status_code == 200
+    result = next(i for i in response.json()["items"] if i["id"] == item.id)
+    assert result["sync_status"] == "dirty"

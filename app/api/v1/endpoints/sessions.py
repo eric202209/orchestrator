@@ -6,6 +6,7 @@ from fastapi import (
     Depends,
     HTTPException,
     Query,
+    Response,
     status,
     WebSocket,
 )
@@ -1620,7 +1621,12 @@ def get_session_replay_reconstruction(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    resolved_task_id = _resolve_replay_task_id(db, session_id, task_id)
+    try:
+        resolved_task_id = _resolve_replay_task_id(db, session_id, task_id)
+    except HTTPException as exc:
+        if exc.status_code == 404 and exc.detail == "No task found for replay":
+            return Response(status_code=status.HTTP_204_NO_CONTENT)
+        raise
     task = db.query(Task).filter(Task.id == resolved_task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")

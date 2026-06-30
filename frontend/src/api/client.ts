@@ -1309,6 +1309,9 @@ export const knowledgeLibraryAPI = {
 
   restore: (id: string, reason?: string) =>
     apiClient.post<KnowledgeLibraryItem>(`/knowledge/${id}/restore`, { reason }),
+
+  sync: (id: string) =>
+    apiClient.post<KnowledgeLibraryItem>(`/knowledge/${id}/sync`),
 };
 
 export const api = apiClient;

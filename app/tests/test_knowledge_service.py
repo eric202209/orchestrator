@@ -51,6 +51,7 @@ def _make_item(
     tags: list | None = None,
     failure_signature: str | None = None,
     priority: int = 0,
+    is_active: bool = True,
 ) -> KnowledgeItem:
     import hashlib
 
@@ -62,6 +63,7 @@ def _make_item(
         tags=tags or [],
         failure_signature=failure_signature,
         priority=priority,
+        is_active=is_active,
         checksum=hashlib.sha256(content.encode()).hexdigest(),
     )
     db.add(item)
@@ -92,6 +94,25 @@ def test_ingest_idempotent_same_item_twice(svc, db):
         svc.ingest(item)  # second call — same id, upsert
         points = svc._client.count(collection_name=svc._collection).count
     assert points == 1
+
+
+def test_retrieve_ignores_retired_qdrant_hits(svc, db):
+    item = _make_item(
+        db,
+        title="Retired Guide",
+        knowledge_type=KnowledgeType.format_guide,
+        is_active=False,
+    )
+    with patch.object(svc, "_embed", return_value=_FAKE_VECTOR):
+        svc.ingest(item)
+        ctx = svc.retrieve(
+            query="output format",
+            trigger_phase="planning",
+            knowledge_types=[KnowledgeType.format_guide],
+            db=db,
+        )
+
+    assert all(ref.id != item.id for ref in ctx.retrieved_items)
 
 
 def test_applies_to_planning_not_returned_for_failure(svc, db):
@@ -131,6 +152,26 @@ def test_validation_retrieval_can_use_failure_memory_from_sqlite_fallback(svc, d
     assert any(ref.id == item.id for ref in ctx.retrieved_items)
     assert ctx.trigger_phase == "validation"
     assert ctx.matched_failure_memory is True
+
+
+def test_sqlite_fallback_ignores_retired_items(svc, db):
+    item = _make_item(
+        db,
+        title="Retired Fallback Guide",
+        applies_to=["planning"],
+        knowledge_type=KnowledgeType.format_guide,
+        is_active=False,
+    )
+
+    with patch.object(svc, "_has_indexed_points", return_value=False):
+        ctx = svc.retrieve(
+            query="format guide",
+            trigger_phase="planning",
+            knowledge_types=[KnowledgeType.format_guide],
+            db=db,
+        )
+
+    assert all(ref.id != item.id for ref in ctx.retrieved_items)
 
 
 def test_sqlite_fallback_ranks_exact_failure_memory_before_generic_guides(svc, db):
