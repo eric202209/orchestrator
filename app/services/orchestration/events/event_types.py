@@ -98,6 +98,16 @@ class EventType:
     INCREMENTAL_FALLBACK_TO_PLANNING = "incremental_fallback_to_planning"
     INCREMENTAL_FALSE_POSITIVE = "incremental_false_positive"
 
+    # ── Phase 17A: recovery infrastructure ───────────────────────────────────
+    RECOVERY_DECISION_ROUTED = "recovery_decision_routed"
+    RECOVERY_NOISE_ANNOTATED = "recovery_noise_annotated"
+
+    # ── Phase 17B: reflection retry ───────────────────────────────────────────
+    RECOVERY_REFLECTION_STARTED = "recovery_reflection_started"
+    RECOVERY_REFLECTION_COMPLETED = "recovery_reflection_completed"
+    RECOVERY_REFLECTION_SKIPPED = "recovery_reflection_skipped"
+    RECOVERY_REFLECTION_FAILED = "recovery_reflection_failed"
+
 
 _ALL_EVENT_TYPES: frozenset[str] = frozenset(
     v for k, v in EventType.__dict__.items() if not k.startswith("_")

@@ -91,6 +91,68 @@ class FailureCoordinator:
         logger = ctx.logger if ctx else logging.getLogger(__name__)
         error_handler = ctx.error_handler if ctx else None
 
+        # ── Phase 17A/17B: classify failure + route through recovery registry ───
+        try:
+            import asyncio
+            import concurrent.futures
+
+            from app.services.orchestration.recovery.failure_classifier import (
+                FailureClassifier,
+            )
+            from app.services.orchestration.recovery.recovery_strategy_registry import (
+                RecoveryStrategyRegistry,
+            )
+
+            _failure_event = FailureClassifier.classify(
+                exc,
+                orchestration_state,
+                session_id=session_id,
+                task_id=task_id,
+            )
+
+            # 17B: build a sync LLM callable for reflection retry when runtime is available.
+            _llm_callable = None
+            _runtime = getattr(ctx, "runtime_service", None) if ctx else None
+            if _runtime is not None:
+
+                def _reflection_llm_callable(_prompt: str) -> str:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _ex:
+                        _res = _ex.submit(
+                            asyncio.run,
+                            _runtime.invoke_prompt(
+                                _prompt,
+                                timeout_seconds=60,
+                                source_brain="local",
+                                session_prefix="reflection",
+                            ),
+                        ).result()
+                    return str(_res.get("output", ""))
+
+                _llm_callable = _reflection_llm_callable
+
+            _recovery_decision = RecoveryStrategyRegistry.route(
+                _failure_event,
+                project_dir=getattr(orchestration_state, "project_dir", None),
+                session_id=session_id,
+                task_id=task_id,
+                orchestration_state=orchestration_state,
+                llm_callable=_llm_callable,
+            )
+
+            # 17A-6: wrapper_timeout_noise → annotate_and_continue
+            # Timeout fired after the task already reached terminal state (DONE).
+            # Treat as watchdog noise — do not mark task failed, do not re-raise.
+            if _recovery_decision.strategy == "annotate_and_continue":
+                logger.info(
+                    "[17A] wrapper_timeout_noise annotated; not propagating as task "
+                    "failure (session_id=%s task_id=%s)",
+                    session_id,
+                    task_id,
+                )
+                return
+        except Exception as _17a_exc:
+            logger.debug("[17A/17B] classifier/registry raised: %s", _17a_exc)
+
         should_retry = (
             error_handler.should_retry(exc, "task_execution")
             if error_handler
