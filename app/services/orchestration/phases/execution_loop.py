@@ -140,8 +140,8 @@ from app.schemas.knowledge import KnowledgeContext
 from app.services.orchestration.recovery.execution_recovery_evidence import (
     build_step_recovery_evidence,
 )
-from app.services.orchestration.recovery.execution_recovery_service import (
-    ExecutionRecoveryService,
+from app.services.orchestration.recovery.recovery_strategy_registry import (
+    RecoveryStrategyRegistry,
 )
 
 _DEBUG_KNOWLEDGE_MIN_CONFIDENCE = 0.85
@@ -1868,7 +1868,7 @@ def execute_step_loop(
                 task_title=getattr(task, "title", "") or "",
                 task_prompt=prompt,
             )
-            _step_recovery_result = ExecutionRecoveryService.attempt_recovery(
+            _step_recovery_result = RecoveryStrategyRegistry.execute_recovery(
                 project_dir=orchestration_state.project_dir,
                 session_id=session_id,
                 task_id=task_id,

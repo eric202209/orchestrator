@@ -315,7 +315,7 @@ def test_complete_task_completion_validation_failure(tmp_path, monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        "app.services.orchestration.coordinators.completion_coordinator.ExecutionRecoveryService.attempt_recovery",
+        "app.services.orchestration.coordinators.completion_coordinator.RecoveryStrategyRegistry.execute_recovery",
         lambda **kwargs: {"status": "skipped"},
     )
     monkeypatch.setattr(

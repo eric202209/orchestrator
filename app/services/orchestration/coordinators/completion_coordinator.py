@@ -41,8 +41,8 @@ from app.services.orchestration.phases.completion_workspace import (
 from app.services.orchestration.recovery.execution_recovery_evidence import (
     build_completion_recovery_evidence,
 )
-from app.services.orchestration.recovery.execution_recovery_service import (
-    ExecutionRecoveryService,
+from app.services.orchestration.recovery.recovery_strategy_registry import (
+    RecoveryStrategyRegistry,
 )
 from app.services.orchestration.review_policy import decide_change_set_review
 from app.services.orchestration.run_state import mark_task_attempt_failed
@@ -472,7 +472,7 @@ class CompletionCoordinator:
                 except Exception as _exc:
                     return False, f"validator_exception:{_exc}"
 
-            _completion_recovery_result = ExecutionRecoveryService.attempt_recovery(
+            _completion_recovery_result = RecoveryStrategyRegistry.execute_recovery(
                 project_dir=orchestration_state.project_dir,
                 session_id=session_id,
                 task_id=task_id,
