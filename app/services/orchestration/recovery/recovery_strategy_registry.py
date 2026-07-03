@@ -35,6 +35,9 @@ from app.services.orchestration.recovery.recovery_policy import (
     PolicyRule,
     PolicyTable,
 )
+from app.services.planning.candidate_operator_policy import (
+    evaluate_candidate_operator_policy,
+)
 from app.services.planning.candidate_planning_outcome import CandidatePlanningOutcome
 from app.services.orchestration.recovery.strategies.reflection_retry import (
     RecoveryResult,
@@ -46,9 +49,6 @@ logger = logging.getLogger(__name__)
 # Machine profiles where reflection retry is disabled (Machine C).
 _LOW_RESOURCE_PROFILES = frozenset({"low_resource", "compact_local"})
 _REFLECTION_EVIDENCE_FAILURE_CLASSES = frozenset({"unknown_failure"})
-_CANDIDATE_PLANNING_PROFILES = frozenset({"standard"})
-
-
 # ── Machine profile helpers ───────────────────────────────────────────────────
 
 
@@ -503,13 +503,23 @@ class RecoveryStrategyRegistry:
             enabled = bool(settings.CANDIDATE_RECOVERY_ENABLED)
         except Exception:
             enabled = False
-        if not enabled:
-            return _skipped("not_enabled")
         if context.scope != "planning" or failure_class != "planning_validation_failed":
             return _skipped("ineligible_trigger")
-        if context.runtime_profile not in _CANDIDATE_PLANNING_PROFILES:
-            return _skipped("unsupported_runtime_profile")
-        dedup_key = f"{failure_class}:{strategy_name}:{signature}"
+        candidate_operator = str(metadata.get("candidate_operator") or "")
+        try:
+            slot_merge_enabled = bool(settings.CANDIDATE_SLOT_MERGE_ENABLED)
+        except Exception:
+            slot_merge_enabled = False
+        policy_decision = evaluate_candidate_operator_policy(
+            runtime_profile=context.runtime_profile,
+            candidate_operator=candidate_operator,
+            candidate_recovery_enabled=enabled,
+            slot_merge_enabled=slot_merge_enabled,
+        )
+        if not policy_decision.allowed:
+            return _skipped(policy_decision.reason)
+        dedup_operator = candidate_operator or strategy_name
+        dedup_key = f"{failure_class}:{strategy_name}:{dedup_operator}:{signature}"
         if dedup_key in _get_candidate_signatures(context.orchestration_state):
             return _skipped("signature_already_attempted")
         candidate_executor = metadata.get("candidate_executor")

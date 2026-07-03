@@ -1,0 +1,78 @@
+{
+  "phase": "17G-V",
+  "description": "Controlled offline replay corpus for Candidate Recovery certification.",
+  "cases": [
+    {
+      "case_id": "validation_missing_expected_file",
+      "feature_flag_off": {
+        "triggered": false,
+        "outcome": "skipped",
+        "baseline_validator_status": "repair_required",
+        "final_validator_status": "repair_required"
+      },
+      "feature_flag_on": {
+        "triggered": true,
+        "outcome": "selected",
+        "candidate_count": 2,
+        "selected_candidate_id": "candidate-sibling-1",
+        "selected_lineage": "sibling",
+        "validator_statuses": {
+          "candidate-original": "repair_required",
+          "candidate-sibling-1": "accepted"
+        },
+        "duration_ms": 1200,
+        "token_estimate": 900,
+        "baseline_validator_status": "repair_required",
+        "final_validator_status": "accepted"
+      }
+    },
+    {
+      "case_id": "validation_brittle_shell_command",
+      "feature_flag_off": {
+        "triggered": false,
+        "outcome": "skipped",
+        "baseline_validator_status": "rejected",
+        "final_validator_status": "rejected"
+      },
+      "feature_flag_on": {
+        "triggered": true,
+        "outcome": "exhausted",
+        "candidate_count": 2,
+        "selected_candidate_id": null,
+        "selected_lineage": null,
+        "validator_statuses": {
+          "candidate-original": "rejected",
+          "candidate-sibling-1": "repair_required"
+        },
+        "duration_ms": 800,
+        "token_estimate": 700,
+        "baseline_validator_status": "rejected",
+        "final_validator_status": "rejected"
+      }
+    },
+    {
+      "case_id": "validation_original_warning_wins_tie",
+      "feature_flag_off": {
+        "triggered": false,
+        "outcome": "skipped",
+        "baseline_validator_status": "warning",
+        "final_validator_status": "warning"
+      },
+      "feature_flag_on": {
+        "triggered": true,
+        "outcome": "selected",
+        "candidate_count": 2,
+        "selected_candidate_id": "candidate-original",
+        "selected_lineage": "original",
+        "validator_statuses": {
+          "candidate-original": "warning",
+          "candidate-sibling-1": "warning"
+        },
+        "duration_ms": 1000,
+        "token_estimate": 750,
+        "baseline_validator_status": "warning",
+        "final_validator_status": "warning"
+      }
+    }
+  ]
+}

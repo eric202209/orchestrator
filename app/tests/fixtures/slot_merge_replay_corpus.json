@@ -1,0 +1,114 @@
+{
+  "phase": "17H-V",
+  "description": "Controlled offline replay corpus for Machine B Slot Merge certification.",
+  "cases": [
+    {
+      "case_id": "medium_merge_rescues_missing_verification",
+      "slot_merge_off": {
+        "triggered": false,
+        "outcome": "skipped",
+        "baseline_validator_status": "repair_required",
+        "final_validator_status": "repair_required"
+      },
+      "slot_merge_on": {
+        "machine_profile": "medium",
+        "triggered": true,
+        "outcome": "selected",
+        "merged_candidate_count": 1,
+        "selected_candidate_id": "candidate-slot-merge-1",
+        "selected_lineage": "slot_merge",
+        "parent_candidate_ids": ["candidate-original", "candidate-repair"],
+        "merged_candidate_id": "candidate-slot-merge-1",
+        "validator_statuses": {
+          "candidate-original": "repair_required",
+          "candidate-repair": "rejected",
+          "candidate-slot-merge-1": "accepted"
+        },
+        "duration_ms": 420,
+        "token_estimate": 120,
+        "baseline_validator_status": "repair_required",
+        "final_validator_status": "accepted",
+        "merged_plan_hash": "merge-rescue"
+      }
+    },
+    {
+      "case_id": "medium_merge_exhausted",
+      "slot_merge_off": {
+        "triggered": false,
+        "outcome": "skipped",
+        "baseline_validator_status": "rejected",
+        "final_validator_status": "rejected"
+      },
+      "slot_merge_on": {
+        "machine_profile": "medium",
+        "triggered": true,
+        "outcome": "exhausted",
+        "merged_candidate_count": 1,
+        "selected_candidate_id": null,
+        "selected_lineage": null,
+        "parent_candidate_ids": ["candidate-original", "candidate-repair"],
+        "merged_candidate_id": "candidate-slot-merge-1",
+        "validator_statuses": {
+          "candidate-original": "rejected",
+          "candidate-repair": "repair_required",
+          "candidate-slot-merge-1": "repair_required"
+        },
+        "duration_ms": 380,
+        "token_estimate": 100,
+        "baseline_validator_status": "rejected",
+        "final_validator_status": "rejected",
+        "merged_plan_hash": "merge-exhausted"
+      }
+    },
+    {
+      "case_id": "standard_machine_a_unchanged",
+      "slot_merge_off": {
+        "triggered": false,
+        "outcome": "skipped",
+        "baseline_validator_status": "repair_required",
+        "final_validator_status": "repair_required"
+      },
+      "slot_merge_on": {
+        "machine_profile": "standard",
+        "triggered": false,
+        "outcome": "skipped",
+        "merged_candidate_count": 0,
+        "selected_candidate_id": null,
+        "selected_lineage": null,
+        "parent_candidate_ids": [],
+        "merged_candidate_id": null,
+        "validator_statuses": {},
+        "duration_ms": 0,
+        "token_estimate": 0,
+        "baseline_validator_status": "repair_required",
+        "final_validator_status": "repair_required",
+        "merged_plan_hash": null
+      }
+    },
+    {
+      "case_id": "compact_machine_c_excluded",
+      "slot_merge_off": {
+        "triggered": false,
+        "outcome": "skipped",
+        "baseline_validator_status": "rejected",
+        "final_validator_status": "rejected"
+      },
+      "slot_merge_on": {
+        "machine_profile": "compact_local",
+        "triggered": false,
+        "outcome": "skipped",
+        "merged_candidate_count": 0,
+        "selected_candidate_id": null,
+        "selected_lineage": null,
+        "parent_candidate_ids": [],
+        "merged_candidate_id": null,
+        "validator_statuses": {},
+        "duration_ms": 0,
+        "token_estimate": 0,
+        "baseline_validator_status": "rejected",
+        "final_validator_status": "rejected",
+        "merged_plan_hash": null
+      }
+    }
+  ]
+}

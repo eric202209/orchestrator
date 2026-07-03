@@ -35,8 +35,15 @@ from app.services.orchestration.phases.planning_verification import (
 )
 from app.services.planning.candidate_recovery import (
     CandidateRecoveryRequest,
+    SlotMergeCandidateRecoveryRequest,
+    execute_slot_merge_candidate_recovery,
     execute_single_sibling_candidate_recovery,
     planning_failure_signature,
+)
+from app.services.planning.candidate_operator_policy import (
+    OPERATOR_SIBLING_GENERATION,
+    OPERATOR_SLOT_MERGE,
+    operator_for_runtime_profile,
 )
 
 
@@ -45,12 +52,54 @@ def candidate_recovery_precheck(
 ) -> bool:
     if not settings.CANDIDATE_RECOVERY_ENABLED:
         return False
-    if settings.RUNTIME_PROFILE != "standard":
+    if (
+        operator_for_runtime_profile(settings.RUNTIME_PROFILE)
+        != OPERATOR_SIBLING_GENERATION
+    ):
         return False
     if getattr(plan_verdict, "accepted", False):
         return False
     status = str(getattr(plan_verdict, "status", "") or "")
     return status in {"repair_required", "rejected"}
+
+
+def slot_merge_recovery_precheck(
+    ctx: OrchestrationRunContext,
+    retry_state: Any,
+    plan_verdict: Any,
+    previous_plan: Any,
+    previous_verdict: Any,
+) -> bool:
+    if not settings.CANDIDATE_RECOVERY_ENABLED:
+        return False
+    if not settings.CANDIDATE_SLOT_MERGE_ENABLED:
+        return False
+    if operator_for_runtime_profile(settings.RUNTIME_PROFILE) != OPERATOR_SLOT_MERGE:
+        return False
+    if not getattr(retry_state, "repair_prompt_used", False):
+        return False
+    if not isinstance(previous_plan, list) or not previous_plan:
+        return False
+    if previous_verdict is None or getattr(previous_verdict, "accepted", False):
+        return False
+    if getattr(plan_verdict, "accepted", False):
+        return False
+    statuses = {
+        str(getattr(previous_verdict, "status", "") or ""),
+        str(getattr(plan_verdict, "status", "") or ""),
+    }
+    return statuses.issubset({"repair_required", "rejected"})
+
+
+def capture_slot_merge_parent_lineage(
+    ctx: OrchestrationRunContext,
+    retry_state: Any,
+    plan_verdict: Any,
+    output_text: str,
+) -> None:
+    retry_state.candidate_slot_merge_parent_plan = ctx.orchestration_state.plan or []
+    retry_state.candidate_slot_merge_parent_verdict = plan_verdict
+    retry_state.candidate_slot_merge_parent_output_text = output_text
 
 
 def try_candidate_recovery_after_validation(
@@ -202,6 +251,103 @@ def try_candidate_recovery_after_validation(
     return {"outcome": outcome, "runtime_result": runtime_result_holder["result"]}
 
 
+def try_slot_merge_recovery_after_validation(
+    *,
+    ctx: OrchestrationRunContext,
+    retry_state: Any,
+    plan_verdict: Any,
+    output_text: str,
+    planning_phase_event: Any,
+) -> Any:
+    previous_plan = getattr(retry_state, "candidate_slot_merge_parent_plan", None)
+    previous_verdict = getattr(retry_state, "candidate_slot_merge_parent_verdict", None)
+    previous_output_text = getattr(
+        retry_state, "candidate_slot_merge_parent_output_text", ""
+    )
+    if not slot_merge_recovery_precheck(
+        ctx, retry_state, plan_verdict, previous_plan, previous_verdict
+    ):
+        return None
+
+    signature = planning_failure_signature(
+        tuple(getattr(previous_verdict, "reasons", ()) or ())
+        + tuple(getattr(plan_verdict, "reasons", ()) or ())
+    )
+
+    def _validate_candidate(candidate_plan: list[dict[str, Any]], text: str) -> Any:
+        return ValidatorService.validate_plan(
+            candidate_plan,
+            output_text=text,
+            task_prompt=ctx.prompt,
+            execution_profile=ctx.execution_profile,
+            project_dir=ctx.orchestration_state.project_dir,
+            title=ctx.task.title if ctx.task else None,
+            description=ctx.task.description if ctx.task else None,
+            validation_severity=ctx.validation_severity,
+            workflow_profile=ctx.workflow_profile,
+            workflow_stage=ctx.workflow_stage,
+            is_first_ordered_task=_is_first_ordered_task(ctx.task),
+        )
+
+    runtime_result_holder: dict[str, Any] = {}
+
+    def _candidate_executor() -> Any:
+        runtime_result = execute_slot_merge_candidate_recovery(
+            SlotMergeCandidateRecoveryRequest(
+                project_dir=ctx.orchestration_state.project_dir,
+                session_id=ctx.session_id,
+                task_id=ctx.task_id,
+                parent_a_plan=list(previous_plan or []),
+                parent_a_output_text=previous_output_text,
+                parent_a_verdict=previous_verdict,
+                parent_b_plan=list(ctx.orchestration_state.plan or []),
+                parent_b_output_text=output_text,
+                parent_b_verdict=plan_verdict,
+                runtime_profile=settings.RUNTIME_PROFILE,
+                parent_event_id=(planning_phase_event or {}).get("event_id"),
+                validate_candidate=_validate_candidate,
+            )
+        )
+        runtime_result_holder["result"] = runtime_result
+        return runtime_result
+
+    evidence = ExecutionRecoveryEvidence(
+        task_title=str(getattr(ctx.task, "title", "") or "")[:200],
+        task_description=str(ctx.prompt or "")[:400],
+        failed_command="planning_validation",
+        exit_code=None,
+        stdout_excerpt="",
+        stderr_excerpt="; ".join(plan_verdict.reasons[:5]),
+        traceback_excerpt="",
+        validator_rejection_reason="; ".join(plan_verdict.reasons[:5]),
+        failure_class="planning_validation_failed",
+    )
+    recovery_context = RecoveryContext(
+        project_dir=ctx.orchestration_state.project_dir,
+        session_id=ctx.session_id,
+        task_id=ctx.task_id,
+        scope="planning",
+        evidence=evidence,
+        orchestration_state=ctx.orchestration_state,
+        recovery_metadata={
+            "planning_failure_signature": signature,
+            "candidate_operator": "slot_merge",
+            "candidate_executor": _candidate_executor,
+        },
+    )
+    outcome = RecoveryStrategyRegistry.execute_candidate_planning(
+        context=recovery_context
+    )
+    if not outcome.succeeded:
+        if outcome.get("status") == "skipped":
+            return None
+        return {
+            "outcome": outcome,
+            "runtime_result": runtime_result_holder.get("result"),
+        }
+    return {"outcome": outcome, "runtime_result": runtime_result_holder["result"]}
+
+
 def apply_candidate_recovery_after_validation(
     *,
     ctx: OrchestrationRunContext,
@@ -211,22 +357,29 @@ def apply_candidate_recovery_after_validation(
     recovery_hooks: dict[str, Any],
 ) -> Any:
     if getattr(retry_state, "repair_prompt_used", False):
-        return None
-    candidate_recovery = try_candidate_recovery_after_validation(
-        ctx=ctx,
-        plan_verdict=plan_verdict,
-        output_text=output_text,
-        planning_prompt=recovery_hooks["planning_prompt"] or "",
-        planning_timeout_seconds=recovery_hooks["planning_timeout_seconds"],
-        prompt_profile=recovery_hooks["prompt_profile"],
-        planning_phase_event=recovery_hooks["planning_phase_event"],
-        extract_structured_text=recovery_hooks["extract_structured_text"],
-        extract_plan_steps=recovery_hooks["extract_plan_steps"],
-        normalize_plan_with_live_logging=recovery_hooks[
-            "normalize_plan_with_live_logging"
-        ],
-        coerce_output_text=recovery_hooks["coerce_output_text"],
-    )
+        candidate_recovery = try_slot_merge_recovery_after_validation(
+            ctx=ctx,
+            retry_state=retry_state,
+            plan_verdict=plan_verdict,
+            output_text=output_text,
+            planning_phase_event=recovery_hooks["planning_phase_event"],
+        )
+    else:
+        candidate_recovery = try_candidate_recovery_after_validation(
+            ctx=ctx,
+            plan_verdict=plan_verdict,
+            output_text=output_text,
+            planning_prompt=recovery_hooks["planning_prompt"] or "",
+            planning_timeout_seconds=recovery_hooks["planning_timeout_seconds"],
+            prompt_profile=recovery_hooks["prompt_profile"],
+            planning_phase_event=recovery_hooks["planning_phase_event"],
+            extract_structured_text=recovery_hooks["extract_structured_text"],
+            extract_plan_steps=recovery_hooks["extract_plan_steps"],
+            normalize_plan_with_live_logging=recovery_hooks[
+                "normalize_plan_with_live_logging"
+            ],
+            coerce_output_text=recovery_hooks["coerce_output_text"],
+        )
     if candidate_recovery is None:
         return None
     candidate_outcome = candidate_recovery["outcome"]

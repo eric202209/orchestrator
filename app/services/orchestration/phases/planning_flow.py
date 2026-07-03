@@ -88,6 +88,7 @@ from app.services.orchestration.phases.planning_guidance_enforcement import (
 )
 from app.services.orchestration.phases.planning_candidate_recovery import (
     apply_candidate_recovery_after_validation as _apply_candidate_recovery_after_validation,
+    capture_slot_merge_parent_lineage as _capture_slot_parent,
 )
 from app.services.orchestration.phases.planning_phase_persistence import (
     emit_planning_phase_finished as _emit_planning_phase_finished,
@@ -1872,6 +1873,7 @@ def execute_planning_phase(
                 retry_state.last_repair_reason = "plan_validation_failed"
                 if "verification_mutates_source_assets" in semantic_violation_codes:
                     retry_state.vma_repair_triggered = True
+                _capture_slot_parent(ctx, retry_state, plan_verdict, output_text)
                 retry_state.task1_bootstrap_rejection_contract = (
                     plan_verdict.details or {}
                 ).get("task1_bootstrap_contract")
