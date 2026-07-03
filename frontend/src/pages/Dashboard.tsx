@@ -77,6 +77,13 @@ function Dashboard() {
   const totalTasks = attention?.total_tasks ?? 0;
   const runningSessions = attention?.running_sessions ?? 0;
   const completedTasks = attention?.completed_tasks ?? 0;
+  const sessionsNeedingAttention = attention?.sessions_needing_attention ?? 0;
+  const tasksPendingReview = attention?.tasks_pending_review ?? 0;
+
+  const hasNothingToShow =
+    pendingInterventions.length === 0 &&
+    sessionsNeedingAttention === 0 &&
+    tasksPendingReview === 0;
 
   const accountLabel = user?.name?.trim() || user?.email || '';
 
@@ -134,44 +141,82 @@ function Dashboard() {
         </div>
       </div>
 
-      {/* Pending interventions */}
-      {pendingInterventions.length === 0 ? (
+      {/* Action sections */}
+      {hasNothingToShow ? (
         <div className="bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)] px-6 py-12 text-center">
           <CheckCircle2 className="h-8 w-8 mx-auto mb-3 text-emerald-500/50" />
           <p className="text-sm font-medium text-slate-300">Nothing requires attention.</p>
           <p className="text-xs text-slate-500 mt-1">All sessions are healthy.</p>
         </div>
       ) : (
-        <div className="bg-[color:var(--oc-surface)] rounded-lg border border-amber-500/30">
-          <div className="px-5 py-3 border-b border-[color:var(--oc-border-soft)] flex items-center gap-2">
-            <AlertTriangle className="h-4 w-4 text-amber-400 flex-shrink-0" />
-            <h2 className="text-sm font-medium text-white">
-              {pendingInterventions.length === 1
-                ? '1 Pending Intervention'
-                : `${pendingInterventions.length} Pending Interventions`}
-            </h2>
-          </div>
-          <div className="divide-y divide-[color:var(--oc-border-soft)]">
-            {pendingInterventions.map((item) => (
-              <Link
-                key={item.id}
-                to={`/sessions/${item.session_id}`}
-                className="flex items-center justify-between px-5 py-3 hover:bg-[color:var(--oc-surface-raised)] transition-colors group"
-              >
-                <div className="min-w-0">
-                  <p className="text-sm font-medium text-slate-200 group-hover:text-white transition-colors truncate">
-                    {truncatePrompt(item.prompt)}
-                  </p>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    {item.project_name}
-                  </p>
-                </div>
-                <span className="text-xs text-amber-400 font-medium flex-shrink-0 ml-3">
-                  Respond →
-                </span>
-              </Link>
-            ))}
-          </div>
+        <div className="space-y-4">
+          {pendingInterventions.length > 0 && (
+            <div className="bg-[color:var(--oc-surface)] rounded-lg border border-amber-500/30">
+              <div className="px-5 py-3 border-b border-[color:var(--oc-border-soft)] flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4 text-amber-400 flex-shrink-0" />
+                <h2 className="text-sm font-medium text-white">
+                  {pendingInterventions.length === 1
+                    ? '1 Pending Intervention'
+                    : `${pendingInterventions.length} Pending Interventions`}
+                </h2>
+              </div>
+              <div className="divide-y divide-[color:var(--oc-border-soft)]">
+                {pendingInterventions.map((item) => (
+                  <Link
+                    key={item.id}
+                    to={`/sessions/${item.session_id}`}
+                    className="flex items-center justify-between px-5 py-3 hover:bg-[color:var(--oc-surface-raised)] transition-colors group"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-slate-200 group-hover:text-white transition-colors truncate">
+                        {truncatePrompt(item.prompt)}
+                      </p>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        {item.project_name}
+                      </p>
+                    </div>
+                    <span className="text-xs text-amber-400 font-medium flex-shrink-0 ml-3">
+                      Respond →
+                    </span>
+                  </Link>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {sessionsNeedingAttention > 0 && (
+            <Link
+              to="/sessions"
+              className="flex items-center justify-between bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)] px-5 py-4 hover:bg-[color:var(--oc-surface-raised)] transition-colors group"
+            >
+              <div className="flex items-center gap-2">
+                <Activity className="h-4 w-4 text-amber-400 flex-shrink-0" />
+                <p className="text-sm font-medium text-slate-200 group-hover:text-white transition-colors">
+                  {sessionsNeedingAttention === 1
+                    ? '1 session needs attention'
+                    : `${sessionsNeedingAttention} sessions need attention`}
+                </p>
+              </div>
+              <span className="text-xs text-slate-400 flex-shrink-0 ml-3">View →</span>
+            </Link>
+          )}
+
+          {tasksPendingReview > 0 && (
+            <Link
+              to="/tasks"
+              className="flex items-center justify-between bg-[color:var(--oc-surface)] rounded-lg border border-[color:var(--oc-border-soft)] px-5 py-4 hover:bg-[color:var(--oc-surface-raised)] transition-colors group"
+            >
+              <div className="flex items-center gap-2">
+                <FileText className="h-4 w-4 text-amber-400 flex-shrink-0" />
+                <p className="text-sm font-medium text-slate-200 group-hover:text-white transition-colors">
+                  {tasksPendingReview === 1
+                    ? '1 task pending review'
+                    : `${tasksPendingReview} tasks pending review`}
+                </p>
+              </div>
+              <span className="text-xs text-slate-400 flex-shrink-0 ml-3">View →</span>
+            </Link>
+          )}
         </div>
       )}
     </div>
