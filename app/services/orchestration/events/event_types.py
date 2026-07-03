@@ -102,6 +102,12 @@ class EventType:
     RECOVERY_DECISION_ROUTED = "recovery_decision_routed"
     RECOVERY_NOISE_ANNOTATED = "recovery_noise_annotated"
 
+    # ── Phase 17C: active recovery lifecycle ─────────────────────────────────
+    RECOVERY_STARTED = "recovery_started"
+    RECOVERY_COMPLETED = "recovery_completed"
+    RECOVERY_RESUMED = "recovery_resumed"
+    RECOVERY_FAILED = "recovery_failed"
+
     # ── Phase 17B: reflection retry ───────────────────────────────────────────
     RECOVERY_REFLECTION_STARTED = "recovery_reflection_started"
     RECOVERY_REFLECTION_COMPLETED = "recovery_reflection_completed"

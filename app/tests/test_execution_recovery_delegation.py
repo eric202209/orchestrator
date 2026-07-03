@@ -13,6 +13,7 @@ import importlib
 
 from app.services.orchestration.coordinators import completion_coordinator
 from app.services.orchestration.phases import execution_loop
+from app.services.orchestration.recovery.recovery_context import RecoveryContext
 from app.services.orchestration.recovery.recovery_strategy_registry import (
     RecoveryStrategyRegistry,
 )
@@ -95,7 +96,11 @@ def test_completion_coordinator_calls_registry_not_service_directly(
     )
 
     assert len(calls) == 1
-    assert calls[0]["scope"] == "completion"
+    assert list(calls[0]) == ["context"]
+    assert isinstance(calls[0]["context"], RecoveryContext)
+    assert calls[0]["context"].scope == "completion"
+    assert calls[0]["context"].evidence.failure_class == "missing_files"
+    assert calls[0]["context"].orchestration_state is ctx.orchestration_state
     assert result["status"] == "failed"
     assert result["reason"] == TerminalReason.COMPLETION_VALIDATION_FAILED
 

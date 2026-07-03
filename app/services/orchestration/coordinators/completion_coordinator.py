@@ -41,6 +41,7 @@ from app.services.orchestration.phases.completion_workspace import (
 from app.services.orchestration.recovery.execution_recovery_evidence import (
     build_completion_recovery_evidence,
 )
+from app.services.orchestration.recovery.recovery_context import RecoveryContext
 from app.services.orchestration.recovery.recovery_strategy_registry import (
     RecoveryStrategyRegistry,
 )
@@ -472,7 +473,7 @@ class CompletionCoordinator:
                 except Exception as _exc:
                     return False, f"validator_exception:{_exc}"
 
-            _completion_recovery_result = RecoveryStrategyRegistry.execute_recovery(
+            _completion_recovery_context = RecoveryContext(
                 project_dir=orchestration_state.project_dir,
                 session_id=session_id,
                 task_id=task_id,
@@ -483,6 +484,9 @@ class CompletionCoordinator:
                 llm_callable=_completion_recovery_llm_callable,
                 command_runner=_completion_recovery_command_runner,
                 validator_callable=_completion_recovery_validator_callable,
+            )
+            _completion_recovery_result = RecoveryStrategyRegistry.execute_recovery(
+                context=_completion_recovery_context,
             )
 
             # S3: if recovery succeeded, re-run the authoritative completion validator.

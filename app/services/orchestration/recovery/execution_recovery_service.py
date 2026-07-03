@@ -21,6 +21,7 @@ from app.services.orchestration.state.persistence import append_orchestration_ev
 from app.services.orchestration.recovery.execution_recovery_evidence import (
     ExecutionRecoveryEvidence,
 )
+from app.services.orchestration.recovery.reflection_evidence import ReflectionEvidence
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,7 @@ class ExecutionRecoveryService:
         llm_callable: Optional[Callable[[str], str]] = None,
         command_runner: Optional[Callable[[str], Tuple[int, str, str]]] = None,
         validator_callable: Optional[Callable[[str], Tuple[bool, str]]] = None,
+        reflection_evidence: Optional[ReflectionEvidence] = None,
     ) -> Dict[str, Any]:
         """Attempt to recover from a terminal execution failure.
 
@@ -253,6 +255,7 @@ class ExecutionRecoveryService:
             llm_callable=llm_callable,
             command_runner=command_runner,
             validator_callable=validator_callable,
+            reflection_evidence=reflection_evidence,
         )
 
     @staticmethod
@@ -341,6 +344,7 @@ class ExecutionRecoveryService:
         llm_callable: Callable[[str], str],
         command_runner: Optional[Callable[[str], Tuple[int, str, str]]],
         validator_callable: Optional[Callable[[str], Tuple[bool, str]]] = None,
+        reflection_evidence: Optional[ReflectionEvidence] = None,
     ) -> Dict[str, Any]:
         """Full step-scope recovery: LLM patch → validate → apply → rerun → validator."""
         from app.services.orchestration.recovery.recovery_patch import (
@@ -387,7 +391,10 @@ class ExecutionRecoveryService:
 
         # Step 1: Call LLM.
         try:
-            prompt = build_recovery_prompt(evidence)
+            prompt = build_recovery_prompt(
+                evidence,
+                reflection_evidence=reflection_evidence,
+            )
             raw_text = llm_callable(prompt)
         except Exception as exc:
             logger.warning("[RECOVERY] LLM call failed: %s", exc)

@@ -16,7 +16,8 @@ Phase 17B: retry_with_reflection routing with:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, Callable, Optional
 
@@ -25,6 +26,10 @@ from app.services.orchestration.recovery.execution_recovery_service import (
     ExecutionRecoveryService,
 )
 from app.services.orchestration.recovery.failure_event import FailureEvent
+from app.services.orchestration.recovery.recovery_context import RecoveryContext
+from app.services.orchestration.recovery.reflection_evidence import ReflectionEvidence
+from app.services.orchestration.recovery.recovery_lifecycle import RecoveryLifecycle
+from app.services.orchestration.recovery.recovery_outcome import RecoveryOutcome
 from app.services.orchestration.recovery.recovery_policy import PolicyRule, PolicyTable
 from app.services.orchestration.recovery.strategies.reflection_retry import (
     RecoveryResult,
@@ -35,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 # Machine profiles where reflection retry is disabled (Machine C).
 _LOW_RESOURCE_PROFILES = frozenset({"low_resource", "compact_local"})
+_REFLECTION_EVIDENCE_FAILURE_CLASSES = frozenset({"unknown_failure"})
 
 
 # ── Machine profile helpers ───────────────────────────────────────────────────
@@ -350,52 +356,86 @@ class RecoveryStrategyRegistry:
     @staticmethod
     def execute_recovery(
         *,
-        project_dir: Any,
-        session_id: int,
-        task_id: int,
-        evidence: Any,
-        orchestration_state: Any,
-        scope: str,
-        step_index: Optional[int] = None,
-        parent_event_id: Optional[str] = None,
-        llm_callable: Optional[Callable[[str], str]] = None,
-        command_runner: Optional[Callable[..., Any]] = None,
-        validator_callable: Optional[Callable[..., Any]] = None,
-    ) -> dict:
-        """Phase 17C-1R: registry-orchestrated entry point for active execution recovery.
+        context: RecoveryContext,
+    ) -> RecoveryOutcome:
+        """Phase 17C-3: registry entry point for active execution recovery.
 
         Emits a routing audit event, then delegates to
-        ExecutionRecoveryService.attempt_recovery() exactly once with the evidence
-        and callables unchanged. ExecutionRecoveryService owns all recovery
+        ExecutionRecoveryService.attempt_recovery() exactly once with context
+        values unpacked unchanged. ExecutionRecoveryService owns all recovery
         behavior, budget, and its own EXECUTION_RECOVERY_* audit events; this
-        method only establishes the registry as the single orchestration entry
-        point at the execution boundary.
+        method owns the canonical registry-level lifecycle.
         """
+        started_at = time.perf_counter()
+        strategy_name = "execution_recovery"
+        context = RecoveryStrategyRegistry._attach_reflection_evidence(context)
         _emit(
             EventType.RECOVERY_DECISION_ROUTED,
             {
-                "failure_class": getattr(evidence, "failure_class", None),
-                "strategy": "execution_recovery",
-                "scope": scope,
-                "step_index": step_index,
-                "session_id": session_id,
-                "task_id": task_id,
+                "failure_class": getattr(context.evidence, "failure_class", None),
+                "strategy": strategy_name,
+                "scope": context.scope,
+                "step_index": context.step_index,
+                "session_id": context.session_id,
+                "task_id": context.task_id,
                 "timestamp": datetime.now(UTC).isoformat(),
             },
-            project_dir,
-            session_id,
-            task_id,
+            context.project_dir,
+            context.session_id,
+            context.task_id,
         )
-        return ExecutionRecoveryService.attempt_recovery(
-            project_dir=project_dir,
-            session_id=session_id,
-            task_id=task_id,
-            evidence=evidence,
-            orchestration_state=orchestration_state,
-            scope=scope,
-            step_index=step_index,
-            parent_event_id=parent_event_id,
-            llm_callable=llm_callable,
-            command_runner=command_runner,
-            validator_callable=validator_callable,
+        lifecycle = RecoveryLifecycle(context=context, strategy_name=strategy_name)
+        lifecycle.started()
+        try:
+            result = ExecutionRecoveryService.attempt_recovery(
+                project_dir=context.project_dir,
+                session_id=context.session_id,
+                task_id=context.task_id,
+                evidence=context.evidence,
+                orchestration_state=context.orchestration_state,
+                scope=context.scope,
+                step_index=context.step_index,
+                parent_event_id=context.parent_event_id,
+                llm_callable=context.llm_callable,
+                command_runner=context.command_runner,
+                validator_callable=context.validator_callable,
+                reflection_evidence=context.reflection_result,
+            )
+        except Exception as exc:
+            lifecycle.failed(error=str(exc))
+            raise
+
+        succeeded = result.get("status") == "success"
+        if succeeded:
+            lifecycle.completed(result=result)
+            lifecycle.resumed(result=result)
+        else:
+            lifecycle.failed(result=result)
+
+        return RecoveryOutcome(
+            succeeded=succeeded,
+            resumed_execution=succeeded,
+            strategy_name=strategy_name,
+            duration_ms=max(0, int((time.perf_counter() - started_at) * 1000)),
+            failure_class=str(getattr(context.evidence, "failure_class", "") or ""),
+            recovery_context=context,
+            audit_event_ids=lifecycle.audit_event_ids,
+            strategy_result=result,
         )
+
+    @staticmethod
+    def _attach_reflection_evidence(context: RecoveryContext) -> RecoveryContext:
+        failure_class = str(getattr(context.evidence, "failure_class", "") or "")
+        if failure_class not in _REFLECTION_EVIDENCE_FAILURE_CLASSES:
+            if context.reflection_result is None:
+                return context
+            return replace(context, reflection_result=None)
+        if context.reflection_result is None:
+            return context
+
+        reflection_evidence = ReflectionEvidence.from_reflection_result(
+            context.reflection_result
+        )
+        if reflection_evidence is context.reflection_result:
+            return context
+        return replace(context, reflection_result=reflection_evidence)

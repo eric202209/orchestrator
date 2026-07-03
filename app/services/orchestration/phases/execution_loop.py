@@ -140,6 +140,7 @@ from app.schemas.knowledge import KnowledgeContext
 from app.services.orchestration.recovery.execution_recovery_evidence import (
     build_step_recovery_evidence,
 )
+from app.services.orchestration.recovery.recovery_context import RecoveryContext
 from app.services.orchestration.recovery.recovery_strategy_registry import (
     RecoveryStrategyRegistry,
 )
@@ -1868,7 +1869,7 @@ def execute_step_loop(
                 task_title=getattr(task, "title", "") or "",
                 task_prompt=prompt,
             )
-            _step_recovery_result = RecoveryStrategyRegistry.execute_recovery(
+            _step_recovery_context = RecoveryContext(
                 project_dir=orchestration_state.project_dir,
                 session_id=session_id,
                 task_id=task_id,
@@ -1880,6 +1881,9 @@ def execute_step_loop(
                 llm_callable=_recovery_llm_callable,
                 command_runner=_recovery_command_runner,
                 validator_callable=_recovery_validator_callable,
+            )
+            _step_recovery_result = RecoveryStrategyRegistry.execute_recovery(
+                context=_step_recovery_context,
             )
             if _step_recovery_result.get("status") == "success":
                 # Recovery patched the file, rerun passed, and validator accepted.

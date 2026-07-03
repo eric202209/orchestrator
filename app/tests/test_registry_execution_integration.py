@@ -11,13 +11,13 @@ active execution recovery at the execution boundary:
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import patch
 
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.recovery.execution_recovery_evidence import (
     ExecutionRecoveryEvidence,
 )
+from app.services.orchestration.recovery.recovery_context import RecoveryContext
 from app.services.orchestration.recovery.recovery_strategy_registry import (
     RecoveryStrategyRegistry,
 )
@@ -57,6 +57,15 @@ def test_execute_recovery_delegates_exactly_once(tmp_path):
     """execute_recovery calls ExecutionRecoveryService.attempt_recovery exactly once."""
     evidence = _make_evidence()
     orchestration_state = _make_state()
+    context = RecoveryContext(
+        project_dir=tmp_path,
+        session_id=31,
+        task_id=31,
+        evidence=evidence,
+        orchestration_state=orchestration_state,
+        scope="step",
+        step_index=2,
+    )
 
     with patch(
         "app.services.orchestration.recovery.recovery_strategy_registry."
@@ -65,13 +74,7 @@ def test_execute_recovery_delegates_exactly_once(tmp_path):
         mock_attempt.return_value = {"status": "skipped", "reason": "budget_exhausted"}
 
         result = RecoveryStrategyRegistry.execute_recovery(
-            project_dir=tmp_path,
-            session_id=31,
-            task_id=31,
-            evidence=evidence,
-            orchestration_state=orchestration_state,
-            scope="step",
-            step_index=2,
+            context=context,
         )
 
     mock_attempt.assert_called_once()
@@ -92,6 +95,20 @@ def test_execute_recovery_preserves_evidence_and_callables_unchanged(tmp_path):
     def validator_callable(_path: str):
         return True, ""
 
+    context = RecoveryContext(
+        project_dir=tmp_path,
+        session_id=32,
+        task_id=32,
+        evidence=evidence,
+        orchestration_state=orchestration_state,
+        scope="completion",
+        step_index=None,
+        parent_event_id="evt-abc",
+        llm_callable=llm_callable,
+        command_runner=command_runner,
+        validator_callable=validator_callable,
+    )
+
     with patch(
         "app.services.orchestration.recovery.recovery_strategy_registry."
         "ExecutionRecoveryService.attempt_recovery"
@@ -99,17 +116,7 @@ def test_execute_recovery_preserves_evidence_and_callables_unchanged(tmp_path):
         mock_attempt.return_value = {"status": "success"}
 
         RecoveryStrategyRegistry.execute_recovery(
-            project_dir=tmp_path,
-            session_id=32,
-            task_id=32,
-            evidence=evidence,
-            orchestration_state=orchestration_state,
-            scope="completion",
-            step_index=None,
-            parent_event_id="evt-abc",
-            llm_callable=llm_callable,
-            command_runner=command_runner,
-            validator_callable=validator_callable,
+            context=context,
         )
 
     _, kwargs = mock_attempt.call_args
@@ -130,6 +137,15 @@ def test_execute_recovery_emits_routing_audit_event(tmp_path):
     """A RECOVERY_DECISION_ROUTED event is emitted before delegating."""
     evidence = _make_evidence(failure_class="pytest_failure")
     orchestration_state = _make_state()
+    context = RecoveryContext(
+        project_dir=tmp_path,
+        session_id=33,
+        task_id=33,
+        evidence=evidence,
+        orchestration_state=orchestration_state,
+        scope="step",
+        step_index=5,
+    )
 
     with patch(
         "app.services.orchestration.recovery.recovery_strategy_registry."
@@ -141,13 +157,7 @@ def test_execute_recovery_emits_routing_audit_event(tmp_path):
         }
 
         RecoveryStrategyRegistry.execute_recovery(
-            project_dir=tmp_path,
-            session_id=33,
-            task_id=33,
-            evidence=evidence,
-            orchestration_state=orchestration_state,
-            scope="step",
-            step_index=5,
+            context=context,
         )
 
     routed_events = _events(tmp_path, 33, 33, EventType.RECOVERY_DECISION_ROUTED)
@@ -163,6 +173,24 @@ def test_execute_recovery_no_duplicate_or_additional_recovery_attempts(tmp_path)
     """Two independent calls each delegate exactly once — no double-attempts per call."""
     evidence = _make_evidence()
     orchestration_state = _make_state()
+    context_1 = RecoveryContext(
+        project_dir=tmp_path,
+        session_id=34,
+        task_id=34,
+        evidence=evidence,
+        orchestration_state=orchestration_state,
+        scope="step",
+        step_index=1,
+    )
+    context_2 = RecoveryContext(
+        project_dir=tmp_path,
+        session_id=34,
+        task_id=34,
+        evidence=evidence,
+        orchestration_state=orchestration_state,
+        scope="step",
+        step_index=2,
+    )
 
     with patch(
         "app.services.orchestration.recovery.recovery_strategy_registry."
@@ -171,23 +199,11 @@ def test_execute_recovery_no_duplicate_or_additional_recovery_attempts(tmp_path)
         mock_attempt.return_value = {"status": "success"}
 
         RecoveryStrategyRegistry.execute_recovery(
-            project_dir=tmp_path,
-            session_id=34,
-            task_id=34,
-            evidence=evidence,
-            orchestration_state=orchestration_state,
-            scope="step",
-            step_index=1,
+            context=context_1,
         )
         assert mock_attempt.call_count == 1
 
         RecoveryStrategyRegistry.execute_recovery(
-            project_dir=tmp_path,
-            session_id=34,
-            task_id=34,
-            evidence=evidence,
-            orchestration_state=orchestration_state,
-            scope="step",
-            step_index=2,
+            context=context_2,
         )
         assert mock_attempt.call_count == 2

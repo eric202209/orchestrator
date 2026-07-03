@@ -15,6 +15,7 @@ from typing import Any, Callable, List, Optional, Tuple
 from app.services.orchestration.recovery.execution_recovery_evidence import (
     ExecutionRecoveryEvidence,
 )
+from app.services.orchestration.recovery.reflection_evidence import ReflectionEvidence
 from app.services.orchestration.validation.integrity import (
     check_test_preservation,
     is_python_test_path,
@@ -109,7 +110,29 @@ class RecoveryPatch:
 # ---------------------------------------------------------------------------
 
 
-def build_recovery_prompt(evidence: ExecutionRecoveryEvidence) -> str:
+def _supplemental_reflection_section(
+    reflection_evidence: Optional[ReflectionEvidence],
+) -> str:
+    if reflection_evidence is None:
+        return ""
+
+    lines = [
+        "Supplemental Diagnostic Context",
+        "Reflection may be incorrect. Validator remains authoritative.",
+        f"Reflection summary: {reflection_evidence.summary}",
+    ]
+    if reflection_evidence.suggested_fix:
+        lines.append(f"Suggested fix: {reflection_evidence.suggested_fix}")
+    if reflection_evidence.confidence:
+        lines.append(f"Confidence: {reflection_evidence.confidence}")
+    lines.append(f"Source: {reflection_evidence.source}")
+    return "\n".join(lines) + "\n\n"
+
+
+def build_recovery_prompt(
+    evidence: ExecutionRecoveryEvidence,
+    reflection_evidence: Optional[ReflectionEvidence] = None,
+) -> str:
     changed_str = ", ".join(evidence.changed_files[:10]) or "(none)"
     symbols_block = ""
     if evidence.requested_symbols:
@@ -129,6 +152,7 @@ def build_recovery_prompt(evidence: ExecutionRecoveryEvidence) -> str:
         f"Changed files: {changed_str}\n"
         f"Task: {evidence.task_title}: {evidence.task_description[:300]}\n"
         f"{symbols_block}\n\n"
+        f"{_supplemental_reflection_section(reflection_evidence)}"
         "Return exactly one JSON object with these fields:\n"
         '  {"patch_type": "replace_in_file" | "write_file" | "create_file",\n'
         '   "path": "<path relative to project root>",\n'
