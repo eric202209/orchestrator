@@ -1,0 +1,40 @@
+version: "3.9"
+
+services:
+  browser-session:
+    image: mcr.microsoft.com/playwright:v1.61.0-noble
+    container_name: orchestrator-browser-session
+    ports:
+      - "6080:6080"    # noVNC — view browser from host or phone
+      - "9222:9222"    # Chrome DevTools Protocol — relay connects here
+    environment:
+      - DISPLAY=:99
+    volumes:
+      # ONLY the relay exchange folder — not the entire workflow directory
+      - ./relay:/relay:rw
+      # Persistent Chrome profile — login session survives restarts
+      - browser-session-profile:/home/pwuser/.config/chromium
+    cap_add:
+      - SYS_PTRACE
+    restart: unless-stopped
+    command: >
+      bash -c "
+        rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
+        Xvfb :99 -screen 0 1280x1024x24 &
+        sleep 1
+        fluxbox &
+        x11vnc -display :99 -forever -nopw -quiet -listen 0.0.0.0 &
+        websockify --web=/usr/share/novnc 6080 localhost:5900 &
+        chromium-browser \
+          --no-sandbox \
+          --disable-dev-shm-usage \
+          --remote-debugging-port=9222 \
+          --remote-debugging-address=0.0.0.0 \
+          --user-data-dir=/home/pwuser/.config/chromium \
+          --display=:99 \
+          https://chatgpt.com &
+        sleep infinity
+      "
+
+volumes:
+  browser-session-profile:

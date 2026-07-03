@@ -1,0 +1,23 @@
+# ChatGPT web UI selectors — update this file when OpenAI changes their DOM.
+# Do not hardcode selectors in planner_relay.py.
+
+# The main prompt input box
+input: "#prompt-textarea"
+
+# The send button
+send_button: 'button[data-testid="send-button"]'
+
+# Assistant response messages
+response: '[data-message-author-role="assistant"]'
+
+# Streaming in-progress indicator (present while ChatGPT is generating)
+streaming_indicator: 'button[aria-label="Stop streaming"]'
+
+# Login detection: if current URL matches any of these, we are not logged in
+login_url_patterns:
+  - "chatgpt.com/auth"
+  - "chatgpt.com/login"
+  - "accounts.google.com"
+
+# Target URL to navigate to
+target_url: "https://chatgpt.com/"
