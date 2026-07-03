@@ -35,6 +35,12 @@ class EventType:
     # ── Planning ──────────────────────────────────────────────────────────────
     PLAN_REVISED = "plan_revised"
     PLANNING_REPAIR_ARBITRATION = "planning_repair_arbitration"
+    PLAN_CANDIDATE_CREATED = "plan_candidate_created"
+    PLAN_CANDIDATE_VALIDATED = "plan_candidate_validated"
+    PLAN_CANDIDATE_SELECTED = "plan_candidate_selected"
+    PLAN_CANDIDATE_REJECTED = "plan_candidate_rejected"
+    PLAN_SLOT_MERGED = "plan_slot_merged"
+    PLAN_CANDIDATE_EXHAUSTED = "plan_candidate_exhausted"
     CROSS_STAGE_CONVERGENCE = "cross_stage_convergence"
     REASONING_ARTIFACT_GENERATED = "reasoning_artifact_generated"
     LANE_ESCALATION_TRIGGERED = "lane_escalation_triggered"

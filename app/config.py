@@ -159,6 +159,7 @@ class Settings(BaseSettings):
     PLANNER_MODEL: str = ""
     EXECUTION_MODEL: str = ""
     PLANNING_REPAIR_ENABLED: bool = True
+    CANDIDATE_RECOVERY_ENABLED: bool = False
     PLANNING_REPAIR_BASE_URL: str = "http://ai-gateway:8000/v1"
     PLANNING_REPAIR_MODEL: str = "qwen-local"
     PLANNING_REPAIR_API_KEY: str = ""

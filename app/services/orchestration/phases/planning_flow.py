@@ -86,6 +86,12 @@ from app.services.orchestration.phases.planning_guidance_enforcement import (
     collect_repair_guidance_block as _collect_repair_guidance,
     run_guidance_plan_enforcement as _run_guidance_plan_enforcement,
 )
+from app.services.orchestration.phases.planning_candidate_recovery import (
+    apply_candidate_recovery_after_validation as _apply_candidate_recovery_after_validation,
+)
+from app.services.orchestration.phases.planning_phase_persistence import (
+    emit_planning_phase_finished as _emit_planning_phase_finished,
+)
 from app.services.orchestration.phases.planning_support import (
     BLOCKING_IMMEDIATE_REPAIR_ISSUE_KEYS,
     MAX_PLANNING_RETRIES,
@@ -1809,32 +1815,23 @@ def execute_planning_phase(
                     schema_validation.get("errors", []),
                     schema_validation.get("details", {}),
                 )
-            try:
-                phase_finished_event = append_orchestration_event(
-                    project_dir=ctx.orchestration_state.project_dir,
-                    session_id=ctx.session_id,
-                    task_id=ctx.task_id,
-                    event_type=EventType.PHASE_FINISHED,
-                    parent_event_id=(planning_phase_event or {}).get("event_id"),
-                    details={
-                        "phase": "planning",
-                        "status": plan_verdict.status,
-                        "step_count": len(ctx.orchestration_state.plan),
-                    },
-                )
-                write_orchestration_state_snapshot(
-                    project_dir=ctx.orchestration_state.project_dir,
-                    session_id=ctx.session_id,
-                    task_id=ctx.task_id,
-                    orchestration_state=ctx.orchestration_state,
-                    trigger="phase_finished",
-                    related_event_id=phase_finished_event.get("event_id"),
-                )
-            except Exception as exc:
-                ctx.logger.debug(
-                    "[ORCHESTRATION] Failed to persist planning phase finish event/snapshot: %s",
-                    exc,
-                )
+            candidate_recovery = _apply_candidate_recovery_after_validation(
+                ctx=ctx,
+                retry_state=retry_state,
+                plan_verdict=plan_verdict,
+                output_text=output_text,
+                recovery_hooks=dict(locals(), coerce_output_text=__coerce_output_text),
+            )
+            if candidate_recovery is not None:
+                if candidate_recovery.get("return_result"):
+                    return candidate_recovery["return_result"]
+                output_text = candidate_recovery["output_text"]
+                plan_verdict = candidate_recovery["plan_verdict"]
+            _emit_planning_phase_finished(
+                ctx,
+                plan_verdict=plan_verdict,
+                planning_phase_event=planning_phase_event,
+            )
 
             if not plan_verdict.accepted and not retry_state.repair_prompt_used:
                 contract_diagnostics = _plan_contract_diagnostics(plan_verdict.details)

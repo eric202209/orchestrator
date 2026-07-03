@@ -16,6 +16,7 @@ POLICY_VERSION = "v2"
 STRATEGY_EXISTING_RECOVERY = "existing_recovery"
 STRATEGY_ANNOTATE_AND_CONTINUE = "annotate_and_continue"
 STRATEGY_RETRY_WITH_REFLECTION = "retry_with_reflection"
+STRATEGY_CANDIDATE_PLANNING = "candidate_planning"
 STRATEGY_TERMINAL = "terminal"
 
 
@@ -102,6 +103,13 @@ RECOVERY_POLICY_V1: dict[str, PolicyRule] = {
         strategy=STRATEGY_RETRY_WITH_REFLECTION,
         consumes_budget=False,
         note="17B: one reflection retry before terminal (disabled on low_resource)",
+    ),
+    # ── New in 17F: candidate planning placeholder ──────────────────────────
+    "planning_validation_failed": PolicyRule(
+        failure_class="planning_validation_failed",
+        strategy=STRATEGY_CANDIDATE_PLANNING,
+        consumes_budget=False,
+        note="17F: infrastructure placeholder only; returns skipped/not_enabled",
     ),
 }
 

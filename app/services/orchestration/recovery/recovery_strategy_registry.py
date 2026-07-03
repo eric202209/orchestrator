@@ -30,7 +30,12 @@ from app.services.orchestration.recovery.recovery_context import RecoveryContext
 from app.services.orchestration.recovery.reflection_evidence import ReflectionEvidence
 from app.services.orchestration.recovery.recovery_lifecycle import RecoveryLifecycle
 from app.services.orchestration.recovery.recovery_outcome import RecoveryOutcome
-from app.services.orchestration.recovery.recovery_policy import PolicyRule, PolicyTable
+from app.services.orchestration.recovery.recovery_policy import (
+    STRATEGY_CANDIDATE_PLANNING,
+    PolicyRule,
+    PolicyTable,
+)
+from app.services.planning.candidate_planning_outcome import CandidatePlanningOutcome
 from app.services.orchestration.recovery.strategies.reflection_retry import (
     RecoveryResult,
     ReflectionRetryStrategy,
@@ -41,6 +46,7 @@ logger = logging.getLogger(__name__)
 # Machine profiles where reflection retry is disabled (Machine C).
 _LOW_RESOURCE_PROFILES = frozenset({"low_resource", "compact_local"})
 _REFLECTION_EVIDENCE_FAILURE_CLASSES = frozenset({"unknown_failure"})
+_CANDIDATE_PLANNING_PROFILES = frozenset({"standard"})
 
 
 # ── Machine profile helpers ───────────────────────────────────────────────────
@@ -70,6 +76,23 @@ def _add_reflection_signature(orchestration_state: Any, sig: str) -> None:
         setattr(
             orchestration_state,
             "_reflection_attempted_signatures",
+            existing | {sig},
+        )
+    except Exception:
+        pass
+
+
+def _get_candidate_signatures(orchestration_state: Any) -> frozenset:
+    raw = getattr(orchestration_state, "_candidate_planning_signatures", None)
+    return frozenset(raw) if raw else frozenset()
+
+
+def _add_candidate_signature(orchestration_state: Any, sig: str) -> None:
+    existing = _get_candidate_signatures(orchestration_state)
+    try:
+        setattr(
+            orchestration_state,
+            "_candidate_planning_signatures",
             existing | {sig},
         )
     except Exception:
@@ -420,6 +443,130 @@ class RecoveryStrategyRegistry:
             failure_class=str(getattr(context.evidence, "failure_class", "") or ""),
             recovery_context=context,
             audit_event_ids=lifecycle.audit_event_ids,
+            strategy_result=result,
+        )
+
+    @staticmethod
+    def execute_candidate_planning(
+        *,
+        context: RecoveryContext,
+    ) -> RecoveryOutcome:
+        """Registry-owned Candidate Recovery orchestration."""
+        started_at = time.perf_counter()
+        strategy_name = STRATEGY_CANDIDATE_PLANNING
+        failure_class = str(getattr(context.evidence, "failure_class", "") or "")
+        metadata = dict(context.recovery_metadata or {})
+        signature = str(
+            metadata.get("planning_failure_signature")
+            or getattr(context.evidence, "validator_rejection_reason", "")
+            or failure_class
+        )
+
+        def _skipped(reason: str) -> RecoveryOutcome:
+            _emit(
+                EventType.RECOVERY_DECISION_ROUTED,
+                {
+                    "failure_class": failure_class,
+                    "strategy": strategy_name,
+                    "scope": context.scope,
+                    "step_index": context.step_index,
+                    "session_id": context.session_id,
+                    "task_id": context.task_id,
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "status": "skipped",
+                    "reason": reason,
+                    "signature_hash": signature,
+                },
+                context.project_dir,
+                context.session_id,
+                context.task_id,
+            )
+            outcome = CandidatePlanningOutcome.skipped(reason=reason)
+            return RecoveryOutcome(
+                succeeded=False,
+                resumed_execution=False,
+                strategy_name=strategy_name,
+                duration_ms=max(0, int((time.perf_counter() - started_at) * 1000)),
+                failure_class=failure_class,
+                recovery_context=context,
+                audit_event_ids=(),
+                strategy_result={
+                    "status": "skipped",
+                    "reason": reason,
+                    "candidate_outcome": outcome.to_dict(),
+                },
+            )
+
+        try:
+            from app.config import settings
+
+            enabled = bool(settings.CANDIDATE_RECOVERY_ENABLED)
+        except Exception:
+            enabled = False
+        if not enabled:
+            return _skipped("not_enabled")
+        if context.scope != "planning" or failure_class != "planning_validation_failed":
+            return _skipped("ineligible_trigger")
+        if context.runtime_profile not in _CANDIDATE_PLANNING_PROFILES:
+            return _skipped("unsupported_runtime_profile")
+        dedup_key = f"{failure_class}:{strategy_name}:{signature}"
+        if dedup_key in _get_candidate_signatures(context.orchestration_state):
+            return _skipped("signature_already_attempted")
+        candidate_executor = metadata.get("candidate_executor")
+        if not callable(candidate_executor):
+            return _skipped("candidate_executor_missing")
+
+        _add_candidate_signature(context.orchestration_state, dedup_key)
+        _emit(
+            EventType.RECOVERY_DECISION_ROUTED,
+            {
+                "failure_class": failure_class,
+                "strategy": strategy_name,
+                "scope": context.scope,
+                "step_index": context.step_index,
+                "session_id": context.session_id,
+                "task_id": context.task_id,
+                "timestamp": datetime.now(UTC).isoformat(),
+                "signature_hash": signature,
+            },
+            context.project_dir,
+            context.session_id,
+            context.task_id,
+        )
+        lifecycle = RecoveryLifecycle(context=context, strategy_name=strategy_name)
+        lifecycle.started()
+        try:
+            candidate_result = candidate_executor()
+        except Exception as exc:
+            lifecycle.failed(error=str(exc))
+            raise
+
+        outcome = candidate_result.outcome
+        succeeded = bool(getattr(candidate_result, "selected", False))
+        if succeeded:
+            lifecycle.completed(result=outcome.to_dict())
+            lifecycle.resumed(result=outcome.to_dict())
+            status = "success"
+            reason = ""
+        else:
+            lifecycle.failed(result=outcome.to_dict())
+            status = "failed"
+            reason = "candidate_exhausted"
+
+        result = {
+            "status": status,
+            "reason": reason,
+            "candidate_outcome": outcome.to_dict(),
+        }
+        candidate_audit_ids = tuple(getattr(candidate_result, "audit_event_ids", ()))
+        return RecoveryOutcome(
+            succeeded=succeeded,
+            resumed_execution=succeeded,
+            strategy_name=strategy_name,
+            duration_ms=max(0, int((time.perf_counter() - started_at) * 1000)),
+            failure_class=failure_class,
+            recovery_context=context,
+            audit_event_ids=tuple(lifecycle.audit_event_ids) + candidate_audit_ids,
             strategy_result=result,
         )
 
