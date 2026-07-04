@@ -19,6 +19,7 @@ build/
 htmlcov/
 .coverage
 coverage.xml
+.relay-venv/
 
 # Node.js
 node_modules/

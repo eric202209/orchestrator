@@ -6,7 +6,7 @@ services:
     container_name: orchestrator-browser-session
     ports:
       - "6080:6080"    # noVNC — view browser from host or phone
-      - "9222:9222"    # Chrome DevTools Protocol — relay connects here
+      - "9222:9223"    # Chrome DevTools Protocol — relay connects here
     environment:
       - DISPLAY=:99
     volumes:
@@ -18,23 +18,39 @@ services:
       - SYS_PTRACE
     restart: unless-stopped
     command: >
-      bash -c "
+      bash -lc '
+        set -e
+        apt-get update
+        apt-get install -y fluxbox x11vnc websockify novnc socat
+
         rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
+
         Xvfb :99 -screen 0 1280x1024x24 &
-        sleep 1
+        sleep 2
+
         fluxbox &
-        x11vnc -display :99 -forever -nopw -quiet -listen 0.0.0.0 &
+        sleep 1
+
+        x11vnc -display :99 -forever -nopw -quiet -listen 0.0.0.0 -rfbport 5900 &
+        sleep 1
+
         websockify --web=/usr/share/novnc 6080 localhost:5900 &
-        chromium-browser \
+        sleep 1
+
+        /ms-playwright/chromium-*/chrome-linux/chrome \
           --no-sandbox \
           --disable-dev-shm-usage \
+          --no-first-run \
+          --no-default-browser-check \
+          --remote-allow-origins=* \
           --remote-debugging-port=9222 \
           --remote-debugging-address=0.0.0.0 \
           --user-data-dir=/home/pwuser/.config/chromium \
           --display=:99 \
           https://chatgpt.com &
+          socat TCP-LISTEN:9223,fork,bind=0.0.0.0,reuseaddr TCP:127.0.0.1:9222 &
         sleep infinity
-      "
+      '
 
 volumes:
   browser-session-profile:

@@ -46,7 +46,7 @@ cp "$HANDOFF" "$INPUT"
 # Step 2: run the stateless relay
 echo "[wrapper] Running planner relay..."
 RELAY_DIR="$RELAY_DIR" CDP_URL="http://localhost:9222" \
-    python3 "$SCRIPT_DIR/planner_relay.py"
+    "$REPO_ROOT/.relay-venv/bin/python" "$SCRIPT_DIR/planner_relay.py"
 
 # Step 3: check output was written
 if [[ ! -f "$OUTPUT" ]]; then
