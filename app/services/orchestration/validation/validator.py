@@ -107,6 +107,132 @@ class ValidatorService:
         return rejected + repairable + warnings
 
     @staticmethod
+    def _snake_case_rule_id(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        text = re.sub(r"[^a-z0-9]+", "_", text)
+        return text.strip("_")
+
+    @classmethod
+    def _validator_rule_ids_from_details(
+        cls,
+        *,
+        stage: str,
+        details: Dict[str, Any],
+    ) -> List[str]:
+        """Return stable source-level validator rule IDs from detector metadata."""
+
+        ids: List[str] = []
+
+        def add(rule_id: Any) -> None:
+            normalized = cls._snake_case_rule_id(rule_id)
+            if normalized and normalized not in ids:
+                ids.append(normalized)
+
+        for code in details.get("semantic_violation_codes") or []:
+            add(code)
+
+        validation_evidence = details.get("validation_evidence")
+        if isinstance(validation_evidence, dict):
+            for code in validation_evidence.get("semantic_violation_codes") or []:
+                add(code)
+
+        if isinstance(details.get("plan_schema"), dict) and not details[
+            "plan_schema"
+        ].get("valid", True):
+            add("plan_schema_invalid")
+
+        detail_rule_ids = {
+            "received_type": "reasoning_artifact_invalid_type",
+            "read_only_stage_mutation_steps": "read_only_stage_mutation",
+            "read_only_stage_failable_probe_steps": "read_only_stage_failable_probe",
+            "invalid_ops_path_steps": "invalid_ops_path",
+            "missing_replace_in_file_targets": "missing_replace_in_file_target",
+            "empty_replace_old_text_steps": "empty_replace_old_text",
+            "python_source_syntax_invalid": "python_source_syntax_invalid",
+            "static_site_off_root_mutations": "static_site_off_root_mutation",
+            "fake_verification_artifact_steps": "fake_verification_artifact",
+            "expected_source_file_not_materialized": (
+                "expected_source_file_not_materialized"
+            ),
+            "unmaterialized_expected_files": "unmaterialized_expected_files",
+            "oversized_command_steps": "oversized_command_length",
+            "brittle_command_subcodes": "brittle_command",
+            "malformed_shell_quoting_steps": "malformed_shell_quoting",
+            "missing_description_steps": "missing_description",
+            "missing_commands_steps": "missing_runnable_commands",
+            "unsafe_expected_files": "unsafe_expected_file_path",
+            "unsafe_command_paths": "unsafe_command_path",
+            "non_runnable_steps": "non_runnable_command",
+            "background_process_steps": "background_process",
+            "nested_workspace_steps": "nested_workspace",
+            "nested_project_root_steps": "nested_project_root",
+            "duplicated_root_paths": "duplicated_root_path",
+            "task1_bootstrap_contract": "task1_bootstrap_contract",
+            "negative_existing_file_checks": "negative_existing_file_check",
+            "workflow_phase_violations": "workflow_phase_order_violation",
+            "missing_workflow_phases": "workflow_phase_missing",
+            "missing_materialization_for_implementation": (
+                "missing_materialization_for_implementation"
+            ),
+            "python_package_root_contract": "python_package_root_contract",
+            "missing_verification_steps": "missing_verification_command",
+            "weak_verification_steps": "weak_verification",
+            "placeholder_only_implementation": "placeholder_implementation",
+            "frontend_wrong_stack_materializations": "frontend_wrong_stack",
+            "undefined_js_identifier_materializations": "undefined_js_identifier",
+            "undefined_python_test_name_materializations": (
+                "undefined_python_test_name"
+            ),
+            "undefined_python_decorator_materializations": (
+                "undefined_python_decorator"
+            ),
+            "import_time_parse_args_materializations": "import_time_parse_args",
+            "unsafe_python_append_fragments": "unsafe_python_append_fragment",
+            "physical_src_import_materializations": "physical_src_import",
+            "verification_profile_mutated_source_assets": (
+                "verification_mutates_source_assets"
+            ),
+            "missing_workspace_expected_files": "missing_workspace_expected_file",
+            "verification_profile_created_source_assets": (
+                "verification_creates_source_assets"
+            ),
+            "stack_conflict": "stack_conflict",
+            "missing_expected_files": "missing_expected_files",
+            "tool_failures": "tool_failures",
+            "reported_changed_files": "reported_changed_files_not_materialized",
+            "placeholder_reasons": "placeholder_content",
+            "test_integrity_findings": "test_integrity_finding",
+            "missing_task_expected_files": "baseline_missing_task_expected_files",
+            "missing_prior_expected_files": "baseline_missing_prior_expected_files",
+            "consistency_issues": "baseline_consistency_issue",
+            "missing_core_files": "missing_core_files",
+            "nested_expected_file_matches": "nested_expected_file_match",
+            "workspace_consistency": "workspace_consistency",
+            "symbol_verification": "requested_symbol_missing",
+        }
+        for detail_key, rule_id in detail_rule_ids.items():
+            value = details.get(detail_key)
+            if value:
+                add(rule_id)
+
+        if stage and ids:
+            return ids
+        return ids
+
+    @classmethod
+    def _with_validator_rule_ids(
+        cls,
+        *,
+        stage: str,
+        details: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        rule_ids = cls._validator_rule_ids_from_details(stage=stage, details=details)
+        if rule_ids:
+            details = dict(details)
+            details["validator_rule_ids"] = rule_ids
+        return details
+
+    @staticmethod
     def _select_status(
         *,
         warnings: List[str],
@@ -536,7 +662,10 @@ class ValidatorService:
                 ),
                 profile="control_plane",
                 reasons=["Reasoning artifact must be a JSON object"],
-                details={"received_type": type(artifact).__name__},
+                details=cls._with_validator_rule_ids(
+                    stage="reasoning_artifact",
+                    details={"received_type": type(artifact).__name__},
+                ),
                 confidence="high",
             )
 
@@ -600,7 +729,10 @@ class ValidatorService:
                 repairable=repairable,
                 rejected=rejected,
             ),
-            details=details,
+            details=cls._with_validator_rule_ids(
+                stage="reasoning_artifact",
+                details=details,
+            ),
             confidence=confidence,
         )
 
@@ -4114,6 +4246,7 @@ class ValidatorService:
                 dict.fromkeys(semantic_violation_codes)
             )
 
+        details = cls._with_validator_rule_ids(stage="plan", details=details)
         verdict = ValidationVerdict(
             stage="plan",
             status=cls._select_status(
@@ -4243,6 +4376,10 @@ class ValidatorService:
                 else:
                     warnings.append(message)
 
+        details = cls._with_validator_rule_ids(
+            stage="step_completion",
+            details=details | {"step_output_preview": step_output[:240]},
+        )
         return ValidationVerdict(
             stage="step_completion",
             status=cls._select_status(
@@ -4256,7 +4393,7 @@ class ValidatorService:
             reasons=cls._ordered_reasons(
                 warnings=warnings, repairable=repairable, rejected=rejected
             ),
-            details=details | {"step_output_preview": step_output[:240]},
+            details=details,
         )
 
     @classmethod
@@ -4690,6 +4827,10 @@ class ValidatorService:
         if failure_signature:
             details["failure_signature"] = failure_signature
 
+        details = cls._with_validator_rule_ids(
+            stage="task_completion",
+            details=details,
+        )
         return ValidationVerdict(
             stage="task_completion",
             status=cls._select_status(
@@ -4749,6 +4890,10 @@ class ValidatorService:
         if consistency_details:
             details["consistency"] = consistency_details
 
+        details = ValidatorService._with_validator_rule_ids(
+            stage="baseline_publish",
+            details=details,
+        )
         return ValidationVerdict(
             stage="baseline_publish",
             status=ValidatorService._select_status(

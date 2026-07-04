@@ -86,6 +86,15 @@ def _verdict_reasons(verdict: Any) -> tuple[str, ...]:
     return tuple(str(reason) for reason in (getattr(verdict, "reasons", []) or []))
 
 
+def _verdict_rule_ids(verdict: Any) -> tuple[str, ...]:
+    rule_ids = getattr(verdict, "validator_rule_ids", None)
+    if rule_ids is None:
+        details = getattr(verdict, "details", {}) or {}
+        if isinstance(details, Mapping):
+            rule_ids = details.get("validator_rule_ids")
+    return tuple(str(rule_id) for rule_id in (rule_ids or []) if str(rule_id).strip())
+
+
 def _emit(
     *,
     request: Any,
@@ -126,6 +135,7 @@ def _candidate_from_verdict(
         artifact_hash=stable_plan_hash(plan),
         validator_status=_verdict_status(verdict),
         validator_reasons=_verdict_reasons(verdict),
+        validator_rule_ids=_verdict_rule_ids(verdict),
         planning_failure_signature=failure_signature,
         runtime_profile=runtime_profile,
     )

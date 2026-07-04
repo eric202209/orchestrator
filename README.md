@@ -183,9 +183,31 @@ Projects store `workspace_path` as a root-relative slug. API responses also incl
 | Mobile status pages empty | Set `MOBILE_GATEWAY_API_KEY` in `.env` |
 | OpenClaw operations fail | Confirm `OPENCLAW_GATEWAY_URL` points to port `8000`, not `8001` |
 
+## Workflow Infrastructure
+
+Planner Relay
+
+Start:
+
+docker compose \
+-f docker-compose.browser-session.yml \
+up -d
+
+Open:
+
+http://localhost:6080
+
+Health:
+
+curl http://localhost:9222/json/version
+
+Run relay:
+
+scripts/relay/run_planner_relay.sh
+
 ---
 
-**Last updated: 2026-06-02**
+**Last updated: 2026-07-04**
 
 <p align="center">
   <a href="https://github.com/henrycode03/orchestrator/stargazers">

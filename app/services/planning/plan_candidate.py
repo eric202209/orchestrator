@@ -36,6 +36,7 @@ class PlanCandidate:
     artifact_hash: str = ""
     validator_status: str = "rejected"
     validator_reasons: tuple[str, ...] = field(default_factory=tuple)
+    validator_rule_ids: tuple[str, ...] = field(default_factory=tuple)
     planning_failure_signature: str = ""
     runtime_profile: str = "unknown"
 
@@ -66,6 +67,11 @@ class PlanCandidate:
             self,
             "validator_reasons",
             _tuple_of_strings(self.validator_reasons),
+        )
+        object.__setattr__(
+            self,
+            "validator_rule_ids",
+            _tuple_of_strings(self.validator_rule_ids),
         )
         object.__setattr__(
             self,
@@ -107,6 +113,7 @@ class PlanCandidate:
             "artifact_hash": self.artifact_hash,
             "validator_status": self.validator_status,
             "validator_reasons": list(self.validator_reasons),
+            "validator_rule_ids": list(self.validator_rule_ids),
             "planning_failure_signature": self.planning_failure_signature,
             "runtime_profile": self.runtime_profile,
         }

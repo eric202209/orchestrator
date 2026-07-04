@@ -38,12 +38,21 @@ class ValidationVerdict:
     def rejected(self) -> bool:
         return self.status == "rejected"
 
+    @property
+    def validator_rule_ids(self) -> List[str]:
+        return [
+            str(rule_id)
+            for rule_id in (self.details.get("validator_rule_ids") or [])
+            if str(rule_id).strip()
+        ]
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "stage": self.stage,
             "status": self.status,
             "profile": self.profile,
             "reasons": list(self.reasons),
+            "validator_rule_ids": self.validator_rule_ids,
             "details": dict(self.details),
             "used_small_model": self.used_small_model,
             "confidence": self.confidence,
