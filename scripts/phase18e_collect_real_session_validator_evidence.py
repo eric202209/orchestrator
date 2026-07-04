@@ -75,7 +75,8 @@ def main() -> None:
     event_files = list(iter_event_files(sessions))
     events_by_session = load_events_by_session(sessions, event_files)
     records = collect_records(events_by_session)
-    print(render_markdown(sessions, event_files, records))
+    validation_event_count = count_validation_events(events_by_session)
+    print(render_markdown(sessions, event_files, records, validation_event_count))
 
 
 def load_sessions(*, db_path: Path, workspace_root: Path) -> tuple[SessionRow, ...]:
@@ -170,9 +171,9 @@ def collect_records(
         )
         recovery_rescued = recovery_was_rescued(events)
         latency_ms = recovery_latency_ms(events)
-        signature = failure_signature(events)
-        machine_profile = machine_profile_from_events(events)
         runtime_profile = runtime_profile_from_events(events)
+        signature = failure_signature(events)
+        machine_profile = machine_profile_from_events(events, runtime_profile)
 
         for event in events:
             if event.get("event_type") != PLAN_CANDIDATE_VALIDATED:
@@ -206,6 +207,7 @@ def render_markdown(
     sessions: tuple[SessionRow, ...],
     event_files: list[tuple[SessionRow, Path]],
     records: tuple[ValidationRecord, ...],
+    validation_event_count: int,
 ) -> str:
     rule_frequency = Counter(record.rule_id for record in records)
     status_by_rule: dict[str, Counter[str]] = defaultdict(Counter)
@@ -223,7 +225,8 @@ def render_markdown(
         "",
         f"Real sessions inspected: {len(sessions)}",
         f"Workspace event journal files inspected: {len(event_files)}",
-        f"Total planning validation events: {len(records)}",
+        f"Total planning validation events: {validation_event_count}",
+        f"Rule-bearing validation records: {len(records)}",
         "",
         "## Source Sessions",
     ]
@@ -239,9 +242,9 @@ def render_markdown(
     append_counter(lines, rule_frequency)
 
     lines.extend(["", "## Validator Status Distribution By Rule"])
+    for record in records:
+        status_by_rule[record.rule_id][record.validator_status] += 1
     if status_by_rule:
-        for record in records:
-            status_by_rule[record.rule_id][record.validator_status] += 1
         for rule_id in sorted(status_by_rule):
             lines.append(f"- `{rule_id}`: {dict(status_by_rule[rule_id])}")
     else:
@@ -302,6 +305,17 @@ def append_counter(lines: list[str], counter: Counter[str]) -> None:
         lines.append(f"- `{key}`: {count}")
 
 
+def count_validation_events(
+    events_by_session: dict[int, list[dict[str, Any]]],
+) -> int:
+    return sum(
+        1
+        for events in events_by_session.values()
+        for event in events
+        if event.get("event_type") == PLAN_CANDIDATE_VALIDATED
+    )
+
+
 def event_details(event: dict[str, Any]) -> dict[str, Any]:
     details = event.get("details") or {}
     return details if isinstance(details, dict) else {}
@@ -343,8 +357,26 @@ def selected_candidate(events: list[dict[str, Any]]) -> str:
 
 
 def recovery_was_rescued(events: list[dict[str, Any]]) -> bool:
-    if not any(event.get("event_type") == RECOVERY_STARTED for event in events):
+    started_index = next(
+        (
+            index
+            for index, event in enumerate(events)
+            if event.get("event_type") == RECOVERY_STARTED
+        ),
+        None,
+    )
+    if started_index is None:
         return False
+    if any(
+        event.get("event_type") == "recovery_resumed"
+        for event in events[started_index + 1 :]
+    ):
+        return True
+    if any(
+        event.get("event_type") == PLAN_CANDIDATE_SELECTED
+        for event in events[started_index + 1 :]
+    ):
+        return True
     for event in reversed(events):
         if event.get("event_type") != RECOVERY_COMPLETED:
             continue
@@ -373,18 +405,29 @@ def recovery_latency_ms(events: list[dict[str, Any]]) -> int | None:
 def failure_signature(events: list[dict[str, Any]]) -> str:
     for event in reversed(events):
         details = event_details(event)
-        for key in ("failure_signature", "signature", "signature_hash"):
+        for key in (
+            "planning_failure_signature",
+            "failure_signature",
+            "signature",
+            "signature_hash",
+        ):
             if details.get(key):
                 return str(details[key])
     return "unknown"
 
 
-def machine_profile_from_events(events: list[dict[str, Any]]) -> str:
+def machine_profile_from_events(events: list[dict[str, Any]], runtime_profile: str) -> str:
     for event in events:
         details = event_details(event)
         value = details.get("machine_profile")
         if value:
             return str(value)
+    if runtime_profile == "standard":
+        return "machine-a"
+    if runtime_profile == "medium":
+        return "machine-b"
+    if runtime_profile in {"low_resource", "compact_local"}:
+        return "machine-c"
     return "unknown"
 
 

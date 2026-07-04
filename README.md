@@ -185,25 +185,18 @@ Projects store `workspace_path` as a root-relative slug. API responses also incl
 
 ## Workflow Infrastructure
 
-Planner Relay
+- Start browser session
+docker compose -f docker-compose.browser-session.yml up -d
 
-Start:
+- Verify
+docker ps
+curl http://127.0.0.1:6080/vnc.html
 
-docker compose \
--f docker-compose.browser-session.yml \
-up -d
-
-Open:
-
+- Open
 http://localhost:6080
 
-Health:
-
-curl http://localhost:9222/json/version
-
-Run relay:
-
-scripts/relay/run_planner_relay.sh
+- If needed, verify CDP
+curl http://127.0.0.1:9222/json/version
 
 ---
 
