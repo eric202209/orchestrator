@@ -116,6 +116,16 @@ class Settings(BaseSettings):
             return f"sqlite:///{(BASE_DIR / path).resolve()}{suffix}"
         return database_url
 
+    # Connection pool sizing for this process's SQLAlchemy engine (uvicorn
+    # API and each Celery worker process each own a separate pool onto the
+    # same database). Defaults sized for a few concurrent daily-driver
+    # sessions plus normal dashboard polling; see
+    # docs/roadmap/done/phase19/phase19b-db-concurrency-soak-test-report.md
+    # for the soak test that found size=5/overflow=10 (15 total) exhausted
+    # under that load and required these to be raised.
+    DB_POOL_SIZE: int = 10
+    DB_MAX_OVERFLOW: int = 20
+
     # Auth
     SECRET_KEY: str = ""
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15  # 15-minute access token (short-lived)

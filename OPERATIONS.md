@@ -209,7 +209,8 @@ Send.
 The control-plane database is SQLite (`orchestrator.db`), in `journal_mode=WAL`
 (set on every connection via `app/database.py`'s pragma listener). Each
 process — the `uvicorn` API and every Celery worker process — opens its own
-SQLAlchemy connection pool (`pool_size=5, max_overflow=10`) onto the same
+SQLAlchemy connection pool (`pool_size=10, max_overflow=20` by default,
+configurable via `DB_POOL_SIZE`/`DB_MAX_OVERFLOW` in `.env`) onto the same
 file; WAL lets readers proceed while a writer commits, and `busy_timeout=30000`
 makes a connection wait up to 30s for a lock before raising, instead of
 failing immediately.
