@@ -74,6 +74,8 @@ coverage/
 *.db-journal
 dump.rdb
 *.rdb
+*.db-shm
+*.db-wal
 
 # Checkpoint files (runtime state)
 checkpoints/

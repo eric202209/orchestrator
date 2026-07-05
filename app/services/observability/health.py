@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 from sqlalchemy import text
 
 from app.config import settings
-from app.database import engine
+from app.database import engine, get_pool_status
 from app.services.agents.agent_backends import (
     UnsupportedAgentBackendError,
     get_backend_descriptor,
@@ -46,6 +46,13 @@ def health_payload() -> tuple[dict, int]:
         checks["database"] = "error"
         details["database_error"] = str(exc)
         overall_status = "degraded"
+
+    try:
+        # Reflects only this process's own pool -- API and each Celery worker
+        # process each hold a separate engine/pool onto the same sqlite file.
+        details["database_pool"] = get_pool_status()
+    except Exception as exc:
+        details["database_pool_error"] = str(exc)
 
     try:
         import redis

@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 def process_github_webhook(
     self, webhook_data: Dict[str, Any], repo_owner: str, repo_name: str
 ):
+    db = get_db_session()
     try:
-        db = get_db_session()
         project = (
             db.query(Project)
             .filter(Project.github_url.ilike(f"%{repo_owner}/{repo_name}%"))
@@ -48,7 +48,6 @@ def process_github_webhook(
         elif webhook_type == "IssueEvent":
             logger.info(f"Processing issue event for {repo_owner}/{repo_name}")
 
-        db.close()
         return {
             "status": "processed",
             "webhook_type": webhook_type,
@@ -57,12 +56,15 @@ def process_github_webhook(
     except Exception as exc:
         logger.error(f"Webhook processing failed: {str(exc)}")
         raise self.retry(exc=exc)
+    finally:
+        db.close()
 
 
 @celery_app.task(bind=True, max_retries=5, default_retry_delay=30)
 def scheduled_task_execution(self, task_id: int, scheduled_time: str, prompt: str):
     from datetime import datetime as dt
 
+    db = None
     try:
         now = dt.utcnow()
         schedule_dt = dt.fromisoformat(scheduled_time.replace("Z", "+00:00"))
@@ -84,7 +86,6 @@ def scheduled_task_execution(self, task_id: int, scheduled_time: str, prompt: st
             mark_task_attempt_done(task=task, completed_at=dt.now(timezone.utc))
             db.commit()
 
-        db.close()
         return {
             "status": "completed",
             "task_id": task_id,
@@ -93,6 +94,9 @@ def scheduled_task_execution(self, task_id: int, scheduled_time: str, prompt: st
     except Exception as exc:
         logger.error(f"Scheduled task {task_id} failed: {str(exc)}")
         raise self.retry(exc=exc, max_retries=3)
+    finally:
+        if db is not None:
+            db.close()
 
 
 @celery_app.task(bind=True)
@@ -122,10 +126,10 @@ def sweep_orphaned_running_sessions(
 
 @celery_app.task(bind=True)
 def cleanup_old_logs(self, days: int = 30, session_id: Optional[int] = None):
-    try:
-        from datetime import datetime
+    from datetime import datetime
 
-        db = get_db_session()
+    db = get_db_session()
+    try:
         cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
         query = db.query(LogEntry).filter(LogEntry.created_at < cutoff_date)
         if session_id:
@@ -133,7 +137,6 @@ def cleanup_old_logs(self, days: int = 30, session_id: Optional[int] = None):
         deleted_count = query.delete(synchronize_session=False)
         db.commit()
         logger.info(f"Deleted {deleted_count} old log entries")
-        db.close()
         return {
             "status": "completed",
             "deleted_count": deleted_count,
@@ -143,6 +146,8 @@ def cleanup_old_logs(self, days: int = 30, session_id: Optional[int] = None):
     except Exception as exc:
         logger.error(f"Log cleanup failed: {str(exc)}")
         raise self.retry(exc=exc, max_retries=3)
+    finally:
+        db.close()
 
 
 @celery_app.task(bind=True)

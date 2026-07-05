@@ -204,6 +204,60 @@ today: it pastes into whichever ChatGPT tab is currently active in that
 browser, so confirm the correct conversation is focused before approving
 Send.
 
+## Database Concurrency / SQLite Locking
+
+The control-plane database is SQLite (`orchestrator.db`), in `journal_mode=WAL`
+(set on every connection via `app/database.py`'s pragma listener). Each
+process — the `uvicorn` API and every Celery worker process — opens its own
+SQLAlchemy connection pool (`pool_size=5, max_overflow=10`) onto the same
+file; WAL lets readers proceed while a writer commits, and `busy_timeout=30000`
+makes a connection wait up to 30s for a lock before raising, instead of
+failing immediately.
+
+**Known risk (Phase 18L-R):** under concurrent load, an unbounded Celery
+worker pool (Celery defaults `--concurrency` to one prefork process per CPU
+core) combined with SQLite's default `journal_mode=delete` caused the API to
+become completely unresponsive — every connection blocked on file-level
+locks until each process's pool (`size 5 + overflow 10 = 15`) was exhausted,
+surfacing as `sqlalchemy.exc.TimeoutError: QueuePool limit of size 5
+overflow 10 reached, connection timed out`. Recovery required killing and
+restarting the wedged `uvicorn` process.
+
+**Phase 19A mitigations:**
+- WAL mode (Phase 18N) removes the primary lock-contention path between
+  concurrent readers and a writer.
+- `start.sh` now caps Celery worker concurrency at 4 processes by default
+  (override with `CELERY_WORKER_CONCURRENCY` in `.env`) instead of Celery's
+  default of one process per CPU core — on a 20-core host this previously
+  spawned ~20 worker processes, each holding its own pool against the same
+  file for the full duration of whatever orchestration task it was running.
+- Three Celery maintenance tasks (`process_github_webhook`,
+  `scheduled_task_execution`, `cleanup_old_logs` in
+  `app/tasks/maintenance.py`) only released their DB session on the success
+  path; an exception before that point leaked the connection out of the
+  pool for the rest of the process's life. Fixed to close deterministically
+  in a `finally` block, matching the pattern already used elsewhere in that
+  file.
+
+**If the API wedges again** (health check hangs, backend log shows
+`QueuePool limit ... reached, connection timed out`):
+
+1. Check `GET /api/v1/ops/health` — `details.database_pool` reports this
+   process's own pool state (`size`, `checked_out`, `overflow`,
+   `checked_in`; each process has a separate pool, so this only reflects
+   whichever process answers the request).
+2. If the API itself is unresponsive to `/health`, a graceful `SIGTERM` may
+   also hang (it did during the Phase 18L-R incident) — `SIGKILL` the
+   `uvicorn` process and restart it (`pkill -9 -f "uvicorn app.main:app"`,
+   then `./start.sh`). This does not corrupt `orchestrator.db`; WAL mode is
+   crash-safe.
+3. Confirm no orphaned worker processes remain (`ps aux | grep celery`);
+   `pkill -f "celery -A app.celery_app worker"` if needed, then restart.
+4. This is an operational mitigation for a known SQLite-under-load
+   limitation, not a guarantee that pool exhaustion cannot recur under
+   heavier concurrency than has been verified — see
+   `docs/roadmap/done/phase19/phase19a-db-pool-sqlite-concurrency-hardening-report.md`.
+
 ## Evidence Collection
 
 Validator and recovery telemetry evidence is written per-project-workspace

@@ -63,6 +63,25 @@ def get_db_session():
     return SessionLocal()
 
 
+def get_pool_status() -> dict:
+    """Report this process's connection pool state for operational diagnosis.
+
+    Each Celery worker process and the API process hold their own engine/pool
+    (see docs/roadmap/done/phase18/phase18l-r-runtime-verification-report.md,
+    "DB Connection Pool Exhaustion"), so this only reflects the calling
+    process, not the system as a whole.
+    """
+    pool = engine.pool
+    # Pools other than QueuePool (e.g. SingletonThreadPool/StaticPool, used for
+    # in-memory test databases) don't expose all of these methods.
+    return {
+        "size": pool.size() if hasattr(pool, "size") else None,
+        "checked_out": pool.checkedout() if hasattr(pool, "checkedout") else None,
+        "overflow": pool.overflow() if hasattr(pool, "overflow") else None,
+        "checked_in": pool.checkedin() if hasattr(pool, "checkedin") else None,
+    }
+
+
 # ============= TEST DATABASE HELPERS =============
 
 

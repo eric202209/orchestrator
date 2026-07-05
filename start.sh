@@ -388,9 +388,21 @@ start_workers() {
     
     # Start worker in background
     # LOGS DIRECTIVE: Write directly to root logs/ for history preservation.
+    # Concurrency defaults to a bounded value rather than Celery's default
+    # (one prefork child per CPU core). Each worker process opens its own
+    # SQLAlchemy connection pool onto the same SQLite file and holds one
+    # connection per in-flight orchestration task for that task's full
+    # (potentially many-minute) duration; on a high-core-count host,
+    # unbounded concurrency spawned enough worker processes to exhaust
+    # pool + SQLite lock capacity under real load -- see
+    # docs/roadmap/done/phase18/phase18l-r-runtime-verification-report.md,
+    # "DB Connection Pool Exhaustion". Override with CELERY_WORKER_CONCURRENCY
+    # in .env if you need more parallel task slots and have verified your
+    # host/DB can handle it.
     cleanup_pid_file "${PID_DIR}/worker.pid"
     setsid nohup "${VENV_DIR}/bin/celery" \
         -A app.celery_app worker \
+        --concurrency="${CELERY_WORKER_CONCURRENCY:-4}" \
         --loglevel=info \
         >> "${LOG_DIR}/worker.log" 2>&1 &
     local worker_pid=$!
