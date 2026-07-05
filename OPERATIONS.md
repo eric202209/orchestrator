@@ -161,7 +161,7 @@ After pulling new code or rebuilding a Docker image:
    `alembic upgrade head` — the Alembic directory in this repo is historical
    and not wired into startup; see `alembic/README`.
 
-## Browser-Session / WF-B
+## Browser-Session / WF-B / WF-C
 
 The Planner Relay browser-session container provides a persistent, logged-in
 Chromium instance that the Planner Relay script pastes prompts into and
@@ -185,12 +185,40 @@ reports a locked profile after an unclean restart, remove the
 `SingletonLock`/`SingletonSocket`/`SingletonCookie` files from the persistent
 profile volume before restarting the container.
 
-**Security note:** the compose file currently publishes noVNC (6080) and CDP
-(9223→9222) on all host interfaces, and the VNC server runs without a
-password. CDP access is equivalent to full control of the authenticated
-ChatGPT session in that browser. Do not expose this container's ports beyond
-a trusted LAN or tailnet, and do not put it behind a public reverse proxy
-until it is bound to loopback/tailnet-only interfaces.
+**Security (WF-C hardened):** noVNC (6080) and CDP (9223→9222) now bind to
+`127.0.0.1` on the host by default — set via `NOVNC_BIND_HOST` /
+`CDP_BIND_HOST` in `.env` (see `.env.example`), both default `127.0.0.1`.
+Neither port has its own authentication (the VNC server still runs without a
+password; CDP has none by design), so both are equivalent to full control of
+the authenticated ChatGPT session — loopback binding is the actual security
+boundary. To reach them from another machine, use an SSH tunnel:
+
+```bash
+ssh -L 6080:localhost:6080 -L 9222:localhost:9222 user@host
+```
+
+Only widen `NOVNC_BIND_HOST`/`CDP_BIND_HOST` to `0.0.0.0` if you understand
+and accept exposing full session control to that interface, and never on a
+machine reachable from an untrusted network.
+
+**Conversation pinning (WF-C):** set `RELAY_EXPECTED_CONVERSATION_URL` in
+`.env` to the exact ChatGPT conversation URL the relay should send into. If
+set, the relay verifies the browser's current tab matches before pasting or
+sending, and aborts with a clear message on any mismatch — it never switches
+tabs itself. Leave it blank only when deliberately bootstrapping a new
+conversation.
+
+**Preflight (WF-C):** `scripts/relay/check_relay.sh` checks the container,
+noVNC, CDP, expected conversation, login state, relay directories, selectors
+file, and file writability, printing PASS/FAIL with diagnostics.
+`run_planner_relay.sh` runs it automatically and refuses to start the relay
+on FAIL; run it standalone any time to diagnose without sending anything.
+
+**Metrics (WF-C):** every relay run appends one JSON line per event to
+`relay/metrics.jsonl` (start, completion with elapsed time and outcome —
+success, selector failure, URL mismatch, login expired, browser unavailable,
+operator/relay cancelled, or unexpected error). Append-only, no database;
+inspect with `tail -f relay/metrics.jsonl` or `jq`.
 
 Run the relay:
 
@@ -199,10 +227,7 @@ scripts/relay/run_planner_relay.sh
 ```
 
 Always confirm `Send? [y/N]` manually — this gate is permanent by design,
-not a temporary limitation. The relay has no conversation-target pinning
-today: it pastes into whichever ChatGPT tab is currently active in that
-browser, so confirm the correct conversation is focused before approving
-Send.
+not a temporary limitation.
 
 ## Database Concurrency / SQLite Locking
 

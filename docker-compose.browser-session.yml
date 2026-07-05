@@ -5,8 +5,18 @@ services:
     image: mcr.microsoft.com/playwright:v1.61.0-noble
     container_name: orchestrator-browser-session
     ports:
-      - "6080:6080"    # noVNC — view browser from host or phone
-      - "9222:9223"    # Chrome DevTools Protocol — relay connects here
+      # Bind to localhost by default (WF-C security hardening). Both noVNC
+      # and CDP grant full control of the persistent Chrome/ChatGPT session
+      # with no additional auth (x11vnc runs -nopw; CDP has none by design),
+      # so publishing them beyond loopback is a full account-takeover
+      # surface. To reach them from another host, use an SSH tunnel (see
+      # docs/roadmap/done/workflow/wf-b-browser-session-runbook.md) instead
+      # of widening these binds. Only override NOVNC_BIND_HOST /
+      # CDP_BIND_HOST (e.g. to 0.0.0.0) if you understand and accept that
+      # exposure — never do so on a machine reachable from an untrusted
+      # network.
+      - "${NOVNC_BIND_HOST:-127.0.0.1}:6080:6080"    # noVNC — view browser from host or phone
+      - "${CDP_BIND_HOST:-127.0.0.1}:9222:9223"       # Chrome DevTools Protocol — relay connects here
     environment:
       - DISPLAY=:99
     volumes:

@@ -16,22 +16,26 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 WORKFLOW_DIR="${WORKFLOW_DIR:-$REPO_ROOT/docs/roadmap/workflow}"
 RELAY_DIR="${RELAY_DIR:-$REPO_ROOT/relay}"
+CDP_URL="${CDP_URL:-http://localhost:9222}"
+RELAY_EXPECTED_CONVERSATION_URL="${RELAY_EXPECTED_CONVERSATION_URL:-}"
 
 HANDOFF="$WORKFLOW_DIR/HANDOFF_DRAFT.md"
 NEXT_PROMPT="$WORKFLOW_DIR/NEXT_PROMPT.md"
 INPUT="$RELAY_DIR/input.md"
 OUTPUT="$RELAY_DIR/output.md"
 
-echo "=== WF-B Planner Relay ==="
+echo "=== WF-B/WF-C Planner Relay ==="
 echo ""
 
-# Verify browser-session container is running
-if ! docker inspect orchestrator-browser-session &>/dev/null; then
-    echo "ERROR: browser-session container is not running."
-    echo "Start it with:"
-    echo "  docker compose -f docker-compose.browser-session.yml up -d"
+# Preflight (WF-C): browser-session up, CDP/noVNC reachable, expected
+# conversation open, login valid, dirs/selectors/files in place.
+echo "[wrapper] Running preflight..."
+if ! "$SCRIPT_DIR/check_relay.sh"; then
+    echo ""
+    echo "ERROR: Preflight FAILED. See diagnostics above. Relay not started."
     exit 1
 fi
+echo ""
 
 # Verify HANDOFF_DRAFT.md exists
 if [[ ! -f "$HANDOFF" ]]; then
@@ -45,7 +49,8 @@ cp "$HANDOFF" "$INPUT"
 
 # Step 2: run the stateless relay
 echo "[wrapper] Running planner relay..."
-RELAY_DIR="$RELAY_DIR" CDP_URL="http://localhost:9222" \
+RELAY_DIR="$RELAY_DIR" CDP_URL="$CDP_URL" \
+    RELAY_EXPECTED_CONVERSATION_URL="$RELAY_EXPECTED_CONVERSATION_URL" \
     "$REPO_ROOT/.relay-venv/bin/python" "$SCRIPT_DIR/planner_relay.py"
 
 # Step 3: check output was written
