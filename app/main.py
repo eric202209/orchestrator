@@ -4,6 +4,8 @@ from contextlib import asynccontextmanager
 import logging
 from urllib.parse import urlsplit, urlunsplit
 
+import time
+
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -18,6 +20,7 @@ from app.api.v1.router import api_router
 from app.api.v1.endpoints.auth import router as auth_router
 from app.database import init_db, get_db_session
 from app.services.observability import flush_langfuse
+from app.services.observability import runtime_queue_metrics
 from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.planning.planning_session_service import PlanningSessionService
 from app.services.health import health_payload
@@ -119,6 +122,36 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
+
+
+# Phase 19E: read-only total-request-wall-time sample for a small set of
+# routes already known to be latency-sensitive (Knowledge, Analytics). This
+# measures time from ASGI receipt to response, which includes any wait for a
+# free threadpool worker before the sync route handler even starts running —
+# the gap between this and the in-handler `runtime_queue_metrics` sample is
+# queueing delay, not query cost. Adds no behavior, only a timer.
+_WALL_TIME_METRIC_PREFIXES = {
+    "/api/v1/knowledge": "knowledge_total_wall",
+    "/api/v1/analytics": "analytics_total_wall",
+}
+
+
+@app.middleware("http")
+async def _runtime_wall_time_sampler(request: Request, call_next):
+    metric = next(
+        (
+            name
+            for prefix, name in _WALL_TIME_METRIC_PREFIXES.items()
+            if request.url.path.startswith(prefix)
+        ),
+        None,
+    )
+    if metric is None:
+        return await call_next(request)
+    started = time.monotonic()
+    response = await call_next(request)
+    runtime_queue_metrics.record(metric, time.monotonic() - started)
+    return response
 
 
 @app.exception_handler(HTTPException)

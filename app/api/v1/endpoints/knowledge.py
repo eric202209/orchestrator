@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from datetime import datetime
 from typing import List, Optional
 
@@ -17,6 +18,7 @@ from app.dependencies import get_current_active_user
 from app.models import KnowledgeItem
 from app.schemas.knowledge import KnowledgeContext, KnowledgeType
 from app.services.knowledge.knowledge_service import KnowledgeService
+from app.services.observability import runtime_queue_metrics
 
 router = APIRouter()
 
@@ -171,6 +173,7 @@ def list_knowledge_items(
     db: Session = Depends(get_db),
     _current_user=Depends(get_current_active_user),
 ):
+    started = time.monotonic()
     q = db.query(KnowledgeItem)
     if not include_retired:
         q = q.filter(KnowledgeItem.is_active.is_(True))
@@ -186,6 +189,7 @@ def list_knowledge_items(
         )
     total = q.count()
     items = q.offset((page - 1) * page_size).limit(page_size).all()
+    runtime_queue_metrics.record("knowledge_queue", time.monotonic() - started)
     return PaginatedKnowledgeItems(
         items=items,
         total=total,
@@ -203,9 +207,10 @@ def query_knowledge(
     db: Session = Depends(get_db),
     _current_user=Depends(get_current_active_user),
 ):
+    started = time.monotonic()
     try:
         svc = _get_knowledge_service()
-        return svc.retrieve(
+        result = svc.retrieve(
             query=body.query,
             trigger_phase=body.trigger_phase,
             knowledge_types=body.knowledge_types,
@@ -217,3 +222,5 @@ def query_knowledge(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Qdrant unavailable: {exc}",
         )
+    runtime_queue_metrics.record("knowledge_semantic_query", time.monotonic() - started)
+    return result

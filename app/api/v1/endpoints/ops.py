@@ -461,10 +461,11 @@ def ops_queue_latency(
         .one()
     )
 
-    # p95 — Python sort (SQLite percentile_cont is unavailable without extensions)
+    # p95/p99 — Python sort (SQLite percentile_cont is unavailable without extensions)
     # Suppress for small samples where percentile is not meaningful.
     _P95_MIN_SAMPLES = 20
     p95: Optional[float] = None
+    p99: Optional[float] = None
     if row.count >= _P95_MIN_SAMPLES:
         values = [
             float(v)
@@ -478,6 +479,7 @@ def ops_queue_latency(
         if values:
             values.sort()
             p95 = round(values[int(0.95 * len(values))], 3)
+            p99 = round(values[int(0.99 * len(values))], 3)
 
     return {
         "computed_at": datetime.now(UTC).isoformat(),
@@ -490,6 +492,51 @@ def ops_queue_latency(
             round(float(row.max_seconds), 3) if row.max_seconds is not None else None
         ),
         "p95_queue_latency_seconds": p95,
+        "p99_queue_latency_seconds": p99,
+    }
+
+
+@router.get("/runtime-queues")
+def ops_runtime_queues(
+    current_user=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    days: int = 7,
+) -> Dict[str, Any]:
+    """Unified live + historical view across the five runtime queues.
+
+    Phase 19E: consolidates signals that already existed under separate
+    endpoints (`/queue-latency` for planning/execution dispatch wait,
+    `/backends/concurrency` for session admission, `/health` for Celery
+    worker occupancy) with a new in-process, read-only rolling recorder for
+    Knowledge, so all five queues (Planning, Execution, Knowledge, Worker,
+    Session) are visible with avg/p95/p99 from one call. Does not change
+    runtime behavior — every value here is either a passthrough of an
+    existing query or a recorded sample from work that already happened.
+    """
+    from app.services.observability import runtime_queue_metrics
+
+    planning_execution = ops_queue_latency(current_user=current_user, db=db, days=days)
+    concurrency = ops_backends_concurrency(current_user=current_user, db=db)
+    celery = _celery_health()
+
+    return {
+        "computed_at": datetime.now(UTC).isoformat(),
+        "window_days": days,
+        "planning_queue": planning_execution,
+        "execution_queue": planning_execution,
+        "session_queue": {
+            "redis_available": concurrency["redis_available"],
+            "backends": concurrency["backends"],
+        },
+        "worker_queue": celery,
+        "knowledge_queue": {
+            "items_search_in_handler": runtime_queue_metrics.stats("knowledge_queue"),
+            "semantic_query_in_handler": runtime_queue_metrics.stats(
+                "knowledge_semantic_query"
+            ),
+            "knowledge_total_wall": runtime_queue_metrics.stats("knowledge_total_wall"),
+        },
+        "analytics_total_wall": runtime_queue_metrics.stats("analytics_total_wall"),
     }
 
 
