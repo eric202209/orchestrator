@@ -77,8 +77,11 @@ from app.services.orchestration.phases.planning_plan_shape import (
 from app.services.orchestration.phases.planning_task1_bootstrap import (
     emit_task1_bootstrap_contract_event as _emit_task1_bootstrap_contract_event,
     is_first_ordered_task as _is_first_ordered_task,
+    apply_task1_brittle_inline_python_normalization as _apply_task1_brittle_inline_python_normalization,
     normalize_task1_bootstrap_plan_for_json_stability as _normalize_task1_bootstrap_plan_for_json_stability,
     normalize_task1_python_src_layout_verification as _normalize_task1_python_src_layout_verification,
+    plan_has_brittle_inline_python_verification as _plan_has_brittle_inline_python_verification,
+    reconcile_task1_bootstrap_plan as _reconcile_task1_bootstrap_plan,
     task1_bootstrap_contract_passed as _task1_bootstrap_contract_passed,
     task1_plan_failed_only_brittle_command_shape as _task1_plan_failed_only_brittle_command_shape,
 )
@@ -1731,43 +1734,33 @@ def execute_planning_phase(
             if (
                 _is_first_ordered_task(ctx.task)
                 and not plan_verdict.accepted
+                and _plan_has_brittle_inline_python_verification(plan_verdict)
+            ):
+                reconciled_verdict = _apply_task1_brittle_inline_python_normalization(
+                    ctx, plan_verdict
+                )
+                if reconciled_verdict is not None:
+                    plan_verdict = reconciled_verdict
+                    output_text = json.dumps(ctx.orchestration_state.plan)
+            if (
+                _is_first_ordered_task(ctx.task)
+                and not plan_verdict.accepted
                 and _task1_bootstrap_contract_passed(plan_verdict)
                 and _task1_plan_failed_only_brittle_command_shape(plan_verdict)
             ):
-                normalized_plan = _normalize_task1_bootstrap_plan_for_json_stability(
-                    ctx.orchestration_state.plan
+                reconciled_verdict = _reconcile_task1_bootstrap_plan(
+                    ctx,
+                    normalize=_normalize_task1_bootstrap_plan_for_json_stability,
+                    reason="task1_bootstrap_json_stability_normalized",
+                    message=(
+                        "[ORCHESTRATION] Normalized Task 1 bootstrap plan "
+                        "before repair by preferring typed file ops over "
+                        "malformed shell command text"
+                    ),
                 )
-                if normalized_plan != ctx.orchestration_state.plan:
-                    emit_phase_event(
-                        ctx.orchestration_state,
-                        ctx.emit_live,
-                        level="INFO",
-                        phase="planning",
-                        message=(
-                            "[ORCHESTRATION] Normalized Task 1 bootstrap plan "
-                            "before repair by preferring typed file ops over "
-                            "malformed shell command text"
-                        ),
-                        details={
-                            "reason": "task1_bootstrap_json_stability_normalized",
-                            "step_count": len(normalized_plan),
-                        },
-                    )
-                    ctx.orchestration_state.plan = normalized_plan
-                    output_text = json.dumps(normalized_plan)
-                    plan_verdict = ValidatorService.validate_plan(
-                        ctx.orchestration_state.plan,
-                        output_text=output_text,
-                        task_prompt=ctx.prompt,
-                        execution_profile=ctx.execution_profile,
-                        project_dir=ctx.orchestration_state.project_dir,
-                        title=ctx.task.title if ctx.task else None,
-                        description=ctx.task.description if ctx.task else None,
-                        validation_severity=ctx.validation_severity,
-                        workflow_profile=ctx.workflow_profile,
-                        workflow_stage=ctx.workflow_stage,
-                        is_first_ordered_task=_is_first_ordered_task(ctx.task),
-                    )
+                if reconciled_verdict is not None:
+                    plan_verdict = reconciled_verdict
+                    output_text = json.dumps(ctx.orchestration_state.plan)
             if _is_first_ordered_task(ctx.task) and _task1_bootstrap_contract_passed(
                 plan_verdict
             ):

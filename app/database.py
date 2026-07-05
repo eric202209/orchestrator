@@ -1,10 +1,12 @@
 """Database initialization."""
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from app.config import settings
 from app.models import Base
 from app.db_migrations import run_schema_migrations
+
+_IS_SQLITE = "sqlite" in settings.DATABASE_URL
 
 # Create database engine with optimized pool settings
 engine = create_engine(
@@ -13,12 +15,29 @@ engine = create_engine(
     max_overflow=10,  # Allow up to 10 additional connections
     pool_recycle=3600,  # Recycle connections after 1 hour
     pool_pre_ping=True,  # Verify connection before use
-    connect_args=(
-        {"check_same_thread": False, "timeout": 30}
-        if "sqlite" in settings.DATABASE_URL
-        else {}
-    ),
+    connect_args=({"check_same_thread": False, "timeout": 30} if _IS_SQLITE else {}),
 )
+
+if _IS_SQLITE:
+
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragmas(dbapi_connection, _):
+        """WAL mode lets concurrent readers (API requests) proceed while a
+        writer (Celery worker, of which there are many processes, each with
+        its own connection pool onto this same file) commits, instead of
+        every connection blocking on a single exclusive file lock. Without
+        this, the default `journal_mode=delete` serializes all readers and
+        writers against each other, and connections held waiting on that
+        lock exhaust each process's own pool -- see
+        docs/roadmap/done/phase18/phase18l-r-runtime-verification-report.md,
+        "DB Connection Pool Exhaustion".
+        """
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.close()
+
 
 # Create session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

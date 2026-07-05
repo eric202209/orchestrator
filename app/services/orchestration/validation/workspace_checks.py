@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import ast
 import re
+import shlex
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
 from .placeholder_policy import path_allows_placeholder_fixture_content
 
@@ -85,6 +86,53 @@ def _python_has_stub_pass(content: str) -> bool:
         ):
             return True
     return False
+
+
+def uses_brittle_python_inline_command(command: str) -> bool:
+    """Shared brittle-inline-Python detection (validator rule + bootstrap-contract normalization)."""
+
+    raw = str(command or "").strip()
+    lowered = raw.lower()
+    if "python -c" not in lowered and "python3 -c" not in lowered:
+        return False
+    if "stdin.read(" in lowered and not re.search(r"(^|[^<>])\|([^|]|$)|<", raw):
+        return True
+
+    quote_chars = raw.count('"') + raw.count("'")
+    has_nested_python_content = any(
+        marker in raw
+        for marker in (
+            "f'",
+            'f"',
+            "json.dumps(",
+            "assert ",
+            "{",
+            "}",
+        )
+    )
+    return quote_chars >= 4 and has_nested_python_content
+
+
+def extract_inline_python_dash_c_script(command: str) -> Optional[str]:
+    """Return the script text from a bare `python[3] -c "<script>"` command.
+
+    Returns ``None`` when the command is not exactly `<interpreter> -c <script>`
+    (e.g. it has extra CLI arguments after the script, or fails to shell-parse),
+    so callers can conservatively skip rewriting anything they cannot losslessly
+    reconstruct.
+    """
+
+    raw = str(command or "").strip()
+    lowered = raw.lower()
+    if not lowered.startswith(("python -c", "python3 -c")):
+        return None
+    try:
+        parts = shlex.split(raw)
+    except ValueError:
+        return None
+    if len(parts) != 3 or parts[1] != "-c":
+        return None
+    return parts[2]
 
 
 def iter_candidate_files(project_dir: Path, file_paths: Iterable[str]) -> List[Path]:

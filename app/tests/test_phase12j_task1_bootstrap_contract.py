@@ -15,11 +15,17 @@ from app.services.orchestration.phases.planning_support import (
 )
 from app.services.orchestration.phases.planning_task1_bootstrap import (
     normalize_task1_bootstrap_plan_for_json_stability,
+    normalize_task1_brittle_inline_python_verification,
+    plan_has_brittle_inline_python_verification,
     task1_bootstrap_contract_passed,
     task1_plan_failed_only_brittle_command_shape,
 )
 from app.services.orchestration.planning.task_bootstrap_contract import (
     validate_task1_bootstrap_contract,
+)
+from app.services.orchestration.validation.workspace_checks import (
+    extract_inline_python_dash_c_script,
+    uses_brittle_python_inline_command,
 )
 from app.services.orchestration.planning.repair_arbitration import (
     classify_planning_repair_candidate,
@@ -723,6 +729,140 @@ def test_task1_bootstrap_normalizes_stale_heredoc_output_before_repair(tmp_path)
 
     assert normalized_plan[0]["commands"] == []
     assert final_verdict.accepted
+
+
+def test_task1_bootstrap_reconciles_brittle_inline_python_verification(tmp_path):
+    """Phase 18N: first-task inline python -c verification no longer creates an
+    unsatisfiable repair loop between task1_bootstrap_contract and brittle_commands."""
+
+    verify_cmd = (
+        "python -c \"import add; assert add.add(2,3)==5, f'bad {add.add(2,3)}'\""
+    )
+    plan = [
+        _step(
+            ops=[
+                {
+                    "op": "write_file",
+                    "path": "add.py",
+                    "content": "def add(a, b):\n    return a + b\n",
+                }
+            ],
+            commands=[verify_cmd],
+            verification=verify_cmd,
+            expected_files=["add.py"],
+        )
+    ]
+    task_prompt = (
+        "Implement a Python module add.py with a function add(a, b) that "
+        f"returns a + b. Verify with {verify_cmd}."
+    )
+
+    initial_verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt=task_prompt,
+        execution_profile="implementation",
+        project_dir=tmp_path,
+        is_first_ordered_task=True,
+    )
+
+    assert not initial_verdict.accepted
+    assert "Plan contains brittle heredoc-heavy or malformed commands" in (
+        initial_verdict.reasons or []
+    )
+    assert plan_has_brittle_inline_python_verification(initial_verdict)
+
+    normalized_plan = normalize_task1_brittle_inline_python_verification(plan)
+    assert normalized_plan[0]["commands"] != [verify_cmd]
+    assert verify_cmd not in normalized_plan[0]["commands"]
+
+    final_verdict = ValidatorService.validate_plan(
+        normalized_plan,
+        output_text=json.dumps(normalized_plan),
+        task_prompt=task_prompt,
+        execution_profile="implementation",
+        project_dir=tmp_path,
+        is_first_ordered_task=True,
+    )
+
+    assert final_verdict.accepted
+    contract = (final_verdict.details or {}).get("task1_bootstrap_contract") or {}
+    # The rewritten script must not itself be counted as project source code
+    # requiring test coverage -- it exists only to carry the verification.
+    assert contract.get("required_source_files") == ["add.py"]
+    assert not plan_has_brittle_inline_python_verification(final_verdict)
+
+
+def test_normalize_task1_brittle_inline_python_verification_is_idempotent(tmp_path):
+    verify_cmd = (
+        "python -c \"import add; assert add.add(2,3)==5, f'bad {add.add(2,3)}'\""
+    )
+    plan = [
+        _step(
+            ops=[
+                {
+                    "op": "write_file",
+                    "path": "add.py",
+                    "content": "def add(a, b):\n    return a + b\n",
+                }
+            ],
+            commands=[verify_cmd],
+            verification=verify_cmd,
+            expected_files=["add.py"],
+        )
+    ]
+    once = normalize_task1_brittle_inline_python_verification(plan)
+    twice = normalize_task1_brittle_inline_python_verification(once)
+    assert once == twice
+
+
+def test_brittle_commands_still_rejects_unsafe_inline_python_for_later_tasks(tmp_path):
+    """The brittle_commands rule itself must remain intact outside the
+    bootstrap-contract reconciliation path (later tasks are unaffected)."""
+
+    verify_cmd = (
+        "python -c \"import add; assert add.add(2,3)==5, f'bad {add.add(2,3)}'\""
+    )
+    plan = [
+        _step(
+            ops=[
+                {
+                    "op": "write_file",
+                    "path": "add.py",
+                    "content": "def add(a, b):\n    return a + b\n",
+                }
+            ],
+            commands=[verify_cmd],
+            verification=verify_cmd,
+            expected_files=["add.py"],
+        )
+    ]
+    verdict = ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt="Fix add.py",
+        execution_profile="implementation",
+        project_dir=tmp_path,
+        is_first_ordered_task=False,
+    )
+    assert not verdict.accepted
+    assert "Plan contains brittle heredoc-heavy or malformed commands" in (
+        verdict.reasons or []
+    )
+
+
+def test_extract_inline_python_dash_c_script_round_trips_simple_commands():
+    command = "python -c \"import add; assert add.add(2,3)==5, f'bad {add.add(2,3)}'\""
+    assert uses_brittle_python_inline_command(command)
+    script = extract_inline_python_dash_c_script(command)
+    assert script == "import add; assert add.add(2,3)==5, f'bad {add.add(2,3)}'"
+
+
+def test_extract_inline_python_dash_c_script_declines_extra_arguments():
+    # Extra positional args after the script are not losslessly reconstructable
+    # by the rewrite, so extraction must conservatively bail out.
+    command = "python -c \"print('hi')\" extra_arg"
+    assert extract_inline_python_dash_c_script(command) is None
 
 
 def test_task1_bootstrap_contract_is_not_applied_to_later_tasks(tmp_path):

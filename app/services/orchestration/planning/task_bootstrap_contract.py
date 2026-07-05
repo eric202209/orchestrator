@@ -13,6 +13,7 @@ from app.services.orchestration.validation.workspace_checks import SOURCE_EXTENS
 
 
 TEST_ROOTS = {"test", "tests", "spec", "specs"}
+VERIFICATION_HELPER_SCRIPT_RE = re.compile(r"(?:^|/)verify_task1_step\d+\.py$")
 EXPECTED_TEST_REASON_EXPLICIT_CODE_TEST_INTENT = "explicit_code_test_intent"
 EXPECTED_TEST_REASON_EXISTING_PROJECT_TESTS_PRESENT = "existing_project_tests_present"
 EXPECTED_TEST_REASON_MIXED_TASK_CODE_COMPONENT = "mixed_task_code_component"
@@ -94,6 +95,19 @@ def _normalize_path(path_text: Any) -> str:
     return str(path_text or "").strip().rstrip("/").lstrip("./")
 
 
+def _is_verification_helper_script(path_text: str) -> bool:
+    """Ops-written scripts from a brittle-inline-Python verification rewrite.
+
+    Excluded from source/test/artifact classification entirely: they exist
+    solely to give a nested-quote `python -c "..."` verification command a
+    non-brittle shape (see planning_task1_bootstrap.normalize_task1_brittle_
+    inline_python_verification) and must not count as project source code the
+    contract then demands tests for.
+    """
+
+    return bool(VERIFICATION_HELPER_SCRIPT_RE.search(_normalize_path(path_text)))
+
+
 def _is_test_path(path_text: str) -> bool:
     parts = Path(path_text).parts
     return bool(parts and parts[0].lower() in TEST_ROOTS)
@@ -101,7 +115,11 @@ def _is_test_path(path_text: str) -> bool:
 
 def _is_source_path(path_text: str) -> bool:
     normalized = _normalize_path(path_text)
-    if not normalized or _is_test_path(normalized):
+    if (
+        not normalized
+        or _is_test_path(normalized)
+        or _is_verification_helper_script(normalized)
+    ):
         return False
     return Path(normalized).suffix.lower() in SOURCE_EXTENSIONS
 

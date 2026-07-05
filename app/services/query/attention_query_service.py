@@ -137,14 +137,23 @@ class AttentionQueryService:
     # ------------------------------------------------------------------
 
     def get_running_sessions_count(self, current_user) -> int:
-        """Count of non-deleted sessions currently in running or awaiting_input status."""
+        """Count of non-deleted sessions currently in running or awaiting_input status.
+
+        Deliberately excludes "paused": a paused session is not running (it is
+        either genuinely suspended or, for a planning-repair-exhaustion
+        failure, a terminal failure mislabeled "paused" -- see
+        docs/roadmap/done/phase18/phase18l-r-runtime-verification-report.md,
+        "Planning-Failure Lifecycle Asymmetry"). Counting it here previously
+        made the dashboard's running-session count disagree with the Sessions
+        page, which does not treat "paused" as running.
+        """
         return (
             self.db.query(SessionModel)
             .join(Project, Project.id == SessionModel.project_id)
             .filter(
                 SessionModel.deleted_at.is_(None),
                 Project.deleted_at.is_(None),
-                SessionModel.status.in_(("running", "awaiting_input", "paused")),
+                SessionModel.status.in_(("running", "awaiting_input")),
                 project_access_filter(self.db, current_user),
             )
             .count()

@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import json
 import shlex
-from typing import Any
+from typing import Any, Callable
 
+from app.services.orchestration.events.telemetry import emit_phase_event
 from app.services.orchestration.types import OrchestrationRunContext
+from app.services.orchestration.validation.validator import ValidatorService
+from app.services.orchestration.validation.workspace_checks import (
+    extract_inline_python_dash_c_script,
+    uses_brittle_python_inline_command,
+)
 
 
 def is_first_ordered_task(task: Any) -> bool:
@@ -103,6 +109,140 @@ def normalize_task1_python_src_layout_verification(
             updated["verification"] = verification
         normalized.append(updated)
     return normalized
+
+
+def plan_has_brittle_inline_python_verification(plan_verdict: Any) -> bool:
+    details = getattr(plan_verdict, "details", None) or {}
+    subcodes = set(details.get("brittle_command_subcodes") or [])
+    return "brittle_inline_python" in subcodes
+
+
+def normalize_task1_brittle_inline_python_verification(
+    plan: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Rewrite brittle `python -c "..."` commands into an ops-written script.
+
+    Resolves the Phase 18N contradiction where `task1_bootstrap_contract`
+    carries a first task's literal verification command forward into repair
+    prompts while `brittle_commands` simultaneously rejects that same
+    nested-quote inline command, giving the repair loop no satisfiable
+    target. Writing the script to a file and invoking it plainly preserves
+    the exact verification semantics while satisfying both rules.
+    """
+
+    normalized: list[dict[str, Any]] = []
+    for index, step in enumerate(plan, start=1):
+        updated = dict(step)
+        ops = list(updated.get("ops") or [])
+        rewritten_by_original: dict[str, str] = {}
+        changed = False
+
+        def _rewrite(raw_command: str) -> str | None:
+            if raw_command in rewritten_by_original:
+                return rewritten_by_original[raw_command]
+            if not uses_brittle_python_inline_command(raw_command):
+                return None
+            script = extract_inline_python_dash_c_script(raw_command)
+            if script is None:
+                return None
+            interpreter = (
+                "python3"
+                if raw_command.strip().lower().startswith("python3")
+                else "python"
+            )
+            script_path = f"verify_task1_step{index}.py"
+            ops.append(
+                {
+                    "op": "write_file",
+                    "path": script_path,
+                    "content": script + "\n",
+                }
+            )
+            rewritten = f"{interpreter} {script_path}"
+            rewritten_by_original[raw_command] = rewritten
+            return rewritten
+
+        new_commands = []
+        for command in updated.get("commands") or []:
+            rewritten = _rewrite(str(command or ""))
+            if rewritten is not None:
+                new_commands.append(rewritten)
+                changed = True
+            else:
+                new_commands.append(command)
+
+        verification = str(updated.get("verification") or "")
+        new_verification: Any = updated.get("verification")
+        if verification:
+            rewritten = _rewrite(verification)
+            if rewritten is not None:
+                new_verification = rewritten
+                changed = True
+
+        if changed:
+            updated["commands"] = new_commands
+            updated["verification"] = new_verification
+            updated["ops"] = ops
+        normalized.append(updated)
+    return normalized
+
+
+def reconcile_task1_bootstrap_plan(
+    ctx: OrchestrationRunContext,
+    *,
+    normalize: Callable[[list[dict[str, Any]]], list[dict[str, Any]]],
+    reason: str,
+    message: str,
+) -> Any | None:
+    """Normalize + re-validate a first-task plan; None if normalize was a no-op.
+
+    Shared by every Task-1 bootstrap plan-normalization pass (JSON-stability,
+    src-layout verification, brittle-inline-Python rewrite) so planning_flow.py
+    only needs a short guarded call instead of inlining the normalize/emit/
+    re-validate sequence at each call site.
+    """
+
+    normalized_plan = normalize(ctx.orchestration_state.plan)
+    if normalized_plan == ctx.orchestration_state.plan:
+        return None
+
+    emit_phase_event(
+        ctx.orchestration_state,
+        ctx.emit_live,
+        level="INFO",
+        phase="planning",
+        message=message,
+        details={"reason": reason, "step_count": len(normalized_plan)},
+    )
+    ctx.orchestration_state.plan = normalized_plan
+    return ValidatorService.validate_plan(
+        ctx.orchestration_state.plan,
+        output_text=json.dumps(normalized_plan),
+        task_prompt=ctx.prompt,
+        execution_profile=ctx.execution_profile,
+        project_dir=ctx.orchestration_state.project_dir,
+        title=ctx.task.title if ctx.task else None,
+        description=ctx.task.description if ctx.task else None,
+        validation_severity=ctx.validation_severity,
+        workflow_profile=ctx.workflow_profile,
+        workflow_stage=ctx.workflow_stage,
+        is_first_ordered_task=is_first_ordered_task(ctx.task),
+    )
+
+
+def apply_task1_brittle_inline_python_normalization(
+    ctx: OrchestrationRunContext,
+    plan_verdict: Any,
+) -> Any | None:
+    return reconcile_task1_bootstrap_plan(
+        ctx,
+        normalize=normalize_task1_brittle_inline_python_verification,
+        reason="task1_bootstrap_brittle_inline_python_normalized",
+        message=(
+            "[ORCHESTRATION] Normalized Task 1 bootstrap plan by rewriting "
+            "brittle inline Python verification into an ops-written script"
+        ),
+    )
 
 
 def _plan_has_path(plan: list[dict[str, Any]], paths: set[str]) -> bool:

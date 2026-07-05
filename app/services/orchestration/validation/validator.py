@@ -41,6 +41,7 @@ from .workspace_checks import (
     find_nested_expected_file_matches as _find_nested_expected_file_matches,
     iter_candidate_files as _iter_candidate_files,
     split_content_issue_severity as _split_content_issue_severity,
+    uses_brittle_python_inline_command as _uses_brittle_python_inline_command_shared,
 )
 from .workspace_guard import (
     TaskWorkspaceViolationError,
@@ -2498,26 +2499,7 @@ class ValidatorService:
 
     @staticmethod
     def _uses_brittle_python_inline_command(command: str) -> bool:
-        raw = str(command or "").strip()
-        lowered = raw.lower()
-        if "python -c" not in lowered and "python3 -c" not in lowered:
-            return False
-        if "stdin.read(" in lowered and not re.search(r"(^|[^<>])\|([^|]|$)|<", raw):
-            return True
-
-        quote_chars = raw.count('"') + raw.count("'")
-        has_nested_python_content = any(
-            marker in raw
-            for marker in (
-                "f'",
-                'f"',
-                "json.dumps(",
-                "assert ",
-                "{",
-                "}",
-            )
-        )
-        return quote_chars >= 4 and has_nested_python_content
+        return _uses_brittle_python_inline_command_shared(command)
 
     @staticmethod
     def _is_non_runnable_command(command: str) -> bool:

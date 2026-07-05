@@ -907,6 +907,17 @@ class TestAttentionQueryService:
         count = svc.get_sessions_needing_attention_count(user)
         assert count == 2
 
+    def test_get_running_sessions_count_excludes_paused(self, db):
+        """A paused session is not running -- it must not inflate the count
+        the dashboard shows, disagreeing with the Sessions page (which does
+        not treat "paused" as running)."""
+        user, project = _make_user_and_project(db, 20, "u20@x.com")
+        _make_session(db, project, name="running", status="running")
+        _make_session(db, project, name="awaiting", status="awaiting_input")
+        _make_session(db, project, name="paused", status="paused")
+        svc = AttentionQueryService(db)
+        assert svc.get_running_sessions_count(user) == 2
+
     def test_get_review_queue_count(self, db):
         user, project = _make_user_and_project(db, 14, "u14@x.com")
         _make_task(db, project, title="ready", workspace_status="ready")
