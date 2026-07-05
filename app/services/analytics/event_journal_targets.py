@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 
 from sqlalchemy.orm import Session as DbSession
 
-from app.models import Project, Session as SessionModel, Task
+from app.models import Project, Session as SessionModel, SessionTask
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
@@ -35,12 +35,6 @@ class _SessionSnapshot:
     project_id: int
 
 
-@dataclass(frozen=True)
-class _TaskSnapshot:
-    id: int
-    project_id: int
-
-
 def load_event_journal_targets(db: DbSession) -> List[EventJournalTarget]:
     """Snapshot DB metadata needed for event-journal analytics.
 
@@ -49,6 +43,14 @@ def load_event_journal_targets(db: DbSession) -> List[EventJournalTarget]:
     pool and make unrelated page loads time out. This function copies the small
     amount of metadata needed for the walk, then releases the read transaction
     before returning plain value objects.
+
+    Phase 19F: targets are the actual `session_tasks` link rows (one journal
+    per session actually assigned a task), not the full cross product of
+    every session in a project against every task in that project. The prior
+    cross-product scan was O(sessions x tasks) per project and was the
+    dominant cost in `/analytics/execution` (~6.4s) and `/analytics/failures`
+    (~6.3s) under Phase 19E measurement — most generated pairs never
+    co-occurred and every one still cost a filesystem read attempt.
     """
 
     try:
@@ -62,7 +64,7 @@ def load_event_journal_targets(db: DbSession) -> List[EventJournalTarget]:
             .filter(SessionModel.deleted_at.is_(None))
             .all()
         )
-        task_rows = db.query(Task.id, Task.project_id).all()
+        session_task_rows = db.query(SessionTask.session_id, SessionTask.task_id).all()
     except Exception:
         return []
     finally:
@@ -79,30 +81,32 @@ def load_event_journal_targets(db: DbSession) -> List[EventJournalTarget]:
         )
         for row in project_rows
     }
-    sessions = [
-        _SessionSnapshot(id=row.id, project_id=row.project_id) for row in session_rows
-    ]
-    tasks_by_project: Dict[int, List[_TaskSnapshot]] = {}
-    for row in task_rows:
-        tasks_by_project.setdefault(row.project_id, []).append(
-            _TaskSnapshot(id=row.id, project_id=row.project_id)
-        )
+    sessions: Dict[int, _SessionSnapshot] = {
+        row.id: _SessionSnapshot(id=row.id, project_id=row.project_id)
+        for row in session_rows
+    }
 
+    project_dirs: Dict[int, Path] = {}
     targets: List[EventJournalTarget] = []
-    for session in sessions:
-        project = projects.get(session.project_id)
-        if not project:
+    for row in session_task_rows:
+        session = sessions.get(row.session_id)
+        if session is None:
             continue
-        project_dir = Path(
-            resolve_project_workspace_path(project.workspace_path, project.name)
-        )
-        for task in tasks_by_project.get(session.project_id, []):
-            targets.append(
-                EventJournalTarget(
-                    project_id=session.project_id,
-                    session_id=session.id,
-                    task_id=task.id,
-                    project_dir=project_dir,
-                )
+        project = projects.get(session.project_id)
+        if project is None:
+            continue
+        project_dir = project_dirs.get(project.id)
+        if project_dir is None:
+            project_dir = Path(
+                resolve_project_workspace_path(project.workspace_path, project.name)
             )
+            project_dirs[project.id] = project_dir
+        targets.append(
+            EventJournalTarget(
+                project_id=session.project_id,
+                session_id=session.id,
+                task_id=row.task_id,
+                project_dir=project_dir,
+            )
+        )
     return targets

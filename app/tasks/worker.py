@@ -125,7 +125,16 @@ from app.services.observability import (
 logger = logging.getLogger(__name__)
 
 MAX_SUBFOLDER_COLLISION_ATTEMPTS = 999
-BACKEND_CAPACITY_RETRY_MAX_RETRIES = 20
+# Phase 19F: raised from 20 (300s ceiling) to 60 (900s ceiling) at the same
+# 15s countdown. Phase 19E found real completed task_executions run p50=217s,
+# p90=279s, max=605s; with LOCAL_OPENCLAW_MAX_PARALLEL_SESSIONS=1 a session
+# queued behind others must wait for their full duration, not just capacity
+# becoming free. The old 300s ceiling was shorter than one p50 execution plus
+# any queueing, and historically caused 28 permanent FAILED / 176 total
+# task_executions (16%) whose capacity genuinely would have freed up given
+# more time (10 sessions did recover at 242-303s, right at the old ceiling).
+# MAX_PARALLEL_SESSIONS itself is left at 1 — see phase19f report Task 3.
+BACKEND_CAPACITY_RETRY_MAX_RETRIES = 60
 
 
 def _env_value(name: str) -> Optional[str]:

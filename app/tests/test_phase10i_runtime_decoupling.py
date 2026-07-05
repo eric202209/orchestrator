@@ -834,14 +834,15 @@ def test_backend_capacity_retry_state_marks_exhaustion():
     assert exhausted is True
 
 
-def test_backend_capacity_retry_budget_is_300s():
+def test_backend_capacity_retry_budget_is_900s():
     import app.tasks.worker as worker_module
 
-    # 20 retries × 15s countdown = 300s total patience budget
+    # Phase 19F: 60 retries x 15s countdown = 900s total patience budget
+    # (raised from 300s — see BACKEND_CAPACITY_RETRY_MAX_RETRIES docstring).
     countdown_seconds = 15
     budget = worker_module.BACKEND_CAPACITY_RETRY_MAX_RETRIES * countdown_seconds
-    assert worker_module.BACKEND_CAPACITY_RETRY_MAX_RETRIES == 20
-    assert budget == 300
+    assert worker_module.BACKEND_CAPACITY_RETRY_MAX_RETRIES == 60
+    assert budget == 900
 
 
 def test_prepare_backend_capacity_retry_returns_attempt_to_pending(db_session):
