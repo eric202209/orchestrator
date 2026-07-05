@@ -809,49 +809,31 @@ class DecisionAnalyticsService:
         from app.services.orchestration.state.persistence import (
             read_orchestration_events,
         )
-        from app.services.session.session_runtime_service import (
-            resolve_event_log_project_dir,
+        from app.services.analytics.event_journal_targets import (
+            load_event_journal_targets,
         )
 
         records: List[Dict[str, Any]] = []
-        try:
-            sessions = (
-                self._db.query(SessionModel)
-                .filter(SessionModel.deleted_at.is_(None))
-                .all()
-            )
-        except Exception:
-            return records
-
-        for sess in sessions:
+        for target in load_event_journal_targets(self._db):
             try:
-                tasks = (
-                    self._db.query(Task)
-                    .filter(Task.project_id == sess.project_id)
-                    .all()
+                events = read_orchestration_events(
+                    target.project_dir,
+                    target.session_id,
+                    target.task_id,
                 )
             except Exception:
                 continue
 
-            for task in tasks:
-                try:
-                    project_dir = resolve_event_log_project_dir(self._db, sess, task.id)
-                    if not project_dir:
-                        continue
-                    events = read_orchestration_events(project_dir, sess.id, task.id)
-                except Exception:
+            for event in events:
+                if not isinstance(event, dict):
                     continue
-
-                for event in events:
-                    if not isinstance(event, dict):
-                        continue
-                    records.append(
-                        {
-                            "project_id": sess.project_id,
-                            "session_id": sess.id,
-                            "task_id": task.id,
-                            "timestamp": _parse_ts(event.get("timestamp")),
-                            "event": event,
-                        }
-                    )
+                records.append(
+                    {
+                        "project_id": target.project_id,
+                        "session_id": target.session_id,
+                        "task_id": target.task_id,
+                        "timestamp": _parse_ts(event.get("timestamp")),
+                        "event": event,
+                    }
+                )
         return records

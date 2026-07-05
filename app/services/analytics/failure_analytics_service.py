@@ -23,7 +23,7 @@ from typing import Any, Dict, Optional
 from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session as DbSession
 
-from app.models import Session as SessionModel, Task, TaskExecution
+from app.models import Session as SessionModel, TaskExecution
 from app.services.orchestration.events.event_types import EventType
 
 _WINDOW_DAYS: Dict[str, Optional[int]] = {
@@ -145,8 +145,8 @@ class FailureAnalyticsService:
         from app.services.orchestration.state.persistence import (
             read_orchestration_events,
         )
-        from app.services.session.session_runtime_service import (
-            resolve_event_log_project_dir,
+        from app.services.analytics.event_journal_targets import (
+            load_event_journal_targets,
         )
 
         thresholds: Dict[str, Optional[datetime]] = {
@@ -158,62 +158,44 @@ class FailureAnalyticsService:
             label: _empty_event_bucket() for label in thresholds
         }
 
-        try:
-            sessions = (
-                self._db.query(SessionModel)
-                .filter(SessionModel.deleted_at.is_(None))
-                .all()
-            )
-        except Exception:
-            return per_window
-
-        for sess in sessions:
+        for target in load_event_journal_targets(self._db):
             try:
-                tasks = (
-                    self._db.query(Task)
-                    .filter(Task.project_id == sess.project_id)
-                    .all()
+                events = read_orchestration_events(
+                    target.project_dir,
+                    target.session_id,
+                    target.task_id,
                 )
             except Exception:
                 continue
 
-            for task in tasks:
+            for event in events:
                 try:
-                    project_dir = resolve_event_log_project_dir(self._db, sess, task.id)
-                    if not project_dir:
+                    et = event.get("event_type", "")
+                    if et not in (
+                        _RECOVERY_ATTEMPT,
+                        _RECOVERY_SUCCESS,
+                        _RECOVERY_FAILED,
+                    ):
                         continue
-                    events = read_orchestration_events(project_dir, sess.id, task.id)
+
+                    event_ts = _parse_event_timestamp(event.get("timestamp"))
+
+                    for label, threshold in thresholds.items():
+                        if threshold is not None:
+                            if event_ts is None or event_ts < threshold:
+                                continue
+
+                        bucket = per_window[label]
+                        if et == _RECOVERY_ATTEMPT:
+                            bucket["recovery_attempts"] += 1
+                        elif et == _RECOVERY_SUCCESS:
+                            bucket["recovery_successes"] += 1
+                        elif et == _RECOVERY_FAILED:
+                            bucket["recovery_failures"] += 1
+                            details = event.get("details") or {}
+                            if details.get("budget_exhausted"):
+                                bucket["budget_exhaustion_count"] += 1
                 except Exception:
                     continue
-
-                for event in events:
-                    try:
-                        et = event.get("event_type", "")
-                        if et not in (
-                            _RECOVERY_ATTEMPT,
-                            _RECOVERY_SUCCESS,
-                            _RECOVERY_FAILED,
-                        ):
-                            continue
-
-                        event_ts = _parse_event_timestamp(event.get("timestamp"))
-
-                        for label, threshold in thresholds.items():
-                            if threshold is not None:
-                                if event_ts is None or event_ts < threshold:
-                                    continue
-
-                            bucket = per_window[label]
-                            if et == _RECOVERY_ATTEMPT:
-                                bucket["recovery_attempts"] += 1
-                            elif et == _RECOVERY_SUCCESS:
-                                bucket["recovery_successes"] += 1
-                            elif et == _RECOVERY_FAILED:
-                                bucket["recovery_failures"] += 1
-                                details = event.get("details") or {}
-                                if details.get("budget_exhausted"):
-                                    bucket["budget_exhaustion_count"] += 1
-                    except Exception:
-                        continue
 
         return per_window

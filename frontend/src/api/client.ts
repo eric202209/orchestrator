@@ -148,11 +148,19 @@ apiClient.interceptors.request.use((config) => {
   return config;
 });
 
-// Response interceptor: redirect to login on 401
+// Response interceptor: only the explicit auth probe owns navigation to login.
+// Background/admin requests can receive 401/403 while the shell should remain
+// mounted and show a local error panel instead of forcing a full-app logout.
 apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401) {
+    const requestUrl = String(error.config?.url || "");
+    const authProbeFailed = requestUrl.includes("/auth/me");
+    if (
+      error.response?.status === 401 &&
+      authProbeFailed &&
+      !["/login", "/register"].includes(window.location.pathname)
+    ) {
       window.location.href = "/login";
     }
     return Promise.reject(error);

@@ -5,7 +5,6 @@ import type { Page, Project, Task } from '../types/api';
 import {
   GitBranch,
   Plus,
-  FileText,
   XCircle,
   ExternalLink,
   Search,
@@ -34,7 +33,6 @@ function ProjectsList() {
   const [updatingProject, setUpdatingProject] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [reviewCounts, setReviewCounts] = useState<Record<number, number>>({});
-  const [taskCounts, setTaskCounts] = useState<Record<number, number>>({});
 
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -85,20 +83,13 @@ function ProjectsList() {
 
   const fetchProjects = useCallback(async () => {
     try {
-      const [projectsResponse, tasksResponse] = await Promise.all([
-        projectsAPI.getAll({ page: 1, per_page: 200, order_by: 'created_at', order_dir: 'desc' }),
-        tasksAPI.getAll({ page: 1, per_page: 200, order_by: 'created_at', order_dir: 'desc' }),
-      ]);
-      setProjects(pageItems<Project>(projectsResponse.data));
-      const counts: Record<number, number> = {};
-      const tCounts: Record<number, number> = {};
-      pageItems<Task>(tasksResponse.data).forEach((task) => {
-        tCounts[task.project_id] = (tCounts[task.project_id] || 0) + 1;
-        if (!taskNeedsReview(task)) return;
-        counts[task.project_id] = (counts[task.project_id] || 0) + 1;
+      const projectsResponse = await projectsAPI.getAll({
+        page: 1,
+        per_page: 100,
+        order_by: 'created_at',
+        order_dir: 'desc',
       });
-      setReviewCounts(counts);
-      setTaskCounts(tCounts);
+      setProjects(pageItems<Project>(projectsResponse.data));
     } catch (error) {
       console.error('Failed to fetch projects:', error);
     } finally {
@@ -106,9 +97,31 @@ function ProjectsList() {
     }
   }, []);
 
+  const fetchReviewCounts = useCallback(async () => {
+    try {
+      const tasksResponse = await tasksAPI.getAll({
+        page: 1,
+        per_page: 100,
+        needs_review: true,
+        order_by: 'created_at',
+        order_dir: 'desc',
+      });
+      const counts: Record<number, number> = {};
+      pageItems<Task>(tasksResponse.data).forEach((task) => {
+        if (!taskNeedsReview(task)) return;
+        counts[task.project_id] = (counts[task.project_id] || 0) + 1;
+      });
+      setReviewCounts(counts);
+    } catch (error) {
+      console.warn('Failed to fetch project review counts:', error);
+      setReviewCounts({});
+    }
+  }, []);
+
   useEffect(() => {
     fetchProjects();
-  }, [fetchProjects]);
+    fetchReviewCounts();
+  }, [fetchProjects, fetchReviewCounts]);
 
   
 
@@ -355,12 +368,6 @@ function ProjectsList() {
                       <GitBranch className="h-3 w-3" />
                       {project.branch}
                     </span>
-                    {(taskCounts[project.id] || 0) > 0 && (
-                      <span className="flex items-center gap-1">
-                        <FileText className="h-3 w-3" />
-                        {taskCounts[project.id]} task{taskCounts[project.id] !== 1 ? 's' : ''}
-                      </span>
-                    )}
                   </div>
                   <span>{formatDistanceToNow(new Date(project.created_at), { addSuffix: true })}</span>
                 </div>

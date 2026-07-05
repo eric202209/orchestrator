@@ -529,11 +529,12 @@ function KnowledgeSection({
         <SimpleBarChart
           title="Top Items by Retrieval Count"
           bars={w.top_items.map((item) => ({
-            label: (item.title || item.knowledge_item_id).slice(0, 16),
+            label: item.title || item.knowledge_item_id,
             value: item.retrieval_count,
           }))}
           formatValue={fmtNum}
           emptyText="No knowledge retrievals in this window"
+          labelClassName="w-40 text-left"
         />
       </div>
       {(w.top_items.length > 0 || w.low_effectiveness_items.length > 0) && (
@@ -784,62 +785,59 @@ export default function AnalyticsDashboard() {
     setOperatorsLoading(true);
     setDecisionLoading(true);
 
-    const [op, fa, kn, ex, oa, di] = await Promise.allSettled([
-      analyticsAPI.getOperational(),
-      analyticsAPI.getFailures(),
-      analyticsAPI.getKnowledge(),
-      analyticsAPI.getExecution(),
-      analyticsAPI.getOperators(),
-      analyticsAPI.getDecision(),
-    ]);
+    const loadSection = async <T,>(
+      request: () => Promise<{ data: T }>,
+      setData: (value: T) => void,
+      setError: (value: boolean) => void,
+      setLoading: (value: boolean) => void,
+    ) => {
+      try {
+        const response = await request();
+        setData(response.data);
+        setError(false);
+      } catch {
+        setError(true);
+      } finally {
+        setLoading(false);
+      }
+    };
 
-    if (op.status === 'fulfilled') {
-      setOperational(op.value.data);
-      setOperationalError(false);
-    } else {
-      setOperationalError(true);
-    }
-    setOperationalLoading(false);
-
-    if (fa.status === 'fulfilled') {
-      setFailures(fa.value.data);
-      setFailuresError(false);
-    } else {
-      setFailuresError(true);
-    }
-    setFailuresLoading(false);
-
-    if (kn.status === 'fulfilled') {
-      setKnowledge(kn.value.data);
-      setKnowledgeError(false);
-    } else {
-      setKnowledgeError(true);
-    }
-    setKnowledgeLoading(false);
-
-    if (ex.status === 'fulfilled') {
-      setExecution(ex.value.data);
-      setExecutionError(false);
-    } else {
-      setExecutionError(true);
-    }
-    setExecutionLoading(false);
-
-    if (oa.status === 'fulfilled') {
-      setOperators(oa.value.data);
-      setOperatorsError(false);
-    } else {
-      setOperatorsError(true);
-    }
-    setOperatorsLoading(false);
-
-    if (di.status === 'fulfilled') {
-      setDecision(di.value.data);
-      setDecisionError(false);
-    } else {
-      setDecisionError(true);
-    }
-    setDecisionLoading(false);
+    await loadSection(
+      analyticsAPI.getOperational,
+      setOperational,
+      setOperationalError,
+      setOperationalLoading,
+    );
+    await loadSection(
+      analyticsAPI.getFailures,
+      setFailures,
+      setFailuresError,
+      setFailuresLoading,
+    );
+    await loadSection(
+      analyticsAPI.getKnowledge,
+      setKnowledge,
+      setKnowledgeError,
+      setKnowledgeLoading,
+    );
+    await loadSection(
+      analyticsAPI.getExecution,
+      setExecution,
+      setExecutionError,
+      setExecutionLoading,
+    );
+    await loadSection(
+      analyticsAPI.getOperators,
+      setOperators,
+      setOperatorsError,
+      setOperatorsLoading,
+    );
+    await loadSection(
+      analyticsAPI.getDecision,
+      setDecision,
+      setDecisionError,
+      setDecisionLoading,
+    );
 
     setLastRefreshed(new Date().toISOString());
   }, []);

@@ -9,6 +9,7 @@ interface SimpleBarChartProps {
   max?: number;
   formatValue?: (v: number | null) => string;
   emptyText?: string;
+  labelClassName?: string;
 }
 
 function defaultFmt(v: number | null): string {
@@ -21,6 +22,7 @@ export function SimpleBarChart({
   max,
   formatValue = defaultFmt,
   emptyText = 'No data',
+  labelClassName = 'w-9 text-right',
 }: SimpleBarChartProps) {
   const allNull = bars.every((b) => b.value == null);
   if (bars.length === 0 || allNull) {
@@ -46,7 +48,9 @@ export function SimpleBarChart({
           const pct = value != null ? Math.min((value / effectiveMax) * 100, 100) : 0;
           return (
             <div key={label} className="flex items-center gap-2">
-              <span className="text-xs text-slate-400 w-9 shrink-0 text-right">{label}</span>
+              <span className={`text-xs text-slate-400 shrink-0 truncate ${labelClassName}`} title={label}>
+                {label}
+              </span>
               <div className="flex-1 h-3 bg-slate-800 rounded-sm overflow-hidden">
                 {value != null && pct > 0 && (
                   <div
