@@ -1369,7 +1369,12 @@ def test_phase7f_valid_bounded_repair_is_retried_and_succeeds(db_session, tmp_pa
             },
         ]
     )
-    ctx, execution = _make_run_context(db_session, tmp_path, runtime=runtime)
+    ctx, execution = _make_run_context(
+        db_session,
+        tmp_path,
+        runtime=runtime,
+        step_overrides={"commands": ["custom-test-command"], "verification": ""},
+    )
 
     result = execute_step_loop(
         ctx=ctx,
@@ -2697,7 +2702,11 @@ def test_phase7g_diff_repair_prompt_is_used_when_capsule_available(
         ]
     )
     ctx, _execution = _make_run_context(
-        db_session, tmp_path, runtime=runtime, expected_files=["src/demo.py"]
+        db_session,
+        tmp_path,
+        runtime=runtime,
+        expected_files=["src/demo.py"],
+        step_overrides={"commands": ["custom-test-command"], "verification": ""},
     )
     holder["project_dir"] = ctx.orchestration_state.project_dir
     (holder["project_dir"] / "src").mkdir(parents=True)
@@ -2773,7 +2782,11 @@ def test_diff_scoped_compliance_retry_list_shape_is_normalized_after_parse_failu
         ]
     )
     ctx, _execution = _make_run_context(
-        db_session, tmp_path, runtime=runtime, expected_files=["src/demo.py"]
+        db_session,
+        tmp_path,
+        runtime=runtime,
+        expected_files=["src/demo.py"],
+        step_overrides={"commands": ["custom-test-command"], "verification": ""},
     )
     holder["project_dir"] = ctx.orchestration_state.project_dir
     (holder["project_dir"] / "src").mkdir(parents=True)
@@ -2827,7 +2840,12 @@ def test_phase7f_invalid_bounded_repair_terminalizes(db_session, tmp_path):
             {"output": "```json\n[]\n```"},
         ]
     )
-    ctx, execution = _make_run_context(db_session, tmp_path, runtime=runtime)
+    ctx, execution = _make_run_context(
+        db_session,
+        tmp_path,
+        runtime=runtime,
+        step_overrides={"commands": ["custom-test-command"], "verification": ""},
+    )
 
     result = execute_step_loop(
         ctx=ctx,
@@ -2894,7 +2912,12 @@ def test_phase7f_compliance_retry_parse_failure_records_diagnostics(
             {"output": "```json\nnot json final\n```"},
         ]
     )
-    ctx, _execution = _make_run_context(db_session, tmp_path, runtime=runtime)
+    ctx, _execution = _make_run_context(
+        db_session,
+        tmp_path,
+        runtime=runtime,
+        step_overrides={"commands": ["custom-test-command"], "verification": ""},
+    )
 
     result = execute_step_loop(
         ctx=ctx,
@@ -2954,7 +2977,11 @@ def test_phase7f_second_debug_repair_for_task_execution_is_blocked(
         ]
     )
     ctx, execution = _make_run_context(
-        db_session, tmp_path, runtime=runtime, used_debug_repair=True
+        db_session,
+        tmp_path,
+        runtime=runtime,
+        used_debug_repair=True,
+        step_overrides={"commands": ["custom-test-command"], "verification": ""},
     )
 
     result = execute_step_loop(

@@ -1623,6 +1623,9 @@ def execute_step_loop(
             step=step,
             step_result=step_result,
             step_status=step_status,
+        ) and not (
+            debug_feedback_envelope is not None
+            and debug_feedback_envelope.eligible_for_debug_repair
         ):
             terminal_message = (
                 f"Verification command failed for standalone execution step "

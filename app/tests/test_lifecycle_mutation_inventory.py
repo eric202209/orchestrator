@@ -36,8 +36,13 @@ AUDITED_LIFECYCLE_FILES = [
 ]
 
 EXPECTED_SESSION_CALLS = {
-    "app/tasks/worker.py": {"mark_session_paused": 5, "mark_session_running": 1},
+    "app/tasks/worker.py": {
+        "mark_session_failed": 1,
+        "mark_session_paused": 5,
+        "mark_session_running": 1,
+    },
     "app/services/session/session_lifecycle_service.py": {
+        "mark_session_failed": 1,
         "mark_session_paused": 2,
         "mark_session_running": 5,
         "mark_session_stopped": 6,
@@ -61,6 +66,7 @@ EXPECTED_SESSION_CALLS = {
         "mark_session_resumed": 2,
     },
     "app/services/orchestration/phases/execution_loop.py": {
+        "mark_session_failed": 1,
         "mark_session_paused": 4,
     },
     "app/services/orchestration/lifecycle/completion.py": {
@@ -116,7 +122,7 @@ EXPECTED_TASK_ATTEMPT_CALLS = {
     },
     "app/services/orchestration/phases/execution_loop.py": {
         "mark_task_attempt_cancelled": 1,
-        "mark_task_attempt_failed": 14,
+        "mark_task_attempt_failed": 15,
     },
     "app/services/orchestration/lifecycle/completion.py": {
         "mark_task_attempt_pending": 2,

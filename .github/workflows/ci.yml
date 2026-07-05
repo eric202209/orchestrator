@@ -53,7 +53,7 @@ jobs:
     - name: Install frontend dependencies
       run: |
         cd frontend
-        npm install --legacy-peer-deps
+        npm ci --legacy-peer-deps --include=optional
 
     - name: Run lint
       run: |
@@ -117,7 +117,7 @@ jobs:
     - name: Install frontend dependencies
       run: |
         cd frontend
-        npm install --legacy-peer-deps
+        npm ci --legacy-peer-deps --include=optional
 
     - name: Run type check
       run: |
