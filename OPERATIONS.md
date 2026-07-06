@@ -158,8 +158,8 @@ After pulling new code or rebuilding a Docker image:
 4. If the upgrade touched `app/db_migrations.py`, confirm the new
    `_migration_0NN_*` function ran: check the `schema_migrations` table for
    the new version, or watch `logs/backend.log` startup output. Do not run
-   `alembic upgrade head` — the Alembic directory in this repo is historical
-   and not wired into startup; see `alembic/README`.
+   `alembic upgrade head` — Alembic is not used by this repo; the legacy
+   Alembic migration tree was removed in Phase 20C.
 
 ## Browser-Session / WF-B / WF-C / WF-D
 
