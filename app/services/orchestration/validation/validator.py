@@ -5,8 +5,6 @@ from __future__ import annotations
 import copy
 import re
 import shlex
-import ast
-import builtins
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from ..policy import apply_validation_policy
@@ -26,12 +24,10 @@ from app.services.orchestration.operations.file_ops_contract import (
 )
 from app.services.orchestration.workflow_profiles import (
     get_implementation_intent_markers,
-    get_multi_stack_pair_markers,
     get_mutation_build_intent_markers,
     get_workflow_markers,
     get_workflow_phases,
 )
-from .placeholder_policy import path_allows_placeholder_fixture_content
 from .workspace_checks import (
     NESTED_PROJECT_STRUCTURAL_DIRS,
     SOURCE_EXTENSIONS,
@@ -41,7 +37,6 @@ from .workspace_checks import (
     find_nested_expected_file_matches as _find_nested_expected_file_matches,
     iter_candidate_files as _iter_candidate_files,
     split_content_issue_severity as _split_content_issue_severity,
-    uses_brittle_python_inline_command as _uses_brittle_python_inline_command_shared,
 )
 from .workspace_guard import (
     TaskWorkspaceViolationError,
@@ -50,27 +45,62 @@ from .workspace_guard import (
 from .integrity import (
     check_test_preservation,
     classify_verification_command,
-    is_python_test_path,
     pre_existing_python_test_files,
-    scan_python_test_text,
     scan_test_file_changes,
 )
-from app.services.project.source_imports import extract_python_test_contract
 from app.services.orchestration.planning.task_bootstrap_contract import (
     BootstrapTaskType,
     build_task1_bootstrap_contract,
     validate_task1_bootstrap_contract,
 )
+from .rules.contract_placeholders import (
+    _plan_contains_placeholder_intent,
+    _plan_fake_verification_artifact_steps,
+    _plan_materialized_file_targets,
+    _plan_placeholder_source_write_ops,
+    _step_uses_fake_verification_artifact,
+    _write_file_content_has_placeholder_implementation,
+)
+from .rules.contract_python import (
+    _expected_source_files_not_materialized,
+    _plan_appends_contextual_python_fragments,
+    _plan_physical_src_python_import_details,
+    _plan_python_source_syntax_issues,
+    _plan_writes_import_time_python_parse_args,
+    _plan_writes_obvious_undefined_python_decorators,
+    _plan_writes_obvious_undefined_python_test_names,
+    _plan_writes_physical_src_python_imports,
+    _python_package_root_contract_violation,
+)
+from .rules.contract_frontend import (
+    _frontend_wrong_stack_materializations,
+    _infer_stack_from_plan,
+    _plan_contains_stack_conflict,
+    _plan_static_site_off_root_mutations,
+    _plan_writes_obvious_undefined_js_identifiers,
+    _task_allows_multiple_stacks,
+)
+from .rules.contract_commands import (
+    _heredoc_target_is_unsafe,
+    _plan_command_budget_diagnostics,
+    _plan_contains_background_processes,
+    _plan_contains_non_runnable_commands,
+    _shadow_rule_warnings,
+    _single_file_write_heredoc_targets,
+    _uses_brittle_python_inline_command,
+    _uses_looped_heredoc,
+)
+from .rules.contract_verification import (
+    _command_source_read_targets,
+    _plan_missing_verification_steps,
+    _verification_is_weak,
+    _verification_plan_creates_new_source_assets,
+    _verification_plan_missing_workspace_files,
+    _verification_plan_mutates_app_source_assets,
+)
 
 MAX_INITIAL_PLAN_STEPS = 4
 MAX_PLANNING_COMMAND_CHARS = 900
-PLAN_STRUCTURAL_PLACEHOLDER_MARKER_PATTERN = re.compile(
-    r"\b(?:placeholder|stub|notimplemented|notimplementederror)\b|"
-    r"\bnot[-_\s]*implemented\b",
-    re.IGNORECASE,
-)
-PLAN_PASS_MARKER_PATTERN = re.compile(r"\bpass\b", re.IGNORECASE)
-PLAN_TODO_FIXME_MARKER_PATTERN = re.compile(r"\b(?:todo|fixme)\b", re.IGNORECASE)
 READ_ONLY_WORKFLOW_STAGES = {
     "diagnose",
     "plan",
@@ -95,6 +125,87 @@ class ValidatorService:
         _assess_plan_workspace_compatibility
     )
     persist_validation_result = staticmethod(_persist_validation_result)
+
+    # workload_contract rule delegates (app/services/orchestration/validation/rules/).
+    _plan_contains_placeholder_intent = staticmethod(_plan_contains_placeholder_intent)
+    _plan_fake_verification_artifact_steps = staticmethod(
+        _plan_fake_verification_artifact_steps
+    )
+    _plan_materialized_file_targets = staticmethod(_plan_materialized_file_targets)
+    _plan_placeholder_source_write_ops = staticmethod(
+        _plan_placeholder_source_write_ops
+    )
+    _step_uses_fake_verification_artifact = staticmethod(
+        _step_uses_fake_verification_artifact
+    )
+    _write_file_content_has_placeholder_implementation = staticmethod(
+        _write_file_content_has_placeholder_implementation
+    )
+    _expected_source_files_not_materialized = staticmethod(
+        _expected_source_files_not_materialized
+    )
+    _plan_appends_contextual_python_fragments = staticmethod(
+        _plan_appends_contextual_python_fragments
+    )
+    _plan_physical_src_python_import_details = staticmethod(
+        _plan_physical_src_python_import_details
+    )
+    _plan_python_source_syntax_issues = staticmethod(_plan_python_source_syntax_issues)
+    _plan_writes_import_time_python_parse_args = staticmethod(
+        _plan_writes_import_time_python_parse_args
+    )
+    _plan_writes_obvious_undefined_python_decorators = staticmethod(
+        _plan_writes_obvious_undefined_python_decorators
+    )
+    _plan_writes_obvious_undefined_python_test_names = staticmethod(
+        _plan_writes_obvious_undefined_python_test_names
+    )
+    _plan_writes_physical_src_python_imports = staticmethod(
+        _plan_writes_physical_src_python_imports
+    )
+    _python_package_root_contract_violation = staticmethod(
+        _python_package_root_contract_violation
+    )
+    _frontend_wrong_stack_materializations = staticmethod(
+        _frontend_wrong_stack_materializations
+    )
+    _infer_stack_from_plan = staticmethod(_infer_stack_from_plan)
+    _plan_contains_stack_conflict = staticmethod(_plan_contains_stack_conflict)
+    _plan_static_site_off_root_mutations = staticmethod(
+        _plan_static_site_off_root_mutations
+    )
+    _plan_writes_obvious_undefined_js_identifiers = staticmethod(
+        _plan_writes_obvious_undefined_js_identifiers
+    )
+    _task_allows_multiple_stacks = staticmethod(_task_allows_multiple_stacks)
+    _plan_command_budget_diagnostics = staticmethod(_plan_command_budget_diagnostics)
+    _shadow_rule_warnings = staticmethod(_shadow_rule_warnings)
+    _plan_contains_background_processes = staticmethod(
+        _plan_contains_background_processes
+    )
+    _plan_contains_non_runnable_commands = staticmethod(
+        _plan_contains_non_runnable_commands
+    )
+    _single_file_write_heredoc_targets = staticmethod(
+        _single_file_write_heredoc_targets
+    )
+    _heredoc_target_is_unsafe = staticmethod(_heredoc_target_is_unsafe)
+    _uses_looped_heredoc = staticmethod(_uses_looped_heredoc)
+    _uses_brittle_python_inline_command = staticmethod(
+        _uses_brittle_python_inline_command
+    )
+    _verification_is_weak = staticmethod(_verification_is_weak)
+    _plan_missing_verification_steps = staticmethod(_plan_missing_verification_steps)
+    _verification_plan_missing_workspace_files = staticmethod(
+        _verification_plan_missing_workspace_files
+    )
+    _verification_plan_creates_new_source_assets = staticmethod(
+        _verification_plan_creates_new_source_assets
+    )
+    _verification_plan_mutates_app_source_assets = staticmethod(
+        _verification_plan_mutates_app_source_assets
+    )
+    _command_source_read_targets = staticmethod(_command_source_read_targets)
 
     @staticmethod
     def _ordered_reasons(
@@ -545,102 +656,6 @@ class ValidatorService:
         }
 
     @classmethod
-    def _plan_python_source_syntax_issues(
-        cls,
-        plan: List[Dict[str, Any]],
-        project_dir: Optional[Path],
-    ) -> List[Dict[str, Any]]:
-        """Compile simulated Python file-op results without touching the workspace."""
-
-        root = Path(project_dir).resolve() if project_dir is not None else None
-        simulated_files: Dict[str, str] = {}
-        issues: List[Dict[str, Any]] = []
-        seen_issue_paths: set[str] = set()
-
-        def _read_current(relative_path: str) -> str:
-            if relative_path in simulated_files:
-                return simulated_files[relative_path]
-            if root is None:
-                return ""
-            candidate = (root / relative_path).resolve()
-            try:
-                if not candidate.is_relative_to(root) or not candidate.is_file():
-                    return ""
-            except ValueError:
-                return ""
-            try:
-                return candidate.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                return candidate.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                return ""
-
-        def _record_issue(relative_path: str, exc: SyntaxError) -> None:
-            if relative_path in seen_issue_paths:
-                return
-            seen_issue_paths.add(relative_path)
-            candidate_content = simulated_files.get(relative_path) or ""
-            candidate_excerpt = " ".join(candidate_content.split())[:500]
-            issues.append(
-                {
-                    "path": relative_path,
-                    "line": exc.lineno,
-                    "offset": exc.offset,
-                    "message": str(exc.msg or "invalid Python syntax"),
-                    "candidate_content_excerpt": candidate_excerpt,
-                    "candidate_content": candidate_content[:12000],
-                    "candidate_content_truncated": len(candidate_content) > 12000,
-                }
-            )
-
-        for step in plan:
-            for raw_operation in step.get("ops", []) or []:
-                if not isinstance(raw_operation, dict):
-                    continue
-                operation = normalize_file_op_shape(raw_operation)
-                op_name = str(operation.get("op") or "")
-                if op_name not in {"write_file", "append_file", "replace_in_file"}:
-                    continue
-                path_text = str(operation.get("path") or "").strip()
-                if not path_text or Path(path_text).suffix.lower() != ".py":
-                    continue
-                if root is not None:
-                    try:
-                        relative_path = normalize_path_reference(path_text, root)
-                    except TaskWorkspaceViolationError:
-                        continue
-                else:
-                    relative_path = path_text.rstrip("/").lstrip("./")
-                    if (
-                        not relative_path
-                        or Path(relative_path).is_absolute()
-                        or ".." in Path(relative_path).parts
-                    ):
-                        continue
-
-                current = _read_current(relative_path)
-                if op_name == "write_file":
-                    candidate_content = str(operation.get("content") or "")
-                elif op_name == "append_file":
-                    candidate_content = current + str(operation.get("content") or "")
-                else:
-                    old = operation.get("old")
-                    new = operation.get("new")
-                    if not isinstance(old, str) or not isinstance(new, str) or not old:
-                        continue
-                    if current.count(old) != 1:
-                        continue
-                    candidate_content = current.replace(old, new, 1)
-
-                simulated_files[relative_path] = candidate_content
-                try:
-                    compile(candidate_content, relative_path, "exec")
-                except SyntaxError as exc:
-                    _record_issue(relative_path, exc)
-
-        return issues
-
-    @classmethod
     def validate_reasoning_artifact(
         cls,
         artifact: Any,
@@ -795,59 +810,6 @@ class ValidatorService:
         ):
             return "scaffold"
         return "implementation"
-
-    @staticmethod
-    def _verification_is_weak(command: Optional[str]) -> bool:
-        text = str(command or "").strip().lower()
-        if not text:
-            return True
-        if (
-            re.search(r"\bpython(?:3)?\s+-c\b", text)
-            and "unittest.main" in text
-            and "discover" not in text
-        ):
-            return True
-        if (
-            re.search(r"\bpython(?:3)?\s+-c\b", text)
-            and "sys.exit(0)" in text
-            and "assert " not in text
-            and "pytest" not in text
-            and "unittest" not in text
-        ):
-            return True
-        meaningful_markers = (
-            "pytest",
-            "python3 -m",
-            "python3 ",
-            "python -m",
-            "node -e",
-            "node ",
-            "npm test",
-            "pnpm test",
-            "cargo test",
-            "go test",
-            "python ",
-            "uv run",
-            "npm run build",
-            "pnpm build",
-            "yarn build",
-            "tsc",
-        )
-        if any(marker in text for marker in meaningful_markers):
-            return False
-        weak_command_patterns = (
-            r"test\s+-[fds]\b",
-            r"grep\s+-q\b",
-            r"ls\b",
-            r"echo\b",
-            r"cat\b",
-            r"find\b",
-            r"wc\s+-l\b",
-        )
-        return any(
-            re.search(rf"(?:^|[;&|()\n])\s*{pattern}(?:\s|$)", text)
-            for pattern in weak_command_patterns
-        )
 
     @staticmethod
     def repair_requires_independent_evidence(
@@ -1048,212 +1010,6 @@ class ValidatorService:
             "matched_reported_files": matched_reported_files[:20],
         }
 
-    @staticmethod
-    def _plan_contains_stack_conflict(
-        plan: List[Dict[str, Any]], task_prompt: str
-    ) -> bool:
-        lowered_task = (task_prompt or "").lower()
-        if any(
-            marker in lowered_task
-            for marker in ("python", "node", "javascript", "typescript")
-        ):
-            return False
-
-        seen_python = False
-        seen_node = False
-        for step in plan:
-            if ValidatorService._step_is_readonly_inspection(step):
-                continue
-            text_parts = [str(step.get("description") or "")]
-            for command in step.get("commands", []) or []:
-                command_text = str(command or "").strip()
-                lowered_command = command_text.lower()
-                if (
-                    lowered_command.startswith("python -c ")
-                    and ".py" not in lowered_command
-                    and "pytest" not in lowered_command
-                    and "pip " not in lowered_command
-                    and "requirements.txt" not in lowered_command
-                ):
-                    continue
-                text_parts.append(command_text)
-            text = " ".join(text_parts).lower()
-            if any(
-                token in text
-                for token in ("requirements.txt", "python ", ".py", "pip ", "pytest")
-            ):
-                seen_python = True
-            if any(
-                token in text for token in ("package.json", "npm ", "pnpm ", "node ")
-            ) or re.search(r"\.(?:js|ts)(?![a-z0-9_])", text):
-                seen_node = True
-        return seen_python and seen_node
-
-    @staticmethod
-    def _plan_contains_placeholder_intent(
-        plan: List[Dict[str, Any]], task_prompt: str = ""
-    ) -> bool:
-        return bool(
-            ValidatorService._plan_placeholder_source_write_ops(plan, task_prompt)
-        ) or ValidatorService._plan_contains_placeholder_commands(plan, task_prompt)
-
-    @staticmethod
-    def _plan_placeholder_source_write_ops(
-        plan: List[Dict[str, Any]], task_prompt: str = ""
-    ) -> List[Dict[str, Any]]:
-        allow_todo_fixme_literals = ValidatorService._task_allows_todo_fixme_literals(
-            task_prompt
-        )
-        findings: List[Dict[str, Any]] = []
-
-        for index, step in enumerate(plan, start=1):
-            step_number = step.get("step_number", index)
-            for operation in step.get("ops", []) or []:
-                if not isinstance(operation, dict):
-                    continue
-                if operation.get("op") != "write_file":
-                    continue
-                path_text = str(operation.get("path", "")).strip().lstrip("./")
-                content = str(operation.get("content", ""))
-                if not ValidatorService._write_file_content_has_placeholder_implementation(
-                    path_text,
-                    content,
-                    allow_todo_fixme_literals=allow_todo_fixme_literals,
-                ):
-                    continue
-                findings.append(
-                    {
-                        "step_number": step_number,
-                        "op": "write_file",
-                        "path": path_text,
-                        "content_excerpt": " ".join(content.split())[:260],
-                    }
-                )
-
-        return findings
-
-    @staticmethod
-    def _plan_contains_placeholder_commands(
-        plan: List[Dict[str, Any]], task_prompt: str = ""
-    ) -> bool:
-        allow_todo_fixme_literals = ValidatorService._task_allows_todo_fixme_literals(
-            task_prompt
-        )
-
-        for step in plan:
-            for command in step.get("commands", []) or []:
-                if ValidatorService._command_writes_placeholder_implementation(
-                    str(command or ""),
-                    allow_todo_fixme_literals=allow_todo_fixme_literals,
-                ):
-                    return True
-        return False
-
-    @staticmethod
-    def _task_allows_todo_fixme_literals(task_prompt: str) -> bool:
-        lowered = str(task_prompt or "").lower()
-        if not any(marker in lowered for marker in ("todo", "fixme")):
-            return False
-        return any(
-            intent in lowered
-            for intent in (
-                "report",
-                "scan",
-                "scanner",
-                "generator",
-                "detect",
-                "extract",
-                "list",
-                "summar",
-            )
-        )
-
-    @staticmethod
-    def _write_file_content_has_placeholder_implementation(
-        path_text: str, content: str, *, allow_todo_fixme_literals: bool = False
-    ) -> bool:
-        raw = str(content or "")
-        if path_allows_placeholder_fixture_content(path_text):
-            return False
-
-        if PLAN_STRUCTURAL_PLACEHOLDER_MARKER_PATTERN.search(raw):
-            return True
-        if not allow_todo_fixme_literals and PLAN_TODO_FIXME_MARKER_PATTERN.search(raw):
-            return True
-        if not PLAN_PASS_MARKER_PATTERN.search(raw):
-            return False
-
-        if Path(str(path_text or "")).suffix.lower() != ".py":
-            return True
-
-        try:
-            tree = ast.parse(raw)
-        except SyntaxError:
-            return True
-
-        for node in ast.walk(tree):
-            body = getattr(node, "body", None)
-            if not isinstance(body, list) or len(body) != 1:
-                continue
-            if isinstance(body[0], ast.Pass) and isinstance(
-                node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
-            ):
-                return True
-        return False
-
-    @staticmethod
-    def _command_write_targets(command: str) -> List[str]:
-        targets = ValidatorService._single_file_write_heredoc_targets(command)
-        try:
-            tokens = shlex.split(str(command or ""), posix=True)
-        except ValueError:
-            tokens = str(command or "").split()
-
-        index = 0
-        while index < len(tokens):
-            token = tokens[index]
-            if token in {">", ">>"} and index + 1 < len(tokens):
-                targets.append(tokens[index + 1])
-                index += 2
-                continue
-            if token.startswith((">", ">>")) and token not in {">&1", ">&2"}:
-                target = token.lstrip(">")
-                if target:
-                    targets.append(target)
-            if token == "tee":
-                next_index = index + 1
-                while next_index < len(tokens) and tokens[next_index].startswith("-"):
-                    next_index += 1
-                if next_index < len(tokens):
-                    targets.append(tokens[next_index])
-            index += 1
-
-        return [target for target in targets if target]
-
-    @staticmethod
-    def _command_writes_placeholder_implementation(
-        command: str, *, allow_todo_fixme_literals: bool = False
-    ) -> bool:
-        raw = str(command or "")
-        has_marker = (
-            PLAN_STRUCTURAL_PLACEHOLDER_MARKER_PATTERN.search(raw)
-            or PLAN_PASS_MARKER_PATTERN.search(raw)
-            or (
-                not allow_todo_fixme_literals
-                and PLAN_TODO_FIXME_MARKER_PATTERN.search(raw)
-            )
-        )
-        if not has_marker:
-            return False
-
-        targets = ValidatorService._command_write_targets(raw)
-        if targets:
-            return not all(
-                path_allows_placeholder_fixture_content(target) for target in targets
-            )
-
-        return False
-
     @classmethod
     def _plan_declared_expected_files(cls, plan: List[Dict[str, Any]]) -> set[str]:
         files: set[str] = set()
@@ -1263,316 +1019,6 @@ class ValidatorService:
                 if path:
                     files.add(path)
         return files
-
-    @classmethod
-    def _plan_materialized_file_targets(cls, plan: List[Dict[str, Any]]) -> set[str]:
-        files: set[str] = set()
-        for step in plan:
-            for operation in step.get("ops", []) or []:
-                if not isinstance(operation, dict):
-                    continue
-                if str(operation.get("op") or "") in {
-                    "write_file",
-                    "append_file",
-                    "replace_in_file",
-                }:
-                    path = (
-                        str(operation.get("path") or "")
-                        .strip()
-                        .rstrip("/")
-                        .lstrip("./")
-                    )
-                    if path:
-                        files.add(path)
-            top_level_op = str(
-                step.get("op") or step.get("step") or step.get("type") or ""
-            ).strip()
-            if top_level_op in {"create_file", "write_file", "write", "append_file"}:
-                path = (
-                    str(step.get("path") or step.get("file") or "")
-                    .strip()
-                    .rstrip("/")
-                    .lstrip("./")
-                )
-                if path:
-                    files.add(path)
-            for command in step.get("commands", []) or []:
-                for target in cls._command_write_targets(str(command or "")):
-                    path = str(target or "").strip().rstrip("/").lstrip("./")
-                    if path:
-                        files.add(path)
-        return files
-
-    @staticmethod
-    def _python_src_package_root(path: str) -> Optional[str]:
-        parts = Path(str(path or "").strip().lstrip("./")).parts
-        if len(parts) >= 3 and parts[0] == "src" and parts[1].isidentifier():
-            return parts[1]
-        return None
-
-    @staticmethod
-    def _task_prompt_requests_python_package_rename(
-        task_prompt: str,
-        title: Optional[str] = None,
-        description: Optional[str] = None,
-    ) -> bool:
-        combined = " ".join(
-            str(value or "") for value in (task_prompt, title, description)
-        ).lower()
-        return bool(
-            re.search(
-                r"\b(?:rename|renaming|migrate|move|change)\b.{0,80}"
-                r"\b(?:package|module|import|namespace)\b",
-                combined,
-            )
-            or re.search(
-                r"\b(?:package|module|import|namespace)\b.{0,80}"
-                r"\b(?:rename|renaming|migrate|move|change)\b",
-                combined,
-            )
-        )
-
-    @staticmethod
-    def _operation_text_import_roots(operation: Dict[str, Any]) -> set[str]:
-        text = str(operation.get("content") or operation.get("new") or "")
-        if not text:
-            return set()
-        roots: set[str] = set()
-        for match in re.finditer(
-            r"^\s*(?:from\s+([A-Za-z_][A-Za-z0-9_]*)"
-            r"(?:\.[A-Za-z_][A-Za-z0-9_.]*)?\s+import\b|"
-            r"import\s+([A-Za-z_][A-Za-z0-9_]*)"
-            r"(?:\.[A-Za-z_][A-Za-z0-9_.]*)?)",
-            text,
-            re.MULTILINE,
-        ):
-            root = match.group(1) or match.group(2)
-            if root:
-                roots.add(root)
-        return roots
-
-    @classmethod
-    def _python_package_root_contract_violation(
-        cls,
-        plan: List[Dict[str, Any]],
-        *,
-        project_dir: Optional[Path],
-        task_prompt: str,
-        title: Optional[str],
-        description: Optional[str],
-    ) -> Optional[Dict[str, Any]]:
-        if project_dir is None or not project_dir.exists():
-            return None
-        if cls._task_prompt_requests_python_package_rename(
-            task_prompt, title=title, description=description
-        ):
-            return None
-
-        try:
-            contract = extract_python_test_contract(project_dir)
-        except Exception:
-            return None
-        if contract is None or not contract.source_targets or not contract.imports:
-            return None
-
-        required_source_targets = sorted(
-            {
-                path
-                for path, _reason in contract.source_targets
-                if str(path or "").startswith("src/")
-            }
-        )
-        existing_roots = sorted(
-            {
-                root
-                for path in required_source_targets
-                if (root := cls._python_src_package_root(path))
-            }
-        )
-        if not required_source_targets or not existing_roots:
-            return None
-
-        materialized_targets = sorted(cls._plan_materialized_file_targets(plan))
-        source_write_paths = sorted(
-            path
-            for path in materialized_targets
-            if path.startswith("src/") and Path(path).suffix.lower() == ".py"
-        )
-        touched_existing_roots = sorted(
-            {
-                root
-                for path in source_write_paths
-                if (root := cls._python_src_package_root(path)) in set(existing_roots)
-            }
-        )
-        introduced_roots = sorted(
-            {
-                root
-                for path in source_write_paths
-                if (root := cls._python_src_package_root(path))
-                and root not in set(existing_roots)
-            }
-        )
-
-        rewritten_test_import_roots: set[str] = set()
-        for step in plan:
-            for operation in step.get("ops", []) or []:
-                if not isinstance(operation, dict):
-                    continue
-                path = str(operation.get("path") or "").strip().rstrip("/").lstrip("./")
-                if not path or not is_python_test_path(path):
-                    continue
-                rewritten_test_import_roots.update(
-                    root
-                    for root in cls._operation_text_import_roots(operation)
-                    if root not in set(existing_roots)
-                )
-
-        introduced_without_existing_touch = bool(
-            introduced_roots and not touched_existing_roots
-        )
-        rewrites_tests_to_introduced_root = bool(
-            set(rewritten_test_import_roots).intersection(introduced_roots)
-        )
-        if (
-            not introduced_without_existing_touch
-            and not rewrites_tests_to_introduced_root
-        ):
-            return None
-
-        return {
-            "existing_package_roots": existing_roots,
-            "required_source_targets": required_source_targets[:12],
-            "source_write_paths": source_write_paths[:12],
-            "touched_existing_package_roots": touched_existing_roots,
-            "introduced_package_roots": introduced_roots,
-            "rewritten_test_import_roots": sorted(rewritten_test_import_roots),
-            "introduced_without_existing_touch": introduced_without_existing_touch,
-            "rewrites_tests_to_introduced_root": rewrites_tests_to_introduced_root,
-        }
-
-    @classmethod
-    def _expected_source_files_not_materialized(
-        cls,
-        *,
-        declared_expected_files: set[str],
-        materialized_targets: set[str],
-        existing_expected_files: set[str],
-    ) -> List[str]:
-        missing_sources: List[str] = []
-        for path_text in sorted(declared_expected_files):
-            normalized = str(path_text or "").strip().rstrip("/").lstrip("./")
-            if not normalized or normalized in materialized_targets:
-                continue
-            if normalized in existing_expected_files:
-                continue
-            path = Path(normalized)
-            if path.suffix.lower() not in SOURCE_EXTENSIONS:
-                continue
-            if not normalized.startswith("src/"):
-                continue
-            missing_sources.append(normalized)
-        return missing_sources
-
-    @staticmethod
-    def _step_uses_fake_verification_artifact(step: Dict[str, Any]) -> bool:
-        """Detect invented test-output artifacts used instead of test exit codes."""
-
-        fake_artifact_pattern = re.compile(
-            r"(?<![A-Za-z0-9_.~/-])"
-            r"((?:tests?|spec)/[A-Za-z0-9_./-]*\.(?:out|log|txt))"
-            r"(?![A-Za-z0-9_.-])",
-            re.IGNORECASE,
-        )
-        step_text_parts = [
-            str(step.get("verification") or ""),
-            str(step.get("rollback") or ""),
-        ]
-        step_text_parts.extend(
-            str(command or "") for command in step.get("commands", []) or []
-        )
-        step_text_parts.extend(
-            str(path or "") for path in step.get("expected_files", []) or []
-        )
-        mentioned = {
-            match.group(1).strip().lstrip("./")
-            for text in step_text_parts
-            for match in fake_artifact_pattern.finditer(text)
-        }
-        if not mentioned:
-            return False
-
-        materialized: set[str] = set()
-        for operation in step.get("ops", []) or []:
-            if not isinstance(operation, dict):
-                continue
-            if str(operation.get("op") or "") in {"write_file", "append_file"}:
-                path = str(operation.get("path") or "").strip().lstrip("./")
-                if path:
-                    materialized.add(path)
-        for command in step.get("commands", []) or []:
-            for target in ValidatorService._command_write_targets(str(command or "")):
-                path = str(target or "").strip().lstrip("./")
-                if path:
-                    materialized.add(path)
-
-        return bool(mentioned.difference(materialized))
-
-    @classmethod
-    def _plan_fake_verification_artifact_steps(
-        cls, plan: List[Dict[str, Any]]
-    ) -> List[int]:
-        steps: List[int] = []
-        for index, step in enumerate(plan, start=1):
-            if cls._step_uses_fake_verification_artifact(step):
-                steps.append(int(step.get("step_number", index)))
-        return sorted(set(steps))
-
-    @staticmethod
-    def _existing_static_site_roots(project_dir: Optional[Path]) -> List[str]:
-        if project_dir is None or not Path(project_dir).exists():
-            return []
-        root = Path(project_dir)
-        roots: List[str] = []
-        if (root / "index.html").is_file() and (root / "css" / "style.css").is_file():
-            roots.append("")
-        public_dir = root / "public"
-        if public_dir.is_dir():
-            for child in sorted(public_dir.iterdir()):
-                if not child.is_dir():
-                    continue
-                if (child / "index.html").is_file() and (
-                    child / "css" / "style.css"
-                ).is_file():
-                    roots.append(f"public/{child.name}")
-        return roots
-
-    @classmethod
-    def _plan_static_site_off_root_mutations(
-        cls,
-        plan: List[Dict[str, Any]],
-        project_dir: Optional[Path],
-        task_prompt: str,
-    ) -> List[str]:
-        prompt = str(task_prompt or "").lower()
-        if not any(marker in prompt for marker in ("static site", "status site")):
-            return []
-        roots = cls._existing_static_site_roots(project_dir)
-        if not roots:
-            return []
-        allowed_roots = [f"{root}/" for root in roots if root]
-        suffixes = {".css", ".html", ".js", ".svg"}
-        off_root: List[str] = []
-        for path in sorted(cls._plan_materialized_file_targets(plan)):
-            normalized = path.strip().lstrip("./")
-            if Path(normalized).suffix.lower() not in suffixes:
-                continue
-            if "" in roots and "/" not in normalized:
-                continue
-            if any(normalized.startswith(prefix) for prefix in allowed_roots):
-                continue
-            off_root.append(normalized)
-        return off_root
 
     @staticmethod
     def _task_prompt_requires_materialization(
@@ -1598,1004 +1044,6 @@ class ValidatorService:
                 "update",
             )
         )
-
-    @classmethod
-    def _frontend_wrong_stack_materializations(
-        cls,
-        plan: List[Dict[str, Any]],
-        workflow_profile: Optional[str],
-    ) -> List[str]:
-        if workflow_profile != "frontend_only":
-            return []
-        wrong_paths: List[str] = []
-        for step in plan:
-            for operation in step.get("ops", []) or []:
-                if not isinstance(operation, dict):
-                    continue
-                if str(operation.get("op") or "") not in {
-                    "write_file",
-                    "append_file",
-                    "replace_in_file",
-                }:
-                    continue
-                path_text = str(operation.get("path") or "").strip().lstrip("./")
-                suffix = Path(path_text).suffix.lower()
-                content = str(operation.get("content") or operation.get("new") or "")
-                if (
-                    not suffix
-                    or suffix == ".py"
-                    or re.search(r"(?m)^def\s+\w+\(", content)
-                ):
-                    wrong_paths.append(path_text or "(missing path)")
-        return sorted(set(wrong_paths))
-
-    @classmethod
-    def _plan_writes_obvious_undefined_js_identifiers(
-        cls,
-        plan: List[Dict[str, Any]],
-    ) -> List[str]:
-        bad_paths: List[str] = []
-        allowed_globals = {
-            "array",
-            "boolean",
-            "date",
-            "json",
-            "math",
-            "number",
-            "object",
-            "string",
-            "undefined",
-        }
-        for step in plan:
-            for operation in step.get("ops", []) or []:
-                if not isinstance(operation, dict):
-                    continue
-                if str(operation.get("op") or "") not in {"write_file", "append_file"}:
-                    continue
-                path_text = str(operation.get("path") or "").strip().lstrip("./")
-                if Path(path_text).suffix.lower() not in {".js", ".jsx", ".ts", ".tsx"}:
-                    continue
-                content = str(operation.get("content") or "")
-                function_match = re.search(
-                    r"function\s+\w+\s*\((?P<params>[^)]*)\)\s*\{(?P<body>.*?)\}",
-                    content,
-                    flags=re.DOTALL,
-                )
-                if not function_match:
-                    continue
-                declared = {
-                    part.strip().split("=")[0].split(":")[0].strip()
-                    for part in function_match.group("params").split(",")
-                    if part.strip()
-                }
-                body = function_match.group("body")
-                declared.update(
-                    re.findall(
-                        r"\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)",
-                        body,
-                    )
-                )
-                for return_match in re.finditer(r"\breturn\s+([^;\n]+)", body):
-                    return_expression = return_match.group(1)
-                    identifier_expression = re.sub(
-                        r"(['\"])(?:\\.|(?!\1).)*\1",
-                        "",
-                        return_expression,
-                    )
-                    identifiers = [
-                        match.group(1)
-                        for match in re.finditer(
-                            r"\b([A-Za-z_$][A-Za-z0-9_$]*)\b",
-                            identifier_expression,
-                        )
-                        if match.start() == 0
-                        or identifier_expression[match.start() - 1] != "."
-                    ]
-                    if any(
-                        identifier not in declared
-                        and identifier.lower() not in allowed_globals
-                        and identifier not in {"true", "false", "null"}
-                        for identifier in identifiers
-                    ):
-                        bad_paths.append(path_text)
-                        break
-        return sorted(set(bad_paths))
-
-    @classmethod
-    def _plan_writes_obvious_undefined_python_test_names(
-        cls,
-        plan: List[Dict[str, Any]],
-        project_dir: Optional[Path],
-    ) -> List[str]:
-        bad_paths: List[str] = []
-        root = project_dir.resolve() if project_dir is not None else None
-        for step in plan:
-            for operation in step.get("ops", []) or []:
-                if not isinstance(operation, dict):
-                    continue
-                op_name = str(operation.get("op") or "")
-                if op_name not in {"write_file", "append_file"}:
-                    continue
-                path_text = str(operation.get("path") or "").strip().lstrip("./")
-                if not is_python_test_path(path_text):
-                    continue
-                content = str(operation.get("content") or "")
-                if not content.strip():
-                    continue
-                scan_text = content
-                if op_name == "append_file" and project_dir is not None:
-                    existing_path = (project_dir / path_text).resolve()
-                    try:
-                        if root is not None and existing_path.is_relative_to(root):
-                            try:
-                                existing_text = existing_path.read_text(
-                                    encoding="utf-8"
-                                )
-                            except UnicodeDecodeError:
-                                existing_text = existing_path.read_text(
-                                    encoding="utf-8", errors="ignore"
-                                )
-                            except OSError:
-                                existing_text = ""
-                            if existing_text:
-                                scan_text = f"{existing_text.rstrip()}\n{content}"
-                    except ValueError:
-                        pass
-                findings = scan_python_test_text(scan_text, path_text)
-                if any(
-                    finding.code == "undefined_test_name"
-                    and finding.severity == "error"
-                    for finding in findings
-                ):
-                    bad_paths.append(path_text or "(missing path)")
-        return sorted(set(bad_paths))
-
-    @classmethod
-    def _plan_writes_obvious_undefined_python_decorators(
-        cls,
-        plan: List[Dict[str, Any]],
-        project_dir: Optional[Path],
-    ) -> List[str]:
-        bad_paths: List[str] = []
-        root = project_dir.resolve() if project_dir is not None else None
-        for step in plan:
-            for operation in step.get("ops", []) or []:
-                if not isinstance(operation, dict):
-                    continue
-                op_name = str(operation.get("op") or "")
-                if op_name not in {"write_file", "append_file"}:
-                    continue
-                path_text = str(operation.get("path") or "").strip().lstrip("./")
-                if Path(path_text).suffix.lower() != ".py":
-                    continue
-                content = str(operation.get("content") or "")
-                if not content.strip():
-                    continue
-                scan_text = content
-                if op_name == "append_file" and project_dir is not None:
-                    existing_path = (project_dir / path_text).resolve()
-                    try:
-                        if root is not None and existing_path.is_relative_to(root):
-                            try:
-                                existing_text = existing_path.read_text(
-                                    encoding="utf-8"
-                                )
-                            except UnicodeDecodeError:
-                                existing_text = existing_path.read_text(
-                                    encoding="utf-8", errors="ignore"
-                                )
-                            except OSError:
-                                existing_text = ""
-                            if existing_text:
-                                scan_text = f"{existing_text.rstrip()}\n{content}"
-                    except ValueError:
-                        pass
-                try:
-                    tree = ast.parse(scan_text)
-                except SyntaxError:
-                    continue
-                defined = cls._python_module_defined_names(tree)
-                for node in ast.walk(tree):
-                    decorators = getattr(node, "decorator_list", None)
-                    if not decorators:
-                        continue
-                    for decorator in decorators:
-                        root_name = cls._python_expression_root_name(decorator)
-                        if root_name and root_name not in defined:
-                            bad_paths.append(path_text or "(missing path)")
-                            break
-                    if bad_paths and bad_paths[-1] == (path_text or "(missing path)"):
-                        break
-        return sorted(set(bad_paths))
-
-    @classmethod
-    def _plan_writes_import_time_python_parse_args(
-        cls,
-        plan: List[Dict[str, Any]],
-        project_dir: Optional[Path],
-    ) -> List[str]:
-        bad_paths: List[str] = []
-        root = project_dir.resolve() if project_dir is not None else None
-        for step in plan:
-            for operation in step.get("ops", []) or []:
-                if not isinstance(operation, dict):
-                    continue
-                op_name = str(operation.get("op") or "")
-                if op_name not in {"write_file", "append_file"}:
-                    continue
-                path_text = str(operation.get("path") or "").strip().lstrip("./")
-                if Path(path_text).suffix.lower() != ".py":
-                    continue
-                content = str(operation.get("content") or "")
-                if not content.strip():
-                    continue
-                scan_text = content
-                if op_name == "append_file" and project_dir is not None:
-                    existing_path = (project_dir / path_text).resolve()
-                    try:
-                        if root is not None and existing_path.is_relative_to(root):
-                            try:
-                                existing_text = existing_path.read_text(
-                                    encoding="utf-8"
-                                )
-                            except UnicodeDecodeError:
-                                existing_text = existing_path.read_text(
-                                    encoding="utf-8", errors="ignore"
-                                )
-                            except OSError:
-                                existing_text = ""
-                            if existing_text:
-                                scan_text = f"{existing_text.rstrip()}\n{content}"
-                    except ValueError:
-                        pass
-                try:
-                    tree = ast.parse(scan_text)
-                except SyntaxError:
-                    continue
-                if cls._python_module_has_import_time_parse_args(tree):
-                    bad_paths.append(path_text or "(missing path)")
-        return sorted(set(bad_paths))
-
-    @classmethod
-    def _plan_appends_contextual_python_fragments(
-        cls,
-        plan: List[Dict[str, Any]],
-    ) -> List[str]:
-        bad_paths: List[str] = []
-        block_continuation_pattern = re.compile(
-            r"^(?:elif\b.*:|else\s*:|except\b.*:|finally\s*:|case\b.*:)"
-        )
-        indented_flow_exit_pattern = re.compile(r"^(?:return\b|break\b|continue\b)")
-
-        for step in plan:
-            for operation in step.get("ops", []) or []:
-                if not isinstance(operation, dict):
-                    continue
-                if str(operation.get("op") or "") != "append_file":
-                    continue
-                path_text = str(operation.get("path") or "").strip().lstrip("./")
-                if Path(path_text).suffix.lower() != ".py":
-                    continue
-                content = str(operation.get("content") or "")
-                if not content.strip():
-                    continue
-                try:
-                    ast.parse(content)
-                    continue
-                except SyntaxError:
-                    pass
-
-                for raw_line in content.splitlines():
-                    if not raw_line.strip():
-                        continue
-                    stripped = raw_line.strip()
-                    is_indented = raw_line[:1].isspace()
-                    if block_continuation_pattern.match(stripped):
-                        bad_paths.append(path_text or "(missing path)")
-                        break
-                    if is_indented and indented_flow_exit_pattern.match(stripped):
-                        bad_paths.append(path_text or "(missing path)")
-                        break
-
-        return sorted(set(bad_paths))
-
-    @classmethod
-    def _plan_writes_physical_src_python_imports(
-        cls,
-        plan: List[Dict[str, Any]],
-        project_dir: Optional[Path],
-    ) -> List[str]:
-        return sorted(
-            {
-                str(item.get("path") or "")
-                for item in cls._plan_physical_src_python_import_details(
-                    plan, project_dir
-                )
-                if str(item.get("path") or "")
-            }
-        )
-
-    @classmethod
-    def _plan_physical_src_python_import_details(
-        cls,
-        plan: List[Dict[str, Any]],
-        project_dir: Optional[Path],
-    ) -> List[Dict[str, Any]]:
-        if project_dir is None or not cls._project_has_python_src_layout(project_dir):
-            return []
-
-        findings: List[Dict[str, Any]] = []
-        package_names = cls._python_src_layout_package_names(project_dir)
-        for step in plan:
-            for operation in step.get("ops", []) or []:
-                if not isinstance(operation, dict):
-                    continue
-                op_name = str(operation.get("op") or "")
-                if op_name not in {"write_file", "append_file", "replace_in_file"}:
-                    continue
-                path_text = str(operation.get("path") or "").strip().lstrip("./")
-                if Path(path_text).suffix.lower() != ".py":
-                    continue
-                raw_content = (
-                    operation.get("new")
-                    if op_name == "replace_in_file"
-                    else operation.get("content")
-                )
-                content = str(raw_content or "")
-                if not content.strip():
-                    continue
-                invalid_lines = cls._python_physical_src_import_lines(
-                    content,
-                    package_names=package_names,
-                )
-                if invalid_lines:
-                    findings.append(
-                        {
-                            "path": path_text or "(missing path)",
-                            "invalid_imports": invalid_lines[:5],
-                        }
-                    )
-        return findings
-
-    @classmethod
-    def _project_has_python_src_layout(cls, project_dir: Path) -> bool:
-        root = project_dir.resolve()
-        src_dir = root / "src"
-        if not src_dir.is_dir():
-            return False
-
-        for config_name in ("pyproject.toml", "setup.cfg", "setup.py"):
-            config_path = root / config_name
-            try:
-                config_text = config_path.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                config_text = config_path.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                config_text = ""
-            lowered = config_text.lower()
-            if any(
-                marker in lowered
-                for marker in (
-                    'where = ["src"]',
-                    "where = ['src']",
-                    "package_dir",
-                    'pythonpath = ["src"]',
-                    "pythonpath = ['src']",
-                )
-            ):
-                return True
-
-        return any(
-            candidate.is_dir() and (candidate / "__init__.py").exists()
-            for candidate in src_dir.iterdir()
-        )
-
-    @staticmethod
-    def _python_src_layout_package_names(project_dir: Path) -> set[str]:
-        src_dir = project_dir.resolve() / "src"
-        if not src_dir.is_dir():
-            return set()
-        try:
-            return {
-                candidate.name
-                for candidate in src_dir.iterdir()
-                if candidate.is_dir()
-                and candidate.name.isidentifier()
-                and (candidate / "__init__.py").exists()
-            }
-        except OSError:
-            return set()
-
-    @classmethod
-    def _python_text_uses_physical_src_import_prefix(
-        cls,
-        text: str,
-        *,
-        package_names: set[str],
-    ) -> bool:
-        if cls._python_physical_src_import_lines(text, package_names=package_names):
-            return True
-        return False
-
-    @classmethod
-    def _python_physical_src_import_lines(
-        cls,
-        text: str,
-        *,
-        package_names: set[str],
-    ) -> List[str]:
-        lines: List[str] = []
-        line_pattern = re.compile(
-            r"^\s*(?:from\s+src\.([A-Za-z_][A-Za-z0-9_]*)\b.*|import\s+src\.([A-Za-z_][A-Za-z0-9_]*)\b.*)$"
-        )
-        for raw_line in str(text or "").splitlines():
-            match = line_pattern.match(raw_line)
-            if not match:
-                continue
-            package = match.group(1) or match.group(2) or ""
-            if not package_names or package in package_names:
-                rendered = raw_line.strip()
-                if rendered and rendered not in lines:
-                    lines.append(rendered)
-
-        try:
-            tree = ast.parse(text)
-        except SyntaxError:
-            return lines
-
-        for node in ast.walk(tree):
-            package = ""
-            if isinstance(node, ast.ImportFrom) and str(node.module or "").startswith(
-                "src."
-            ):
-                package = str(node.module or "").split(".", 2)[1]
-                rendered = f"from {node.module} import ..."
-            elif isinstance(node, ast.Import):
-                rendered = ""
-                for alias in node.names:
-                    name = str(alias.name or "")
-                    if name.startswith("src."):
-                        package = name.split(".", 2)[1]
-                        rendered = f"import {name}"
-                        break
-            if package and (not package_names or package in package_names):
-                if isinstance(node, ast.ImportFrom) and any(
-                    line.startswith(f"from {node.module} import ") for line in lines
-                ):
-                    continue
-                if rendered and rendered not in lines:
-                    lines.append(rendered)
-        return lines
-
-    @classmethod
-    def _python_module_has_import_time_parse_args(cls, tree: ast.AST) -> bool:
-        for node in getattr(tree, "body", []):
-            if cls._is_main_guard(node):
-                continue
-            for child in ast.walk(node):
-                if child is node and isinstance(
-                    child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-                ):
-                    break
-                if isinstance(
-                    child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-                ):
-                    continue
-                if cls._is_parse_args_call(child):
-                    return True
-        return False
-
-    @staticmethod
-    def _is_parse_args_call(node: ast.AST) -> bool:
-        if not isinstance(node, ast.Call):
-            return False
-        func = node.func
-        return isinstance(func, ast.Attribute) and func.attr == "parse_args"
-
-    @classmethod
-    def _is_main_guard(cls, node: ast.AST) -> bool:
-        if not isinstance(node, ast.If):
-            return False
-        return cls._is_main_guard_compare(node.test)
-
-    @classmethod
-    def _is_main_guard_compare(cls, node: ast.AST) -> bool:
-        if not isinstance(node, ast.Compare):
-            return False
-        if len(node.ops) != 1 or not isinstance(node.ops[0], ast.Eq):
-            return False
-        if len(node.comparators) != 1:
-            return False
-        return (
-            cls._is_dunder_name_name(node.left)
-            and cls._is_main_string(node.comparators[0])
-        ) or (
-            cls._is_main_string(node.left)
-            and cls._is_dunder_name_name(node.comparators[0])
-        )
-
-    @staticmethod
-    def _is_dunder_name_name(node: ast.AST) -> bool:
-        return isinstance(node, ast.Name) and node.id == "__name__"
-
-    @staticmethod
-    def _is_main_string(node: ast.AST) -> bool:
-        return isinstance(node, ast.Constant) and node.value == "__main__"
-
-    @staticmethod
-    def _python_module_defined_names(tree: ast.AST) -> set[str]:
-        names = set(dir(builtins))
-        for node in getattr(tree, "body", []):
-            if isinstance(node, ast.Import):
-                names.update(
-                    alias.asname or alias.name.split(".")[0] for alias in node.names
-                )
-            elif isinstance(node, ast.ImportFrom):
-                names.update(alias.asname or alias.name for alias in node.names)
-            elif isinstance(
-                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-            ):
-                names.add(node.name)
-            elif isinstance(node, ast.Assign):
-                for target in node.targets:
-                    names.update(ValidatorService._python_bound_names(target))
-            elif isinstance(node, ast.AnnAssign):
-                names.update(ValidatorService._python_bound_names(node.target))
-        return names
-
-    @staticmethod
-    def _python_bound_names(node: ast.AST) -> set[str]:
-        if isinstance(node, ast.Name):
-            return {node.id}
-        if isinstance(node, (ast.Tuple, ast.List)):
-            names: set[str] = set()
-            for child in node.elts:
-                names.update(ValidatorService._python_bound_names(child))
-            return names
-        return set()
-
-    @staticmethod
-    def _python_expression_root_name(node: ast.AST) -> Optional[str]:
-        current = node
-        while isinstance(current, (ast.Call, ast.Attribute, ast.Subscript)):
-            if isinstance(current, ast.Call):
-                current = current.func
-            elif isinstance(current, ast.Attribute):
-                current = current.value
-            else:
-                current = current.value
-        if isinstance(current, ast.Name):
-            return current.id
-        return None
-
-    @staticmethod
-    def _task_allows_multiple_stacks(
-        task_prompt: str,
-        title: Optional[str] = None,
-        description: Optional[str] = None,
-    ) -> bool:
-        combined = " ".join([task_prompt or "", title or "", description or ""]).lower()
-        explicit_pairs = get_multi_stack_pair_markers()
-        if any(
-            left in combined and right in combined for left, right in explicit_pairs
-        ):
-            return True
-        return any(
-            marker in combined
-            for marker in ("polyglot", "multi-language", "full stack", "full-stack")
-        )
-
-    @staticmethod
-    def _infer_stack_from_plan(plan: List[Dict[str, Any]]) -> Optional[str]:
-        seen_python = False
-        seen_node = False
-        for step in plan:
-            text = " ".join(
-                [
-                    str(step.get("description") or ""),
-                    str(step.get("verification") or ""),
-                ]
-                + [str(command or "") for command in step.get("commands", []) or []]
-                + [str(path or "") for path in step.get("expected_files", []) or []]
-            ).lower()
-            if any(
-                token in text
-                for token in (
-                    "requirements.txt",
-                    "python ",
-                    ".py",
-                    "pip ",
-                    "pytest",
-                    "pyproject.toml",
-                )
-            ):
-                seen_python = True
-            if any(
-                token in text
-                for token in (
-                    "package.json",
-                    "npm ",
-                    "pnpm ",
-                    "node ",
-                    "tsconfig.json",
-                )
-            ) or re.search(r"\.(?:js|ts)(?![a-z0-9_])", text):
-                seen_node = True
-        if seen_python and seen_node:
-            return "mixed"
-        if seen_node:
-            return "node"
-        if seen_python:
-            return "python"
-        return None
-
-    @staticmethod
-    def _plan_contains_brittle_commands(
-        extracted_plan: Optional[List[Dict[str, Any]]], output_text: str = ""
-    ) -> bool:
-        diagnostics = ValidatorService._plan_command_budget_diagnostics(
-            extracted_plan, output_text
-        )
-        return bool(diagnostics.get("has_brittle_commands"))
-
-    @classmethod
-    def _plan_command_budget_diagnostics(
-        cls, extracted_plan: Optional[List[Dict[str, Any]]], output_text: str = ""
-    ) -> Dict[str, Any]:
-        if not extracted_plan:
-            return {
-                "step_count": 0,
-                "max_command_length": 0,
-                "heredoc_command_count": 0,
-                "command_total_chars": 0,
-                "oversized_command_steps": [],
-                "has_brittle_commands": False,
-                "brittle_command_subcodes": [],
-                "brittle_command_step_details": {},
-                "brittle_command_step_command_lengths": {},
-            }
-
-        heredoc_count = 0
-        max_command_length = 0
-        command_total_chars = 0
-        oversized_command_steps: List[int] = []
-        has_brittle_commands = False
-        plan_subcodes: set = set()
-        step_subcodes: Dict[int, List[str]] = {}
-        step_command_lengths: Dict[int, List[int]] = {}
-
-        def _flag(step_num, code: str) -> None:
-            nonlocal has_brittle_commands
-            has_brittle_commands = True
-            plan_subcodes.add(code)
-            if step_num is not None:
-                step_subcodes.setdefault(int(step_num), []).append(code)
-
-        for step in extracted_plan:
-            commands = step.get("commands", [])
-            if not isinstance(commands, list):
-                _flag(step.get("step_number"), "non_list_commands")
-                continue
-            step_number = step.get("step_number")
-            for command in commands:
-                raw_command = str(command or "")
-                lowered = raw_command.lower()
-                command_length = len(raw_command)
-                write_heredoc_targets = (
-                    ValidatorService._single_file_write_heredoc_targets(raw_command)
-                )
-                command_total_chars += command_length
-                max_command_length = max(max_command_length, command_length)
-                if ValidatorService._uses_brittle_python_inline_command(raw_command):
-                    _flag(step_number, "brittle_inline_python")
-                heredoc_count += len(write_heredoc_targets)
-                if "<<" in lowered:
-                    if not write_heredoc_targets:
-                        _flag(step_number, "disallowed_heredoc_shape")
-                    if len(write_heredoc_targets) > 1:
-                        _flag(step_number, "multiple_heredoc_in_command")
-                    if ValidatorService._uses_looped_heredoc(raw_command):
-                        _flag(step_number, "looped_heredoc")
-                    if any(
-                        ValidatorService._heredoc_target_is_unsafe(target)
-                        for target in write_heredoc_targets
-                    ):
-                        _flag(step_number, "unsafe_heredoc_target")
-                if raw_command.count("\n") > 25:
-                    _flag(step_number, "too_many_lines")
-                if command_length > MAX_PLANNING_COMMAND_CHARS:
-                    _flag(step_number, "oversized_command_length")
-                    if step_number is not None:
-                        normalized_step_number = int(step_number)
-                        oversized_command_steps.append(normalized_step_number)
-                        step_command_lengths.setdefault(
-                            normalized_step_number, []
-                        ).append(command_length)
-
-        if heredoc_count >= 2:
-            has_brittle_commands = True
-            plan_subcodes.add("multiple_heredoc_across_plan")
-
-        lowered_output = (output_text or "").lower()
-        if lowered_output.count("cat >") >= 2 and "```json" in lowered_output:
-            has_brittle_commands = True
-            plan_subcodes.add("markdown_wrapped_heredoc")
-
-        return {
-            "step_count": len(extracted_plan),
-            "max_command_length": max_command_length,
-            "heredoc_command_count": heredoc_count,
-            "command_total_chars": command_total_chars,
-            "oversized_command_steps": sorted(set(oversized_command_steps)),
-            "has_brittle_commands": has_brittle_commands,
-            "brittle_command_subcodes": sorted(plan_subcodes),
-            "brittle_command_step_details": {
-                k: sorted(set(v)) for k, v in step_subcodes.items()
-            },
-            "brittle_command_step_command_lengths": {
-                k: sorted(set(v)) for k, v in step_command_lengths.items()
-            },
-            "malformed_shell_quoting_steps": cls._plan_malformed_shell_quoting_steps(
-                extracted_plan
-            ),
-        }
-
-    @staticmethod
-    def _shadow_rule_warnings(
-        command_budget: Dict[str, Any],
-    ) -> List[Dict[str, Any]]:
-        """Report downgrade candidates without changing validation status."""
-
-        subcodes = set(command_budget.get("brittle_command_subcodes") or [])
-        step_details = command_budget.get("brittle_command_step_details") or {}
-        warnings: List[Dict[str, Any]] = []
-
-        def _steps_for(codes: set[str]) -> List[int]:
-            steps: List[int] = []
-            for raw_step, raw_codes in step_details.items():
-                if codes.intersection(set(raw_codes or [])):
-                    try:
-                        steps.append(int(raw_step))
-                    except (TypeError, ValueError):
-                        continue
-            return sorted(set(steps))
-
-        heredoc_codes = {
-            "disallowed_heredoc_shape",
-            "multiple_heredoc_in_command",
-            "looped_heredoc",
-            "unsafe_heredoc_target",
-            "multiple_heredoc_across_plan",
-            "markdown_wrapped_heredoc",
-        }
-        if subcodes.intersection(heredoc_codes):
-            warnings.append(
-                {
-                    "rule_id": "model_behavior.heredoc_guidance",
-                    "category": "model_behavior_patch",
-                    "current_owner": "validator.command_budget_diagnostics",
-                    "current_behavior": "repair_required",
-                    "shadow_candidate": True,
-                    "proposed_shadow_behavior": "warning_after_live_evidence",
-                    "fallback_detectors": [
-                        "structured_ops_contract",
-                        "workspace_guard",
-                        "completion_verification",
-                    ],
-                    "subcodes": sorted(subcodes.intersection(heredoc_codes)),
-                    "steps": _steps_for(heredoc_codes),
-                }
-            )
-
-        if "oversized_command_length" in subcodes:
-            warnings.append(
-                {
-                    "rule_id": "model_behavior.command_length_prompt_patch",
-                    "category": "model_behavior_patch",
-                    "current_owner": "validator.command_budget_diagnostics",
-                    "current_behavior": "repair_required",
-                    "shadow_candidate": True,
-                    "proposed_shadow_behavior": "warning_for_non_file_writing_commands",
-                    "fallback_detectors": [
-                        "structured_ops_contract",
-                        "completion_verification",
-                    ],
-                    "subcodes": ["oversized_command_length"],
-                    "steps": command_budget.get("oversized_command_steps") or [],
-                }
-            )
-
-        malformed_shell_quoting_steps = (
-            command_budget.get("malformed_shell_quoting_steps") or []
-        )
-        printf_or_shell_codes = {"brittle_inline_python", "too_many_lines"}
-        if malformed_shell_quoting_steps or subcodes.intersection(
-            printf_or_shell_codes
-        ):
-            warnings.append(
-                {
-                    "rule_id": "model_behavior.shell_quoting_patch",
-                    "category": "model_behavior_patch",
-                    "current_owner": "validator.command_budget_diagnostics",
-                    "current_behavior": "repair_required",
-                    "shadow_candidate": True,
-                    "proposed_shadow_behavior": "shell_fallback_warning",
-                    "fallback_detectors": [
-                        "structured_ops_contract",
-                        "executor_command_preflight",
-                        "completion_verification",
-                    ],
-                    "subcodes": sorted(subcodes.intersection(printf_or_shell_codes)),
-                    "steps": sorted(set(malformed_shell_quoting_steps)),
-                }
-            )
-
-        return warnings
-
-    @staticmethod
-    def _command_has_malformed_shell_quoting(command: str) -> bool:
-        raw = str(command or "")
-        if "\\'" in raw and re.search(r"\bprintf\s+'", raw):
-            return True
-        try:
-            shlex.split(raw, posix=True)
-        except ValueError:
-            return True
-        return False
-
-    @classmethod
-    def _plan_malformed_shell_quoting_steps(
-        cls, plan: List[Dict[str, Any]]
-    ) -> List[int]:
-        bad_steps: List[int] = []
-        for index, step in enumerate(plan, start=1):
-            step_number = step.get("step_number", index)
-            step_text_parts = [
-                str(step.get("verification") or ""),
-                str(step.get("rollback") or ""),
-            ]
-            step_text_parts.extend(
-                str(command or "") for command in step.get("commands", []) or []
-            )
-            if any(
-                cls._command_has_malformed_shell_quoting(text)
-                for text in step_text_parts
-            ):
-                bad_steps.append(int(step_number))
-        return sorted(set(bad_steps))
-
-    @staticmethod
-    def _single_file_write_heredoc_targets(command: str) -> List[str]:
-        """Return targets for bounded `cat > file <<EOF` write heredocs."""
-
-        target_pattern = re.compile(
-            r"(?:^|[\n;&|]\s*)"
-            r"(?:mkdir\s+-p\s+[^\n;&|]+\s*&&\s*)?"
-            r"cat\s+>\s*(?P<target>'[^']+'|\"[^\"]+\"|[^\s<;&|]+)"
-            r"\s*<<\s*['\"]?[A-Za-z_][A-Za-z0-9_]*['\"]?",
-            re.IGNORECASE,
-        )
-        targets: List[str] = []
-        for match in target_pattern.finditer(str(command or "")):
-            target = match.group("target").strip().strip("'\"")
-            if target:
-                targets.append(target)
-        return targets
-
-    @staticmethod
-    def _uses_looped_heredoc(command: str) -> bool:
-        first_line = str(command or "").split("\n", 1)[0].lower()
-        return bool(re.search(r"\b(for|while)\b.*\bdo\b.*cat\s+>", first_line))
-
-    @staticmethod
-    def _heredoc_target_is_unsafe(target: str) -> bool:
-        path_text = str(target or "").strip()
-        if not path_text:
-            return True
-        candidate = Path(path_text)
-        return (
-            candidate.is_absolute() or "~" in candidate.parts or ".." in candidate.parts
-        )
-
-    @staticmethod
-    def _uses_brittle_python_inline_command(command: str) -> bool:
-        return _uses_brittle_python_inline_command_shared(command)
-
-    @staticmethod
-    def _is_non_runnable_command(command: str) -> bool:
-        text = str(command or "").strip()
-        lowered = text.lower()
-        if not text:
-            return True
-        if re.match(
-            r"^(?:npm|pnpm|yarn)\s+install\s+\.?/[\w./-]+\.(?:js|jsx|ts|tsx)\s*$",
-            lowered,
-        ):
-            return True
-        if re.match(
-            r"^(?:mv|cp)\s+\.?/[\w./-]+\.(?:py|js|jsx|ts|tsx)\s+\.?/[\w./-]+\.(?:py|js|jsx|ts|tsx)\s*$",
-            lowered,
-        ):
-            return True
-        if re.match(
-            r"^\{\s*(?:\\?\"\\?|')?(?:ops|op|command|cmd)(?:\\?\"\\?|')?\s*:", text
-        ):
-            return True
-        non_runnable_prefixes = (
-            "write ",
-            "edit ",
-            "create files",
-            "create file",
-            "set up ",
-            "setup ",
-            "implement ",
-            "add component",
-            "update component",
-            "verify ",
-        )
-        if lowered.startswith(non_runnable_prefixes):
-            return True
-        if lowered.startswith("check ") and "test " not in lowered:
-            return True
-        if lowered.startswith("ensure "):
-            return True
-        if lowered.startswith("confirm "):
-            return True
-        if re.match(
-            r"^(create|build|make)\s+(the\s+)?(app|page|site|ui|component)\b", lowered
-        ):
-            return True
-        return False
-
-    @staticmethod
-    def _uses_background_process(command: str) -> bool:
-        text = str(command or "").strip().lower()
-        if not text:
-            return False
-        # Only check the first line for shell background operator (&).
-        # Heredoc bodies start on line 2+, so bare & in HTML content (e.g.
-        # "Flowers & Seasons") cannot trigger a false positive.
-        first_line = text.split("\n")[0]
-        if re.search(r"(?<![&])&(\s|$)", first_line):
-            return True
-        return any(
-            marker in text
-            for marker in (
-                "nohup ",
-                " disown",
-                "tail -f",
-                "npm run dev",
-                "pnpm dev",
-                "yarn dev",
-                "vite dev",
-                "next dev",
-                "webpack serve",
-            )
-        )
-
-    @classmethod
-    def _plan_contains_background_processes(
-        cls, plan: List[Dict[str, Any]]
-    ) -> List[int]:
-        bad_steps: List[int] = []
-        for step in plan:
-            for command in step.get("commands", []) or []:
-                if cls._uses_background_process(str(command or "")):
-                    bad_steps.append(step.get("step_number"))
-                    break
-        return [step for step in bad_steps if step is not None]
-
-    @classmethod
-    def _plan_contains_non_runnable_commands(
-        cls, plan: List[Dict[str, Any]]
-    ) -> List[int]:
-        bad_steps: List[int] = []
-        for step in plan:
-            for command in step.get("commands", []) or []:
-                if cls._is_non_runnable_command(str(command or "")):
-                    bad_steps.append(step.get("step_number"))
-                    break
-        return [step for step in bad_steps if step is not None]
 
     @staticmethod
     def _step_is_readonly_inspection(step: Dict[str, Any]) -> bool:
@@ -2635,17 +1083,6 @@ class ValidatorService:
             "current project",
         )
         return any(marker in description for marker in inspection_markers)
-
-    @staticmethod
-    def _plan_missing_verification_steps(plan: List[Dict[str, Any]]) -> List[int]:
-        missing_steps: List[int] = []
-        for index, step in enumerate(plan, start=1):
-            step_number = step.get("step_number", index)
-            if ValidatorService._step_is_readonly_inspection(step):
-                continue
-            if not str(step.get("verification") or "").strip():
-                missing_steps.append(step_number)
-        return [step for step in missing_steps if step is not None]
 
     @staticmethod
     def _plan_missing_required_fields(
@@ -2971,257 +1408,6 @@ class ValidatorService:
                     continue
                 bad_steps.append(step.get("step_number"))
         return [step for step in bad_steps if step is not None]
-
-    @staticmethod
-    def _verification_plan_missing_workspace_files(
-        plan: List[Dict[str, Any]],
-        project_dir: Optional[Path],
-        *,
-        include_expected_files: bool = True,
-    ) -> List[str]:
-        """Return expected source files in verification plans that do not exist yet."""
-
-        if not project_dir or not project_dir.exists():
-            return []
-
-        project_root = Path(project_dir)
-        known_paths = {
-            path.relative_to(project_root).as_posix()
-            for path in project_root.rglob("*")
-            if path.is_file()
-        }
-        missing: List[str] = []
-        seen: set[str] = set()
-        for step in plan:
-            for raw_operation in step.get("ops", []) or []:
-                if not isinstance(raw_operation, dict):
-                    continue
-                operation = normalize_file_op_shape(raw_operation)
-                op_name = str(operation.get("op") or "")
-                raw_path = str(operation.get("path") or "")
-                if not raw_path.strip():
-                    continue
-                try:
-                    relative_path = normalize_path_reference(raw_path, project_root)
-                except TaskWorkspaceViolationError:
-                    continue
-                if relative_path == ".":
-                    continue
-                if op_name in {"write_file", "append_file"}:
-                    known_paths.add(relative_path)
-                elif op_name == "delete_file":
-                    known_paths.discard(relative_path)
-
-            step_source_paths: List[str] = []
-            if include_expected_files:
-                step_source_paths.extend(
-                    str(path or "")
-                    for path in step.get("expected_files", []) or []
-                    if str(path or "").strip()
-                )
-            for command in step.get("commands", []) or []:
-                step_source_paths.extend(
-                    ValidatorService._command_source_read_targets(str(command or ""))
-                )
-            verification = str(step.get("verification") or "")
-            if verification:
-                step_source_paths.extend(
-                    ValidatorService._command_source_read_targets(verification)
-                )
-
-            for path_text in step_source_paths:
-                try:
-                    relative_path = normalize_path_reference(path_text, project_root)
-                except TaskWorkspaceViolationError:
-                    relative_path = path_text
-                if relative_path in known_paths:
-                    continue
-                candidate = (project_root / relative_path).resolve()
-                if candidate.exists():
-                    known_paths.add(relative_path)
-                    continue
-                if relative_path in seen:
-                    continue
-                seen.add(relative_path)
-                missing.append(relative_path)
-        return [
-            path
-            for path in missing
-            if not any(
-                other != path and other.startswith(f"{path.rstrip('/')}/")
-                for other in missing
-            )
-        ]
-
-    @staticmethod
-    def _verification_plan_creates_new_source_assets(
-        plan: List[Dict[str, Any]], project_dir: Optional[Path]
-    ) -> List[str]:
-        """Return app/source assets a verification plan tries to create from scratch."""
-
-        if not project_dir or not project_dir.exists():
-            return []
-
-        blocked_extensions = {
-            ".css",
-            ".html",
-            ".jsx",
-            ".py",
-            ".scss",
-            ".svg",
-            ".ts",
-            ".tsx",
-        }
-        project_root = Path(project_dir)
-        created: List[str] = []
-        seen: set[str] = set()
-        for step in plan:
-            for raw_operation in step.get("ops", []) or []:
-                if not isinstance(raw_operation, dict):
-                    continue
-                operation = normalize_file_op_shape(raw_operation)
-                op_name = str(operation.get("op") or "")
-                if op_name not in {"write_file", "append_file"}:
-                    continue
-                raw_path = str(operation.get("path") or "")
-                if not raw_path.strip():
-                    continue
-                try:
-                    relative_path = normalize_path_reference(raw_path, project_root)
-                except TaskWorkspaceViolationError:
-                    continue
-                path = Path(relative_path)
-                if path.suffix.lower() not in blocked_extensions:
-                    continue
-                if path.name.lower().startswith(("verify", "check")):
-                    continue
-                if path.parts and path.parts[0] in {"test", "tests", "spec"}:
-                    continue
-                if (project_root / relative_path).exists():
-                    continue
-                if relative_path not in seen:
-                    seen.add(relative_path)
-                    created.append(relative_path)
-        return created
-
-    @staticmethod
-    def _verification_plan_mutates_app_source_assets(
-        plan: List[Dict[str, Any]], project_dir: Optional[Path]
-    ) -> List[str]:
-        """Return app/source assets mutated by a verification-only plan."""
-
-        if not project_dir or not project_dir.exists():
-            return []
-
-        blocked_extensions = {
-            ".css",
-            ".html",
-            ".jsx",
-            ".py",
-            ".scss",
-            ".svg",
-            ".ts",
-            ".tsx",
-        }
-        project_root = Path(project_dir)
-        mutated: List[str] = []
-        seen: set[str] = set()
-        for step in plan:
-            for raw_operation in step.get("ops", []) or []:
-                if not isinstance(raw_operation, dict):
-                    continue
-                operation = normalize_file_op_shape(raw_operation)
-                op_name = str(operation.get("op") or "")
-                if op_name not in {"write_file", "append_file", "replace_in_file"}:
-                    continue
-                raw_path = str(operation.get("path") or "")
-                if not raw_path.strip():
-                    continue
-                try:
-                    relative_path = normalize_path_reference(raw_path, project_root)
-                except TaskWorkspaceViolationError:
-                    continue
-                path = Path(relative_path)
-                if path.suffix.lower() not in blocked_extensions:
-                    continue
-                if path.name.lower().startswith(("verify", "check")):
-                    continue
-                if path.parts and path.parts[0] in {"test", "tests", "spec"}:
-                    continue
-                if relative_path not in seen:
-                    seen.add(relative_path)
-                    mutated.append(relative_path)
-        return mutated
-
-    @staticmethod
-    def _command_source_read_targets(command: str) -> List[str]:
-        """Extract likely source-file reads from shell or inline Node commands."""
-
-        raw = str(command or "")
-        targets: List[str] = []
-
-        for match in re.finditer(
-            r"\b(?:readFileSync|existsSync|statSync|lstatSync)\(\s*['\"]([^'\"]+)['\"]",
-            raw,
-        ):
-            targets.append(match.group(1))
-
-        try:
-            tokens = shlex.split(raw, posix=True)
-        except ValueError:
-            tokens = raw.split()
-
-        if tokens:
-            command_name = Path(tokens[0]).name
-            if command_name in {"cat", "head", "tail", "less"}:
-                for token in tokens[1:]:
-                    if token in {"|", "||", "&&", ";"}:
-                        break
-                    if token.startswith("-") or token.startswith((">", "2>")):
-                        continue
-                    targets.append(token)
-            elif command_name in {"ls", "find"}:
-                for token in tokens[1:]:
-                    if token in {"|", "||", "&&", ";"}:
-                        break
-                    if token.startswith("-") or token.startswith((">", "2>")):
-                        continue
-                    if token == ".":
-                        continue
-                    targets.append(token)
-            elif command_name in {"test", "["}:
-                for index, token in enumerate(tokens[1:], start=1):
-                    if token in {"|", "||", "&&", ";", "]"}:
-                        break
-                    if token in {"-f", "-d", "-e", "-s"} and index + 1 < len(tokens):
-                        targets.append(tokens[index + 1])
-            elif command_name in {"node", "python", "python3"} and len(tokens) > 1:
-                script = tokens[1]
-                if script not in {"-e", "-c"}:
-                    targets.append(script)
-
-        filtered: List[str] = []
-        seen: set[str] = set()
-        for target in targets:
-            path_text = str(target or "").strip()
-            if (
-                not path_text
-                or path_text in {".", ".."}
-                or path_text.startswith(("-", "$", "http://", "https://"))
-                or any(char in path_text for char in "*?[]{}")
-            ):
-                continue
-            path = Path(path_text)
-            if path.suffix.lower() not in SOURCE_EXTENSIONS and not (
-                path_text.endswith("/")
-                or "/" in path_text
-                or path_text in {"app", "src", "spec", "test", "tests"}
-            ):
-                continue
-            if path_text not in seen:
-                seen.add(path_text)
-                filtered.append(path_text)
-        return filtered
 
     @staticmethod
     def _source_path_mentions(*values: Any) -> List[str]:
