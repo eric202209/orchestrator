@@ -161,7 +161,7 @@ After pulling new code or rebuilding a Docker image:
    `alembic upgrade head` — the Alembic directory in this repo is historical
    and not wired into startup; see `alembic/README`.
 
-## Browser-Session / WF-B / WF-C
+## Browser-Session / WF-B / WF-C / WF-D
 
 The Planner Relay browser-session container provides a persistent, logged-in
 Chromium instance that the Planner Relay script pastes prompts into and
@@ -228,6 +228,68 @@ scripts/relay/run_planner_relay.sh
 
 Always confirm `Send? [y/N]` manually — this gate is permanent by design,
 not a temporary limitation.
+
+**Workflow Recovery (WF-D):** the relay is still stateless with respect to
+Orchestrator and remains outside `app/`, but it now writes minimal browser-run
+metadata under `relay/` so an operator can recover from interruption without
+manual archaeology:
+
+- `relay/state.json` records the current relay phase (`waiting_send`,
+  `waiting_response`, or `extracting_response`) plus timestamp and URL.
+- `relay/session_snapshot.json` records the conversation URL, title, assistant
+  message count, and timestamp before Send and after response extraction.
+- `relay/relay.lock` prevents concurrent relay executions.
+
+Resume procedure:
+
+```bash
+scripts/relay/run_planner_relay.sh --resume
+```
+
+Resume never sends automatically. If the saved phase is `waiting_send`, the
+operator still gets the normal `Send? [y/N]` gate. If the saved phase is
+`waiting_response` or `extracting_response`, the relay asks only whether to
+continue waiting/extracting the current assistant response; it does not click
+Send.
+
+**Replay Package:** create a deterministic local bundle for bug reports,
+workflow debugging, or future regression tests:
+
+```bash
+scripts/relay/run_planner_relay.sh --bundle
+```
+
+The archive is written to `relay/replay/replay-YYYYMMDD-HHMMSS.zip` and
+contains `input.md`, `output.md`, `relay.log`, `metrics.jsonl`,
+`session_snapshot.json`, and `state.json` when present. There is no cloud
+upload.
+
+**Lock Recovery:** a second relay instance refuses to run and prints the PID
+and timestamp from `relay/relay.lock`. Normal exits and `SIGINT`/`SIGTERM`
+remove the lock automatically. If a machine crash leaves a lock behind, rerun
+the relay normally; it removes stale locks when the PID no longer exists or
+when the lock is older than `RELAY_LOCK_STALE_AFTER_S` (default 21600 seconds).
+Only delete `relay/relay.lock` manually after confirming the recorded PID is
+not an active relay process.
+
+**Failure Classification:** relay failures are standardized in both
+`relay/relay.log` and `relay/metrics.jsonl` with `failure_reason` /
+`failure_category`:
+
+- `browser_unavailable`
+- `login_expired`
+- `url_mismatch`
+- `selector_failure`
+- `operator_cancelled`
+- `relay_cancelled`
+- `response_timeout`
+- `browser_reload`
+- `conversation_changed`
+- `unexpected_error`
+
+Selector failures print a concise diagnostic block for the input selector,
+send button, streaming indicator, and assistant response. Stack traces are
+suppressed by default; pass `--verbose` to include expanded exception details.
 
 ## Database Concurrency / SQLite Locking
 

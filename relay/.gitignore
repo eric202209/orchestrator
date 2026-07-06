@@ -2,3 +2,7 @@ input.md
 output.md
 relay.log
 metrics.jsonl
+relay.lock
+state.json
+session_snapshot.json
+replay/
