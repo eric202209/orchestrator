@@ -33,6 +33,7 @@ AUDITED_LIFECYCLE_FILES = [
     "app/services/orchestration/phases/completion_flow.py",
     "app/services/orchestration/phases/failure_flow.py",
     "app/services/orchestration/phases/planning_support.py",
+    "app/services/orchestration/execution/step_assessment.py",
 ]
 
 EXPECTED_SESSION_CALLS = {
@@ -66,8 +67,10 @@ EXPECTED_SESSION_CALLS = {
         "mark_session_resumed": 2,
     },
     "app/services/orchestration/phases/execution_loop.py": {
-        "mark_session_failed": 1,
         "mark_session_paused": 4,
+    },
+    "app/services/orchestration/execution/step_assessment.py": {
+        "mark_session_failed": 1,
     },
     "app/services/orchestration/lifecycle/completion.py": {
         "mark_session_completed": 1,
@@ -122,7 +125,10 @@ EXPECTED_TASK_ATTEMPT_CALLS = {
     },
     "app/services/orchestration/phases/execution_loop.py": {
         "mark_task_attempt_cancelled": 1,
-        "mark_task_attempt_failed": 15,
+        "mark_task_attempt_failed": 14,
+    },
+    "app/services/orchestration/execution/step_assessment.py": {
+        "mark_task_attempt_failed": 1,
     },
     "app/services/orchestration/lifecycle/completion.py": {
         "mark_task_attempt_pending": 2,
