@@ -47,7 +47,7 @@ from app.dependencies import (
     get_current_active_user,
     get_current_optional_user,
 )
-from app.services.auth_rate_limit import enforce_auth_rate_limit
+from app.services.auth.rate_limit import enforce_auth_rate_limit
 from app.services.session.auth import (
     generate_session_token,
     verify_session_token,

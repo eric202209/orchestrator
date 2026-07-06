@@ -254,7 +254,7 @@ def _read_event_journal(context: dict[str, Any]) -> dict[str, Any]:
 def _runtime_identity(conn: sqlite3.Connection) -> dict[str, Any]:
     build_git_sha = _env_str("ORCHESTRATOR_GIT_SHA", "GIT_SHA", "COMMIT_SHA")
     try:
-        from app.services.build_identity import _read_repo_git_sha
+        from app.services.observability.build_identity import _read_repo_git_sha
 
         repo_git_sha = _read_repo_git_sha() or "unknown"
     except Exception:
@@ -952,7 +952,9 @@ def _extract_scorer_result_from_timeline(
     return None
 
 
-def _extract_scorer_result_from_reports(context: dict[str, Any]) -> dict[str, Any] | None:
+def _extract_scorer_result_from_reports(
+    context: dict[str, Any]
+) -> dict[str, Any] | None:
     reports_dir = Path(
         os.environ.get(
             "RUN_REPLAY_SCORER_REPORT_DIR",
@@ -982,7 +984,10 @@ def _extract_scorer_result_from_reports(context: dict[str, Any]) -> dict[str, An
             continue
         if task_id is not None and input_block.get("task_id") != task_id:
             continue
-        if workspace_path and str(input_block.get("project_dir") or "") != workspace_path:
+        if (
+            workspace_path
+            and str(input_block.get("project_dir") or "") != workspace_path
+        ):
             continue
         try:
             mtime = path.stat().st_mtime
@@ -1188,15 +1193,18 @@ def _run_replay_bundle_manifest(
             "results": [
                 record
                 for record in verification_records
-                if record.get("status") is not None or record.get("exit_code") is not None
+                if record.get("status") is not None
+                or record.get("exit_code") is not None
             ],
             "contract_verdicts": _extract_contract_verdicts(decision_timeline),
             "scorer_result_ref": (
                 scorer_result.get("path")
                 if scorer_result.get("source") == "eval_report"
-                else scorer_result.get("source")
-                if scorer_result.get("available")
-                else None
+                else (
+                    scorer_result.get("source")
+                    if scorer_result.get("available")
+                    else None
+                )
             ),
         },
         "scorer": scorer_result,

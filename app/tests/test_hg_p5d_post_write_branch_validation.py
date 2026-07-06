@@ -7,12 +7,12 @@ import pytest
 
 from app.config import settings
 from app.models import HumanGuidanceConflict, LogEntry, Project, User
-from app.services.human_guidance_post_write_checker import (
+from app.services.human_guidance.post_write_checker import (
     run_post_write_check_if_enabled,
 )
-from app.services.human_guidance_service import create_guidance
+from app.services.human_guidance.service import create_guidance
 from app.services.orchestration.context.assembly import assemble_execution_prompt
-from app.services.prompt_templates import OrchestrationState
+from app.services.orchestration.prompt_templates import OrchestrationState
 
 
 def _make_user(db, email: str = "hg-p5d@example.com") -> User:
@@ -39,7 +39,7 @@ def _make_project(db, user_id: int, tmp_path) -> Project:
 
 
 def _enable_all_flags(db, project_id: int) -> None:
-    from app.services.human_guidance_activation_service import set_project_activation
+    from app.services.human_guidance.activation import set_project_activation
 
     set_project_activation(
         db,

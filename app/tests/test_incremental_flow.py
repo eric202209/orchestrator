@@ -51,7 +51,7 @@ class _ErrorRuntime:
 
 
 def _make_state(project_dir: str):
-    from app.services.prompt_templates import OrchestrationState
+    from app.services.orchestration.prompt_templates import OrchestrationState
 
     state = OrchestrationState(
         session_id="test-inc-1",

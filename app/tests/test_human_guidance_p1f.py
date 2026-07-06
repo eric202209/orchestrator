@@ -23,7 +23,7 @@ from app.models import (
     Session as SessionModel,
     User,
 )
-from app.services.human_guidance_activation_service import (
+from app.services.human_guidance.activation import (
     check_activation_flag,
     disable_activation,
     get_effective_activation,
@@ -31,10 +31,10 @@ from app.services.human_guidance_activation_service import (
     set_project_activation,
     set_session_activation,
 )
-from app.services.human_guidance_conflict_service import (
+from app.services.human_guidance.conflicts import (
     run_conflict_detection_if_enabled,
 )
-from app.services.human_guidance_service import create_guidance
+from app.services.human_guidance.service import create_guidance
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────

@@ -36,7 +36,7 @@ def _make_project(db, user_id: int) -> Project:
 def _make_guidance(
     db, project, user_id: int, message: str = "Use type hints.", priority: int = 50
 ):
-    from app.services.human_guidance_service import create_guidance
+    from app.services.human_guidance.service import create_guidance
 
     entry, _ = create_guidance(
         db,
@@ -50,7 +50,7 @@ def _make_guidance(
 
 
 def _enable_activation(db, project_id: int):
-    from app.services.human_guidance_activation_service import set_project_activation
+    from app.services.human_guidance.activation import set_project_activation
 
     return set_project_activation(
         db,

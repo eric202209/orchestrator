@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from app.config import settings
 from app.dependencies import get_current_active_user
 from app.models import User
-from app.services.github_service import GitHubService
+from app.services.integrations.github import GitHubService
 from app.tasks.github_tasks import (
     process_github_issue_event,
     process_github_pr_event,

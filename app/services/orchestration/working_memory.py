@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
-    from app.services.file_lock import fcntl as _fcntl  # type: ignore[attr-defined]
+    from app.services.workspace.file_lock import fcntl as _fcntl  # type: ignore[attr-defined]
 except Exception:
     _fcntl = None  # type: ignore[assignment]
 
@@ -326,11 +326,11 @@ def _wm_write_table_guidance(
 ) -> None:
     """HG-P1b: populate wm['human_guidance'] from HumanGuidance table and record usage."""
     try:
-        from app.services.human_guidance_service import (
+        from app.services.human_guidance.service import (
             collect_active_guidance,
             record_guidance_usage,
         )
-        from app.services.human_guidance_selection_service import (
+        from app.services.human_guidance.selection import (
             select_guidance_for_injection,
         )
 
@@ -491,7 +491,7 @@ def write_working_memory(
                 # P1f: check per-project/session activation (backward compat: no row = True)
                 _use_table = True
                 try:
-                    from app.services.human_guidance_activation_service import (
+                    from app.services.human_guidance.activation import (
                         check_activation_flag as _check_act,
                     )
 

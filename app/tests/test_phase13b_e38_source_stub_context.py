@@ -11,7 +11,7 @@ from app.services.orchestration.context.assembly import (
     assemble_planning_prompt,
 )
 from app.services.project.source_imports import render_source_stub_block
-from app.services.prompt_templates import OrchestrationState
+from app.services.orchestration.prompt_templates import OrchestrationState
 
 
 def _write(path: Path, content: str) -> None:

@@ -17,7 +17,7 @@ from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
 from app.services.workspace.workspace_paths import TASK_REPORT_ROOT
-from app.services.task_service import TaskService
+from app.services.tasks.service import TaskService
 
 
 def is_verification_style_task(

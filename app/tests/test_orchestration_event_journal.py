@@ -18,8 +18,8 @@ from app.services.orchestration.state.persistence import (
     save_orchestration_checkpoint,
 )
 from app.services.orchestration.types import ValidationVerdict
-from app.services.prompt_templates import OrchestrationState
-from app.services.tool_tracking_service import ToolTrackingService
+from app.services.orchestration.prompt_templates import OrchestrationState
+from app.services.tasks.tool_tracking import ToolTrackingService
 
 
 def test_append_orchestration_event_writes_append_only_jsonl(tmp_path):

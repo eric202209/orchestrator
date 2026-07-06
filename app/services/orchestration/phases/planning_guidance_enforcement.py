@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
-from app.services.human_guidance_plan_validator import (
+from app.services.human_guidance.plan_validator import (
     check_plan_guidance_violations_if_enabled as _check_plan_violations,
 )
 from app.services.orchestration.events.telemetry import emit_phase_event
@@ -69,7 +69,7 @@ def collect_repair_guidance_block(ctx: Any) -> str:
     artifacts (typed function signatures, class names).  Returns empty string
     when HG is disabled, no guidance exists, or any error occurs.
     """
-    from app.services.human_guidance_plan_validator import (
+    from app.services.human_guidance.plan_validator import (
         render_active_guidance_for_repair as _render,
     )
     from app.services.orchestration.planning.repair_faithfulness import (

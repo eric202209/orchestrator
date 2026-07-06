@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import app.services.workspace.project_isolation_service as project_isolation_service
-import app.services.prompt_templates as prompt_templates
+import app.services.orchestration.prompt_templates as prompt_templates
 import app.services.workspace.system_settings as system_settings
 from app.models import Project, Session as SessionModel, Task, TaskStatus
 from app.services.agents.openclaw_service import OpenClawSessionService

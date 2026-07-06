@@ -20,7 +20,7 @@ from app.schemas.knowledge import (
     KnowledgeItemRef,
     RecommendedAction,
 )
-from app.services.prompt_templates import OrchestrationState, StepResult
+from app.services.orchestration.prompt_templates import OrchestrationState, StepResult
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 
 

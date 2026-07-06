@@ -32,7 +32,7 @@ from app.services.orchestration.recovery.execution_recovery_service import (
     _failure_signature_hash,
 )
 from app.services.orchestration.state.persistence import read_orchestration_events
-from app.services.prompt_templates import OrchestrationState
+from app.services.orchestration.prompt_templates import OrchestrationState
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────

@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from app.services.file_lock import fcntl
+from app.services.workspace.file_lock import fcntl
 from ..policy import (
     MINIMAL_PLANNING_TIMEOUT_SECONDS,
     PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS,

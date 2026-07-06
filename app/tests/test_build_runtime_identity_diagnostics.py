@@ -15,7 +15,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.models import Base
-from app.services.build_identity import (
+from app.services.observability.build_identity import (
     _config_source_summary,
     _stale_container_warning,
     _timeout_settings,
@@ -64,7 +64,7 @@ def test_build_identity_includes_runtime_profile(mem_db):
 
 def test_build_identity_runtime_profile_matches_settings(mem_db, monkeypatch):
     monkeypatch.setattr(
-        "app.services.build_identity.settings.RUNTIME_PROFILE", "medium"
+        "app.services.observability.build_identity.settings.RUNTIME_PROFILE", "medium"
     )
     payload = build_identity_payload(mem_db)
     assert payload["runtime_profile"] == "medium"
@@ -92,10 +92,12 @@ def test_build_identity_includes_timeout_settings(mem_db):
 
 def test_timeout_settings_reflects_settings_values(monkeypatch):
     monkeypatch.setattr(
-        "app.services.build_identity.settings.PLANNING_REPAIR_TIMEOUT_SECONDS", 42
+        "app.services.observability.build_identity.settings.PLANNING_REPAIR_TIMEOUT_SECONDS",
+        42,
     )
     monkeypatch.setattr(
-        "app.services.build_identity.settings.PLANNING_SYNTHESIS_TIMEOUT_SECONDS", 77
+        "app.services.observability.build_identity.settings.PLANNING_SYNTHESIS_TIMEOUT_SECONDS",
+        77,
     )
     ts = _timeout_settings()
     assert ts["planning_repair_timeout_seconds"] == 42

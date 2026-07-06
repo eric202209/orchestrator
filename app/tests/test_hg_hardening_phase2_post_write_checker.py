@@ -31,7 +31,7 @@ from app.models import (
     Project,
     User,
 )
-from app.services.human_guidance_post_write_checker import (
+from app.services.human_guidance.post_write_checker import (
     _backend_bypasses_structured_planning,
     _is_skippable_file,
     _read_file_safe,
@@ -66,7 +66,7 @@ def _make_project(db, user_id: int) -> Project:
 
 
 def _make_guidance(db, project_id, user_id, message, priority=50):
-    from app.services.human_guidance_service import create_guidance
+    from app.services.human_guidance.service import create_guidance
 
     entry, _ = create_guidance(
         db,
@@ -80,7 +80,7 @@ def _make_guidance(db, project_id, user_id, message, priority=50):
 
 
 def _enable_all_flags(db, project_id):
-    from app.services.human_guidance_activation_service import set_project_activation
+    from app.services.human_guidance.activation import set_project_activation
 
     set_project_activation(
         db,
@@ -492,7 +492,7 @@ class TestFilteringRespected:
         _enable_all_flags(db_session, project.id)
 
         # Create guidance targeting only 'qwen' backend
-        from app.services.human_guidance_service import create_guidance
+        from app.services.human_guidance.service import create_guidance
 
         create_guidance(
             db_session,
@@ -526,7 +526,7 @@ class TestFilteringRespected:
         project = _make_project(db_session, user.id)
         _enable_all_flags(db_session, project.id)
 
-        from app.services.human_guidance_service import create_guidance
+        from app.services.human_guidance.service import create_guidance
 
         create_guidance(
             db_session,
@@ -563,7 +563,7 @@ class TestFilteringRespected:
         project = _make_project(db_session, user.id)
         _enable_all_flags(db_session, project.id)
 
-        from app.services.human_guidance_service import create_guidance
+        from app.services.human_guidance.service import create_guidance
 
         create_guidance(
             db_session,
@@ -643,7 +643,7 @@ class TestFlagGatedWrapper:
         )
 
         with patch(
-            "app.services.human_guidance_post_write_checker.run_post_write_guidance_check"
+            "app.services.human_guidance.post_write_checker.run_post_write_guidance_check"
         ) as mock_check:
             run_post_write_check_if_enabled(ctx, reported_changed_files=[])
             mock_check.assert_not_called()
@@ -662,7 +662,7 @@ class TestFlagGatedWrapper:
         )
 
         with patch(
-            "app.services.human_guidance_post_write_checker.run_post_write_guidance_check"
+            "app.services.human_guidance.post_write_checker.run_post_write_guidance_check"
         ) as mock_check:
             run_post_write_check_if_enabled(ctx, reported_changed_files=[])
             mock_check.assert_not_called()
@@ -682,7 +682,7 @@ class TestFlagGatedWrapper:
         )
 
         with patch(
-            "app.services.human_guidance_post_write_checker.run_post_write_guidance_check"
+            "app.services.human_guidance.post_write_checker.run_post_write_guidance_check"
         ) as mock_check:
             run_post_write_check_if_enabled(ctx, reported_changed_files=["app.py"])
             mock_check.assert_not_called()
@@ -701,11 +701,11 @@ class TestFlagGatedWrapper:
         )
 
         with patch(
-            "app.services.human_guidance_post_write_checker.run_post_write_guidance_check",
+            "app.services.human_guidance.post_write_checker.run_post_write_guidance_check",
             return_value=[],
         ) as mock_check:
             with patch(
-                "app.services.human_guidance_activation_service.check_activation_flag",
+                "app.services.human_guidance.activation.check_activation_flag",
                 return_value=True,
             ):
                 run_post_write_check_if_enabled(ctx, reported_changed_files=["app.py"])
@@ -726,11 +726,11 @@ class TestFlagGatedWrapper:
         )
 
         with patch(
-            "app.services.human_guidance_post_write_checker.run_post_write_guidance_check",
+            "app.services.human_guidance.post_write_checker.run_post_write_guidance_check",
             side_effect=RuntimeError("db crashed"),
         ):
             with patch(
-                "app.services.human_guidance_activation_service.check_activation_flag",
+                "app.services.human_guidance.activation.check_activation_flag",
                 return_value=True,
             ):
                 # Must not raise

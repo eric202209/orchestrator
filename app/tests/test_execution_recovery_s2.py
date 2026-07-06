@@ -38,7 +38,7 @@ from app.services.orchestration.recovery.recovery_patch import (
     apply_recovery_patch,
 )
 from app.services.orchestration.state.persistence import read_orchestration_events
-from app.services.prompt_templates import OrchestrationState
+from app.services.orchestration.prompt_templates import OrchestrationState
 
 
 # ---------------------------------------------------------------------------

@@ -33,7 +33,7 @@ from app.services.orchestration.diagnostics.signature_guard import (
 )
 from app.services.orchestration.phases.completion_flow import _attempt_completion_repair
 from app.services.orchestration.types import OrchestrationRunContext
-from app.services.prompt_templates import OrchestrationState, StepResult
+from app.services.orchestration.prompt_templates import OrchestrationState, StepResult
 
 
 # ---------------------------------------------------------------------------

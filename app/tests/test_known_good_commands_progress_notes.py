@@ -318,7 +318,7 @@ def test_known_good_commands_survive_planning_prompt_after_slice_h(tmp_path):
     """
     from types import SimpleNamespace
     from app.services.orchestration.context.assembly import assemble_planning_prompt
-    from app.services.prompt_templates import OrchestrationState
+    from app.services.orchestration.prompt_templates import OrchestrationState
     from app.tasks.worker_support.context import _inject_progress_notes_into_context
 
     # Step 1: write progress_notes for a completed task

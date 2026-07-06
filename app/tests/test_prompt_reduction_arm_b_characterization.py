@@ -28,7 +28,7 @@ from unittest.mock import patch
 
 import pytest
 
-from app.services.prompt_templates import PromptTemplates
+from app.services.orchestration.prompt_templates import PromptTemplates
 from app.config import settings
 
 

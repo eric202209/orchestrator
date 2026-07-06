@@ -39,7 +39,7 @@ class _FixedRuntime:
 
 
 def _make_ctx(project_dir: str, output: str, task_id: int = 1):
-    from app.services.prompt_templates import OrchestrationState
+    from app.services.orchestration.prompt_templates import OrchestrationState
 
     state = OrchestrationState(
         session_id="test-compliance",

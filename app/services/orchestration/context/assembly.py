@@ -27,7 +27,7 @@ from app.services.orchestration.context.hitl_sentinel import (
     render as render_hitl_sentinel,
 )
 from app.services.orchestration.workflow_profiles import get_workflow_phases
-from app.services.prompt_templates import PromptTemplates, StepResult
+from app.services.orchestration.prompt_templates import PromptTemplates, StepResult
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 from app.services.workspace.system_settings import get_effective_adaptation_profile
 
@@ -478,7 +478,7 @@ def render_active_human_guidance_section(
             return ""
 
         try:
-            from app.services.human_guidance_activation_service import (
+            from app.services.human_guidance.activation import (
                 check_activation_flag,
             )
 
@@ -492,10 +492,10 @@ def render_active_human_guidance_section(
         except Exception as exc:
             logger.debug("[HG_PROMPT_SECTION] activation check skipped: %s", exc)
 
-        from app.services.human_guidance_selection_service import (
+        from app.services.human_guidance.selection import (
             select_guidance_for_injection,
         )
-        from app.services.human_guidance_service import (
+        from app.services.human_guidance.service import (
             collect_active_guidance,
             record_guidance_usage,
         )

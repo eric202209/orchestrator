@@ -33,7 +33,7 @@ from app.services.orchestration.state.session_state import (
 )
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.workspace.project_mutation_lock import ProjectMutationLockError
-from app.services.prompt_templates import OrchestrationStatus
+from app.services.orchestration.prompt_templates import OrchestrationStatus
 
 DIRTY_RETRY_CHECKPOINT_NAME = "autosave_error"
 _KNOWLEDGE_HALT_MIN_CONFIDENCE = 0.95

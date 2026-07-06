@@ -19,8 +19,8 @@ from app.models import Task, TaskStatus, Project, LogEntry, SessionTask, TaskExe
 from app.schemas import TaskCreate, TaskUpdate, TaskResponse, TaskPromotionRequest
 from app.dependencies import get_current_active_user
 from app.services.agents.agent_runtime import create_agent_runtime
-from app.services.log_utils import deduplicate_logs
-from app.services.name_formatter import humanize_display_name
+from app.services.observability.log_utils import deduplicate_logs
+from app.services.project.name_formatter import humanize_display_name
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.execution.runtime import workspace_snapshot_key
 from app.services.orchestration.review_policy import build_operator_override_metadata
@@ -36,12 +36,12 @@ from app.services.orchestration.state.session_state import (
     mark_session_running,
     mark_session_stopped,
 )
-from app.services.authz import project_access_filter
+from app.services.auth.authorization import project_access_filter
 from app.services.session.session_runtime_service import ensure_task_workspace
-from app.services.task_execution_service import (
+from app.services.tasks.execution import (
     create_task_execution,
 )
-from app.services.task_service import TaskService
+from app.services.tasks.service import TaskService
 from app.services.workspace.system_settings import (
     get_effective_agent_backend,
     get_effective_agent_model_family,
@@ -357,7 +357,7 @@ def _queue_task_retry(
     from app.models import Session as SessionModel
     from app.api.v1.endpoints.sessions import _ensure_unique_session_name
     from app.tasks.worker import execute_orchestration_task
-    from app.services.task_service import TaskService
+    from app.services.tasks.service import TaskService
 
     blocking_tasks = TaskService(db).get_blocking_prior_tasks(task)
     if blocking_tasks:
@@ -1042,7 +1042,7 @@ async def execute_task_with_runtime(
 
         logger.info("Created session %s for task %s", new_session.id, task.id)
 
-        from app.services.prompt_templates import PromptTemplates
+        from app.services.orchestration.prompt_templates import PromptTemplates
 
         prompt_text = PromptTemplates.build_task_prompt(
             task_description=prompt + overwrite_warning,
@@ -1579,7 +1579,7 @@ def accept_task_workspace(
     _deleted_files: list = (_changeset_for_guard or {}).get("deleted_files") or []
     if _deleted_files:
         from app.models import PermissionRequest as _PermReq
-        from app.services.permission_service import PermissionService as _PermSvc
+        from app.services.permissions.approval import PermissionService as _PermSvc
         from fastapi.responses import JSONResponse as _JSONResponse
 
         _existing_approval = (

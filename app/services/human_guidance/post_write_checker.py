@@ -137,7 +137,7 @@ def _collect_guidance_for_post_write(
     guidance_model_family: str,
 ) -> List[Dict]:
     """Collect guidance with validation purpose first, fall back to planning."""
-    from app.services.human_guidance_service import collect_active_guidance
+    from app.services.human_guidance.service import collect_active_guidance
 
     entries = collect_active_guidance(
         db,
@@ -182,7 +182,7 @@ def run_post_write_guidance_check(
 
     Never raises. Non-fatal: any per-file or per-guidance error is logged and skipped.
     """
-    from app.services.human_guidance_plan_validator import _PLAN_GUIDANCE_PATTERNS
+    from app.services.human_guidance.plan_validator import _PLAN_GUIDANCE_PATTERNS
 
     try:
         guidance_entries = _collect_guidance_for_post_write(
@@ -255,7 +255,7 @@ def run_post_write_guidance_check(
                         pass
 
                 # extract excerpt from file content around matched keyword
-                from app.services.human_guidance_conflict_service import (
+                from app.services.human_guidance.conflicts import (
                     _extract_excerpt,
                 )
 
@@ -365,7 +365,7 @@ def run_post_write_check_if_enabled(
             return
 
         try:
-            from app.services.human_guidance_activation_service import (
+            from app.services.human_guidance.activation import (
                 check_activation_flag as _check_act,
             )
 

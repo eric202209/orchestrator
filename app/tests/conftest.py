@@ -14,7 +14,7 @@ from app.config import Settings, settings
 from app.database import get_db
 from app.dependencies import get_current_active_user, get_current_user
 from app.models import Base, User
-from app.services.auth_rate_limit import clear_auth_rate_limits
+from app.services.auth.rate_limit import clear_auth_rate_limits
 
 
 def repo_default_settings() -> Settings:

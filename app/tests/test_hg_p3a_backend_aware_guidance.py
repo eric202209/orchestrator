@@ -16,7 +16,7 @@ from app.models import (
     Session as SessionModel,
     User,
 )
-from app.services.human_guidance_service import (
+from app.services.human_guidance.service import (
     VALID_BACKENDS,
     _backend_matches,
     _parse_backend_targets,
@@ -425,7 +425,7 @@ class TestReadinessBackendStatistics:
     def test_backend_statistics_in_response(
         self, db_session: Session, user: User, project: Project
     ):
-        from app.services.human_guidance_activation_service import readiness_status
+        from app.services.human_guidance.activation import readiness_status
 
         _add_guidance(
             db_session,
@@ -452,7 +452,7 @@ class TestReadinessBackendStatistics:
     def test_backend_statistics_filtered_count(
         self, db_session: Session, user: User, project: Project
     ):
-        from app.services.human_guidance_activation_service import readiness_status
+        from app.services.human_guidance.activation import readiness_status
 
         _add_guidance(
             db_session,
@@ -485,7 +485,7 @@ class TestReadinessBackendStatistics:
     def test_backend_all_shows_no_filtering(
         self, db_session: Session, user: User, project: Project
     ):
-        from app.services.human_guidance_activation_service import readiness_status
+        from app.services.human_guidance.activation import readiness_status
 
         _add_guidance(
             db_session,

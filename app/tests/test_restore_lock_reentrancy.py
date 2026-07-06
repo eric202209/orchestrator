@@ -117,7 +117,7 @@ def test_no_projectmutationlockerror_when_lock_held(tmp_path):
     from app.services.orchestration.execution.runtime import (
         restore_workspace_after_abort,
     )
-    from app.services.task_service import TaskService
+    from app.services.tasks.service import TaskService
 
     project, state, emit_live, task_service = _make_ctx(tmp_path)
 
@@ -168,7 +168,7 @@ def test_no_projectmutationlockerror_when_lock_held(tmp_path):
 
 def test_task_service_skip_lock_calls_unlocked(tmp_path):
     """task_service.restore_workspace_snapshot(skip_lock=True) delegates to snapshots.unlocked."""
-    from app.services.task_service import TaskService
+    from app.services.tasks.service import TaskService
 
     ts = MagicMock(spec=TaskService)
     snapshots = MagicMock()
@@ -186,7 +186,7 @@ def test_task_service_skip_lock_calls_unlocked(tmp_path):
     target_dir = tmp_path
 
     # Call the real method body (not the mock's auto-spec)
-    from app.services.task_service import TaskService as RealTaskService
+    from app.services.tasks.service import TaskService as RealTaskService
 
     real_method = (
         RealTaskService.restore_workspace_snapshot.__wrapped__
@@ -201,7 +201,7 @@ def test_task_service_skip_lock_calls_unlocked(tmp_path):
 
 def test_task_service_no_skip_lock_calls_locked(tmp_path):
     """task_service.restore_workspace_snapshot(skip_lock=False) delegates to snapshots.locked."""
-    from app.services.task_service import TaskService as RealTaskService
+    from app.services.tasks.service import TaskService as RealTaskService
 
     ts = MagicMock()
     snapshots = MagicMock()

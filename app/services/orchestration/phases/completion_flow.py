@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, Optional
 
 from app.models import TaskExecution, TaskStatus
 from app.config import settings
-from app.services.error_handler import error_handler
+from app.services.orchestration.error_handler import error_handler
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.events.telemetry import emit_phase_event
 from app.services.orchestration.diagnostics.debug_feedback import (
@@ -91,7 +91,7 @@ from app.services.orchestration.validation.integrity import (
 )
 from app.services.workspace.permissions import ensure_shared_permissions
 from app.services.workspace.system_settings import get_effective_workspace_review_policy
-from app.services.prompt_templates import OrchestrationStatus, StepResult
+from app.services.orchestration.prompt_templates import OrchestrationStatus, StepResult
 from app.services.orchestration.phases.completion_repair import (
     _apply_completion_repair_ops_direct,
     _augment_completion_verification_command,

@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.state.persistence import append_orchestration_event
-from app.services.prompt_templates import StepResult
+from app.services.orchestration.prompt_templates import StepResult
 
 # Code-fence stripper: LLMs often wrap output in ``` blocks or add prose before
 # the block despite the prompt saying "raw content only."  Search anywhere in the

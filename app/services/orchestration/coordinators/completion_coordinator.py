@@ -65,7 +65,7 @@ from app.services.orchestration.validation.integrity import (
 )
 from app.services.orchestration.validation.parsing import extract_structured_text
 from app.services.orchestration.validation.validator import ValidatorService
-from app.services.prompt_templates import OrchestrationStatus
+from app.services.orchestration.prompt_templates import OrchestrationStatus
 from app.services.workspace.workspace_paths import TASK_REPORT_ROOT
 
 
@@ -1272,7 +1272,7 @@ class CompletionCoordinator:
             guidance_model_family=ctx.guidance_model_family,
         )
 
-        from app.services.human_guidance_post_write_checker import (
+        from app.services.human_guidance.post_write_checker import (
             run_post_write_check_if_enabled,
         )
 

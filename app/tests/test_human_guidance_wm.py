@@ -36,7 +36,7 @@ from app.models import (
     Session as SessionModel,
     User,
 )
-from app.services.human_guidance_service import (
+from app.services.human_guidance.service import (
     collect_active_guidance,
     create_guidance,
     record_guidance_usage,
@@ -681,7 +681,7 @@ class TestWriteWorkingMemoryWithFlag:
         logger = _make_logger()
 
         with patch(
-            "app.services.human_guidance_service.record_guidance_usage",
+            "app.services.human_guidance.service.record_guidance_usage",
             side_effect=Exception("telemetry boom"),
         ):
             write_working_memory(

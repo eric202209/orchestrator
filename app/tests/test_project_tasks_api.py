@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 from app.models import Project, Session as SessionModel, SessionTask, Task, TaskStatus
-from app.services.task_service import TaskService
+from app.services.tasks.service import TaskService
 
 
 def test_project_tasks_include_latest_session_id(authenticated_client, db_session):

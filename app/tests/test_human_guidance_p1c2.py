@@ -41,12 +41,12 @@ from app.models import (
     Session as SessionModel,
     User,
 )
-from app.services.human_guidance_conflict_service import (
+from app.services.human_guidance.conflicts import (
     _CONFLICT_PREFIX,
     detect_guidance_task_conflicts,
     run_conflict_detection_if_enabled,
 )
-from app.services.human_guidance_service import create_guidance
+from app.services.human_guidance.service import create_guidance
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────

@@ -62,13 +62,13 @@ from app.services.observability import (
     start_langfuse_observation,
     update_langfuse_observation,
 )
-from app.services.permission_service import PermissionApprovalService
-from app.services.performance_optimizations import (
+from app.services.permissions.approval import PermissionApprovalService
+from app.services.orchestration.prompt_optimization import (
     optimize_prompt,
     perf_tracker,
 )
 from app.services.workspace.checkpoint_service import CheckpointService, CheckpointError
-from app.services.tool_tracking_service import ToolTrackingService
+from app.services.tasks.tool_tracking import ToolTrackingService
 from app.services.workspace.system_settings import (
     get_effective_agent_backend,
     get_effective_agent_model_family,

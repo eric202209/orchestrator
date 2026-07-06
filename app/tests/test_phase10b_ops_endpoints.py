@@ -24,7 +24,7 @@ from app.models import (
     User,
 )
 from app.services.observability.metrics_collector import MetricsCollector
-from app.services.build_identity import build_identity_payload
+from app.services.observability.build_identity import build_identity_payload
 
 # ---------------------------------------------------------------------------
 # Fixtures

@@ -23,7 +23,7 @@ from app.services.observability import flush_langfuse
 from app.services.observability import runtime_queue_metrics
 from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.planning.planning_session_service import PlanningSessionService
-from app.services.health import health_payload
+from app.services.observability.health import health_payload
 from app.services.workspace.system_settings import emit_runtime_lane_warning
 
 logger = logging.getLogger(__name__)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.services.auth_rate_limit import clear_auth_rate_limits, enforce_api_rate_limit
+from app.services.auth.rate_limit import clear_auth_rate_limits, enforce_api_rate_limit
 from fastapi import HTTPException
 
 

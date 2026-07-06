@@ -42,13 +42,13 @@ from app.models import (
     Session as SessionModel,
     User,
 )
-from app.services.human_guidance_activation_service import readiness_status
-from app.services.human_guidance_conflict_service import detect_guidance_task_conflicts
-from app.services.human_guidance_plan_validator import (
+from app.services.human_guidance.activation import readiness_status
+from app.services.human_guidance.conflicts import detect_guidance_task_conflicts
+from app.services.human_guidance.plan_validator import (
     check_plan_guidance_violations_if_enabled,
     render_active_guidance_for_repair,
 )
-from app.services.human_guidance_service import collect_active_guidance, create_guidance
+from app.services.human_guidance.service import collect_active_guidance, create_guidance
 from app.services.orchestration.working_memory import _FILENAME, write_working_memory
 
 

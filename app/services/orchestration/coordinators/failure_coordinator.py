@@ -35,7 +35,7 @@ from app.services.orchestration.state.session_state import (
     mark_session_running,
 )
 from app.services.orchestration.types import OrchestrationRunContext
-from app.services.prompt_templates import OrchestrationStatus
+from app.services.orchestration.prompt_templates import OrchestrationStatus
 from app.services.workspace.project_mutation_lock import ProjectMutationLockError
 
 

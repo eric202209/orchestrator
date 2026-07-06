@@ -17,7 +17,7 @@ from app.services.orchestration.recovery.recovery_strategy_registry import (
     RecoveryStrategyRegistry,
 )
 from app.services.orchestration.recovery.reflection_evidence import ReflectionEvidence
-from app.services.prompt_templates import OrchestrationState
+from app.services.orchestration.prompt_templates import OrchestrationState
 
 
 def _make_evidence(failure_class: str = "unknown_failure") -> ExecutionRecoveryEvidence:

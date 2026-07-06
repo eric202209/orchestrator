@@ -16,10 +16,10 @@ from app.models import (
     Session as SessionModel,
     User,
 )
-from app.services.human_guidance_selection_service import (
+from app.services.human_guidance.selection import (
     select_guidance_for_injection,
 )
-from app.services.human_guidance_service import create_guidance, record_guidance_usage
+from app.services.human_guidance.service import create_guidance, record_guidance_usage
 
 
 @pytest.fixture()

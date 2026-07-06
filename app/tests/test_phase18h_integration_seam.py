@@ -68,7 +68,7 @@ from app.services.planning.candidate_recovery import (
     CandidateRecoveryRequest,
     execute_single_sibling_candidate_recovery,
 )
-from app.services.prompt_templates import OrchestrationState
+from app.services.orchestration.prompt_templates import OrchestrationState
 
 
 # ---------------------------------------------------------------------------

@@ -138,7 +138,7 @@ from app.services.orchestration.phases.execution_local_steps import (
     _same_simple_verification_command,
     _verification_can_replace_stale_commands,
 )
-from app.services.prompt_templates import OrchestrationStatus, StepResult
+from app.services.orchestration.prompt_templates import OrchestrationStatus, StepResult
 from app.schemas.knowledge import KnowledgeContext
 from app.services.orchestration.recovery.execution_recovery_evidence import (
     build_step_recovery_evidence,

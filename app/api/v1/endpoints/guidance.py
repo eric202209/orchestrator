@@ -16,8 +16,8 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.dependencies import get_current_active_user
 from app.models import GuidanceStatus, HumanGuidance
-from app.services.authz import get_project_for_user
-from app.services.human_guidance_service import (
+from app.services.auth.authorization import get_project_for_user
+from app.services.human_guidance.service import (
     _UNSET,
     archive_guidance,
     collect_active_guidance,
@@ -55,7 +55,7 @@ class PatchGuidanceRequest(BaseModel):
 
 
 def _serialize(g: HumanGuidance, *, full: bool = False) -> dict:
-    from app.services.human_guidance_service import (
+    from app.services.human_guidance.service import (
         _parse_backend_targets,
         _parse_model_targets,
         _parse_purpose_targets,
@@ -357,7 +357,7 @@ def get_rendered_guidance(
         _INJECTION_BUDGET,
         render_guidance_block,
     )
-    from app.services.human_guidance_selection_service import (
+    from app.services.human_guidance.selection import (
         select_guidance_for_injection,
     )
 
@@ -555,7 +555,7 @@ def get_project_guidance_readiness(
     current_user=Depends(get_current_active_user),
 ):
     """Return Human Guidance readiness status for a project (optionally session-scoped)."""
-    from app.services.human_guidance_activation_service import readiness_status
+    from app.services.human_guidance.activation import readiness_status
 
     get_project_for_user(db, project_id, current_user)
     return readiness_status(
@@ -575,7 +575,7 @@ def patch_project_activation(
     current_user=Depends(get_current_active_user),
 ):
     """Set project-level Human Guidance activation flags."""
-    from app.services.human_guidance_activation_service import set_project_activation
+    from app.services.human_guidance.activation import set_project_activation
 
     get_project_for_user(db, project_id, current_user)
     row = set_project_activation(
@@ -594,7 +594,7 @@ def disable_project_activation(
     current_user=Depends(get_current_active_user),
 ):
     """Disable project-level Human Guidance activation."""
-    from app.services.human_guidance_activation_service import disable_activation
+    from app.services.human_guidance.activation import disable_activation
 
     get_project_for_user(db, project_id, current_user)
     row = disable_activation(
@@ -612,8 +612,8 @@ def get_session_guidance_readiness(
     current_user=Depends(get_current_active_user),
 ):
     """Return Human Guidance readiness status for a session."""
-    from app.services.authz import get_session_for_user
-    from app.services.human_guidance_activation_service import readiness_status
+    from app.services.auth.authorization import get_session_for_user
+    from app.services.human_guidance.activation import readiness_status
 
     session = get_session_for_user(db, session_id, current_user)
     return readiness_status(
@@ -633,8 +633,8 @@ def patch_session_activation(
     current_user=Depends(get_current_active_user),
 ):
     """Set session-level Human Guidance activation flags (overrides project)."""
-    from app.services.authz import get_session_for_user
-    from app.services.human_guidance_activation_service import set_session_activation
+    from app.services.auth.authorization import get_session_for_user
+    from app.services.human_guidance.activation import set_session_activation
 
     session = get_session_for_user(db, session_id, current_user)
     row = set_session_activation(
@@ -654,8 +654,8 @@ def disable_session_activation(
     current_user=Depends(get_current_active_user),
 ):
     """Disable session-level Human Guidance activation."""
-    from app.services.authz import get_session_for_user
-    from app.services.human_guidance_activation_service import disable_activation
+    from app.services.auth.authorization import get_session_for_user
+    from app.services.human_guidance.activation import disable_activation
 
     session = get_session_for_user(db, session_id, current_user)
     row = disable_activation(

@@ -542,7 +542,7 @@ def add_operator_guidance(
     if settings.HUMAN_GUIDANCE_TABLE_ENABLED:
         try:
             from app.models import Project
-            from app.services.human_guidance_service import create_guidance
+            from app.services.human_guidance.service import create_guidance
 
             project_id = session.project_id
             project = (
@@ -596,7 +596,7 @@ def _sync_linked_permission(
     if not permission_request_id:
         return
     try:
-        from app.services.permission_service import PermissionApprovalService
+        from app.services.permissions.approval import PermissionApprovalService
 
         svc = PermissionApprovalService(db)
         if approved:
@@ -656,7 +656,7 @@ def _dispatch_resume(
             reset_started_at=True,
             error_message=None,
         )
-        from app.services.task_execution_service import create_task_execution
+        from app.services.tasks.execution import create_task_execution
 
         task_execution = create_task_execution(
             db,

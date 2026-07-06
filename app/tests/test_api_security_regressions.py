@@ -13,8 +13,8 @@ from app.models import (
     User,
 )
 from app.api.v1.endpoints.auth import generate_keypair
-from app.services.auth_rate_limit import clear_auth_rate_limits, enforce_auth_rate_limit
-from app.services.authz import project_access_filter
+from app.services.auth.rate_limit import clear_auth_rate_limits, enforce_auth_rate_limit
+from app.services.auth.authorization import project_access_filter
 from app.dependencies import get_current_active_user, get_current_user
 
 

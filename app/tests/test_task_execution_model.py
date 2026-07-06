@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from app.models import Project, Session as SessionModel, Task, TaskExecution, TaskStatus
-from app.services.task_execution_service import (
+from app.services.tasks.execution import (
     executions_for_session,
     executions_for_task,
     latest_execution_for_session_task,

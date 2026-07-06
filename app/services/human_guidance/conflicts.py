@@ -161,7 +161,7 @@ def detect_guidance_task_conflicts(
     warning for backward compat/audit. Never raises.
     """
     try:
-        from app.services.human_guidance_service import collect_active_guidance
+        from app.services.human_guidance.service import collect_active_guidance
 
         guidance_entries = collect_active_guidance(
             db,
@@ -317,7 +317,7 @@ def run_conflict_detection_if_enabled(
 
     # P1f: check per-project/session activation (non-fatal, backward compat: no row = True)
     try:
-        from app.services.human_guidance_activation_service import (
+        from app.services.human_guidance.activation import (
             check_activation_flag as _check_act,
         )
 

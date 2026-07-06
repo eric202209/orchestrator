@@ -14,7 +14,7 @@ from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
 from app.services.workspace.permissions import ensure_shared_permissions
-from app.services.task_service import TaskService
+from app.services.tasks.service import TaskService
 
 
 def get_state_manager_path(project_root: Path) -> Path:

@@ -6,7 +6,7 @@ from typing import Dict, List
 
 import pytest
 
-from app.services.human_guidance_plan_validator import (
+from app.services.human_guidance.plan_validator import (
     _extract_plan_write_content,
     validate_plan_against_guidance,
 )

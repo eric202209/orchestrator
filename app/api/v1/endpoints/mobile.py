@@ -94,13 +94,13 @@ from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
 from app.services.session.session_stream_service import mobile_sse_event_generator
-from app.services.streaming_health import (
+from app.services.observability.streaming_health import (
     record_stream_error,
     register_stream_connection,
     unregister_stream_connection,
 )
 from app.services.workspace.system_settings import get_effective_mobile_gateway_key
-from app.services.task_service import TaskService
+from app.services.tasks.service import TaskService
 from app.services.session.session_inspection_service import (
     delete_session_checkpoint_payload,
     derive_orchestration_state_block,
@@ -1376,7 +1376,7 @@ def submit_mobile_workspace_review(
     _log_mobile_request(
         request, "workspace_review", task_id=task_id, action=body.action
     )
-    from app.services.task_service import TaskService
+    from app.services.tasks.service import TaskService
 
     task = db.query(Task).filter(Task.id == task_id).first()
     if not task:
@@ -1766,7 +1766,7 @@ async def approve_mobile_permission(
 ):
     """Approve a permission request via mobile (T058)."""
     _log_mobile_request(request, "approve_permission", request_id=request_id)
-    from app.services.permission_service import PermissionApprovalService
+    from app.services.permissions.approval import PermissionApprovalService
 
     service = PermissionApprovalService(db)
     try:
@@ -1793,7 +1793,7 @@ async def reject_mobile_permission(
 ):
     """Reject a permission request via mobile (T059)."""
     _log_mobile_request(request, "reject_permission", request_id=request_id)
-    from app.services.permission_service import PermissionApprovalService
+    from app.services.permissions.approval import PermissionApprovalService
 
     service = PermissionApprovalService(db)
     try:
@@ -1825,7 +1825,7 @@ from app.api.v1.endpoints.guidance import (
     _serialize_activation_row,
     _serialize_conflict_row,
 )
-from app.services.human_guidance_service import (
+from app.services.human_guidance.service import (
     archive_guidance as _archive_guidance,
     create_guidance as _create_guidance,
     get_guidance as _get_guidance,
@@ -1877,7 +1877,7 @@ def mobile_get_guidance_readiness(
     db: Session = Depends(get_db),
 ):
     """Guidance readiness for a project — mobile gateway auth."""
-    from app.services.human_guidance_activation_service import readiness_status
+    from app.services.human_guidance.activation import readiness_status
 
     _guidance_project_or_404(db, project_id)
     return readiness_status(db, project_id=project_id, session_id=None)
@@ -1995,10 +1995,10 @@ def mobile_get_rendered_guidance(
     db: Session = Depends(get_db),
 ):
     """Rendered guidance preview — mobile gateway auth."""
-    from app.services.human_guidance_selection_service import (
+    from app.services.human_guidance.selection import (
         select_guidance_for_injection,
     )
-    from app.services.human_guidance_service import collect_active_guidance
+    from app.services.human_guidance.service import collect_active_guidance
     from app.services.orchestration.working_memory import (
         _INJECTION_BUDGET,
         render_guidance_block,
@@ -2171,7 +2171,7 @@ def mobile_patch_guidance_activation(
     db: Session = Depends(get_db),
 ):
     """Set project guidance activation flags — mobile gateway auth."""
-    from app.services.human_guidance_activation_service import set_project_activation
+    from app.services.human_guidance.activation import set_project_activation
 
     _guidance_project_or_404(db, project_id)
     row = set_project_activation(db, project_id, body.model_dump(), enabled_by="mobile")
@@ -2184,7 +2184,7 @@ def mobile_disable_guidance_activation(
     db: Session = Depends(get_db),
 ):
     """Disable project guidance activation — mobile gateway auth."""
-    from app.services.human_guidance_activation_service import disable_activation
+    from app.services.human_guidance.activation import disable_activation
 
     _guidance_project_or_404(db, project_id)
     row = disable_activation(db, "project", project_id, disabled_by="mobile")

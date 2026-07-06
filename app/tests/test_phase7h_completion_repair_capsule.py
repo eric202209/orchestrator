@@ -30,7 +30,7 @@ from app.services.orchestration.phases.completion_flow import (
 )
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.validation.integrity import scan_python_test_text
-from app.services.prompt_templates import OrchestrationState, StepResult
+from app.services.orchestration.prompt_templates import OrchestrationState, StepResult
 
 
 class _FakeRuntime:

@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 
 from app.models import LogEntry
-from app.services.streaming_health import clear_streaming_health, record_stream_error
+from app.services.observability.streaming_health import (
+    clear_streaming_health,
+    record_stream_error,
+)
 
 
 def test_diagnostics_endpoint_returns_expected_shape(authenticated_client):

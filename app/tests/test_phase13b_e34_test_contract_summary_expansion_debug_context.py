@@ -19,7 +19,7 @@ from app.services.project.source_imports import (
     extract_python_test_contract,
     render_python_test_contract_summary,
 )
-from app.services.prompt_templates import OrchestrationState
+from app.services.orchestration.prompt_templates import OrchestrationState
 
 
 def _write(path: Path, content: str) -> None:

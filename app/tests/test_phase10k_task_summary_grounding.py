@@ -28,7 +28,7 @@ from app.services.orchestration.phases.completion_summary import (
     _generate_task_summary_with_fallback,
     build_workspace_evidence_block,
 )
-from app.services.prompt_templates import PromptTemplates
+from app.services.orchestration.prompt_templates import PromptTemplates
 
 
 # ---------------------------------------------------------------------------

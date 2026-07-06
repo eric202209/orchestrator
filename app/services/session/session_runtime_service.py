@@ -44,13 +44,13 @@ from app.services.agents.agent_backends import (
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
-from app.services.prompt_templates import OrchestrationState
-from app.services.task_service import TaskService
+from app.services.orchestration.prompt_templates import OrchestrationState
+from app.services.tasks.service import TaskService
 from app.services.workspace.system_settings import (
     get_effective_agent_backend,
     get_effective_agent_model_family,
 )
-from app.services.task_execution_service import create_task_execution
+from app.services.tasks.execution import create_task_execution
 from app.services.session.context_compaction import (
     compact_checkpoint_payload,
     estimate_tokens,

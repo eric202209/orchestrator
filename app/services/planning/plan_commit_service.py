@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Plan, Project, Task, TaskStatus
 from app.schemas import PlannerTaskCandidate
-from app.services.name_formatter import humanize_display_name
+from app.services.project.name_formatter import humanize_display_name
 
 
 class PlanCommitService:

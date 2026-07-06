@@ -15,7 +15,7 @@ from app.models import (
     TaskExecution,
     TaskStatus,
 )
-from app.services.error_handler import error_handler
+from app.services.orchestration.error_handler import error_handler
 from app.services.orchestration.diagnostics.debug_feedback import (
     build_bounded_debug_repair_prompt,
     build_debug_feedback_envelope,
@@ -52,7 +52,7 @@ from app.services.orchestration.phases.execution_loop import (
 )
 from app.services.orchestration.state.persistence import read_orchestration_events
 from app.services.orchestration.types import OrchestrationRunContext
-from app.services.prompt_templates import OrchestrationState
+from app.services.orchestration.prompt_templates import OrchestrationState
 
 
 def _seed_execution(db_session, tmp_path):

@@ -138,7 +138,7 @@ def test_validated_timeout_constant_is_240():
 
 
 def test_timeout_config_sources_present_in_timeout_settings():
-    from app.services.build_identity import _timeout_settings
+    from app.services.observability.build_identity import _timeout_settings
 
     ts = _timeout_settings()
     assert "timeout_config_sources" in ts
@@ -151,7 +151,7 @@ def test_timeout_config_source_is_default_when_no_env_var(monkeypatch):
     monkeypatch.delenv("PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS", raising=False)
     monkeypatch.delenv("PLANNING_REPAIR_TIMEOUT_SECONDS", raising=False)
 
-    from app.services.build_identity import _timeout_settings
+    from app.services.observability.build_identity import _timeout_settings
 
     ts = _timeout_settings()
     sources = ts["timeout_config_sources"]
@@ -163,7 +163,7 @@ def test_timeout_config_source_is_env_when_env_var_set(monkeypatch):
     monkeypatch.setenv("PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS", "240")
     monkeypatch.setenv("PLANNING_REPAIR_TIMEOUT_SECONDS", "240")
 
-    from app.services.build_identity import _timeout_settings
+    from app.services.observability.build_identity import _timeout_settings
 
     ts = _timeout_settings()
     sources = ts["timeout_config_sources"]
@@ -173,7 +173,7 @@ def test_timeout_config_source_is_env_when_env_var_set(monkeypatch):
 
 def test_timeout_settings_existing_int_keys_still_present():
     """Adding timeout_config_sources must not remove existing int-valued keys."""
-    from app.services.build_identity import _timeout_settings
+    from app.services.observability.build_identity import _timeout_settings
 
     ts = _timeout_settings()
     for key in (

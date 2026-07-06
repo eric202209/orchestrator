@@ -11,7 +11,7 @@ from typing import Dict, Any, List, Optional
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models import Project
-from app.services.permission_service import (
+from app.services.permissions.approval import (
     PermissionApprovalService,
     PermissionStatus,
 )

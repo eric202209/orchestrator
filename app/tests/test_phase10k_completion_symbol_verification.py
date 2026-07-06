@@ -335,8 +335,11 @@ class TestLogEntryEmission:
             finalize_successful_task,
         )
         from app.services.orchestration.types import OrchestrationRunContext
-        from app.services.prompt_templates import OrchestrationState, StepResult
-        from app.services.task_service import TaskService
+        from app.services.orchestration.prompt_templates import (
+            OrchestrationState,
+            StepResult,
+        )
+        from app.services.tasks.service import TaskService
 
         project_dir = tmp_path / "sym-project"
         project_dir.mkdir()

@@ -11,7 +11,7 @@ from app.services.orchestration.context.assembly import (
     collect_workspace_inventory_paths,
     sanitize_progress_notes_for_workspace,
 )
-from app.services.task_service import TaskService
+from app.services.tasks.service import TaskService
 
 _PROGRESS_NOTES_MAX_BYTES = 8000
 

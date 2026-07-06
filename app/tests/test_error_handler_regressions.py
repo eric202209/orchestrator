@@ -1,4 +1,4 @@
-from app.services.error_handler import EnhancedErrorHandler
+from app.services.orchestration.error_handler import EnhancedErrorHandler
 from app.services.orchestration.planning.planner import PlannerService
 
 

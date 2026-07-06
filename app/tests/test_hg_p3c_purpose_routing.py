@@ -15,7 +15,7 @@ from app.models import (
     Project,
     User,
 )
-from app.services.human_guidance_service import (
+from app.services.human_guidance.service import (
     VALID_PURPOSES,
     _parse_purpose_targets,
     _purpose_matches,

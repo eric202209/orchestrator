@@ -35,8 +35,8 @@ from app.services.orchestration.execution.execution_flow import (
 )
 from app.services.orchestration.types import OrchestrationRunContext, ValidationVerdict
 from app.services.orchestration.validation.validator import ValidatorService
-from app.services.prompt_templates import OrchestrationState, StepResult
-from app.services.task_service import TaskService
+from app.services.orchestration.prompt_templates import OrchestrationState, StepResult
+from app.services.tasks.service import TaskService
 
 
 class _FakeRuntime:

@@ -230,7 +230,7 @@ def test_session_diff_endpoint_returns_structured_delta(
         from app.services.orchestration.state.persistence import (
             write_orchestration_state_snapshot,
         )
-        from app.services.prompt_templates import OrchestrationState
+        from app.services.orchestration.prompt_templates import OrchestrationState
 
         task = Task(
             project_id=project.id,
@@ -300,7 +300,7 @@ def test_session_diff_endpoint_defaults_to_latest_two_snapshots(
         from app.services.orchestration.state.persistence import (
             write_orchestration_state_snapshot,
         )
-        from app.services.prompt_templates import OrchestrationState
+        from app.services.orchestration.prompt_templates import OrchestrationState
 
         task = Task(
             project_id=project.id,
@@ -456,7 +456,7 @@ def test_session_trace_export_and_dag_endpoints(authenticated_client, db_session
             append_orchestration_event,
             write_orchestration_state_snapshot,
         )
-        from app.services.prompt_templates import OrchestrationState
+        from app.services.orchestration.prompt_templates import OrchestrationState
 
         task = Task(
             project_id=project.id,
@@ -540,7 +540,7 @@ def test_session_focus_and_mobile_interruption_endpoints(
         from app.services.orchestration.state.persistence import (
             write_orchestration_state_snapshot,
         )
-        from app.services.prompt_templates import OrchestrationState
+        from app.services.orchestration.prompt_templates import OrchestrationState
 
         task = Task(
             project_id=project.id,

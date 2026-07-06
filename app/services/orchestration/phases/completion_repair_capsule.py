@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from app.services.prompt_templates import StepResult
+from app.services.orchestration.prompt_templates import StepResult
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 
 MAX_RELEVANT_FILES = 25

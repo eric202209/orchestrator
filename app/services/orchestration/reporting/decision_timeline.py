@@ -31,7 +31,7 @@ from app.models import (
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
-from app.services.task_service import TASK_CHANGE_SET_LOG_MESSAGE
+from app.services.tasks.service import TASK_CHANGE_SET_LOG_MESSAGE
 
 from ..events.event_types import EventType
 from ..state.persistence import read_orchestration_events

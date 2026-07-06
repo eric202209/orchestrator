@@ -15,7 +15,7 @@ from app.models import (
     TaskStatus,
 )
 from app.services.orchestration.execution.runtime import workspace_snapshot_key
-from app.services.task_service import TASK_CHANGE_SET_LOG_MESSAGE, TaskService
+from app.services.tasks.service import TASK_CHANGE_SET_LOG_MESSAGE, TaskService
 from app.services.workspace.baseline_promotion_service import BaselinePromotionService
 from app.services.workspace.changeset_service import ChangesetService
 from app.services.workspace.project_mutation_lock import project_mutation_lock

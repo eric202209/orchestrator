@@ -45,7 +45,7 @@ def _make_validation_verdict(
 
 def _make_ctx(tmp_path):
     """Build a minimal OrchestrationRunContext-like namespace for coordinator tests."""
-    from app.services.prompt_templates import OrchestrationState
+    from app.services.orchestration.prompt_templates import OrchestrationState
 
     orch_state = OrchestrationState(
         session_id="1",
@@ -245,7 +245,7 @@ def test_complete_task_validation_success(tmp_path, monkeypatch):
     _patch_coordinator_delegates(monkeypatch, validation_verdict=accepted_verdict)
 
     with patch(
-        "app.services.human_guidance_post_write_checker.run_post_write_check_if_enabled",
+        "app.services.human_guidance.post_write_checker.run_post_write_check_if_enabled",
         _NOOP_FN,
     ):
         result = CompletionCoordinator().complete_task(
@@ -278,7 +278,7 @@ def test_complete_task_verification_success(tmp_path, monkeypatch):
     )
 
     with patch(
-        "app.services.human_guidance_post_write_checker.run_post_write_check_if_enabled",
+        "app.services.human_guidance.post_write_checker.run_post_write_check_if_enabled",
         _NOOP_FN,
     ):
         result = CompletionCoordinator().complete_task(
@@ -375,7 +375,7 @@ def test_complete_task_completion_repair_success(tmp_path, monkeypatch):
     )
 
     with patch(
-        "app.services.human_guidance_post_write_checker.run_post_write_check_if_enabled",
+        "app.services.human_guidance.post_write_checker.run_post_write_check_if_enabled",
         _NOOP_FN,
     ):
         result = CompletionCoordinator().complete_task(

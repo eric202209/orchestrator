@@ -10,11 +10,11 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import Project, Session as SessionModel, User
-from app.services.human_guidance_conflict_service import detect_guidance_task_conflicts
-from app.services.human_guidance_plan_validator import (
+from app.services.human_guidance.conflicts import detect_guidance_task_conflicts
+from app.services.human_guidance.plan_validator import (
     check_plan_guidance_violations_if_enabled,
 )
-from app.services.human_guidance_service import (
+from app.services.human_guidance.service import (
     collect_active_guidance,
     create_guidance,
     resolve_guidance_runtime_target,

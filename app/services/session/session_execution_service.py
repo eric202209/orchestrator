@@ -18,7 +18,7 @@ from app.services.agents.interfaces import AgentRuntimeError
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
-from app.services.prompt_templates import OrchestrationState
+from app.services.orchestration.prompt_templates import OrchestrationState
 from app.services.orchestration.run_state import (
     mark_task_attempt_cancelled,
     mark_task_attempt_done,
@@ -34,8 +34,8 @@ from app.services.session.session_runtime_service import ensure_task_workspace
 from app.services.session.execution_policy import (
     timeout_terminal_state_blocks_late_success,
 )
-from app.services.task_execution_service import create_task_execution
-from app.services.tool_tracking_service import ToolTrackingService
+from app.services.tasks.execution import create_task_execution
+from app.services.tasks.tool_tracking import ToolTrackingService
 
 logger = logging.getLogger(__name__)
 

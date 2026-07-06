@@ -17,7 +17,7 @@ from app.dependencies import get_current_active_user, get_db
 from app.models import LogEntry, Session as SessionModel
 from app.services.agents.agent_backends import list_supported_backends
 from app.services.knowledge.readiness import knowledge_readiness_snapshot
-from app.services.streaming_health import get_streaming_health_snapshot
+from app.services.observability.streaming_health import get_streaming_health_snapshot
 from app.celery_app import celery_app
 
 logger = logging.getLogger(__name__)

@@ -40,7 +40,7 @@ from app.models import (
     Session as SessionModel,
     User,
 )
-from app.services.human_guidance_service import (
+from app.services.human_guidance.service import (
     create_guidance,
     get_guidance_history,
     list_global_guidance,
@@ -132,7 +132,7 @@ class TestGlobalGuidanceEndpoint:
             scope="global",
             message="Active global.",
         )
-        from app.services.human_guidance_service import archive_guidance
+        from app.services.human_guidance.service import archive_guidance
 
         archive_guidance(db_session, entry.id)
 

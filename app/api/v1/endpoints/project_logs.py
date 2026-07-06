@@ -20,9 +20,9 @@ from typing import Optional, AsyncGenerator
 import json
 from app.database import get_db
 from app.models import Project
-from app.services.log_stream_service import LogStreamService
+from app.services.observability.log_stream import LogStreamService
 from app.services.session.session_stream_service import _authenticate_websocket
-from app.services.streaming_health import (
+from app.services.observability.streaming_health import (
     record_stream_error,
     register_stream_connection,
     unregister_stream_connection,

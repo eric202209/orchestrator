@@ -14,7 +14,7 @@ from app.models import (
     Project,
     User,
 )
-from app.services.human_guidance_service import (
+from app.services.human_guidance.service import (
     archive_guidance,
     create_guidance,
     update_guidance,
@@ -23,7 +23,7 @@ from app.services.orchestration.context.assembly import (
     assemble_execution_prompt,
     render_guidance_remediation_section,
 )
-from app.services.prompt_templates import OrchestrationState
+from app.services.orchestration.prompt_templates import OrchestrationState
 
 
 @pytest.fixture()

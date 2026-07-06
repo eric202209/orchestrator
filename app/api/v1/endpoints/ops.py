@@ -31,7 +31,7 @@ from app.models import (
     TaskExecution,
     TaskStatus,
 )
-from app.services.build_identity import build_identity_payload
+from app.services.observability.build_identity import build_identity_payload
 from app.services.orchestration.recovery.recovery_metrics import (
     collect_recovery_ops_metrics,
 )

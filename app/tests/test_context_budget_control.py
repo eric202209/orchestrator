@@ -15,7 +15,7 @@ from app.services.orchestration.context.assembly import (
     _shape_project_context,
     assemble_planning_prompt,
 )
-from app.services.prompt_templates import (
+from app.services.orchestration.prompt_templates import (
     OrchestrationState,
     estimate_token_count,
 )

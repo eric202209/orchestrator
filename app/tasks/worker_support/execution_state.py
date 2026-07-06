@@ -13,7 +13,7 @@ from app.services.orchestration.run_state import (
     mark_task_attempt_pending,
     mark_task_attempt_running,
 )
-from app.services.task_execution_service import get_task_execution
+from app.services.tasks.execution import get_task_execution
 
 
 def _sync_task_execution_state(

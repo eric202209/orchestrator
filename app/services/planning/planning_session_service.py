@@ -34,7 +34,7 @@ from app.services.model_adaptation import render_prompt_for_profile
 from app.services.model_adaptation.schemas import PromptEnvelope
 from app.services.planning.plan_commit_service import PlanCommitService
 from app.services.planning.planner_service import PlannerService
-from app.services.performance_optimizations import optimize_prompt
+from app.services.orchestration.prompt_optimization import optimize_prompt
 from app.services.workspace.system_settings import get_effective_adaptation_profile
 
 logger = logging.getLogger(__name__)

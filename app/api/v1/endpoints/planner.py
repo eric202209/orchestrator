@@ -10,8 +10,8 @@ from app.database import get_db
 from app.dependencies import get_current_active_user
 from app.models import Plan, Task, TaskStatus
 from app.schemas import PlanResponse, PlannerTaskCandidate, TaskResponse
-from app.services.authz import get_project_for_user
-from app.services.name_formatter import humanize_display_name
+from app.services.auth.authorization import get_project_for_user
+from app.services.project.name_formatter import humanize_display_name
 from app.services.planning.plan_commit_service import PlanCommitService
 from app.services.planning.planner_service import PlannerService
 

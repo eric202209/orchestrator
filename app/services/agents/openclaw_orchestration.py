@@ -16,14 +16,14 @@ from app.models import Project
 from app.services.orchestration.task_rules import (
     should_execute_in_canonical_project_root,
 )
-from app.services.prompt_templates import (
+from app.services.orchestration.prompt_templates import (
     OrchestrationState,
     OrchestrationStatus,
     PromptTemplates,
     StepResult,
 )
-from app.services.performance_optimizations import compress_context
-from app.services.task_service import TaskService
+from app.services.orchestration.prompt_optimization import compress_context
+from app.services.tasks.service import TaskService
 from app.services.workspace.project_isolation_service import (
     ProjectIsolationService,
     resolve_project_workspace_path,

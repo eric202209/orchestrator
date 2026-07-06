@@ -75,23 +75,23 @@ from app.services.orchestration.execution.runtime import (
     workspace_snapshot_key as _workspace_snapshot_key,
     write_project_state_snapshot as _write_project_state_snapshot,
 )
-from app.services.error_handler import error_handler
+from app.services.orchestration.error_handler import error_handler
 from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
-from app.services.task_service import TaskService
-from app.services.prompt_templates import (
+from app.services.tasks.service import TaskService
+from app.services.orchestration.prompt_templates import (
     OrchestrationStatus,
     OrchestrationState,
 )
 from app.services.session.session_runtime_service import (
     queue_task_for_session as _queue_task_for_session,
 )
-from app.services.task_execution_service import (
+from app.services.tasks.execution import (
     create_task_execution,
 )
-from app.services.human_guidance_service import resolve_guidance_runtime_target
+from app.services.human_guidance.service import resolve_guidance_runtime_target
 from app.services.orchestration.policy import get_policy_profile
 from app.services.orchestration.policy import (
     ORCHESTRATION_TASK_SOFT_TIME_LIMIT_SECONDS,
@@ -147,7 +147,7 @@ def _env_value(name: str) -> Optional[str]:
 
 def _build_identity_snapshot() -> Dict[str, Optional[str]]:
     try:
-        from app.services.build_identity import _read_repo_git_sha
+        from app.services.observability.build_identity import _read_repo_git_sha
 
         repo_git_sha = _read_repo_git_sha() or "unknown"
     except Exception:
@@ -1787,7 +1787,7 @@ def execute_orchestration_task(
                 _inject_ok = True
                 if project:
                     try:
-                        from app.services.human_guidance_activation_service import (
+                        from app.services.human_guidance.activation import (
                             check_activation_flag as _check_act,
                         )
 
@@ -1824,7 +1824,7 @@ def execute_orchestration_task(
                 )
             # HG-P1c-2: guidance conflict detection (warning-only, non-blocking).
             if project and task:
-                from app.services.human_guidance_conflict_service import (
+                from app.services.human_guidance.conflicts import (
                     run_conflict_detection_if_enabled,
                 )
 

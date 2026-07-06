@@ -21,7 +21,7 @@ from app.schemas import (
     TaskResponse,
 )
 from app.services.planning.planning_session_service import PlanningSessionService
-from app.services.authz import get_project_for_user, project_access_filter
+from app.services.auth.authorization import get_project_for_user, project_access_filter
 
 router = APIRouter(prefix="/planning")
 

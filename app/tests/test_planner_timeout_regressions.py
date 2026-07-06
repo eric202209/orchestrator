@@ -501,7 +501,7 @@ def test_larger_qwen_lane_keeps_general_qwen_profile():
 
 
 def test_initial_planning_prompt_contains_valid_json_contract_example():
-    from app.services.prompt_templates import PromptTemplates
+    from app.services.orchestration.prompt_templates import PromptTemplates
 
     prompt = PromptTemplates.build_planning_prompt(
         "Build a small React page",
@@ -542,7 +542,7 @@ def test_planning_prompt_with_operator_guidance_includes_precedence_before_task(
     from app.services.orchestration.planning.prompt_contracts import (
         OPERATOR_GUIDANCE_PRECEDENCE_LINE,
     )
-    from app.services.prompt_templates import PromptTemplates
+    from app.services.orchestration.prompt_templates import PromptTemplates
 
     prompt = PromptTemplates.build_planning_prompt(
         "Add function add_label(label: str, labels: list[str] = []) -> list[str].",
@@ -562,7 +562,7 @@ def test_planning_prompt_without_operator_guidance_omits_precedence_line():
     from app.services.orchestration.planning.prompt_contracts import (
         OPERATOR_GUIDANCE_PRECEDENCE_LINE,
     )
-    from app.services.prompt_templates import PromptTemplates
+    from app.services.orchestration.prompt_templates import PromptTemplates
 
     prompt = PromptTemplates.build_planning_prompt(
         "Build a small React page",

@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.services.human_guidance_plan_validator import (
+from app.services.human_guidance.plan_validator import (
     _REPAIR_GUIDANCE_AUTHORITY,
     _REPAIR_GUIDANCE_HEADER,
     render_active_guidance_for_repair,
@@ -68,11 +68,11 @@ def _render(entries, *, table_enabled=True, conflict_enabled=True, activation=Tr
 
     with patch("app.config.settings", settings_mock):
         with patch(
-            "app.services.human_guidance_activation_service.check_activation_flag",
+            "app.services.human_guidance.activation.check_activation_flag",
             return_value=activation,
         ):
             with patch(
-                "app.services.human_guidance_service.collect_active_guidance",
+                "app.services.human_guidance.service.collect_active_guidance",
                 return_value=entries,
             ):
                 return render_active_guidance_for_repair(
@@ -136,7 +136,7 @@ class TestRenderActiveGuidanceForRepair:
 
         with patch("app.config.settings", settings_mock):
             with patch(
-                "app.services.human_guidance_service.collect_active_guidance",
+                "app.services.human_guidance.service.collect_active_guidance",
                 side_effect=RuntimeError("database is unavailable"),
             ):
                 result = render_active_guidance_for_repair(
@@ -333,7 +333,7 @@ class TestCollectRepairGuidanceBlock:
 
         ctx = self._make_ctx()
         with patch(
-            "app.services.human_guidance_plan_validator.render_active_guidance_for_repair",
+            "app.services.human_guidance.plan_validator.render_active_guidance_for_repair",
             return_value="mock_block",
         ) as mock_render:
             result = collect_repair_guidance_block(ctx)
@@ -356,7 +356,7 @@ class TestCollectRepairGuidanceBlock:
         ctx.guidance_backend = "direct_ollama"
         ctx.guidance_model_family = "qwen"
         with patch(
-            "app.services.human_guidance_plan_validator.render_active_guidance_for_repair",
+            "app.services.human_guidance.plan_validator.render_active_guidance_for_repair",
             return_value="mock_block",
         ) as mock_render:
             result = collect_repair_guidance_block(ctx)
@@ -384,7 +384,7 @@ class TestCollectRepairGuidanceBlock:
 
         with patch("app.config.settings", settings_mock):
             with patch(
-                "app.services.human_guidance_service.collect_active_guidance",
+                "app.services.human_guidance.service.collect_active_guidance",
                 side_effect=RuntimeError("db error"),
             ):
                 result = collect_repair_guidance_block(ctx)

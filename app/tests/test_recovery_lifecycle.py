@@ -16,7 +16,7 @@ from app.services.orchestration.recovery.recovery_strategy_registry import (
     RecoveryStrategyRegistry,
 )
 from app.services.orchestration.state.persistence import read_orchestration_events
-from app.services.prompt_templates import OrchestrationState
+from app.services.orchestration.prompt_templates import OrchestrationState
 
 
 def _make_context(tmp_path, *, session_id: int = 701, task_id: int = 702):

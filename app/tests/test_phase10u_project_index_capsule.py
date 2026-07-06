@@ -11,7 +11,7 @@ from app.services.orchestration.planning.planner import PlannerService
 from app.services.orchestration.planning.repair_prompts import (
     PLANNING_REPAIR_PROMPT_MAX_CHARS,
 )
-from app.services.prompt_templates import PromptTemplates
+from app.services.orchestration.prompt_templates import PromptTemplates
 from app.services.project.index_service import (
     PROJECT_STRUCTURE_CAPSULE_MAX_CHARS,
     build_project_index,

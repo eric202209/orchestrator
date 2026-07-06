@@ -34,7 +34,7 @@ from app.services.orchestration.recovery.recovery_patch import (
     post_recovery_step_validation,
 )
 from app.services.orchestration.state.persistence import read_orchestration_events
-from app.services.prompt_templates import OrchestrationState
+from app.services.orchestration.prompt_templates import OrchestrationState
 
 
 # ---------------------------------------------------------------------------
@@ -441,7 +441,7 @@ def test_rollback_performed_false_on_apply_failure(tmp_path):
 
 def test_trigger_a_success_uses_record_success(tmp_path):
     """After recovery success, record_success advances current_step_index."""
-    from app.services.prompt_templates import StepResult
+    from app.services.orchestration.prompt_templates import StepResult
 
     _setup_src_file(tmp_path)
     evidence = _make_evidence(tmp_path)

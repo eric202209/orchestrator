@@ -55,7 +55,7 @@ from app.services.orchestration.planning.source_materialization import (
 from app.services.orchestration.state.persistence import append_orchestration_event
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.validation.validator import ValidatorService
-from app.services.prompt_templates import OrchestrationStatus
+from app.services.orchestration.prompt_templates import OrchestrationStatus
 
 
 _SLOT_REPAIR_EXPERIMENT_ENV = "SLOT_BASED_PLANNING_REPAIR_EXPERIMENT"

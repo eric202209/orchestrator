@@ -6,7 +6,7 @@ from typing import Optional, Dict, Any
 from app.celery_app import celery_app
 from app.tasks.worker import get_db_session
 from app.models import Session as SessionModel, Task, TaskStatus
-from app.services.github_service import GitHubService
+from app.services.integrations.github import GitHubService
 
 logger = logging.getLogger(__name__)
 

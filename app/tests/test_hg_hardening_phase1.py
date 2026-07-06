@@ -57,7 +57,7 @@ def _make_project(db, user_id: int, deleted: bool = False) -> Project:
 
 
 def _make_guidance(db, project_id, user_id, message="Never use mutable defaults."):
-    from app.services.human_guidance_service import create_guidance
+    from app.services.human_guidance.service import create_guidance
 
     entry, _ = create_guidance(
         db,
@@ -200,7 +200,7 @@ class TestMobileGuidanceIDOR:
 
 class TestRepairGuidanceFlagGate:
     def _render(self, entries, *, table_enabled=True, conflict_enabled=True):
-        from app.services.human_guidance_plan_validator import (
+        from app.services.human_guidance.plan_validator import (
             render_active_guidance_for_repair,
         )
 
@@ -210,11 +210,11 @@ class TestRepairGuidanceFlagGate:
 
         with patch("app.config.settings", settings_mock):
             with patch(
-                "app.services.human_guidance_activation_service.check_activation_flag",
+                "app.services.human_guidance.activation.check_activation_flag",
                 return_value=True,
             ):
                 with patch(
-                    "app.services.human_guidance_service.collect_active_guidance",
+                    "app.services.human_guidance.service.collect_active_guidance",
                     return_value=entries,
                 ):
                     return render_active_guidance_for_repair(
@@ -243,7 +243,7 @@ class TestRepairGuidanceFlagGate:
 
     def test_conflict_detection_behavior_unchanged(self):
         """Conflict detection service itself is unaffected by this change."""
-        from app.services.human_guidance_conflict_service import _PATTERN_PAIRS
+        from app.services.human_guidance.conflicts import _PATTERN_PAIRS
 
         assert any(name == "mutable_default" for name, _, _ in _PATTERN_PAIRS)
 
@@ -300,11 +300,11 @@ class TestRepairSlotSeparation:
 
         with patch("app.config.settings", settings_mock):
             with patch(
-                "app.services.human_guidance_activation_service.check_activation_flag",
+                "app.services.human_guidance.activation.check_activation_flag",
                 return_value=True,
             ):
                 with patch(
-                    "app.services.human_guidance_service.collect_active_guidance",
+                    "app.services.human_guidance.service.collect_active_guidance",
                     return_value=[
                         {
                             "message": "Never use mutable default arguments. Use None.",
@@ -361,11 +361,11 @@ class TestRepairSlotSeparation:
 
         with patch("app.config.settings", settings_mock):
             with patch(
-                "app.services.human_guidance_activation_service.check_activation_flag",
+                "app.services.human_guidance.activation.check_activation_flag",
                 return_value=True,
             ):
                 with patch(
-                    "app.services.human_guidance_service.collect_active_guidance",
+                    "app.services.human_guidance.service.collect_active_guidance",
                     return_value=[
                         {
                             "message": "Never use mutable default arguments. Use None.",
@@ -508,7 +508,7 @@ class TestWMFileLock:
 
 class TestUsageCountNoN1:
     def test_usage_count_correct_single_row(self, db_session):
-        from app.services.human_guidance_service import collect_active_guidance
+        from app.services.human_guidance.service import collect_active_guidance
 
         user = _make_user(db_session, "n1test@example.com")
         project = _make_project(db_session, user.id)
@@ -539,7 +539,7 @@ class TestUsageCountNoN1:
         assert results[0]["usage_count"] == 3
 
     def test_usage_count_zero_when_no_usage(self, db_session):
-        from app.services.human_guidance_service import collect_active_guidance
+        from app.services.human_guidance.service import collect_active_guidance
 
         user = _make_user(db_session, "n1zero@example.com")
         project = _make_project(db_session, user.id)
@@ -556,7 +556,7 @@ class TestUsageCountNoN1:
         assert results[0]["usage_count"] == 0
 
     def test_usage_count_independent_per_guidance(self, db_session):
-        from app.services.human_guidance_service import collect_active_guidance
+        from app.services.human_guidance.service import collect_active_guidance
 
         user = _make_user(db_session, "n1multi@example.com")
         project = _make_project(db_session, user.id)
@@ -600,12 +600,12 @@ class TestUsageCountNoN1:
 
     def test_selection_ordering_unchanged(self, db_session):
         """Higher priority guidance still appears first after N+1 fix."""
-        from app.services.human_guidance_service import collect_active_guidance
+        from app.services.human_guidance.service import collect_active_guidance
 
         user = _make_user(db_session, "n1order@example.com")
         project = _make_project(db_session, user.id)
 
-        from app.services.human_guidance_service import create_guidance
+        from app.services.human_guidance.service import create_guidance
 
         low, _ = create_guidance(
             db_session,

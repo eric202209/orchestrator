@@ -22,7 +22,7 @@ from app.services.orchestration.diagnostics.debug_feedback import (
 from app.services.orchestration.diagnostics.public_api_guard import (
     detect_debug_repair_public_api_removal,
 )
-from app.services.prompt_templates import PromptTemplates
+from app.services.orchestration.prompt_templates import PromptTemplates
 
 # --- typed command-fix validation ---
 

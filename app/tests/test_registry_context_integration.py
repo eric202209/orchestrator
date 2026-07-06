@@ -11,7 +11,7 @@ from app.services.orchestration.recovery.recovery_context import RecoveryContext
 from app.services.orchestration.recovery.recovery_strategy_registry import (
     RecoveryStrategyRegistry,
 )
-from app.services.prompt_templates import OrchestrationState
+from app.services.orchestration.prompt_templates import OrchestrationState
 
 
 def _make_evidence() -> ExecutionRecoveryEvidence:

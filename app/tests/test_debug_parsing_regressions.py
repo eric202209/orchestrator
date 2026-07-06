@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from app.services.prompt_templates import PromptTemplates, StepResult
+from app.services.orchestration.prompt_templates import PromptTemplates, StepResult
 from app.services.orchestration.execution.step_support import coerce_debug_step_result
 from app.services.orchestration.validation.parsing import (
     extract_plan_steps_from_summary_text,

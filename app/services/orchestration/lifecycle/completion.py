@@ -254,7 +254,7 @@ class TaskCompletionFinalizer:
                 reset_started_at=True,
                 error_message=None,
             )
-            from app.services.task_execution_service import create_task_execution
+            from app.services.tasks.execution import create_task_execution
 
             next_task_execution = create_task_execution(
                 db,

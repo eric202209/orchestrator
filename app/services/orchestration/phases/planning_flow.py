@@ -50,7 +50,10 @@ from app.services.orchestration.validation.validator import (
 from app.services.orchestration.validation.workspace_guard import (
     TaskOperationContractViolation,
 )
-from app.services.prompt_templates import OrchestrationStatus, estimate_token_count
+from app.services.orchestration.prompt_templates import (
+    OrchestrationStatus,
+    estimate_token_count,
+)
 from app.services.orchestration.phases.planning_verification import (
     _commands_are_weak_expected_file_verification,
     _grep_quiet_verification_target,

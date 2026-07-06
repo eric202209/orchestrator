@@ -16,7 +16,7 @@ from app.models import (
     Session as SessionModel,
     Task,
 )
-from app.services.authz import project_access_filter
+from app.services.auth.authorization import project_access_filter
 
 ATTENTION_STATUSES: frozenset[str] = frozenset({"failed", "awaiting_input", "stopped"})
 

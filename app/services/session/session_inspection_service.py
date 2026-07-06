@@ -36,7 +36,7 @@ from app.services.orchestration.run_state import mark_task_attempt_pending
 from app.services.orchestration.state.session_state import mark_session_paused
 from app.services.orchestration.policy import get_policy_profile
 from app.services.workspace.checkpoint_service import CheckpointService
-from app.services.log_utils import deduplicate_logs
+from app.services.observability.log_utils import deduplicate_logs
 from app.services.orchestration.state.persistence import (
     diff_orchestration_state_snapshots,
 )

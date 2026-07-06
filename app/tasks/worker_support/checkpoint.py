@@ -14,7 +14,7 @@ from app.services.orchestration.state.persistence import (
     append_orchestration_event as _append_orchestration_event,
     restore_step_result as _restore_step_result,
 )
-from app.services.prompt_templates import OrchestrationStatus
+from app.services.orchestration.prompt_templates import OrchestrationStatus
 
 
 def _apply_checkpoint_payload(

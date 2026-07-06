@@ -426,8 +426,8 @@ def readiness_status(
         "all": 0,
     }
     try:
-        from app.services.human_guidance_service import collect_active_guidance
-        from app.services.human_guidance_selection_service import (
+        from app.services.human_guidance.service import collect_active_guidance
+        from app.services.human_guidance.selection import (
             select_guidance_for_injection,
         )
         from app.services.orchestration.working_memory import _INJECTION_BUDGET
@@ -467,7 +467,7 @@ def readiness_status(
         }
 
         # Count guidance per purpose using the full (unfiltered) entry set
-        from app.services.human_guidance_service import _parse_purpose_targets
+        from app.services.human_guidance.service import _parse_purpose_targets
 
         for entry in all_entries:
             pts = _parse_purpose_targets(entry.get("purpose_targets"))

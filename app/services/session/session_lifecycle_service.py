@@ -48,8 +48,8 @@ from app.services.orchestration.state.session_state import (
     mark_session_stopped,
     resolve_session_transition,
 )
-from app.services.task_service import TaskService
-from app.services.task_execution_service import create_task_execution
+from app.services.tasks.service import TaskService
+from app.services.tasks.execution import create_task_execution
 
 logger = logging.getLogger(__name__)
 

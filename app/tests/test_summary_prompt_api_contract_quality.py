@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.services.prompt_templates import PromptTemplates
+from app.services.orchestration.prompt_templates import PromptTemplates
 from app.services.orchestration.phases.completion_summary import (
     _deterministic_task_summary,
     _generate_task_summary_with_fallback,
@@ -176,7 +176,7 @@ class TestFallbackBehaviorUnchanged:
         assert "Changed files: none recorded" in summary
 
     def test_deterministic_summary_lists_changed_files(self):
-        from app.services.prompt_templates import StepResult
+        from app.services.orchestration.prompt_templates import StepResult
 
         result = MagicMock()
         result.files_changed = ["src/parser.py"]

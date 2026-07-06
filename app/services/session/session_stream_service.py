@@ -17,13 +17,13 @@ from sqlalchemy.orm import Session
 from app.auth import verify_token
 from app.database import get_db_session as create_db_session
 from app.models import LogEntry, Session as SessionModel, User
-from app.services.authz import get_session_for_user
+from app.services.auth.authorization import get_session_for_user
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
-from app.services.log_stream_service import LogStreamService
+from app.services.observability.log_stream import LogStreamService
 from app.services.session.orchestration_event_bus import orchestration_event_bus
-from app.services.streaming_health import (
+from app.services.observability.streaming_health import (
     record_stream_error,
     register_stream_connection,
     unregister_stream_connection,

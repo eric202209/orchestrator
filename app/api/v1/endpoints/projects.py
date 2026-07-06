@@ -28,12 +28,12 @@ from app.services.workspace.project_isolation_service import (
     normalize_project_workspace_path,
 )
 from app.services.workspace.checkpoint_service import CheckpointService
-from app.services.name_formatter import humanize_display_name
-from app.services.task_service import TaskService
+from app.services.project.name_formatter import humanize_display_name
+from app.services.tasks.service import TaskService
 from app.services.workspace.project_mutation_lock import ProjectMutationLockError
 from app.config import settings
 from app.dependencies import get_current_active_user
-from app.services.authz import get_project_for_user, project_access_filter
+from app.services.auth.authorization import get_project_for_user, project_access_filter
 
 router = APIRouter()
 

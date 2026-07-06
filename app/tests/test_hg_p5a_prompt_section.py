@@ -8,13 +8,13 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import HumanGuidanceUsage, LogEntry, Project, User
-from app.services.human_guidance_activation_service import set_project_activation
-from app.services.human_guidance_service import create_guidance
+from app.services.human_guidance.activation import set_project_activation
+from app.services.human_guidance.service import create_guidance
 from app.services.orchestration.context.assembly import (
     render_active_human_guidance_section,
     assemble_execution_prompt,
 )
-from app.services.prompt_templates import OrchestrationState
+from app.services.orchestration.prompt_templates import OrchestrationState
 
 
 @pytest.fixture()
@@ -337,7 +337,7 @@ def test_task1_local_openclaw_execution_prompt_receives_guidance(
 
 def test_prompt_section_failures_are_non_fatal(db_session, hg_project):
     with patch(
-        "app.services.human_guidance_service.collect_active_guidance",
+        "app.services.human_guidance.service.collect_active_guidance",
         side_effect=RuntimeError("boom"),
     ):
         section = render_active_human_guidance_section(

@@ -53,12 +53,12 @@ from app.models import (
     TaskStatus,
     User,
 )
-from app.services.human_guidance_conflict_service import (
+from app.services.human_guidance.conflicts import (
     _CONFLICT_PREFIX,
     detect_guidance_task_conflicts,
     run_conflict_detection_if_enabled,
 )
-from app.services.human_guidance_service import create_guidance
+from app.services.human_guidance.service import create_guidance
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
@@ -661,7 +661,7 @@ class TestRegressionP1d:
         project: Project,
         running_session: SessionModel,
     ):
-        from app.services.human_guidance_service import collect_active_guidance
+        from app.services.human_guidance.service import collect_active_guidance
 
         _add_stdout_guidance(db_session, user, project)
         entries = collect_active_guidance(

@@ -118,7 +118,7 @@ def check_plan_guidance_violations_if_enabled(
             return []
 
         try:
-            from app.services.human_guidance_activation_service import (
+            from app.services.human_guidance.activation import (
                 check_activation_flag as _check_act,
             )
 
@@ -132,7 +132,7 @@ def check_plan_guidance_violations_if_enabled(
         except Exception:
             pass  # non-fatal: proceed
 
-        from app.services.human_guidance_service import collect_active_guidance
+        from app.services.human_guidance.service import collect_active_guidance
 
         guidance_entries = collect_active_guidance(
             db,
@@ -182,7 +182,7 @@ def render_active_guidance_for_repair(
             return ""
 
         try:
-            from app.services.human_guidance_activation_service import (
+            from app.services.human_guidance.activation import (
                 check_activation_flag as _check_act,
             )
 
@@ -196,7 +196,7 @@ def render_active_guidance_for_repair(
         except Exception:
             pass  # non-fatal: proceed
 
-        from app.services.human_guidance_service import collect_active_guidance
+        from app.services.human_guidance.service import collect_active_guidance
 
         guidance_entries = collect_active_guidance(
             db,

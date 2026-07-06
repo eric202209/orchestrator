@@ -28,7 +28,7 @@ from app.services.orchestration.validation.validator import (
     MAX_PLANNING_COMMAND_CHARS,
     ValidatorService,
 )
-from app.services.prompt_templates import OrchestrationStatus
+from app.services.orchestration.prompt_templates import OrchestrationStatus
 
 MAX_PLANNING_RETRIES = 3
 TRUNCATED_PLAN_REPAIR_REJECTION_REASON = (

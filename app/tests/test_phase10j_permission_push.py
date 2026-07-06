@@ -23,7 +23,10 @@ from app.models import (
     Task,
     TaskStatus,
 )
-from app.services.permission_service import PermissionApprovalService, PermissionStatus
+from app.services.permissions.approval import (
+    PermissionApprovalService,
+    PermissionStatus,
+)
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────

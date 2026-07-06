@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from app.models import LogEntry, Session as SessionModel, TaskCheckpoint
 from app.services.workspace.permissions import ensure_shared_permissions
 from app.services.workspace.checkpoint_service import CheckpointService
-from app.services.prompt_templates import OrchestrationState, StepResult
+from app.services.orchestration.prompt_templates import OrchestrationState, StepResult
 
 from ..events.event_types import EventType
 from ..policy import MAX_STEP_ATTEMPTS
@@ -250,7 +250,7 @@ def _write_json_payload_atomic(path: Path, payload: Dict[str, Any]) -> None:
 
 
 def _append_jsonl_line(log_path: Path, payload: Dict[str, Any]) -> None:
-    from app.services.file_lock import fcntl
+    from app.services.workspace.file_lock import fcntl
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
     ensure_shared_permissions(log_path.parent)

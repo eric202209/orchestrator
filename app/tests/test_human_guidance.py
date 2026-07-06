@@ -25,7 +25,7 @@ from app.models import (
     Session as SessionModel,
     User,
 )
-from app.services.human_guidance_service import (
+from app.services.human_guidance.service import (
     archive_guidance,
     create_guidance,
     get_guidance,

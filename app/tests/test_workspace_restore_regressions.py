@@ -11,7 +11,7 @@ from app.services.orchestration.policy import should_restore_workspace_on_failur
 import app.tasks.worker_support.checkpoint as checkpoint_support
 import app.services.session.session_lifecycle_service as session_lifecycle_service
 from app.services.session.session_lifecycle_service import stop_session_lifecycle
-from app.services.task_service import TaskService
+from app.services.tasks.service import TaskService
 
 
 class _CheckpointApplyState:

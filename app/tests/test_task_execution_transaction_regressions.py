@@ -15,7 +15,7 @@ from app.models import (
     TaskStatus,
     User,
 )
-from app.services.task_service import TASK_CHANGE_SET_LOG_MESSAGE
+from app.services.tasks.service import TASK_CHANGE_SET_LOG_MESSAGE
 
 
 class _FakeAsyncResult:
@@ -481,7 +481,7 @@ def test_task_retry_with_requested_changes_injects_operator_note_and_change_set(
     captured_kwargs = {}
     _stub_retry_dispatch(monkeypatch, captured_kwargs)
     monkeypatch.setattr(
-        "app.services.task_service.TaskService.archive_task_workspace_for_repair_rerun",
+        "app.services.tasks.service.TaskService.archive_task_workspace_for_repair_rerun",
         lambda *a, **kw: {"archived": False, "reason": "test"},
     )
 

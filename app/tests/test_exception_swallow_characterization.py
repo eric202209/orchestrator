@@ -32,7 +32,10 @@ from app.services.orchestration.state.persistence import (
     save_orchestration_checkpoint,
 )
 from app.services.orchestration.types import ValidationVerdict
-from app.services.prompt_templates import OrchestrationState, OrchestrationStatus
+from app.services.orchestration.prompt_templates import (
+    OrchestrationState,
+    OrchestrationStatus,
+)
 
 
 # ─── Shared helpers ───────────────────────────────────────────────────────────

@@ -22,7 +22,7 @@ from app.models import (
     TaskExecution,
     TaskStatus,
 )
-from app.services.task_service import TASK_CHANGE_SET_LOG_MESSAGE
+from app.services.tasks.service import TASK_CHANGE_SET_LOG_MESSAGE
 
 
 def _make_project(db, *, workspace_path: str):

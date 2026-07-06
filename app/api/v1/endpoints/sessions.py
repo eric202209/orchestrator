@@ -100,8 +100,8 @@ from app.services import (
 from app.services.session.session_inspection_service import (
     derive_orchestration_state_block as _derive_orchestration_state_block,
 )
-from app.services.name_formatter import humanize_display_name
-from app.services.auth_rate_limit import enforce_api_rate_limit
+from app.services.project.name_formatter import humanize_display_name
+from app.services.auth.rate_limit import enforce_api_rate_limit
 from app.services.orchestration.reporting.decision_timeline import (
     DEFAULT_TIMELINE_LIMIT,
     event_project_dir_candidates,
@@ -131,7 +131,7 @@ def _serialize_session_timestamp(value: datetime | None) -> str | None:
 
 from app.services.orchestration import is_known_event_type
 from app.dependencies import get_current_active_user, get_current_user
-from app.services.authz import (
+from app.services.auth.authorization import (
     get_project_for_user,
     get_session_for_user,
     project_access_filter,
@@ -611,7 +611,7 @@ def refresh_session_tasks(
     current_user=Depends(get_current_user),
 ):
     """Refresh a session against the latest project task list and queue the next task if applicable."""
-    from app.services.task_service import TaskService
+    from app.services.tasks.service import TaskService
 
     session = _require_session_access(db, session_id, current_user)
 

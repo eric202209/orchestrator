@@ -52,14 +52,14 @@ from app.models import (
     Session as SessionModel,
     User,
 )
-from app.services.human_guidance_activation_service import (
+from app.services.human_guidance.activation import (
     disable_activation,
     get_effective_activation,
     readiness_status,
     set_project_activation,
     set_session_activation,
 )
-from app.services.human_guidance_service import create_guidance
+from app.services.human_guidance.service import create_guidance
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
@@ -507,7 +507,7 @@ class TestRegressionP1e:
         tmp_path,
     ):
         """WM does not write files when flags are off, even if activation is set."""
-        from app.services.human_guidance_service import collect_active_guidance
+        from app.services.human_guidance.service import collect_active_guidance
 
         set_project_activation(db_session, project.id, _all_flags_on())
         create_guidance(

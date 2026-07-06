@@ -416,7 +416,7 @@ class TestCollectRepairGuidanceBlockFaithfulness:
 
         ctx = self._make_ctx(prompt="Write a simple file.")
         with patch(
-            "app.services.human_guidance_plan_validator.render_active_guidance_for_repair",
+            "app.services.human_guidance.plan_validator.render_active_guidance_for_repair",
             return_value="## OPERATOR GUIDANCE\n- Use print.",
         ):
             result = collect_repair_guidance_block(ctx)
@@ -431,7 +431,7 @@ class TestCollectRepairGuidanceBlockFaithfulness:
 
         ctx = self._make_ctx(prompt=_T3_TASK)
         with patch(
-            "app.services.human_guidance_plan_validator.render_active_guidance_for_repair",
+            "app.services.human_guidance.plan_validator.render_active_guidance_for_repair",
             return_value="## OPERATOR GUIDANCE\n- Use None.",
         ):
             result = collect_repair_guidance_block(ctx)
@@ -448,7 +448,7 @@ class TestCollectRepairGuidanceBlockFaithfulness:
 
         ctx = self._make_ctx(prompt=_T3_TASK)
         with patch(
-            "app.services.human_guidance_plan_validator.render_active_guidance_for_repair",
+            "app.services.human_guidance.plan_validator.render_active_guidance_for_repair",
             return_value="",
         ):
             result = collect_repair_guidance_block(ctx)

@@ -22,7 +22,7 @@ from app.services.orchestration.recovery.recovery_strategy_registry import (
 from app.services.orchestration.state.persistence import record_validation_verdict
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.validation.validator import ValidatorService
-from app.services.prompt_templates import OrchestrationStatus
+from app.services.orchestration.prompt_templates import OrchestrationStatus
 from app.services.orchestration.phases.planning_support import (
     _finalize_planning_terminal_failure,
     _terminal_planning_root_cause,
