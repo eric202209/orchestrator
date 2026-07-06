@@ -26,7 +26,7 @@ handled by `../start.sh`; service logs are written directly to `../logs/`.
 - `ingest_knowledge.py` - ingest knowledge documents into SQLite and Qdrant.
   For the compact laptop Ollama Docker runtime, prefer
   `./wsl-start.sh --ollama --ingest-knowledge`, or:
-  `docker compose -f docker-compose.windows.yml exec -T orchestrator python scripts/ingest_knowledge.py --source-dir /app --qdrant-url http://qdrant:6333`.
+  `docker compose -f docker-compose.windows.yml exec -T orchestrator python scripts/planning_and_knowledge/ingest_knowledge.py --source-dir /app --qdrant-url http://qdrant:6333`.
 
 ## Developer Utilities
 
@@ -39,20 +39,18 @@ handled by `../start.sh`; service logs are written directly to `../logs/`.
 
 ## Maintenance
 
+See `scripts/maintenance/README.md` for the removal policy. Current contents:
+
 - `check_openai_compatible_endpoint.py` - verify an OpenAI-compatible endpoint is reachable and responding correctly.
 - `score_orchestrator_eval_case.py` - score a single orchestrator eval case against expected outcomes.
 - `planning_contract_report.py` - summarize recent planning contract violations (also listed under Session And Replay).
-- `validate_incremental.py` - initial live-validation harness for Slice J incremental execution (creation-only fast path).
-- `validate_incremental_fresh_process.py` - fresh-process re-run harness confirming the `search()` code-fence fix (8-task Python corpus).
-- `validate_incremental_20task.py` - 20-task controlled validation window for Slice J post A+E fix (Python/HTML/CSS/JSON).
-- `probe_incremental_output.py` - diagnostic probe capturing raw `execute_task` output shapes (no file writes; used for attribution).
-- `validate_repo_memory.py` - validate RepoMemory injection against a live project.
-- `validate_repo_memory_injection.py` - integration check for RepoMemory block assembly and injection gate.
-- `wm_off_runner.py` - WM OFF arm runner for Priority 5 WorkingMemory A/B measurement: creates 3 Python package projects × 6 tasks each, dispatches sequentially, collects debug_repair_attempted and planning repair events per task. Saves raw JSON to `docs/roadmap/reports/maintenance/`.
-- `wm_off_recovery.py` - recovery companion to `wm_off_runner.py`: monitors in-flight tasks from a prior runner session, re-dispatches failed/cancelled Task 1s, and collects full event data for the final report.
+- `phase10k_p2_live_pilot_runner.py` - Phase 10K-P2 live evidence pilot runner (imported by `app/tests/`).
 - `phase18f_seed_real_session_evidence.py` - evidence-generation harness that seeds persisted project/session/task rows and candidate validation events for Phase 18F; no validator/recovery/policy/feature-flag defaults changed.
 - `phase18i_machine_a_limited_validation.py` - evidence-only harness running the Candidate Recovery path with Machine A standard runtime inputs; restores feature-flag settings after each controlled session.
 - `reflection_replay.py` - Phase 17B-V offline reflection replay tool: replays `ReflectionRetryStrategy` against a synthetic failure corpus (no runtime mutation, no database).
 
-Removed obsolete scripts: old `/tmp` log sync/status/cleanup helpers. Current
-startup no longer writes logs to `/tmp`.
+Removed obsolete scripts: old `/tmp` log sync/status/cleanup helpers (current
+startup no longer writes logs to `/tmp`), and (2026-07) 45 one-off T1/WorkingMemory
+confirmation and pilot runners superseded by their own findings already captured
+under `docs/roadmap/done/` and `docs/roadmap/reports/` — see
+`scripts/maintenance/README.md` for the full list and removal criteria.

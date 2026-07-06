@@ -2,7 +2,7 @@
 
 Drop markdown or JSON files here to inject domain knowledge into the orchestrator's planning, validation, and failure-handling flows.
 
-Files are ingested by `scripts/ingest_knowledge.py`. Re-run the script after adding or editing files.
+Files are ingested by `scripts/planning_and_knowledge/ingest_knowledge.py`. Re-run the script after adding or editing files.
 
 ---
 

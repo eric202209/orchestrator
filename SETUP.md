@@ -240,7 +240,7 @@ For Linux native/OpenClaw installs, ingest `knowledge/` into the same local
 SQLite/Qdrant runtime started by `start.sh`:
 
 ```bash
-venv/bin/python scripts/ingest_knowledge.py --source-dir . --qdrant-url http://localhost:6333
+venv/bin/python scripts/planning_and_knowledge/ingest_knowledge.py --source-dir . --qdrant-url http://localhost:6333
 ```
 
 For Docker/WSL installs, use the Docker-specific startup flags below instead
@@ -368,14 +368,14 @@ the sessions/tasks API.
 
 ```bash
 # Full evidence bundle (recommended starting point)
-PYTHONPATH=. python scripts/capture_task_evidence_bundle.py \
+PYTHONPATH=. python scripts/session_and_replay/capture_task_evidence_bundle.py \
   --db orchestrator.db \
   --session-id <session_id> \
   --task-id <task_id> \
   --task-execution-id <task_execution_id>
 
 # Replay reducer only (no database needed, just the workspace .agent/events/ dir)
-PYTHONPATH=. python scripts/capture_replay_report.py \
+PYTHONPATH=. python scripts/session_and_replay/capture_replay_report.py \
   --project-dir <workspace_path> \
   --session-id <session_id> \
   --task-id <task_id>

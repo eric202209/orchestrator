@@ -2,6 +2,16 @@
 
 This folder holds lightweight orchestrator evaluation manifests.
 
+2026-07: removed 18 one-off completed eval runners (`run_e*_post_e*_validation.py`,
+`run_arm_b_*.py`, `analyze_phase12i_debug_budget.py`,
+`run_recovery_opportunity_analysis.py`, `run_recovery_productionization_report.py`,
+`run_recovery_validation_s4.py`) — each was a dated, slice-specific historical
+run with no `app/tests/` reference and no dependency from any remaining
+script; their findings remain in `docs/roadmap/done/` and
+`docs/roadmap/reports/`. `run_orchestrator_eval_slice.py`,
+`check_phase12c_gates.py`, and `analyze_phase12e_debug_repair_failures.py`
+remain — all three are imported by `app/tests/`.
+
 The v1 manifest is intentionally not a runner. It defines deterministic cases
 for backend resilience and controlled eval expansion:
 
@@ -22,7 +32,7 @@ manual procedure is:
 2. Create the `Project`, `Session`, `Task`, and `SessionTask` database rows.
 3. Call `app.services.session.session_runtime_service.queue_task_for_session(...)`
    or use the backend API endpoint that queues a task.
-4. Score the completed workspace with `scripts/score_orchestrator_eval_case.py`.
+4. Score the completed workspace with `scripts/maintenance/score_orchestrator_eval_case.py`.
 
 Do not call `execute_orchestration_task.run(...)` directly for eval runs. Direct
 worker invocation bypasses queue setup, including `mark_session_running(...)`.
@@ -34,7 +44,7 @@ execution loop will correctly stop at the first step boundary with
 Score an already-run task with:
 
 ```bash
-python3 scripts/score_orchestrator_eval_case.py \
+python3 scripts/maintenance/score_orchestrator_eval_case.py \
   --manifest scripts/evals/orchestrator-eval-v1-manifest.json \
   --case-id debug_import_error_repair \
   --project-dir /path/to/project \
@@ -97,7 +107,7 @@ venv/bin/python scripts/evals/run_orchestrator_eval_slice.py \
 ```
 
 Run the API runner from the repo virtualenv when available. The runner passes
-the same virtualenv Python to `scripts/score_orchestrator_eval_case.py`, so
+the same virtualenv Python to `scripts/maintenance/score_orchestrator_eval_case.py`, so
 manifest verifier commands like `python3 -m pytest -q` run with the interpreter
 that has the eval dependencies installed. If `./venv/bin/python` exists, it is
 also the runner's default `--python/--venv-python` value; otherwise the default

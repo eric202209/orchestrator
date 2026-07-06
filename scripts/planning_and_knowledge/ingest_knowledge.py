@@ -5,9 +5,9 @@ Scans docs/, CONTEXT.md, and knowledge/ for markdown/JSON files with
 frontmatter metadata. Idempotent: skips files whose content hasn't changed.
 
 Usage:
-    python scripts/ingest_knowledge.py
-    python scripts/ingest_knowledge.py --source-dir /path/to/repo
-    python scripts/ingest_knowledge.py --qdrant-url :memory:
+    python scripts/planning_and_knowledge/ingest_knowledge.py
+    python scripts/planning_and_knowledge/ingest_knowledge.py --source-dir /path/to/repo
+    python scripts/planning_and_knowledge/ingest_knowledge.py --qdrant-url :memory:
 """
 
 from __future__ import annotations

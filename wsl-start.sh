@@ -183,7 +183,7 @@ wait_port() {
 }
 
 docker_knowledge_ingest_command() {
-    echo "docker compose -f $COMPOSE_FILE exec -T orchestrator python scripts/ingest_knowledge.py --source-dir /app --qdrant-url http://qdrant:6333"
+    echo "docker compose -f $COMPOSE_FILE exec -T orchestrator python scripts/planning_and_knowledge/ingest_knowledge.py --source-dir /app --qdrant-url http://qdrant:6333"
 }
 
 maybe_ingest_knowledge() {
@@ -204,7 +204,7 @@ maybe_ingest_knowledge() {
         step "Ingesting knowledge into active Docker runtime"
         info "$ingest_cmd"
         docker compose -f "$COMPOSE_FILE" exec -T orchestrator \
-            python scripts/ingest_knowledge.py \
+            python scripts/planning_and_knowledge/ingest_knowledge.py \
             --source-dir /app \
             --qdrant-url http://qdrant:6333
         ok "Knowledge ingest command completed"
