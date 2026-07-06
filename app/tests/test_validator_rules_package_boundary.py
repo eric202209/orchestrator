@@ -71,13 +71,8 @@ def test_contract_modules_are_named_for_workload_contract_ownership():
         )
 
 
-def test_core_modules_are_still_empty_of_rule_logic():
-    """`core_*` modules remain reserved for a later core_invariant move.
-
-    Phases 20K and 20L moved all `workload_contract` rules into the
-    `contract_*` modules listed in `CONTRACT_MODULES`; `core_*` modules are
-    untouched and should stay empty until their own phase.
-    """
+def test_core_modules_now_own_core_invariant_rule_logic():
+    """Phase 20M moved core-invariant rule helpers into `core_*` modules."""
     for name in CORE_MODULES:
         path = RULES_PACKAGE_DIR / f"{name}.py"
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -86,11 +81,9 @@ def test_core_modules_are_still_empty_of_rule_logic():
             for node in tree.body
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
         ]
-        assert defs == [], (
-            f"{path.name} contains rule implementation, but only "
-            "core_invariant modules were expected to still be empty after "
-            "Phase 20L. Move logic here only under a phase whose scope "
-            "explicitly allows it."
+        assert defs, (
+            f"{path.name} is expected to contain core_invariant rule "
+            "implementation after Phase 20M."
         )
 
 
