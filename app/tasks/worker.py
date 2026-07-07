@@ -17,7 +17,6 @@ from app.models import (
     Session as SessionModel,
     SessionTask,
     Task,
-    TaskExecution,
     TaskStatus,
     Project,
 )
@@ -49,6 +48,16 @@ from app.services.orchestration import (
     run_virtual_merge_gate as _run_virtual_merge_gate,
     should_execute_in_canonical_project_root as _should_execute_in_canonical_project_root,
     should_force_review_execution_profile as _should_force_review_execution_profile,
+)
+from app.services.orchestration.lifecycle.worker_bootstrap import (
+    build_claimed_details as _build_claimed_details,
+    run_start_runtime_identity as _run_start_runtime_identity,
+    should_use_configured_planning_runtime,
+)
+from app.services.orchestration.lifecycle.worker_capacity import (
+    BACKEND_CAPACITY_RETRY_MAX_RETRIES,
+    backend_capacity_retry_state,
+    prepare_backend_capacity_retry,
 )
 from app.services.orchestration.coordinators.completion_coordinator import (
     CompletionCoordinator as _CompletionCoordinator,
@@ -90,6 +99,7 @@ from app.services.session.session_runtime_service import (
 )
 from app.services.tasks.execution import (
     create_task_execution,
+    get_task_execution,
 )
 from app.services.human_guidance.service import resolve_guidance_runtime_target
 from app.services.orchestration.policy import get_policy_profile
@@ -105,7 +115,6 @@ from app.services.orchestration.validation.workspace_guard import (
 from app.services.session.session_execution_service import (
     mark_execution_cancelled,
     mark_execution_failed,
-    mark_execution_pending,
     mark_execution_running,
 )
 from app.services.orchestration.state.session_state import (
@@ -125,180 +134,6 @@ from app.services.observability import (
 logger = logging.getLogger(__name__)
 
 MAX_SUBFOLDER_COLLISION_ATTEMPTS = 999
-# Phase 19F: raised from 20 (300s ceiling) to 60 (900s ceiling) at the same
-# 15s countdown. Phase 19E found real completed task_executions run p50=217s,
-# p90=279s, max=605s; with LOCAL_OPENCLAW_MAX_PARALLEL_SESSIONS=1 a session
-# queued behind others must wait for their full duration, not just capacity
-# becoming free. The old 300s ceiling was shorter than one p50 execution plus
-# any queueing, and historically caused 28 permanent FAILED / 176 total
-# task_executions (16%) whose capacity genuinely would have freed up given
-# more time (10 sessions did recover at 242-303s, right at the old ceiling).
-# MAX_PARALLEL_SESSIONS itself is left at 1 — see phase19f report Task 3.
-BACKEND_CAPACITY_RETRY_MAX_RETRIES = 60
-
-
-def _env_value(name: str) -> Optional[str]:
-    value = os.environ.get(name)
-    if value is None:
-        return None
-    text = value.strip()
-    return text if text else None
-
-
-def _build_identity_snapshot() -> Dict[str, Optional[str]]:
-    try:
-        from app.services.observability.build_identity import _read_repo_git_sha
-
-        repo_git_sha = _read_repo_git_sha() or "unknown"
-    except Exception:
-        repo_git_sha = "unknown"
-
-    build_git_sha = (
-        _env_value("ORCHESTRATOR_GIT_SHA")
-        or _env_value("GIT_SHA")
-        or _env_value("COMMIT_SHA")
-        or "unknown"
-    )
-    if build_git_sha != "unknown" and repo_git_sha != "unknown":
-        stale_check = "ok" if build_git_sha == repo_git_sha else "stale"
-    else:
-        stale_check = "unknown"
-    return {
-        "version": str(settings.VERSION),
-        "build_git_sha": build_git_sha,
-        "repo_git_sha": repo_git_sha,
-        "build_time": _env_value("ORCHESTRATOR_BUILD_TIME") or _env_value("BUILD_TIME"),
-        "image_tag": _env_value("ORCHESTRATOR_IMAGE_TAG") or _env_value("IMAGE_TAG"),
-        "image_id": _env_value("ORCHESTRATOR_IMAGE_ID") or _env_value("IMAGE_ID"),
-        "stale_container_check": stale_check,
-    }
-
-
-def _run_start_config_snapshot(
-    db,
-    runtime_selection: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Capture non-secret run-start config provenance for replay bundles."""
-
-    effective_agent_backend = runtime_selection.get("backend")
-    effective_agent_model = runtime_selection.get("model_family")
-    return {
-        "source": "task_started_event",
-        "values": {
-            "AGENT_BACKEND": settings.AGENT_BACKEND,
-            "PLANNING_BACKEND": settings.PLANNING_BACKEND or None,
-            "EXECUTION_BACKEND": settings.EXECUTION_BACKEND or None,
-            "REPAIR_BACKEND": settings.REPAIR_BACKEND or None,
-            "DEBUG_REPAIR_BACKEND": settings.DEBUG_REPAIR_BACKEND or None,
-            "AGENT_MODEL": settings.AGENT_MODEL,
-            "PLANNER_MODEL": settings.PLANNER_MODEL or None,
-            "EXECUTION_MODEL": settings.EXECUTION_MODEL or None,
-            "DEBUG_REPAIR_MODEL": settings.DEBUG_REPAIR_MODEL or None,
-            "PLANNING_REPAIR_MODEL": settings.PLANNING_REPAIR_MODEL,
-            "PLANNING_REPAIR_ENABLED": settings.PLANNING_REPAIR_ENABLED,
-            "PLANNING_REPAIR_DISABLE_THINKING": (
-                settings.PLANNING_REPAIR_DISABLE_THINKING
-            ),
-            "DEBUG_REPAIR_DIRECT_ENABLED": settings.DEBUG_REPAIR_DIRECT_ENABLED,
-            "DEBUG_REPAIR_DISABLE_THINKING": settings.DEBUG_REPAIR_DISABLE_THINKING,
-            "WORKSPACE_REVIEW_POLICY": settings.WORKSPACE_REVIEW_POLICY,
-            "INLINE_PLANNING": settings.INLINE_PLANNING,
-        },
-        "effective": {
-            "agent_backend": effective_agent_backend,
-            "agent_model": effective_agent_model,
-            "planning_backend": runtime_selection.get("planner_backend"),
-            "planning_model": runtime_selection.get("planner_model"),
-            "execution_backend": runtime_selection.get("execution_backend"),
-            "execution_model": runtime_selection.get("execution_model"),
-            "repair_backend": settings.REPAIR_BACKEND or settings.AGENT_BACKEND,
-            "debug_repair_backend": runtime_selection.get("debug_repair_backend"),
-            "debug_repair_model": runtime_selection.get("debug_repair_model"),
-        },
-        "secret_fields_omitted": [
-            "SECRET_KEY",
-            "OPENAI_API_KEY",
-            "OPENCLAW_API_KEY",
-            "PLANNING_REPAIR_API_KEY",
-            "DEBUG_REPAIR_API_KEY",
-            "GITHUB_TOKEN",
-            "MOBILE_GATEWAY_API_KEY",
-        ],
-    }
-
-
-def _run_start_runtime_identity(
-    db,
-    runtime_selection: Dict[str, Any],
-) -> Dict[str, Any]:
-    return {
-        "source": "task_started_event",
-        "captured_at": datetime.now(timezone.utc).isoformat(),
-        "build": _build_identity_snapshot(),
-        "lanes": {
-            "planning": runtime_selection.get("planner_backend"),
-            "execution": runtime_selection.get("execution_backend"),
-            "debug_repair": runtime_selection.get("debug_repair_backend"),
-            "repair": settings.REPAIR_BACKEND or settings.AGENT_BACKEND,
-        },
-        "models": {
-            "planner": runtime_selection.get("planner_model"),
-            "execution": runtime_selection.get("execution_model"),
-            "debug_repair": runtime_selection.get("debug_repair_model"),
-            "planning_repair": settings.PLANNING_REPAIR_MODEL,
-        },
-        "config": _run_start_config_snapshot(db, runtime_selection),
-    }
-
-
-def should_use_configured_planning_runtime(
-    *,
-    planning_backend_override: Optional[str],
-    resolved_planning_backend: str,
-    resolved_execution_backend: str,
-) -> bool:
-    """Return whether planning needs its own configured runtime instance."""
-
-    if planning_backend_override:
-        return True
-    planning_backend = str(resolved_planning_backend or "").strip()
-    execution_backend = str(resolved_execution_backend or "").strip()
-    return bool(planning_backend and planning_backend != execution_backend)
-
-
-def backend_capacity_retry_state(
-    request, max_retries: int | None = None
-) -> tuple[int, bool]:
-    """Return current capacity retry count and whether capacity retries are exhausted."""
-
-    retry_count = int(getattr(request, "retries", 0) or 0)
-    retry_limit = (
-        BACKEND_CAPACITY_RETRY_MAX_RETRIES if max_retries is None else int(max_retries)
-    )
-    return retry_count, retry_count >= retry_limit
-
-
-def prepare_backend_capacity_retry(
-    *,
-    task: Task | None,
-    session_task_link: SessionTask | None,
-    task_execution: TaskExecution | None,
-    backend_id: str,
-) -> None:
-    """Return capacity-only attempts to a retryable state without task failure."""
-
-    mark_execution_pending(
-        task=task,
-        session_task_link=session_task_link,
-        task_execution=task_execution,
-        reset_started_at=True,
-        reset_steps=False,
-        workspace_status=getattr(task, "workspace_status", None) if task else None,
-        error_message=None,
-    )
-    if task_execution is not None:
-        task_execution.failure_category = "backend_capacity_limit"
-        task_execution.backend_id = backend_id
 
 
 from celery.signals import worker_ready
@@ -577,13 +412,7 @@ def execute_orchestration_task(
             resume_checkpoint_name=resume_checkpoint_name,
         )
         if stale_dispatch_reason:
-            task_execution = (
-                db.query(TaskExecution)
-                .filter(TaskExecution.id == task_execution_id)
-                .first()
-                if task_execution_id
-                else None
-            )
+            task_execution = get_task_execution(db, task_execution_id)
             mark_execution_cancelled(
                 task=None,
                 task_execution=task_execution,
@@ -631,13 +460,7 @@ def execute_orchestration_task(
             if claim_ok or claim_reason == "session_instance_changed":
                 break
         if not claim_ok:
-            task_execution = (
-                db.query(TaskExecution)
-                .filter(TaskExecution.id == task_execution_id)
-                .first()
-                if task_execution_id
-                else None
-            )
+            task_execution = get_task_execution(db, task_execution_id)
             mark_execution_cancelled(
                 task=None,
                 task_execution=task_execution,
@@ -661,16 +484,16 @@ def execute_orchestration_task(
             )
 
         runtime_selection = _runtime_selection_details(db)
-        claimed_details = {
-            "session_instance_id": session.instance_id,
-            "expected_session_instance_id": expected_session_instance_id,
-            "celery_task_id": getattr(getattr(self, "request", None), "id", None),
-            "task_execution_id": task_execution_id,
-            "project_dir": str(dispatch_project_dir) if dispatch_project_dir else None,
-            "queue_latency_seconds": queue_latency_seconds,
-            "queued_event_id": (queued_event or {}).get("event_id"),
-            **runtime_selection,
-        }
+        claimed_details = _build_claimed_details(
+            session_instance_id=session.instance_id,
+            expected_session_instance_id=expected_session_instance_id,
+            celery_task_id=getattr(getattr(self, "request", None), "id", None),
+            task_execution_id=task_execution_id,
+            dispatch_project_dir=dispatch_project_dir,
+            queue_latency_seconds=queue_latency_seconds,
+            queued_event=queued_event,
+            runtime_selection=runtime_selection,
+        )
         if dispatch_project_dir:
             _append_orchestration_event(
                 project_dir=dispatch_project_dir,
@@ -927,13 +750,7 @@ def execute_orchestration_task(
                     task_id,
                     time_since_start,
                 )
-                task_execution = (
-                    db.query(TaskExecution)
-                    .filter(TaskExecution.id == task_execution_id)
-                    .first()
-                    if task_execution_id
-                    else None
-                )
+                task_execution = get_task_execution(db, task_execution_id)
                 mark_execution_failed(
                     task=task,
                     session_task_link=session_task_link,
@@ -961,13 +778,7 @@ def execute_orchestration_task(
             )
 
         session_task_link = _get_latest_session_task_link(db, session_id, task_id)
-        task_execution = (
-            db.query(TaskExecution)
-            .filter(TaskExecution.id == task_execution_id)
-            .first()
-            if task_execution_id
-            else None
-        )
+        task_execution = get_task_execution(db, task_execution_id)
 
         # --- Backend concurrency slot acquisition ---
         _eff_backend = _resolved_execution_backend
@@ -1637,13 +1448,7 @@ def execute_orchestration_task(
         if gate_error:
             orchestration_state.status = OrchestrationStatus.ABORTED
             orchestration_state.abort_reason = gate_error
-            task_execution = (
-                db.query(TaskExecution)
-                .filter(TaskExecution.id == task_execution_id)
-                .first()
-                if task_execution_id
-                else None
-            )
+            task_execution = get_task_execution(db, task_execution_id)
             mark_execution_failed(
                 task=task,
                 session_task_link=session_task_link,
