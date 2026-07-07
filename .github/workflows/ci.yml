@@ -7,7 +7,7 @@ on:
     branches: [ main, develop ]
 
 env:
-  PYTHON_VERSION: "3.11"
+  PYTHON_VERSION: "3.12"
   NODE_VERSION: "20"
 
 jobs:
@@ -132,8 +132,7 @@ jobs:
     - name: Run tests
       run: |
         cd frontend
-        npm run test || true
-      continue-on-error: true
+        npm run test
 
   build:
     runs-on: ubuntu-latest
