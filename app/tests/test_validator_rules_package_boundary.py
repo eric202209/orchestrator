@@ -120,3 +120,41 @@ def test_rule_registry_is_not_imported_by_orchestration_runtime():
         "rule_registry.py must remain a documentation/contract lookup "
         f"table, not a runtime dependency. Importing files: {offenders}"
     )
+
+
+def test_runtime_imports_rule_modules_only_through_validator_facade():
+    """Runtime callers must use ValidatorService instead of rule modules.
+
+    `validator.py` is the one runtime facade allowed to import individual
+    `validation.rules.*` modules. Rule modules may also import each other,
+    but planner/execution/recovery/runtime code must not bypass the facade.
+    """
+    offenders = []
+    allowed_runtime_importer = Path(
+        "app/services/orchestration/validation/validator.py"
+    )
+    for path in _orchestration_runtime_source_files():
+        relative_path = path.relative_to(REPO_ROOT)
+        if relative_path == allowed_runtime_importer:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if (
+                    module.startswith("app.services.orchestration.validation.rules")
+                    or module.startswith("validation.rules")
+                    or module == "rules"
+                ):
+                    offenders.append(str(relative_path))
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.startswith(
+                        "app.services.orchestration.validation.rules"
+                    ) or alias.name.startswith("validation.rules"):
+                        offenders.append(str(relative_path))
+    assert offenders == [], (
+        "Runtime code must import validator behavior through "
+        "ValidatorService, not individual validation.rules modules. "
+        f"Importing files: {sorted(set(offenders))}"
+    )
