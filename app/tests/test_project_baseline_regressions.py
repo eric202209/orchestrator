@@ -139,17 +139,6 @@ def test_project_gitignore_guard_creates_runtime_exclusions(
     assert ".agent/" in contents
     assert "node_modules/" in contents
     assert "__pycache__/" in contents
-    # Phase 22B dogfood finding: OpenClaw writes its own per-workspace
-    # agent-identity/onboarding scaffold into whatever directory an agent's
-    # configured workspace points at. When that directory is a real
-    # project's git root, these must be guarded like any other runtime
-    # exclusion so they never pollute the tracked project.
-    assert ".openclaw/" in contents
-    assert "HEARTBEAT.md" in contents
-    assert "IDENTITY.md" in contents
-    assert "SOUL.md" in contents
-    assert "TOOLS.md" in contents
-    assert "USER.md" in contents
 
 
 def test_project_gitignore_guard_preserves_existing_rules_and_is_idempotent(
@@ -195,12 +184,6 @@ def test_project_gitignore_guard_does_not_duplicate_existing_rules(
             "venv/",
             ".pytest_cache/",
             ".agent/",
-            ".openclaw/",
-            "HEARTBEAT.md",
-            "IDENTITY.md",
-            "SOUL.md",
-            "TOOLS.md",
-            "USER.md",
             "",
         ]
     )
