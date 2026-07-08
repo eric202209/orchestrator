@@ -84,8 +84,11 @@ _PROJECT_ORDER_COLUMNS = {
 def get_projects(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
-    # Pagination
-    page: int = 1,
+    # Legacy
+    skip: int = 0,
+    limit: int = 100,
+    # Paginated mode
+    page: Optional[int] = None,
     per_page: int = 25,
     # Filters
     search: Optional[str] = None,
@@ -95,9 +98,10 @@ def get_projects(
 ):
     """Get all active (non-deleted) projects.
 
-    Returns Page[ProjectResponse] with server-side pagination.
+    Legacy mode (no page): returns List[ProjectResponse] with skip/limit.
+    Paginated mode (page param): returns Page[ProjectResponse].
     """
-    if page < 1:
+    if page is not None and page < 1:
         raise HTTPException(status_code=422, detail="page must be >= 1")
     if per_page < 1 or per_page > 200:
         raise HTTPException(
@@ -115,8 +119,14 @@ def get_projects(
         query = query.order_by(col.asc().nullslast())
     else:
         query = query.order_by(col.desc().nullslast())
-    page_data = paginate(query, page, per_page)
+
     from app.schemas import ProjectResponse as _ProjectResponse
+
+    if page is None:
+        projects = query.offset(skip).limit(limit).all()
+        return [_ProjectResponse.model_validate(p) for p in projects]
+
+    page_data = paginate(query, page, per_page)
 
     page_data["items"] = [
         _ProjectResponse.model_validate(p) for p in page_data["items"]
