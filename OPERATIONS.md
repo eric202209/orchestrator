@@ -70,14 +70,58 @@ Back up these paths. Everything else is regenerable from source + these:
   that leaves the machine
 - `logs/`, `checkpoints/`, `run/`, `qdrant/bin`/`qdrant/snapshots` (runtime
   state, regenerable)
-- `.agent/events/` journals under project workspaces (diagnostic evidence,
-  not backup-critical — see "Evidence Collection" below)
+- `.agent/events/` journals under project workspaces — **steady-state
+  policy**: diagnostic evidence, not backup-critical (see "Evidence
+  Collection" below). **Dogfood-window exception (Phase 22, added Phase
+  21B):** journals ARE included in the nightly backup for the duration of
+  the Developer Dogfood program, because they are the evidentiary corpus
+  the program's metrics depend on, not incidental diagnostic residue.
+  Outside a formal dogfood window, this exception does not apply.
+
+**Dogfood nightly backup (Phase 21B/B2):**
+
+```bash
+PYTHONPATH=. venv/bin/python scripts/maintenance/dogfood_backup.py
+```
+
+Online-backs-up `orchestrator.db` (via the sqlite3 backup API — safe
+under WAL, no downtime) plus every registered project's `.agent/events`
+journals, into `/root/.openclaw/workspace/vault/backups/orchestrator/<run-id>/`,
+verifies `PRAGMA integrity_check` on the copy, and prunes runs older than
+14 days (`--retention-days` to override). Known limitation: this
+container has a single overlay filesystem — there is no physically
+separate second disk to write to, so "second location" means a directory
+tree outside the live repo on the same host, not off-host redundancy.
+Acceptable for a single-operator dogfood window per the roadmap review's
+single-host stance; revisit before Private Beta.
+
+**Dogfood restore drill (rehearse before trusting the backup):**
+
+```bash
+PYTHONPATH=. venv/bin/python scripts/maintenance/dogfood_restore.py \
+  --target-dir /path/to/a/scratch/directory
+```
+
+Restores the latest run (or `--run-id <id>`) into the given target
+directory — never the live repo, unless you deliberately intend to
+overwrite it — and verifies integrity, core-table presence, and journal
+archive completeness. Exits non-zero (and prints which check failed) if
+anything is wrong. A restore drill was executed 2026-07-08 (run
+`20260708-141436`): `PRAGMA integrity_check` passed, all core tables
+present, journal archive complete (0/0 journals — no projects registered
+yet at drill time). Rehearse again after real dogfood data accumulates,
+since an empty-journal drill only proves the mechanism, not that a
+journal-bearing restore behaves identically (it will — the archive step
+is content-agnostic — but rehearsing after real data exists resolves any
+doubt with evidence instead of code-reading).
 
 ## Restore
 
 1. Stop all services (see Shutdown).
 2. Restore `orchestrator.db`, `qdrant/data`, `knowledge/`, and `.env` from
-   backup into the repository root.
+   backup into the repository root. During a dogfood window, also restore
+   project workspace `.agent/events/` journals from the dogfood backup's
+   `journals.tar.gz` (see above) if workspace damage requires it.
 3. Run `./start.sh` (or the appropriate `wsl-start.sh` variant) — it will
    detect the existing venv/frontend deps and skip re-provisioning them.
 4. Run the post-install smoke checklist below to confirm the restore.
