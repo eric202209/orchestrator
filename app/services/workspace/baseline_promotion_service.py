@@ -79,20 +79,26 @@ class BaselinePromotionService:
             if gitignore_path.exists()
             else ""
         )
-        guard_block = "\n".join(
-            [
-                PROJECT_GITIGNORE_GUARD_START,
-                *PROJECT_GITIGNORE_GUARD_LINES,
-                PROJECT_GITIGNORE_GUARD_END,
-            ]
-        )
         pattern = re.compile(
             rf"{re.escape(PROJECT_GITIGNORE_GUARD_START)}.*?{re.escape(PROJECT_GITIGNORE_GUARD_END)}",
             re.DOTALL,
         )
+        guard_block = self._gitignore_guard_block(PROJECT_GITIGNORE_GUARD_LINES)
         if pattern.search(existing):
-            updated = pattern.sub(guard_block, existing)
+            if self._gitignore_already_covers_guard_entries(existing):
+                updated = existing
+            else:
+                updated = pattern.sub(guard_block, existing)
+        elif self._gitignore_already_covers_guard_entries(existing):
+            return {
+                "changed": False,
+                "path": str(gitignore_path),
+                "entries": PROJECT_GITIGNORE_GUARD_LINES,
+                "reason": "entries_already_present",
+            }
         else:
+            missing_entries = self._missing_gitignore_guard_entries(existing)
+            guard_block = self._gitignore_guard_block(missing_entries)
             normalized_existing = existing.rstrip()
             updated = (
                 f"{normalized_existing}\n\n{guard_block}\n"
@@ -114,6 +120,39 @@ class BaselinePromotionService:
             "path": str(gitignore_path),
             "entries": PROJECT_GITIGNORE_GUARD_LINES,
         }
+
+    @staticmethod
+    def _gitignore_guard_block(entries: list[str]) -> str:
+        return "\n".join(
+            [
+                PROJECT_GITIGNORE_GUARD_START,
+                *entries,
+                PROJECT_GITIGNORE_GUARD_END,
+            ]
+        )
+
+    @staticmethod
+    def _gitignore_already_covers_guard_entries(existing: str) -> bool:
+        existing_rules = BaselinePromotionService._gitignore_rules(existing)
+        return all(entry in existing_rules for entry in PROJECT_GITIGNORE_GUARD_LINES)
+
+    @staticmethod
+    def _missing_gitignore_guard_entries(existing: str) -> list[str]:
+        existing_rules = BaselinePromotionService._gitignore_rules(existing)
+        return [
+            entry
+            for entry in PROJECT_GITIGNORE_GUARD_LINES
+            if entry not in existing_rules
+        ]
+
+    @staticmethod
+    def _gitignore_rules(existing: str) -> set[str]:
+        existing_rules = {
+            line.strip()
+            for line in existing.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        return existing_rules
 
     def _copy_tree_into_target(
         self,

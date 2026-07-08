@@ -215,7 +215,6 @@ function ProjectDetail() {
           tasksAPI.getByProject(Number(id), taskPageParams(1)),
           sessionsAPI.getByProject(Number(id), { page: 1, per_page: 25, order_by: 'created_at', order_dir: 'desc' }),
         ]);
-        const workspaceRes = await projectsAPI.getWorkspaceOverview(Number(id));
 
         setProject(projectRes.data);
         setProjectDescriptionDraft(projectRes.data.description || '');
@@ -224,8 +223,18 @@ function ProjectDetail() {
         const sessionsData = sessionsRes.data as Page<Session>;
         setSessions(sessionsData.items ?? []);
         setSessionTotal(sessionsData.total ?? 0);
-        setWorkspaceOverview(workspaceRes.data || null);
-        await loadReviewTaskDetails(workspaceRes.data || null, taskItems);
+        setLoading(false);
+
+        try {
+          const workspaceRes = await projectsAPI.getWorkspaceOverview(Number(id));
+          const workspaceData = workspaceRes.data || null;
+          setWorkspaceOverview(workspaceData);
+          await loadReviewTaskDetails(workspaceData, taskItems);
+        } catch (workspaceErr) {
+          console.error('Failed to load project workspace overview:', workspaceErr);
+          setWorkspaceOverview(null);
+          await loadReviewTaskDetails(null, taskItems);
+        }
 
       } catch (err) {
         console.error('Failed to load project data:', err);

@@ -197,6 +197,23 @@ describe('ProjectDetail — Project Overview section', () => {
     expect(overview).not.toBeNull();
   });
 
+  it('keeps the project page visible when workspace overview fails', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    setupMocks({ sessions: [makeSession({ id: 10, name: 'Run #10', status: 'running' })] });
+    (projectsAPI.getWorkspaceOverview as Mock).mockRejectedValue(new Error('timeout of 60000ms exceeded'));
+
+    await render();
+
+    expect(container.querySelector('[data-testid="project-overview"]')).not.toBeNull();
+    expect(container.textContent).toContain('Test Project');
+    expect(container.textContent).not.toContain('Error Loading Project');
+    expect(consoleError).toHaveBeenCalledWith(
+      'Failed to load project workspace overview:',
+      expect.any(Error),
+    );
+    consoleError.mockRestore();
+  });
+
   it('shows latest session name with a link to session detail', async () => {
     setupMocks({ sessions: [makeSession({ id: 42, name: 'Run #42', status: 'completed' })] });
     await render();

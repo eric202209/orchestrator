@@ -1,3 +1,5 @@
+import json
+
 from app.services.agents.agent_backends import (
     UnsupportedAgentBackendError,
     get_backend_descriptor,
@@ -100,3 +102,56 @@ def test_openclaw_cli_args_are_parsed_into_resolved_command(
         "load test",
         "--json",
     ]
+
+
+def test_openclaw_agent_command_selects_matching_workspace_agent(monkeypatch, tmp_path):
+    project_root = tmp_path / "vault" / "projects" / "orchestrator"
+    project_root.mkdir(parents=True)
+    config_path = tmp_path / "openclaw.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "list": [
+                        {
+                            "id": "main",
+                            "workspace": str(tmp_path / "workspace"),
+                        },
+                        {
+                            "id": "orchestrator",
+                            "workspace": str(project_root),
+                        },
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENCLAW_CONFIG_PATH", str(config_path))
+
+    service = object.__new__(OpenClawSessionService)
+
+    assert service._build_openclaw_agent_command(
+        ["openclaw"], cwd=str(project_root)
+    ) == ["openclaw", "agent", "--agent", "orchestrator"]
+
+
+def test_openclaw_workspace_guard_rejects_parent_workspace(tmp_path):
+    project_root = tmp_path / "workspace" / "vault" / "projects" / "orchestrator"
+    project_root.mkdir(parents=True)
+    logged = []
+    service = object.__new__(OpenClawSessionService)
+    service._log_entry = lambda level, message, **kwargs: logged.append(
+        (level, message, kwargs)
+    )
+
+    result = service._apply_reported_workspace_guard(
+        {"status": "completed", "output": "done"},
+        reported_workspace_dir=str(tmp_path / "workspace"),
+        expected_project_root=str(project_root),
+    )
+
+    assert result["status"] == "failed"
+    assert result["workspace_contract_failed"] is True
+    assert "outside the resolved project root" in result["error"]
+    assert logged and logged[0][0] == "ERROR"

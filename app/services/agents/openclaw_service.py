@@ -321,7 +321,9 @@ class OpenClawSessionService:
 
         cmd = self._resolve_openclaw_command()
         runtime_session_key = f"{session_prefix}-{int(time.time())}"
-        full_cmd = [*cmd, "agent"]
+        full_cmd = self._build_openclaw_agent_command(
+            cmd, cwd=self._resolve_execution_cwd()
+        )
         if source_brain == "local":
             full_cmd.append("--local")
         full_cmd.extend(
@@ -336,6 +338,105 @@ class OpenClawSessionService:
             ]
         )
         return full_cmd
+
+    @staticmethod
+    def _openclaw_config_path() -> Path:
+        configured = os.environ.get("OPENCLAW_CONFIG_PATH", "").strip()
+        if configured:
+            return Path(configured).expanduser()
+        state_dir = os.environ.get("OPENCLAW_STATE_DIR", "").strip()
+        if state_dir:
+            return Path(state_dir).expanduser() / "openclaw.json"
+        return Path.home() / ".openclaw" / "openclaw.json"
+
+    @staticmethod
+    def _paths_same(left: str, right: str) -> bool:
+        try:
+            return (
+                Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
+            )
+        except Exception:
+            return False
+
+    def _find_openclaw_agent_for_workspace(self, cwd: Optional[str]) -> Optional[str]:
+        if not cwd:
+            return None
+        config_path = self._openclaw_config_path()
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+        agents = (config.get("agents") or {}).get("list") or []
+        for agent in agents:
+            if not isinstance(agent, dict):
+                continue
+            agent_id = str(agent.get("id") or "").strip()
+            workspace = str(agent.get("workspace") or "").strip()
+            if agent_id and workspace and self._paths_same(workspace, cwd):
+                return agent_id
+        return None
+
+    def _build_openclaw_agent_command(
+        self, base_command: List[str], *, cwd: Optional[str]
+    ) -> List[str]:
+        full_cmd = [*base_command, "agent"]
+        agent_id = self._find_openclaw_agent_for_workspace(cwd)
+        if agent_id:
+            full_cmd.extend(["--agent", agent_id])
+        return full_cmd
+
+    @staticmethod
+    def _extract_reported_workspace_dir(*texts: str) -> Optional[str]:
+        combined = "\n".join(text for text in texts if text)
+        if not combined:
+            return None
+        pattern = re.compile(r'"workspaceDir"\s*:\s*"([^"]+)"')
+        match = pattern.search(combined)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _workspace_dir_is_under_project_root(
+        reported_workspace_dir: str, project_root: str
+    ) -> bool:
+        try:
+            reported = Path(reported_workspace_dir).expanduser().resolve()
+            root = Path(project_root).expanduser().resolve()
+            reported.relative_to(root)
+            return True
+        except Exception:
+            return False
+
+    def _apply_reported_workspace_guard(
+        self,
+        result: Dict[str, Any],
+        *,
+        reported_workspace_dir: Optional[str],
+        expected_project_root: Optional[str],
+    ) -> Dict[str, Any]:
+        if reported_workspace_dir:
+            result["reported_workspace_dir"] = reported_workspace_dir
+        if (
+            result.get("status") == "completed"
+            and reported_workspace_dir
+            and expected_project_root
+            and not self._workspace_dir_is_under_project_root(
+                reported_workspace_dir, expected_project_root
+            )
+        ):
+            error = (
+                "OpenClaw reported workspaceDir outside the resolved project root: "
+                f"{reported_workspace_dir} (expected under {expected_project_root})"
+            )
+            self._log_entry("ERROR", f"[OPENCLAW] {error}", commit=True)
+            return {
+                **result,
+                "status": "failed",
+                "error": error,
+                "workspace_contract_failed": True,
+                "expected_project_root": expected_project_root,
+            }
+        return result
 
     @staticmethod
     def _openclaw_invocation_metadata(
@@ -1059,6 +1160,31 @@ class OpenClawSessionService:
             )
             return None
 
+    def _resolve_project_root_for_workspace_guard(self) -> Optional[str]:
+        try:
+            project_model = None
+            if self.session_model and self.session_model.project_id:
+                project_model = (
+                    self.db.query(Project)
+                    .filter(Project.id == self.session_model.project_id)
+                    .first()
+                )
+            elif self.task_model and self.task_model.project_id:
+                project_model = (
+                    self.db.query(Project)
+                    .filter(Project.id == self.task_model.project_id)
+                    .first()
+                )
+            if not project_model:
+                return None
+            return str(
+                resolve_project_workspace_path(
+                    project_model.workspace_path, project_model.name
+                ).resolve()
+            )
+        except Exception:
+            return None
+
     def _append_runtime_event(
         self, event_type: str, details: Optional[Dict[str, Any]] = None
     ) -> None:
@@ -1571,18 +1697,21 @@ class OpenClawSessionService:
         try:
             openclaw_command = self._resolve_openclaw_command()
             execution_cwd = self._resolve_execution_cwd()
-            full_cmd = [
-                *openclaw_command,
-                "agent",
-                "--local",
-                "--session-id",
-                new_session_id,
-                "--message",
-                prompt,
-                "--json",
-                "--timeout",
-                str(timeout_seconds),
-            ]
+            full_cmd = self._build_openclaw_agent_command(
+                openclaw_command, cwd=execution_cwd
+            )
+            full_cmd.extend(
+                [
+                    "--local",
+                    "--session-id",
+                    new_session_id,
+                    "--message",
+                    prompt,
+                    "--json",
+                    "--timeout",
+                    str(timeout_seconds),
+                ]
+            )
             started_at = time.monotonic()
             first_output_at: Optional[float] = None
             last_output_at: Optional[float] = None
@@ -1898,7 +2027,16 @@ class OpenClawSessionService:
                 stdout=stdout_text,
                 stderr=stderr_text,
             )
-            return self._parse_openclaw_response(completed)
+            result = self._parse_openclaw_response(completed)
+            return self._apply_reported_workspace_guard(
+                result,
+                reported_workspace_dir=self._extract_reported_workspace_dir(
+                    stdout_text, stderr_text
+                ),
+                expected_project_root=(
+                    self._resolve_project_root_for_workspace_guard() or execution_cwd
+                ),
+            )
 
         except asyncio.TimeoutError:
             try:

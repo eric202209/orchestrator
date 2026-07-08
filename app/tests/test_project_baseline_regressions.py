@@ -169,6 +169,78 @@ def test_project_gitignore_guard_preserves_existing_rules_and_is_idempotent(
     assert contents.count(".agent/") == 1
 
 
+def test_project_gitignore_guard_does_not_duplicate_existing_rules(
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "gitignore-existing-rules"
+    project_root.mkdir(parents=True)
+    gitignore = project_root / ".gitignore"
+    existing = "\n".join(
+        [
+            "__pycache__/",
+            "node_modules/",
+            ".venv/",
+            "venv/",
+            ".pytest_cache/",
+            ".agent/",
+            "",
+        ]
+    )
+    gitignore.write_text(existing, encoding="utf-8")
+    project = Project(
+        name="gitignore-existing-rules",
+        workspace_path=str(project_root),
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    result = TaskService(db_session).ensure_project_gitignore_guard(project)
+
+    assert result["changed"] is False
+    assert result["reason"] == "entries_already_present"
+    assert gitignore.read_text(encoding="utf-8") == existing
+
+
+def test_project_gitignore_guard_adds_only_missing_rules(
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "gitignore-partial-rules"
+    project_root.mkdir(parents=True)
+    gitignore = project_root / ".gitignore"
+    existing = "\n".join(
+        [
+            "__pycache__/",
+            "node_modules/",
+            ".venv/",
+            "venv/",
+            ".pytest_cache/",
+            "",
+        ]
+    )
+    gitignore.write_text(existing, encoding="utf-8")
+    project = Project(
+        name="gitignore-partial-rules",
+        workspace_path=str(project_root),
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    first = TaskService(db_session).ensure_project_gitignore_guard(project)
+    second = TaskService(db_session).ensure_project_gitignore_guard(project)
+    contents = gitignore.read_text(encoding="utf-8")
+
+    assert first["changed"] is True
+    assert second["changed"] is False
+    assert contents.count(".agent/") == 1
+    assert contents.count("node_modules/") == 1
+    assert contents.count("__pycache__/") == 1
+    assert contents.count("# BEGIN OpenClaw workspace guard") == 1
+
+
 def test_workspace_services_share_project_root_contract(db_session, tmp_path: Path):
     project_root = tmp_path / "shared-root-contract"
     project_root.mkdir(parents=True)
@@ -1022,6 +1094,22 @@ def test_project_mutation_lock_waits_for_short_lived_writer(tmp_path: Path):
         assert True
 
     thread.join(timeout=1)
+
+
+def test_project_mutation_lock_removes_empty_agent_lock_dirs(tmp_path: Path):
+    project_root = tmp_path / "mutation-lock-cleanup"
+    project_root.mkdir(parents=True)
+
+    with project_mutation_lock(
+        project_id=123,
+        project_root=project_root,
+        operation="cleanup",
+        owner="test-cleanup",
+        wait_timeout_seconds=0,
+    ):
+        assert (project_root / ".agent" / "locks").is_dir()
+
+    assert not (project_root / ".agent").exists()
 
 
 def test_manual_promote_clears_terminal_execution_mutation_lock(

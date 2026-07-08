@@ -69,6 +69,8 @@ def project_mutation_lock(
         try:
             fd = os.open(lock_path, flags, 0o666)
             break
+        except FileNotFoundError:
+            lock_dir.mkdir(parents=True, exist_ok=True)
         except FileExistsError as exc:
             if time.monotonic() >= deadline:
                 raise ProjectMutationLockError(
@@ -94,3 +96,8 @@ def project_mutation_lock(
             current = {}
         if current.get("token") == token:
             lock_path.unlink(missing_ok=True)
+        for path in (lock_dir, lock_dir.parent):
+            try:
+                path.rmdir()
+            except OSError:
+                pass
