@@ -84,11 +84,8 @@ _PROJECT_ORDER_COLUMNS = {
 def get_projects(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
-    # Legacy — TODO(Phase15E-4): remove legacy skip/limit mode
-    skip: int = 0,
-    limit: int = 100,
-    # Paginated mode
-    page: Optional[int] = None,
+    # Pagination
+    page: int = 1,
     per_page: int = 25,
     # Filters
     search: Optional[str] = None,
@@ -98,10 +95,9 @@ def get_projects(
 ):
     """Get all active (non-deleted) projects.
 
-    Legacy mode (no page): returns List[ProjectResponse] with skip/limit.
-    Paginated mode (page param): returns Page[ProjectResponse].
+    Returns Page[ProjectResponse] with server-side pagination.
     """
-    if page is not None and page < 1:
+    if page < 1:
         raise HTTPException(status_code=422, detail="page must be >= 1")
     if per_page < 1 or per_page > 200:
         raise HTTPException(
@@ -114,12 +110,6 @@ def get_projects(
     if search:
         query = query.filter(Project.name.ilike(f"%{search}%"))
 
-    if page is None:
-        # Legacy mode
-        projects = query.offset(skip).limit(limit).all()
-        return projects
-
-    # Paginated mode
     col = _PROJECT_ORDER_COLUMNS.get(order_by, Project.created_at)
     if order_dir.lower() == "asc":
         query = query.order_by(col.asc().nullslast())
