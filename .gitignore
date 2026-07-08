@@ -124,3 +124,18 @@ graphify-out/
 # understand-anything
 .understand-anything/
 .understandignore
+
+# BEGIN OpenClaw workspace guard
+.agent/
+__pycache__/
+node_modules/
+.venv/
+venv/
+.pytest_cache/
+.openclaw/
+HEARTBEAT.md
+IDENTITY.md
+SOUL.md
+TOOLS.md
+USER.md
+# END OpenClaw workspace guard

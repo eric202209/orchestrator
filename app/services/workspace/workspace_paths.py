@@ -25,6 +25,14 @@ HYDRATION_EXCLUDED_NAMES = {
     # .gitignore is orchestrator scaffolding (written by ensure_project_gitignore_guard)
     # and must not count as user content for the has_existing_files workspace review.
     ".gitignore",
+    # OpenClaw's own per-workspace agent-identity/onboarding scaffold,
+    # written whenever an agent's configured workspace matches the
+    # project root (Phase 22B dogfood finding) — not user/task content.
+    "HEARTBEAT.md",
+    "IDENTITY.md",
+    "SOUL.md",
+    "TOOLS.md",
+    "USER.md",
 }
 LEGACY_BASELINE_DIR_NAME = ".project-baseline"
 AUTO_SNAPSHOT_ROOT = ".agent/auto-snapshots"
@@ -45,6 +53,17 @@ PROJECT_GITIGNORE_GUARD_LINES = [
     ".venv/",
     "venv/",
     ".pytest_cache/",
+    # OpenClaw writes its own per-workspace agent-identity/onboarding
+    # scaffold into whatever directory an agent's configured workspace
+    # points at (see openclaw_service.py agent-workspace-matching). When
+    # that directory is a real project's git root, these files must not
+    # count as tracked project content (Phase 22B dogfood finding).
+    ".openclaw/",
+    "HEARTBEAT.md",
+    "IDENTITY.md",
+    "SOUL.md",
+    "TOOLS.md",
+    "USER.md",
 ]
 
 
