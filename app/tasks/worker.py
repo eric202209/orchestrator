@@ -268,8 +268,9 @@ def execute_orchestration_task(
     _runtime_sandbox: Optional[TaskSandbox] = None
     _runtime_sandbox_project_root: Optional[Path] = None
     # Phase 23D: the single Runtime Executor Context for this dispatch, built
-    # alongside _runtime_sandbox above. None for resume/non-canonical-baseline
-    # dispatch (unchanged, out of scope -- see Phase 23C's own scope note).
+    # alongside _runtime_sandbox above. Phase 23D-2: every canonical-baseline
+    # dispatch (fresh, retry, auto-advance, checkpoint/recovery resume) builds
+    # one; only non-canonical task-subfolder dispatch leaves it None.
     _runtime_context: Optional[RuntimeExecutorContext] = None
     runtime_service = None
 
@@ -626,10 +627,20 @@ def execute_orchestration_task(
             project_mutation_lock_context = mutation_lock_context
         if project:
             task_service.ensure_project_gitignore_guard(project)
-        if runs_in_canonical_baseline and project and not is_resume_execution:
+        if runs_in_canonical_baseline and project:
             canonical_baseline_dir = task_service.get_project_baseline_dir(project)
             canonical_baseline_dir.mkdir(parents=True, exist_ok=True)
             if settings.RUNTIME_WORKSPACE_ENABLED:
+                # Phase 23D-2: resume executions (checkpoint resume, recovery
+                # auto-resume) now allocate through this exact same branch as
+                # fresh dispatch. Under the flag, the interrupted attempt's
+                # own sandbox was already disposed (discard-on-dispose, no
+                # promotion yet), so there is no prior workspace state to
+                # preserve by running in the Project Workspace -- executing
+                # there instead was the one remaining RUNTIME_WORKSPACE_ENABLED
+                # bypass (Phase 23D-1 §8). The resume's fresh worktree carries
+                # HEAD; the existing checkpoint workspace-compatibility check
+                # downgrades to a replan if the saved plan's files are absent.
                 # Phase 23C: redirect execution into an allocated Task
                 # Execution Sandbox instead of the Project Workspace itself.
                 # maybe_allocate_runtime_workspace raises TaskSandboxError on
@@ -694,6 +705,30 @@ def execute_orchestration_task(
                     event_type=EventType.RUNTIME_WORKSPACE_ALLOCATED,
                     details=runtime_metadata_fields,
                 )
+            elif is_resume_execution:
+                # Flag off: resume keeps executing directly in the canonical
+                # project root, preserving the current workspace state
+                # (unchanged pre-23C behavior, via the shared context object).
+                _runtime_context = _build_runtime_executor_context(
+                    sandbox=None,
+                    project_workspace=canonical_baseline_dir,
+                    executor=_resolved_execution_backend,
+                    project_id=project.id,
+                    task_execution_id=task_execution_id,
+                )
+                orchestration_state._project_dir_override = str(
+                    _runtime_context.runtime_workspace
+                )
+                emit_live(
+                    "INFO",
+                    "[ORCHESTRATION] Resume requested; using the canonical project root and skipping pre-run baseline rebuild to preserve the current workspace",
+                    metadata={
+                        "phase": "resume",
+                        "baseline_path": str(canonical_baseline_dir),
+                        "workspace_mutation_skipped": True,
+                        "reason": "resume_preserve_workspace",
+                    },
+                )
             else:
                 _runtime_context = _build_runtime_executor_context(
                     sandbox=None,
@@ -723,43 +758,19 @@ def execute_orchestration_task(
                         "reason": "project_root_is_source_of_truth",
                     },
                 )
-        elif runs_in_canonical_baseline and project and is_resume_execution:
-            # Phase 23C scope note: resume executions are not redirected into
-            # a Task Execution Sandbox even when RUNTIME_WORKSPACE_ENABLED is
-            # True. Resuming a runtime-workspace execution would require
-            # re-attaching to (or re-allocating against) a prior sandbox --
-            # not specified by this phase -- so resumes keep executing
-            # directly in the canonical project root, unchanged.
-            canonical_baseline_dir = task_service.get_project_baseline_dir(project)
-            canonical_baseline_dir.mkdir(parents=True, exist_ok=True)
-            # Phase 23D-2: same RuntimeExecutorContext authority as every
-            # other branch (still non-sandboxed for resumes -- Phase 23C's
-            # unchanged scope decision -- but no longer a raw
-            # _project_dir_override assignment bypassing the context object).
-            _runtime_context = _build_runtime_executor_context(
-                sandbox=None,
-                project_workspace=canonical_baseline_dir,
-                executor=_resolved_execution_backend,
-                project_id=project.id if project else None,
-                task_execution_id=task_execution_id,
-            )
-            orchestration_state._project_dir_override = str(
-                _runtime_context.runtime_workspace
-            )
-            emit_live(
-                "INFO",
-                "[ORCHESTRATION] Resume requested; using the canonical project root and skipping pre-run baseline rebuild to preserve the current workspace",
-                metadata={
-                    "phase": "resume",
-                    "baseline_path": str(canonical_baseline_dir),
-                    "workspace_mutation_skipped": True,
-                    "reason": "resume_preserve_workspace",
-                },
-            )
 
         # Create the task workspace directory if it doesn't exist
         task_workspace = orchestration_state.project_dir
-        if is_resume_execution and project and task and task.task_subfolder:
+        # Phase 23D-2: the empty-workspace resume fallback below re-points
+        # execution at the real project root; it must never fire while a Task
+        # Execution Sandbox is the active execution surface.
+        if (
+            is_resume_execution
+            and project
+            and task
+            and task.task_subfolder
+            and _runtime_sandbox is None
+        ):
             task_workspace_review = task_service.review_existing_workspace(
                 project=project,
                 current_task=task,

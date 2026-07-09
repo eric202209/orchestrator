@@ -264,12 +264,21 @@ async def execute_task_payload(
         # bypass the POST /tasks/{id}/execute endpoint had. Reuse the same
         # allocate/bind/dispose primitives worker.py's canonical dispatch
         # uses. Only applies when a task (and therefore a task_execution_id
-        # to key sandbox allocation by) is selected; a raw session prompt
-        # with no task_id has no Project Workspace redirect target.
+        # to key sandbox allocation by) is selected AND the task executes in
+        # the canonical project root -- task-subfolder-scoped executions are
+        # not redirected, matching worker.py's canonical-baseline-only scope
+        # (Phase 23C). A raw session prompt with no task_id has no Project
+        # Workspace redirect target.
         _runtime_sandbox = None
         _runtime_context = None
         _project_root = None
-        if selected_task and task_workspace and session.project and task_execution:
+        if (
+            selected_task
+            and task_workspace
+            and session.project
+            and task_execution
+            and task_workspace.get("workspace_scope") == "canonical_project_root"
+        ):
             _project_root = TaskService(db).get_project_root(session.project)
             _runtime_root = get_effective_runtime_root(db)
             _execution_backend = get_effective_agent_backend(
