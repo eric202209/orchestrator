@@ -22,7 +22,13 @@ from app.services.agents.agent_runtime import create_agent_runtime
 from app.services.observability.log_utils import deduplicate_logs
 from app.services.project.name_formatter import humanize_display_name
 from app.services.orchestration.events.event_types import EventType
-from app.services.orchestration.execution.runtime import workspace_snapshot_key
+from app.services.orchestration.execution.runtime import (
+    workspace_snapshot_key,
+    build_runtime_executor_context,
+    maybe_allocate_runtime_workspace,
+    maybe_bind_runtime_cwd_override,
+    dispose_runtime_workspace_safely,
+)
 from app.services.orchestration.review_policy import build_operator_override_metadata
 from app.services.orchestration.state.persistence import append_orchestration_event
 from app.services.orchestration.context.assembly import render_adapted_runtime_prompt
@@ -46,6 +52,7 @@ from app.services.workspace.system_settings import (
     get_effective_agent_backend,
     get_effective_agent_model_family,
     get_effective_workspace_review_policy,
+    get_effective_runtime_root,
 )
 from app.services.workspace.project_mutation_lock import ProjectMutationLockError
 from app.services.workspace.project_isolation_service import (
@@ -1024,77 +1031,126 @@ async def execute_task_with_runtime(
         runtime = create_agent_runtime(db, new_session.id, task_id)
         if hasattr(runtime, "task_execution_id"):
             runtime.task_execution_id = task_execution.id
+
+        # Phase 23D-2: this direct-execution endpoint previously never built a
+        # RuntimeExecutorContext at all -- it ran OpenClaw against the real
+        # Project Workspace unconditionally, ignoring RUNTIME_WORKSPACE_ENABLED.
+        # Reuse the exact same allocate/bind/dispose primitives worker.py's
+        # canonical dispatch already uses, without changing this endpoint's
+        # synchronous request/response contract or its simpler (unplanned)
+        # execution model.
+        _runtime_sandbox = None
+        _runtime_context = None
+        _project_root = None
+        if task.project:
+            _project_root = TaskService(db).get_project_root(task.project)
+            _runtime_root = get_effective_runtime_root(db)
+            _execution_backend = get_effective_agent_backend(
+                settings.AGENT_BACKEND, db=db
+            )
+            _runtime_sandbox = maybe_allocate_runtime_workspace(
+                enabled=settings.RUNTIME_WORKSPACE_ENABLED,
+                project_id=task.project_id,
+                task_execution_id=task_execution.id,
+                canonical_baseline_dir=_project_root,
+                executor=_execution_backend,
+                runtime_root=_runtime_root,
+            )
+            _runtime_context = build_runtime_executor_context(
+                sandbox=_runtime_sandbox,
+                project_workspace=_project_root,
+                executor=_execution_backend,
+                project_id=task.project_id,
+                task_execution_id=task_execution.id,
+                runtime_root=_runtime_root,
+            )
+            maybe_bind_runtime_cwd_override(runtime, _runtime_context)
+            if hasattr(runtime, "bind_runtime_workspace"):
+                runtime.bind_runtime_workspace(_runtime_context)
+
         try:
-            await runtime.create_session(prompt)
-        except Exception:
-            db.rollback()
-            raise
+            try:
+                await runtime.create_session(prompt)
+            except Exception:
+                db.rollback()
+                raise
 
-        mark_session_running(new_session, started_at=datetime.now(timezone.utc))
-        mark_execution_running(
-            task=task,
-            session_task_link=session_task,
-            task_execution=task_execution,
-            started_at=new_session.started_at,
-        )
-        db.commit()
-        db.refresh(new_session)
-
-        logger.info("Created session %s for task %s", new_session.id, task.id)
-
-        from app.services.orchestration.prompt_templates import PromptTemplates
-
-        prompt_text = PromptTemplates.build_task_prompt(
-            task_description=prompt + overwrite_warning,
-            project_context=f"Project: {task.project.name if task.project else 'Unknown'} at {task.project.workspace_path if task.project and task.project.workspace_path else '/workspace'}",
-        )
-        prompt_text = render_adapted_runtime_prompt(
-            db,
-            objective="Execute the requested task through the active runtime.",
-            execution_mode="direct_task_execution",
-            prompt_body=prompt_text,
-            instructions=[
-                "Use the current workspace as the source of truth.",
-                "Return a direct execution result for the requested task.",
-            ],
-            context={
-                "Task ID": task.id,
-                "Project ID": task.project_id,
-            },
-            expected_output="Execution result text or structured completion payload.",
-        )
-
-        actual_timeout = max(timeout_seconds, 600)
-
-        result = await runtime.execute_task(
-            prompt=prompt_text,
-            timeout_seconds=actual_timeout,
-        )
-
-        completed_at = datetime.now(timezone.utc)
-        if result["status"] == "completed":
-            mark_execution_done(
+            mark_session_running(new_session, started_at=datetime.now(timezone.utc))
+            mark_execution_running(
                 task=task,
                 session_task_link=session_task,
                 task_execution=task_execution,
-                completed_at=completed_at,
+                started_at=new_session.started_at,
             )
-            mark_session_stopped(new_session, stopped_at=completed_at)
-        else:
-            mark_execution_failed(
-                task=task,
-                session_task_link=session_task,
-                task_execution=task_execution,
-                error_message=result.get("error", "Unknown error"),
-                completed_at=completed_at,
+            db.commit()
+            db.refresh(new_session)
+
+            logger.info("Created session %s for task %s", new_session.id, task.id)
+
+            from app.services.orchestration.prompt_templates import PromptTemplates
+
+            prompt_text = PromptTemplates.build_task_prompt(
+                task_description=prompt + overwrite_warning,
+                project_context=f"Project: {task.project.name if task.project else 'Unknown'} at {task.project.workspace_path if task.project and task.project.workspace_path else '/workspace'}",
             )
-            mark_session_stopped(new_session, stopped_at=completed_at)
+            prompt_text = render_adapted_runtime_prompt(
+                db,
+                objective="Execute the requested task through the active runtime.",
+                execution_mode="direct_task_execution",
+                prompt_body=prompt_text,
+                instructions=[
+                    "Use the current workspace as the source of truth.",
+                    "Return a direct execution result for the requested task.",
+                ],
+                context={
+                    "Task ID": task.id,
+                    "Project ID": task.project_id,
+                },
+                expected_output="Execution result text or structured completion payload.",
+            )
 
-        db.commit()
-        db.refresh(task)
+            actual_timeout = max(timeout_seconds, 600)
 
-        result["task_execution_id"] = task_execution.id
-        return result
+            result = await runtime.execute_task(
+                prompt=prompt_text,
+                timeout_seconds=actual_timeout,
+            )
+
+            completed_at = datetime.now(timezone.utc)
+            if result["status"] == "completed":
+                mark_execution_done(
+                    task=task,
+                    session_task_link=session_task,
+                    task_execution=task_execution,
+                    completed_at=completed_at,
+                )
+                mark_session_stopped(new_session, stopped_at=completed_at)
+            else:
+                mark_execution_failed(
+                    task=task,
+                    session_task_link=session_task,
+                    task_execution=task_execution,
+                    error_message=result.get("error", "Unknown error"),
+                    completed_at=completed_at,
+                )
+                mark_session_stopped(new_session, stopped_at=completed_at)
+
+            db.commit()
+            db.refresh(task)
+
+            result["task_execution_id"] = task_execution.id
+            return result
+        finally:
+            # Phase 23D-2: release the binding and dispose the sandbox
+            # unconditionally (success, failure, or exception), mirroring
+            # worker.py's own outermost finally for the canonical dispatch.
+            if hasattr(runtime, "release_runtime_workspace_binding"):
+                runtime.release_runtime_workspace_binding()
+            dispose_runtime_workspace_safely(
+                _runtime_sandbox,
+                project_root=_project_root,
+                logger_obj=logger,
+            )
 
     except Exception as e:
         error_msg = f"Task execution failed: {str(e)}"

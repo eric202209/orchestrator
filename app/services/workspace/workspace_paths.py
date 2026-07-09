@@ -16,6 +16,12 @@ from app.services.workspace.project_isolation_service import (
 HYDRATION_EXCLUDED_NAMES = {
     ".agent",
     ".openclaw",  # legacy dir name; kept as migration guard for existing projects
+    # Phase 23D-1: a Runtime Workspace (git worktree) has its own `.git`
+    # gitlink *file* at its root; hydration previously walked the source
+    # project's `.git` directory tree and tried to mkdir over that file,
+    # raising a raw FileExistsError before any step executed. `.git` is
+    # never task content, so it is excluded the same way `.agent` already is.
+    ".git",
     ".venv",
     "__pycache__",
     "node_modules",

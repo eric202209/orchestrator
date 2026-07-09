@@ -2455,16 +2455,25 @@ class OpenClawSessionService:
             "recent_logs": logs_data,
             "openclaw_session_key": self.openclaw_session_key,
             "project_workspace_path": (
-                str(
-                    resolve_project_workspace_path(
-                        self.task_model.project.workspace_path,
-                        self.task_model.project.name,
-                    ).resolve()
+                # Phase 23D-1: when execution is redirected into a Task
+                # Execution Sandbox, verify_workspace_contract's pre-execution
+                # check compares this field against the sandboxed
+                # expected_root; reuse the same Phase 23C override the
+                # post-execution guard already honors so both checks agree
+                # on which root is authoritative for this dispatch.
+                self.execution_cwd_override
+                or (
+                    str(
+                        resolve_project_workspace_path(
+                            self.task_model.project.workspace_path,
+                            self.task_model.project.name,
+                        ).resolve()
+                    )
+                    if self.task_model
+                    and self.task_model.project
+                    and self.task_model.project.workspace_path
+                    else None
                 )
-                if self.task_model
-                and self.task_model.project
-                and self.task_model.project.workspace_path
-                else None
             ),
             "task_workspace_path": self._resolve_execution_cwd(),
             "execution_cwd": self._resolve_execution_cwd(),

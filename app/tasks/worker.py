@@ -593,9 +593,32 @@ def execute_orchestration_task(
         is_resume_execution = bool(resume_checkpoint_name)
         task_service = TaskService(db)
         if runs_in_canonical_baseline and project:
+            # Phase 23D-2: build the one RuntimeExecutorContext (non-sandboxed
+            # here; the sandboxed branch below rebuilds and overwrites it once
+            # RUNTIME_WORKSPACE_ENABLED redirection is known) and set
+            # orchestration_state._project_dir_override *before* the mutation
+            # lock is attempted. Without this, a failure at lock acquisition
+            # (e.g. a concurrent auto-advance/auto-recovery dispatch for the
+            # same project) leaves _project_dir_override unset, and
+            # OrchestrationState.project_dir's own fallback
+            # (project_workspace_path / f"task-{task_id}") then silently
+            # creates a real task-N subfolder directly in the tracked Project
+            # Workspace on the failure path -- a RuntimeExecutorContext
+            # bypass, not a redesign of what happens on success.
+            _early_baseline_dir = task_service.get_project_root(project)
+            _runtime_context = _build_runtime_executor_context(
+                sandbox=None,
+                project_workspace=_early_baseline_dir,
+                executor=_resolved_execution_backend,
+                project_id=project.id,
+                task_execution_id=task_execution_id,
+            )
+            orchestration_state._project_dir_override = str(
+                _runtime_context.runtime_workspace
+            )
             mutation_lock_context = project_mutation_lock(
                 project_id=project.id,
-                project_root=task_service.get_project_root(project),
+                project_root=_early_baseline_dir,
                 operation="execute_canonical_root_task",
                 owner=f"session:{session_id}:task:{task_id}:execution:{task_execution_id}",
             )
@@ -709,7 +732,20 @@ def execute_orchestration_task(
             # directly in the canonical project root, unchanged.
             canonical_baseline_dir = task_service.get_project_baseline_dir(project)
             canonical_baseline_dir.mkdir(parents=True, exist_ok=True)
-            orchestration_state._project_dir_override = str(canonical_baseline_dir)
+            # Phase 23D-2: same RuntimeExecutorContext authority as every
+            # other branch (still non-sandboxed for resumes -- Phase 23C's
+            # unchanged scope decision -- but no longer a raw
+            # _project_dir_override assignment bypassing the context object).
+            _runtime_context = _build_runtime_executor_context(
+                sandbox=None,
+                project_workspace=canonical_baseline_dir,
+                executor=_resolved_execution_backend,
+                project_id=project.id if project else None,
+                task_execution_id=task_execution_id,
+            )
+            orchestration_state._project_dir_override = str(
+                _runtime_context.runtime_workspace
+            )
             emit_live(
                 "INFO",
                 "[ORCHESTRATION] Resume requested; using the canonical project root and skipping pre-run baseline rebuild to preserve the current workspace",

@@ -35,7 +35,19 @@ from app.services.session.execution_policy import (
     timeout_terminal_state_blocks_late_success,
 )
 from app.services.tasks.execution import create_task_execution
+from app.services.tasks.service import TaskService
 from app.services.tasks.tool_tracking import ToolTrackingService
+from app.services.workspace.system_settings import (
+    get_effective_agent_backend,
+    get_effective_runtime_root,
+)
+from app.services.orchestration.execution.runtime import (
+    build_runtime_executor_context,
+    maybe_allocate_runtime_workspace,
+    maybe_bind_runtime_cwd_override,
+    dispose_runtime_workspace_safely,
+)
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -245,9 +257,59 @@ async def execute_task_payload(
                     "workspace_path"
                 ]
 
-        result = await runtime.execute_task_with_orchestration(
-            prompt, timeout_seconds, orchestration_state=orchestration_state
-        )
+        # Phase 23D-2: this direct-execution endpoint (POST
+        # /sessions/{id}/execute) previously never built a
+        # RuntimeExecutorContext -- it always ran against the real Project
+        # Workspace, ignoring RUNTIME_WORKSPACE_ENABLED, mirroring the same
+        # bypass the POST /tasks/{id}/execute endpoint had. Reuse the same
+        # allocate/bind/dispose primitives worker.py's canonical dispatch
+        # uses. Only applies when a task (and therefore a task_execution_id
+        # to key sandbox allocation by) is selected; a raw session prompt
+        # with no task_id has no Project Workspace redirect target.
+        _runtime_sandbox = None
+        _runtime_context = None
+        _project_root = None
+        if selected_task and task_workspace and session.project and task_execution:
+            _project_root = TaskService(db).get_project_root(session.project)
+            _runtime_root = get_effective_runtime_root(db)
+            _execution_backend = get_effective_agent_backend(
+                settings.AGENT_BACKEND, db=db
+            )
+            _runtime_sandbox = maybe_allocate_runtime_workspace(
+                enabled=settings.RUNTIME_WORKSPACE_ENABLED,
+                project_id=session.project_id,
+                task_execution_id=task_execution.id,
+                canonical_baseline_dir=_project_root,
+                executor=_execution_backend,
+                runtime_root=_runtime_root,
+            )
+            _runtime_context = build_runtime_executor_context(
+                sandbox=_runtime_sandbox,
+                project_workspace=_project_root,
+                executor=_execution_backend,
+                project_id=session.project_id,
+                task_execution_id=task_execution.id,
+                runtime_root=_runtime_root,
+            )
+            orchestration_state._project_dir_override = str(
+                _runtime_context.runtime_workspace
+            )
+            maybe_bind_runtime_cwd_override(runtime, _runtime_context)
+            if hasattr(runtime, "bind_runtime_workspace"):
+                runtime.bind_runtime_workspace(_runtime_context)
+
+        try:
+            result = await runtime.execute_task_with_orchestration(
+                prompt, timeout_seconds, orchestration_state=orchestration_state
+            )
+        finally:
+            if hasattr(runtime, "release_runtime_workspace_binding"):
+                runtime.release_runtime_workspace_binding()
+            dispose_runtime_workspace_safely(
+                _runtime_sandbox,
+                project_root=_project_root,
+                logger_obj=logger,
+            )
         if task_execution:
             mark_task_attempt_done(
                 task=selected_task,

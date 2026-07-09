@@ -492,6 +492,19 @@ def _attempt_completion_repair(
             _cr_fast_runtime = _create_completion_repair_runtime(
                 ctx.db, ctx.session_id, ctx.task_id
             )
+            # Phase 23D-2: this fast runtime is a fresh object, separate from
+            # ctx.runtime_service (the one already bound to the Runtime
+            # Workspace for this dispatch, if any). Propagate the same
+            # override rather than letting it independently re-resolve the
+            # Project Workspace -- no new allocation, just reusing the one
+            # authority this dispatch already established.
+            _parent_cwd_override = getattr(
+                getattr(ctx, "runtime_service", None), "execution_cwd_override", None
+            )
+            if _parent_cwd_override and hasattr(
+                _cr_fast_runtime, "execution_cwd_override"
+            ):
+                _cr_fast_runtime.execution_cwd_override = _parent_cwd_override
             _cr_fast_profile = _cr_configured_backend
         except Exception as _cr_fast_err:
             logger.warning(
