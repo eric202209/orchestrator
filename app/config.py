@@ -206,6 +206,16 @@ class Settings(BaseSettings):
     ALLOW_TEST_KEYPAIR_ENDPOINT: bool = False
     INLINE_PLANNING: bool = False
     WORKSPACE_REVIEW_POLICY: str = "hold_nontrivial"
+    # Phase 23B: Orchestrator-owned runtime root for Task Execution Sandboxes.
+    # Deliberately outside every project repo and outside the OpenClaw
+    # workspace tree (see phase23a-workspace-runtime-separation-plan.md §8
+    # Stage 1). Not yet read by any execution path.
+    RUNTIME_ROOT: str = "~/.orchestrator/runtime"
+    # Phase 23C: when True, canonical-project-root dispatch executes OpenClaw
+    # inside an allocated Task Execution Sandbox instead of directly in the
+    # Project Workspace. Off by default. When False, dispatch behavior is
+    # byte-for-byte identical to Phase 23B (no allocator call is made).
+    RUNTIME_WORKSPACE_ENABLED: bool = False
     # Experimental: inject ProjectStateSummary into Task 2+ planning context.
     # Off by default. Characterization only — no effect on any runtime path when False.
     PSS_CONTINUATION_INJECTION_ENABLED: bool = False

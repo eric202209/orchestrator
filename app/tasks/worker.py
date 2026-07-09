@@ -79,16 +79,29 @@ from app.services.orchestration.state.persistence import (
     save_orchestration_checkpoint as _save_orchestration_checkpoint,
 )
 from app.services.orchestration.execution.runtime import (
+    build_runtime_executor_context as _build_runtime_executor_context,
+    dispose_runtime_workspace_safely as _dispose_runtime_workspace_safely,
     get_state_manager_path as _get_state_manager_path,
+    maybe_allocate_runtime_workspace as _maybe_allocate_runtime_workspace,
+    maybe_bind_runtime_cwd_override as _maybe_bind_runtime_cwd_override,
+    resolve_workspace_contract_args as _resolve_workspace_contract_args,
     snapshot_workspace_before_run as _snapshot_workspace_before_run,
     workspace_snapshot_key as _workspace_snapshot_key,
     write_project_state_snapshot as _write_project_state_snapshot,
+)
+from app.services.orchestration.execution.runtime_context import (
+    RuntimeExecutorContext,
 )
 from app.services.orchestration.error_handler import error_handler
 from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
+from app.services.workspace.task_sandbox_allocator import (
+    RUNTIME_SCHEMA_VERSION as _RUNTIME_SCHEMA_VERSION,
+    TaskSandbox,
+)
+from app.services.workspace.system_settings import get_effective_runtime_root
 from app.services.tasks.service import TaskService
 from app.services.orchestration.prompt_templates import (
     OrchestrationStatus,
@@ -248,6 +261,17 @@ def execute_orchestration_task(
     _backend_slot_redis = None
     _resolved_execution_backend: str = settings.AGENT_BACKEND
     planning_runtime_service = None
+    # Phase 23C: set only when RUNTIME_WORKSPACE_ENABLED redirects execution
+    # into an allocated Task Execution Sandbox. `finally` disposes it
+    # unconditionally (success, failure, cancellation, timeout, exception)
+    # whenever it is not None.
+    _runtime_sandbox: Optional[TaskSandbox] = None
+    _runtime_sandbox_project_root: Optional[Path] = None
+    # Phase 23D: the single Runtime Executor Context for this dispatch, built
+    # alongside _runtime_sandbox above. None for resume/non-canonical-baseline
+    # dispatch (unchanged, out of scope -- see Phase 23C's own scope note).
+    _runtime_context: Optional[RuntimeExecutorContext] = None
+    runtime_service = None
 
     try:
         # Get session and task
@@ -582,26 +606,107 @@ def execute_orchestration_task(
         if runs_in_canonical_baseline and project and not is_resume_execution:
             canonical_baseline_dir = task_service.get_project_baseline_dir(project)
             canonical_baseline_dir.mkdir(parents=True, exist_ok=True)
-            orchestration_state._project_dir_override = str(canonical_baseline_dir)
-            logger.info(
-                "[ORCHESTRATION] Using canonical project root for task %s at %s",
-                task_id,
-                canonical_baseline_dir,
-            )
-            emit_live(
-                "INFO",
-                (
-                    "[ORCHESTRATION] Using the canonical project root as the live "
-                    f"workspace and will execute in {canonical_baseline_dir}"
-                ),
-                metadata={
-                    "phase": "canonical_workspace",
-                    "workspace_path": str(canonical_baseline_dir),
-                    "workspace_mutation_skipped": True,
-                    "reason": "project_root_is_source_of_truth",
-                },
-            )
+            if settings.RUNTIME_WORKSPACE_ENABLED:
+                # Phase 23C: redirect execution into an allocated Task
+                # Execution Sandbox instead of the Project Workspace itself.
+                # maybe_allocate_runtime_workspace raises TaskSandboxError on
+                # failure, which propagates to the existing outer exception
+                # handler -- no fallback execution in the Project Workspace
+                # on a failed allocation.
+                runtime_root = get_effective_runtime_root(db)
+                _runtime_sandbox = _maybe_allocate_runtime_workspace(
+                    enabled=True,
+                    project_id=project.id,
+                    task_execution_id=task_execution_id,
+                    canonical_baseline_dir=canonical_baseline_dir,
+                    executor=_resolved_execution_backend,
+                    runtime_root=runtime_root,
+                )
+                _runtime_sandbox_project_root = canonical_baseline_dir
+                _runtime_context = _build_runtime_executor_context(
+                    sandbox=_runtime_sandbox,
+                    project_workspace=canonical_baseline_dir,
+                    executor=_resolved_execution_backend,
+                    project_id=project.id,
+                    task_execution_id=task_execution_id,
+                    runtime_root=runtime_root,
+                )
+                orchestration_state._project_dir_override = str(
+                    _runtime_context.runtime_workspace
+                )
+                logger.info(
+                    "[ORCHESTRATION] Redirecting task %s from Project Workspace %s "
+                    "to Runtime Workspace %s",
+                    task_id,
+                    canonical_baseline_dir,
+                    _runtime_sandbox.path,
+                )
+                runtime_metadata_fields = {
+                    "project_workspace": str(canonical_baseline_dir),
+                    "runtime_workspace": str(_runtime_sandbox.path),
+                    "runtime_root": str(runtime_root),
+                    "runtime_state": _runtime_sandbox.read_metadata().get(
+                        "runtime_state"
+                    ),
+                    "runtime_schema_version": _RUNTIME_SCHEMA_VERSION,
+                }
+                emit_live(
+                    "INFO",
+                    (
+                        "[ORCHESTRATION] Project Workspace "
+                        f"{canonical_baseline_dir} -> Runtime Workspace "
+                        f"{_runtime_sandbox.path}"
+                    ),
+                    metadata={
+                        "phase": "runtime_workspace_allocated",
+                        "workspace_mutation_skipped": True,
+                        "reason": "runtime_workspace_is_execution_surface",
+                        **runtime_metadata_fields,
+                    },
+                )
+                _append_orchestration_event(
+                    project_dir=_runtime_sandbox.path,
+                    session_id=session_id,
+                    task_id=task_id,
+                    event_type=EventType.RUNTIME_WORKSPACE_ALLOCATED,
+                    details=runtime_metadata_fields,
+                )
+            else:
+                _runtime_context = _build_runtime_executor_context(
+                    sandbox=None,
+                    project_workspace=canonical_baseline_dir,
+                    executor=_resolved_execution_backend,
+                    project_id=project.id,
+                    task_execution_id=task_execution_id,
+                )
+                orchestration_state._project_dir_override = str(
+                    _runtime_context.runtime_workspace
+                )
+                logger.info(
+                    "[ORCHESTRATION] Using canonical project root for task %s at %s",
+                    task_id,
+                    canonical_baseline_dir,
+                )
+                emit_live(
+                    "INFO",
+                    (
+                        "[ORCHESTRATION] Using the canonical project root as the live "
+                        f"workspace and will execute in {canonical_baseline_dir}"
+                    ),
+                    metadata={
+                        "phase": "canonical_workspace",
+                        "workspace_path": str(canonical_baseline_dir),
+                        "workspace_mutation_skipped": True,
+                        "reason": "project_root_is_source_of_truth",
+                    },
+                )
         elif runs_in_canonical_baseline and project and is_resume_execution:
+            # Phase 23C scope note: resume executions are not redirected into
+            # a Task Execution Sandbox even when RUNTIME_WORKSPACE_ENABLED is
+            # True. Resuming a runtime-workspace execution would require
+            # re-attaching to (or re-allocating against) a prior sandbox --
+            # not specified by this phase -- so resumes keep executing
+            # directly in the canonical project root, unchanged.
             canonical_baseline_dir = task_service.get_project_baseline_dir(project)
             canonical_baseline_dir.mkdir(parents=True, exist_ok=True)
             orchestration_state._project_dir_override = str(canonical_baseline_dir)
@@ -937,6 +1042,17 @@ def execute_orchestration_task(
         )
         if hasattr(runtime_service, "task_execution_id"):
             runtime_service.task_execution_id = task_execution_id
+        # Phase 23C/23D (F15): single resolved runtime path -- the execution
+        # runtime must use the same Runtime Executor Context path already
+        # set on orchestration_state.project_dir, not re-derive its own.
+        _maybe_bind_runtime_cwd_override(runtime_service, _runtime_context)
+        # Phase 23D (Goal 3): dynamically bind the executor's workspace to
+        # the Runtime Executor Context. No-op for a non-sandboxed context
+        # (Model A); raises OpenClawAgentSelectionError (fail closed) if a
+        # sandboxed context cannot be bound -- never falls back to the
+        # Project Workspace or a default agent.
+        if hasattr(runtime_service, "bind_runtime_workspace"):
+            runtime_service.bind_runtime_workspace(_runtime_context)
         runtime_metadata = (
             runtime_service.get_backend_metadata()
             if hasattr(runtime_service, "get_backend_metadata")
@@ -1050,14 +1166,25 @@ def execute_orchestration_task(
         session_context = asyncio.run(runtime_service.get_session_context())
 
         if project and project.workspace_path:
-            expected_root = Path(
-                resolve_project_workspace_path(project.workspace_path, project.name)
+            # Phase 23C (Goal 4): when a Task Execution Sandbox is active,
+            # validate against the Runtime Workspace only -- execution no
+            # longer happens in the Project Workspace at all, so comparing
+            # task_dir against it would be a false-positive contract failure.
+            _contract_args = _resolve_workspace_contract_args(
+                runtime_context=_runtime_context,
+                project_workspace_path=Path(
+                    resolve_project_workspace_path(project.workspace_path, project.name)
+                ),
+                task_subfolder=getattr(task, "task_subfolder", None),
+                runs_in_canonical_baseline=runs_in_canonical_baseline,
             )
             workspace_contract = verify_workspace_contract(
-                expected_root=expected_root,
+                expected_root=_contract_args["expected_root"],
                 task_dir=Path(orchestration_state.project_dir),
-                expected_task_subfolder=getattr(task, "task_subfolder", None),
-                allow_project_root_task_dir=runs_in_canonical_baseline,
+                expected_task_subfolder=_contract_args["expected_task_subfolder"],
+                allow_project_root_task_dir=_contract_args[
+                    "allow_project_root_task_dir"
+                ],
                 runtime_session_context=session_context,
             )
             if not workspace_contract.get("ok"):
@@ -2038,6 +2165,46 @@ def execute_orchestration_task(
                     _backend_slot_backend_id,
                     _rel_exc,
                 )
+        if runtime_service is not None and hasattr(
+            runtime_service, "release_runtime_workspace_binding"
+        ):
+            # Phase 23D: discard the ephemeral executor workspace binding (if
+            # any was established) on every terminal path, mirroring the
+            # sandbox disposal below. Never raises.
+            runtime_service.release_runtime_workspace_binding()
+        if _runtime_sandbox is not None:
+            # Phase 23C (Goal 5): dispose the Task Execution Sandbox on every
+            # terminal path -- success, failure, cancellation, timeout, or
+            # exception all reach this `finally`. No promotion of sandbox
+            # content back to the Project Workspace happens here or anywhere
+            # else in this phase; disposal is unconditional and never raises.
+            _disposed_path = _runtime_sandbox.path
+            _dispose_runtime_workspace_safely(
+                _runtime_sandbox,
+                project_root=_runtime_sandbox_project_root,
+                logger_obj=logger,
+            )
+            logger.info(
+                "[ORCHESTRATION] Disposed Runtime Workspace %s for task %s "
+                "(task_execution_id=%s)",
+                _disposed_path,
+                task_id,
+                task_execution_id,
+            )
+            if _runtime_sandbox_project_root is not None:
+                try:
+                    _append_orchestration_event(
+                        project_dir=_runtime_sandbox_project_root,
+                        session_id=session_id,
+                        task_id=task_id,
+                        event_type=EventType.RUNTIME_WORKSPACE_DISPOSED,
+                        details={
+                            "runtime_workspace": str(_disposed_path),
+                            "project_workspace": str(_runtime_sandbox_project_root),
+                        },
+                    )
+                except Exception:
+                    pass
         if project_mutation_lock_context is not None:
             project_mutation_lock_context.__exit__(None, None, None)
         if trace_context_manager is not None:

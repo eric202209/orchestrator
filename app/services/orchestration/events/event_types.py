@@ -90,6 +90,8 @@ class EventType:
     WORKSPACE_RETRY_DIRTY = "workspace_retry_dirty"
     RESUME_WORKSPACE_DRIFT = "resume_workspace_drift"
     WORKSPACE_CONTRACT_FAILED = "workspace_contract_failed"
+    RUNTIME_WORKSPACE_ALLOCATED = "runtime_workspace_allocated"
+    RUNTIME_WORKSPACE_DISPOSED = "runtime_workspace_disposed"
 
     # ── Reliability / evidence ───────────────────────────────────────────────
     COMPLETION_EVIDENCE_FAILED = "completion_evidence_failed"

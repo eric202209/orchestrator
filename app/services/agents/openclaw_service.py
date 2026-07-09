@@ -54,6 +54,11 @@ from app.services.orchestration.validation.git_containment_guard import (
     build_git_containment_env,
     cleanup_git_containment_shim,
 )
+from app.services.orchestration.execution.executor_workspace_binding import (
+    ExecutorWorkspaceBinding,
+    ExecutorWorkspaceBindingError,
+    bind_openclaw_workspace,
+)
 from app.services.orchestration.validation.runtime_pollution_guard import (
     detect_runtime_pollution,
     existing_known_scaffold_entries,
@@ -237,6 +242,18 @@ class OpenClawSessionService:
             db.query(Task).filter(Task.id == task_id).first() if task_id else None
         )
         self.task_execution_id = task_execution_id
+        # Phase 23C: explicit single-source-of-truth override for the
+        # execution cwd, set by dispatch when RUNTIME_WORKSPACE_ENABLED
+        # redirects execution into a Task Execution Sandbox. When set,
+        # _resolve_execution_cwd() returns it directly instead of
+        # re-deriving the project/task workspace path independently.
+        self.execution_cwd_override: Optional[str] = None
+        # Phase 23D: set only by bind_runtime_workspace(), when a Runtime
+        # Executor Context is sandboxed. Overrides where this instance
+        # resolves openclaw.json from (an ephemeral, per-invocation copy),
+        # never the operator's real ~/.openclaw/openclaw.json.
+        self._openclaw_config_path_override: Optional[Path] = None
+        self._workspace_binding: Optional[ExecutorWorkspaceBinding] = None
         self.backend_role: Optional[str] = None
         self._safety_prompt_injected = False
         self.openclaw_session_key: Optional[str] = None
@@ -362,8 +379,13 @@ class OpenClawSessionService:
         )
         return full_cmd
 
-    @staticmethod
-    def _openclaw_config_path() -> Path:
+    def _openclaw_config_path(self) -> Path:
+        # Phase 23D: an active runtime-workspace binding takes priority --
+        # it points at an ephemeral, per-invocation config copy, never at
+        # the real ~/.openclaw/openclaw.json (see bind_runtime_workspace()).
+        config_path_override = getattr(self, "_openclaw_config_path_override", None)
+        if config_path_override:
+            return config_path_override
         configured = os.environ.get("OPENCLAW_CONFIG_PATH", "").strip()
         if configured:
             return Path(configured).expanduser()
@@ -433,6 +455,58 @@ class OpenClawSessionService:
             self._log_entry("ERROR", f"[OPENCLAW] {error}", commit=True)
             raise OpenClawAgentSelectionError(error)
         return full_cmd
+
+    def bind_runtime_workspace(self, context: Optional[Any]) -> None:
+        """Bind this session's OpenClaw execution to a Runtime Executor
+        Context (Phase 23D, Goal 3).
+
+        No-op when ``context`` is ``None`` or not sandboxed (Model A) --
+        the existing static ``openclaw.json`` match against the Project
+        Workspace already works unchanged. When sandboxed, resolves an
+        ephemeral, per-invocation config copy whose template agent's
+        ``workspace`` is rewritten to the Runtime Workspace, and points
+        this instance's config resolution at it. Fails closed
+        (``OpenClawAgentSelectionError``) if no template agent matches the
+        Project Workspace -- never falls back to the Project Workspace or
+        a default agent, and never invents a new agent identity.
+        """
+        if context is None or not getattr(context, "is_sandboxed", False):
+            return
+        real_config_path = self._openclaw_config_path()
+        try:
+            self._workspace_binding = bind_openclaw_workspace(
+                context, real_config_path=real_config_path
+            )
+        except ExecutorWorkspaceBindingError as exc:
+            raise OpenClawAgentSelectionError(str(exc)) from exc
+        self._openclaw_config_path_override = self._workspace_binding.config_path
+
+    def release_runtime_workspace_binding(self) -> None:
+        """Discard the ephemeral config copy from ``bind_runtime_workspace``.
+
+        Never raises -- safe to call unconditionally from a `finally` block,
+        including when no binding was ever established.
+        """
+        if getattr(self, "_workspace_binding", None) is None:
+            return
+        self._workspace_binding.release()
+        self._workspace_binding = None
+        self._openclaw_config_path_override = None
+
+    def _apply_workspace_binding_env(self, env: Dict[str, str]) -> Dict[str, str]:
+        """Propagate an active runtime-workspace binding's config path to a
+        subprocess's environment via ``OPENCLAW_CONFIG_PATH``.
+
+        The parent process resolves the same ephemeral config via
+        ``_openclaw_config_path()`` (for agent selection); the child
+        `openclaw` CLI process must resolve the identical file so the agent
+        id passed with ``--agent`` maps to the Runtime Workspace there too,
+        not the real, persistent config.
+        """
+        config_path_override = getattr(self, "_openclaw_config_path_override", None)
+        if config_path_override:
+            env["OPENCLAW_CONFIG_PATH"] = str(config_path_override)
+        return env
 
     @staticmethod
     def _extract_reported_workspace_dir(*texts: str) -> Optional[str]:
@@ -1015,6 +1089,7 @@ class OpenClawSessionService:
 
         expected_project_root = self._resolve_project_root_for_workspace_guard()
         subprocess_env, git_guard_shim_dir = build_git_containment_env()
+        subprocess_env = self._apply_workspace_binding_env(subprocess_env)
 
         diagnostics: Dict[str, Any] = {
             "timeout_seconds": timeout_seconds,
@@ -1313,6 +1388,8 @@ class OpenClawSessionService:
 
     def _resolve_execution_cwd(self) -> Optional[str]:
         """Resolve the best working directory for OpenClaw subprocess execution."""
+        if self.execution_cwd_override:
+            return self.execution_cwd_override
         try:
             project_model = None
             if self.session_model and self.session_model.project_id:
@@ -1357,6 +1434,14 @@ class OpenClawSessionService:
             return None
 
     def _resolve_project_root_for_workspace_guard(self) -> Optional[str]:
+        if self.execution_cwd_override:
+            # Phase 23C: when execution is redirected into a Task Execution
+            # Sandbox, the containment guard (Phase 22C-0) must validate
+            # OpenClaw's reported workspaceDir against the Runtime Workspace
+            # it was actually dispatched into, not the Project Workspace --
+            # otherwise every runtime-workspace execution would trip the
+            # guard as a false positive. The guard itself stays fully active.
+            return self.execution_cwd_override
         try:
             project_model = None
             if self.session_model and self.session_model.project_id:
@@ -1913,6 +1998,7 @@ class OpenClawSessionService:
                 )
             execution_started_at_epoch = time.time()
             subprocess_env, git_guard_shim_dir = build_git_containment_env()
+            subprocess_env = self._apply_workspace_binding_env(subprocess_env)
             openclaw_version = self._resolve_openclaw_cli_version()
 
             full_cmd.extend(

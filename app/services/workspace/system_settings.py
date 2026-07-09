@@ -29,6 +29,8 @@ ORCHESTRATION_POLICY_PROFILE_KEY = "orchestration_policy_profile"
 WORKSPACE_REVIEW_POLICY_KEY = "workspace_review_policy"
 WORKSPACE_REVIEW_POLICIES = {"auto_publish_all", "hold_nontrivial", "hold_all"}
 CONTAINER_WORKSPACE_ROOTS = {"/app/projects", "/app"}
+RUNTIME_ROOT_KEY = "orchestrator_runtime_root"
+DEFAULT_RUNTIME_ROOT = "~/.orchestrator/runtime"
 
 
 def normalize_workspace_review_policy(value: Optional[str]) -> str:
@@ -217,6 +219,20 @@ def get_effective_workspace_review_policy(
         WORKSPACE_REVIEW_POLICY_KEY, default_policy, db=db
     )
     return normalize_workspace_review_policy(policy)
+
+
+def get_effective_runtime_root(db: Optional[Session] = None) -> Path:
+    """Resolve the Orchestrator-owned runtime root (Phase 23B).
+
+    Deliberately separate from get_effective_workspace_root: this path
+    belongs to Orchestrator, not to any project repo or executor. Not yet
+    read by any execution path — see task_sandbox_allocator.py.
+    """
+    value = (
+        get_setting_value_runtime(RUNTIME_ROOT_KEY, settings.RUNTIME_ROOT, db=db)
+        or settings.RUNTIME_ROOT
+    )
+    return Path(value).expanduser().resolve()
 
 
 def classify_model_lane(

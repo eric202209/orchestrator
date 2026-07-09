@@ -37,6 +37,8 @@ harness layout remains stable.
 - `phase18f_seed_real_session_evidence.py`, `phase18i_machine_a_limited_validation.py` -
   Phase 18F/18I evidence-generation harnesses (see
   `docs/roadmap/done/workflow/` for their reports).
+- `workspace_collision_audit.py` - Phase 23B read-only Project workspace
+  collision audit; imported by `app/tests/`.
 
 2026-07: removed 45 one-off T1/WorkingMemory confirmation and pilot runners
 (`t1_*_runner.py`, `t1_*_driver*.py`, `wm_*_runner.py`, `wm_*_pilot*.py`,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -15,6 +16,14 @@ from app.services.workspace.project_isolation_service import (
 )
 from app.services.workspace.permissions import ensure_shared_permissions
 from app.services.tasks.service import TaskService
+from app.services.workspace.task_sandbox_allocator import (
+    TaskSandbox,
+    allocate_task_sandbox,
+    dispose_task_sandbox,
+)
+from app.services.orchestration.execution.runtime_context import (
+    RuntimeExecutorContext,
+)
 
 
 def get_state_manager_path(project_root: Path) -> Path:
@@ -211,3 +220,161 @@ def build_workspace_discovery_step(
     repaired_step["rollback"] = None
     repaired_step["expected_files"] = []
     return repaired_step
+
+
+# ── Phase 23C/23D: runtime workspace redirection (Task Execution Sandbox) ──
+#
+# Pure, worker.py-independent helpers so the sandbox allocation, runtime
+# executor context construction, workspace contract argument selection, and
+# disposal logic used by dispatch can be unit tested without invoking the
+# full Celery task. worker.py calls these directly; none of them are wired
+# into any other execution path.
+
+
+def build_runtime_executor_context(
+    *,
+    sandbox: Optional[TaskSandbox],
+    project_workspace: Path,
+    executor: str,
+    project_id: Optional[int],
+    task_execution_id: Optional[int],
+    runtime_root: Optional[Path] = None,
+) -> RuntimeExecutorContext:
+    """Construct the one Runtime Executor Context for this dispatch (Phase
+    23D Goal 1/2).
+
+    Replaces the three independent ``orchestration_state._project_dir_override``
+    assignments Phase 23C left in ``worker.py`` (sandboxed, non-sandboxed
+    canonical, and -- unchanged, out of scope -- resume) with a single
+    constructed object: ``sandbox`` present means the Task Execution Sandbox
+    branch, ``sandbox is None`` means Model A (execute directly in the
+    Project Workspace).
+    """
+    if sandbox is not None:
+        return RuntimeExecutorContext.for_sandbox(
+            sandbox, project_workspace=project_workspace, runtime_root=runtime_root
+        )
+    return RuntimeExecutorContext.for_project_workspace(
+        project_workspace=project_workspace,
+        executor=executor,
+        project_id=project_id,
+        task_execution_id=task_execution_id,
+    )
+
+
+def maybe_bind_runtime_cwd_override(
+    runtime_service: Any,
+    context: Optional[Any],
+) -> bool:
+    """Bind the Runtime Executor Context's runtime path onto a runtime
+    backend that supports it (Goal 2: single resolved runtime path, closes
+    F15 for the branch that constructs a context).
+
+    ``context`` is normally a ``RuntimeExecutorContext`` (``.runtime_workspace``);
+    a bare ``TaskSandbox`` (``.path``, the pre-23D calling convention) is
+    also accepted for backward compatibility.
+
+    Returns True if the override was set. No-ops (returns False) when there
+    is no context for this dispatch, when it carries no resolvable runtime
+    path, or when the backend has no ``execution_cwd_override`` attribute
+    (e.g. non-OpenClaw backends) -- mirrors the existing ``hasattr`` guard
+    pattern dispatch already uses for optional runtime attributes like
+    ``task_execution_id``.
+    """
+    if context is None:
+        return False
+    if not hasattr(runtime_service, "execution_cwd_override"):
+        return False
+    runtime_workspace = getattr(context, "runtime_workspace", None)
+    if runtime_workspace is None:
+        runtime_workspace = getattr(context, "path", None)
+    if runtime_workspace is None:
+        return False
+    runtime_service.execution_cwd_override = str(runtime_workspace)
+    return True
+
+
+def maybe_allocate_runtime_workspace(
+    *,
+    enabled: bool,
+    project_id: int,
+    task_execution_id: int,
+    canonical_baseline_dir: Path,
+    executor: str,
+    runtime_root: Optional[Path] = None,
+) -> Optional[TaskSandbox]:
+    """Allocate a Task Execution Sandbox when runtime-workspace mode is on.
+
+    Returns None (no allocation, no side effect) when ``enabled`` is False --
+    the Phase 23B behavior is otherwise unchanged. Raises TaskSandboxError on
+    allocation failure; callers must not fall back to executing directly in
+    ``canonical_baseline_dir`` on that error.
+    """
+    if not enabled:
+        return None
+    return allocate_task_sandbox(
+        canonical_baseline_dir,
+        project_id=project_id,
+        task_execution_id=task_execution_id,
+        executor=executor,
+        runtime_root=runtime_root,
+    )
+
+
+def resolve_workspace_contract_args(
+    *,
+    runtime_context: Optional[RuntimeExecutorContext] = None,
+    project_workspace_path: Path,
+    task_subfolder: Optional[str],
+    runs_in_canonical_baseline: bool,
+    runtime_sandbox: Optional[TaskSandbox] = None,
+) -> Dict[str, Any]:
+    """Return the expected_root/subfolder/allow_project_root_task_dir set for
+    verify_workspace_contract.
+
+    When a Task Execution Sandbox is active (via ``runtime_context`` or,
+    kept for backward compatibility, a bare ``runtime_sandbox``), the
+    Runtime Workspace is the only path the contract may validate against --
+    the Project Workspace is not touched during execution and must not be
+    compared to task_dir.
+    """
+    sandbox = runtime_sandbox
+    if sandbox is None and runtime_context is not None:
+        sandbox = runtime_context.sandbox
+    if sandbox is not None:
+        return {
+            "expected_root": sandbox.path,
+            "expected_task_subfolder": None,
+            "allow_project_root_task_dir": True,
+        }
+    return {
+        "expected_root": project_workspace_path,
+        "expected_task_subfolder": task_subfolder,
+        "allow_project_root_task_dir": runs_in_canonical_baseline,
+    }
+
+
+def dispose_runtime_workspace_safely(
+    sandbox: Optional[TaskSandbox],
+    *,
+    project_root: Optional[Path],
+    logger_obj: Optional[logging.Logger] = None,
+) -> bool:
+    """Dispose a Task Execution Sandbox, never raising.
+
+    Returns True if disposal was attempted (sandbox was not None), regardless
+    of whether it succeeded -- callers use this from a `finally` block, where
+    a raised exception here must never mask the original outcome.
+    """
+    if sandbox is None:
+        return False
+    log = logger_obj or logging.getLogger(__name__)
+    try:
+        dispose_task_sandbox(sandbox, project_root=project_root)
+    except Exception as exc:  # noqa: BLE001 - finally-block cleanup must not raise
+        log.warning(
+            "[ORCHESTRATION] Failed to dispose Runtime Workspace %s: %s",
+            sandbox.path,
+            exc,
+        )
+    return True
