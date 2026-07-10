@@ -19,6 +19,7 @@ from app.services.workspace.workspace_paths import (
     HYDRATION_EXCLUDED_NAMES,
     LEGACY_BASELINE_DIR_NAME,
     TASK_REPORT_RE,
+    is_executor_runtime_scaffold,
     is_hydration_excluded_path,
     resolve_project_root,
 )
@@ -184,6 +185,8 @@ class ChangesetService:
                 continue
             if not source_path.is_file():
                 continue
+            if is_executor_runtime_scaffold(source_path):
+                continue
             destination = files_root / relative_path
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, destination)
@@ -285,6 +288,17 @@ class ChangesetService:
 
         before_paths = set(before)
         after_paths = set(after)
+        # OpenClaw may overwrite a project-owned AGENTS.md with its generated
+        # onboarding copy. Treat that executor-owned copy as absent on both
+        # sides, preventing a false deletion from reaching promotion while
+        # retaining legitimate project edits with different content.
+        runtime_scaffold_paths = {
+            relative
+            for relative, path in after.items()
+            if is_executor_runtime_scaffold(path)
+        }
+        before_paths -= runtime_scaffold_paths
+        after_paths -= runtime_scaffold_paths
         added_files = sorted(after_paths - before_paths)
         deleted_files = sorted(before_paths - after_paths)
         modified_files = sorted(

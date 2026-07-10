@@ -22,6 +22,7 @@ from app.services.workspace.workspace_paths import (
     REQUESTED_CHANGES_ARCHIVE_ROOT,
     RETAINED_WORKSPACE_ARCHIVE_ROOT,
     TASK_REPORT_RE,
+    is_executor_runtime_scaffold,
     is_hydration_excluded_path,
     resolve_project_root,
 )
@@ -270,6 +271,11 @@ class BaselinePromotionService:
             except ValueError:
                 continue
             if not source_path.is_file():
+                continue
+            # Defense in depth: capture should already remove executor
+            # scaffolding, but promotion must never apply it if an older or
+            # hand-built artifact contains the generated AGENTS.md.
+            if is_executor_runtime_scaffold(source_path):
                 continue
             destination = baseline_dir / relative
             destination.parent.mkdir(parents=True, exist_ok=True)

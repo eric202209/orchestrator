@@ -40,6 +40,11 @@ HYDRATION_EXCLUDED_NAMES = {
     "TOOLS.md",
     "USER.md",
 }
+# Kept separate from hydration exclusions so legitimate project-owned
+# AGENTS.md files remain visible; the content predicate below identifies only
+# the executor-generated OpenClaw onboarding copy.
+RUNTIME_SCAFFOLD_FILENAME = "AGENTS.md"
+OPENCLAW_RUNTIME_SCAFFOLD_HEADER = "# AGENTS.md - Your Workspace"
 LEGACY_BASELINE_DIR_NAME = ".project-baseline"
 AUTO_SNAPSHOT_ROOT = ".agent/auto-snapshots"
 AUTO_SNAPSHOT_DIR_NAME = "auto-snapshots"
@@ -95,3 +100,18 @@ def resolve_project_root(project: Project, db: Session) -> Path:
 
 def is_hydration_excluded_path(relative_path: Path) -> bool:
     return any(part in HYDRATION_EXCLUDED_NAMES for part in relative_path.parts)
+
+
+def is_executor_runtime_scaffold(path: Path) -> bool:
+    """Identify OpenClaw's generated onboarding AGENTS.md by provenance."""
+
+    path = Path(path)
+    if path.name != RUNTIME_SCAFFOLD_FILENAME or not path.is_file():
+        return False
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return False
+    return content.startswith(OPENCLAW_RUNTIME_SCAFFOLD_HEADER) and (
+        "This folder is home. Treat it that way." in content
+    )
