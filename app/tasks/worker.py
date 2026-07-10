@@ -2219,6 +2219,19 @@ def execute_orchestration_task(
                 # in RuntimeExecutorContext), and no pre-run snapshot was ever
                 # captured there for this execution. Never diff/copy from the
                 # live Project Workspace in this state -- fail closed instead.
+                #
+                # Phase 23D-10: this must commit immediately, not batch with
+                # the commit below. `_sync_task_execution_from_task_state`
+                # (below) can leave task_execution.status FAILED (set by
+                # FailureCoordinator.mark_task_attempt_failed) while
+                # task/session_task_link are reset to PENDING for a retry
+                # (FailureCoordinator's retry branch calls
+                # mark_task_attempt_pending without task_execution=), which
+                # trips its own status-mismatch guard and returns without a
+                # commit -- silently dropping this row on `db.close()` and
+                # regressing GET /tasks/{id}/change-set to "not_recorded".
+                # The durable operator signal must land before any
+                # subsequent retry/checkpoint bookkeeping, committed or not.
                 if (
                     runs_in_canonical_baseline
                     and settings.RUNTIME_WORKSPACE_ENABLED
@@ -2231,7 +2244,7 @@ def execute_orchestration_task(
                         task_execution_id=task_execution_id,
                         snapshot_key=_change_set_snapshot_key,
                         reason="runtime_not_allocated",
-                        commit=False,
+                        commit=True,
                     )
                 else:
                     task_service_for_change_set.persist_task_execution_change_set(
