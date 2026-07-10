@@ -1344,6 +1344,35 @@ def test_project_mutation_lock_waits_for_short_lived_writer(tmp_path: Path):
     thread.join(timeout=1)
 
 
+def test_project_mutation_lock_recreates_directory_removed_before_chmod(
+    tmp_path: Path, monkeypatch
+):
+    """A releasing writer can remove an empty lock directory during setup."""
+    project_root = tmp_path / "mutation-lock-chmod-race"
+    project_root.mkdir(parents=True)
+    lock_dir = project_root / ".agent" / "locks"
+    original_chmod = Path.chmod
+    removed = False
+
+    def remove_lock_dir_before_chmod(path: Path, mode: int, **kwargs) -> None:
+        nonlocal removed
+        if path == lock_dir and not removed:
+            removed = True
+            path.rmdir()
+        original_chmod(path, mode, **kwargs)
+
+    monkeypatch.setattr(Path, "chmod", remove_lock_dir_before_chmod)
+
+    with project_mutation_lock(
+        project_id=123,
+        project_root=project_root,
+        operation="chmod-race",
+        owner="test-chmod-race",
+        wait_timeout_seconds=0,
+    ):
+        assert removed
+
+
 def test_project_mutation_lock_removes_empty_agent_lock_dirs(tmp_path: Path):
     project_root = tmp_path / "mutation-lock-cleanup"
     project_root.mkdir(parents=True)

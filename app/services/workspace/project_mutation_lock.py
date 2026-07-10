@@ -62,9 +62,11 @@ def project_mutation_lock(
     lock_dir.mkdir(parents=True, exist_ok=True)
     try:
         lock_dir.chmod(0o777)
-    except PermissionError:
+    except (PermissionError, FileNotFoundError):
         # Windows-mounted project folders can reject chmod even when the
-        # directory is writable. The atomic lock file creation below is the
+        # directory is writable. A releasing concurrent writer can also remove
+        # the empty lock directory after mkdir and before chmod. The atomic
+        # lock file creation below recreates it when needed and is the
         # authority; chmod is only a permissive-mode best effort.
         pass
     token = str(uuid.uuid4())
