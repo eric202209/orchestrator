@@ -58,6 +58,7 @@ from app.services.workspace.project_mutation_lock import ProjectMutationLockErro
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
+from app.services.workspace.task_sandbox_allocator import TaskSandboxError
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -956,6 +957,8 @@ async def execute_task_with_runtime(
     task = _get_task_for_user(db, task_id, current_user)
     session_task = None
     task_execution = None
+    new_session = None
+    _runtime_sandbox = None
 
     # Get prompt from request body or use task description
     try:
@@ -1169,6 +1172,30 @@ async def execute_task_with_runtime(
                 error_message=error_msg,
                 completed_at=datetime.now(timezone.utc),
             )
+            # Phase 23D-12: mirrors worker.py's dispatch `finally` block
+            # (Phase 23D-8/23D-10) -- a Runtime Workspace sandbox was
+            # required (RUNTIME_WORKSPACE_ENABLED) but never allocated for
+            # this task_execution (e.g. TaskSandboxError before
+            # `maybe_allocate_runtime_workspace` returned). Never fall
+            # through to a change-set read that could resolve a stale row
+            # for a reused task_id -- record the fail-closed
+            # runtime_not_allocated state explicitly, same as worker.py.
+            if (
+                isinstance(e, TaskSandboxError)
+                and settings.RUNTIME_WORKSPACE_ENABLED
+                and _runtime_sandbox is None
+                and task.project
+                and task_execution is not None
+            ):
+                TaskService(db).record_task_execution_change_set_unavailable(
+                    task.project,
+                    task,
+                    session_id=new_session.id if new_session else None,
+                    task_execution_id=task_execution.id,
+                    snapshot_key=workspace_snapshot_key(task.id, task_execution.id),
+                    reason="runtime_not_allocated",
+                    commit=True,
+                )
             db.commit()
         raise HTTPException(status_code=500, detail=error_msg)
 

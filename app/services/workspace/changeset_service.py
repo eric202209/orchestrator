@@ -626,9 +626,23 @@ class ChangesetService:
         self,
         task_id: int,
     ) -> Optional[dict[str, Any]]:
+        # Phase 23D-12: a hard `DELETE /tasks/{id}` can leave orphaned
+        # TaskExecution/TaskExecutionChangeSet rows referencing a task_id
+        # that SQLite later reuses for an unrelated new Task row (observed
+        # live in Phase 23D-11: a stale "promoted" change-set from a
+        # different, already-cleaned-up task/project surfaced for a brand
+        # new task that had never even allocated a sandbox). Every genuine
+        # change-set for a task must belong to an execution that started at
+        # or after that task's own creation -- join through Task and filter
+        # on that invariant instead of trusting task_id alone, which an
+        # orphaned row can share by coincidence of id reuse.
         record = (
             self.db.query(TaskExecutionChangeSet)
-            .filter(TaskExecutionChangeSet.task_id == task_id)
+            .join(Task, Task.id == TaskExecutionChangeSet.task_id)
+            .filter(
+                TaskExecutionChangeSet.task_id == task_id,
+                TaskExecutionChangeSet.created_at >= Task.created_at,
+            )
             .order_by(
                 TaskExecutionChangeSet.created_at.desc(),
                 TaskExecutionChangeSet.id.desc(),
