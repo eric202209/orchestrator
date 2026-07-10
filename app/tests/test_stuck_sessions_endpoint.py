@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import os
+import socket
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -216,6 +218,26 @@ def test_worker_boot_recovery_skips_session_with_running_task(db_session):
     # The key assertion: the session is not prematurely stopped.
     db_session.refresh(session)
     # Still running — active task means no orphan recovery.
+    assert session.is_active is True
+
+
+def test_recovery_does_not_stop_stale_execution_with_live_local_owner(db_session):
+    project = _project(db_session)
+    session = _running_session(db_session, project, started_minutes_ago=20)
+    task = _task(db_session, project)
+    task.status = TaskStatus.RUNNING
+    _session_task_link(db_session, session, task, status=TaskStatus.RUNNING)
+    _task_execution(db_session, session, task).worker_pid = os.getpid()
+    execution = _task_execution(db_session, session, task, attempt=2)
+    execution.worker_pid = os.getpid()
+    execution.worker_hostname = socket.gethostname()
+    db_session.commit()
+
+    recovered = recover_stale_running_sessions(db_session, stale_after_seconds=60)
+
+    assert recovered == []
+    db_session.refresh(session)
+    assert session.status == "running"
     assert session.is_active is True
 
 

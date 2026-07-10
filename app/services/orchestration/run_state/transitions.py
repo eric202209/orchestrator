@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import socket
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -53,7 +55,24 @@ def mark_task_attempt_running(
         task_execution.status = TaskStatus.RUNNING
         task_execution.started_at = started_at
         task_execution.completed_at = None
+        task_execution.worker_pid = os.getpid()
+        task_execution.worker_hostname = socket.gethostname()
+        task_execution.heartbeat_at = started_at
     return started_at
+
+
+def refresh_task_execution_lease(
+    task_execution: TaskExecution | None,
+    *,
+    heartbeat_at: datetime | None = None,
+) -> datetime | None:
+    """Refresh the liveness lease for a running execution at a work boundary."""
+
+    if task_execution is None or task_execution.status != TaskStatus.RUNNING:
+        return None
+    heartbeat_at = heartbeat_at or datetime.now(timezone.utc)
+    task_execution.heartbeat_at = heartbeat_at
+    return heartbeat_at
 
 
 def mark_task_attempt_pending(

@@ -673,6 +673,29 @@ def _migration_013_failure_metadata(engine: Engine) -> None:
                 )
 
 
+def _migration_023_task_execution_lease(engine: Engine) -> None:
+    if "task_executions" not in _table_names(engine):
+        return
+    statements: list[str] = []
+    for column_name, ddl in [
+        ("worker_pid", "ALTER TABLE task_executions ADD COLUMN worker_pid INTEGER"),
+        (
+            "worker_hostname",
+            "ALTER TABLE task_executions ADD COLUMN worker_hostname VARCHAR(255)",
+        ),
+        (
+            "heartbeat_at",
+            "ALTER TABLE task_executions ADD COLUMN heartbeat_at DATETIME",
+        ),
+    ]:
+        if not _has_column(engine, "task_executions", column_name):
+            statements.append(ddl)
+    if statements:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+
+
 def _migration_014_task_workflow_stage(engine: Engine) -> None:
     if "tasks" not in _table_names(engine):
         return
@@ -1065,6 +1088,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="022_knowledge_sync_state",
         description="Add sync_status, sync_required_at, last_synced_at, last_sync_error to knowledge_items",
         upgrade=_migration_022_knowledge_sync_state,
+    ),
+    Migration(
+        version="023_task_execution_lease",
+        description="Add worker ownership and heartbeat fields to task executions",
+        upgrade=_migration_023_task_execution_lease,
     ),
 )
 

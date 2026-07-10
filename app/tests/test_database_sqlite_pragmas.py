@@ -24,6 +24,7 @@ def test_sqlite_engine_connect_sets_wal_and_busy_timeout(tmp_path):
     @event.listens_for(engine, "connect")
     def _set_sqlite_pragmas(dbapi_connection, _):
         cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA synchronous=NORMAL")
         cursor.execute("PRAGMA busy_timeout=30000")
@@ -33,10 +34,12 @@ def test_sqlite_engine_connect_sets_wal_and_busy_timeout(tmp_path):
         journal_mode = conn.exec_driver_sql("PRAGMA journal_mode").scalar()
         synchronous = conn.exec_driver_sql("PRAGMA synchronous").scalar()
         busy_timeout = conn.exec_driver_sql("PRAGMA busy_timeout").scalar()
+        foreign_keys = conn.exec_driver_sql("PRAGMA foreign_keys").scalar()
 
     assert journal_mode == "wal"
     assert synchronous == 1  # NORMAL
     assert busy_timeout == 30000
+    assert foreign_keys == 1
 
 
 def test_database_module_registers_sqlite_pragma_listener_when_sqlite():
@@ -55,8 +58,10 @@ def test_database_module_registers_sqlite_pragma_listener_when_sqlite():
     with engine.connect() as conn:
         journal_mode = conn.exec_driver_sql("PRAGMA journal_mode").scalar()
         busy_timeout = conn.exec_driver_sql("PRAGMA busy_timeout").scalar()
+        foreign_keys = conn.exec_driver_sql("PRAGMA foreign_keys").scalar()
 
     # In-memory databases cannot use WAL (no file to hold the -wal segment),
     # so SQLite silently keeps "memory" here; busy_timeout still applies.
     assert journal_mode == "memory"
     assert busy_timeout == 30000
+    assert foreign_keys == 1

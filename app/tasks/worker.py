@@ -2441,5 +2441,37 @@ def answer_human_intervention_query(
         )
     except Exception as exc:
         logger.error("answer_human_intervention_query failed: %s", exc)
+        db.rollback()
+        try:
+            req = (
+                db.query(InterventionRequest)
+                .filter(InterventionRequest.id == intervention_id)
+                .first()
+            )
+            if req and req.status == "pending":
+                snapshot = _decode_context_snapshot_object(req.context_snapshot)
+                snapshot["ai_response_error"] = str(exc)
+                req.context_snapshot = json.dumps(snapshot)
+                req.status = "failed"
+                _record_live_log(
+                    db,
+                    session_id,
+                    req.task_id,
+                    "ERROR",
+                    "[OPERATOR-QUERY] AI response failed; operator action is required.",
+                    metadata={
+                        "phase": "human_intervention",
+                        "intervention_id": intervention_id,
+                        "status": "failed",
+                    },
+                )
+                db.commit()
+        except Exception as persistence_exc:
+            db.rollback()
+            logger.error(
+                "Failed to persist intervention failure for %s: %s",
+                intervention_id,
+                persistence_exc,
+            )
     finally:
         db.close()

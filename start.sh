@@ -60,6 +60,7 @@ prepare_logs() {
     mkdir -p "${QDRANT_SNAPSHOTS_DIR}"
     : > "${LOG_DIR}/backend.log"
     : > "${LOG_DIR}/worker.log"
+    : > "${LOG_DIR}/beat.log"
     : > "${LOG_DIR}/frontend.log"
     : > "${LOG_DIR}/qdrant.log"
 }
@@ -201,6 +202,7 @@ stop_existing() {
     echo -e "${YELLOW}⚠️  Stopping existing processes...${NC}"
     cleanup_pid_file "${PID_DIR}/backend.pid"
     cleanup_pid_file "${PID_DIR}/worker.pid"
+    cleanup_pid_file "${PID_DIR}/beat.pid"
     cleanup_pid_file "${PID_DIR}/frontend.pid"
 
     # Stop backend
@@ -228,6 +230,19 @@ stop_existing() {
         stopped_workers=true
     fi
     [ "$stopped_workers" = true ] && echo -e "${GREEN}✅ Workers stopped${NC}"
+
+    # Stop the separate Celery Beat scheduler.
+    local stopped_beat=false
+    if [ -f "${PID_DIR}/beat.pid" ]; then
+        kill "$(cat "${PID_DIR}/beat.pid")" 2>/dev/null || true
+        rm -f "${PID_DIR}/beat.pid"
+        stopped_beat=true
+    fi
+    if check_process "celery -A app.celery_app beat"; then
+        pkill -f "celery -A app.celery_app beat" || true
+        stopped_beat=true
+    fi
+    [ "$stopped_beat" = true ] && echo -e "${GREEN}✅ Celery Beat stopped${NC}"
 
     # Stop frontend
     local stopped_frontend=false
@@ -431,6 +446,26 @@ start_workers() {
         echo -e "${YELLOW}Check logs: cat logs/worker.log${NC}"
         return 1
     fi
+
+    cleanup_pid_file "${PID_DIR}/beat.pid"
+    setsid nohup "${VENV_DIR}/bin/celery" \
+        -A app.celery_app beat \
+        --loglevel=info \
+        --schedule="${PID_DIR}/celerybeat-schedule" \
+        >> "${LOG_DIR}/beat.log" 2>&1 &
+    local beat_pid=$!
+    echo "${beat_pid}" > "${PID_DIR}/beat.pid"
+    normalize_runtime_ownership
+
+    sleep 1
+    if ! kill -0 "${beat_pid}" 2>/dev/null; then
+        rm -f "${PID_DIR}/beat.pid"
+        echo -e "${RED}❌ Celery Beat failed to start!${NC}"
+        echo -e "${YELLOW}Check logs: cat logs/beat.log${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}✅ Celery Beat started${NC}"
+    echo -e "${GREEN}🆔 Beat PID: ${beat_pid}${NC}"
     echo ""
 }
 

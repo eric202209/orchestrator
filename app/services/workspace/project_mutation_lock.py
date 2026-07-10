@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import time
 import uuid
@@ -23,6 +24,27 @@ class ProjectMutationLockError(RuntimeError):
         )
 
 
+def _lock_path_for_project_root(project_root: Path) -> Path:
+    resolved_root = project_root.resolve()
+    workspace_key = hashlib.sha256(str(resolved_root).encode("utf-8")).hexdigest()[:16]
+    return (
+        resolved_root / ".agent" / "locks" / f"workspace-{workspace_key}.mutation.lock"
+    )
+
+
+def _pid_is_alive(pid: object) -> bool:
+    try:
+        value = int(pid)
+        if value <= 0:
+            return False
+        os.kill(value, 0)
+    except (TypeError, ValueError, ProcessLookupError):
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 @contextmanager
 def project_mutation_lock(
     *,
@@ -34,7 +56,9 @@ def project_mutation_lock(
     wait_timeout_seconds: float = 2.0,
     poll_interval_seconds: float = 0.1,
 ) -> Iterator[Path]:
-    lock_dir = project_root / ".agent" / "locks"
+    project_root = project_root.resolve()
+    lock_path = _lock_path_for_project_root(project_root)
+    lock_dir = lock_path.parent
     lock_dir.mkdir(parents=True, exist_ok=True)
     try:
         lock_dir.chmod(0o777)
@@ -43,7 +67,6 @@ def project_mutation_lock(
         # directory is writable. The atomic lock file creation below is the
         # authority; chmod is only a permissive-mode best effort.
         pass
-    lock_path = lock_dir / f"project-{project_id}.mutation.lock"
     token = str(uuid.uuid4())
     now = time.time()
 
@@ -53,7 +76,8 @@ def project_mutation_lock(
             created_at = float(metadata.get("created_at_epoch") or 0)
         except (ValueError, OSError, json.JSONDecodeError):
             created_at = 0
-        if created_at and now - created_at > stale_after_seconds:
+        lock_owner_dead = "pid" in metadata and not _pid_is_alive(metadata["pid"])
+        if lock_owner_dead or (created_at and now - created_at > stale_after_seconds):
             lock_path.unlink(missing_ok=True)
 
     metadata = {
@@ -61,6 +85,8 @@ def project_mutation_lock(
         "operation": operation,
         "owner": owner,
         "token": token,
+        "pid": os.getpid(),
+        "resolved_project_root": str(project_root),
         "created_at_epoch": now,
     }
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY

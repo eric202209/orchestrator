@@ -311,6 +311,45 @@ class TestSubmitInterventionReply:
             )
         assert exc_info.value.status_code == 400
 
+
+def test_ai_intervention_failure_terminalizes_pending_request(
+    db_session: Session,
+    running_session: SessionModel,
+    pending_intervention: InterventionRequest,
+):
+    from app.tasks.worker import answer_human_intervention_query
+
+    intervention_id = pending_intervention.id
+    session_id = running_session.id
+
+    with (
+        patch("app.tasks.worker.get_db_session", return_value=db_session),
+        patch(
+            "app.services.agents.agent_runtime.invoke_runtime_prompt",
+            side_effect=RuntimeError("model down"),
+        ),
+    ):
+        answer_human_intervention_query.run(
+            intervention_id,
+            session_id,
+        )
+
+    persisted = db_session.get(InterventionRequest, intervention_id)
+    assert persisted is not None
+    assert persisted.status == "failed"
+    snapshot = json.loads(persisted.context_snapshot)
+    assert snapshot["ai_response_error"] == "model down"
+    error_log = (
+        db_session.query(LogEntry)
+        .filter(
+            LogEntry.session_id == session_id,
+            LogEntry.level == "ERROR",
+        )
+        .order_by(LogEntry.id.desc())
+        .first()
+    )
+    assert error_log is not None
+
     def test_emits_reply_event_log(
         self,
         db_session: Session,

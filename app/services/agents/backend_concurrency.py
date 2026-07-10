@@ -27,30 +27,45 @@ def _slot_key(backend_id: str) -> str:
     return f"orchestrator:backend_slots:{backend_id}"
 
 
+_ACQUIRE_SLOT_SCRIPT = """
+local key = KEYS[1]
+local session_id = ARGV[1]
+local max_slots = tonumber(ARGV[2])
+local lease_seconds = tonumber(ARGV[3])
+
+if redis.call('SISMEMBER', key, session_id) == 0 and redis.call('SCARD', key) >= max_slots then
+    return 0
+end
+
+redis.call('SADD', key, session_id)
+redis.call('EXPIRE', key, lease_seconds)
+return 1
+"""
+
+
 def acquire_backend_slot(
     redis_client: Any,
     backend_id: str,
     session_id: int,
     max_slots: int,
-    timeout_s: int = 30,
+    timeout_s: int = 3900,
 ) -> bool:
     """Atomically claim a backend slot for session_id. Returns False when at capacity.
 
-    Redis operational errors (connection failure, timeout, WatchError) propagate to
-    the caller so it can fail open. Only genuine capacity limits return False.
+    Redis operational errors propagate to the caller so the worker can apply its
+    availability policy. Contention is represented only by a False return.
     """
     key = _slot_key(backend_id)
-    with redis_client.pipeline() as pipe:
-        pipe.watch(key)
-        current = redis_client.smembers(key)
-        if len(current) >= max_slots:
-            pipe.reset()
-            return False
-        pipe.multi()
-        pipe.sadd(key, str(session_id))
-        pipe.expire(key, timeout_s * 60)
-        pipe.execute()
-        return True
+    return bool(
+        redis_client.eval(
+            _ACQUIRE_SLOT_SCRIPT,
+            1,
+            key,
+            str(session_id),
+            max_slots,
+            timeout_s,
+        )
+    )
 
 
 def release_backend_slot(redis_client: Any, backend_id: str, session_id: int) -> None:

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import socket
 import uuid
 from datetime import UTC, datetime, timezone
 from pathlib import Path
@@ -46,7 +48,9 @@ from app.services.orchestration.state.session_state import (
     mark_session_paused,
     mark_session_running,
     mark_session_stopped,
+    normalize_session_status,
     resolve_session_transition,
+    SessionStatus,
 )
 from app.services.tasks.service import TaskService
 from app.services.tasks.execution import create_task_execution
@@ -64,6 +68,18 @@ def _coerce_naive_utc_datetime(value: datetime | None) -> datetime | None:
     if value.tzinfo is None:
         return value
     return value.astimezone(UTC).replace(tzinfo=None)
+
+
+def _execution_owner_is_alive(execution: TaskExecution) -> bool:
+    if execution.worker_hostname != socket.gethostname() or not execution.worker_pid:
+        return False
+    try:
+        os.kill(execution.worker_pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _reset_running_session_tasks(
@@ -338,7 +354,7 @@ def recover_stale_running_sessions(
 ) -> list[dict[str, Any]]:
     now = datetime.now(UTC).replace(tzinfo=None)
     running_sessions = db.query(SessionModel).filter(
-        SessionModel.status == "running",
+        SessionModel.status.in_([SessionStatus.RUNNING.value, "active"]),
         SessionModel.is_active.is_(True),
         SessionModel.deleted_at.is_(None),
     )
@@ -406,6 +422,19 @@ def recover_stale_running_sessions(
 
         task = db.query(Task).filter(Task.id == latest_link.task_id).first()
         if not task or task.status != TaskStatus.RUNNING:
+            continue
+
+        active_execution = (
+            db.query(TaskExecution)
+            .filter(
+                TaskExecution.session_id == session.id,
+                TaskExecution.task_id == task.id,
+                TaskExecution.status == TaskStatus.RUNNING,
+            )
+            .order_by(TaskExecution.id.desc())
+            .first()
+        )
+        if active_execution and _execution_owner_is_alive(active_execution):
             continue
 
         latest_log = (
@@ -494,7 +523,12 @@ def reconcile_terminal_running_sessions(
         session_ids = [
             session.id
             for session in sessions
-            if session.status in ["running", "paused", "stopped"]
+            if normalize_session_status(session.status)
+            in {
+                SessionStatus.RUNNING.value,
+                SessionStatus.PAUSED.value,
+                SessionStatus.STOPPED.value,
+            }
         ]
         if not session_ids:
             return []
@@ -521,7 +555,7 @@ def reconcile_terminal_running_sessions(
             is not None
         )
         if active_running_exists:
-            if session.status == "paused":
+            if normalize_session_status(session.status) == SessionStatus.PAUSED.value:
                 previous_status = session.status
                 mark_session_running(session, started_at=session.started_at)
                 db.add(
@@ -1031,7 +1065,10 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
     if recovered_orphaned_run:
         db.refresh(session)
 
-    if session.status in ["running", "paused", "active"]:
+    if normalize_session_status(session.status) in {
+        SessionStatus.RUNNING.value,
+        SessionStatus.PAUSED.value,
+    }:
         raise HTTPException(
             status_code=409,
             detail=(
@@ -1040,7 +1077,10 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
             ),
         )
 
-    if session.status == "pending" and session.is_active:
+    if (
+        normalize_session_status(session.status) == SessionStatus.PENDING.value
+        and session.is_active
+    ):
         logger.warning(
             "Session %s is stuck in pending state with is_active=True. Resetting...",
             session_id,
@@ -1325,7 +1365,7 @@ async def stop_session_lifecycle(
     if session.status not in ["running", "paused", "active", "awaiting_input"]:
         raise HTTPException(status_code=400, detail="Session is not running")
     stop_transition = resolve_session_transition(
-        "running" if session.status == "active" else session.status,
+        normalize_session_status(session.status),
         "stop",
     )
     if not stop_transition.allowed:
@@ -1495,7 +1535,7 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
             await runtime.pause_session()
 
         pause_transition = resolve_session_transition(
-            "running" if session.status == "active" else session.status,
+            normalize_session_status(session.status),
             "pause",
         )
         mark_session_paused(
@@ -1609,7 +1649,7 @@ async def resume_session_lifecycle(
     previous_is_active = session.is_active
     previous_resumed_at = session.resumed_at
     dispatch_submitted = False
-    if session.status == "running":
+    if normalize_session_status(session.status) == SessionStatus.RUNNING.value:
         _recover_orphaned_running_session_if_needed(db, session=session)
         db.refresh(session)
     resume_transition = resolve_session_transition(session.status, "resume")
@@ -1838,7 +1878,11 @@ async def resume_session_lifecycle(
             session = (
                 db.query(SessionModel).filter(SessionModel.id == session_id).first()
             )
-            if session and session.status == "running":
+            if (
+                session
+                and normalize_session_status(session.status)
+                == SessionStatus.RUNNING.value
+            ):
                 session.status = previous_status
                 session.is_active = previous_is_active
                 session.resumed_at = previous_resumed_at

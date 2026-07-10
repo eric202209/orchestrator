@@ -33,7 +33,11 @@ from app.services.agents.agent_backends import (
 from app.services.agents.interfaces import AgentRuntimeError
 from app.services.model_adaptation import get_adaptation_profile
 from app.services.orchestration.run_state import mark_task_attempt_pending
-from app.services.orchestration.state.session_state import mark_session_paused
+from app.services.orchestration.state.session_state import (
+    SessionStatus,
+    mark_session_paused,
+    normalize_session_status,
+)
 from app.services.orchestration.policy import get_policy_profile
 from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.observability.log_utils import deduplicate_logs
@@ -638,7 +642,8 @@ def get_session_reconciliation_audit_payload(
     )
     reasons, category = _extract_stop_reasons(db, session)
     explicit_reason = None
-    if session.status == "paused":
+    normalized_status = normalize_session_status(session.status)
+    if normalized_status == SessionStatus.PAUSED.value:
         if intervention_requests:
             explicit_reason = "waiting_intervention"
         elif permission_requests:
@@ -651,7 +656,9 @@ def get_session_reconciliation_audit_payload(
             )
 
     scheduler_bug = bool(
-        session.status == "paused" and pending_tasks and explicit_reason is None
+        normalized_status == SessionStatus.PAUSED.value
+        and pending_tasks
+        and explicit_reason is None
     )
 
     return {
@@ -922,7 +929,12 @@ def get_session_divergence_compare_payload(
         fingerprint = None
         if workspace_path:
             # Completed sessions: long TTL.  Running sessions: short TTL.
-            max_age = 300 if candidate.status in {"running", "active"} else 3600
+            max_age = (
+                300
+                if normalize_session_status(candidate.status)
+                == SessionStatus.RUNNING.value
+                else 3600
+            )
             try:
                 fingerprint = read_session_fingerprint_index(
                     workspace_path, candidate.id, max_age_seconds=max_age
@@ -979,10 +991,11 @@ def get_session_divergence_compare_payload(
 def _prepare_session_for_replay(db: Session, session: SessionModel) -> None:
     """Allow checkpoint replay even if the session is still marked running."""
 
-    if session.status in {"paused", "stopped"}:
+    normalized_status = normalize_session_status(session.status)
+    if normalized_status in {SessionStatus.PAUSED.value, SessionStatus.STOPPED.value}:
         return
 
-    if session.status not in {"running", "active"}:
+    if normalized_status != SessionStatus.RUNNING.value:
         raise HTTPException(
             status_code=400,
             detail=f"Cannot replay checkpoint while session status is '{session.status}'",
@@ -2077,10 +2090,11 @@ def get_session_timeline_payload(
             },
         )
 
-    if session.status in {
-        "paused",
-        "stopped",
-        "failed",
+    normalized_status = normalize_session_status(session.status)
+    if normalized_status in {
+        SessionStatus.PAUSED.value,
+        SessionStatus.STOPPED.value,
+        SessionStatus.FAILED.value,
         "cancelled",
         "canceled",
         "awaiting_input",
@@ -2091,8 +2105,18 @@ def get_session_timeline_payload(
             at=_timeline_iso(
                 session.stopped_at or session.paused_at or session.updated_at
             ),
-            phase="failure" if session.status in {"failed", "stopped"} else "session",
-            kind="failure" if session.status in {"failed", "stopped"} else "warning",
+            phase=(
+                "failure"
+                if normalized_status
+                in {SessionStatus.FAILED.value, SessionStatus.STOPPED.value}
+                else "session"
+            ),
+            kind=(
+                "failure"
+                if normalized_status
+                in {SessionStatus.FAILED.value, SessionStatus.STOPPED.value}
+                else "warning"
+            ),
             title=f"Session {session.status}",
             detail="; ".join(stop_reasons),
             cause=stop_category,
@@ -2262,10 +2286,11 @@ def _extract_stop_reasons(
             if not reasons:
                 reasons.append("Backend capacity unavailable or overloaded.")
 
-    if not reasons and session.status == "awaiting_input":
+    normalized_status = normalize_session_status(session.status)
+    if not reasons and normalized_status == SessionStatus.AWAITING_INPUT.value:
         reasons = ["Waiting for operator input before continuing."]
         category = "awaiting_input"
-    elif not reasons and session.status == "paused":
+    elif not reasons and normalized_status == SessionStatus.PAUSED.value:
         reasons = ["Session paused by operator."]
         category = "operator_paused"
     elif not reasons:

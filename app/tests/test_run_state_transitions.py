@@ -21,6 +21,7 @@ from app.services.orchestration.run_state import (
     mark_task_attempt_failed,
     mark_task_attempt_pending,
     mark_task_attempt_running,
+    refresh_task_execution_lease,
     read_run_state_snapshot,
     reset_active_attempts_for_session_stop,
     task_execution_id_from_context,
@@ -92,6 +93,21 @@ def test_mark_task_attempt_running_updates_task_link_and_execution(db_session):
     assert execution.status == TaskStatus.RUNNING
     assert execution.started_at == started_at
     assert execution.completed_at is None
+
+
+def test_refresh_task_execution_lease_updates_only_running_attempt(db_session):
+    _, _, execution = _make_task_attempt(db_session)
+    execution.status = TaskStatus.RUNNING
+    heartbeat_at = datetime(2026, 5, 14, 2, 3, 4, tzinfo=UTC)
+
+    assert (
+        refresh_task_execution_lease(execution, heartbeat_at=heartbeat_at)
+        == heartbeat_at
+    )
+    assert execution.heartbeat_at == heartbeat_at
+
+    execution.status = TaskStatus.DONE
+    assert refresh_task_execution_lease(execution, heartbeat_at=heartbeat_at) is None
 
 
 def test_mark_task_attempt_pending_resets_task_link_and_execution(db_session):

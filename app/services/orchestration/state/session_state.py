@@ -4,9 +4,28 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any
 
 from app.services.orchestration.state.persistence import set_session_alert
+
+
+class SessionStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    PAUSED = "paused"
+    AWAITING_INPUT = "awaiting_input"
+    STOPPED = "stopped"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+_LEGACY_STATUS_ALIASES = {"active": SessionStatus.RUNNING.value}
+
+
+def normalize_session_status(status: str | SessionStatus | None) -> str:
+    value = str(status.value if isinstance(status, SessionStatus) else status or "")
+    return _LEGACY_STATUS_ALIASES.get(value.strip().lower(), value.strip().lower())
 
 
 @dataclass(frozen=True)
@@ -83,7 +102,7 @@ _SESSION_TRANSITION_POLICY: dict[tuple[str, str], SessionTransition] = {
 def resolve_session_transition(current_status: str, action: str) -> SessionTransition:
     """Resolve session transition policy without mutating a session row."""
 
-    normalized_status = str(current_status or "").strip().lower()
+    normalized_status = normalize_session_status(current_status)
     normalized_action = str(action or "").strip().lower()
     transition = _SESSION_TRANSITION_POLICY.get((normalized_status, normalized_action))
     if transition:
@@ -91,7 +110,8 @@ def resolve_session_transition(current_status: str, action: str) -> SessionTrans
     return SessionTransition(
         allowed=False,
         result_status=normalized_status,
-        is_active=normalized_status in {"running", "awaiting_input"},
+        is_active=normalized_status
+        in {SessionStatus.RUNNING.value, SessionStatus.AWAITING_INPUT.value},
     )
 
 

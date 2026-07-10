@@ -41,6 +41,8 @@ from app.services.orchestration.state.session_state import (
     mark_session_awaiting_input,
     mark_session_paused,
     mark_session_running,
+    normalize_session_status,
+    SessionStatus,
 )
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
@@ -491,7 +493,10 @@ def add_operator_guidance(
         raise HTTPException(status_code=400, detail="guidance must not be empty")
 
     session = get_session_or_404(db, session_id)
-    if session.status in {"completed", "stopped"}:
+    if normalize_session_status(session.status) in {
+        SessionStatus.COMPLETED.value,
+        SessionStatus.STOPPED.value,
+    }:
         raise HTTPException(
             status_code=400,
             detail=f"Cannot add guidance for session in state '{session.status}'",
@@ -714,7 +719,11 @@ def submit_intervention_reply(
     )
 
     session = db.query(SessionModel).filter(SessionModel.id == req.session_id).first()
-    if session and session.status == "awaiting_input":
+    if (
+        session
+        and normalize_session_status(session.status)
+        == SessionStatus.AWAITING_INPUT.value
+    ):
         mark_session_paused(session, paused_at=now)
         db.commit()
 
@@ -787,7 +796,11 @@ def approve_intervention(
     )
 
     session = db.query(SessionModel).filter(SessionModel.id == req.session_id).first()
-    if session and session.status == "awaiting_input":
+    if (
+        session
+        and normalize_session_status(session.status)
+        == SessionStatus.AWAITING_INPUT.value
+    ):
         mark_session_paused(session, paused_at=now)
         db.commit()
 
@@ -858,7 +871,11 @@ def deny_intervention(
     )
 
     session = db.query(SessionModel).filter(SessionModel.id == req.session_id).first()
-    if session and session.status == "awaiting_input":
+    if (
+        session
+        and normalize_session_status(session.status)
+        == SessionStatus.AWAITING_INPUT.value
+    ):
         mark_session_paused(session, paused_at=now)
         db.commit()
 

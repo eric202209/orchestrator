@@ -8,6 +8,7 @@
 # This must run before any Celery import touches ZoneInfo('UTC').
 import importlib.resources as _ir
 import zoneinfo as _zoneinfo
+from datetime import timedelta
 
 try:
     _tzdata_zoneinfo_path = str(_ir.files("tzdata").joinpath("zoneinfo"))
@@ -26,7 +27,7 @@ celery_app = Celery(
     backend=settings.CELERY_RESULT_BACKEND,
     include=[
         "app.tasks.worker",
-        "app.tasks.scheduler",
+        "app.tasks.maintenance",
         "app.tasks.github_tasks",
         "app.tasks.planning_tasks",
     ],
@@ -43,6 +44,18 @@ celery_app.conf.update(
     task_reject_on_worker_lost=True,
     task_acks_on_failure_or_timeout=True,
     worker_prefetch_multiplier=1,
+    beat_schedule={
+        "cleanup-old-logs": {
+            "task": "app.tasks.maintenance.cleanup_old_logs",
+            "schedule": timedelta(days=1),
+            "kwargs": {"days": 30},
+        },
+        "recover-orphaned-running-sessions": {
+            "task": "app.tasks.maintenance.sweep_orphaned_running_sessions",
+            "schedule": timedelta(minutes=15),
+            "kwargs": {},
+        },
+    },
 )
 
 # Ensure tasks are registered when workers start with `-A app.celery_app worker`.

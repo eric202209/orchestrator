@@ -29,6 +29,8 @@ from app.services.orchestration.run_state import (
 from app.services.orchestration.state.session_state import (
     mark_session_running,
     mark_session_stopped,
+    normalize_session_status,
+    SessionStatus,
 )
 from app.services.session.session_runtime_service import ensure_task_workspace
 from app.services.session.execution_policy import (
@@ -58,7 +60,7 @@ async def start_session_payload(
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    if session.status in {"running", "active"}:
+    if normalize_session_status(session.status) == SessionStatus.RUNNING.value:
         raise HTTPException(
             status_code=409,
             detail=(
@@ -133,7 +135,7 @@ async def execute_task_payload(
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    if session.status in {"running", "active"}:
+    if normalize_session_status(session.status) == SessionStatus.RUNNING.value:
         raise HTTPException(
             status_code=409,
             detail=(

@@ -451,6 +451,15 @@ class FakeRedis:
     def expire(self, key: str, ttl: int) -> None:
         self._expirations[key] = ttl
 
+    def eval(self, _script, key_count, key, session_id, max_slots, lease_seconds):
+        assert key_count == 1
+        members = self._sets.setdefault(key, set())
+        if str(session_id) not in members and len(members) >= int(max_slots):
+            return 0
+        members.add(str(session_id))
+        self.expire(key, int(lease_seconds))
+        return 1
+
     def pipeline(self):
         return _FakePipeline(self)
 
@@ -496,6 +505,51 @@ class _FakePipeline:
 
 
 class TestBackendConcurrency:
+    def test_acquire_slot_uses_atomic_claim_and_preserves_task_length_lease(self):
+        class AtomicRedis:
+            def __init__(self):
+                self.calls = []
+
+            def eval(
+                self, script, key_count, key, session_id, max_slots, lease_seconds
+            ):
+                self.calls.append(
+                    (script, key_count, key, session_id, max_slots, lease_seconds)
+                )
+                return 1
+
+        redis = AtomicRedis()
+
+        assert (
+            acquire_backend_slot(
+                redis,
+                "local_openclaw",
+                session_id=7,
+                max_slots=1,
+                timeout_s=3600,
+            )
+            is True
+        )
+        assert redis.calls[0][1:] == (
+            1,
+            "orchestrator:backend_slots:local_openclaw",
+            "7",
+            1,
+            3600,
+        )
+
+    def test_atomic_claim_returns_false_at_capacity(self):
+        class FullRedis:
+            def eval(self, *_args):
+                return 0
+
+        assert (
+            acquire_backend_slot(
+                FullRedis(), "local_openclaw", session_id=2, max_slots=1
+            )
+            is False
+        )
+
     def test_acquire_slot_succeeds_when_under_max(self):
         r = FakeRedis()
         result = acquire_backend_slot(r, "local_openclaw", session_id=1, max_slots=1)
@@ -898,7 +952,7 @@ def test_acquire_backend_slot_propagates_redis_errors():
     """
 
     class BrokenRedis:
-        def pipeline(self):
+        def eval(self, *_args):
             raise OSError("redis down")
 
     with pytest.raises(OSError):

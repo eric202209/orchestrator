@@ -7,6 +7,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from app.models import (
     LogEntry,
     Project,
@@ -24,7 +26,11 @@ from app.services.orchestration.execution.runtime import (
 from app.services.tasks.service import TASK_CHANGE_SET_LOG_MESSAGE, TaskService
 from app.services.workspace.baseline_promotion_service import BaselinePromotionService
 from app.services.workspace.changeset_service import ChangesetService
-from app.services.workspace.project_mutation_lock import project_mutation_lock
+from app.services.workspace.project_mutation_lock import (
+    ProjectMutationLockError,
+    _lock_path_for_project_root,
+    project_mutation_lock,
+)
 from app.services.workspace.workspace_paths import (
     AUTO_SNAPSHOT_ROOT,
     resolve_project_root,
@@ -1354,6 +1360,55 @@ def test_project_mutation_lock_removes_empty_agent_lock_dirs(tmp_path: Path):
     assert not (project_root / ".agent").exists()
 
 
+def test_project_mutation_lock_uses_resolved_workspace_identity(tmp_path: Path):
+    project_root = tmp_path / "shared-workspace"
+    project_root.mkdir()
+    alias_root = tmp_path / "shared-workspace-alias"
+    alias_root.symlink_to(project_root, target_is_directory=True)
+
+    with project_mutation_lock(
+        project_id=1,
+        project_root=project_root,
+        operation="first-writer",
+        wait_timeout_seconds=0,
+    ):
+        with pytest.raises(ProjectMutationLockError):
+            with project_mutation_lock(
+                project_id=2,
+                project_root=alias_root,
+                operation="second-writer",
+                wait_timeout_seconds=0,
+            ):
+                pass
+
+
+def test_project_mutation_lock_reclaims_dead_pid_without_waiting_for_age(
+    tmp_path: Path,
+):
+    project_root = tmp_path / "dead-lock-owner"
+    lock_dir = project_root / ".agent" / "locks"
+    lock_dir.mkdir(parents=True)
+    lock_path = _lock_path_for_project_root(project_root)
+    lock_path.write_text(
+        json.dumps(
+            {
+                "pid": 99999999,
+                "token": "dead-owner",
+                "created_at_epoch": time.time(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with project_mutation_lock(
+        project_id=1,
+        project_root=project_root,
+        operation="replacement-writer",
+        wait_timeout_seconds=0,
+    ):
+        assert True
+
+
 def test_manual_promote_clears_terminal_execution_mutation_lock(
     authenticated_client,
     db_session,
@@ -1404,7 +1459,7 @@ def test_manual_promote_clears_terminal_execution_mutation_lock(
     )
     lock_dir = project_root / ".agent" / "locks"
     lock_dir.mkdir(parents=True)
-    lock_path = lock_dir / f"project-{project.id}.mutation.lock"
+    lock_path = _lock_path_for_project_root(project_root)
     lock_path.write_text(
         json.dumps(
             {

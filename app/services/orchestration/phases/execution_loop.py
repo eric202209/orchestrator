@@ -97,6 +97,7 @@ from app.runtime_naming import (
 from app.services.orchestration.run_state import (
     mark_task_attempt_cancelled,
     mark_task_attempt_failed,
+    refresh_task_execution_lease,
 )
 from app.services.orchestration.state.execution_states import (
     OrchestrationPhase,
@@ -465,6 +466,7 @@ def execute_step_loop(
 
         orchestration_state.current_step_index = step_index
         task.current_step = step_index + 1
+        refresh_task_execution_lease(_get_task_execution(db, ctx.task_execution_id))
         save_orchestration_checkpoint(
             db, session_id, task_id, prompt, orchestration_state
         )

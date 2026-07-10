@@ -11,6 +11,7 @@ from .transitions import (
     mark_task_attempt_failed,
     mark_task_attempt_pending,
     mark_task_attempt_running,
+    refresh_task_execution_lease,
     reset_active_attempts_for_session_stop,
 )
 from .context import task_execution_id_from_context
@@ -28,6 +29,7 @@ __all__ = [
     "mark_task_attempt_failed",
     "mark_task_attempt_pending",
     "mark_task_attempt_running",
+    "refresh_task_execution_lease",
     "read_run_state_snapshot",
     "reset_active_attempts_for_session_stop",
     "task_execution_id_from_context",

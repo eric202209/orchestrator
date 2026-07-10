@@ -347,6 +347,9 @@ class TaskExecution(Base):
     token_source = Column(String(64), nullable=True)
     started_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
+    worker_pid = Column(Integer, nullable=True)
+    worker_hostname = Column(String(255), nullable=True)
+    heartbeat_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
