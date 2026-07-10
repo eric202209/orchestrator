@@ -28,6 +28,7 @@ from app.services.orchestration.execution.runtime import (
     maybe_allocate_runtime_workspace,
     maybe_bind_runtime_cwd_override,
     dispose_runtime_workspace_safely,
+    snapshot_workspace_before_run,
 )
 from app.services.orchestration.review_policy import build_operator_override_metadata
 from app.services.orchestration.state.persistence import append_orchestration_event
@@ -1070,6 +1071,20 @@ async def execute_task_with_runtime(
             maybe_bind_runtime_cwd_override(runtime, _runtime_context)
             if hasattr(runtime, "bind_runtime_workspace"):
                 runtime.bind_runtime_workspace(_runtime_context)
+            # Phase 23D-14: capture the pre-run snapshot inside the sandbox
+            # (worker.py does this for every dispatch) so the post-run
+            # change-set diffs only what this execution actually changed,
+            # not the entire hydrated sandbox tree. Sandbox-only: the
+            # flag-off Model A path keeps its pre-23D-14 behavior.
+            if _runtime_sandbox is not None:
+                snapshot_workspace_before_run(
+                    TaskService(db),
+                    task.project,
+                    task.id,
+                    _runtime_context.runtime_workspace,
+                    task_execution_id=task_execution.id,
+                    preserve_project_root_rules=True,
+                )
 
         try:
             try:
@@ -1128,6 +1143,26 @@ async def execute_task_with_runtime(
                     completed_at=completed_at,
                 )
                 mark_session_stopped(new_session, stopped_at=completed_at)
+                if _runtime_sandbox is not None:
+                    # Phase 23D-14: the task ran in a disposable Runtime
+                    # Workspace sandbox; its output is captured into a
+                    # durable change-set artifact (see the `finally` below),
+                    # not applied to the Project Workspace. Mirror
+                    # finalize_success()'s "ready, awaiting review" branch
+                    # (Phase 23D-8): only POST /tasks/{id}/accept may promote.
+                    task.workspace_status = "ready"
+                    existing_note = (
+                        getattr(task, "promotion_note", None) or ""
+                    ).strip()
+                    review_note = (
+                        "Runtime execution captured a change-set artifact; "
+                        "awaiting operator review via POST /tasks/{id}/accept."
+                    )
+                    task.promotion_note = (
+                        f"{existing_note}\n{review_note}"
+                        if existing_note
+                        else review_note
+                    )
             else:
                 mark_execution_failed(
                     task=task,
@@ -1144,6 +1179,32 @@ async def execute_task_with_runtime(
             result["task_execution_id"] = task_execution.id
             return result
         finally:
+            # Phase 23D-14: persist the change-set from the sandbox before
+            # it is disposed, mirroring worker.py's dispatch `finally`
+            # (Phase 23D-8) -- the sandbox is the only place the executed
+            # work exists, and disposal below is unconditional. Wrapped so
+            # a capture failure never masks the original outcome.
+            if _runtime_sandbox is not None and task_execution is not None:
+                try:
+                    TaskService(db).persist_task_execution_change_set(
+                        task.project,
+                        task,
+                        session_id=new_session.id if new_session else None,
+                        task_execution_id=task_execution.id,
+                        snapshot_key=workspace_snapshot_key(task.id, task_execution.id),
+                        target_dir=Path(_runtime_context.runtime_workspace),
+                        preserve_project_root_rules=True,
+                        status=getattr(getattr(task, "status", None), "value", None),
+                        commit=True,
+                    )
+                except Exception as capture_exc:
+                    logger.warning(
+                        "Failed to persist change-set for task %s "
+                        "(task_execution_id=%s): %s",
+                        task.id,
+                        task_execution.id,
+                        capture_exc,
+                    )
             # Phase 23D-2: release the binding and dispose the sandbox
             # unconditionally (success, failure, or exception), mirroring
             # worker.py's own outermost finally for the canonical dispatch.
