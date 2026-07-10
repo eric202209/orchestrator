@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.models import LogEntry, Project, Task, TaskExecutionChangeSet
 from app.services.orchestration.review_policy import decide_change_set_review
+from app.services.workspace.permissions import ensure_shared_tree
 from app.services.workspace.workspace_paths import (
     AUTO_SNAPSHOT_ROOT,
     HYDRATION_EXCLUDED_NAMES,
@@ -103,6 +105,88 @@ class ChangesetService:
                 digest.update(chunk)
         return digest.hexdigest()
 
+    def _artifact_files_root(self, project: Project, task_execution_id: int) -> Path:
+        return (
+            self.get_project_root(project)
+            / ".agent"
+            / "change-sets"
+            / str(task_execution_id)
+            / "files"
+        )
+
+    def _artifact_manifest_path(self, project: Project, task_execution_id: int) -> Path:
+        return (
+            self.get_project_root(project)
+            / ".agent"
+            / "change-sets"
+            / str(task_execution_id)
+            / "manifest.json"
+        )
+
+    def _path_is_safe_relative(self, relative_path: str) -> bool:
+        path = Path(relative_path)
+        return (
+            relative_path
+            and not path.is_absolute()
+            and ".." not in path.parts
+            and not is_hydration_excluded_path(path)
+            and not TASK_REPORT_RE.match(path.name)
+        )
+
+    def persist_change_set_artifact(
+        self,
+        project: Project,
+        change_set: dict[str, Any],
+        *,
+        target_root: Path,
+    ) -> dict[str, Any]:
+        """Persist approved-file candidates outside the disposable runtime tree."""
+
+        task_execution_id = int(change_set["task_execution_id"])
+        files_root = self._artifact_files_root(project, task_execution_id)
+        manifest_path = self._artifact_manifest_path(project, task_execution_id)
+        if files_root.exists():
+            shutil.rmtree(files_root)
+        files_root.mkdir(parents=True, exist_ok=True)
+
+        copied_files: list[str] = []
+        for relative_path in sorted(
+            set(change_set.get("added_files") or [])
+            | set(change_set.get("modified_files") or [])
+        ):
+            if not self._path_is_safe_relative(relative_path):
+                continue
+            source_path = (target_root / relative_path).resolve()
+            try:
+                source_path.relative_to(target_root)
+            except ValueError:
+                continue
+            if not source_path.is_file():
+                continue
+            destination = files_root / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, destination)
+            copied_files.append(relative_path)
+
+        manifest = {
+            "schema": "openclaw.task_execution_change_set_artifact.v1",
+            "task_execution_id": task_execution_id,
+            "project_id": change_set.get("project_id"),
+            "task_id": change_set.get("task_id"),
+            "source_target_path": str(target_root),
+            "artifact_path": str(files_root),
+            "copied_files": copied_files,
+            "deleted_files": list(change_set.get("deleted_files") or []),
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+        ensure_shared_tree(manifest_path.parent)
+        change_set["artifact_path"] = str(files_root)
+        change_set["artifact_manifest_path"] = str(manifest_path)
+        change_set["artifact_file_count"] = len(copied_files)
+        return change_set
+
     def change_set_warning_flags(
         self,
         *,
@@ -160,8 +244,8 @@ class ChangesetService:
         status: Optional[str] = None,
     ) -> dict[str, Any]:
         project_root = self.get_project_root(project).resolve()
-        snapshot_dir = (project_root / AUTO_SNAPSHOT_ROOT / snapshot_key).resolve()
         target_root = (target_dir or project_root).resolve()
+        snapshot_dir = (target_root / AUTO_SNAPSHOT_ROOT / snapshot_key).resolve()
 
         before = self._tracked_workspace_file_map(
             snapshot_dir,
@@ -216,7 +300,7 @@ class ChangesetService:
         modified_files = list(record.modified_files or [])
         deleted_files = list(record.deleted_files or [])
         warning_flags = list(record.warning_flags or [])
-        return {
+        payload = {
             "schema": "openclaw.task_execution_change_set.v1",
             "change_set_id": record.id,
             "project_id": record.project_id,
@@ -249,6 +333,16 @@ class ChangesetService:
             ),
             "disposition_metadata": record.disposition_metadata,
         }
+        project = self.db.query(Project).filter(Project.id == record.project_id).first()
+        if project is not None:
+            files_root = self._artifact_files_root(project, record.task_execution_id)
+            manifest_path = self._artifact_manifest_path(
+                project, record.task_execution_id
+            )
+            payload["artifact_path"] = str(files_root)
+            payload["artifact_exists"] = files_root.exists()
+            payload["artifact_manifest_path"] = str(manifest_path)
+        return payload
 
     def parse_change_set_captured_at(
         self, change_set: dict[str, Any]
@@ -372,6 +466,13 @@ class ChangesetService:
             preserve_project_root_rules=preserve_project_root_rules,
             status=status,
         )
+        target_root = Path(change_set["target_path"]).resolve()
+        if target_root.exists():
+            self.persist_change_set_artifact(
+                project,
+                change_set,
+                target_root=target_root,
+            )
         self.upsert_record(
             change_set=change_set,
             session_id=session_id,

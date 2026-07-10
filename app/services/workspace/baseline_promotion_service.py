@@ -192,6 +192,112 @@ class BaselinePromotionService:
             copied += 1
         return copied
 
+    def _change_set_artifact_files_root(
+        self, project: Project, task_execution_id: int
+    ) -> Path:
+        return (
+            self.get_project_root(project)
+            / ".agent"
+            / "change-sets"
+            / str(task_execution_id)
+            / "files"
+        )
+
+    @staticmethod
+    def _safe_change_set_relative_path(relative_path: str) -> Optional[Path]:
+        path = Path(relative_path)
+        if (
+            not relative_path
+            or path.is_absolute()
+            or ".." in path.parts
+            or is_hydration_excluded_path(path)
+            or TASK_REPORT_RE.match(path.name)
+        ):
+            return None
+        return path
+
+    def promote_change_set_into_baseline(
+        self,
+        project: Project,
+        task: Task,
+        change_set: dict[str, Any],
+    ) -> dict[str, Any]:
+        project_root = self.get_project_root(project)
+        task_execution_id = int(change_set["task_execution_id"])
+        return self.canonical_mutations.run_locked(
+            project,
+            project_root=project_root,
+            operation="promote_change_set",
+            owner=f"task:{task.id}:execution:{task_execution_id}",
+            fn=lambda: self.promote_change_set_into_baseline_unlocked(
+                project, task, change_set
+            ),
+        )
+
+    def promote_change_set_into_baseline_unlocked(
+        self,
+        project: Project,
+        task: Task,
+        change_set: dict[str, Any],
+    ) -> dict[str, Any]:
+        baseline_dir = self.get_project_baseline_dir(project)
+        baseline_dir.mkdir(parents=True, exist_ok=True)
+        task_execution_id = int(change_set["task_execution_id"])
+        source_dir = self._change_set_artifact_files_root(project, task_execution_id)
+        if not source_dir.exists():
+            target_path = change_set.get("target_path")
+            if target_path:
+                candidate = Path(str(target_path)).expanduser().resolve()
+                if candidate.exists():
+                    source_dir = candidate
+        if not source_dir.exists():
+            raise FileNotFoundError(
+                f"No durable change-set artifact found for task_execution_id={task_execution_id}"
+            )
+
+        files_copied = 0
+        files_deleted = 0
+        for relative_path in sorted(
+            set(change_set.get("added_files") or [])
+            | set(change_set.get("modified_files") or [])
+        ):
+            relative = self._safe_change_set_relative_path(relative_path)
+            if relative is None:
+                continue
+            source_path = (source_dir / relative).resolve()
+            try:
+                source_path.relative_to(source_dir.resolve())
+            except ValueError:
+                continue
+            if not source_path.is_file():
+                continue
+            destination = baseline_dir / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, destination)
+            files_copied += 1
+
+        for relative_path in sorted(set(change_set.get("deleted_files") or [])):
+            relative = self._safe_change_set_relative_path(relative_path)
+            if relative is None:
+                continue
+            destination = (baseline_dir / relative).resolve()
+            try:
+                destination.relative_to(baseline_dir.resolve())
+            except ValueError:
+                continue
+            if destination.exists() and destination.is_file():
+                destination.unlink()
+                files_deleted += 1
+
+        return {
+            "baseline_path": str(baseline_dir),
+            "files_copied": files_copied,
+            "files_deleted": files_deleted,
+            "source": "change_set_artifact",
+            "artifact_path": str(source_dir),
+            "task_execution_id": task_execution_id,
+        }
+
     def promote_task_into_baseline(
         self, project: Project, task: Task
     ) -> dict[str, Any]:

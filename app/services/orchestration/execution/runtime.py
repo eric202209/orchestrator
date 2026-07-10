@@ -158,6 +158,7 @@ def snapshot_workspace_before_run(
         target_dir,
         snapshot_key=workspace_snapshot_key(task_id, task_execution_id),
         preserve_project_root_rules=preserve_project_root_rules,
+        snapshot_root=target_dir,
     )
 
 
@@ -179,6 +180,7 @@ def restore_workspace_after_abort(
         snapshot_key=workspace_snapshot_key(task_id, task_execution_id),
         preserve_project_root_rules=preserve_project_root_rules,
         skip_lock=lock_already_held,
+        snapshot_root=target_dir,
     )
 
 

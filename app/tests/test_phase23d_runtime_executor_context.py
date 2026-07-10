@@ -26,7 +26,7 @@ import threading
 import pytest
 
 from app.config import settings
-from app.models import Project, Session as SessionModel
+from app.models import Project, Session as SessionModel, Task, TaskStatus
 from app.services.agents.openclaw_service import (
     OpenClawAgentSelectionError,
     OpenClawSessionService,
@@ -428,11 +428,9 @@ class TestConcurrentRuntimeWorkspaceBinding:
 
 class TestFeatureFlagOffRuntimeWorkspaceBinding:
     def test_flag_off_never_reaches_binding(self, db_session, tmp_path):
-        """With RUNTIME_WORKSPACE_ENABLED False, worker.py never allocates a
-        sandbox, so build_runtime_executor_context always produces a
-        non-sandboxed context and bind_runtime_workspace is a no-op --
-        byte-identical to pre-23D dispatch."""
-        assert settings.RUNTIME_WORKSPACE_ENABLED is False
+        """Operators can still disable runtime workspaces and use the
+        non-sandboxed context branch as an emergency compatibility override."""
+        assert settings.RUNTIME_WORKSPACE_ENABLED is True
 
         project_workspace = tmp_path / "project"
         project_workspace.mkdir()
@@ -456,3 +454,45 @@ class TestFeatureFlagOffRuntimeWorkspaceBinding:
 
         service.bind_runtime_workspace(context)
         assert service._openclaw_config_path_override is None
+
+
+def test_openclaw_runtime_result_contract_identifies_runtime_and_project_workspaces(
+    db_session, tmp_path
+):
+    project_workspace = tmp_path / "project"
+    runtime_workspace = tmp_path / "runtime"
+    project_workspace.mkdir()
+    runtime_workspace.mkdir()
+    project = Project(
+        name="Runtime Result Contract",
+        workspace_path=str(project_workspace),
+    )
+    db_session.add(project)
+    db_session.flush()
+    session = SessionModel(name="Runtime Result Session", project_id=project.id)
+    task = Task(
+        project_id=project.id,
+        title="Runtime result task",
+        description="Verify runtime contract",
+        status=TaskStatus.RUNNING,
+    )
+    db_session.add_all([session, task])
+    db_session.commit()
+    db_session.refresh(session)
+    db_session.refresh(task)
+
+    service = OpenClawSessionService(
+        db_session,
+        session.id,
+        task_id=task.id,
+        task_execution_id=123,
+    )
+    service.execution_cwd_override = str(runtime_workspace)
+
+    contract = service._runtime_result_contract()
+
+    assert contract["schema"] == "openclaw.runtime_result.v1"
+    assert contract["project_workspace"] == str(project_workspace.resolve())
+    assert contract["runtime_workspace"] == str(runtime_workspace)
+    assert contract["runtime_workspace_enabled"] is True
+    assert contract["task_execution_id"] == 123

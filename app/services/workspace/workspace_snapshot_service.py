@@ -57,19 +57,22 @@ class WorkspaceSnapshotService:
         *,
         snapshot_key: str,
         preserve_project_root_rules: bool = False,
+        snapshot_root: Path | None = None,
     ) -> dict[str, Any]:
         source_dir = source_dir.resolve()
         project_root = self.get_project_root(project).resolve()
-        snapshot_dir = (project_root / AUTO_SNAPSHOT_ROOT / snapshot_key).resolve()
+        snapshot_anchor = (snapshot_root or project_root).resolve()
+        snapshot_dir = (snapshot_anchor / AUTO_SNAPSHOT_ROOT / snapshot_key).resolve()
 
         if snapshot_dir.exists():
             shutil.rmtree(snapshot_dir)
         snapshot_dir.mkdir(parents=True, exist_ok=True)
-        ensure_shared_path_to_root(snapshot_dir, project_root)
+        ensure_shared_path_to_root(snapshot_dir, snapshot_anchor)
 
         if not source_dir.exists():
             return {
                 "snapshot_path": str(snapshot_dir),
+                "snapshot_root": str(snapshot_anchor),
                 "source_path": str(source_dir),
                 "files_copied": 0,
                 "source_exists": False,
@@ -94,13 +97,14 @@ class WorkspaceSnapshotService:
                 continue
             destination = snapshot_dir / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
-            ensure_shared_path_to_root(destination.parent, project_root)
+            ensure_shared_path_to_root(destination.parent, snapshot_anchor)
             shutil.copy2(source_path, destination)
             ensure_shared_permissions(destination)
             files_copied += 1
 
         return {
             "snapshot_path": str(snapshot_dir),
+            "snapshot_root": str(snapshot_anchor),
             "source_path": str(source_dir),
             "files_copied": files_copied,
             "source_exists": True,
@@ -114,6 +118,7 @@ class WorkspaceSnapshotService:
         *,
         snapshot_key: str,
         preserve_project_root_rules: bool = False,
+        snapshot_root: Path | None = None,
     ) -> dict[str, Any]:
         project_root = self.get_project_root(project).resolve()
         return self.canonical_mutations.run_locked(
@@ -127,6 +132,7 @@ class WorkspaceSnapshotService:
                 snapshot_key=snapshot_key,
                 preserve_project_root_rules=preserve_project_root_rules,
                 project_root=project_root,
+                snapshot_root=snapshot_root,
             ),
         )
 
@@ -138,22 +144,25 @@ class WorkspaceSnapshotService:
         snapshot_key: str,
         preserve_project_root_rules: bool = False,
         project_root: Path | None = None,
+        snapshot_root: Path | None = None,
     ) -> dict[str, Any]:
         target_dir = target_dir.resolve()
         project_root = project_root or self.get_project_root(project).resolve()
-        snapshot_dir = (project_root / AUTO_SNAPSHOT_ROOT / snapshot_key).resolve()
+        snapshot_anchor = (snapshot_root or project_root).resolve()
+        snapshot_dir = (snapshot_anchor / AUTO_SNAPSHOT_ROOT / snapshot_key).resolve()
 
         if not snapshot_dir.exists():
             return {
                 "restored": False,
                 "reason": "snapshot_missing",
                 "snapshot_path": str(snapshot_dir),
+                "snapshot_root": str(snapshot_anchor),
                 "target_path": str(target_dir),
                 "files_restored": 0,
             }
 
         target_dir.mkdir(parents=True, exist_ok=True)
-        ensure_shared_path_to_root(target_dir, project_root)
+        ensure_shared_path_to_root(target_dir, snapshot_anchor)
         snapshot_files = [
             path
             for path in snapshot_dir.rglob("*")
@@ -198,7 +207,7 @@ class WorkspaceSnapshotService:
             relative = snapshot_path.relative_to(snapshot_dir)
             destination = target_dir / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
-            ensure_shared_path_to_root(destination.parent, project_root)
+            ensure_shared_path_to_root(destination.parent, snapshot_anchor)
             shutil.copy2(snapshot_path, destination)
             ensure_shared_permissions(destination)
             files_restored += 1
@@ -206,6 +215,7 @@ class WorkspaceSnapshotService:
         return {
             "restored": True,
             "snapshot_path": str(snapshot_dir),
+            "snapshot_root": str(snapshot_anchor),
             "target_path": str(target_dir),
             "files_restored": files_restored,
         }

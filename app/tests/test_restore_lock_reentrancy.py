@@ -160,6 +160,7 @@ def test_no_projectmutationlockerror_when_lock_held(tmp_path):
         snapshot_key="snap-key",
         preserve_project_root_rules=True,
         skip_lock=True,
+        snapshot_root=tmp_path,
     )
 
     # Clean up the fake lock

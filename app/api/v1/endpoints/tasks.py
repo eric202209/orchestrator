@@ -1562,10 +1562,6 @@ def accept_task_workspace(
         raise HTTPException(
             status_code=409, detail="Only completed tasks can be accepted"
         )
-    if not task.task_subfolder:
-        raise HTTPException(
-            status_code=409, detail="Task has no workspace folder to accept"
-        )
 
     project = db.query(Project).filter(Project.id == task.project_id).first()
     if not project:
@@ -1626,6 +1622,10 @@ def accept_task_workspace(
                 status_code=409,
                 detail="Change set task_execution_id does not match request",
             )
+    if not task.task_subfolder and not accepted_change_set:
+        raise HTTPException(
+            status_code=409, detail="Task has no workspace folder to accept"
+        )
 
     # File deletion guard — require explicit PermissionRequest approval when the
     # changeset contains deleted files before allowing promotion to proceed.
@@ -1695,7 +1695,12 @@ def accept_task_workspace(
     task.promotion_note = (payload.note or "").strip() or None
     task.updated_at = datetime.now(timezone.utc)
     try:
-        baseline_result = task_service.promote_task_into_baseline(project, task)
+        if accepted_change_set:
+            baseline_result = task_service.promote_change_set_into_baseline(
+                project, task, accepted_change_set
+            )
+        else:
+            baseline_result = task_service.promote_task_into_baseline(project, task)
     except ProjectMutationLockError as exc:
         if _clear_terminal_task_mutation_lock(
             db,
@@ -1703,9 +1708,16 @@ def accept_task_workspace(
             lock_path=exc.lock_path,
             task_execution_id=payload.task_execution_id,
         ):
-            baseline_result = task_service.promote_task_into_baseline(project, task)
+            if accepted_change_set:
+                baseline_result = task_service.promote_change_set_into_baseline(
+                    project, task, accepted_change_set
+                )
+            else:
+                baseline_result = task_service.promote_task_into_baseline(project, task)
         else:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if accepted_change_set:
         baseline_result["accepted_change_set"] = accepted_change_set
         disposition_record = task_service.mark_task_execution_change_set_disposition(

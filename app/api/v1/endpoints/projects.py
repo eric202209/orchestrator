@@ -26,6 +26,7 @@ from app.models import (
 from app.schemas import ProjectCreate, ProjectUpdate, ProjectResponse
 from app.services.workspace.project_isolation_service import (
     normalize_project_workspace_path,
+    resolve_project_workspace_path,
 )
 from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.project.name_formatter import humanize_display_name
@@ -50,6 +51,33 @@ class WorkspaceArchiveRestoreRequest(BaseModel):
     archive_path: str
 
 
+def _assert_unique_resolved_workspace(
+    db: Session,
+    *,
+    workspace_path: str,
+    project_name: str,
+    exclude_project_id: Optional[int] = None,
+) -> None:
+    target_root = resolve_project_workspace_path(workspace_path, project_name, db=db)
+    active_projects = db.query(Project).filter(Project.deleted_at.is_(None)).all()
+    for existing in active_projects:
+        if exclude_project_id is not None and existing.id == exclude_project_id:
+            continue
+        existing_root = resolve_project_workspace_path(
+            existing.workspace_path,
+            existing.name,
+            db=db,
+        )
+        if existing_root == target_root:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Project {existing.id} already uses workspace "
+                    f"{target_root}; choose a distinct project workspace."
+                ),
+            )
+
+
 @router.post(
     "/projects", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED
 )
@@ -62,7 +90,12 @@ def create_project(
     project_data = project.model_dump()
     project_data["name"] = humanize_display_name(project_data.get("name", ""))
     project_data["workspace_path"] = normalize_project_workspace_path(
-        project.workspace_path, project.name, db=db
+        project.workspace_path, project_data["name"], db=db
+    )
+    _assert_unique_resolved_workspace(
+        db,
+        workspace_path=project_data["workspace_path"],
+        project_name=project_data["name"],
     )
     project_data["user_id"] = current_user.id
     db_project = Project(**project_data)
@@ -372,6 +405,12 @@ def update_project(
             update_data.get("workspace_path", db_project.workspace_path),
             update_data.get("name", db_project.name),
             db=db,
+        )
+        _assert_unique_resolved_workspace(
+            db,
+            workspace_path=update_data["workspace_path"],
+            project_name=update_data.get("name", db_project.name),
+            exclude_project_id=db_project.id,
         )
     for field, value in update_data.items():
         setattr(db_project, field, value)

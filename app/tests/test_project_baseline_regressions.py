@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.models import (
@@ -14,7 +16,11 @@ from app.models import (
     TaskExecutionChangeSet,
     TaskStatus,
 )
-from app.services.orchestration.execution.runtime import workspace_snapshot_key
+from app.services.orchestration.execution.runtime import (
+    restore_workspace_after_abort,
+    snapshot_workspace_before_run,
+    workspace_snapshot_key,
+)
 from app.services.tasks.service import TASK_CHANGE_SET_LOG_MESSAGE, TaskService
 from app.services.workspace.baseline_promotion_service import BaselinePromotionService
 from app.services.workspace.changeset_service import ChangesetService
@@ -287,6 +293,124 @@ def test_workspace_services_share_project_root_contract(db_session, tmp_path: Pa
     )
 
 
+def test_create_project_rejects_duplicate_resolved_workspace(
+    authenticated_client,
+    db_session,
+):
+    existing = Project(
+        name="existing-workspace-owner",
+        workspace_path="shared-workspace",
+    )
+    db_session.add(existing)
+    db_session.commit()
+
+    response = authenticated_client.post(
+        "/api/v1/projects",
+        json={
+            "name": "duplicate workspace",
+            "workspace_path": "shared-workspace",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "already uses workspace" in response.json()["detail"]
+
+
+def test_update_project_rejects_duplicate_resolved_workspace(
+    authenticated_client,
+    db_session,
+):
+    first = Project(name="first-workspace-owner", workspace_path="first-workspace")
+    second = Project(name="second-workspace-owner", workspace_path="second-workspace")
+    db_session.add_all([first, second])
+    db_session.commit()
+    db_session.refresh(second)
+
+    response = authenticated_client.put(
+        f"/api/v1/projects/{second.id}",
+        json={"workspace_path": "first-workspace"},
+    )
+
+    assert response.status_code == 409
+    assert "already uses workspace" in response.json()["detail"]
+
+
+def test_create_project_allows_reusing_soft_deleted_workspace(
+    authenticated_client,
+    db_session,
+):
+    deleted = Project(
+        name="deleted-workspace-owner",
+        workspace_path="reusable-workspace",
+        deleted_at=datetime.now(timezone.utc),
+    )
+    db_session.add(deleted)
+    db_session.commit()
+
+    response = authenticated_client.post(
+        "/api/v1/projects",
+        json={
+            "name": "replacement workspace owner",
+            "workspace_path": "reusable-workspace",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["workspace_path"] == "reusable-workspace"
+
+
+def test_runtime_workspace_snapshot_anchors_to_execution_root(
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "project-root"
+    runtime_root = tmp_path / "runtime-root"
+    project_root.mkdir(parents=True)
+    runtime_root.mkdir(parents=True)
+    (runtime_root / "README.md").write_text("before\n", encoding="utf-8")
+
+    project = Project(
+        name="runtime-snapshot-anchor",
+        workspace_path=str(project_root),
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task_service = TaskService(db_session)
+    result = snapshot_workspace_before_run(
+        task_service,
+        project,
+        12,
+        runtime_root,
+        task_execution_id=34,
+        preserve_project_root_rules=True,
+    )
+
+    expected_snapshot = (
+        runtime_root / AUTO_SNAPSHOT_ROOT / "task-12-execution-34-pre-run"
+    ).resolve()
+    assert Path(result["snapshot_path"]) == expected_snapshot
+    assert (expected_snapshot / "README.md").read_text(encoding="utf-8") == "before\n"
+    assert not (project_root / AUTO_SNAPSHOT_ROOT).exists()
+
+    (runtime_root / "README.md").write_text("after\n", encoding="utf-8")
+    restore_result = restore_workspace_after_abort(
+        task_service,
+        project,
+        12,
+        runtime_root,
+        task_execution_id=34,
+        preserve_project_root_rules=True,
+        lock_already_held=True,
+    )
+
+    assert restore_result["restored"] is True
+    assert Path(restore_result["snapshot_path"]) == expected_snapshot
+    assert (runtime_root / "README.md").read_text(encoding="utf-8") == "before\n"
+    assert not (project_root / AUTO_SNAPSHOT_ROOT).exists()
+
+
 def test_task_execution_change_set_captures_added_modified_and_deleted_files(
     db_session,
     tmp_path: Path,
@@ -395,6 +519,15 @@ def test_task_execution_change_set_captures_added_modified_and_deleted_files(
     )
     assert read_back["changed_count"] == 3
     assert read_back["added_files"] == ["package.json"]
+    assert read_back["artifact_exists"] is True
+    assert (
+        Path(read_back["artifact_path"], "README.md").read_text(encoding="utf-8")
+        == "after\n"
+    )
+    assert (
+        Path(read_back["artifact_path"], "package.json").read_text(encoding="utf-8")
+        == '{"scripts": {}}\n'
+    )
     assert read_back["review_decision"]["reason"] == (
         "nontrivial_change_set_review_required"
     )
@@ -409,6 +542,98 @@ def test_task_execution_change_set_captures_added_modified_and_deleted_files(
         .one()
     )
     assert '"changed_count": 3' in log_entry.log_metadata
+
+
+def test_runtime_change_set_accept_promotes_from_durable_artifact(
+    authenticated_client,
+    db_session,
+    tmp_path: Path,
+):
+    project_root = tmp_path / "runtime-artifact-promote"
+    runtime_root = tmp_path / "runtime-execution"
+    project_root.mkdir(parents=True)
+    runtime_root.mkdir(parents=True)
+    (project_root / "README.md").write_text("before\n", encoding="utf-8")
+    (runtime_root / "README.md").write_text("before\n", encoding="utf-8")
+
+    project = Project(
+        name="runtime-artifact-promote",
+        workspace_path=str(project_root),
+    )
+    task = Task(
+        project_id=1,
+        title="Runtime artifact promote",
+        description="Accept runtime workspace changes",
+        status=TaskStatus.DONE,
+        workspace_status="ready",
+        task_subfolder=None,
+    )
+    session = SessionModel(project_id=1, name="runtime-artifact-session")
+    db_session.add(project)
+    db_session.flush()
+    task.project_id = project.id
+    session.project_id = project.id
+    db_session.add_all([task, session])
+    db_session.commit()
+    db_session.refresh(project)
+    db_session.refresh(task)
+    db_session.refresh(session)
+
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.DONE,
+    )
+    db_session.add(execution)
+    db_session.commit()
+    db_session.refresh(execution)
+
+    task_service = TaskService(db_session)
+    snapshot_key = workspace_snapshot_key(task.id, execution.id)
+    task_service.create_workspace_snapshot(
+        project,
+        runtime_root,
+        snapshot_key=snapshot_key,
+        snapshot_root=runtime_root,
+        preserve_project_root_rules=True,
+    )
+    (runtime_root / "README.md").write_text("after runtime\n", encoding="utf-8")
+    (runtime_root / "new.txt").write_text("new runtime\n", encoding="utf-8")
+
+    change_set = task_service.persist_task_execution_change_set(
+        project,
+        task,
+        session_id=session.id,
+        task_execution_id=execution.id,
+        snapshot_key=snapshot_key,
+        target_dir=runtime_root,
+        status=TaskStatus.DONE.value,
+    )
+    artifact_path = Path(change_set["artifact_path"])
+    assert change_set["modified_files"] == ["README.md"]
+    assert change_set["added_files"] == ["new.txt"]
+    assert artifact_path.exists()
+    shutil.rmtree(runtime_root)
+
+    response = authenticated_client.post(
+        f"/api/v1/tasks/{task.id}/accept",
+        json={"note": "accepted runtime", "task_execution_id": execution.id},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["workspace_status"] == "promoted"
+    assert (project_root / "README.md").read_text(encoding="utf-8") == (
+        "after runtime\n"
+    )
+    assert (project_root / "new.txt").read_text(encoding="utf-8") == "new runtime\n"
+    read_back = task_service.get_task_execution_change_set(
+        task_execution_id=execution.id
+    )
+    assert read_back["disposition"] == "promoted"
+    assert read_back["disposition_metadata"]["files_copied"] == 2
+    assert body["promotion_note"] == "accepted runtime"
 
 
 def test_reject_task_execution_change_set_archives_candidate_and_restores_snapshot(

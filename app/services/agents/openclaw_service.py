@@ -498,6 +498,37 @@ class OpenClawSessionService:
         self._workspace_binding = None
         self._openclaw_config_path_override = None
 
+    def _runtime_result_contract(self) -> Dict[str, Any]:
+        project_workspace = None
+        project_id = None
+        if self.task_model and self.task_model.project_id:
+            project_id = self.task_model.project_id
+            project_model = (
+                self.db.query(Project).filter(Project.id == project_id).first()
+            )
+            if project_model is not None:
+                project_workspace = str(
+                    resolve_project_workspace_path(
+                        project_model.workspace_path, project_model.name
+                    ).resolve()
+                )
+        runtime_workspace = self.execution_cwd_override or self._resolve_execution_cwd()
+        return {
+            "schema": "openclaw.runtime_result.v1",
+            "executor": self.backend_descriptor.name,
+            "project_id": project_id,
+            "task_id": self.task_id,
+            "task_execution_id": self.task_execution_id,
+            "project_workspace": project_workspace,
+            "runtime_workspace": runtime_workspace,
+            "runtime_workspace_enabled": bool(self.execution_cwd_override),
+            "openclaw_config_path": (
+                str(self._openclaw_config_path_override)
+                if self._openclaw_config_path_override
+                else None
+            ),
+        }
+
     def _apply_workspace_binding_env(self, env: Dict[str, str]) -> Dict[str, str]:
         """Propagate an active runtime-workspace binding's config path to a
         subprocess's environment via ``OPENCLAW_CONFIG_PATH``.
@@ -2337,6 +2368,11 @@ class OpenClawSessionService:
             result = self._parse_openclaw_response(completed)
             result["openclaw_version"] = openclaw_version
             result["selected_openclaw_agent"] = self._last_selected_openclaw_agent_id
+            result["runtime_result"] = {
+                **self._runtime_result_contract(),
+                "openclaw_version": openclaw_version,
+                "selected_openclaw_agent": self._last_selected_openclaw_agent_id,
+            }
             self._record_runtime_pollution(
                 result,
                 expected_project_root=expected_project_root,

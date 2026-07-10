@@ -49,8 +49,8 @@ def _init_git_repo(repo_dir):
 
 
 class TestFeatureFlagDefault:
-    def test_runtime_workspace_enabled_defaults_false(self):
-        assert settings.RUNTIME_WORKSPACE_ENABLED is False
+    def test_runtime_workspace_enabled_defaults_true(self):
+        assert settings.RUNTIME_WORKSPACE_ENABLED is True
 
 
 class TestFeatureFlagOff:

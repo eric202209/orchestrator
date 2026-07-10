@@ -352,12 +352,14 @@ class TaskService:
         *,
         snapshot_key: str,
         preserve_project_root_rules: bool = False,
+        snapshot_root: Path | None = None,
     ) -> dict:
         return self.snapshots.create_workspace_snapshot(
             project,
             source_dir,
             snapshot_key=snapshot_key,
             preserve_project_root_rules=preserve_project_root_rules,
+            snapshot_root=snapshot_root,
         )
 
     def restore_workspace_snapshot(
@@ -368,6 +370,7 @@ class TaskService:
         snapshot_key: str,
         preserve_project_root_rules: bool = False,
         skip_lock: bool = False,
+        snapshot_root: Path | None = None,
     ) -> dict:
         if skip_lock:
             return self.snapshots.restore_workspace_snapshot_unlocked(
@@ -375,12 +378,14 @@ class TaskService:
                 target_dir,
                 snapshot_key=snapshot_key,
                 preserve_project_root_rules=preserve_project_root_rules,
+                snapshot_root=snapshot_root,
             )
         return self.snapshots.restore_workspace_snapshot(
             project,
             target_dir,
             snapshot_key=snapshot_key,
             preserve_project_root_rules=preserve_project_root_rules,
+            snapshot_root=snapshot_root,
         )
 
     def change_set_review_decision(
@@ -1036,6 +1041,13 @@ class TaskService:
 
     def promote_task_into_baseline(self, project: Project, task: Task) -> dict:
         return self.baselines.promote_task_into_baseline(project, task)
+
+    def promote_change_set_into_baseline(
+        self, project: Project, task: Task, change_set: dict
+    ) -> dict:
+        return self.baselines.promote_change_set_into_baseline(
+            project, task, change_set
+        )
 
     def auto_publish_task_into_baseline(self, project: Project, task: Task) -> dict:
         """Publish a completed task into the canonical merged project workspace."""
