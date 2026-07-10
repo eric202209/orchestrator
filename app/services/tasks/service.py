@@ -657,6 +657,19 @@ class TaskService:
             return "changes_requested"
         if getattr(task, "promoted_at", None) or current_status == "promoted":
             return "promoted"
+        if (
+            current_status == "ready"
+            and task.status == TaskStatus.DONE
+            and not getattr(task, "promoted_at", None)
+        ):
+            # Runtime Workspace (Task Execution Sandbox) completions never
+            # allocate a task_subfolder -- their output lives only in a
+            # captured, unapplied change-set artifact. The subfolder-based
+            # inference below predates that model and would otherwise
+            # silently flip this back to "not_created" on every subsequent
+            # sync (e.g. via write_project_state_snapshot), hiding the task
+            # from the needs_review queue right after completion set it.
+            return "ready"
         if not getattr(task, "task_subfolder", None):
             return "not_created"
         if task.status == TaskStatus.DONE:

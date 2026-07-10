@@ -23,7 +23,9 @@ from app.models import (
     Task,
     TaskExecution,
     TaskExecutionChangeSet,
+    TaskStatus,
 )
+from app.services.tasks.service import TaskService
 from app.services.workspace.changeset_service import ChangesetService
 
 
@@ -123,3 +125,39 @@ def test_record_change_set_unavailable_returned_by_lookup(db_session, tmp_path):
     assert change_set["disposition"] == "unavailable"
     assert change_set["added_files"] == []
     assert change_set["changed_count"] == 0
+
+
+def test_infer_workspace_status_preserves_ready_without_task_subfolder(
+    db_session, tmp_path
+):
+    """Live-verification regression (2026-07-10): a Runtime Workspace sandbox
+    completion never allocates a task_subfolder -- TaskCompletionFinalizer
+    sets workspace_status="ready" directly (Finding 2 fix). But
+    write_project_state_snapshot_fn, called from inside finalize_success
+    itself, calls TaskService.get_project_tasks() -> sync_workspace_status()
+    for every task in the project, including the one that was just marked
+    ready. infer_workspace_status()'s old "no task_subfolder -> not_created"
+    rule (predating Runtime Workspace redirection) silently flipped that
+    "ready" back to "not_created" on the very same request, hiding the task
+    from GET /tasks?needs_review=true immediately after completion set it.
+    """
+
+    project, task, _execution, _project_dir = _seed_task(db_session, tmp_path)
+    task.status = TaskStatus.DONE
+    task.workspace_status = "ready"
+    task.task_subfolder = None
+    db_session.commit()
+
+    task_service = TaskService(db_session)
+    changed = task_service.sync_workspace_status(task, commit=False)
+
+    assert changed is False
+    assert task.workspace_status == "ready"
+
+    # get_project_tasks() (called by write_project_state_snapshot_fn) syncs
+    # every task in the project the same way -- must not regress the task
+    # out of the review queue either.
+    refetched = [
+        t for t in task_service.get_project_tasks(project.id) if t.id == task.id
+    ]
+    assert refetched and refetched[0].workspace_status == "ready"
