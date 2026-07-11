@@ -23,7 +23,6 @@ from .auth_service import (
 )
 from .resume_service import ResumeError, ResumeSessionService
 from .session_execution_service import (
-    execute_task_payload,
     get_session_statistics_payload,
     get_tool_execution_history_payload,
     start_agent_session_payload,
@@ -132,7 +131,6 @@ __all__ = [
     "get_session_or_404",
     "request_human_intervention_lifecycle",
     "submit_intervention_reply",
-    "execute_task_payload",
     "get_session_statistics_payload",
     "get_tool_execution_history_payload",
     "start_agent_session_payload",

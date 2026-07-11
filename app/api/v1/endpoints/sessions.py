@@ -36,7 +36,6 @@ from app.schemas import (
     SessionCreate,
     SessionUpdate,
     SessionResponse,
-    TaskExecuteRequest,
 )
 from app.schemas.pagination import paginate
 from app.services import (
@@ -93,7 +92,6 @@ from app.services import (
     stream_session_logs as _stream_session_logs,
     stream_session_status as _stream_session_status,
     track_tool_execution_payload as _track_tool_execution_payload,
-    execute_task_payload as _execute_task_payload,
 )
 from app.services.session.session_inspection_service import (
     derive_orchestration_state_block as _derive_orchestration_state_block,
@@ -657,18 +655,6 @@ async def start_openclaw_session_compat(
     return await _start_agent_session_payload(
         db, session_id, task_description=request.task_description
     )
-
-
-@router.post("/sessions/{session_id}/execute")
-async def execute_task(
-    session_id: int,
-    task_request: TaskExecuteRequest,
-    db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
-):
-    """Execute a task via the active orchestration runtime."""
-    _require_session_access(db, session_id, current_user)
-    return await _execute_task_payload(db, session_id, task_request)
 
 
 @router.websocket("/sessions/{session_id}/logs/stream")

@@ -246,31 +246,6 @@ class OllamaRuntime:
             "model_family": self._model,
         }
 
-    async def execute_task_with_orchestration(
-        self,
-        prompt: str,
-        timeout_seconds: int = 300,
-        orchestration_state: Any = None,
-    ) -> dict[str, Any]:
-        """Used by orchestration step loop — route to planning or step execution."""
-        project_context = ""
-        if orchestration_state is not None:
-            project_context = getattr(orchestration_state, "project_context", "") or ""
-
-        is_planning = orchestration_state is not None and not getattr(
-            orchestration_state, "plan", None
-        )
-        system = _PLAN_SYSTEM if is_planning else _STEP_SYSTEM
-        user = f"{project_context}\n\n{prompt}".strip() if project_context else prompt
-
-        output = await self._chat(
-            system=system,
-            user=user,
-            timeout=timeout_seconds,
-            planning=is_planning,
-        )
-        return {"status": "completed", "output": output}
-
     async def pause_session(self) -> None:
         """No-op: Ollama is stateless."""
 

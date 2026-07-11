@@ -62,14 +62,6 @@ class StubRuntime:
             "files_changed": [],
         }
 
-    async def execute_task_with_orchestration(
-        self,
-        prompt: str,
-        timeout_seconds: int = 300,
-        orchestration_state: Any = None,
-    ) -> dict[str, Any]:
-        return await self.execute_task(prompt, timeout_seconds=timeout_seconds)
-
     async def pause_session(self) -> None:
         return None
 

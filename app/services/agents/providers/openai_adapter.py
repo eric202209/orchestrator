@@ -210,13 +210,6 @@ class OpenAIResponsesRuntime:
             or self.backend_descriptor.default_model_family
         )
 
-    async def execute_task_with_orchestration(
-        self, prompt: str, timeout_seconds: int = 300, orchestration_state: Any = None
-    ) -> dict[str, Any]:
-        raise UnsupportedCapabilityError(
-            "Backend 'openai_responses_api' does not support full step-by-step orchestration."
-        )
-
     async def pause_session(self) -> None:
         raise UnsupportedCapabilityError(
             "Backend 'openai_responses_api' does not support checkpoint pause."

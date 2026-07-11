@@ -48,10 +48,6 @@ EXPECTED_SESSION_CALLS = {
         "mark_session_running": 5,
         "mark_session_stopped": 6,
     },
-    "app/services/session/session_execution_service.py": {
-        "mark_session_running": 1,
-        "mark_session_stopped": 1,
-    },
     "app/services/session/session_runtime_service.py": {
         "mark_session_completed": 1,
         "mark_session_paused": 4,
@@ -111,10 +107,10 @@ EXPECTED_TASK_ATTEMPT_CALLS = {
     },
     "app/services/session/session_execution_service.py": {
         "mark_task_attempt_cancelled": 1,
-        "mark_task_attempt_done": 2,
-        "mark_task_attempt_failed": 2,
+        "mark_task_attempt_done": 1,
+        "mark_task_attempt_failed": 1,
         "mark_task_attempt_pending": 1,
-        "mark_task_attempt_running": 2,
+        "mark_task_attempt_running": 1,
     },
     "app/services/session/session_runtime_service.py": {
         "mark_task_attempt_failed": 1,

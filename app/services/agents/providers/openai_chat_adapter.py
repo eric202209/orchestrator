@@ -219,16 +219,6 @@ class OpenAIChatCompletionsRuntime:
             "model_family": self._model_name(),
         }
 
-    async def execute_task_with_orchestration(
-        self,
-        prompt: str,
-        timeout_seconds: int = 300,
-        orchestration_state: Any = None,
-    ) -> dict[str, Any]:
-        raise UnsupportedCapabilityError(
-            "Backend 'openai_chat_completions' does not support full step-by-step orchestration."
-        )
-
     async def pause_session(self) -> None:
         raise UnsupportedCapabilityError(
             "Backend 'openai_chat_completions' does not support checkpoint pause."

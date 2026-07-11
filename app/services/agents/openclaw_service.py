@@ -105,13 +105,6 @@ from app.services.agents.openclaw_response import (
     summarize_cli_error as _summarize_cli_error,
     text_contains_model_content as _text_contains_model_content,
 )
-from app.services.agents.openclaw_orchestration import (
-    _debug_step as _openclaw_debug_step,
-    _execute_step_with_retry as _openclaw_execute_step_with_retry,
-    _execute_task_with_permission_check as _openclaw_execute_task_with_permission_check,
-    _revise_plan as _openclaw_revise_plan,
-    execute_task_with_orchestration as _openclaw_execute_task_with_orchestration,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -210,12 +203,6 @@ class OpenClawSessionService:
 
     def _parse_openclaw_response(self, result: Any) -> Dict[str, Any]:
         return _parse_openclaw_cli_response(result, self._log_entry)
-
-    _execute_task_with_permission_check = _openclaw_execute_task_with_permission_check
-    execute_task_with_orchestration = _openclaw_execute_task_with_orchestration
-    _execute_step_with_retry = _openclaw_execute_step_with_retry
-    _debug_step = _openclaw_debug_step
-    _revise_plan = _openclaw_revise_plan
 
     MAX_PROMPT_LENGTH = 50000  # Leave room for model overhead
     STREAM_READ_LIMIT = 262144  # Allow large JSON/log lines from newer OpenClaw builds
