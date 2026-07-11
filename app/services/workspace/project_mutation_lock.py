@@ -45,6 +45,31 @@ def _pid_is_alive(pid: object) -> bool:
     return True
 
 
+def _read_lock_metadata(lock_path: Path) -> dict:
+    try:
+        value = json.loads(lock_path.read_text(encoding="utf-8") or "{}")
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _lock_can_be_reclaimed(
+    lock_path: Path, *, now: float, stale_after_seconds: int
+) -> bool:
+    metadata = _read_lock_metadata(lock_path)
+    if "pid" in metadata:
+        # Age never overrides a live owner; long-running executions remain
+        # protected until their token-owning context exits.
+        return not _pid_is_alive(metadata.get("pid"))
+    try:
+        created_at = float(
+            metadata.get("created_at_epoch") or lock_path.stat().st_mtime
+        )
+    except (OSError, TypeError, ValueError):
+        return False
+    return bool(created_at and now - created_at > stale_after_seconds)
+
+
 @contextmanager
 def project_mutation_lock(
     *,
@@ -72,16 +97,6 @@ def project_mutation_lock(
     token = str(uuid.uuid4())
     now = time.time()
 
-    if lock_path.exists():
-        try:
-            metadata = json.loads(lock_path.read_text(encoding="utf-8") or "{}")
-            created_at = float(metadata.get("created_at_epoch") or 0)
-        except (ValueError, OSError, json.JSONDecodeError):
-            created_at = 0
-        lock_owner_dead = "pid" in metadata and not _pid_is_alive(metadata["pid"])
-        if lock_owner_dead or (created_at and now - created_at > stale_after_seconds):
-            lock_path.unlink(missing_ok=True)
-
     metadata = {
         "project_id": project_id,
         "operation": operation,
@@ -94,6 +109,11 @@ def project_mutation_lock(
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
     deadline = time.monotonic() + max(0.0, wait_timeout_seconds)
     while True:
+        if lock_path.exists() and _lock_can_be_reclaimed(
+            lock_path, now=time.time(), stale_after_seconds=stale_after_seconds
+        ):
+            lock_path.unlink(missing_ok=True)
+            continue
         try:
             fd = os.open(lock_path, flags, 0o666)
             break

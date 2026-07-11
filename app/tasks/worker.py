@@ -2201,6 +2201,18 @@ def execute_orchestration_task(
         # forced SIGTERM) -- unregister the forced-termination cleanup
         # closure so it never fires after this point.
         _unregister_forced_termination_cleanup()
+        # Release the canonical-root lock before any other terminal cleanup.
+        # A sandbox/backend cleanup failure must not strand a failed run's
+        # mutation lock. Token-guarded __exit__ preserves replacement owners.
+        if project_mutation_lock_context is not None:
+            try:
+                project_mutation_lock_context.__exit__(None, None, None)
+            except Exception as lock_exc:
+                logger.warning(
+                    "[ORCHESTRATION] Failed to release project mutation lock: %s",
+                    lock_exc,
+                )
+            project_mutation_lock_context = None
         try:
             if planning_backend_override and session is not None:
                 session.escalation_backend_id = None
@@ -2327,8 +2339,6 @@ def execute_orchestration_task(
                     )
                 except Exception:
                     pass
-        if project_mutation_lock_context is not None:
-            project_mutation_lock_context.__exit__(None, None, None)
         if trace_context_manager is not None:
             trace_context_manager.__exit__(None, None, None)
         flush_langfuse()

@@ -10,6 +10,12 @@ from app.runtime_naming import DEBUG_REPAIR_LEGACY_ENV_ALIASES
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DATABASE_URL = f"sqlite:///{BASE_DIR}/orchestrator.db"
 
+READ_ONLY_INSPECTION_TIMEOUT_SECONDS = 30
+SIMPLE_LOCAL_COMMAND_TIMEOUT_SECONDS = 60
+TASK_WIDE_EXECUTION_TIMEOUT_SECONDS = 1800
+CELERY_SOFT_TIME_LIMIT_SECONDS = 3300
+CELERY_HARD_TIME_LIMIT_SECONDS = 3600
+
 # Legacy env var aliases kept for deployments using old ORCHESTRATOR_* names.
 # Retire individual entries only when: (1) all active deployments confirmed on
 # current names; (2) /api/v1/ops/build-identity config_source shows no legacy
@@ -337,6 +343,13 @@ class Settings(BaseSettings):
     RUNTIME_PROFILE: str = "standard"
     MAX_PLAN_STEPS: int = 10
 
+    # Timeout ladder: inspection < simple command < verification < task budget
+    # < Celery soft < Celery hard.  300s exceeds the measured 122.776s pytest
+    # workload while remaining below every outer execution limit.
+    READ_ONLY_INSPECTION_TIMEOUT_SECONDS: int = READ_ONLY_INSPECTION_TIMEOUT_SECONDS
+    SIMPLE_LOCAL_COMMAND_TIMEOUT_SECONDS: int = SIMPLE_LOCAL_COMMAND_TIMEOUT_SECONDS
+    LOCAL_VERIFICATION_TIMEOUT_SECONDS: int = 300
+
     @field_validator("RUNTIME_PROFILE")
     @classmethod
     def validate_runtime_profile(cls, value: str) -> str:
@@ -374,6 +387,18 @@ class Settings(BaseSettings):
             if self.KNOWLEDGE_MAX_TOTAL_CHARS > 1400:
                 self.KNOWLEDGE_MAX_TOTAL_CHARS = 1400
             self.MAX_PLAN_STEPS = 6
+        if not (
+            self.READ_ONLY_INSPECTION_TIMEOUT_SECONDS
+            < self.SIMPLE_LOCAL_COMMAND_TIMEOUT_SECONDS
+            < self.LOCAL_VERIFICATION_TIMEOUT_SECONDS
+            < TASK_WIDE_EXECUTION_TIMEOUT_SECONDS
+            < CELERY_SOFT_TIME_LIMIT_SECONDS
+            < CELERY_HARD_TIME_LIMIT_SECONDS
+        ):
+            raise ValueError(
+                "Timeout policy must satisfy inspection < simple < verification "
+                "< task-wide < Celery soft < Celery hard"
+            )
         return self
 
 

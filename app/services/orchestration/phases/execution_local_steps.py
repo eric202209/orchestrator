@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from app.config import settings
 from app.services.orchestration.execution.execution_flow import (
     execute_verification_command,
     workspace_python_command_env,
@@ -441,7 +442,7 @@ def _execute_read_only_inspection_step(
         result = execute_verification_command(
             project_dir=project_dir,
             command=str(command),
-            timeout_seconds=30,
+            timeout_seconds=settings.READ_ONLY_INSPECTION_TIMEOUT_SECONDS,
         )
         if not result.get("success"):
             return {
@@ -671,7 +672,7 @@ def _execute_local_shell_commands_step(
         vresult = execute_verification_command(
             project_dir=project_dir,
             command=verification,
-            timeout_seconds=60,
+            timeout_seconds=settings.SIMPLE_LOCAL_COMMAND_TIMEOUT_SECONDS,
         )
         if not vresult.get("success"):
             verr = vresult.get("output", "verification failed")
@@ -736,7 +737,7 @@ def _execute_simple_verification_step(
     result = execute_verification_command(
         project_dir=project_dir,
         command=command_to_run,
-        timeout_seconds=120,
+        timeout_seconds=settings.LOCAL_VERIFICATION_TIMEOUT_SECONDS,
     )
     return {
         "status": "completed" if result.get("success") else "failed",

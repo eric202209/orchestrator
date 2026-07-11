@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
+
 from .python_resolution import resolve_project_python
 from .executor import ExecutorService
 from .runtime import build_workspace_discovery_step
@@ -347,8 +349,10 @@ def execute_verification_command(
     *,
     project_dir: Path,
     command: str,
-    timeout_seconds: int = 120,
+    timeout_seconds: int | None = None,
 ) -> Dict[str, Any]:
+    if timeout_seconds is None:
+        timeout_seconds = settings.LOCAL_VERIFICATION_TIMEOUT_SECONDS
     raw_command = str(command or "").strip()
     if not raw_command:
         return {
