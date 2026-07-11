@@ -98,6 +98,7 @@ from app.services.orchestration.phases.completion_repair import (
     _classify_completion_verification_failure,
     _completion_failure_signature,
     _completion_repair_invalid_paths,
+    _canonicalize_completion_repair_envelope,
     _detect_completion_verification_command,
     _execute_completion_verification,
     _extract_completion_repair_step,
@@ -584,7 +585,7 @@ def _attempt_completion_repair(
         repair_generated_details["compliance_retry_attempted"] = True
         compliance_prompt = build_json_compliance_retry_prompt(
             repair_output,
-            expected_shape="object",
+            expected_shape='object containing exactly one "repair_step" object',
         )
         try:
             compliance_result = asyncio.run(
@@ -624,14 +625,21 @@ def _attempt_completion_repair(
             "reason": f"repair_step_parse_failed:{strategy_info}",
         }
 
-    repair_step = _extract_completion_repair_step(repair_data, next_step_number)
+    canonical_repair_data = _canonicalize_completion_repair_envelope(
+        repair_data, next_step_number
+    )
+    repair_step = (
+        _extract_completion_repair_step(canonical_repair_data, next_step_number)
+        if canonical_repair_data is not None
+        else None
+    )
     if repair_step is None:
         logger.warning(
-            "[ORCHESTRATION] Completion repair parse succeeded but no usable step object was found"
+            "[ORCHESTRATION] Completion repair JSON failed canonical envelope validation"
         )
         return {
             "status": "failed",
-            "reason": "repair_step_missing_step_object",
+            "reason": "repair_step_invalid_contract",
         }
 
     if not repair_step.get("commands") and not repair_step.get("ops"):
@@ -702,8 +710,17 @@ def _attempt_completion_repair(
                 "status": "failed",
                 "reason": f"repair_step_inventory_guard_parse_failed:{retry_strategy_info}",
             }
-        repair_step = _extract_completion_repair_step(retry_data, next_step_number)
-        if not repair_step or not repair_step.get("commands"):
+        canonical_retry_data = _canonicalize_completion_repair_envelope(
+            retry_data, next_step_number
+        )
+        repair_step = (
+            _extract_completion_repair_step(canonical_retry_data, next_step_number)
+            if canonical_retry_data is not None
+            else None
+        )
+        if not repair_step or (
+            not repair_step.get("commands") and not repair_step.get("ops")
+        ):
             return {
                 "status": "failed",
                 "reason": "repair_step_inventory_guard_missing_commands",

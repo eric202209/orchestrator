@@ -517,7 +517,7 @@ def _build_completion_repair_prompt(
         if failure_envelope is not None
         else ""
     )
-    return f"""Return one minimal JSON repair step to fix completion validation issues. Output JSON object only.
+    return f"""Return one minimal JSON repair envelope to fix completion validation issues. Output JSON object only.
 
 Task:
 {task_prompt[:2000]}
@@ -540,11 +540,11 @@ Current workspace inventory:
 {workspace_inventory[:5000]}
 
 Rules:
-1. Return a single JSON object with keys: step_number, repair_type, description, ops, verification, expected_files.
-2. Set repair_type to "ops_fix". Use step_number {next_step_number}.
+1. Return exactly {{"repair_step": {{...}}}} with one executable repair step.
+2. Inside repair_step, set repair_type to "ops_fix" and step_number to {next_step_number}.
 3. ops must be a non-empty JSON array of structured file operations.
 4. Each op must have "op" (write_file, append_file, or replace_in_file), "path" (relative), and op-specific fields: "content" for write_file/append_file; "old" and "new" for replace_in_file.
-5. verification must be one top-level shell command string or null. Do not use shell metacharacters.
+5. verification must be one non-empty top-level shell command string. Do not use shell metacharacters.
 6. Do not use a "commands" key. Use ops only.
 7. Prefer replace_in_file for targeted edits; use write_file only to create or fully overwrite a file.
 8. Use relative paths only. No absolute paths, "..", or "~".
@@ -613,6 +613,124 @@ def _normalize_completion_repair_step(
                 if isinstance(op, dict) and str(op.get("path") or "").strip()
             ]
     return normalized
+
+
+_COMPLETION_REPAIR_WRAPPER_KEYS = (
+    "repair_step",
+    "step",
+    "completion_repair_step",
+    "payload",
+    "result",
+)
+_COMPLETION_REPAIR_OPS = {"write_file", "append_file", "replace_in_file"}
+
+
+def _valid_completion_repair_path(value: Any) -> bool:
+    path = str(value or "").strip().replace("\\", "/")
+    return bool(
+        path and not path.startswith(("/", "~")) and ".." not in Path(path).parts
+    )
+
+
+def _valid_completion_repair_ops(value: Any) -> bool:
+    if not isinstance(value, list) or not value:
+        return False
+    for operation in value:
+        if not isinstance(operation, dict):
+            return False
+        operation_name = operation.get("op")
+        path = operation.get("path")
+        if (
+            operation_name not in _COMPLETION_REPAIR_OPS
+            or not _valid_completion_repair_path(path)
+        ):
+            return False
+        if operation_name in {"write_file", "append_file"}:
+            if not isinstance(operation.get("content"), str):
+                return False
+        elif not all(isinstance(operation.get(field), str) for field in ("old", "new")):
+            return False
+    return True
+
+
+def _valid_completion_repair_step(raw_step: Any) -> bool:
+    """Validate the producer contract before permissive legacy normalization."""
+
+    if not isinstance(raw_step, dict):
+        return False
+    description = raw_step.get("description")
+    if not isinstance(description, str) or not description.strip():
+        return False
+
+    commands = raw_step.get("commands")
+    valid_commands = (
+        isinstance(commands, list)
+        and bool(commands)
+        and all(isinstance(command, str) and command.strip() for command in commands)
+    )
+    valid_ops = _valid_completion_repair_ops(raw_step.get("ops"))
+    if not (valid_commands or valid_ops):
+        return False
+
+    verification = raw_step.get("verification", raw_step.get("verification_command"))
+    if not isinstance(verification, str) or not verification.strip():
+        return False
+
+    expected_files = raw_step.get("expected_files")
+    if expected_files is not None and (
+        not isinstance(expected_files, list)
+        or not all(_valid_completion_repair_path(path) for path in expected_files)
+    ):
+        return False
+    rollback = raw_step.get("rollback")
+    return rollback is None or isinstance(rollback, str)
+
+
+def _canonicalize_completion_repair_envelope(
+    parsed_data: Any, next_step_number: int
+) -> Optional[Dict[str, Any]]:
+    """Return one canonical envelope, accepting only bounded legacy shapes."""
+
+    if not isinstance(parsed_data, dict):
+        return None
+
+    candidates: list[Dict[str, Any]] = []
+    if "repair_step" in parsed_data:
+        if set(parsed_data) != {"repair_step"}:
+            return None
+        candidate = parsed_data.get("repair_step")
+        if isinstance(candidate, dict):
+            candidates.append(candidate)
+    else:
+        direct_keys = {
+            "step_number",
+            "description",
+            "commands",
+            "verification",
+            "verification_command",
+            "rollback",
+            "expected_files",
+            "ops",
+            "repair_type",
+        }
+        if direct_keys.intersection(parsed_data):
+            candidates.append(parsed_data)
+        else:
+            wrapper_keys = [
+                key for key in _COMPLETION_REPAIR_WRAPPER_KEYS[1:] if key in parsed_data
+            ]
+            if len(wrapper_keys) == 1 and isinstance(
+                parsed_data.get(wrapper_keys[0]), dict
+            ):
+                candidates.append(parsed_data[wrapper_keys[0]])
+
+    if len(candidates) != 1 or not _valid_completion_repair_step(candidates[0]):
+        return None
+    return {
+        "repair_step": _normalize_completion_repair_step(
+            candidates[0], next_step_number
+        )
+    }
 
 
 def _salvage_completion_repair_json_text(text: str) -> str:

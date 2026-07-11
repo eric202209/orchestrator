@@ -294,7 +294,7 @@ def build_bounded_completion_repair_prompt(
                 + contract
             )
 
-    return f"""Return one minimal JSON completion repair step. Output JSON object only.
+    return f"""Return one minimal JSON completion repair envelope. Output JSON object only.
 
 Task excerpt:
 {capsule.task_prompt_excerpt}
@@ -312,15 +312,16 @@ Last execution step:
 {capsule.last_step_summary or "No execution results recorded."}{evidence_section}{source_content_section}{api_contract_section}
 
 Rules:
-1. Return a single JSON object with keys: step_number, repair_type, description, ops, verification, expected_files.
-2. Set repair_type to "ops_fix". Use step_number {next_step_number}.
-3. ops must be a non-empty JSON array of structured file operations.
+1. Return exactly {{"repair_step": {{...}}}}. The repair_step object is the only executable object.
+2. Inside repair_step, set repair_type to "ops_fix" and step_number to {next_step_number}.
+3. description must be non-empty. ops must be a non-empty JSON array of structured file operations.
 4. Each op must have "op" (write_file, append_file, or replace_in_file), "path" (relative to workspace root), and op-specific fields: "content" for write_file/append_file; "old" and "new" for replace_in_file.
-5. verification must be one top-level shell command string or null. No shell metacharacters.
+5. verification must be one non-empty top-level shell command string. No shell metacharacters.
 6. Do not use a "commands" key. Use ops only.
+   The canonical producer envelope is the repair_step wrapper.
 7. Prefer replace_in_file for targeted in-place edits; use write_file only to create or fully overwrite a file.
 8. Use relative paths only; no absolute paths, "..", or "~".
-9. Do not return prose, markdown, comments, or fenced code.
+9. Do not return prose, markdown, comments, a list, a second plan, or fenced code.
 10. Touch only files that appear in the relevant existing files list, unless ops explicitly create a new required file.
 11. expected_files must list every file path that ops write to.
 12. For replace_in_file, copy the "old" value character-for-character from CURRENT FILE CONTENT above — same whitespace, indentation, quotes, and line breaks. Do not reconstruct from memory or training data.

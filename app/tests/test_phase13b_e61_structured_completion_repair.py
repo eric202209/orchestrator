@@ -13,9 +13,67 @@ from app.services.orchestration.diagnostics.signature_guard import (
 )
 from app.services.orchestration.phases.completion_repair import (
     _apply_completion_repair_ops_direct,
+    _canonicalize_completion_repair_envelope,
     _extract_completion_repair_step,
     _normalize_completion_repair_step,
 )
+
+
+def _contract_step(**overrides):
+    step = {
+        "description": "Repair the failing service assertion",
+        "ops": [{"op": "replace_in_file", "path": "src/f.py", "old": "a", "new": "b"}],
+        "verification": "python -m pytest -q",
+        "expected_files": ["src/f.py"],
+    }
+    step.update(overrides)
+    return step
+
+
+def test_canonical_completion_repair_envelope_normalizes_one_step():
+    result = _canonicalize_completion_repair_envelope(
+        {"repair_step": _contract_step()}, 4
+    )
+    assert result is not None
+    assert list(result) == ["repair_step"]
+    assert result["repair_step"]["step_number"] == 4
+
+
+@pytest.mark.parametrize(
+    "wrapper", ["step", "completion_repair_step", "payload", "result"]
+)
+def test_supported_completion_repair_wrappers_normalize_to_same_step(wrapper):
+    canonical = _canonicalize_completion_repair_envelope(
+        {"repair_step": _contract_step()}, 4
+    )
+    wrapped = _canonicalize_completion_repair_envelope({wrapper: _contract_step()}, 4)
+    assert wrapped == canonical
+
+
+def test_legacy_direct_completion_repair_step_normalizes_to_canonical():
+    result = _canonicalize_completion_repair_envelope(
+        {"step_number": 9, **_contract_step()}, 4
+    )
+    assert result is not None
+    assert result["repair_step"]["step_number"] == 9
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"status": "ready", "message": "done"},
+        {"repair_step": {}},
+        {"repair_step": {**_contract_step(), "commands": [], "ops": []}},
+        {"repair_step": {**_contract_step(), "verification": []}},
+        {"repair_step": {**_contract_step(), "expected_files": "src/f.py"}},
+        {"outer": {"repair_step": _contract_step()}},
+        [{"repair_step": _contract_step()}],
+    ],
+)
+def test_completion_repair_contract_rejects_noncanonical_or_malformed_shapes(value):
+    assert _canonicalize_completion_repair_envelope(value, 4) is None
+
+
 from app.services.orchestration.phases.completion_repair_capsule import (
     CompletionRepairCapsule,
     build_bounded_completion_repair_prompt,

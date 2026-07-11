@@ -2119,6 +2119,20 @@ def test_completion_verification_repair_has_separate_budget_from_execution_debug
     db_session, tmp_path, monkeypatch
 ):
     ctx, execution = _seed_finalize_ctx(db_session, tmp_path)
+    # Phase 24A-9-shaped setup: three completed steps before final verification.
+    for step_number in (2, 3):
+        ctx.orchestration_state.plan.append(
+            {
+                "step_number": step_number,
+                "description": f"Completed step {step_number}",
+                "commands": ["true"],
+                "verification": "true",
+                "expected_files": [],
+            }
+        )
+        ctx.orchestration_state.execution_results.append(
+            StepResult(step_number=step_number, status="success", output="ok")
+        )
     ctx.orchestration_state.debug_repair_task_execution_ids = [execution.id]
     ctx.orchestration_state.completion_repair_attempts = 0
     verification_outputs = [
@@ -2133,8 +2147,11 @@ def test_completion_verification_repair_has_separate_budget_from_execution_debug
         {"output": "Task summary"},
         {
             "output": (
-                '{"description":"repair import","commands":["python -c \\"print(1)\\""],'
-                '"verification":"python -c \\"print(1)\\"","expected_files":[]}'
+                '{"repair_step":{"description":"repair import",'
+                '"ops":[{"op":"write_file","path":"tests/test_config.py",'
+                '"content":"def test_ok():\\n    assert True\\n"}],'
+                '"verification":"python -m pytest -q",'
+                '"expected_files":["tests/test_config.py"]}}'
             )
         },
         {"output": "repair applied"},
@@ -2205,3 +2222,5 @@ def test_completion_verification_repair_has_separate_budget_from_execution_debug
     assert result["status"] == "completed"
     assert ctx.orchestration_state.completion_repair_attempts == 1
     assert ctx.task.status == TaskStatus.DONE
+    assert ctx.task.current_step == 4
+    assert len(ctx.orchestration_state.execution_results) == 4

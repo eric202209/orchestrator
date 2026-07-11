@@ -280,10 +280,7 @@ def test_completion_repair_compliance_retry_recovers_valid_json(db_session, tmp_
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
     )
 
-    assert result == {
-        "status": "failed",
-        "reason": "repair_step_missing_commands_or_ops",
-    }
+    assert result == {"status": "failed", "reason": "repair_step_invalid_contract"}
     assert len(runtime.prompts) == 2
     assert runtime.prompts[1].startswith("Your previous response was not valid JSON.")
     assert "Relevant existing files:" not in runtime.prompts[1]
@@ -329,7 +326,7 @@ def test_completion_repair_generic_json_response_classifies_as_non_step(
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
     )
 
-    assert result == {"status": "failed", "reason": "repair_step_missing_step_object"}
+    assert result == {"status": "failed", "reason": "repair_step_invalid_contract"}
     assert len(runtime.prompts) == 1
     events = read_orchestration_events(
         ctx.orchestration_state.project_dir, ctx.session_id, ctx.task_id
@@ -362,7 +359,7 @@ def test_completion_repair_compliance_retry_wrapper_json_classifies_as_non_step(
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
     )
 
-    assert result == {"status": "failed", "reason": "repair_step_missing_step_object"}
+    assert result == {"status": "failed", "reason": "repair_step_invalid_contract"}
     assert len(runtime.prompts) == 2
     events = read_orchestration_events(
         ctx.orchestration_state.project_dir, ctx.session_id, ctx.task_id
