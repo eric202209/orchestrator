@@ -8,12 +8,14 @@ wiring it into dispatch is Stage 3, explicitly out of scope here.
 from __future__ import annotations
 
 import json
+import fcntl
 import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
+from contextlib import contextmanager
 
 from app.services.workspace.workspace_paths import HYDRATION_EXCLUDED_NAMES
 
@@ -110,6 +112,36 @@ def _copy_project_tree(project_root: Path, destination: Path) -> None:
     shutil.copytree(project_root, destination, ignore=_ignore, dirs_exist_ok=True)
 
 
+@contextmanager
+def _git_worktree_lock(project_root: Path):
+    """Serialize Git worktree administration for one repository.
+
+    Git updates the shared ``.git/worktrees`` administrative directory during
+    both add and remove operations. A process-local lock is insufficient here
+    because Celery workers and CI jobs may use separate processes, so use an
+    advisory lock file in the repository's common Git directory.
+    """
+    common_dir_result = subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=True,
+    )
+    common_dir = Path(common_dir_result.stdout.strip())
+    if not common_dir.is_absolute():
+        common_dir = (project_root / common_dir).resolve()
+    lock_path = common_dir / "orchestrator-worktree.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def allocate_task_sandbox(
     project_root: Path,
     *,
@@ -165,13 +197,22 @@ def allocate_task_sandbox(
         branch = f"orchestrator/task-{task_execution_id}"
         base_commit = head.stdout.strip()
 
-        result = subprocess.run(
-            ["git", "worktree", "add", "-b", branch, str(sandbox_dir), base_commit],
-            cwd=project_root,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+        with _git_worktree_lock(project_root):
+            result = subprocess.run(
+                [
+                    "git",
+                    "worktree",
+                    "add",
+                    "-b",
+                    branch,
+                    str(sandbox_dir),
+                    base_commit,
+                ],
+                cwd=project_root,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
         if result.returncode != 0:
             raise TaskSandboxError(
                 f"git worktree add failed for {project_root} -> {sandbox_dir}: "
@@ -219,22 +260,23 @@ def dispose_task_sandbox(
 
     if sandbox.is_git and project_root is not None:
         project_root = Path(project_root).expanduser().resolve()
-        result = subprocess.run(
-            ["git", "worktree", "remove", "--force", str(sandbox.path)],
-            cwd=project_root,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        if result.returncode != 0:
-            shutil.rmtree(sandbox.path, ignore_errors=True)
-            subprocess.run(
-                ["git", "worktree", "prune"],
+        with _git_worktree_lock(project_root):
+            result = subprocess.run(
+                ["git", "worktree", "remove", "--force", str(sandbox.path)],
                 cwd=project_root,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=60,
             )
+            if result.returncode != 0:
+                shutil.rmtree(sandbox.path, ignore_errors=True)
+                subprocess.run(
+                    ["git", "worktree", "prune"],
+                    cwd=project_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
         return
 
     shutil.rmtree(sandbox.path, ignore_errors=True)

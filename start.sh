@@ -447,6 +447,11 @@ start_workers() {
         return 1
     fi
 
+    if check_process "celery -A app.celery_app beat"; then
+        echo -e "${YELLOW}⚠️  Celery Beat already running; leaving the existing scheduler in place${NC}"
+        return 0
+    fi
+
     cleanup_pid_file "${PID_DIR}/beat.pid"
     setsid nohup "${VENV_DIR}/bin/celery" \
         -A app.celery_app beat \
