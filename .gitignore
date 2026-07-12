@@ -128,6 +128,7 @@ graphify-out/
 # BEGIN OpenClaw workspace guard
 .agent/
 .openclaw/
+BOOTSTRAP.md
 HEARTBEAT.md
 IDENTITY.md
 SOUL.md

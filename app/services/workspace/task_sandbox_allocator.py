@@ -148,18 +148,21 @@ def allocate_task_sandbox(
     branch: Optional[str] = None
 
     if is_git:
-        branch = f"orchestrator/task-{task_execution_id}"
         head = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            ["git", "rev-parse", "--quiet", "--verify", "HEAD"],
             cwd=project_root,
             capture_output=True,
             text=True,
             timeout=15,
         )
         if head.returncode != 0:
-            raise TaskSandboxError(
-                f"Failed to resolve HEAD for {project_root}: {head.stderr.strip()}"
-            )
+            # Freshly initialized repo with no commits yet (unborn HEAD):
+            # there is no base commit to anchor a worktree on, so use the
+            # same filtered-copy sandbox that non-git projects get.
+            is_git = False
+
+    if is_git:
+        branch = f"orchestrator/task-{task_execution_id}"
         base_commit = head.stdout.strip()
 
         result = subprocess.run(

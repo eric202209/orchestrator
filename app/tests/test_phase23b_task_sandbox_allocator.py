@@ -193,6 +193,31 @@ class TestNonGitAllocation:
         finally:
             dispose_task_sandbox(sandbox)
 
+    def test_allocate_treats_unborn_head_repo_as_copy(self, tmp_path):
+        # Phase 24B-6 live finding: a freshly `git init`-ed project with no
+        # commits has an unborn HEAD, so a worktree cannot be anchored;
+        # allocation must fall back to the filtered copy instead of failing.
+        project_dir = tmp_path / "unborn-head-project"
+        project_dir.mkdir()
+        (project_dir / ".gitignore").write_text("venv/\n", encoding="utf-8")
+        (project_dir / "file.txt").write_text("data\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=project_dir, check=True)
+        runtime_root = tmp_path / "runtime"
+
+        sandbox = allocate_task_sandbox(
+            project_dir, project_id=5, task_execution_id=9, runtime_root=runtime_root
+        )
+
+        try:
+            assert sandbox.is_git is False
+            assert sandbox.branch is None
+            assert (sandbox.path / "file.txt").read_text(encoding="utf-8") == "data\n"
+
+            metadata = sandbox.read_metadata()
+            assert metadata["base_commit"] is None
+        finally:
+            dispose_task_sandbox(sandbox)
+
     def test_dispose_removes_copied_directory(self, tmp_path):
         project_dir = tmp_path / "plain-project"
         project_dir.mkdir()

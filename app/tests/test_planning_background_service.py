@@ -169,6 +169,63 @@ def test_process_session_preserves_operator_cancel_during_runtime_failure(
     assert db_session.query(PlanningArtifact).count() == 0
 
 
+def test_synthesis_runtime_failure_persists_terminal_failure_without_unbound_result(
+    db_session, monkeypatch
+):
+    project = _create_project(db_session, name="Initial Planning Failure Project")
+    session = PlanningSession(
+        project_id=project.id,
+        title="Initial planning failure",
+        prompt="Create a bounded documentation change.",
+        status="active",
+        source_brain="local",
+    )
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+
+    service = PlanningSessionService(db_session)
+
+    def fail_runtime(*args, **kwargs):
+        raise RuntimeError("runtime unavailable")
+
+    monkeypatch.setattr(service, "_invoke_openclaw", fail_runtime)
+    service._finalize_session(session, project)
+    db_session.commit()
+    db_session.refresh(session)
+
+    assert session.status == "failed"
+    assert session.last_error == "runtime unavailable"
+    assert session.current_prompt_id is None
+    assert "unbound local variable" not in session.last_error
+
+
+def test_planning_runtime_receives_project_context(db_session, monkeypatch):
+    captured = {}
+
+    def fake_invoke_runtime_prompt(db, prompt, **kwargs):
+        captured.update(kwargs)
+        return {"status": "completed", "output": "{}"}
+
+    monkeypatch.setattr(
+        "app.services.planning.planning_session_service.invoke_runtime_prompt",
+        fake_invoke_runtime_prompt,
+    )
+    service = PlanningSessionService(db_session)
+
+    service._run_openclaw(
+        "Return JSON",
+        source_brain="local",
+        timeout_seconds=7,
+        project_id=42,
+    )
+
+    assert captured["session_id"] is None
+    assert captured["project_id"] == 42
+    assert captured["task_id"] is None
+    assert captured["timeout_seconds"] == 7
+
+
 def test_malformed_planning_synthesis_failure_writes_diagnostic_artifact(
     db_session, monkeypatch
 ):

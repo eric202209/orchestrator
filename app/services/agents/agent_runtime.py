@@ -113,6 +113,7 @@ def invoke_runtime_prompt(
     session_id: Optional[int] = None,
     task_id: Optional[int] = None,
     task_execution_id: Optional[int] = None,
+    project_id: Optional[int] = None,
     source_brain: str = "local",
     timeout_seconds: int = 180,
     session_prefix: str = "planning",
@@ -120,6 +121,8 @@ def invoke_runtime_prompt(
     """Execute a one-shot runtime prompt across local or remote backends."""
 
     runtime = create_agent_runtime(db, session_id, task_id)
+    if project_id is not None and hasattr(runtime, "project_id"):
+        runtime.project_id = project_id
     if task_execution_id is not None and hasattr(runtime, "task_execution_id"):
         runtime.task_execution_id = task_execution_id
     try:

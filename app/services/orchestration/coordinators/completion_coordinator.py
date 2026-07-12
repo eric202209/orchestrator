@@ -66,6 +66,9 @@ from app.services.orchestration.validation.integrity import (
 from app.services.orchestration.validation.parsing import extract_structured_text
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.orchestration.prompt_templates import OrchestrationStatus
+from app.services.workspace.project_isolation_service import (
+    resolve_project_workspace_path,
+)
 from app.services.workspace.workspace_paths import TASK_REPORT_ROOT
 
 
@@ -1315,10 +1318,21 @@ class CompletionCoordinator:
                 )
                 if report_result and "report" in report_result:
                     report_content = report_result["report"]
+                    # The virtual merge gate resolves reports against the
+                    # durable project root; under RUNTIME_WORKSPACE_ENABLED
+                    # orchestration_state.project_dir is the disposable Task
+                    # Execution Sandbox, so a report written there is lost on
+                    # disposal (Phase 24B-7 live finding on tasks 47/48).
+                    report_root = orchestration_state.project_dir
+                    if project is not None:
+                        try:
+                            report_root = resolve_project_workspace_path(
+                                project.workspace_path, project.name
+                            )
+                        except Exception:
+                            report_root = orchestration_state.project_dir
                     report_path = (
-                        orchestration_state.project_dir
-                        / TASK_REPORT_ROOT
-                        / f"task_report_{task_id}.md"
+                        report_root / TASK_REPORT_ROOT / f"task_report_{task_id}.md"
                     )
                     os.makedirs(report_path.parent, exist_ok=True)
                     report_path.parent.chmod(0o777)

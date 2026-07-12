@@ -478,3 +478,48 @@ def test_complete_task_verification_integrity_failure(tmp_path, monkeypatch):
 
     assert result["status"] == "failed"
     assert result["reason"] == TerminalReason.VERIFICATION_INTEGRITY_FAILED
+
+
+def test_complete_task_writes_report_to_durable_project_root(tmp_path, monkeypatch):
+    """Phase 24B-7: the task report must land in the durable project root,
+    not in the disposable Task Execution Sandbox the coordinator ran in,
+    because the virtual merge gate resolves reports against the project root."""
+    durable_root = tmp_path / "durable-project"
+    durable_root.mkdir()
+    sandbox_dir = tmp_path / "runtime-sandbox"
+    sandbox_dir.mkdir()
+
+    ctx = _make_ctx(tmp_path)
+    ctx.orchestration_state._project_dir_override = str(sandbox_dir)
+    ctx.project.workspace_path = str(durable_root)
+
+    accepted_verdict = _make_validation_verdict(status="accepted", accepted=True)
+    _patch_coordinator_delegates(monkeypatch, validation_verdict=accepted_verdict)
+
+    with patch(
+        "app.services.human_guidance.post_write_checker.run_post_write_check_if_enabled",
+        _NOOP_FN,
+    ):
+        result = CompletionCoordinator().complete_task(
+            ctx=ctx,
+            write_project_state_snapshot_fn=_NOOP_FN,
+            save_orchestration_checkpoint_fn=_NOOP_FN,
+            build_task_report_payload_fn=lambda db, task_id: {
+                "task_id": task_id,
+                "title": "Test task",
+                "status": "done",
+                "duration_seconds": 1,
+                "structured_state": {},
+                "logs": [],
+            },
+            render_task_report_fn=lambda payload, output_format: {
+                "report": "# Task Report: Test task\n",
+                "format": output_format,
+            },
+        )
+
+    assert result["status"] == "completed"
+    durable_report = durable_root / ".agent" / "task-reports" / "task_report_1.md"
+    sandbox_report = sandbox_dir / ".agent" / "task-reports" / "task_report_1.md"
+    assert durable_report.exists()
+    assert not sandbox_report.exists()

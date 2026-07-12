@@ -157,6 +157,7 @@ def test_project_gitignore_guard_creates_runtime_exclusions(
     # project's git root, these must be guarded like any other runtime
     # exclusion so they never pollute the tracked project.
     assert ".openclaw/" in contents
+    assert "BOOTSTRAP.md" in contents
     assert "HEARTBEAT.md" in contents
     assert "IDENTITY.md" in contents
     assert "SOUL.md" in contents
@@ -208,6 +209,7 @@ def test_project_gitignore_guard_does_not_duplicate_existing_rules(
             ".pytest_cache/",
             ".agent/",
             ".openclaw/",
+            "BOOTSTRAP.md",
             "HEARTBEAT.md",
             "IDENTITY.md",
             "SOUL.md",

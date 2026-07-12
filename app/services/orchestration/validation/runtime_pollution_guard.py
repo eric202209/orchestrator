@@ -35,6 +35,7 @@ KNOWN_OPENCLAW_RUNTIME_SCAFFOLD_NAMES = frozenset(
         "TOOLS.md",
         "HEARTBEAT.md",
         "IDENTITY.md",
+        "BOOTSTRAP.md",
         ".openclaw",
     }
 )

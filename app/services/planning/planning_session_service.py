@@ -595,11 +595,13 @@ class PlanningSessionService:
         )
         used_replan_fallback = False
         replan_fallback_error = ""
+        result: dict[str, Any] = {}
         try:
             result = self._run_openclaw_with_fallback(
                 prompt,
                 source_brain=session.source_brain,
                 timeout_seconds=timeout_seconds,
+                project_id=project.id,
             )
             artifacts = self._parse_finalization_payload(result)
         except HTTPException:
@@ -617,6 +619,7 @@ class PlanningSessionService:
                         compact,
                         source_brain=session.source_brain,
                         timeout_seconds=timeout_seconds,
+                        project_id=project.id,
                     )
                     artifacts = self._parse_finalization_payload(result)
                 except HTTPException:
@@ -718,6 +721,7 @@ class PlanningSessionService:
         *,
         source_brain: str = "local",
         timeout_seconds: int | None = None,
+        project_id: int | None = None,
     ) -> dict[str, Any]:
         """Execute planning synthesis through the active backend runtime."""
         try:
@@ -725,6 +729,7 @@ class PlanningSessionService:
                 self.db,
                 prompt,
                 session_id=None,
+                project_id=project_id,
                 task_id=None,
                 source_brain=source_brain,
                 timeout_seconds=(
@@ -741,11 +746,13 @@ class PlanningSessionService:
         *,
         source_brain: str = "local",
         timeout_seconds: int | None = None,
+        project_id: int | None = None,
     ) -> dict[str, Any]:
         result = self._invoke_openclaw(
             prompt,
             source_brain=source_brain,
             timeout_seconds=timeout_seconds,
+            project_id=project_id,
         )
         if not runtime_reports_context_overflow(self.db, result):
             return result
@@ -757,6 +764,7 @@ class PlanningSessionService:
             compact_prompt,
             source_brain=source_brain,
             timeout_seconds=timeout_seconds,
+            project_id=project_id,
         )
 
     def _invoke_openclaw(
@@ -765,6 +773,7 @@ class PlanningSessionService:
         *,
         source_brain: str = "local",
         timeout_seconds: int | None = None,
+        project_id: int | None = None,
     ) -> dict[str, Any]:
         """
         Run planning synthesis while tolerating older monkeypatched helpers used in tests.
@@ -775,16 +784,38 @@ class PlanningSessionService:
                 prompt,
                 source_brain=source_brain,
                 timeout_seconds=timeout_seconds,
+                project_id=project_id,
             )
         except TypeError as exc:
-            if "source_brain" not in str(exc) and "timeout_seconds" not in str(exc):
+            error_text = str(exc)
+            unsupported = {
+                name
+                for name in ("source_brain", "timeout_seconds", "project_id")
+                if name in error_text
+            }
+            if not unsupported:
                 raise
+            fallback_kwargs = {
+                "source_brain": source_brain,
+                "timeout_seconds": timeout_seconds,
+            }
+            fallback_kwargs = {
+                key: value
+                for key, value in fallback_kwargs.items()
+                if key not in unsupported
+            }
             try:
-                return self._run_openclaw(prompt, source_brain=source_brain)
+                return self._run_openclaw(prompt, **fallback_kwargs)
             except TypeError as second_exc:
-                if "source_brain" not in str(second_exc):
+                second_text = str(second_exc)
+                if (
+                    "source_brain" not in second_text
+                    and "timeout_seconds" not in second_text
+                ):
                     raise
-                return self._run_openclaw(prompt)
+                fallback_kwargs.pop("timeout_seconds", None)
+                fallback_kwargs.pop("source_brain", None)
+                return self._run_openclaw(prompt, **fallback_kwargs)
 
     def _parse_finalization_payload(self, result: dict[str, Any]) -> dict[str, str]:
         if result.get("status") == "failed":
@@ -998,7 +1029,9 @@ class PlanningSessionService:
         )
         try:
             result = self._run_openclaw_with_fallback(
-                prompt, source_brain=session.source_brain
+                prompt,
+                source_brain=session.source_brain,
+                project_id=project.id,
             )
             return self._parse_clarification_payload(
                 result,

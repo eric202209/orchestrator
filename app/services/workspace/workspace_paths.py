@@ -34,6 +34,7 @@ HYDRATION_EXCLUDED_NAMES = {
     # OpenClaw's own per-workspace agent-identity/onboarding scaffold,
     # written whenever an agent's configured workspace matches the
     # project root (Phase 22B dogfood finding) — not user/task content.
+    "BOOTSTRAP.md",
     "HEARTBEAT.md",
     "IDENTITY.md",
     "SOUL.md",
@@ -70,6 +71,7 @@ PROJECT_GITIGNORE_GUARD_LINES = [
     # that directory is a real project's git root, these files must not
     # count as tracked project content (Phase 22B dogfood finding).
     ".openclaw/",
+    "BOOTSTRAP.md",
     "HEARTBEAT.md",
     "IDENTITY.md",
     "SOUL.md",

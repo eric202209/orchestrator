@@ -234,6 +234,7 @@ class OpenClawSessionService:
             db.query(Task).filter(Task.id == task_id).first() if task_id else None
         )
         self.task_execution_id = task_execution_id
+        self.project_id: Optional[int] = None
         # Phase 23C: explicit single-source-of-truth override for the
         # execution cwd, set by dispatch when RUNTIME_WORKSPACE_ENABLED
         # redirects execution into a Task Execution Sandbox. When set,
@@ -1109,6 +1110,8 @@ class OpenClawSessionService:
         stdout_chunks: List[str] = []
         stderr_chunks: List[str] = []
         first_output_event = asyncio.Event()
+        response_ready_event = asyncio.Event()
+        response_boundary_reached = False
 
         expected_project_root = self._resolve_project_root_for_workspace_guard()
         subprocess_env, git_guard_shim_dir = build_git_containment_env()
@@ -1125,6 +1128,8 @@ class OpenClawSessionService:
             "stream_stalled": None,
             "truncated": False,
             "timeout_boundary": None,
+            "response_boundary_reached": False,
+            "response_cleanup_return_code": None,
             "invocation": self._openclaw_invocation_metadata(
                 full_cmd=full_cmd,
                 prompt=prompt,
@@ -1184,6 +1189,21 @@ class OpenClawSessionService:
                 line_text = line.decode("utf-8", errors="replace").strip()
                 chunks.append(line_text)
 
+                # A one-shot CLI can leave a reader or descendant alive after
+                # it has emitted the complete gateway response.  The parser
+                # already treats structured model content as the valid final
+                # response contract, so use that boundary to begin normal
+                # process-group cleanup instead of waiting for EOF.
+                stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
+                stderr_text = "\n".join(filter(None, stderr_chunks)).strip()
+                response_received = self._text_contains_model_content(stdout_text)
+                if not response_received:
+                    response_received = bool(
+                        self._recover_json_like_output_from_stderr(stderr_text)
+                    )
+                if response_received:
+                    response_ready_event.set()
+
                 if (
                     stream_name == "stderr"
                     and line_text
@@ -1232,11 +1252,38 @@ class OpenClawSessionService:
                     first_output_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await first_output_task
-            await asyncio.wait_for(stream_task, timeout=timeout_seconds + 30)
-            return_code = await asyncio.wait_for(
-                process.wait(), timeout=timeout_seconds + 30
-            )
+            response_ready_task = asyncio.create_task(response_ready_event.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    {stream_task, response_ready_task},
+                    timeout=timeout_seconds + 30,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    raise asyncio.TimeoutError
+                response_boundary_reached = (
+                    response_ready_task in done and not stream_task.done()
+                )
+                if response_boundary_reached and not stream_task.done():
+                    diagnostics["response_boundary_reached"] = True
+                    kill_process_group(process.pid)
+                    await process.wait()
+                    diagnostics["response_cleanup_return_code"] = process.returncode
+                    await asyncio.wait_for(stream_task, timeout=5)
+                else:
+                    await stream_task
+                    await asyncio.wait_for(process.wait(), timeout=timeout_seconds + 30)
+                return_code = process.returncode
+            finally:
+                response_ready_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await response_ready_task
             diagnostics["return_code"] = return_code
+            if response_boundary_reached:
+                # Cleanup may necessarily signal the CLI after the successful
+                # response.  Keep the established successful response
+                # contract while retaining the actual signal result above.
+                diagnostics["return_code"] = 0
         except asyncio.TimeoutError:
             diagnostics["timed_out"] = True
             diagnostics["timeout_boundary"] = (
@@ -1409,7 +1456,11 @@ class OpenClawSessionService:
             return self.execution_cwd_override
         try:
             project_model = None
-            if self.session_model and self.session_model.project_id:
+            if self.project_id is not None:
+                project_model = (
+                    self.db.query(Project).filter(Project.id == self.project_id).first()
+                )
+            elif self.session_model and self.session_model.project_id:
                 project_model = (
                     self.db.query(Project)
                     .filter(Project.id == self.session_model.project_id)
@@ -1461,7 +1512,11 @@ class OpenClawSessionService:
             return self.execution_cwd_override
         try:
             project_model = None
-            if self.session_model and self.session_model.project_id:
+            if self.project_id is not None:
+                project_model = (
+                    self.db.query(Project).filter(Project.id == self.project_id).first()
+                )
+            elif self.session_model and self.session_model.project_id:
                 project_model = (
                     self.db.query(Project)
                     .filter(Project.id == self.session_model.project_id)
