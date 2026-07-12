@@ -25,6 +25,8 @@ import shlex
 import time
 import re
 import tempfile
+import uuid
+from types import SimpleNamespace
 from typing import Optional, Dict, Any, List, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -94,6 +96,11 @@ from app.services.tasks.tool_tracking import ToolTrackingService
 from app.services.workspace.system_settings import (
     get_effective_agent_backend,
     get_effective_agent_model_family,
+    get_effective_runtime_root,
+)
+from app.services.workspace.workspace_paths import (
+    HYDRATION_EXCLUDED_NAMES,
+    is_executor_runtime_scaffold,
 )
 from app.services.agents.openclaw_response import (
     channel_metadata as _openclaw_channel_metadata,
@@ -354,6 +361,8 @@ class OpenClawSessionService:
 
         cmd = self._resolve_openclaw_command()
         runtime_session_key = f"{session_prefix}-{int(time.time())}"
+        if session_prefix.startswith("planning"):
+            runtime_session_key += f"-{uuid.uuid4().hex[:12]}"
         full_cmd = self._build_openclaw_agent_command(
             cmd, cwd=self._resolve_execution_cwd()
         )
@@ -2571,14 +2580,67 @@ class OpenClawSessionService:
         no_output_timeout_seconds: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Run a one-shot prompt using the CLI request path."""
-
-        full_cmd = self.build_cli_agent_command(
-            prompt,
-            source_brain=source_brain,
-            timeout_seconds=timeout_seconds,
-            session_prefix=session_prefix,
-        )
+        planning_temp_dir = None
+        previous_cwd_override = self.execution_cwd_override
         try:
+            if session_prefix == "planning" and self.project_id is not None:
+                project = (
+                    self.db.query(Project).filter(Project.id == self.project_id).first()
+                )
+                if project is None:
+                    raise OpenClawSessionError(
+                        f"Planning project {self.project_id} was not found"
+                    )
+                project_workspace = resolve_project_workspace_path(
+                    project.workspace_path, project.name
+                ).resolve()
+                planning_root = (
+                    get_effective_runtime_root(self.db)
+                    / "planning"
+                    / str(self.project_id)
+                )
+                planning_root.mkdir(parents=True, exist_ok=True)
+                planning_temp_dir = tempfile.TemporaryDirectory(
+                    prefix="invocation-", dir=planning_root
+                )
+                runtime_workspace = Path(planning_temp_dir.name).resolve()
+
+                def _ignore_runtime_scaffold(
+                    source_dir: str, names: List[str]
+                ) -> set[str]:
+                    ignored = {
+                        name for name in names if name in HYDRATION_EXCLUDED_NAMES
+                    }
+                    agents_path = Path(source_dir) / "AGENTS.md"
+                    if "AGENTS.md" in names and is_executor_runtime_scaffold(
+                        agents_path
+                    ):
+                        ignored.add("AGENTS.md")
+                    return ignored
+
+                shutil.copytree(
+                    project_workspace,
+                    runtime_workspace,
+                    ignore=_ignore_runtime_scaffold,
+                    dirs_exist_ok=True,
+                )
+                context = SimpleNamespace(
+                    executor="openclaw",
+                    runtime_workspace=runtime_workspace,
+                    project_workspace=project_workspace,
+                    project_id=self.project_id,
+                    task_execution_id=None,
+                    is_sandboxed=True,
+                )
+                self.execution_cwd_override = str(runtime_workspace)
+                self.bind_runtime_workspace(context)
+
+            full_cmd = self.build_cli_agent_command(
+                prompt,
+                source_brain=source_brain,
+                timeout_seconds=timeout_seconds,
+                session_prefix=session_prefix,
+            )
             isolated_temp_dir = None
             if isolate_workspace_context:
                 isolated_temp_dir = tempfile.TemporaryDirectory(
@@ -2612,6 +2674,11 @@ class OpenClawSessionService:
             raise
         except asyncio.CancelledError:
             raise
+        finally:
+            if planning_temp_dir is not None:
+                self.release_runtime_workspace_binding()
+                self.execution_cwd_override = previous_cwd_override
+                planning_temp_dir.cleanup()
         result = self.parse_cli_response(proc)
         result["runtime_diagnostics"] = diagnostics
         return result
