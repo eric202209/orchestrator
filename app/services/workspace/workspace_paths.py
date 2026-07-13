@@ -13,6 +13,8 @@ from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
 
+RUNTIME_METADATA_FILENAME = "runtime.json"
+
 HYDRATION_EXCLUDED_NAMES = {
     ".agent",
     ".openclaw",  # legacy dir name; kept as migration guard for existing projects
@@ -31,6 +33,8 @@ HYDRATION_EXCLUDED_NAMES = {
     # .gitignore is orchestrator scaffolding (written by ensure_project_gitignore_guard)
     # and must not count as user content for the has_existing_files workspace review.
     ".gitignore",
+    # Task Execution Sandbox recovery metadata must never enter durable workspace content.
+    RUNTIME_METADATA_FILENAME,
     # OpenClaw's own per-workspace agent-identity/onboarding scaffold,
     # written whenever an agent's configured workspace matches the
     # project root (Phase 22B dogfood finding) — not user/task content.

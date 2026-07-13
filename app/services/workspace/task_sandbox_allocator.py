@@ -17,10 +17,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 from contextlib import contextmanager
 
-from app.services.workspace.workspace_paths import HYDRATION_EXCLUDED_NAMES
+from app.services.workspace.workspace_paths import (
+    HYDRATION_EXCLUDED_NAMES,
+    RUNTIME_METADATA_FILENAME,
+)
 
 RUNTIME_SCHEMA_VERSION = 1
-RUNTIME_METADATA_FILENAME = "runtime.json"
 
 VALID_RUNTIME_STATES = {
     "allocated",
