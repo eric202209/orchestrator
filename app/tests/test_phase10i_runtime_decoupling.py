@@ -31,6 +31,54 @@ from app.services.agents.backend_concurrency import (
 )
 
 
+def test_forced_stop_release_removes_only_the_owned_slot(caplog):
+    """The forced-stop cleanup seam releases the session-owned Redis member."""
+    from app.tasks.worker import _release_backend_slot_safely
+
+    r = FakeRedis()
+    acquire_backend_slot(r, "local_openclaw", session_id=101, max_slots=2)
+    acquire_backend_slot(r, "local_openclaw", session_id=202, max_slots=2)
+
+    _release_backend_slot_safely(
+        r,
+        "local_openclaw",
+        session_id=101,
+        task_execution_id=7001,
+    )
+
+    assert get_concurrency_snapshot(r, "local_openclaw") == {
+        "backend_id": "local_openclaw",
+        "active_count": 1,
+        "active_session_ids": [202],
+    }
+    _release_backend_slot_safely(
+        r,
+        "local_openclaw",
+        session_id=101,
+        task_execution_id=7001,
+    )
+    assert get_concurrency_snapshot(r, "local_openclaw")["active_count"] == 1
+
+
+def test_forced_stop_release_failure_is_logged_with_execution_identity(caplog):
+    from app.tasks.worker import _release_backend_slot_safely
+
+    class BrokenRedis:
+        def srem(self, *_args):
+            raise RuntimeError("redis unavailable")
+
+    with caplog.at_level("WARNING"):
+        _release_backend_slot_safely(
+            BrokenRedis(),
+            "local_openclaw",
+            session_id=101,
+            task_execution_id=7001,
+        )
+
+    assert "task_execution_id=7001" in caplog.text
+    assert "session_id=101" in caplog.text
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

@@ -97,7 +97,7 @@ EXPECTED_TASK_ATTEMPT_CALLS = {
         "mark_task_attempt_running": 2,
     },
     "app/services/orchestration/run_state/transitions.py": {
-        "mark_task_attempt_cancelled": 1,
+        "mark_task_attempt_cancelled": 3,
         "mark_task_attempt_done": 1,
         "mark_task_attempt_failed": 3,
     },

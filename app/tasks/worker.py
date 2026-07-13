@@ -149,6 +149,28 @@ from app.services.observability import (
 
 logger = logging.getLogger(__name__)
 
+
+def _release_backend_slot_safely(
+    redis_client: Any,
+    backend_id: str,
+    *,
+    session_id: int,
+    task_execution_id: Optional[int],
+) -> None:
+    """Release this dispatch's slot without masking terminal task cleanup."""
+    from app.services.agents.backend_concurrency import release_backend_slot
+
+    released = release_backend_slot(redis_client, backend_id, session_id)
+    if released is False:
+        logger.warning(
+            "[ORCHESTRATION] Failed to release backend slot for backend=%s "
+            "session_id=%s task_execution_id=%s",
+            backend_id,
+            session_id,
+            task_execution_id,
+        )
+
+
 MAX_SUBFOLDER_COLLISION_ATTEMPTS = 999
 
 
@@ -288,6 +310,17 @@ def execute_orchestration_task(
     # cleanup` is called first thing in the normal `finally` so this never
     # double-runs against a dispatch that already completed on its own.
     def _forced_termination_cleanup() -> None:
+        if (
+            _backend_slot_acquired
+            and _backend_slot_redis is not None
+            and _backend_slot_backend_id
+        ):
+            _release_backend_slot_safely(
+                _backend_slot_redis,
+                _backend_slot_backend_id,
+                session_id=session_id,
+                task_execution_id=task_execution_id,
+            )
         if runtime_service is not None and hasattr(
             runtime_service, "release_runtime_workspace_binding"
         ):
@@ -2288,15 +2321,19 @@ def execute_orchestration_task(
             and _backend_slot_backend_id
         ):
             try:
-                from app.services.agents.backend_concurrency import release_backend_slot
-
-                release_backend_slot(
-                    _backend_slot_redis, _backend_slot_backend_id, session_id
+                _release_backend_slot_safely(
+                    _backend_slot_redis,
+                    _backend_slot_backend_id,
+                    session_id=session_id,
+                    task_execution_id=task_execution_id,
                 )
             except Exception as _rel_exc:
                 logger.warning(
-                    "[ORCHESTRATION] Failed to release backend slot for %s: %s",
+                    "[ORCHESTRATION] Failed to release backend slot for backend=%s "
+                    "session_id=%s task_execution_id=%s: %s",
                     _backend_slot_backend_id,
+                    session_id,
+                    task_execution_id,
                     _rel_exc,
                 )
         if runtime_service is not None and hasattr(

@@ -617,6 +617,70 @@ def test_force_stop_awaiting_input_session_without_task_links(db_session, monkey
     assert session.stopped_at is not None
 
 
+def test_explicit_stop_terminalizes_active_task_attempt(db_session):
+    project = _make_project(db_session)
+    session = _make_session(
+        db_session,
+        project,
+        status="running",
+        is_active=True,
+        execution_mode="automatic",
+    )
+    task = _make_task(db_session, project, status=TaskStatus.RUNNING)
+    link = SessionTask(
+        session_id=session.id,
+        task_id=task.id,
+        status=TaskStatus.RUNNING,
+    )
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.RUNNING,
+    )
+    db_session.add_all([link, execution])
+    db_session.commit()
+
+    result = asyncio.run(
+        stop_session_lifecycle(
+            db_session,
+            session.id,
+            force=True,
+            initiated_by="operator@example.com",
+            source="api:POST /sessions/1/stop",
+        )
+    )
+
+    db_session.refresh(session)
+    db_session.refresh(task)
+    db_session.refresh(link)
+    db_session.refresh(execution)
+    assert result["status"] == "stopped"
+    assert session.status == "stopped"
+    assert task.status == TaskStatus.CANCELLED
+    assert task.error_message == "Operator requested stop"
+    assert task.completed_at is not None
+    assert link.status == TaskStatus.CANCELLED
+    assert link.completed_at == task.completed_at
+    assert execution.status == TaskStatus.CANCELLED
+    assert execution.completed_at == task.completed_at
+    assert execution.failure_category == "manual_stop"
+
+    repeated = asyncio.run(
+        stop_session_lifecycle(
+            db_session,
+            session.id,
+            force=True,
+            initiated_by="operator@example.com",
+            source="api:POST /sessions/1/stop",
+        )
+    )
+    assert repeated["status"] == "stopped"
+    db_session.refresh(task)
+    assert task.status == TaskStatus.CANCELLED
+    assert task.completed_at is not None
+
+
 def test_force_stop_clears_orphan_running_project_task_without_links(
     db_session,
     monkeypatch,
@@ -854,14 +918,13 @@ def test_start_automatic_session_requeues_failed_task_even_after_auto_budget_exh
 # ── stop boundary conditions ──────────────────────────────────────────────────
 
 
-def test_stop_already_stopped_session_returns_400(db_session):
+def test_stop_already_stopped_session_is_idempotent(db_session):
     project = _make_project(db_session)
     session = _make_session(db_session, project, status="stopped")
 
-    with pytest.raises(HTTPException) as exc_info:
-        asyncio.run(stop_session_lifecycle(db_session, session.id))
+    result = asyncio.run(stop_session_lifecycle(db_session, session.id))
 
-    assert exc_info.value.status_code == 400
+    assert result["status"] == "stopped"
 
 
 def test_stop_nonexistent_session_returns_404(db_session):
@@ -1176,10 +1239,14 @@ def test_stop_session_cancels_pending_retry_execution_and_clears_running_task(
     db_session.refresh(link)
     db_session.refresh(execution)
     assert result["status"] == "stopped"
-    assert task.status == TaskStatus.PENDING
-    assert link.status == TaskStatus.PENDING
+    assert task.status == TaskStatus.CANCELLED
+    assert task.error_message == "Operator requested stop"
+    assert task.completed_at is not None
+    assert link.status == TaskStatus.CANCELLED
+    assert link.completed_at == task.completed_at
     assert execution.status == TaskStatus.CANCELLED
-    assert execution.completed_at is not None
+    assert execution.completed_at == task.completed_at
+    assert execution.failure_category == "manual_stop"
 
 
 # ── pause boundary conditions ─────────────────────────────────────────────────

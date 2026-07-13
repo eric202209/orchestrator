@@ -68,12 +68,13 @@ def acquire_backend_slot(
     )
 
 
-def release_backend_slot(redis_client: Any, backend_id: str, session_id: int) -> None:
-    """Release the slot held by session_id for backend."""
+def release_backend_slot(redis_client: Any, backend_id: str, session_id: int) -> bool:
+    """Release the slot held by session_id for backend, idempotently."""
     try:
         redis_client.srem(_slot_key(backend_id), str(session_id))
+        return True
     except Exception:
-        pass
+        return False
 
 
 def get_concurrency_snapshot(redis_client: Any, backend_id: str) -> dict:

@@ -144,12 +144,15 @@ def mark_task_attempt_cancelled(
     session_task_link: SessionTask | None = None,
     task_execution: TaskExecution | None = None,
     completed_at: datetime | None = None,
+    error_message: str | None = None,
 ) -> datetime:
     """Mark a task attempt as cancelled across domain rows."""
 
     completed_at = completed_at or datetime.now(timezone.utc)
     if task:
         task.status = TaskStatus.CANCELLED
+        if error_message is not None:
+            task.error_message = error_message
         task.completed_at = completed_at
     if session_task_link:
         session_task_link.status = TaskStatus.CANCELLED
@@ -285,8 +288,10 @@ def reset_active_attempts_for_session_stop(
     *,
     session_id: int,
     next_status: TaskStatus = TaskStatus.PENDING,
+    terminalize: bool = False,
+    stop_reason: str | None = None,
 ) -> int:
-    """Normalize active attempts after pause/stop so resume starts cleanly."""
+    """Normalize active attempts after pause, or terminalize an explicit stop."""
 
     now = datetime.now(timezone.utc)
     active_executions = (
@@ -299,10 +304,52 @@ def reset_active_attempts_for_session_stop(
     )
     execution_task_ids = {execution.task_id for execution in active_executions}
     for execution in active_executions:
-        execution.status = TaskStatus.CANCELLED
-        execution.completed_at = execution.completed_at or now
+        task = db.query(Task).filter(Task.id == execution.task_id).first()
+        link = (
+            db.query(SessionTask)
+            .filter(
+                SessionTask.session_id == session_id,
+                SessionTask.task_id == execution.task_id,
+            )
+            .order_by(SessionTask.id.desc())
+            .first()
+        )
+        if terminalize:
+            mark_task_attempt_cancelled(
+                task=task,
+                session_task_link=link,
+                task_execution=execution,
+                completed_at=now,
+                error_message=stop_reason,
+            )
+        else:
+            execution.status = TaskStatus.CANCELLED
+            execution.completed_at = execution.completed_at or now
         if getattr(execution, "failure_category", None) is None:
             execution.failure_category = "manual_stop"
+
+    if terminalize:
+        terminalized_task_ids = set(execution_task_ids)
+        running_links = (
+            db.query(SessionTask)
+            .filter(
+                SessionTask.session_id == session_id,
+                SessionTask.status == TaskStatus.RUNNING,
+            )
+            .all()
+        )
+        for link in running_links:
+            if link.task_id in terminalized_task_ids:
+                continue
+            task = db.query(Task).filter(Task.id == link.task_id).first()
+            mark_task_attempt_cancelled(
+                task=task,
+                session_task_link=link,
+                completed_at=now,
+                error_message=stop_reason,
+            )
+            terminalized_task_ids.add(link.task_id)
+        return len(terminalized_task_ids)
 
     running_links = (
         db.query(SessionTask)

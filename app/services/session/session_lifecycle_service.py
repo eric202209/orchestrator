@@ -87,6 +87,8 @@ def _reset_running_session_tasks(
     *,
     session_id: int,
     next_status: TaskStatus = TaskStatus.PENDING,
+    terminalize: bool = False,
+    stop_reason: str | None = None,
 ) -> int:
     """Compatibility wrapper for the run-state transition module."""
 
@@ -94,6 +96,8 @@ def _reset_running_session_tasks(
         db,
         session_id=session_id,
         next_status=next_status,
+        terminalize=terminalize,
+        stop_reason=stop_reason,
     )
 
 
@@ -1362,6 +1366,14 @@ async def stop_session_lifecycle(
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    if session.status == "stopped":
+        return {
+            "status": "stopped",
+            "session_id": session_id,
+            "initiated_by": initiated_by or "unknown",
+            "source": source or "unspecified",
+            "message": f"Session '{session.name}' is already stopped",
+        }
     if session.status not in ["running", "paused", "active", "awaiting_input"]:
         raise HTTPException(status_code=400, detail="Session is not running")
     stop_transition = resolve_session_transition(
@@ -1426,6 +1438,8 @@ async def stop_session_lifecycle(
             db,
             session_id=session_id,
             next_status=TaskStatus.PENDING,
+            terminalize=True,
+            stop_reason="Operator requested stop",
         )
         orphan_reset_count = _reset_orphan_running_project_tasks_for_session_stop(
             db,

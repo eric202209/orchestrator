@@ -565,5 +565,8 @@ def test_stop_session_resets_running_task_state_for_clean_resume(
     assert result["status"] == "stopped"
     assert session.status == "stopped"
     assert session.is_active is False
-    assert task.status == TaskStatus.PENDING
-    assert link.status == TaskStatus.PENDING
+    assert task.status == TaskStatus.CANCELLED
+    assert task.error_message == "Operator requested stop"
+    assert task.completed_at is not None
+    assert link.status == TaskStatus.CANCELLED
+    assert link.completed_at == task.completed_at

@@ -346,6 +346,31 @@ def test_reset_active_attempts_cancels_pending_and_running_executions(db_session
     assert execution.failure_category == "manual_stop"
 
 
+def test_reset_active_attempts_terminalizes_explicit_operator_stop(db_session):
+    task, link, execution = _make_task_attempt(db_session)
+    task.status = TaskStatus.RUNNING
+    link.status = TaskStatus.RUNNING
+    execution.status = TaskStatus.RUNNING
+    db_session.commit()
+
+    reset_count = reset_active_attempts_for_session_stop(
+        db_session,
+        session_id=1,
+        terminalize=True,
+        stop_reason="Operator requested stop",
+    )
+
+    assert reset_count == 1
+    assert task.status == TaskStatus.CANCELLED
+    assert task.error_message == "Operator requested stop"
+    assert task.completed_at is not None
+    assert link.status == TaskStatus.CANCELLED
+    assert link.completed_at == task.completed_at
+    assert execution.status == TaskStatus.CANCELLED
+    assert execution.completed_at == task.completed_at
+    assert execution.failure_category == "manual_stop"
+
+
 def test_task_execution_id_from_context_rejects_bool_and_non_int():
     class Context:
         def __init__(self, task_execution_id):
