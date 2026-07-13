@@ -35,6 +35,7 @@ from app.services.model_adaptation.schemas import PromptEnvelope
 from app.services.planning.plan_commit_service import PlanCommitService
 from app.services.planning.planner_service import PlannerService
 from app.services.orchestration.prompt_optimization import optimize_prompt
+from app.services.observability.planning_identity import active_planning_identity
 from app.services.workspace.system_settings import get_effective_adaptation_profile
 
 logger = logging.getLogger(__name__)
@@ -97,12 +98,14 @@ class PlanningSessionService:
                 detail="This project already has an active planning session",
             )
 
+        identity = active_planning_identity(self.db)
         session = PlanningSession(
             project_id=project.id,
             title=self._generate_title(prompt),
             prompt=prompt.strip(),
             status="active",
             source_brain=source_brain,
+            **identity,
         )
         self.db.add(session)
         try:
@@ -369,6 +372,10 @@ class PlanningSessionService:
             "prompt": session.prompt,
             "status": session.status,
             "source_brain": session.source_brain,
+            "planning_backend": session.planning_backend,
+            "planner_model": session.planner_model,
+            "reasoning_profile": session.reasoning_profile,
+            "configuration_fingerprint": session.configuration_fingerprint,
             "current_prompt_id": session.current_prompt_id,
             "finalized_plan_id": session.finalized_plan_id,
             "committed_at": session.committed_at,

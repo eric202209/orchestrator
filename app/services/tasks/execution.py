@@ -6,6 +6,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models import TaskExecution, TaskStatus
+from app.services.observability.planning_identity import active_execution_identity
 
 
 def create_task_execution(
@@ -16,12 +17,14 @@ def create_task_execution(
     status: TaskStatus = TaskStatus.PENDING,
     started_at: datetime | None = None,
 ) -> TaskExecution:
+    identity = active_execution_identity(db)
     execution = TaskExecution(
         session_id=session_id,
         task_id=task_id,
         attempt_number=next_attempt_number(db, session_id, task_id),
         status=status,
         started_at=started_at,
+        **identity,
     )
     db.add(execution)
     db.flush()

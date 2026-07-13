@@ -129,6 +129,7 @@ class TaskResponse(TaskBase):
     updated_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    latest_execution_identity: Optional[Dict[str, Any]] = None
 
 
 class PlannerTaskCandidate(BaseModel):
@@ -186,6 +187,10 @@ class PlanningSessionSummaryResponse(BaseModel):
     prompt: str
     status: str
     source_brain: str
+    planning_backend: Optional[str] = None
+    planner_model: Optional[str] = None
+    reasoning_profile: Optional[str] = None
+    configuration_fingerprint: Optional[str] = None
     current_prompt_id: Optional[str] = None
     finalized_plan_id: Optional[int] = None
     committed_at: Optional[datetime] = None

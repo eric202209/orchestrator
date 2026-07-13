@@ -696,6 +696,37 @@ def _migration_023_task_execution_lease(engine: Engine) -> None:
                 connection.execute(text(statement))
 
 
+def _migration_024_planning_identity_metadata(engine: Engine) -> None:
+    table_names = _table_names(engine)
+    additions = {
+        "planning_sessions": [
+            ("planning_backend", "VARCHAR(64)"),
+            ("planner_model", "VARCHAR(255)"),
+            ("reasoning_profile", "VARCHAR(128)"),
+            ("configuration_fingerprint", "VARCHAR(64)"),
+        ],
+        "task_executions": [
+            ("planning_backend", "VARCHAR(64)"),
+            ("execution_backend", "VARCHAR(64)"),
+            ("planner_model", "VARCHAR(255)"),
+            ("executor_model", "VARCHAR(255)"),
+            ("configuration_fingerprint", "VARCHAR(64)"),
+        ],
+    }
+    for table_name, columns in additions.items():
+        if table_name not in table_names:
+            continue
+        statements = [
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}"
+            for column_name, ddl in columns
+            if not _has_column(engine, table_name, column_name)
+        ]
+        if statements:
+            with engine.begin() as connection:
+                for statement in statements:
+                    connection.execute(text(statement))
+
+
 def _migration_014_task_workflow_stage(engine: Engine) -> None:
     if "tasks" not in _table_names(engine):
         return
@@ -1093,6 +1124,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="023_task_execution_lease",
         description="Add worker ownership and heartbeat fields to task executions",
         upgrade=_migration_023_task_execution_lease,
+    ),
+    Migration(
+        version="024_planning_identity_metadata",
+        description="Add creation-time planning and execution identity metadata",
+        upgrade=_migration_024_planning_identity_metadata,
     ),
 )
 

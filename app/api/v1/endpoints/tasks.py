@@ -1069,6 +1069,21 @@ def get_task(
     # Add session_id to task response
     task_dict = task.__dict__.copy()
     task_dict["session_id"] = session_id
+    latest_execution = (
+        db.query(TaskExecution)
+        .filter(TaskExecution.task_id == task_id)
+        .order_by(TaskExecution.id.desc())
+        .first()
+    )
+    if latest_execution:
+        task_dict["latest_execution_identity"] = {
+            "task_execution_id": latest_execution.id,
+            "planning_backend": latest_execution.planning_backend,
+            "execution_backend": latest_execution.execution_backend,
+            "planner_model": latest_execution.planner_model,
+            "executor_model": latest_execution.executor_model,
+            "configuration_fingerprint": latest_execution.configuration_fingerprint,
+        }
 
     # If no session found but task is running/done, try to get from recent logs
     if not session_id and task.status in [TaskStatus.RUNNING, TaskStatus.DONE]:
