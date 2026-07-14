@@ -1335,7 +1335,15 @@ def _latest_session_task_context(
 def get_session_trace_export_payload(db: Session, session_id: int) -> Dict[str, Any]:
     session = get_inspectable_session_or_404(db, session_id)
     root, events, snapshots = _latest_session_task_context(db, session)
+    from app.services.tasks.execution import task_execution_identity_payload
+
     if root is None:
+        latest_execution = (
+            db.query(TaskExecution)
+            .filter(TaskExecution.session_id == session_id)
+            .order_by(TaskExecution.id.desc())
+            .first()
+        )
         return {
             "schema_version": 1,
             "session_id": session_id,
@@ -1345,8 +1353,20 @@ def get_session_trace_export_payload(db: Session, session_id: int) -> Dict[str, 
             "span_count": 0,
             "snapshot_count": 0,
             "spans": [],
+            "latest_execution_identity": task_execution_identity_payload(
+                latest_execution
+            ),
         }
-    return build_trace_export(
+    latest_execution = (
+        db.query(TaskExecution)
+        .filter(
+            TaskExecution.session_id == session_id,
+            TaskExecution.task_id == root["task_id"],
+        )
+        .order_by(TaskExecution.id.desc())
+        .first()
+    )
+    payload = build_trace_export(
         session_id=session.id,
         task_id=root["task_id"],
         events=events,
@@ -1354,6 +1374,10 @@ def get_session_trace_export_payload(db: Session, session_id: int) -> Dict[str, 
         exporter_backend=settings.TRACE_EXPORTER_BACKEND,
         include_langfuse_handoff=bool(settings.LANGFUSE_ENABLED),
     )
+    payload["latest_execution_identity"] = task_execution_identity_payload(
+        latest_execution
+    )
+    return payload
 
 
 def get_session_execution_dag_payload(db: Session, session_id: int) -> Dict[str, Any]:

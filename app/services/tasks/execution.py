@@ -1,11 +1,13 @@
-"""Read-only helpers for task execution attempts."""
+"""Helpers for task execution attempts and their immutable identity evidence."""
 
+import json
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models import TaskExecution, TaskStatus
+from app.models import PlanningSession, Task, TaskExecution, TaskStatus
 from app.services.observability.planning_identity import active_execution_identity
 
 
@@ -18,6 +20,19 @@ def create_task_execution(
     started_at: datetime | None = None,
 ) -> TaskExecution:
     identity = active_execution_identity(db)
+    planning_session = _originating_planning_session(db, task_id)
+    if planning_session is not None:
+        identity.update(
+            {
+                "planning_session_id": planning_session.id,
+                "planning_backend": planning_session.planning_backend,
+                "planner_model": planning_session.planner_model,
+                "reasoning_profile": planning_session.reasoning_profile,
+                "configuration_fingerprint": (
+                    planning_session.configuration_fingerprint
+                ),
+            }
+        )
     execution = TaskExecution(
         session_id=session_id,
         task_id=task_id,
@@ -29,6 +44,61 @@ def create_task_execution(
     db.add(execution)
     db.flush()
     return execution
+
+
+def task_execution_identity_payload(
+    execution: TaskExecution | None,
+) -> dict[str, Any] | None:
+    if execution is None:
+        return None
+    return {
+        "task_execution_id": execution.id,
+        "planning_session_id": execution.planning_session_id,
+        "planning_backend": execution.planning_backend,
+        "execution_backend": execution.execution_backend,
+        "planner_model": execution.planner_model,
+        "executor_model": execution.executor_model,
+        "reasoning_profile": execution.reasoning_profile,
+        "configuration_fingerprint": execution.configuration_fingerprint,
+    }
+
+
+def _originating_planning_session(db: Session, task_id: int) -> PlanningSession | None:
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if task is None or task.plan_id is None:
+        return None
+    candidates = (
+        db.query(PlanningSession)
+        .filter(PlanningSession.finalized_plan_id == task.plan_id)
+        .order_by(PlanningSession.id.desc())
+        .all()
+    )
+    explicit_matches = [
+        candidate
+        for candidate in candidates
+        if task_id in _committed_task_ids(candidate.committed_task_ids)
+    ]
+    if len(explicit_matches) == 1:
+        return explicit_matches[0]
+    if not explicit_matches and len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def _committed_task_ids(raw_value: str | None) -> set[int]:
+    if not raw_value:
+        return set()
+    try:
+        values = json.loads(raw_value)
+    except (TypeError, json.JSONDecodeError):
+        return set()
+    if not isinstance(values, list):
+        return set()
+    return {
+        int(value)
+        for value in values
+        if isinstance(value, int) or (isinstance(value, str) and value.isdigit())
+    }
 
 
 def get_task_execution(

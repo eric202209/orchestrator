@@ -1076,14 +1076,11 @@ def get_task(
         .first()
     )
     if latest_execution:
-        task_dict["latest_execution_identity"] = {
-            "task_execution_id": latest_execution.id,
-            "planning_backend": latest_execution.planning_backend,
-            "execution_backend": latest_execution.execution_backend,
-            "planner_model": latest_execution.planner_model,
-            "executor_model": latest_execution.executor_model,
-            "configuration_fingerprint": latest_execution.configuration_fingerprint,
-        }
+        from app.services.tasks.execution import task_execution_identity_payload
+
+        task_dict["latest_execution_identity"] = task_execution_identity_payload(
+            latest_execution
+        )
 
     # If no session found but task is running/done, try to get from recent logs
     if not session_id and task.status in [TaskStatus.RUNNING, TaskStatus.DONE]:

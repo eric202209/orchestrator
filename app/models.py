@@ -344,10 +344,14 @@ class TaskExecution(Base):
     status = Column(Enum(TaskStatus), default=TaskStatus.PENDING, nullable=False)
     failure_category = Column(String(64), nullable=True)
     backend_id = Column(String(64), nullable=True)
+    planning_session_id = Column(
+        Integer, ForeignKey("planning_sessions.id"), nullable=True, index=True
+    )
     planning_backend = Column(String(64), nullable=True)
     execution_backend = Column(String(64), nullable=True)
     planner_model = Column(String(255), nullable=True)
     executor_model = Column(String(255), nullable=True)
+    reasoning_profile = Column(String(128), nullable=True)
     configuration_fingerprint = Column(String(64), nullable=True)
     queued_at = Column(DateTime(timezone=True), nullable=True)
     queue_latency_seconds = Column(Float, nullable=True)
@@ -373,6 +377,7 @@ class TaskExecution(Base):
 
     session = relationship("Session", back_populates="task_executions")
     task = relationship("Task", back_populates="executions")
+    planning_session = relationship("PlanningSession")
     logs = relationship("LogEntry", back_populates="task_execution")
     change_sets = relationship(
         "TaskExecutionChangeSet",

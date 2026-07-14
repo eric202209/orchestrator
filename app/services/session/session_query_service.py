@@ -157,6 +157,14 @@ def serialize_failure_summary(db: DBSession, record) -> Dict[str, Any]:
             .first()
         )
 
+    latest_execution = (
+        db.query(TaskExecution)
+        .filter(TaskExecution.session_id == record.session_id)
+        .order_by(TaskExecution.id.desc())
+        .first()
+    )
+    from app.services.tasks.execution import task_execution_identity_payload
+
     return {
         "session_id": record.session_id,
         "summary": record.summary,
@@ -172,6 +180,7 @@ def serialize_failure_summary(db: DBSession, record) -> Dict[str, Any]:
         "replan_planning_session_title": (
             replan_session.title if replan_session else None
         ),
+        "latest_execution_identity": task_execution_identity_payload(latest_execution),
     }
 
 

@@ -727,6 +727,30 @@ def _migration_024_planning_identity_metadata(engine: Engine) -> None:
                     connection.execute(text(statement))
 
 
+def _migration_025_task_execution_planner_provenance(engine: Engine) -> None:
+    if "task_executions" not in _table_names(engine):
+        return
+    statements = [
+        f"ALTER TABLE task_executions ADD COLUMN {column_name} {ddl}"
+        for column_name, ddl in [
+            ("planning_session_id", "INTEGER"),
+            ("reasoning_profile", "VARCHAR(128)"),
+        ]
+        if not _has_column(engine, "task_executions", column_name)
+    ]
+    if statements:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_task_executions_planning_session_id "
+                "ON task_executions (planning_session_id)"
+            )
+        )
+
+
 def _migration_014_task_workflow_stage(engine: Engine) -> None:
     if "tasks" not in _table_names(engine):
         return
@@ -1129,6 +1153,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="024_planning_identity_metadata",
         description="Add creation-time planning and execution identity metadata",
         upgrade=_migration_024_planning_identity_metadata,
+    ),
+    Migration(
+        version="025_task_execution_planner_provenance",
+        description="Add immutable planner provenance to task executions",
+        upgrade=_migration_025_task_execution_planner_provenance,
     ),
 )
 

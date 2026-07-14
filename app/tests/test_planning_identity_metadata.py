@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
+import json
+
 from sqlalchemy import create_engine, inspect, text
 
 from app.config import settings
-from app.db_migrations import Migration, _migration_024_planning_identity_metadata
-from app.models import PlanningSession, Project, Session as SessionModel, Task
+from app.db_migrations import (
+    Migration,
+    _migration_024_planning_identity_metadata,
+    _migration_025_task_execution_planner_provenance,
+)
+from app.models import (
+    Plan,
+    PlanningSession,
+    Project,
+    Session as SessionModel,
+    Task,
+    TaskStatus,
+)
 from app.services.observability.planning_identity import (
     active_execution_identity,
     active_planning_identity,
@@ -24,6 +37,36 @@ def _project_with_task_and_session(db_session):
     db_session.add_all([task, session])
     db_session.commit()
     return project, task, session
+
+
+def _planning_session_for_task(db_session, project, task):
+    plan = Plan(
+        project_id=project.id,
+        title="identity plan",
+        source_brain="local",
+        requirement="preserve provenance",
+        markdown="# Plan",
+        status="draft",
+    )
+    db_session.add(plan)
+    db_session.flush()
+    task.plan_id = plan.id
+    planning_session = PlanningSession(
+        project_id=project.id,
+        title="originating planning session",
+        prompt="Preserve provenance",
+        status="completed",
+        source_brain="local",
+        planning_backend="origin-planning-backend",
+        planner_model="origin-planner-model",
+        reasoning_profile="origin-reasoning-profile",
+        configuration_fingerprint="a" * 64,
+        finalized_plan_id=plan.id,
+        committed_task_ids=json.dumps([task.id]),
+    )
+    db_session.add(planning_session)
+    db_session.commit()
+    return planning_session
 
 
 def test_planning_session_snapshots_active_planner_identity(db_session, monkeypatch):
@@ -72,6 +115,74 @@ def test_task_execution_snapshots_lanes_and_ignores_later_config_changes(
     assert execution.configuration_fingerprint != changed["configuration_fingerprint"]
 
 
+def test_task_execution_preserves_originating_planning_session_on_retries(
+    db_session, monkeypatch
+):
+    project, task, session = _project_with_task_and_session(db_session)
+    planning_session = _planning_session_for_task(db_session, project, task)
+
+    first = create_task_execution(db_session, session_id=session.id, task_id=task.id)
+    db_session.commit()
+    monkeypatch.setattr(settings, "PLANNING_BACKEND", "later-planning-backend")
+    monkeypatch.setattr(settings, "PLANNER_MODEL", "later-planner-model")
+    second = create_task_execution(db_session, session_id=session.id, task_id=task.id)
+    db_session.commit()
+
+    for execution in (first, second):
+        assert execution.planning_session_id == planning_session.id
+        assert execution.planning_backend == planning_session.planning_backend
+        assert execution.planner_model == planning_session.planner_model
+        assert execution.reasoning_profile == planning_session.reasoning_profile
+        assert (
+            execution.configuration_fingerprint
+            == planning_session.configuration_fingerprint
+        )
+    assert first.attempt_number == 1
+    assert second.attempt_number == 2
+
+
+def test_existing_reads_and_trace_export_expose_complete_planner_provenance(
+    authenticated_client, db_session
+):
+    project, task, session = _project_with_task_and_session(db_session)
+    planning_session = _planning_session_for_task(db_session, project, task)
+    session.status = "stopped"
+    session.is_active = False
+    task.status = TaskStatus.FAILED
+    execution = create_task_execution(
+        db_session,
+        session_id=session.id,
+        task_id=task.id,
+        status=TaskStatus.FAILED,
+    )
+    db_session.commit()
+
+    expected = {
+        "task_execution_id": execution.id,
+        "planning_session_id": planning_session.id,
+        "planning_backend": planning_session.planning_backend,
+        "execution_backend": execution.execution_backend,
+        "planner_model": planning_session.planner_model,
+        "executor_model": execution.executor_model,
+        "reasoning_profile": planning_session.reasoning_profile,
+        "configuration_fingerprint": planning_session.configuration_fingerprint,
+    }
+    task_payload = authenticated_client.get(f"/api/v1/tasks/{task.id}")
+    failure_payload = authenticated_client.get(
+        f"/api/v1/sessions/{session.id}/failure-summary?enrich=false"
+    )
+    export_payload = authenticated_client.get(
+        f"/api/v1/sessions/{session.id}/trace-export"
+    )
+
+    assert task_payload.status_code == 200
+    assert failure_payload.status_code == 200
+    assert export_payload.status_code == 200
+    assert task_payload.json()["latest_execution_identity"] == expected
+    assert failure_payload.json()["latest_execution_identity"] == expected
+    assert export_payload.json()["latest_execution_identity"] == expected
+
+
 def test_identity_migration_is_additive_and_preserves_existing_rows():
     engine = create_engine("sqlite://")
     try:
@@ -94,6 +205,7 @@ def test_identity_migration_is_additive_and_preserves_existing_rows():
             )
 
         _migration_024_planning_identity_metadata(engine)
+        _migration_025_task_execution_planner_provenance(engine)
         inspector = inspect(engine)
         planning_columns = {
             column["name"] for column in inspector.get_columns("planning_sessions")
@@ -112,6 +224,8 @@ def test_identity_migration_is_additive_and_preserves_existing_rows():
             "execution_backend",
             "planner_model",
             "executor_model",
+            "planning_session_id",
+            "reasoning_profile",
             "configuration_fingerprint",
         } <= execution_columns
 
@@ -130,5 +244,7 @@ def test_identity_migration_is_additive_and_preserves_existing_rows():
         assert planning_row["planning_backend"] is None
         assert execution_row["attempt_number"] == 1
         assert execution_row["execution_backend"] is None
+        assert execution_row["planning_session_id"] is None
+        assert execution_row["reasoning_profile"] is None
     finally:
         engine.dispose()
