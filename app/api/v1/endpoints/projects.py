@@ -31,6 +31,7 @@ from app.services.workspace.project_isolation_service import (
 from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.project.name_formatter import humanize_display_name
 from app.services.tasks.service import TaskService
+from app.services.tasks.task_deletion import delete_task_owned_graph
 from app.services.workspace.project_mutation_lock import ProjectMutationLockError
 from app.config import settings
 from app.dependencies import get_current_active_user
@@ -483,13 +484,7 @@ def delete_project(
         ).delete(synchronize_session=False)
 
     if task_ids:
-        db.query(LogEntry).filter(LogEntry.task_id.in_(task_ids)).delete(
-            synchronize_session=False
-        )
-        db.query(TaskCheckpoint).filter(TaskCheckpoint.task_id.in_(task_ids)).delete(
-            synchronize_session=False
-        )
-        db.query(Task).filter(Task.id.in_(task_ids)).delete(synchronize_session=False)
+        delete_task_owned_graph(db, task_ids)
 
     db.commit()
 

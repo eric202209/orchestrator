@@ -40,6 +40,7 @@ from app.services.tasks.execution import (
     create_task_execution,
 )
 from app.services.tasks.service import TaskService
+from app.services.tasks.task_deletion import delete_task_owned_graph
 from app.services.workspace.system_settings import (
     get_effective_agent_backend,
     get_effective_agent_model_family,
@@ -1812,20 +1813,8 @@ def delete_task(
     current_user=Depends(get_current_active_user),
 ):
     """Delete a task"""
-    from app.models import TaskCheckpoint
-
     task = _get_task_for_user(db, task_id, current_user)
-
-    db.query(LogEntry).filter(LogEntry.task_id == task_id).delete(
-        synchronize_session=False
-    )
-    db.query(SessionTask).filter(SessionTask.task_id == task_id).delete(
-        synchronize_session=False
-    )
-    db.query(TaskCheckpoint).filter(TaskCheckpoint.task_id == task_id).delete(
-        synchronize_session=False
-    )
-    db.delete(task)
+    delete_task_owned_graph(db, [task.id])
     db.commit()
     return None
 
