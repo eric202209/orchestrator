@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 
 from app.config import settings
 from app.services.agents.runtime_configuration import RoleRuntimeConfiguration
+from app.services.observability.runtime_identity import RuntimeIdentityProjection
 
 
 def env_value(name: str) -> Optional[str]:
@@ -54,11 +55,21 @@ def build_identity_snapshot() -> Dict[str, Optional[str]]:
 def run_start_config_snapshot(
     db,
     runtime_selection: Dict[str, Any],
+    identity_projection: Optional[RuntimeIdentityProjection] = None,
 ) -> Dict[str, Any]:
     """Capture non-secret run-start config provenance for replay bundles."""
 
-    effective_agent_backend = runtime_selection.get("backend")
-    effective_agent_model = runtime_selection.get("model_family")
+    identity = (
+        identity_projection.to_metadata()
+        if identity_projection is not None
+        else runtime_selection
+    )
+    effective_agent_backend = identity.get(
+        "execution_backend"
+    ) or runtime_selection.get("backend")
+    effective_agent_model = identity.get("executor_model") or runtime_selection.get(
+        "model_family"
+    )
     return {
         "source": "task_started_event",
         "values": {
@@ -84,10 +95,12 @@ def run_start_config_snapshot(
         "effective": {
             "agent_backend": effective_agent_backend,
             "agent_model": effective_agent_model,
-            "planning_backend": runtime_selection.get("planner_backend"),
-            "planning_model": runtime_selection.get("planner_model"),
-            "execution_backend": runtime_selection.get("execution_backend"),
-            "execution_model": runtime_selection.get("execution_model"),
+            "planning_backend": identity.get("planning_backend")
+            or identity.get("planner_backend"),
+            "planning_model": identity.get("planner_model"),
+            "execution_backend": identity.get("execution_backend"),
+            "execution_model": identity.get("executor_model")
+            or identity.get("execution_model"),
             "repair_backend": settings.REPAIR_BACKEND or settings.AGENT_BACKEND,
             "debug_repair_backend": runtime_selection.get("debug_repair_backend"),
             "debug_repair_model": runtime_selection.get("debug_repair_model"),
@@ -107,24 +120,37 @@ def run_start_config_snapshot(
 def run_start_runtime_identity(
     db,
     runtime_selection: Dict[str, Any],
+    identity_projection: Optional[RuntimeIdentityProjection] = None,
 ) -> Dict[str, Any]:
+    identity = (
+        identity_projection.to_metadata()
+        if identity_projection is not None
+        else runtime_selection
+    )
     return {
         "source": "task_started_event",
         "captured_at": datetime.now(timezone.utc).isoformat(),
+        "identity_source": identity.get("identity_source"),
         "build": build_identity_snapshot(),
         "lanes": {
-            "planning": runtime_selection.get("planner_backend"),
-            "execution": runtime_selection.get("execution_backend"),
+            "planning": identity.get("planning_backend")
+            or identity.get("planner_backend"),
+            "execution": identity.get("execution_backend"),
             "debug_repair": runtime_selection.get("debug_repair_backend"),
             "repair": settings.REPAIR_BACKEND or settings.AGENT_BACKEND,
         },
         "models": {
-            "planner": runtime_selection.get("planner_model"),
-            "execution": runtime_selection.get("execution_model"),
+            "planner": identity.get("planner_model"),
+            "execution": identity.get("executor_model")
+            or identity.get("execution_model"),
             "debug_repair": runtime_selection.get("debug_repair_model"),
             "planning_repair": settings.PLANNING_REPAIR_MODEL,
         },
-        "config": run_start_config_snapshot(db, runtime_selection),
+        "config": run_start_config_snapshot(
+            db,
+            runtime_selection,
+            identity_projection=identity_projection,
+        ),
     }
 
 

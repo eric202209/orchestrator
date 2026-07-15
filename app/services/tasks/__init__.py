@@ -7,6 +7,7 @@ from .execution import (
     get_task_execution,
     latest_execution_for_session_task,
     next_attempt_number,
+    originating_planning_session_for_task,
 )
 from .service import TASK_CHANGE_SET_LOG_MESSAGE, TaskService
 from .tool_tracking import ToolTrackingService
@@ -21,4 +22,5 @@ __all__ = [
     "get_task_execution",
     "latest_execution_for_session_task",
     "next_attempt_number",
+    "originating_planning_session_for_task",
 ]

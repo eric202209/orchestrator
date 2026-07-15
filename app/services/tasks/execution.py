@@ -85,6 +85,14 @@ def _originating_planning_session(db: Session, task_id: int) -> PlanningSession 
     return None
 
 
+def originating_planning_session_for_task(
+    db: Session, task_id: int
+) -> PlanningSession | None:
+    """Return the uniquely attributable immutable planning session, if any."""
+
+    return _originating_planning_session(db, task_id)
+
+
 def _committed_task_ids(raw_value: str | None) -> set[int]:
     if not raw_value:
         return set()

@@ -151,6 +151,9 @@ from app.services.observability import (
     start_langfuse_observation,
     update_langfuse_observation,
 )
+from app.services.observability.runtime_identity import (
+    build_runtime_identity_projection,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -291,6 +294,9 @@ def execute_orchestration_task(
     _backend_slot_redis = None
     _resolved_execution_backend: str = settings.AGENT_BACKEND
     planning_runtime_service = None
+    task_execution: Optional[TaskExecution] = None
+    identity_projection = None
+    runtime_selection: Dict[str, Any] = {}
     # Phase 23C: set only when RUNTIME_WORKSPACE_ENABLED redirects execution
     # into an allocated Task Execution Sandbox. `finally` disposes it
     # unconditionally (success, failure, cancellation, timeout, exception)
@@ -367,6 +373,24 @@ def execute_orchestration_task(
                 task_id=task_id,
             )
             task_execution_id = task_execution.id
+        else:
+            task_execution = get_task_execution(db, task_execution_id)
+
+        identity_projection = build_runtime_identity_projection(
+            db,
+            task_execution=task_execution,
+            task_execution_id=task_execution_id,
+            planning_configuration=planning_configuration,
+            execution_configuration=execution_configuration,
+        )
+        runtime_selection = _runtime_selection_details(
+            db,
+            task_execution=task_execution,
+            task_execution_id=task_execution_id,
+            planning_configuration=planning_configuration,
+            execution_configuration=execution_configuration,
+            identity_projection=identity_projection,
+        )
 
         def emit_live(
             level: str, message: str, metadata: Optional[Dict[str, Any]] = None
@@ -529,6 +553,7 @@ def execute_orchestration_task(
                 queue_latency_seconds=queue_latency_seconds,
                 queued_event=queued_event,
                 emit_live=emit_live,
+                runtime_selection=runtime_selection,
             )
 
         session_task_link = _get_latest_session_task_link(db, session_id, task_id)
@@ -577,9 +602,9 @@ def execute_orchestration_task(
                 queue_latency_seconds=queue_latency_seconds,
                 queued_event=queued_event,
                 emit_live=emit_live,
+                runtime_selection=runtime_selection,
             )
 
-        runtime_selection = _runtime_selection_details(db)
         claimed_details = _build_claimed_details(
             session_instance_id=session.instance_id,
             expected_session_instance_id=expected_session_instance_id,
@@ -1134,6 +1159,7 @@ def execute_orchestration_task(
             run_start_runtime_identity = _run_start_runtime_identity(
                 db,
                 runtime_selection,
+                identity_projection,
             )
             _append_orchestration_event(
                 project_dir=orchestration_state.project_dir,
@@ -1237,7 +1263,6 @@ def execute_orchestration_task(
             backend=effective_guidance_planning_backend,
             runtime_metadata=guidance_runtime_metadata,
             planning_backend=effective_guidance_planning_backend,
-            planning_adaptation_profile=planning_configuration.adaptation_profile,
             execution_backend=_resolved_execution_backend,
         )
         guidance_backend = guidance_target["backend"]

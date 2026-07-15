@@ -46,11 +46,10 @@ from app.services.workspace.project_isolation_service import (
 )
 from app.services.orchestration.prompt_templates import OrchestrationState
 from app.services.tasks.service import TaskService
-from app.services.workspace.system_settings import (
-    get_effective_agent_backend,
-    get_effective_agent_model_family,
-)
 from app.services.tasks.execution import create_task_execution
+from app.services.observability.runtime_identity import (
+    build_runtime_identity_projection,
+)
 from app.services.session.context_compaction import (
     compact_checkpoint_payload,
     estimate_tokens,
@@ -168,13 +167,6 @@ def _count_automatic_recovery_attempts(
         )
         .count()
     )
-
-
-def _runtime_selection_details(db: Session) -> Dict[str, Optional[str]]:
-    return {
-        "backend": get_effective_agent_backend(settings.AGENT_BACKEND, db=db),
-        "model_family": get_effective_agent_model_family(settings.AGENT_MODEL, db=db),
-    }
 
 
 def ensure_task_workspace(
@@ -552,7 +544,10 @@ def queue_task_for_session(
             "workflow_stage": getattr(task, "workflow_stage", None),
             "planning_backend_override": planning_backend_override,
             "planning_escalation": planning_escalation_metadata,
-            **_runtime_selection_details(db),
+            **build_runtime_identity_projection(
+                db,
+                task_execution=task_execution,
+            ).to_metadata(),
         },
     )
     db.commit()

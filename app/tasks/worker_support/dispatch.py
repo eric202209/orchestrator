@@ -7,16 +7,22 @@ from typing import Any, Dict, Optional
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import Session as SessionModel, SessionTask, Task, TaskStatus
+from app.models import (
+    Session as SessionModel,
+    SessionTask,
+    Task,
+    TaskExecution,
+    TaskStatus,
+)
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.state.persistence import (
     append_orchestration_event as _append_orchestration_event,
     find_latest_orchestration_event as _find_latest_orchestration_event,
     read_orchestration_events as _read_orchestration_events,
 )
-from app.services.workspace.system_settings import (
-    get_effective_agent_backend,
-    get_effective_agent_model_family,
+from app.services.observability.runtime_identity import (
+    RuntimeIdentityProjection,
+    build_runtime_identity_projection,
 )
 
 from .common import _parse_event_timestamp
@@ -39,17 +45,32 @@ def _get_latest_session_task_link(
     )
 
 
-def _runtime_selection_details(db: Session) -> Dict[str, Optional[str]]:
-    execution_model = (
-        settings.EXECUTION_MODEL
-        or settings.OLLAMA_AGENT_MODEL
-        or get_effective_agent_model_family(settings.AGENT_MODEL, db=db)
+def _runtime_selection_details(
+    db: Session,
+    *,
+    task_execution: Optional[TaskExecution] = None,
+    task_execution_id: Optional[int] = None,
+    planning_configuration: Any = None,
+    execution_configuration: Any = None,
+    identity_projection: Optional[RuntimeIdentityProjection] = None,
+) -> Dict[str, Any]:
+    """Build dispatch metadata from the shared historical identity projection."""
+
+    if task_execution is None and task_execution_id:
+        task_execution = (
+            db.query(TaskExecution)
+            .filter(TaskExecution.id == task_execution_id)
+            .first()
+        )
+    identity_projection = identity_projection or build_runtime_identity_projection(
+        db,
+        task_execution=task_execution,
+        task_execution_id=task_execution_id,
+        planning_configuration=planning_configuration,
+        execution_configuration=execution_configuration,
     )
     return {
-        "backend": get_effective_agent_backend(settings.AGENT_BACKEND, db=db),
-        "model_family": get_effective_agent_model_family(settings.AGENT_MODEL, db=db),
-        "planner_model": settings.PLANNER_MODEL or settings.AGENT_MODEL,
-        "planner_backend": settings.PLANNING_BACKEND or settings.AGENT_BACKEND,
+        **identity_projection.to_metadata(),
         "planning_repair_model": settings.PLANNING_REPAIR_MODEL,
         "planning_repair_backend": settings.PLANNING_BACKEND or settings.AGENT_BACKEND,
         "debug_repair_model": (
@@ -60,8 +81,6 @@ def _runtime_selection_details(db: Session) -> Dict[str, Optional[str]]:
             or settings.REPAIR_BACKEND
             or settings.AGENT_BACKEND
         ),
-        "execution_model": execution_model,
-        "execution_backend": settings.EXECUTION_BACKEND or settings.AGENT_BACKEND,
     }
 
 
@@ -225,17 +244,21 @@ def _emit_dispatch_rejected(
     queue_latency_seconds: Optional[float],
     queued_event: Optional[Dict[str, Any]],
     emit_live: Any,
+    runtime_selection: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    runtime_identity = runtime_selection or _runtime_selection_details(
+        db,
+        task_execution_id=task_execution_id,
+    )
     reject_details = {
         "reason": reason,
         "session_instance_id": session.instance_id,
         "expected_session_instance_id": expected_session_instance_id,
         "project_dir": str(dispatch_project_dir) if dispatch_project_dir else None,
         "celery_task_id": celery_task_id,
-        "task_execution_id": task_execution_id,
         "queue_latency_seconds": queue_latency_seconds,
         "queued_event_id": (queued_event or {}).get("event_id"),
-        **_runtime_selection_details(db),
+        **runtime_identity,
     }
     if dispatch_project_dir:
         _append_orchestration_event(
