@@ -242,6 +242,10 @@ def purge_soft_deleted_projects(
                 checkpoint_service.delete_all_checkpoints(session_id)
 
             if session_ids:
+                # Checkpoint cleanup queues audit LogEntry rows. Flush them before
+                # deleting session logs so the cleanup rows cannot be inserted after
+                # this bulk delete during the final commit.
+                db.flush()
                 db.query(LogEntry).filter(LogEntry.session_id.in_(session_ids)).delete(
                     synchronize_session=False
                 )
@@ -473,6 +477,8 @@ def delete_project(
             checkpoint_service.delete_all_checkpoints(session_id)
         checkpoint_service.cleanup_orphaned_checkpoints()
 
+        # Flush checkpoint audit rows before removing all logs for these sessions.
+        db.flush()
         db.query(LogEntry).filter(LogEntry.session_id.in_(session_ids)).delete(
             synchronize_session=False
         )
