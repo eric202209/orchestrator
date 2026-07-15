@@ -274,6 +274,19 @@ def purge_soft_deleted_projects(
                 ).delete(synchronize_session=False)
 
             if planning_session_ids:
+                # Invalidate every async planning owner before deleting rows.
+                # Generation + owner-token checks make any late worker write a
+                # stale_owner no-op even when a SQLite ID is reused later.
+                db.query(PlanningSession).filter(
+                    PlanningSession.id.in_(planning_session_ids)
+                ).update(
+                    {
+                        "processing_token": None,
+                        "processing_started_at": None,
+                        "processing_task_id": None,
+                    },
+                    synchronize_session=False,
+                )
                 db.query(PlanningMessage).filter(
                     PlanningMessage.planning_session_id.in_(planning_session_ids)
                 ).delete(synchronize_session=False)
@@ -466,6 +479,8 @@ def delete_project(
         {
             "status": "cancelled",
             "current_prompt_id": None,
+            "processing_token": None,
+            "processing_started_at": None,
             "updated_at": datetime.now(timezone.utc),
         },
         synchronize_session=False,

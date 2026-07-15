@@ -43,6 +43,16 @@ from app.services.observability.planning_identity import active_planning_identit
 logger = logging.getLogger(__name__)
 
 
+class StalePlanningOwnerError(RuntimeError):
+    """A planning worker no longer owns the generation it was given."""
+
+    def __init__(self, session_id: int, generation_id: str, reason: str):
+        super().__init__("stale_owner")
+        self.session_id = session_id
+        self.generation_id = generation_id
+        self.reason = reason
+
+
 class PlanningSessionService:
     """Manage resumable planning conversations and final plan synthesis."""
 
@@ -148,6 +158,7 @@ class PlanningSessionService:
         session.status = "active"
         session.processing_token = None
         session.processing_started_at = None
+        session.processing_task_id = None
         session.updated_at = datetime.now(timezone.utc)
         self.db.commit()
         self.schedule_processing(session.id)
@@ -165,6 +176,7 @@ class PlanningSessionService:
         session.last_error = None
         session.processing_token = None
         session.processing_started_at = None
+        session.processing_task_id = None
         session.updated_at = datetime.now(timezone.utc)
         self.db.commit()
         self.schedule_processing(session.id)
@@ -173,14 +185,22 @@ class PlanningSessionService:
 
     def cancel(self, session_id: int) -> PlanningSession:
         session = self.get_session(session_id)
-        if session.status not in {"completed", "cancelled"}:
-            session.status = "cancelled"
+        processing_task_id = session.processing_task_id
+        if (
+            session.status != "cancelled"
+            or session.processing_token is not None
+            or session.processing_started_at is not None
+        ):
+            if session.status not in {"completed", "cancelled"}:
+                session.status = "cancelled"
             session.current_prompt_id = None
+            # Invalidate the write authority before the response is observable.
             session.processing_token = None
             session.processing_started_at = None
             session.updated_at = datetime.now(timezone.utc)
             self.db.commit()
             self.db.refresh(session)
+            self._revoke_processing_task(processing_task_id)
         return session
 
     def delete_terminal_session(self, session_id: int) -> None:
@@ -202,71 +222,196 @@ class PlanningSessionService:
                     "sessions can be deleted"
                 ),
             )
+        if session.processing_token:
+            raise HTTPException(
+                status_code=409,
+                detail="Planning session cleanup pending while processing is owned",
+            )
         self.db.delete(session)
         self.db.commit()
 
-    def schedule_processing(self, session_id: int) -> None:
+    def schedule_processing(
+        self,
+        session_id: int,
+        generation_id: Optional[str] = None,
+        owner_token: Optional[str] = None,
+    ) -> Optional[dict[str, object]]:
+        """Persist an owner before publishing a task and serialize all fences."""
+
+        session = (
+            self.db.query(PlanningSession)
+            .filter(PlanningSession.id == session_id)
+            .populate_existing()
+            .first()
+        )
+        if not session or not session.generation_id:
+            self.db.rollback()
+            return self._stale_owner_result(
+                session_id, generation_id or "", "missing_generation"
+            )
+        if generation_id is not None and session.generation_id != generation_id:
+            self.db.rollback()
+            return self._stale_owner_result(
+                session_id, generation_id, "generation_mismatch"
+            )
+        generation_id = session.generation_id
+        if session.status != "active" or session.current_prompt_id is not None:
+            self.db.rollback()
+            return None
+
+        if session.processing_token is not None:
+            if owner_token != session.processing_token:
+                self.db.rollback()
+                return None
+            task_id = session.processing_task_id or str(uuid.uuid4())
+            if session.processing_task_id is None:
+                session.processing_task_id = task_id
+                session.updated_at = datetime.now(timezone.utc)
+        else:
+            owner_token = owner_token or uuid.uuid4().hex
+            task_id = session.processing_task_id or str(uuid.uuid4())
+            session.processing_token = owner_token
+            session.processing_started_at = datetime.now(timezone.utc)
+            session.processing_task_id = task_id
+            session.updated_at = datetime.now(timezone.utc)
+
+        self.db.commit()
+
         if self._should_process_inline():
-            self.process_session(session_id)
-            return
+            try:
+                self.process_session(
+                    session_id,
+                    generation_id,
+                    owner_token,
+                    processing_task_id=task_id,
+                )
+            finally:
+                self.release_processing_task(
+                    session_id, generation_id, owner_token, task_id
+                )
+            return None
 
         try:
             from app.tasks.planning_tasks import advance_planning_session
 
-            advance_planning_session.delay(session_id)
+            advance_planning_session.apply_async(
+                args=(session_id, generation_id, owner_token),
+                task_id=task_id,
+            )
         except Exception:
-            self.process_session(session_id)
+            logger.exception("Planning task publish failed for session %s", session_id)
+            try:
+                self.process_session(
+                    session_id,
+                    generation_id,
+                    owner_token,
+                    processing_task_id=task_id,
+                )
+            finally:
+                self.release_processing_task(
+                    session_id, generation_id, owner_token, task_id
+                )
+        return None
 
-    def process_session(self, session_id: int) -> Optional[PlanningSession]:
-        session = self._claim_session_for_processing(session_id)
-        if not session:
+    def process_session(
+        self,
+        session_id: int,
+        generation_id: Optional[str] = None,
+        owner_token: Optional[str] = None,
+        *,
+        processing_task_id: Optional[str] = None,
+    ) -> Optional[PlanningSession | dict[str, object]]:
+        # Direct synchronous callers predate the Celery contract.  They acquire
+        # a current owner safely; Celery tasks must always supply all arguments.
+        if generation_id is None or owner_token is None:
+            prepared = self._prepare_direct_owner(session_id)
+            if isinstance(prepared, dict):
+                return prepared
+            generation_id, owner_token = prepared
+
+        claim = self._claim_session_for_processing(
+            session_id, generation_id, owner_token
+        )
+        if isinstance(claim, dict):
+            return claim
+        if not claim:
             return None
 
+        session = claim
         try:
             project = session.project
-            self._advance_or_finalize(session, project)
-            if self._was_cancelled_during_processing(session.id):
-                self.db.rollback()
-                return self.get_session(session.id)
+            self._advance_or_finalize(
+                session, project, generation_id=generation_id, owner_token=owner_token
+            )
+            self._assert_owner(session.id, generation_id, owner_token)
             self._clear_processing_lease(session)
             self.db.commit()
             self.db.refresh(session)
             return session
+        except StalePlanningOwnerError as exc:
+            self.db.rollback()
+            return self._stale_owner_result(
+                exc.session_id, exc.generation_id, exc.reason
+            )
         except HTTPException:
-            self._clear_processing_lease(session)
-            self.db.commit()
+            try:
+                self._assert_owner(session.id, generation_id, owner_token)
+                self._clear_processing_lease(session)
+                self.db.commit()
+            except StalePlanningOwnerError as exc:
+                self.db.rollback()
+                return self._stale_owner_result(
+                    exc.session_id, exc.generation_id, exc.reason
+                )
             raise
         except Exception as exc:
-            if self._was_cancelled_during_processing(session.id):
+            try:
+                self._assert_owner(session.id, generation_id, owner_token)
+                session.status = "failed"
+                session.last_error = str(exc)
+                session.current_prompt_id = None
+                session.updated_at = datetime.now(timezone.utc)
+                self._clear_processing_lease(session)
+                self.db.commit()
+                self.db.refresh(session)
+                return session
+            except StalePlanningOwnerError as stale:
                 self.db.rollback()
-                return self.get_session(session.id)
-            session.status = "failed"
-            session.last_error = str(exc)
-            session.current_prompt_id = None
-            session.updated_at = datetime.now(timezone.utc)
-            self._clear_processing_lease(session)
-            self.db.commit()
-            self.db.refresh(session)
-            return session
+                return self._stale_owner_result(
+                    stale.session_id, stale.generation_id, stale.reason
+                )
 
     def recover_active_sessions(self) -> list[int]:
+        stale_before = datetime.now(timezone.utc) - timedelta(
+            minutes=self.PROCESSING_LEASE_MINUTES
+        )
         active_sessions = (
             self.db.query(PlanningSession)
             .join(Project)
             .filter(Project.deleted_at.is_(None))
             .filter(PlanningSession.status == "active")
             .filter(PlanningSession.current_prompt_id.is_(None))
+            .filter(
+                or_(
+                    PlanningSession.processing_token.is_(None),
+                    PlanningSession.processing_started_at.is_(None),
+                    PlanningSession.processing_started_at < stale_before,
+                )
+            )
             .all()
         )
-        session_ids = [session.id for session in active_sessions]
+        session_details = [
+            (session.id, session.generation_id) for session in active_sessions
+        ]
         for session in active_sessions:
             session.processing_token = None
             session.processing_started_at = None
+            session.processing_task_id = None
             session.updated_at = datetime.now(timezone.utc)
         self.db.commit()
-        for session_id in session_ids:
+        for session_id, generation_id in session_details:
             self.schedule_processing(session_id)
-        return session_ids
+        return [session_id for session_id, _ in session_details]
 
     def commit(
         self,
@@ -275,6 +420,11 @@ class PlanningSessionService:
         planner_markdown: Optional[str] = None,
     ) -> tuple[PlanningSession, Optional[Plan], list[Task]]:
         session = self.get_session(session_id)
+        if not session.generation_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Planning session generation is unavailable; migration required",
+            )
         if session.status != "completed":
             raise HTTPException(
                 status_code=409,
@@ -404,38 +554,62 @@ class PlanningSessionService:
             "committed_task_ids": self._load_committed_task_ids(session),
         }
 
-    def _claim_session_for_processing(
+    def _prepare_direct_owner(
         self, session_id: int
-    ) -> Optional[PlanningSession]:
-        token = uuid.uuid4().hex[:12]
+    ) -> tuple[str, str] | dict[str, object]:
+        session = (
+            self.db.query(PlanningSession)
+            .filter(PlanningSession.id == session_id)
+            .populate_existing()
+            .first()
+        )
+        if not session or not session.generation_id:
+            self.db.rollback()
+            return self._stale_owner_result(session_id, "", "missing_generation")
+        if session.processing_token:
+            return session.generation_id, session.processing_token
+        session.processing_token = uuid.uuid4().hex
+        session.processing_started_at = datetime.now(timezone.utc)
+        session.updated_at = datetime.now(timezone.utc)
+        self.db.commit()
+        return session.generation_id, session.processing_token
+
+    def _claim_session_for_processing(
+        self, session_id: int, generation_id: str, owner_token: str
+    ) -> Optional[PlanningSession | dict[str, object]]:
         stale_before = datetime.now(timezone.utc) - timedelta(
             minutes=self.PROCESSING_LEASE_MINUTES
         )
         session = (
             self.db.query(PlanningSession)
             .filter(PlanningSession.id == session_id)
-            .filter(PlanningSession.status == "active")
-            .filter(PlanningSession.current_prompt_id.is_(None))
-            .filter(
-                or_(
-                    PlanningSession.processing_token.is_(None),
-                    PlanningSession.processing_started_at.is_(None),
-                    PlanningSession.processing_started_at < stale_before,
-                )
-            )
             .with_for_update()
             .first()
         )
         if not session:
             self.db.rollback()
+            return self._stale_owner_result(
+                session_id, generation_id, "missing_session"
+            )
+        if session.generation_id != generation_id:
+            self.db.rollback()
+            return self._stale_owner_result(
+                session_id, generation_id, "generation_mismatch"
+            )
+        if session.processing_token != owner_token:
+            self.db.rollback()
+            return self._stale_owner_result(session_id, generation_id, "owner_mismatch")
+        if session.status != "active" or session.current_prompt_id is not None:
+            self.db.rollback()
             return None
-
-        now = datetime.now(timezone.utc)
-        session.processing_token = token
-        session.processing_started_at = now
-        session.updated_at = now
-        self.db.commit()
-        self.db.refresh(session)
+        started_at = session.processing_started_at
+        if started_at is not None and started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+        if started_at is not None and started_at < stale_before:
+            # An expired owner must be replaced by recovery with a new token;
+            # the expired task cannot reclaim itself.
+            self.db.rollback()
+            return self._stale_owner_result(session_id, generation_id, "lease_expired")
         return session
 
     @staticmethod
@@ -444,15 +618,106 @@ class PlanningSessionService:
         session.processing_started_at = None
         session.updated_at = datetime.now(timezone.utc)
 
-    def _was_cancelled_during_processing(self, session_id: int) -> bool:
+    def _assert_owner_if_present(
+        self,
+        session: PlanningSession,
+        generation_id: Optional[str],
+        owner_token: Optional[str],
+    ) -> None:
+        if generation_id is not None and owner_token is not None:
+            self._assert_owner(session.id, generation_id, owner_token)
+
+    def _assert_owner(
+        self, session_id: int, generation_id: str, owner_token: str
+    ) -> PlanningSession:
         with self.db.no_autoflush:
-            status = (
-                self.db.query(PlanningSession.status)
-                .populate_existing()
-                .filter(PlanningSession.id == session_id)
-                .scalar()
+            current = (
+                self.db.query(PlanningSession.id, PlanningSession.status)
+                .filter(
+                    PlanningSession.id == session_id,
+                    PlanningSession.generation_id == generation_id,
+                    PlanningSession.processing_token == owner_token,
+                )
+                .first()
             )
-        return status == "cancelled"
+        if current is None:
+            reason = "missing_session"
+            with self.db.no_autoflush:
+                by_id = (
+                    self.db.query(
+                        PlanningSession.generation_id, PlanningSession.processing_token
+                    )
+                    .populate_existing()
+                    .filter(PlanningSession.id == session_id)
+                    .first()
+                )
+            if by_id is not None:
+                reason = (
+                    "generation_mismatch"
+                    if by_id[0] != generation_id
+                    else "owner_mismatch"
+                )
+            raise StalePlanningOwnerError(session_id, generation_id, reason)
+        if current[1] not in {"active", "waiting_for_input", "completed", "failed"}:
+            raise StalePlanningOwnerError(session_id, generation_id, "terminal_state")
+        return self.db.get(PlanningSession, session_id)
+
+    @staticmethod
+    def _stale_owner_result(
+        session_id: int, generation_id: str, reason: str
+    ) -> dict[str, object]:
+        return {
+            "status": "stale_owner",
+            "session_id": session_id,
+            "generation_id": generation_id,
+            "reason": reason,
+        }
+
+    @staticmethod
+    def _revoke_processing_task(task_id: Optional[str]) -> None:
+        if not task_id:
+            return
+        try:
+            from app.celery_app import celery_app
+
+            celery_app.control.revoke(task_id, terminate=False)
+        except Exception:
+            logger.warning("Best-effort revoke failed for planning task %s", task_id)
+
+    def release_processing_task(
+        self,
+        session_id: int,
+        generation_id: str,
+        owner_token: str,
+        task_id: Optional[str],
+    ) -> None:
+        """Clear only this generation's observational Celery task ID."""
+
+        if not task_id:
+            return
+        with self.db.no_autoflush:
+            session = (
+                self.db.query(PlanningSession)
+                .filter(
+                    PlanningSession.id == session_id,
+                    PlanningSession.generation_id == generation_id,
+                    PlanningSession.processing_task_id == task_id,
+                )
+                .populate_existing()
+                .first()
+            )
+        if session is None:
+            self.db.rollback()
+            return
+        # Token matching is required while the owner is still active.  After
+        # terminalization/cancellation the token is intentionally NULL, so the
+        # generation + task-id match remains the cleanup observation boundary.
+        if session.processing_token not in {None, owner_token}:
+            self.db.rollback()
+            return
+        session.processing_task_id = None
+        session.updated_at = datetime.now(timezone.utc)
+        self.db.commit()
 
     @staticmethod
     def _should_process_inline() -> bool:
@@ -564,7 +829,14 @@ class PlanningSessionService:
             "planner_markdown": planner_markdown,
         }
 
-    def _advance_or_finalize(self, session: PlanningSession, project: Project) -> None:
+    def _advance_or_finalize(
+        self,
+        session: PlanningSession,
+        project: Project,
+        *,
+        generation_id: Optional[str] = None,
+        owner_token: Optional[str] = None,
+    ) -> None:
         # Skip Q&A entirely for sessions that carry full context (e.g. replan).
         first_msg = session.messages[0] if session.messages else None
         if (
@@ -572,14 +844,32 @@ class PlanningSessionService:
             and isinstance(getattr(first_msg, "metadata_json", None), dict)
             and first_msg.metadata_json.get("skip_clarification")
         ):
-            self._finalize_session(session, project)
+            self._finalize_session(
+                session,
+                project,
+                generation_id=generation_id,
+                owner_token=owner_token,
+            )
             return
 
         question_count = len([m for m in session.messages if m.role == "assistant"])
-        decision = self._decide_clarification(session, project)
+        try:
+            decision = self._decide_clarification(
+                session,
+                project,
+                generation_id=generation_id,
+                owner_token=owner_token,
+            )
+        except TypeError as exc:
+            # Preserve older test/in-process seams while the production worker
+            # uses the explicit owner context.
+            if "generation_id" not in str(exc) and "owner_token" not in str(exc):
+                raise
+            decision = self._decide_clarification(session, project)
         if decision["needs_clarification"] and question_count < self.MAX_QUESTIONS:
             question = decision["question"]
             prompt_id = f"prompt-{uuid.uuid4().hex[:12]}"
+            self._assert_owner_if_present(session, generation_id, owner_token)
             session.status = "waiting_for_input"
             session.current_prompt_id = prompt_id
             session.updated_at = datetime.now(timezone.utc)
@@ -589,12 +879,26 @@ class PlanningSessionService:
                 question,
                 prompt_id=prompt_id,
                 metadata={"kind": "clarifying_question"},
+                generation_id=generation_id,
+                owner_token=owner_token,
             )
             return
 
-        self._finalize_session(session, project)
+        self._finalize_session(
+            session,
+            project,
+            generation_id=generation_id,
+            owner_token=owner_token,
+        )
 
-    def _finalize_session(self, session: PlanningSession, project: Project) -> None:
+    def _finalize_session(
+        self,
+        session: PlanningSession,
+        project: Project,
+        *,
+        generation_id: Optional[str] = None,
+        owner_token: Optional[str] = None,
+    ) -> None:
         prompt = self._build_synthesis_prompt(session, project)
         is_replan_recovery = self._is_replan_recovery_session(session)
         timeout_seconds = (
@@ -612,6 +916,7 @@ class PlanningSessionService:
                 timeout_seconds=timeout_seconds,
                 project_id=project.id,
             )
+            self._assert_owner_if_present(session, generation_id, owner_token)
             artifacts = self._parse_finalization_payload(result)
         except HTTPException:
             raise
@@ -630,6 +935,7 @@ class PlanningSessionService:
                         timeout_seconds=timeout_seconds,
                         project_id=project.id,
                     )
+                    self._assert_owner_if_present(session, generation_id, owner_token)
                     artifacts = self._parse_finalization_payload(result)
                 except HTTPException:
                     raise
@@ -640,7 +946,10 @@ class PlanningSessionService:
                         exc,
                         attempt="compact_retry",
                         first_attempt_error=str(first_exc),
+                        generation_id=generation_id,
+                        owner_token=owner_token,
                     )
+                    self._assert_owner_if_present(session, generation_id, owner_token)
                     session.status = "failed"
                     session.last_error = str(exc)
                     session.current_prompt_id = None
@@ -659,6 +968,8 @@ class PlanningSessionService:
                         "kind": "replan_fallback",
                         "error": replan_fallback_error,
                     },
+                    generation_id=generation_id,
+                    owner_token=owner_token,
                 )
 
         planner_markdown = artifacts.get("planner_markdown", "")
@@ -675,8 +986,11 @@ class PlanningSessionService:
                     "deterministic scoped replan markdown instead."
                 ),
                 metadata={"kind": "replan_scope_fallback"},
+                generation_id=generation_id,
+                owner_token=owner_token,
             )
         if not planner_markdown or not parsed_tasks:
+            self._assert_owner_if_present(session, generation_id, owner_token)
             session.status = "failed"
             session.last_error = (
                 "Planning synthesis did not produce parseable planner markdown"
@@ -700,6 +1014,8 @@ class PlanningSessionService:
                 artifact_type=artifact_type,
                 filename=filename,
                 content=content.strip(),
+                generation_id=generation_id,
+                owner_token=owner_token,
             )
 
         self._add_message(
@@ -707,7 +1023,10 @@ class PlanningSessionService:
             "assistant",
             "Planning complete. Review the artifacts and task preview, then commit when ready.",
             metadata={"kind": "completion"},
+            generation_id=generation_id,
+            owner_token=owner_token,
         )
+        self._assert_owner_if_present(session, generation_id, owner_token)
         session.status = "completed"
         session.current_prompt_id = None
         session.completed_at = datetime.now(timezone.utc)
@@ -870,6 +1189,8 @@ class PlanningSessionService:
         *,
         attempt: str,
         first_attempt_error: Optional[str] = None,
+        generation_id: Optional[str] = None,
+        owner_token: Optional[str] = None,
     ) -> None:
         output_text = self._extract_output_text(
             result,
@@ -911,6 +1232,8 @@ class PlanningSessionService:
             artifact_type="planning_synthesis_parse_failure_diagnostic",
             filename="planning_synthesis_parse_failure.json",
             content=json.dumps(metadata, indent=2, sort_keys=True),
+            generation_id=generation_id,
+            owner_token=owner_token,
         )
 
     @staticmethod
@@ -1027,7 +1350,12 @@ class PlanningSessionService:
         )
 
     def _decide_clarification(
-        self, session: PlanningSession, project: Project
+        self,
+        session: PlanningSession,
+        project: Project,
+        *,
+        generation_id: Optional[str] = None,
+        owner_token: Optional[str] = None,
     ) -> dict[str, Any]:
         heuristic_question = self._heuristic_next_question(session)
         heuristic_needs = self._heuristic_needs_clarification(session)
@@ -1052,6 +1380,7 @@ class PlanningSessionService:
                 source_brain=session.source_brain,
                 project_id=project.id,
             )
+            self._assert_owner_if_present(session, generation_id, owner_token)
             return self._parse_clarification_payload(
                 result,
                 fallback_needs=heuristic_needs,
@@ -1184,7 +1513,10 @@ class PlanningSessionService:
         *,
         prompt_id: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
+        generation_id: Optional[str] = None,
+        owner_token: Optional[str] = None,
     ) -> PlanningMessage:
+        self._assert_owner_if_present(session, generation_id, owner_token)
         message = PlanningMessage(
             planning_session_id=session.id,
             role=role,
@@ -1267,7 +1599,10 @@ class PlanningSessionService:
         artifact_type: str,
         filename: str,
         content: str,
+        generation_id: Optional[str] = None,
+        owner_token: Optional[str] = None,
     ) -> None:
+        self._assert_owner_if_present(session, generation_id, owner_token)
         latest = next(
             (
                 artifact

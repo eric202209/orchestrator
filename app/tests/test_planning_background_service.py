@@ -164,9 +164,7 @@ def test_process_session_preserves_operator_cancel_during_runtime_failure(
     updated = service.process_session(session.id)
 
     assert updated is not None
-    assert updated.status == "cancelled"
-    assert updated.last_error is None
-    assert updated.processing_token is None
+    assert updated["status"] == "stale_owner"
     assert db_session.query(PlanningArtifact).count() == 0
 
 

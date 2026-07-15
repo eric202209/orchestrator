@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Iterable
+import uuid
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
@@ -751,6 +752,61 @@ def _migration_025_task_execution_planner_provenance(engine: Engine) -> None:
         )
 
 
+def _migration_026_planning_generation_fence(engine: Engine) -> None:
+    """Backfill immutable planning generations and task observations."""
+
+    if "planning_sessions" not in _table_names(engine):
+        return
+
+    statements: list[str] = []
+    if not _has_column(engine, "planning_sessions", "generation_id"):
+        statements.append(
+            "ALTER TABLE planning_sessions ADD COLUMN generation_id VARCHAR(36)"
+        )
+    if not _has_column(engine, "planning_sessions", "processing_task_id"):
+        statements.append(
+            "ALTER TABLE planning_sessions ADD COLUMN processing_task_id VARCHAR(255)"
+        )
+    if statements:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+
+    with engine.begin() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT id FROM planning_sessions "
+                "WHERE generation_id IS NULL OR generation_id = ''"
+            )
+        ).fetchall()
+        for (session_id,) in rows:
+            connection.execute(
+                text(
+                    "UPDATE planning_sessions SET generation_id = :generation_id "
+                    "WHERE id = :session_id"
+                ),
+                {"generation_id": str(uuid.uuid4()), "session_id": session_id},
+            )
+        if not _has_index(
+            engine, "planning_sessions", "ux_planning_sessions_generation_id"
+        ):
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX ux_planning_sessions_generation_id "
+                    "ON planning_sessions (generation_id)"
+                )
+            )
+        if not _has_index(
+            engine, "planning_sessions", "ix_planning_sessions_processing_task_id"
+        ):
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_planning_sessions_processing_task_id "
+                    "ON planning_sessions (processing_task_id)"
+                )
+            )
+
+
 def _migration_014_task_workflow_stage(engine: Engine) -> None:
     if "tasks" not in _table_names(engine):
         return
@@ -1158,6 +1214,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="025_task_execution_planner_provenance",
         description="Add immutable planner provenance to task executions",
         upgrade=_migration_025_task_execution_planner_provenance,
+    ),
+    Migration(
+        version="026_planning_generation_fence",
+        description="Add immutable Planning Session generations and task observations",
+        upgrade=_migration_026_planning_generation_fence,
     ),
 )
 

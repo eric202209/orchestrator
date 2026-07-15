@@ -210,6 +210,11 @@ class PlanningSession(Base):
     prompt = Column(Text, nullable=False)
     status = Column(String(50), nullable=False, default="active", index=True)
     source_brain = Column(String(50), nullable=False, default="local")
+    # Immutable logical identity.  Integer IDs are deliberately reusable on
+    # SQLite, so asynchronous planning work must never use ``id`` alone.
+    generation_id = Column(
+        String(36), nullable=True, unique=True, default=lambda: str(uuid.uuid4())
+    )
     planning_backend = Column(String(64), nullable=True)
     planner_model = Column(String(255), nullable=True)
     reasoning_profile = Column(String(128), nullable=True)
@@ -217,6 +222,8 @@ class PlanningSession(Base):
     current_prompt_id = Column(String(64), nullable=True)
     processing_token = Column(String(64), nullable=True, index=True)
     processing_started_at = Column(DateTime(timezone=True), nullable=True)
+    # Observational only: the owner fence is generation + processing_token.
+    processing_task_id = Column(String(255), nullable=True, index=True)
     finalized_plan_id = Column(
         Integer, ForeignKey("plans.id"), nullable=True, index=True
     )

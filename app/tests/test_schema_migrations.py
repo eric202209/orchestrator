@@ -89,6 +89,9 @@ def test_schema_migrations_add_required_columns_and_indexes(tmp_path):
     log_columns = {column["name"] for column in inspector.get_columns("log_entries")}
     session_indexes = {index["name"] for index in inspector.get_indexes("sessions")}
     planning_tables = set(inspector.get_table_names())
+    planning_columns = {
+        column["name"] for column in inspector.get_columns("planning_sessions")
+    }
 
     assert {"github_url", "branch", "workspace_path", "deleted_at"} <= project_columns
     assert {
@@ -113,6 +116,7 @@ def test_schema_migrations_add_required_columns_and_indexes(tmp_path):
         "planning_messages",
         "planning_artifacts",
     } <= planning_tables
+    assert {"generation_id", "processing_task_id"} <= planning_columns
     assert "ux_planning_sessions_one_active" in {
         index["name"] for index in inspector.get_indexes("planning_sessions")
     }
