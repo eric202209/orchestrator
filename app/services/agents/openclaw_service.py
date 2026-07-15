@@ -261,7 +261,7 @@ class OpenClawSessionService:
         self._workspace_binding: Optional[ExecutorWorkspaceBinding] = None
         self.runtime_configuration = runtime_configuration
         self.backend_role: Optional[str] = (
-            runtime_configuration.role if runtime_configuration else None
+            runtime_configuration.role.value if runtime_configuration else None
         )
         self._safety_prompt_injected = False
         self.openclaw_session_key: Optional[str] = None
@@ -286,7 +286,7 @@ class OpenClawSessionService:
 
         model_family = self._model_family_for_role()
         adaptation_profile = self._adaptation_profile_for_role(model_family)
-        return {
+        payload = {
             "backend": self.backend_descriptor.name,
             "display_name": self.backend_descriptor.display_name,
             "implementation": self.backend_descriptor.implementation,
@@ -295,10 +295,17 @@ class OpenClawSessionService:
             "agent_interface": self.describe_interface().to_dict(),
             "capabilities": self.backend_descriptor.capabilities.to_dict(),
         }
+        if self.runtime_configuration is not None:
+            payload["role"] = self.backend_role
+            payload["runtime_configuration"] = self.runtime_configuration.to_dict()
+        return payload
 
     def _model_family_for_role(self) -> str:
         if self.runtime_configuration and self.runtime_configuration.model_family:
             return self.runtime_configuration.model_family
+        # Stage A migration fallback for legacy unscoped/direct adapter
+        # construction. Explicit role factory calls always supply the full
+        # RoleRuntimeConfiguration first.
         role_model = ""
         if self.backend_role == "planning":
             role_model = settings.PLANNER_MODEL
@@ -313,6 +320,7 @@ class OpenClawSessionService:
     def _adaptation_profile_for_role(self, model_family: str):
         if self.runtime_configuration and self.runtime_configuration.adaptation_profile:
             return get_adaptation_profile(self.runtime_configuration.adaptation_profile)
+        # Stage A migration fallback for legacy unscoped/direct adapter calls.
         return resolve_adaptation_profile(
             backend=self.backend_descriptor.name,
             model_family=model_family,

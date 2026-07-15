@@ -26,6 +26,12 @@ AGENT_BACKEND_KEY = "orchestrator_agent_backend"
 AGENT_MODEL_FAMILY_KEY = "orchestrator_agent_model_family"
 ADAPTATION_PROFILE_KEY = "orchestrator_adaptation_profile"
 PLANNING_ADAPTATION_PROFILE_KEY = "orchestrator_planning_adaptation_profile"
+EXECUTION_ADAPTATION_PROFILE_KEY = "orchestrator_execution_adaptation_profile"
+REPAIR_ADAPTATION_PROFILE_KEY = "orchestrator_repair_adaptation_profile"
+DEBUG_REPAIR_ADAPTATION_PROFILE_KEY = "orchestrator_debug_repair_adaptation_profile"
+COMPLETION_REPAIR_ADAPTATION_PROFILE_KEY = (
+    "orchestrator_completion_repair_adaptation_profile"
+)
 ORCHESTRATION_POLICY_PROFILE_KEY = "orchestration_policy_profile"
 WORKSPACE_REVIEW_POLICY_KEY = "workspace_review_policy"
 WORKSPACE_REVIEW_POLICIES = {"auto_publish_all", "hold_nontrivial", "hold_all"}

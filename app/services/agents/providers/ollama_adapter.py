@@ -115,7 +115,7 @@ class OllamaRuntime:
         self.task_execution_id: Optional[int] = None
         self.runtime_configuration = runtime_configuration
         self.backend_role: Optional[str] = (
-            runtime_configuration.role if runtime_configuration else None
+            runtime_configuration.role.value if runtime_configuration else None
         )
         backend_name = (
             runtime_configuration.backend_name
@@ -132,6 +132,7 @@ class OllamaRuntime:
         )
         if runtime_configuration and runtime_configuration.model_family:
             selected_model = runtime_configuration.model_family
+        # Stage A migration fallback for legacy unscoped/direct adapter calls.
         elif (
             persisted_model
             and str(settings.AGENT_BACKEND or "").strip() == "direct_ollama"
@@ -294,6 +295,9 @@ class OllamaRuntime:
             payload["adaptation_profile"] = (
                 self.runtime_configuration.adaptation_profile
             )
+        if self.runtime_configuration is not None:
+            payload["role"] = self.backend_role
+            payload["runtime_configuration"] = self.runtime_configuration.to_dict()
         return payload
 
     def describe_interface(self) -> AgentInterfaceDescriptor:
@@ -333,6 +337,7 @@ class OllamaRuntime:
     def _adaptation_profile(self):
         if self.runtime_configuration and self.runtime_configuration.adaptation_profile:
             return get_adaptation_profile(self.runtime_configuration.adaptation_profile)
+        # Stage A migration fallback for legacy unscoped/direct adapter calls.
         return resolve_adaptation_profile(
             backend=self.backend_descriptor.name,
             model_family=self._model,

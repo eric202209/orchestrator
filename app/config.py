@@ -175,11 +175,16 @@ class Settings(BaseSettings):
     PLANNER_MODEL: str = ""
     EXECUTION_MODEL: str = ""
     PLANNING_ADAPTATION_PROFILE: Optional[str] = None
+    EXECUTION_ADAPTATION_PROFILE: Optional[str] = None
+    REPAIR_ADAPTATION_PROFILE: Optional[str] = None
+    DEBUG_REPAIR_ADAPTATION_PROFILE: Optional[str] = None
     PLANNING_REPAIR_ENABLED: bool = True
     CANDIDATE_RECOVERY_ENABLED: bool = False
     CANDIDATE_SLOT_MERGE_ENABLED: bool = False
     PLANNING_REPAIR_BASE_URL: str = "http://ai-gateway:8000/v1"
     PLANNING_REPAIR_MODEL: str = "qwen-local"
+    COMPLETION_REPAIR_MODEL: str = ""
+    COMPLETION_REPAIR_ADAPTATION_PROFILE: Optional[str] = None
     PLANNING_REPAIR_API_KEY: str = ""
     PLANNING_REPAIR_DISABLE_THINKING: bool = True
     DEBUG_REPAIR_DIRECT_ENABLED: bool = True

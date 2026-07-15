@@ -12,6 +12,7 @@ from app.services.agents.interfaces import (
     RetryStrategy,
     RuntimeBackendResult,
 )
+from app.services.agents.runtime_configuration import RoleRuntimeConfiguration
 
 
 class StubRuntime:
@@ -25,12 +26,17 @@ class StubRuntime:
         *,
         backend_id: str,
         use_demo_mode: Optional[bool] = None,
+        runtime_configuration: RoleRuntimeConfiguration | None = None,
     ):
         self.db = db
         self.session_id = session_id
         self.task_id = task_id
         self.backend_id = backend_id
         self.use_demo_mode = use_demo_mode
+        self.runtime_configuration = runtime_configuration
+        self.backend_role = (
+            runtime_configuration.role.value if runtime_configuration else None
+        )
         self.backend_descriptor = None
 
     async def create_session(
@@ -87,7 +93,7 @@ class StubRuntime:
         return await self.execute_task(prompt, timeout_seconds=timeout_seconds)
 
     def get_backend_metadata(self) -> dict[str, Any]:
-        return {
+        payload = {
             "backend": self.backend_id,
             "display_name": self.backend_id,
             "implementation": "test_only",
@@ -99,6 +105,10 @@ class StubRuntime:
                 "supports_debug_repair": True,
             },
         }
+        if self.runtime_configuration is not None:
+            payload["role"] = self.backend_role
+            payload["runtime_configuration"] = self.runtime_configuration.to_dict()
+        return payload
 
     def describe_interface(self) -> AgentInterfaceDescriptor:
         return AgentInterfaceDescriptor(
@@ -156,6 +166,7 @@ def create_stub_runtime(
     *,
     use_demo_mode: Optional[bool] = None,
     backend_id: str,
+    runtime_configuration: RoleRuntimeConfiguration | None = None,
 ) -> StubRuntime:
     return StubRuntime(
         db,
@@ -163,4 +174,5 @@ def create_stub_runtime(
         task_id,
         backend_id=backend_id,
         use_demo_mode=use_demo_mode,
+        runtime_configuration=runtime_configuration,
     )

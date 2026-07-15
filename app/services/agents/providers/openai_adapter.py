@@ -54,7 +54,7 @@ class OpenAIResponsesRuntime:
         )
         self.backend_descriptor = get_backend_descriptor(backend_name)
         self.backend_role: Optional[str] = (
-            runtime_configuration.role if runtime_configuration else None
+            runtime_configuration.role.value if runtime_configuration else None
         )
         self.response_session_key = (
             f"openai:session:{task_id or session_id or int(time.time())}"
@@ -210,6 +210,7 @@ class OpenAIResponsesRuntime:
     def _model_name(self) -> str:
         if self.runtime_configuration and self.runtime_configuration.model_family:
             return self.runtime_configuration.model_family
+        # Stage A migration fallback for legacy unscoped/direct adapter calls.
         role_model = ""
         if self.backend_role == "planning":
             role_model = settings.PLANNER_MODEL
@@ -251,7 +252,7 @@ class OpenAIResponsesRuntime:
     def get_backend_metadata(self) -> dict[str, Any]:
         model_family = self._model_name()
         adaptation_profile = self._adaptation_profile(model_family)
-        return {
+        payload = {
             "backend": self.backend_descriptor.name,
             "display_name": self.backend_descriptor.display_name,
             "implementation": self.backend_descriptor.implementation,
@@ -260,6 +261,10 @@ class OpenAIResponsesRuntime:
             "agent_interface": self.describe_interface().to_dict(),
             "capabilities": self.backend_descriptor.capabilities.to_dict(),
         }
+        if self.runtime_configuration is not None:
+            payload["role"] = self.backend_role
+            payload["runtime_configuration"] = self.runtime_configuration.to_dict()
+        return payload
 
     def describe_interface(self) -> AgentInterfaceDescriptor:
         model_family = self._model_name()
@@ -307,6 +312,7 @@ class OpenAIResponsesRuntime:
     def _adaptation_profile(self, model_family: str):
         if self.runtime_configuration and self.runtime_configuration.adaptation_profile:
             return get_adaptation_profile(self.runtime_configuration.adaptation_profile)
+        # Stage A migration fallback for legacy unscoped/direct adapter calls.
         return resolve_adaptation_profile(
             backend=self.backend_descriptor.name,
             model_family=model_family,

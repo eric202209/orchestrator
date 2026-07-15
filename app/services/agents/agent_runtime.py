@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import enum
 import logging
 from typing import Any, Optional
 
@@ -16,28 +15,27 @@ from app.services.agents.agent_backends import (
 )
 from app.services.agents.interfaces import AgentRuntime
 from app.services.agents.providers import get_runtime_factory
-from app.services.agents.runtime_configuration import RuntimeConfiguration
+from app.services.agents.runtime_configuration import (
+    BackendRole,
+    RoleRuntimeConfiguration,
+)
 from app.services.model_adaptation import (
-    get_adaptation_profile,
     require_adaptation_profile,
+    resolve_adaptation_profile,
 )
 from app.services.workspace.system_settings import get_effective_agent_backend
 from app.services.workspace.system_settings import (
     PLANNING_ADAPTATION_PROFILE_KEY,
+    COMPLETION_REPAIR_ADAPTATION_PROFILE_KEY,
+    DEBUG_REPAIR_ADAPTATION_PROFILE_KEY,
+    EXECUTION_ADAPTATION_PROFILE_KEY,
+    REPAIR_ADAPTATION_PROFILE_KEY,
     get_effective_adaptation_profile,
     get_effective_agent_model_family,
     get_setting_value_runtime,
 )
 
 logger = logging.getLogger(__name__)
-
-
-class BackendRole(str, enum.Enum):
-    PLANNING = "planning"
-    EXECUTION = "execution"
-    DEBUG_REPAIR = "debug_repair"
-    REPAIR = "repair"
-    COMPLETION_REPAIR = "completion_repair"
 
 
 _TEST_RUNTIME_BACKENDS = {"stub_success", "stub_capacity"}
@@ -56,19 +54,162 @@ def _is_test_runtime_backend(backend_name: str) -> bool:
     return backend_name in _TEST_RUNTIME_BACKENDS
 
 
+def _coerce_backend_role(role: BackendRole | str) -> BackendRole:
+    if isinstance(role, BackendRole):
+        return role
+    try:
+        return BackendRole(str(role))
+    except ValueError as exc:
+        raise ValueError(f"Unknown runtime role: {role!r}") from exc
+
+
 def resolve_backend_name_for_role(db: Session, role: BackendRole) -> str:
     """Return the configured backend name for role, falling back to AGENT_BACKEND."""
+    role = _coerce_backend_role(role)
     role_setting = {
-        BackendRole.PLANNING: settings.PLANNING_BACKEND,
-        BackendRole.EXECUTION: settings.EXECUTION_BACKEND,
-        BackendRole.DEBUG_REPAIR: settings.DEBUG_REPAIR_BACKEND
-        or settings.REPAIR_BACKEND,
-        BackendRole.REPAIR: settings.REPAIR_BACKEND,
-        BackendRole.COMPLETION_REPAIR: settings.COMPLETION_REPAIR_BACKEND,
+        BackendRole.PLANNING: getattr(settings, "PLANNING_BACKEND", None),
+        BackendRole.EXECUTION: getattr(settings, "EXECUTION_BACKEND", None),
+        BackendRole.DEBUG_REPAIR: getattr(settings, "DEBUG_REPAIR_BACKEND", None)
+        or getattr(settings, "REPAIR_BACKEND", None),
+        BackendRole.REPAIR: getattr(settings, "REPAIR_BACKEND", None),
+        # Completion repair historically inherits the active execution lane
+        # when no fast-route backend is configured.
+        BackendRole.COMPLETION_REPAIR: getattr(
+            settings, "COMPLETION_REPAIR_BACKEND", None
+        )
+        or getattr(settings, "EXECUTION_BACKEND", None),
     }.get(role)
     if role_setting:
-        return role_setting.strip()
+        return str(role_setting).strip()
     return get_effective_agent_backend(settings.AGENT_BACKEND, db=db).strip()
+
+
+def _effective_global_model_family(db: Session, backend_name: str) -> str:
+    descriptor = require_backend_descriptor(backend_name)
+    return (
+        get_effective_agent_model_family(settings.AGENT_MODEL, db=db).strip()
+        or descriptor.default_model_family
+    )
+
+
+def _role_model_family(db: Session, role: BackendRole, backend_name: str) -> str:
+    """Resolve role model ownership using the current compatibility order."""
+
+    role_models = {
+        BackendRole.PLANNING: getattr(settings, "PLANNER_MODEL", ""),
+        # OLLAMA_AGENT_MODEL is the existing local-provider fallback used by
+        # canonical OpenClaw execution and worker selection details.
+        BackendRole.EXECUTION: getattr(settings, "EXECUTION_MODEL", "")
+        or getattr(settings, "OLLAMA_AGENT_MODEL", ""),
+        BackendRole.REPAIR: getattr(settings, "PLANNING_REPAIR_MODEL", ""),
+        BackendRole.DEBUG_REPAIR: getattr(settings, "DEBUG_REPAIR_MODEL", "")
+        or getattr(settings, "PLANNING_REPAIR_MODEL", ""),
+        BackendRole.COMPLETION_REPAIR: getattr(settings, "COMPLETION_REPAIR_MODEL", "")
+        or getattr(settings, "PLANNING_REPAIR_MODEL", ""),
+    }
+    return str(role_models[role] or "").strip() or _effective_global_model_family(
+        db, backend_name
+    )
+
+
+def _configured_profile_name(db: Session, key: str, setting_name: str) -> Optional[str]:
+    value = get_setting_value_runtime(
+        key,
+        getattr(settings, setting_name, None),
+        db=db,
+    )
+    normalized = str(value or "").strip()
+    return normalized or None
+
+
+def _profile_for_role(db: Session, role: BackendRole) -> Optional[str]:
+    profile_settings = {
+        BackendRole.PLANNING: (
+            PLANNING_ADAPTATION_PROFILE_KEY,
+            "PLANNING_ADAPTATION_PROFILE",
+        ),
+        BackendRole.EXECUTION: (
+            EXECUTION_ADAPTATION_PROFILE_KEY,
+            "EXECUTION_ADAPTATION_PROFILE",
+        ),
+        BackendRole.REPAIR: (
+            REPAIR_ADAPTATION_PROFILE_KEY,
+            "REPAIR_ADAPTATION_PROFILE",
+        ),
+        BackendRole.DEBUG_REPAIR: (
+            DEBUG_REPAIR_ADAPTATION_PROFILE_KEY,
+            "DEBUG_REPAIR_ADAPTATION_PROFILE",
+        ),
+        BackendRole.COMPLETION_REPAIR: (
+            COMPLETION_REPAIR_ADAPTATION_PROFILE_KEY,
+            "COMPLETION_REPAIR_ADAPTATION_PROFILE",
+        ),
+    }
+    profile_key, setting_name = profile_settings[role]
+    profile_name = _configured_profile_name(db, profile_key, setting_name)
+    if profile_name:
+        return profile_name
+
+    # Debug and completion repair inherit the repair profile before falling
+    # back to the compatible global profile. This mirrors their direct-path
+    # model fallback without routing those consumers in Stage A.
+    if role in {BackendRole.DEBUG_REPAIR, BackendRole.COMPLETION_REPAIR}:
+        return _configured_profile_name(
+            db,
+            REPAIR_ADAPTATION_PROFILE_KEY,
+            "REPAIR_ADAPTATION_PROFILE",
+        )
+    return None
+
+
+def _profile_matches_backend(profile_name: str, descriptor: Any) -> bool:
+    profile = require_adaptation_profile(profile_name)
+    return (
+        profile.backend == "*" or profile.name in descriptor.config.adaptation_profiles
+    )
+
+
+def _resolve_profile(
+    db: Session,
+    *,
+    role: BackendRole,
+    backend_name: str,
+    model_family: str,
+) -> str:
+    descriptor = require_backend_descriptor(backend_name)
+    explicit_profile = _profile_for_role(db, role)
+    if explicit_profile:
+        if not _profile_matches_backend(explicit_profile, descriptor):
+            raise UnsupportedRuntimeProfileError(
+                f"Adaptation profile '{explicit_profile}' is not supported by "
+                f"{role.value} backend '{descriptor.name}'."
+            )
+        return require_adaptation_profile(explicit_profile).name
+
+    # Planning preserves its Phase 26C-1 global-profile fallback exactly.
+    if role is BackendRole.PLANNING:
+        global_profile_name = get_effective_adaptation_profile(db=db)
+        return require_adaptation_profile(global_profile_name).name
+
+    # Non-planning adapters historically selected a registry-compatible
+    # profile from backend/model, ignoring the global profile setting. Keep
+    # that effective behavior while making the value explicit in the role
+    # configuration.
+    resolved_profile = resolve_adaptation_profile(
+        backend=descriptor.name,
+        model_family=model_family,
+    )
+    if _profile_matches_backend(resolved_profile.name, descriptor):
+        return resolved_profile.name
+
+    # The registry's first listed profile is the deterministic compatible
+    # fallback when no profile advertises the resolved model family.
+    for profile_name in descriptor.config.adaptation_profiles:
+        if _profile_matches_backend(profile_name, descriptor):
+            return require_adaptation_profile(profile_name).name
+    raise UnsupportedRuntimeProfileError(
+        f"Backend '{descriptor.name}' has no registered adaptation profile."
+    )
 
 
 def resolve_runtime_configuration(
@@ -77,50 +218,63 @@ def resolve_runtime_configuration(
     *,
     backend_override: Optional[str] = None,
     adaptation_profile_override: object = _PROFILE_OVERRIDE_UNSET,
-) -> RuntimeConfiguration:
-    """Resolve provider-neutral ownership for a role runtime invocation."""
+) -> RoleRuntimeConfiguration:
+    """Resolve complete provider-neutral ownership for one explicit role."""
+
+    role = _coerce_backend_role(role)
 
     backend_name = (
         str(backend_override).strip()
         if backend_override
         else resolve_backend_name_for_role(db, role)
     )
-    if role is not BackendRole.PLANNING:
-        return RuntimeConfiguration(role=role.value, backend_name=backend_name)
+
+    if _is_test_runtime_backend(backend_name):
+        if not _test_runtime_backends_enabled():
+            raise UnsupportedAgentBackendError(
+                f"Backend '{backend_name}' is test-only and ENABLE_TEST_RUNTIME_BACKENDS is false."
+            )
+        return RoleRuntimeConfiguration(
+            role=role,
+            backend_name=backend_name,
+            model_family="stub",
+            adaptation_profile="stub",
+        )
 
     descriptor = require_backend_descriptor(backend_name)
-    model_family = (
-        str(settings.PLANNER_MODEL or "").strip()
-        or get_effective_agent_model_family(settings.AGENT_MODEL, db=db).strip()
-        or descriptor.default_model_family
-    )
-    if adaptation_profile_override is _PROFILE_OVERRIDE_UNSET:
-        explicit_profile = get_setting_value_runtime(
-            PLANNING_ADAPTATION_PROFILE_KEY,
-            settings.PLANNING_ADAPTATION_PROFILE,
-            db=db,
-        )
-    else:
+    if (
+        role is BackendRole.PLANNING
+        and adaptation_profile_override is not _PROFILE_OVERRIDE_UNSET
+    ):
         explicit_profile = str(adaptation_profile_override or "").strip() or None
-
-    if explicit_profile:
-        profile = require_adaptation_profile(str(explicit_profile))
-        if (
-            profile.backend != "*"
-            and profile.name not in descriptor.config.adaptation_profiles
-        ):
-            raise UnsupportedRuntimeProfileError(
-                f"Adaptation profile '{profile.name}' is not supported by "
-                f"planning backend '{descriptor.name}'."
+        if explicit_profile:
+            profile = require_adaptation_profile(explicit_profile)
+            if not _profile_matches_backend(profile.name, descriptor):
+                raise UnsupportedRuntimeProfileError(
+                    f"Adaptation profile '{profile.name}' is not supported by "
+                    f"planning backend '{descriptor.name}'."
+                )
+            adaptation_profile = profile.name
+        else:
+            adaptation_profile = _resolve_profile(
+                db,
+                role=role,
+                backend_name=descriptor.name,
+                model_family=_role_model_family(db, role, descriptor.name),
             )
     else:
-        profile = get_adaptation_profile(get_effective_adaptation_profile(db=db))
+        adaptation_profile = _resolve_profile(
+            db,
+            role=role,
+            backend_name=descriptor.name,
+            model_family=_role_model_family(db, role, descriptor.name),
+        )
 
-    return RuntimeConfiguration(
-        role=role.value,
+    return RoleRuntimeConfiguration(
+        role=role,
         backend_name=descriptor.name,
-        model_family=model_family,
-        adaptation_profile=profile.name,
+        model_family=_role_model_family(db, role, descriptor.name),
+        adaptation_profile=adaptation_profile,
     )
 
 
@@ -128,7 +282,7 @@ def resolve_planning_runtime_configuration(
     db: Session,
     *,
     adaptation_profile_override: object = _PROFILE_OVERRIDE_UNSET,
-) -> RuntimeConfiguration:
+) -> RoleRuntimeConfiguration:
     """Resolve the single configuration owner used by Planning Sessions."""
 
     return resolve_runtime_configuration(
@@ -147,10 +301,17 @@ def create_agent_runtime(
     role: Optional[BackendRole] = None,
     backend_override: Optional[str] = None,
 ) -> AgentRuntime:
-    """Instantiate the configured backend runtime for a session/task pair."""
+    """Instantiate the configured backend runtime for a session/task pair.
 
-    runtime_configuration: RuntimeConfiguration | None = None
-    if role is BackendRole.PLANNING:
+    For an explicit role, ``backend_override`` replaces only the backend
+    setting; model and adaptation profile remain role-owned resolver outputs
+    and are validated against the overridden backend. Role-less calls retain
+    the legacy backend-only path.
+    """
+
+    role = _coerce_backend_role(role) if role is not None else None
+    runtime_configuration: RoleRuntimeConfiguration | None = None
+    if role is not None:
         runtime_configuration = resolve_runtime_configuration(
             db,
             role,
@@ -159,8 +320,6 @@ def create_agent_runtime(
         backend_name = runtime_configuration.backend_name
     elif backend_override:
         backend_name = str(backend_override).strip()
-    elif role is not None:
-        backend_name = resolve_backend_name_for_role(db, role)
     else:
         backend_name = get_effective_agent_backend(
             settings.AGENT_BACKEND, db=db
@@ -178,6 +337,7 @@ def create_agent_runtime(
             task_id,
             use_demo_mode=use_demo_mode,
             backend_id=backend_name,
+            runtime_configuration=runtime_configuration,
         )
     descriptor = require_backend_descriptor(backend_name)
     runtime_factory = get_runtime_factory(descriptor.name)

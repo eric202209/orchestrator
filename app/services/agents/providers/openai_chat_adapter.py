@@ -104,7 +104,7 @@ class OpenAIChatCompletionsRuntime:
         )
         self.backend_descriptor = get_backend_descriptor(backend_name)
         self.backend_role: Optional[str] = (
-            runtime_configuration.role if runtime_configuration else None
+            runtime_configuration.role.value if runtime_configuration else None
         )
         self.response_session_key = (
             f"openai-chat:session:{task_id or session_id or int(time.time())}"
@@ -126,6 +126,7 @@ class OpenAIChatCompletionsRuntime:
     def _model_name(self) -> str:
         if self.runtime_configuration and self.runtime_configuration.model_family:
             return self.runtime_configuration.model_family
+        # Stage A migration fallback for legacy unscoped/direct adapter calls.
         if self.backend_role == "planning" and settings.PLANNER_MODEL:
             return settings.PLANNER_MODEL
         return (
@@ -273,6 +274,9 @@ class OpenAIChatCompletionsRuntime:
             payload["adaptation_profile"] = (
                 self.runtime_configuration.adaptation_profile
             )
+        if self.runtime_configuration is not None:
+            payload["role"] = self.backend_role
+            payload["runtime_configuration"] = self.runtime_configuration.to_dict()
         return payload
 
     def describe_interface(self) -> AgentInterfaceDescriptor:
@@ -315,10 +319,21 @@ class OpenAIChatCompletionsRuntime:
     def _adaptation_profile(self, model_family: str):
         if self.runtime_configuration and self.runtime_configuration.adaptation_profile:
             return get_adaptation_profile(self.runtime_configuration.adaptation_profile)
-        return resolve_adaptation_profile(
+        # Stage A migration fallback for legacy unscoped/direct adapter calls.
+        profile = resolve_adaptation_profile(
             backend=self.backend_descriptor.name,
             model_family=model_family,
         )
+        if (
+            profile.backend == "*"
+            or profile.name in self.backend_descriptor.config.adaptation_profiles
+        ):
+            return profile
+        if self.backend_descriptor.config.adaptation_profiles:
+            return get_adaptation_profile(
+                self.backend_descriptor.config.adaptation_profiles[0]
+            )
+        return profile
 
     def get_interface_descriptor(self) -> AgentInterfaceDescriptor:
         return self.describe_interface()
