@@ -245,6 +245,7 @@ class OrchestrationRunContext:
     task_execution_id: Optional[int] = None
     restore_workspace_snapshot_if_needed: Optional[Callable[..., Any]] = None
     planning_backend: str = "all"
+    planning_adaptation_profile: Optional[str] = None
     execution_backend: str = "all"
     guidance_backend: str = "all"
     guidance_model_name: str = "unknown"

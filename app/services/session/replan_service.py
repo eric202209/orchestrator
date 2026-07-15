@@ -155,7 +155,7 @@ def _latest_summary_task_execution(
 def _generate_summary_via_llm(db: DBSession, session_id: int) -> Optional[str]:
     """Call the LLM to produce a compact failure summary. Returns None on failure."""
     try:
-        from app.services.agents.agent_runtime import invoke_runtime_prompt
+        from app.services.agents.agent_runtime import BackendRole, invoke_runtime_prompt
 
         error_logs = (
             db.query(LogEntry)
@@ -214,6 +214,8 @@ def _generate_summary_via_llm(db: DBSession, session_id: int) -> Optional[str]:
             task_execution_id=task_execution.id if task_execution else None,
             timeout_seconds=_LLM_SUMMARY_TIMEOUT_SECONDS,
             session_prefix="failure_summary",
+            role=BackendRole.EXECUTION,
+            backend_override=(task_execution.backend_id if task_execution else None),
         )
 
         output = result.get("output") or result.get("content") or ""

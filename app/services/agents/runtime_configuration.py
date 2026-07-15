@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import enum
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from typing import Any
 
 
@@ -45,6 +45,27 @@ class RoleRuntimeConfiguration:
         payload = asdict(self)
         payload["role"] = self.role.value
         return payload
+
+    def behavioral_identity(self) -> tuple[Any, ...]:
+        """Return the role-independent behavior that controls runtime reuse.
+
+        The role itself is intentionally excluded: Planning and Execution are
+        different owners but may safely share one runtime only when every
+        behavior-affecting configuration dimension is equal. Deriving this
+        tuple from dataclass fields means a later configuration dimension is
+        automatically included in reuse decisions.
+        """
+
+        return tuple(
+            getattr(self, field.name) for field in fields(self) if field.name != "role"
+        )
+
+    def is_behaviorally_equivalent(self, other: "RoleRuntimeConfiguration") -> bool:
+        """Whether two role-owned configurations can share a runtime."""
+
+        if not isinstance(other, RoleRuntimeConfiguration):
+            return False
+        return self.behavioral_identity() == other.behavioral_identity()
 
 
 # Compatibility alias retained while internal and external callers migrate to

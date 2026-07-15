@@ -94,6 +94,17 @@ def _execution_owner_is_alive(execution: TaskExecution) -> bool:
     return True
 
 
+def _latest_task_execution(db: Session, session_id: int) -> TaskExecution | None:
+    """Return the persisted execution identity for runtime control."""
+
+    return (
+        db.query(TaskExecution)
+        .filter(TaskExecution.session_id == session_id)
+        .order_by(TaskExecution.id.desc())
+        .first()
+    )
+
+
 async def _await_backend_lease_release(
     db: Session,
     *,
@@ -1203,7 +1214,12 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
         session_instance_id = str(uuid.uuid4())
         session.instance_id = session_instance_id
 
-        runtime = create_agent_runtime(db, session_id, use_demo_mode=False)
+        runtime = create_agent_runtime(
+            db,
+            session_id,
+            use_demo_mode=False,
+            role=BackendRole.EXECUTION,
+        )
         task_description = session.description or session.name
         logger.info(
             "Starting session %s with description: %s, instance: %s",
@@ -1521,7 +1537,13 @@ async def stop_session_lifecycle(
             session_id=session_id,
         )
         if not force:
-            runtime = create_agent_runtime(db, session_id, use_demo_mode=False)
+            runtime = create_agent_runtime(
+                db,
+                session_id,
+                use_demo_mode=False,
+                role=BackendRole.EXECUTION,
+                backend_override=backend_lease.get("backend_id"),
+            )
             await runtime.stop_session()
 
         mark_session_stopped(session, stopped_at=datetime.now(timezone.utc))
@@ -1644,6 +1666,7 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                 step_results=latest_checkpoint.get("step_results", []),
             )
         except Exception:
+            latest_execution = _latest_task_execution(db, session_id)
             latest_session_task = (
                 db.query(SessionTask)
                 .filter(SessionTask.session_id == session_id)
@@ -1657,6 +1680,10 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                 session_id,
                 latest_session_task.task_id if latest_session_task else None,
                 use_demo_mode=False,
+                role=BackendRole.EXECUTION,
+                backend_override=(
+                    latest_execution.backend_id if latest_execution else None
+                ),
             )
             await runtime.pause_session()
 

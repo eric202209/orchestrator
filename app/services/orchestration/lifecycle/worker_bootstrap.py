@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from app.config import settings
+from app.services.agents.runtime_configuration import RoleRuntimeConfiguration
 
 
 def env_value(name: str) -> Optional[str]:
@@ -155,13 +156,23 @@ def build_claimed_details(
 def should_use_configured_planning_runtime(
     *,
     planning_backend_override: Optional[str],
-    resolved_planning_backend: str,
-    resolved_execution_backend: str,
+    planning_config: Optional[RoleRuntimeConfiguration] = None,
+    execution_config: Optional[RoleRuntimeConfiguration] = None,
+    resolved_planning_backend: Optional[str] = None,
+    resolved_execution_backend: Optional[str] = None,
 ) -> bool:
-    """Return whether planning needs its own configured runtime instance."""
+    """Return whether planning needs its own configured runtime instance.
+
+    Explicit role configurations are compared by all behavior-affecting
+    fields, not by role or backend name alone. The string arguments remain a
+    compatibility path for older diagnostics/tests; production worker calls
+    pass the resolved configurations.
+    """
 
     if planning_backend_override:
         return True
+    if planning_config is not None and execution_config is not None:
+        return not planning_config.is_behaviorally_equivalent(execution_config)
     planning_backend = str(resolved_planning_backend or "").strip()
     execution_backend = str(resolved_execution_backend or "").strip()
     return bool(planning_backend and planning_backend != execution_backend)

@@ -25,7 +25,11 @@ from app.models import (
     TaskExecution,
     TaskStatus,
 )
-from app.services.agents.agent_runtime import create_agent_runtime
+from app.services.agents.agent_runtime import (
+    BackendRole,
+    create_agent_runtime,
+    invoke_runtime_prompt,
+)
 from app.services.agents.agent_backends import (
     UnsupportedAgentBackendError,
     get_backend_descriptor,
@@ -82,6 +86,19 @@ from .session_lookup import get_session_or_404
 
 QUEUE_WATCHDOG_SLA_SECONDS = 30
 _DIGEST_ENRICHMENT_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _latest_execution_backend(db: Session, session_id: int) -> str | None:
+    """Resolve the historical execution provider for control/inspection."""
+
+    execution = (
+        db.query(TaskExecution)
+        .filter(TaskExecution.session_id == session_id)
+        .order_by(TaskExecution.id.desc())
+        .first()
+    )
+    return getattr(execution, "backend_id", None) if execution else None
+
 
 # ── Orchestration-state derivation tables ─────────────────────────────────────
 
@@ -1195,7 +1212,12 @@ async def save_session_checkpoint_payload(
     db: Session, session_id: int
 ) -> Dict[str, Any]:
     get_inspectable_session_or_404(db, session_id)
-    runtime = create_agent_runtime(db, session_id)
+    runtime = create_agent_runtime(
+        db,
+        session_id,
+        role=BackendRole.EXECUTION,
+        backend_override=_latest_execution_backend(db, session_id),
+    )
     try:
         await runtime.pause_session()
     except AgentRuntimeError as exc:
@@ -1464,7 +1486,12 @@ async def load_session_checkpoint_payload(
     db: Session, session_id: int, checkpoint_name: str
 ) -> Dict[str, Any]:
     get_inspectable_session_or_404(db, session_id)
-    runtime = create_agent_runtime(db, session_id)
+    runtime = create_agent_runtime(
+        db,
+        session_id,
+        role=BackendRole.EXECUTION,
+        backend_override=_latest_execution_backend(db, session_id),
+    )
     try:
         session_key = await runtime.resume_session(checkpoint_name=checkpoint_name)
     except AgentRuntimeError as exc:
@@ -2632,8 +2659,6 @@ def _generate_enriched_digest(
         return cached
 
     try:
-        from app.services.agents.agent_runtime import invoke_runtime_prompt
-
         log_rows = (
             db.query(LogEntry)
             .filter(LogEntry.session_id == session_id)
@@ -2662,6 +2687,8 @@ def _generate_enriched_digest(
             session_id=session_id,
             timeout_seconds=20,
             session_prefix="session_digest",
+            role=BackendRole.EXECUTION,
+            backend_override=_latest_execution_backend(db, session_id),
         )
         text = str(result.get("output") or result.get("content") or "").strip()
         if len(text) < 40:

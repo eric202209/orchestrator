@@ -17,6 +17,7 @@ from app.models import (
     Session as SessionModel,
     SessionTask,
     Task,
+    TaskExecution,
     TaskStatus,
     Project,
 )
@@ -27,7 +28,11 @@ from app.services import (
     get_session_or_404,
 )
 from app.config import settings
-from app.services.agents.agent_runtime import BackendRole, resolve_backend_name_for_role
+from app.services.agents.agent_runtime import (
+    BackendRole,
+    resolve_backend_name_for_role,
+    resolve_runtime_configuration,
+)
 from app.services.agents.subprocess_lifecycle import (
     register_forced_termination_cleanup,
 )
@@ -344,12 +349,16 @@ def execute_orchestration_task(
         if not session or not task:
             raise ValueError("Session or task not found")
 
-        _resolved_execution_backend = resolve_backend_name_for_role(
-            db, BackendRole.EXECUTION
+        execution_configuration = resolve_runtime_configuration(
+            db,
+            BackendRole.EXECUTION,
         )
-        resolved_planning_backend = resolve_backend_name_for_role(
-            db, BackendRole.PLANNING
+        planning_configuration = resolve_runtime_configuration(
+            db,
+            BackendRole.PLANNING,
         )
+        _resolved_execution_backend = execution_configuration.backend_name
+        resolved_planning_backend = planning_configuration.backend_name
 
         if task_execution_id is None:
             task_execution = create_task_execution(
@@ -1170,6 +1179,8 @@ def execute_orchestration_task(
         planning_runtime_metadata = None
         use_configured_planning_runtime = should_use_configured_planning_runtime(
             planning_backend_override=planning_backend_override,
+            planning_config=planning_configuration,
+            execution_config=execution_configuration,
             resolved_planning_backend=resolved_planning_backend,
             resolved_execution_backend=_resolved_execution_backend,
         )
@@ -1226,6 +1237,7 @@ def execute_orchestration_task(
             backend=effective_guidance_planning_backend,
             runtime_metadata=guidance_runtime_metadata,
             planning_backend=effective_guidance_planning_backend,
+            planning_adaptation_profile=planning_configuration.adaptation_profile,
             execution_backend=_resolved_execution_backend,
         )
         guidance_backend = guidance_target["backend"]
@@ -2432,6 +2444,15 @@ def answer_human_intervention_query(
 
         project = db.query(Project).filter(Project.id == req.project_id).first()
         project_name = project.name if project else f"project-{req.project_id}"
+        historical_execution = (
+            db.query(TaskExecution)
+            .filter(
+                TaskExecution.session_id == session_id,
+                TaskExecution.task_id == req.task_id,
+            )
+            .order_by(TaskExecution.id.desc())
+            .first()
+        )
 
         human_question = req.prompt or ""
 
@@ -2468,6 +2489,10 @@ def answer_human_intervention_query(
             task_id=req.task_id,
             timeout_seconds=90,
             session_prefix="human_intervention",
+            role=BackendRole.EXECUTION,
+            backend_override=(
+                historical_execution.backend_id if historical_execution else None
+            ),
         )
         ai_answer = str((result or {}).get("output", "")).strip() or "(No response)"
 

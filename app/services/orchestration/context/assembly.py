@@ -59,6 +59,7 @@ class OrchestrationContext(Protocol):
     execution_profile: str
     prompt: str
     workflow_profile: str
+    planning_adaptation_profile: Optional[str]
 
 
 OrchestrationContext.__protocol_attrs__ = frozenset(
@@ -68,6 +69,7 @@ OrchestrationContext.__protocol_attrs__ = frozenset(
         "execution_profile",
         "prompt",
         "workflow_profile",
+        "planning_adaptation_profile",
     }
 )
 
@@ -803,11 +805,12 @@ def render_adapted_runtime_prompt(
     context: Optional[Dict[str, Any]] = None,
     expected_output: Optional[str] = None,
     direct: bool = False,
+    adaptation_profile: Optional[str] = None,
 ) -> str:
     if direct:
         return prompt_body
 
-    profile_name = get_effective_adaptation_profile(db=db)
+    profile_name = adaptation_profile or get_effective_adaptation_profile(db=db)
     envelope = PromptEnvelope(
         objective=objective,
         execution_mode=execution_mode,
@@ -893,6 +896,7 @@ def assemble_planning_prompt(
             "Workflow Profile": getattr(ctx, "workflow_profile", "default"),
         },
         expected_output="JSON array of orchestration step objects.",
+        adaptation_profile=getattr(ctx, "planning_adaptation_profile", None),
     )
     from app.services.orchestration.context.provenance import _maybe_emit_provenance
 

@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.models import LogEntry, Session as SessionModel, SessionTask, TaskStatus
-from app.services.agents.agent_runtime import create_agent_runtime
+from app.services.agents.agent_runtime import BackendRole, create_agent_runtime
 from app.services.orchestration.run_state import (
     mark_task_attempt_cancelled,
     mark_task_attempt_done,
@@ -48,7 +48,12 @@ async def start_session_payload(
         )
 
     try:
-        runtime = create_agent_runtime(db, session_id, use_demo_mode=False)
+        runtime = create_agent_runtime(
+            db,
+            session_id,
+            use_demo_mode=False,
+            role=BackendRole.EXECUTION,
+        )
         session_key = await runtime.create_session(task_description)
 
         db.add(

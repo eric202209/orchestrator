@@ -369,10 +369,17 @@ def invoke_runtime_prompt(
     timeout_seconds: int = 180,
     session_prefix: str = "planning",
     role: Optional[BackendRole] = None,
+    backend_override: Optional[str] = None,
 ) -> dict[str, Any]:
     """Execute a one-shot runtime prompt across local or remote backends."""
 
-    runtime = create_agent_runtime(db, session_id, task_id, role=role)
+    runtime = create_agent_runtime(
+        db,
+        session_id,
+        task_id,
+        role=role,
+        backend_override=backend_override,
+    )
     if project_id is not None and hasattr(runtime, "project_id"):
         runtime.project_id = project_id
     if task_execution_id is not None and hasattr(runtime, "task_execution_id"):
