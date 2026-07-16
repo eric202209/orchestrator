@@ -306,6 +306,117 @@ def test_malformed_planning_synthesis_failure_writes_diagnostic_artifact(
     assert "missing colon" in payload["raw_excerpt_head"]
 
 
+def test_clarification_cannot_persist_synthesis_artifacts(db_session, monkeypatch):
+    project = _create_project(db_session, name="Phase Boundary Project")
+    session = PlanningSession(
+        project_id=project.id,
+        title="Keep planning phases separate",
+        prompt=(
+            "Fix backend API authentication and add focused integration tests while "
+            "preserving existing owner access behavior."
+        ),
+        status="active",
+        source_brain="local",
+    )
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+
+    service = PlanningSessionService(db_session)
+    service._add_message(session, "user", session.prompt, metadata={"kind": "prompt"})
+    db_session.commit()
+
+    stale_synthesis = {
+        "requirements": "# Stale Requirements",
+        "design": "# Stale Design",
+        "implementation_plan": "# Stale Plan",
+        "planner_markdown": "## Task List\n- [ ] TASK_START: Stale task | Must not persist | order=1 | P1 | effort=small | profile=full_lifecycle",
+    }
+    current_synthesis = {
+        "requirements": "# Current Requirements",
+        "design": "# Current Design",
+        "implementation_plan": "# Current Plan",
+        "planner_markdown": "\n".join(
+            [
+                "## Task List",
+                "- [ ] TASK_START: Inspect auth seam | Inspect current authorization | order=1 | P1 | effort=small | profile=full_lifecycle",
+                "- [ ] TASK_START: Apply auth fix | Enforce the existing policy | order=2 | P1 | effort=medium | profile=full_lifecycle",
+                "- [ ] TASK_START: Add regression tests | Cover unauthorized access | order=3 | P1 | effort=small | profile=test_only",
+            ]
+        ),
+    }
+    outputs = [stale_synthesis, current_synthesis]
+
+    def fake_run(*args, **kwargs):
+        return {"status": "completed", "output": json.dumps(outputs.pop(0))}
+
+    monkeypatch.setattr(service, "_run_openclaw", fake_run)
+
+    updated = service.process_session(session.id)
+
+    assert updated is not None
+    assert updated.status == "completed"
+    assert outputs == []
+    assert all("Stale" not in artifact.content for artifact in updated.artifacts)
+    assert any(
+        artifact.content == "# Current Requirements" for artifact in updated.artifacts
+    )
+
+
+def test_synthesis_cannot_persist_clarification_payload(db_session, monkeypatch):
+    project = _create_project(db_session, name="Synthesis Boundary Project")
+    session = PlanningSession(
+        project_id=project.id,
+        title="Reject clarification during synthesis",
+        prompt="Plan a bounded backend API authorization fix with focused tests.",
+        status="active",
+        source_brain="local",
+    )
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+
+    service = PlanningSessionService(db_session)
+    service._add_message(
+        session,
+        "user",
+        session.prompt,
+        metadata={"kind": "prompt", "skip_clarification": True},
+    )
+    db_session.commit()
+
+    clarification = {
+        "needs_clarification": True,
+        "question": "Which rollout constraint matters most?",
+    }
+    outputs = [clarification, clarification]
+
+    def fake_run(*args, **kwargs):
+        return {"status": "completed", "output": json.dumps(outputs.pop(0))}
+
+    monkeypatch.setattr(service, "_run_openclaw", fake_run)
+
+    updated = service.process_session(session.id)
+
+    assert updated is not None
+    assert updated.status == "failed"
+    assert updated.current_prompt_id is None
+    assert outputs == []
+    assert not any(
+        artifact.artifact_type
+        in {"requirements", "design", "implementation_plan", "planner_markdown"}
+        for artifact in updated.artifacts
+    )
+    diagnostic = next(
+        artifact
+        for artifact in updated.artifacts
+        if artifact.artifact_type == "planning_synthesis_parse_failure_diagnostic"
+    )
+    assert json.loads(diagnostic.content)["classification"] == (
+        "malformed_artifact_payload"
+    )
+
+
 def test_replan_recovery_uses_short_timeout_and_deterministic_fallback(
     db_session, monkeypatch
 ):

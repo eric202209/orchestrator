@@ -161,7 +161,12 @@ def channel_metadata(stdout_text: str, stderr_text: str) -> Dict[str, Any]:
     }
 
 
-def parse_openclaw_response(result: Any, log_entry) -> Dict[str, Any]:
+def parse_openclaw_response(
+    result: Any,
+    log_entry,
+    *,
+    expected_session_id: str | None = None,
+) -> Dict[str, Any]:
     """Parse OpenClaw CLI response with unified error handling"""
 
     # Handle subprocess.CompletedProcess object
@@ -229,6 +234,31 @@ def parse_openclaw_response(result: Any, log_entry) -> Dict[str, Any]:
     try:
         output_data = json.loads(stdout)
 
+        response_session_id = None
+        response_meta: Dict[str, Any] = {}
+        if isinstance(output_data, dict):
+            response_meta = output_data.get("meta") or {}
+            response_session_id = str(
+                (response_meta.get("agentMeta") or {}).get("sessionId", "") or ""
+            ).strip()
+        if expected_session_id and response_session_id != expected_session_id:
+            error = (
+                "OpenClaw response provenance mismatch: expected session "
+                f"{expected_session_id}, received "
+                f"{response_session_id or 'no session identity'}"
+            )
+            log_entry("ERROR", f"[OPENCLAW] {error}")
+            return {
+                "status": "failed",
+                "mode": "real",
+                "output": "",
+                "error": error,
+                "response_session_id": response_session_id or None,
+                "expected_session_id": expected_session_id,
+                **metadata,
+                "logs": [],
+            }
+
         # Extract text from payloads if present
         if isinstance(output_data, dict) and "payloads" in output_data:
             payloads = output_data.get("payloads", [])
@@ -243,7 +273,9 @@ def parse_openclaw_response(result: Any, log_entry) -> Dict[str, Any]:
                 output_data
             )
 
-        if isinstance(output_data, dict) and output_data.get("aborted") is True:
+        if isinstance(output_data, dict) and (
+            output_data.get("aborted") is True or response_meta.get("aborted") is True
+        ):
             timeout_error = cli_error_message or "OpenClaw run was aborted"
             lowered_output_text = str(output_text or "").lower()
             if "timeout" in lowered_output_text:
@@ -268,6 +300,7 @@ def parse_openclaw_response(result: Any, log_entry) -> Dict[str, Any]:
             "mode": "real",
             "output": output_text,
             "error": cli_error_message if return_code != 0 else "",
+            "response_session_id": response_session_id or None,
             **metadata,
             "logs": [],
         }

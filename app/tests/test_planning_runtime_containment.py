@@ -44,7 +44,7 @@ async def test_planning_openclaw_uses_hydrated_disposable_runtime_and_cleans_it(
 
     def fake_build(*args, **kwargs):
         observed["build_cwd"] = service._resolve_execution_cwd()
-        return ["openclaw", "agent"]
+        return ["openclaw", "agent", "--session-id", "planning-contained"]
 
     async def fake_run(full_cmd, *, cwd, **kwargs):
         runtime = Path(cwd)
@@ -54,7 +54,12 @@ async def test_planning_openclaw_uses_hydrated_disposable_runtime_and_cleans_it(
             "# AGENTS.md - Your Workspace\nThis folder is home. Treat it that way.\n",
             encoding="utf-8",
         )
-        payload = json.dumps({"payloads": [{"text": "planning artifacts"}]})
+        payload = json.dumps(
+            {
+                "payloads": [{"text": "planning artifacts"}],
+                "meta": {"agentMeta": {"sessionId": "planning-contained"}},
+            }
+        )
         return subprocess.CompletedProcess(full_cmd, 0, payload, ""), {"cwd": cwd}
 
     monkeypatch.setattr(service, "bind_runtime_workspace", fake_bind)

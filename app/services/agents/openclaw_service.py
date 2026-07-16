@@ -212,8 +212,14 @@ class OpenClawSessionService:
     )
     _summarize_cli_error = staticmethod(_summarize_cli_error)
 
-    def _parse_openclaw_response(self, result: Any) -> Dict[str, Any]:
-        return _parse_openclaw_cli_response(result, self._log_entry)
+    def _parse_openclaw_response(
+        self, result: Any, *, expected_session_id: str | None = None
+    ) -> Dict[str, Any]:
+        return _parse_openclaw_cli_response(
+            result,
+            self._log_entry,
+            expected_session_id=expected_session_id,
+        )
 
     MAX_PROMPT_LENGTH = 50000  # Leave room for model overhead
     STREAM_READ_LIMIT = 262144  # Allow large JSON/log lines from newer OpenClaw builds
@@ -388,6 +394,7 @@ class OpenClawSessionService:
         runtime_session_key = f"{session_prefix}-{int(time.time())}"
         if session_prefix.startswith("planning"):
             runtime_session_key += f"-{uuid.uuid4().hex[:12]}"
+            self._bind_planning_session_main_key(runtime_session_key)
         full_cmd = self._build_openclaw_agent_command(
             cmd, cwd=self._resolve_execution_cwd()
         )
@@ -405,6 +412,17 @@ class OpenClawSessionService:
             ]
         )
         return full_cmd
+
+    def _bind_planning_session_main_key(self, runtime_session_key: str) -> None:
+        """Make OpenClaw's agent-main history key unique for this invocation."""
+
+        config_path = getattr(self, "_openclaw_config_path_override", None)
+        if config_path is None:
+            return
+        config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        session_config = config.setdefault("session", {})
+        session_config["mainKey"] = runtime_session_key
+        Path(config_path).write_text(json.dumps(config, indent=2), encoding="utf-8")
 
     def _openclaw_config_path(self) -> Path:
         # Phase 23D: an active runtime-workspace binding takes priority --
@@ -1239,11 +1257,17 @@ class OpenClawSessionService:
         )
 
     def parse_cli_response(
-        self, proc: subprocess.CompletedProcess[str]
+        self,
+        proc: subprocess.CompletedProcess[str],
+        *,
+        expected_session_id: str | None = None,
     ) -> Dict[str, Any]:
         """Normalize subprocess output into the same payload shape as streaming execution."""
 
-        return self._parse_openclaw_response(proc)
+        return self._parse_openclaw_response(
+            proc,
+            expected_session_id=expected_session_id,
+        )
 
     def reports_context_overflow(self, result: Optional[Dict[str, Any]]) -> bool:
         """Detect overflow errors for the local OpenClaw CLI/runtime."""
@@ -2540,7 +2564,13 @@ class OpenClawSessionService:
                 self.release_runtime_workspace_binding()
                 self.execution_cwd_override = previous_cwd_override
                 planning_temp_dir.cleanup()
-        result = self.parse_cli_response(proc)
+        runtime_session_id = full_cmd[full_cmd.index("--session-id") + 1]
+        result = self.parse_cli_response(
+            proc,
+            expected_session_id=(
+                runtime_session_id if session_prefix.startswith("planning") else None
+            ),
+        )
         result["runtime_diagnostics"] = diagnostics
         return result
 

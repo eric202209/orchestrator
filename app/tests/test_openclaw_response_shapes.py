@@ -42,6 +42,31 @@ def test_openclaw_payload_extracts_first_visible_text_payload():
     assert isinstance(result["output"], str)
 
 
+def test_planning_stderr_recovery_rejects_payload_owned_by_another_session():
+    logs: list[tuple[str, str]] = []
+    result = parse_openclaw_response(
+        subprocess.CompletedProcess(
+            args=["openclaw"],
+            returncode=0,
+            stdout="",
+            stderr=json.dumps(
+                {
+                    "payloads": [{"text": "stale planning artifacts"}],
+                    "meta": {"agentMeta": {"sessionId": "old-session"}},
+                }
+            ),
+        ),
+        lambda level, message, **_: logs.append((level, message)),
+        expected_session_id="current-session",
+    )
+
+    assert result["status"] == "failed"
+    assert result["output"] == ""
+    assert result["response_session_id"] == "old-session"
+    assert result["expected_session_id"] == "current-session"
+    assert "provenance" in result["error"].lower()
+
+
 def test_payloads_support_visible_text_keys_beyond_text():
     for key in (
         "finalAssistantVisibleText",
@@ -138,6 +163,32 @@ def test_aborted_payload_returns_failed():
     )
 
     assert result["status"] == "failed"
+
+
+def test_planning_timeout_metadata_cannot_return_previous_response_as_success():
+    logs: list[tuple[str, str]] = []
+    result = parse_openclaw_response(
+        subprocess.CompletedProcess(
+            args=["openclaw"],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "payloads": [{"text": "previous response"}],
+                    "meta": {
+                        "aborted": True,
+                        "agentMeta": {"sessionId": "current-session"},
+                    },
+                }
+            ),
+            stderr="",
+        ),
+        lambda level, message, **_: logs.append((level, message)),
+        expected_session_id="current-session",
+    )
+
+    assert result["status"] == "failed"
+    assert result["output"] == "previous response"
+    assert "aborted" in result["error"].lower()
 
 
 def test_aborted_payload_with_timeout_text_sets_timeout_error():
