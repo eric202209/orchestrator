@@ -30,31 +30,6 @@ from app.services.workspace.system_settings import (
 
 logger = logging.getLogger(__name__)
 
-_PLAN_SYSTEM = """You are a precise software development orchestrator.
-Analyse the task and produce an execution plan using ONLY file operations.
-
-Output ONLY a valid JSON array. Each element:
-{
-  "step": <int>,
-  "title": <str>,
-  "description": <str>,
-  "type": "implementation",
-  "ops": [
-    {"op": "write_file", "path": "<relative_path>", "content": "<file_content>"}
-  ]
-}
-
-STRICT RULES:
-- Use ONLY the "ops" array for all actions
-- Supported ops: write_file, mkdir, replace_in_file, delete_file
-- NEVER include "commands" field
-- NEVER include "verification" field
-- NEVER include "rollback" field
-- NEVER use "step_number", always use "step"
-- Do NOT generate shell commands like find, ls, python, node
-- No markdown fences, no preamble, no explanation outside the JSON
-- Maximum 5 steps"""
-
 _STEP_SYSTEM = """You are a precise software development assistant.
 Execute the given step exactly as described.
 Output the result clearly. Wrap code in appropriate fences.
@@ -327,7 +302,7 @@ class OllamaRuntime:
         if isinstance(diagnostic_metadata, dict):
             planning = planning or bool(diagnostic_metadata.get("planning_attempt"))
         output = await self._chat(
-            system=_PLAN_SYSTEM if planning else _STEP_SYSTEM,
+            system=_GENERIC_SYSTEM if planning else _STEP_SYSTEM,
             user=prompt,
             timeout=timeout_seconds,
             planning=planning,
@@ -345,7 +320,9 @@ class OllamaRuntime:
         no_output_timeout_seconds: Optional[int] = None,
         invocation_options: RuntimeInvocationOptions | None = None,
     ) -> dict[str, Any]:
-        system = _PLAN_SYSTEM if session_prefix == "planning" else _GENERIC_SYSTEM
+        # PlanningSessionService owns the artifact contract and sends it in
+        # the rendered user prompt. Provider adapters must not redefine it.
+        system = _GENERIC_SYSTEM
         output = await self._chat(
             system=system,
             user=prompt,

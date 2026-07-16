@@ -196,7 +196,10 @@ def test_direct_ollama_planning_timeout_override_is_planning_only(
 def test_direct_ollama_execute_task_detects_planning_diagnostic(
     db_session, monkeypatch
 ):
-    from app.services.agents.providers.ollama_adapter import OllamaRuntime
+    from app.services.agents.providers.ollama_adapter import (
+        OllamaRuntime,
+        _GENERIC_SYSTEM,
+    )
 
     captured = {}
 
@@ -220,7 +223,8 @@ def test_direct_ollama_execute_task_detects_planning_diagnostic(
     )
 
     assert captured["planning"] is True
-    assert "Output ONLY a valid JSON array" in captured["system"]
+    assert captured["system"] == _GENERIC_SYSTEM
+    assert "Output ONLY a valid JSON array" not in captured["system"]
 
 
 def test_unsupported_capability_error_is_runtime_neutral():
