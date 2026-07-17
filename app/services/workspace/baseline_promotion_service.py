@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 from datetime import UTC, datetime
@@ -26,6 +27,8 @@ from app.services.workspace.workspace_paths import (
     is_hydration_excluded_path,
     resolve_project_root,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class BaselinePromotionService:
@@ -225,7 +228,7 @@ class BaselinePromotionService:
     ) -> dict[str, Any]:
         project_root = self.get_project_root(project)
         task_execution_id = int(change_set["task_execution_id"])
-        return self.canonical_mutations.run_locked(
+        result = self.canonical_mutations.run_locked(
             project,
             project_root=project_root,
             operation="promote_change_set",
@@ -234,6 +237,8 @@ class BaselinePromotionService:
                 project, task, change_set
             ),
         )
+        self._trigger_engineering_context_generation(project)
+        return result
 
     def promote_change_set_into_baseline_unlocked(
         self,
@@ -308,13 +313,38 @@ class BaselinePromotionService:
         self, project: Project, task: Task
     ) -> dict[str, Any]:
         project_root = self.get_project_root(project)
-        return self.canonical_mutations.run_locked(
+        result = self.canonical_mutations.run_locked(
             project,
             project_root=project_root,
             operation="promote_task",
             owner=f"task:{task.id}",
             fn=lambda: self.promote_task_into_baseline_unlocked(project, task),
         )
+        self._trigger_engineering_context_generation(project)
+        return result
+
+    def _trigger_engineering_context_generation(self, project: Project) -> None:
+        """Run the post-Promotion hook without changing Promotion success."""
+
+        try:
+            from app.services.engineering_context import EngineeringContextService
+
+            result = EngineeringContextService().generate_for_promotion(
+                self.get_project_root(project)
+            )
+            logger.info(
+                "[ENGINEERING_CONTEXT] promotion_hook_result project_id=%s result=%s",
+                project.id,
+                {key: value for key, value in result.items() if key != "source"},
+            )
+        except Exception as exc:
+            # Context generation is a separate lifecycle concern. A successful
+            # canonical Promotion must remain successful if the hook fails.
+            logger.exception(
+                "[ENGINEERING_CONTEXT] promotion_hook_failed project_id=%s reason=%s",
+                project.id,
+                str(exc)[:240],
+            )
 
     def promote_task_into_baseline_unlocked(
         self, project: Project, task: Task

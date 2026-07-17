@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "registrations": [
+    {
+      "repository_identity": "git@github.com:henrycode03/orchestrator",
+      "subsystem_id": "project-log-authorization",
+      "subsystem_version": 1,
+      "scope": [
+        "app/api/v1/endpoints/project_logs.py",
+        "app/dependencies.py",
+        "app/services/auth/authorization.py",
+        "app/tests/test_api_security_regressions.py"
+      ],
+      "triggers": [
+        "project-log-authorization",
+        "apply the established per-user Project access predicate to project-log GET, summary, SSE, and WebSocket transports",
+        "app/api/v1/endpoints/project_logs.py",
+        "app/services/auth/authorization.py",
+        "app/dependencies.py",
+        "app/tests/test_api_security_regressions.py",
+        "get_project_for_user",
+        "project_access_filter",
+        "project-log GET",
+        "project-log summary",
+        "project-log SSE",
+        "project-log WebSocket"
+      ],
+      "status": "live",
+      "provenance": {
+        "authority": "operator",
+        "source": "phase27g-approved-registration",
+        "boundary_decision": "phase27e-f-phase27g"
+      },
+      "created_at": "2026-07-17T00:00:00+00:00",
+      "retired_at": null
+    }
+  ]
+}

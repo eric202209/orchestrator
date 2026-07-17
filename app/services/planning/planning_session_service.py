@@ -34,11 +34,16 @@ from app.services.agents.agent_runtime import (
 from app.services.agents.interfaces import AgentRuntimeError
 from app.services.model_adaptation import render_prompt_for_profile
 from app.services.model_adaptation.schemas import PromptEnvelope
+from app.services.engineering_context import (
+    EngineeringContextSelection,
+    EngineeringContextService,
+)
 from app.services.planning.plan_commit_service import PlanCommitService
 from app.services.planning.planner_service import PlannerService
 from app.services.orchestration.prompt_optimization import optimize_prompt
 from app.services.orchestration.policy import PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS
 from app.services.observability.planning_identity import active_planning_identity
+from app.services.workspace.workspace_paths import resolve_project_root
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +70,16 @@ class PlanningSessionService:
     SYNTHESIS_OUTPUT_CHAR_LIMIT = 100_000
     PROCESSING_LEASE_MINUTES = 10
 
-    def __init__(self, db: Session):
+    def __init__(
+        self,
+        db: Session,
+        *,
+        engineering_context_service: EngineeringContextService | None = None,
+    ):
         self.db = db
+        self.engineering_context_service = (
+            engineering_context_service or EngineeringContextService()
+        )
 
     def list_sessions(self, project_id: Optional[int] = None) -> list[PlanningSession]:
         query = self.db.query(PlanningSession).join(Project)
@@ -1265,6 +1278,19 @@ class PlanningSessionService:
         transcript = self._build_condensed_transcript(session)
         project_description = self._trim_text(project.description or "", 280)
         project_rules = self._trim_text(project.project_rules or "", 280)
+        engineering_selection = self._select_engineering_context(session, project)
+        engineering_block = self.engineering_context_service.render_prompt_block(
+            engineering_selection
+        )
+        prompt_context = {
+            "Project": project.name,
+            "Project description": project_description or "None provided",
+            "Project rules": project_rules or "None provided",
+            "Planning prompt": self._trim_text(session.prompt, 600),
+            "Conversation transcript": transcript,
+        }
+        if engineering_block is not None:
+            prompt_context["Engineering Context"] = engineering_block
         prompt = self._render_adapted_prompt(
             objective="Create implementation-planning artifacts for a software project.",
             execution_mode="planning_synthesis",
@@ -1278,20 +1304,52 @@ class PlanningSessionService:
                 "Prefer implementation detail grounded in the prompt and transcript.",
                 "Do not include prose outside the JSON object.",
             ],
-            context={
-                "Project": project.name,
-                "Project description": project_description or "None provided",
-                "Project rules": project_rules or "None provided",
-                "Planning prompt": self._trim_text(session.prompt, 600),
-                "Conversation transcript": transcript,
-            },
+            context=prompt_context,
             expected_output="A JSON object with requirements, design, implementation_plan, and planner_markdown.",
         )
+        # Keep the pre-existing optimizer and hard limit for the baseline path.
+        # A selected object is already exact-fresh raw source; optimizing it
+        # would collapse source whitespace and make the supplied bytes
+        # unverifiable in the actual Planning input.
+        if engineering_block is not None:
+            return prompt
         return optimize_prompt(
             prompt,
             max_tokens=1400,
             hard_char_limit=self.SYNTHESIS_PROMPT_CHAR_BUDGET,
         )
+
+    def _select_engineering_context(
+        self, session: PlanningSession, project: Project
+    ) -> EngineeringContextSelection:
+        """Select immutable context without any lifecycle mutation."""
+
+        try:
+            project_root = resolve_project_root(project, self.db)
+            return self.engineering_context_service.select(
+                project_root,
+                task_title=session.title or "",
+                task_text=session.prompt or "",
+            )
+        except Exception as exc:
+            # Selection is advisory to Planning. Any unavailable repository,
+            # registry, or store must preserve today's discovery fallback.
+            logger.warning(
+                "[ENGINEERING_CONTEXT] planning selection unavailable reason=%s",
+                str(exc)[:240],
+            )
+            return EngineeringContextSelection(
+                context=None,
+                reason="selection_unavailable",
+                matched_trigger=None,
+                diagnostics={
+                    "reason": "selection_unavailable",
+                    "fallback_reason": "selection_unavailable",
+                    "context_supplied": False,
+                    "lifecycle_mutation_origin": "planning",
+                    "lifecycle_mutation": False,
+                },
+            )
 
     def _build_compact_synthesis_prompt(self, prompt: str) -> str:
         compact = optimize_prompt(prompt, max_tokens=700, hard_char_limit=2200)
