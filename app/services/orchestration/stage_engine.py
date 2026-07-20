@@ -638,21 +638,38 @@ class StageExecutor:
                 session_generation_id=ownership.session_generation_id,
                 fencing_token=ownership.fencing_token,
             )
-            checkpoint = self.persistence.record_checkpoint(
-                session_id,
-                stage_name=definition.identifier,
-                checkpoint_version=definition.version,
-                content=self._serialize_output(output),
-                stage_generation_id=stage_generation_id,
-                attempt_id=attempt_id,
-                fencing_token=ownership.fencing_token,
-                session_generation_id=ownership.session_generation_id,
-                protocol_version=PROTOCOL_V2,
-                status="accepted",
-                parent_checkpoint_ids=[
-                    predecessors[name].id for name in sorted(predecessors)
-                ],
-            )
+            if definition.identifier == "planning_brief" and isinstance(
+                output, PlanningBrief
+            ):
+                checkpoint = self.persistence.record_planning_brief(
+                    session_id,
+                    brief=output,
+                    stage_generation_id=stage_generation_id,
+                    attempt_id=attempt_id,
+                    fencing_token=ownership.fencing_token,
+                    session_generation_id=ownership.session_generation_id,
+                    protocol_version=PROTOCOL_V2,
+                    status="accepted",
+                    parent_checkpoint_ids=[
+                        predecessors[name].id for name in sorted(predecessors)
+                    ],
+                )
+            else:
+                checkpoint = self.persistence.record_checkpoint(
+                    session_id,
+                    stage_name=definition.identifier,
+                    checkpoint_version=definition.version,
+                    content=self._serialize_output(output),
+                    stage_generation_id=stage_generation_id,
+                    attempt_id=attempt_id,
+                    fencing_token=ownership.fencing_token,
+                    session_generation_id=ownership.session_generation_id,
+                    protocol_version=PROTOCOL_V2,
+                    status="accepted",
+                    parent_checkpoint_ids=[
+                        predecessors[name].id for name in sorted(predecessors)
+                    ],
+                )
             return StageExecution(
                 definition,
                 attempt_id,
@@ -921,6 +938,21 @@ class StageExecutor:
         ownership: StageOwnership,
         reason: str,
     ) -> PlanningCheckpoint:
+        if definition.identifier == "planning_brief" and isinstance(
+            output, PlanningBrief
+        ):
+            return self.persistence.record_planning_brief(
+                session_id,
+                brief=output,
+                stage_generation_id=stage_generation_id,
+                attempt_id=attempt_id,
+                fencing_token=ownership.fencing_token,
+                session_generation_id=ownership.session_generation_id,
+                protocol_version=PROTOCOL_V2,
+                status="failed",
+                parent_checkpoint_ids=[],
+                failure_reason=str(reason or "stage failed"),
+            )
         content = self._serialize_output(output) if output is not None else ""
         return self.persistence.record_checkpoint(
             session_id,

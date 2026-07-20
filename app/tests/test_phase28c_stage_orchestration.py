@@ -240,7 +240,9 @@ def test_planning_session_selects_v2_without_entering_legacy_provider_path(
     )
     db_session.add(project)
     db_session.flush()
-    service = PlanningSessionService(db_session)
+    # Phase 28G registers the Brief stage by default; this test preserves the
+    # Phase 28C empty-registry compatibility contract explicitly.
+    service = PlanningSessionService(db_session, stage_definitions=())
     monkeypatch.setattr(service, "schedule_processing", lambda *_args: None)
     monkeypatch.setattr(
         service,

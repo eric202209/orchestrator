@@ -52,6 +52,18 @@ _EXPORTS = {
         "app.services.planning.planning_brief",
         "validate_planning_brief",
     ),
+    "PlanningBriefStage": (
+        "app.services.planning.planning_brief_stage",
+        "PlanningBriefStage",
+    ),
+    "PlanningBriefProvider": (
+        "app.services.planning.planning_brief_stage",
+        "PlanningBriefProvider",
+    ),
+    "build_protocol_v2_stage_definitions": (
+        "app.services.planning.planning_brief_stage",
+        "build_protocol_v2_stage_definitions",
+    ),
     "render_planning_brief": (
         "app.services.planning.planning_brief",
         "render_planning_brief",

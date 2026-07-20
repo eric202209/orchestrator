@@ -47,6 +47,10 @@ from app.services.planning.protocol_persistence import (
     PlanningProtocolPersistenceService,
     SUPPORTED_PROTOCOL_VERSIONS,
 )
+from app.services.planning.planning_brief_stage import (
+    PlanningBriefProvider,
+    build_protocol_v2_stage_definitions,
+)
 from app.services.planning.input_manifest import (
     InputManifestBuilder,
     collect_repository_snapshot,
@@ -91,16 +95,23 @@ class PlanningSessionService:
         db: Session,
         *,
         engineering_context_service: EngineeringContextService | None = None,
-        stage_definitions: Iterable[StageDefinition] = (),
+        stage_definitions: Iterable[StageDefinition] | None = None,
         stage_executor: StageExecutor | None = None,
+        brief_provider: PlanningBriefProvider | None = None,
     ):
         self.db = db
         self.engineering_context_service = (
             engineering_context_service or EngineeringContextService()
         )
-        self.stage_executor = stage_executor or StageExecutor(
-            db, stage_definitions=stage_definitions
-        )
+        if stage_executor is not None:
+            self.stage_executor = stage_executor
+        else:
+            definitions = (
+                tuple(stage_definitions)
+                if stage_definitions is not None
+                else build_protocol_v2_stage_definitions(db, provider=brief_provider)
+            )
+            self.stage_executor = StageExecutor(db, stage_definitions=definitions)
         self.protocol_persistence = PlanningProtocolPersistenceService(db)
 
     def list_sessions(self, project_id: Optional[int] = None) -> list[PlanningSession]:
