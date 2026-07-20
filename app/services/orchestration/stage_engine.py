@@ -26,11 +26,15 @@ from app.models import (
 from app.services.planning.protocol_persistence import (
     PROTOCOL_V2,
     PlanningProtocolPersistenceService,
+    ProtocolPersistenceError,
     ProtocolOwnershipError,
 )
 from app.services.planning.input_manifest import InputManifest
 from app.services.planning.planning_brief import PlanningBrief
-from app.services.planning.structured_task_plan import StructuredTaskPlan
+from app.services.planning.structured_task_plan import (
+    DEFAULT_TASK_PLAN_POLICY,
+    StructuredTaskPlan,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -462,6 +466,10 @@ class StageExecutor:
             definition = self.graph.get(identifier)
             current = effective.get((identifier, definition.version))
             if current is not None and current.status == "accepted":
+                if identifier == "planning_brief":
+                    self._load_accepted_planning_brief(session_id)
+                elif identifier == "structured_task_plan":
+                    self._load_accepted_structured_task_plan(session_id)
                 continue
             if current is not None and current.status == "invalidated":
                 return StageRecovery(
@@ -535,6 +543,11 @@ class StageExecutor:
             stage_versions={stage_identifier: definition.version},
         ).get((stage_identifier, definition.version))
         if current is not None and current.status == "accepted" and not retry:
+            if current is not None and current.status == "accepted" and not retry:
+                if stage_identifier == "planning_brief":
+                    self._load_accepted_planning_brief(session_id)
+                elif stage_identifier == "structured_task_plan":
+                    self._load_accepted_structured_task_plan(session_id)
             return StageExecution(
                 definition,
                 current.attempt_id,
@@ -618,6 +631,7 @@ class StageExecutor:
                     stage_generation_id,
                     ownership,
                     validation.reason or "stage validation failed",
+                    context=context,
                 )
                 return StageExecution(
                     definition,
@@ -640,6 +654,7 @@ class StageExecutor:
                     stage_generation_id,
                     ownership,
                     acceptance.reason or "stage acceptance rejected",
+                    context=context,
                 )
                 return StageExecution(
                     definition,
@@ -674,6 +689,26 @@ class StageExecutor:
                     parent_checkpoint_ids=[
                         predecessors[name].id for name in sorted(predecessors)
                     ],
+                )
+            elif definition.identifier == "structured_task_plan" and isinstance(
+                output, StructuredTaskPlan
+            ):
+                checkpoint = self.persistence.record_structured_task_plan(
+                    session_id,
+                    task_plan=output,
+                    stage_generation_id=stage_generation_id,
+                    attempt_id=attempt_id,
+                    fencing_token=ownership.fencing_token,
+                    session_generation_id=ownership.session_generation_id,
+                    protocol_version=PROTOCOL_V2,
+                    status="accepted",
+                    parent_checkpoint_ids=[
+                        predecessors[name].id for name in sorted(predecessors)
+                    ],
+                    policy=self._structured_task_plan_policy(context.configuration),
+                    stage_configuration_fingerprint=(
+                        context.input_manifest.configuration_identity.stage_configuration_fingerprint
+                    ),
                 )
             else:
                 checkpoint = self.persistence.record_checkpoint(
@@ -716,6 +751,7 @@ class StageExecutor:
                     stage_generation_id,
                     ownership,
                     str(exc),
+                    context=context,
                 )
             except ProtocolOwnershipError:
                 self.db.rollback()
@@ -829,6 +865,11 @@ class StageExecutor:
         )
         accepted = []
         dependency_hashes: set[str] = set()
+        input_manifest = self._require_input_manifest(session_id)
+        dependency_hashes.add(input_manifest.manifest_hash)
+        dependency_hashes.add(
+            input_manifest.configuration_identity.stage_configuration_fingerprint
+        )
         for identifier in required:
             definition = self.graph.get(identifier)
             checkpoint = effective.get((identifier, definition.version))
@@ -895,6 +936,10 @@ class StageExecutor:
                 stage_versions={identifier: definition.version},
             ).get((identifier, definition.version))
             if current is not None and current.status == "accepted":
+                if identifier == "planning_brief":
+                    self._load_accepted_planning_brief(session_id)
+                elif identifier == "structured_task_plan":
+                    self._load_accepted_structured_task_plan(session_id)
                 continue
             if current is not None and current.status in {"failed", "invalidated"}:
                 execution = self.retry_stage(
@@ -958,6 +1003,7 @@ class StageExecutor:
         stage_generation_id: str,
         ownership: StageOwnership,
         reason: str,
+        context: StageContext | None = None,
     ) -> PlanningCheckpoint:
         if definition.identifier == "planning_brief" and isinstance(
             output, PlanningBrief
@@ -973,6 +1019,38 @@ class StageExecutor:
                 status="failed",
                 parent_checkpoint_ids=[],
                 failure_reason=str(reason or "stage failed"),
+            )
+        if definition.identifier == "structured_task_plan" and isinstance(
+            output, StructuredTaskPlan
+        ):
+            return self.persistence.record_structured_task_plan(
+                session_id,
+                task_plan=output,
+                stage_generation_id=stage_generation_id,
+                attempt_id=attempt_id,
+                fencing_token=ownership.fencing_token,
+                session_generation_id=ownership.session_generation_id,
+                protocol_version=PROTOCOL_V2,
+                status="failed",
+                parent_checkpoint_ids=(
+                    [
+                        context.predecessor_checkpoints[name].id
+                        for name in sorted(context.predecessor_checkpoints)
+                    ]
+                    if context is not None
+                    else ()
+                ),
+                failure_reason=str(reason or "stage failed"),
+                policy=(
+                    self._structured_task_plan_policy(context.configuration)
+                    if context is not None
+                    else None
+                ),
+                stage_configuration_fingerprint=(
+                    context.input_manifest.configuration_identity.stage_configuration_fingerprint
+                    if context is not None
+                    else None
+                ),
             )
         content = self._serialize_output(output) if output is not None else ""
         return self.persistence.record_checkpoint(
@@ -993,7 +1071,24 @@ class StageExecutor:
     def _serialize_output(output: Any) -> str:
         if isinstance(output, str):
             return output
+        if isinstance(output, StructuredTaskPlan):
+            return output.canonical_json()
         return json.dumps(output, sort_keys=True, separators=(",", ":"))
+
+    @staticmethod
+    def _structured_task_plan_policy(
+        configuration: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        nested = configuration.get("structured_task_plan", {})
+        nested = nested if isinstance(nested, Mapping) else {}
+        result = dict(DEFAULT_TASK_PLAN_POLICY)
+        result["auto_accept"] = True
+        for key in result:
+            if key in nested:
+                result[key] = nested[key]
+            elif key in configuration:
+                result[key] = configuration[key]
+        return result
 
     def _get_session(self, session_id: int) -> PlanningSession:
         session = (
@@ -1028,6 +1123,8 @@ class StageExecutor:
     ) -> StructuredTaskPlan | None:
         try:
             return self.persistence.load_accepted_structured_task_plan(session_id)
+        except ProtocolPersistenceError as exc:
+            raise StageEngineError(f"integrity_failure: {exc}") from exc
         except Exception as exc:
             raise StageEngineError(str(exc)) from exc
 

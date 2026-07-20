@@ -563,11 +563,25 @@ def _validation_reason(acceptance: Any) -> str:
 
 
 def build_protocol_v2_stage_definitions(
-    db: Any, *, provider: PlanningBriefProvider | None = None
+    db: Any,
+    *,
+    provider: PlanningBriefProvider | None = None,
+    task_plan_provider: Any | None = None,
 ) -> tuple[StageDefinition, ...]:
-    """Return the deterministic v2 registry; later stages append here."""
+    """Return the deterministic default v2 registry."""
 
-    return (PlanningBriefStage(provider or RuntimePlanningBriefProvider(db)),)
+    # Kept as a compatibility import path for Phase 28G callers.  The lazy
+    # import avoids a module cycle because the Task Plan stage reuses this
+    # module's Brief provider contract and stage implementation.
+    from app.services.planning.structured_task_plan_stage import (
+        build_protocol_v2_stage_definitions as build_v2_definitions,
+    )
+
+    return build_v2_definitions(
+        db,
+        provider=provider,
+        task_plan_provider=task_plan_provider,
+    )
 
 
 __all__ = [

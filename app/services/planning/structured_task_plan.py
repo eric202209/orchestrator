@@ -37,7 +37,9 @@ DEFAULT_TASK_PLAN_POLICY = MappingProxyType(
     {
         "max_tasks": 200,
         "max_groups": 50,
-        "max_dependencies_per_task": 50,
+        "max_dependencies_per_task": 8,
+        "max_dependency_fan_in": 8,
+        "max_dependency_fan_out": 8,
         "max_work_items_per_task": 8,
         "max_expected_effort": 8 * 60,
         "max_parallel_width": 4,
@@ -1419,6 +1421,7 @@ def validate_structured_task_plan(
 
     task_by_id = {task.id: task for task in plan.tasks}
     seen_edges: set[tuple[str, str, str, str]] = set()
+    seen_edge_pairs: set[tuple[str, str]] = set()
     for index, dependency in enumerate(plan.dependencies):
         path = f"dependencies[{index}]"
         if (
@@ -1460,11 +1463,16 @@ def validate_structured_task_plan(
             dependency.type,
             _normalized(dependency.reason),
         )
-        if edge in seen_edges:
+        edge_pair = (
+            dependency.prerequisite_task_id,
+            dependency.dependent_task_id,
+        )
+        if edge in seen_edges or edge_pair in seen_edge_pairs:
             errors.append(
                 _issue("duplicate_dependency", path, "duplicate dependency edge")
             )
         seen_edges.add(edge)
+        seen_edge_pairs.add(edge_pair)
     cycles = detect_cycles(plan)
     if cycles:
         errors.append(
@@ -1538,7 +1546,8 @@ def validate_structured_task_plan(
                 group_by_task[task_id] = group
                 group_orders[task_id] = group.order
         if group.kind == "optional" and any(
-            task_by_id.get(task_id, Task()).priority == "required"
+            task_by_id.get(task_id) is not None
+            and task_by_id[task_id].priority == "required"
             for task_id in group.task_ids
         ):
             errors.append(
@@ -1549,8 +1558,8 @@ def validate_structured_task_plan(
                 )
             )
         if group.kind == "review_gate" and any(
-            task_by_id.get(task_id, Task()).category
-            not in {"review", "operator_action"}
+            task_by_id.get(task_id) is not None
+            and task_by_id[task_id].category not in {"review", "operator_action"}
             for task_id in group.task_ids
         ):
             errors.append(
@@ -1561,8 +1570,8 @@ def validate_structured_task_plan(
                 )
             )
         if group.kind == "verification" and any(
-            task_by_id.get(task_id, Task()).category
-            not in {"test", "verification", "review"}
+            task_by_id.get(task_id) is not None
+            and task_by_id[task_id].category not in {"test", "verification", "review"}
             for task_id in group.task_ids
         ):
             errors.append(
@@ -1612,8 +1621,10 @@ def validate_structured_task_plan(
                 )
             targets: dict[str, list[Task]] = defaultdict(list)
             for task_id in group.task_ids:
-                for item in task_by_id.get(task_id, Task()).work_items:
-                    targets[_normalized(item.target)].append(task_by_id[task_id])
+                task = task_by_id.get(task_id)
+                if task is not None:
+                    for item in task.work_items:
+                        targets[_normalized(item.target)].append(task)
             for target, tasks in targets.items():
                 if len(tasks) > 1 and any(
                     task.execution_profile.write_scope != "none"
@@ -1729,13 +1740,25 @@ def validate_structured_task_plan(
                     "effort_cap", path, "Task expected effort exceeds configured cap"
                 )
             )
-        dependency_count = sum(
+        fan_in = sum(
+            1
+            for dependency in plan.dependencies
+            if dependency.dependent_task_id == task.id
+        )
+        fan_out = sum(
             1
             for dependency in plan.dependencies
             if dependency.prerequisite_task_id == task.id
-            or dependency.dependent_task_id == task.id
         )
-        if dependency_count > int(limits["max_dependencies_per_task"]):
+        max_fan_in = int(
+            (policy or {}).get("max_dependency_fan_in", limits["max_dependency_fan_in"])
+        )
+        max_fan_out = int(
+            (policy or {}).get(
+                "max_dependency_fan_out", limits["max_dependency_fan_out"]
+            )
+        )
+        if fan_in > max_fan_in or fan_out > max_fan_out:
             errors.append(
                 _issue(
                     "dependency_fan_limit",
@@ -1944,6 +1967,80 @@ def validate_structured_task_plan(
         warnings.append(
             _issue("optional_tasks", "tasks", "plan contains optional Tasks", "warning")
         )
+
+    # Automatic acceptance is deliberately conservative.  These findings do
+    # not mutate the immutable plan and do not make it semantically invalid;
+    # they keep a validated candidate out of the accepted checkpoint path until
+    # a future operator-approval mechanism exists.
+    if any(task.category == "operator_action" for task in plan.tasks):
+        warnings.append(
+            _issue(
+                "acceptance_policy_operator_action",
+                "tasks",
+                "operator_action Tasks require operator approval",
+                "review_required",
+            )
+        )
+    if any(
+        task.blocking_state == "review_required" or task.category == "review"
+        for task in plan.tasks
+    ):
+        warnings.append(
+            _issue(
+                "acceptance_policy_review_required_task",
+                "tasks",
+                "review_required Tasks require operator approval",
+                "review_required",
+            )
+        )
+    if any(
+        group.kind == "review_gate" and group.skip_policy == "not_skippable"
+        for group in plan.execution_groups
+    ) or any(item.type == "review_gate" for item in plan.dependencies):
+        warnings.append(
+            _issue(
+                "acceptance_policy_review_gate",
+                "execution_groups",
+                "blocking review gates require operator approval",
+                "review_required",
+            )
+        )
+    if any(task.complexity == "very_large" for task in plan.tasks):
+        warnings.append(
+            _issue(
+                "atomicity_exception",
+                "tasks",
+                "very_large Tasks require atomicity review",
+                "review_required",
+            )
+        )
+    for field_name in ("objective",):
+        by_value: dict[str, list[str]] = defaultdict(list)
+        for task in plan.tasks:
+            by_value[_normalized(getattr(task, field_name))].append(task.id)
+        overlaps = [
+            (value, tuple(sorted(task_ids)))
+            for value, task_ids in by_value.items()
+            if value and len(task_ids) > 1
+        ]
+        for value, task_ids in sorted(overlaps):
+            warnings.append(
+                _issue(
+                    "semantic_overlap",
+                    "tasks",
+                    f"unresolved semantic overlap for {field_name}: {','.join(task_ids)}",
+                    "review_required",
+                )
+            )
+    if (policy or {}).get("auto_accept", True) is False:
+        warnings.append(
+            _issue(
+                "acceptance_policy_disabled",
+                "policy",
+                "automatic acceptance is disabled by stage policy",
+                "review_required",
+            )
+        )
     schema_error_codes = {
         "unsupported_schema",
         "invalid_hash",
@@ -1957,7 +2054,8 @@ def validate_structured_task_plan(
     result = StructuredTaskPlanValidation(
         schema_valid=schema_valid,
         semantically_valid=semantically_valid,
-        protocol_acceptable=semantically_valid,
+        protocol_acceptable=semantically_valid
+        and not any(item.severity == "review_required" for item in warnings),
         errors=tuple(errors),
         warnings=tuple(warnings),
     )

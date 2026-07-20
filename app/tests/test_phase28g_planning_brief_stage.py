@@ -347,13 +347,14 @@ def test_downstream_stage_context_loads_accepted_brief(db_session):
     assert observed["hash"]
 
 
-def test_planning_session_registers_brief_stage_by_default_but_allows_explicit_empty_graph(
+def test_planning_session_registers_default_v2_graph_but_allows_explicit_empty_graph(
     db_session,
 ):
     from app.services.planning.planning_session_service import PlanningSessionService
 
     assert PlanningSessionService(db_session).stage_executor.graph.identifiers == (
         "planning_brief",
+        "structured_task_plan",
     )
     assert (
         PlanningSessionService(
@@ -363,10 +364,11 @@ def test_planning_session_registers_brief_stage_by_default_but_allows_explicit_e
     )
 
 
-def test_default_registry_contains_only_planning_brief_stage(db_session):
+def test_default_registry_contains_brief_then_task_plan(db_session):
     definitions = build_protocol_v2_stage_definitions(
         db_session, provider=_Provider({})
     )
     assert tuple(definition.identifier for definition in definitions) == (
         "planning_brief",
+        "structured_task_plan",
     )

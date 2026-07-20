@@ -49,6 +49,10 @@ from app.services.planning.protocol_persistence import (
 )
 from app.services.planning.planning_brief_stage import (
     PlanningBriefProvider,
+)
+from app.services.planning.structured_task_plan_stage import (
+    StructuredTaskPlanProvider,
+    build_protocol_v2_stage_configuration,
     build_protocol_v2_stage_definitions,
 )
 from app.services.planning.input_manifest import (
@@ -98,6 +102,8 @@ class PlanningSessionService:
         stage_definitions: Iterable[StageDefinition] | None = None,
         stage_executor: StageExecutor | None = None,
         brief_provider: PlanningBriefProvider | None = None,
+        task_plan_provider: StructuredTaskPlanProvider | None = None,
+        structured_task_plan_provider: StructuredTaskPlanProvider | None = None,
     ):
         self.db = db
         self.engineering_context_service = (
@@ -106,12 +112,32 @@ class PlanningSessionService:
         if stage_executor is not None:
             self.stage_executor = stage_executor
         else:
-            definitions = (
-                tuple(stage_definitions)
-                if stage_definitions is not None
-                else build_protocol_v2_stage_definitions(db, provider=brief_provider)
+            if stage_definitions is not None:
+                definitions = tuple(stage_definitions)
+                configuration = {
+                    "stages": [
+                        {
+                            "identifier": definition.identifier,
+                            "version": definition.version,
+                            "prerequisites": list(definition.prerequisites),
+                        }
+                        for definition in definitions
+                    ]
+                }
+            else:
+                definitions = build_protocol_v2_stage_definitions(
+                    db,
+                    provider=brief_provider,
+                    task_plan_provider=(
+                        structured_task_plan_provider or task_plan_provider
+                    ),
+                )
+                configuration = build_protocol_v2_stage_configuration(definitions)
+            self.stage_executor = StageExecutor(
+                db,
+                stage_definitions=definitions,
+                configuration=configuration,
             )
-            self.stage_executor = StageExecutor(db, stage_definitions=definitions)
         self.protocol_persistence = PlanningProtocolPersistenceService(db)
 
     def list_sessions(self, project_id: Optional[int] = None) -> list[PlanningSession]:
@@ -259,16 +285,15 @@ class PlanningSessionService:
                     "freshness": "fresh",
                 }
             )
-        stage_configuration = {
-            "stages": [
-                {
-                    "identifier": definition.identifier,
-                    "version": definition.version,
-                    "prerequisites": list(definition.prerequisites),
-                }
-                for definition in self.stage_executor.graph.definitions
-            ]
-        }
+        stage_configuration = dict(self.stage_executor.configuration)
+        stage_configuration["stages"] = [
+            {
+                "identifier": definition.identifier,
+                "version": definition.version,
+                "prerequisites": list(definition.prerequisites),
+            }
+            for definition in self.stage_executor.graph.definitions
+        ]
         messages = [
             {
                 "id": message.id,

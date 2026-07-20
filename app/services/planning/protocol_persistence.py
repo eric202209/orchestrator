@@ -49,6 +49,7 @@ from app.services.planning.structured_task_plan import (
     STRUCTURED_TASK_PLAN_STAGE_NAME,
     STRUCTURED_TASK_PLAN_STAGE_VERSION,
     STRUCTURED_TASK_PLAN_VALIDATOR_VERSION,
+    DEFAULT_TASK_PLAN_POLICY,
     StructuredTaskPlan,
     StructuredTaskPlanCompatibilityProjection,
     StructuredTaskPlanValidation,
@@ -550,6 +551,10 @@ class PlanningProtocolPersistenceService:
             raise ProtocolPersistenceError(
                 "persisted Planning Brief content hash mismatch"
             )
+        if brief.canonical_json() != checkpoint.content:
+            raise ProtocolPersistenceError(
+                "persisted Planning Brief canonical bytes mismatch"
+            )
         manifest = self.load_input_manifest(session.id)
         acceptance = validate_planning_brief(brief, input_manifest=manifest)
         if not acceptance.semantically_valid or not acceptance.protocol_acceptable:
@@ -575,6 +580,7 @@ class PlanningProtocolPersistenceService:
         parent_checkpoint_ids: Sequence[int] = (),
         failure_reason: str | None = None,
         policy: Mapping[str, Any] | None = None,
+        stage_configuration_fingerprint: str | None = None,
     ) -> PlanningCheckpoint:
         """Persist canonical Task Plan JSON through the existing checkpoint API."""
 
@@ -633,6 +639,20 @@ class PlanningProtocolPersistenceService:
                 "accepted Task Plan must depend on its accepted Brief checkpoint"
             )
         metadata = computed.to_dict()
+        effective_policy = dict(DEFAULT_TASK_PLAN_POLICY)
+        if policy is not None:
+            effective_policy.update(
+                {
+                    str(key): value
+                    for key, value in policy.items()
+                    if str(key) in DEFAULT_TASK_PLAN_POLICY or str(key) == "auto_accept"
+                }
+            )
+        configuration_fingerprint = _normalize_hash(
+            stage_configuration_fingerprint
+            or manifest.configuration_identity.stage_configuration_fingerprint,
+            "stage_configuration_fingerprint",
+        )
         metadata.update(
             {
                 "task_plan_hash": task_plan.content_hash,
@@ -643,6 +663,8 @@ class PlanningProtocolPersistenceService:
                 "task_count": len(task_plan.tasks),
                 "group_count": len(task_plan.execution_groups),
                 "critical_path": list(task_plan.topology.critical_path),
+                "policy": effective_policy,
+                "stage_configuration_fingerprint": configuration_fingerprint,
             }
         )
         return self.record_checkpoint(
@@ -707,6 +729,10 @@ class PlanningProtocolPersistenceService:
             raise ProtocolPersistenceError(
                 "persisted Structured Task Plan content hash mismatch"
             )
+        if task_plan.canonical_json() != checkpoint.content:
+            raise ProtocolPersistenceError(
+                "persisted Structured Task Plan canonical bytes mismatch"
+            )
         metadata = checkpoint.validation_json or {}
         if metadata.get("task_plan_hash") not in {None, task_plan.content_hash}:
             raise ProtocolPersistenceError(
@@ -717,6 +743,23 @@ class PlanningProtocolPersistenceService:
         if brief is None:
             raise ProtocolPersistenceError(
                 "accepted Structured Task Plan has no accepted Brief predecessor"
+            )
+        if metadata.get("input_manifest_id") not in {
+            None,
+            task_plan.input_manifest_ref.id,
+        } or metadata.get("input_manifest_hash") not in {
+            None,
+            task_plan.input_manifest_ref.hash,
+        }:
+            raise ProtocolPersistenceError(
+                "persisted Structured Task Plan manifest metadata mismatch"
+            )
+        if metadata.get("stage_configuration_fingerprint") not in {
+            None,
+            manifest.configuration_identity.stage_configuration_fingerprint,
+        }:
+            raise ProtocolPersistenceError(
+                "persisted Structured Task Plan configuration mismatch"
             )
         if task_plan.brief_ref.checkpoint_id != str(
             next(
@@ -733,8 +776,18 @@ class PlanningProtocolPersistenceService:
                 "persisted Structured Task Plan Brief checkpoint binding mismatch"
             )
         validation = validate_structured_task_plan(
-            task_plan, brief=brief, input_manifest=manifest
+            task_plan,
+            brief=brief,
+            input_manifest=manifest,
+            policy=(metadata.get("policy") if isinstance(metadata, Mapping) else None),
         )
+        if metadata.get("validation_hash") not in {
+            None,
+            validation.validation_hash,
+        }:
+            raise ProtocolPersistenceError(
+                "persisted Structured Task Plan validation hash mismatch"
+            )
         if not validation.protocol_acceptable:
             raise ProtocolPersistenceError(
                 "persisted accepted Structured Task Plan no longer validates"
