@@ -43,6 +43,19 @@ from app.services.planning.planning_brief import (
     project_compatibility,
     validate_planning_brief,
 )
+from app.services.planning.structured_task_plan import (
+    STRUCTURED_TASK_PLAN_RENDERER_VERSION,
+    STRUCTURED_TASK_PLAN_SCHEMA_VERSION,
+    STRUCTURED_TASK_PLAN_STAGE_NAME,
+    STRUCTURED_TASK_PLAN_STAGE_VERSION,
+    STRUCTURED_TASK_PLAN_VALIDATOR_VERSION,
+    StructuredTaskPlan,
+    StructuredTaskPlanCompatibilityProjection,
+    StructuredTaskPlanValidation,
+    StructuredTaskPlanSchemaError,
+    project_structured_task_plan,
+    validate_structured_task_plan,
+)
 
 PROTOCOL_V1 = "v1"
 PROTOCOL_V2 = "v2"
@@ -546,6 +559,197 @@ class PlanningProtocolPersistenceService:
         return brief
 
     load_accepted_brief = load_accepted_planning_brief
+
+    def record_structured_task_plan(
+        self,
+        session_id: int,
+        *,
+        task_plan: StructuredTaskPlan,
+        validation: StructuredTaskPlanValidation | None = None,
+        stage_generation_id: str | None = None,
+        attempt_id: str | None = None,
+        fencing_token: str | None = None,
+        session_generation_id: str | None = None,
+        protocol_version: str | None = None,
+        status: str = "accepted",
+        parent_checkpoint_ids: Sequence[int] = (),
+        failure_reason: str | None = None,
+        policy: Mapping[str, Any] | None = None,
+    ) -> PlanningCheckpoint:
+        """Persist canonical Task Plan JSON through the existing checkpoint API."""
+
+        session = self._assert_owner(
+            session_id,
+            protocol_version=protocol_version,
+            session_generation_id=session_generation_id,
+            fencing_token=fencing_token,
+        )
+        if session.protocol_version != PROTOCOL_V2:
+            raise ProtocolPersistenceError(
+                "Structured Task Plan checkpoints require Protocol v2"
+            )
+        normalized_status = str(status or "").strip().lower()
+        manifest = self.load_input_manifest(session.id)
+        brief = self.load_accepted_planning_brief(session.id)
+        if brief is None:
+            raise ProtocolPersistenceError(
+                "Structured Task Plan requires an accepted Planning Brief"
+            )
+        computed = validate_structured_task_plan(
+            task_plan, brief=brief, input_manifest=manifest, policy=policy
+        )
+        if (
+            validation is not None
+            and validation.validation_hash != computed.validation_hash
+        ):
+            raise ProtocolPersistenceError(
+                "Task Plan validation evidence does not match deterministic validation"
+            )
+        if normalized_status == "accepted" and not computed.protocol_acceptable:
+            detail = "; ".join(
+                f"{issue.code}: {issue.path}" for issue in computed.errors[:8]
+            )
+            raise ProtocolPersistenceError(
+                detail or "Structured Task Plan is not protocol acceptable"
+            )
+        effective_briefs = self.effective_checkpoints(
+            session.id,
+            stage_versions={PLANNING_BRIEF_STAGE_NAME: PLANNING_BRIEF_STAGE_VERSION},
+        )
+        brief_checkpoint = effective_briefs.get(
+            (PLANNING_BRIEF_STAGE_NAME, PLANNING_BRIEF_STAGE_VERSION)
+        )
+        if brief_checkpoint is None or brief_checkpoint.status != "accepted":
+            raise ProtocolPersistenceError(
+                "accepted Planning Brief checkpoint is missing"
+            )
+        if task_plan.brief_ref.checkpoint_id != str(brief_checkpoint.id):
+            raise ProtocolPersistenceError(
+                "Task Plan brief_ref does not name the accepted Brief checkpoint"
+            )
+        parent_ids = tuple(parent_checkpoint_ids) or (brief_checkpoint.id,)
+        if normalized_status == "accepted" and brief_checkpoint.id not in parent_ids:
+            raise ProtocolPersistenceError(
+                "accepted Task Plan must depend on its accepted Brief checkpoint"
+            )
+        metadata = computed.to_dict()
+        metadata.update(
+            {
+                "task_plan_hash": task_plan.content_hash,
+                "brief_checkpoint_id": brief_checkpoint.id,
+                "brief_hash": brief.content_hash,
+                "input_manifest_id": task_plan.input_manifest_ref.id,
+                "input_manifest_hash": task_plan.input_manifest_ref.hash,
+                "task_count": len(task_plan.tasks),
+                "group_count": len(task_plan.execution_groups),
+                "critical_path": list(task_plan.topology.critical_path),
+            }
+        )
+        return self.record_checkpoint(
+            session.id,
+            stage_name=STRUCTURED_TASK_PLAN_STAGE_NAME,
+            checkpoint_version=STRUCTURED_TASK_PLAN_STAGE_VERSION,
+            content=task_plan.canonical_json(),
+            stage_generation_id=stage_generation_id,
+            attempt_id=attempt_id,
+            fencing_token=fencing_token,
+            session_generation_id=session_generation_id,
+            protocol_version=protocol_version,
+            status=normalized_status,
+            parent_checkpoint_ids=parent_ids,
+            failure_reason=failure_reason,
+            schema_version=STRUCTURED_TASK_PLAN_SCHEMA_VERSION,
+            renderer_version=STRUCTURED_TASK_PLAN_RENDERER_VERSION,
+            validator_version=STRUCTURED_TASK_PLAN_VALIDATOR_VERSION,
+            validation_json=metadata,
+        )
+
+    persist_structured_task_plan = record_structured_task_plan
+
+    def load_accepted_structured_task_plan(
+        self, session_id: int
+    ) -> StructuredTaskPlan | None:
+        """Reload and verify the current accepted immutable Task Plan."""
+
+        session = self._get_session(session_id)
+        if session.protocol_version != PROTOCOL_V2:
+            return None
+        effective = self.effective_checkpoints(
+            session.id,
+            stage_versions={
+                STRUCTURED_TASK_PLAN_STAGE_NAME: STRUCTURED_TASK_PLAN_STAGE_VERSION
+            },
+        )
+        checkpoint = effective.get(
+            (STRUCTURED_TASK_PLAN_STAGE_NAME, STRUCTURED_TASK_PLAN_STAGE_VERSION)
+        )
+        if checkpoint is None or checkpoint.status != "accepted":
+            return None
+        if checkpoint.schema_version != STRUCTURED_TASK_PLAN_SCHEMA_VERSION:
+            raise ProtocolPersistenceError(
+                "unsupported persisted Structured Task Plan schema"
+            )
+        if checkpoint.renderer_version != STRUCTURED_TASK_PLAN_RENDERER_VERSION:
+            raise ProtocolPersistenceError(
+                "unsupported persisted Structured Task Plan renderer"
+            )
+        if checkpoint.validator_version != STRUCTURED_TASK_PLAN_VALIDATOR_VERSION:
+            raise ProtocolPersistenceError(
+                "unsupported persisted Structured Task Plan validator"
+            )
+        try:
+            task_plan = StructuredTaskPlan.from_json(checkpoint.content)
+        except (StructuredTaskPlanSchemaError, TypeError, ValueError) as exc:
+            raise ProtocolPersistenceError(
+                f"invalid persisted Structured Task Plan: {exc}"
+            ) from exc
+        if task_plan.content_hash != checkpoint.content_hash:
+            raise ProtocolPersistenceError(
+                "persisted Structured Task Plan content hash mismatch"
+            )
+        metadata = checkpoint.validation_json or {}
+        if metadata.get("task_plan_hash") not in {None, task_plan.content_hash}:
+            raise ProtocolPersistenceError(
+                "persisted Structured Task Plan metadata hash mismatch"
+            )
+        brief = self.load_accepted_planning_brief(session.id)
+        manifest = self.load_input_manifest(session.id)
+        if brief is None:
+            raise ProtocolPersistenceError(
+                "accepted Structured Task Plan has no accepted Brief predecessor"
+            )
+        if task_plan.brief_ref.checkpoint_id != str(
+            next(
+                (
+                    parent.parent_checkpoint_id
+                    for parent in checkpoint.dependencies
+                    if parent.parent_checkpoint is not None
+                    and parent.parent_checkpoint.stage_name == PLANNING_BRIEF_STAGE_NAME
+                ),
+                "",
+            )
+        ):
+            raise ProtocolPersistenceError(
+                "persisted Structured Task Plan Brief checkpoint binding mismatch"
+            )
+        validation = validate_structured_task_plan(
+            task_plan, brief=brief, input_manifest=manifest
+        )
+        if not validation.protocol_acceptable:
+            raise ProtocolPersistenceError(
+                "persisted accepted Structured Task Plan no longer validates"
+            )
+        return task_plan
+
+    load_accepted_task_plan = load_accepted_structured_task_plan
+
+    def structured_task_plan_compatibility_projection(
+        self, session_id: int
+    ) -> StructuredTaskPlanCompatibilityProjection | None:
+        task_plan = self.load_accepted_structured_task_plan(session_id)
+        if task_plan is None:
+            return None
+        return project_structured_task_plan(task_plan)
 
     def planning_brief_compatibility_projection(
         self, session_id: int, *, task_plan: str | None = None

@@ -30,6 +30,7 @@ from app.services.planning.protocol_persistence import (
 )
 from app.services.planning.input_manifest import InputManifest
 from app.services.planning.planning_brief import PlanningBrief
+from app.services.planning.structured_task_plan import StructuredTaskPlan
 
 logger = logging.getLogger(__name__)
 
@@ -311,12 +312,31 @@ class StageContext:
         default_factory=dict
     )
     planning_brief: PlanningBrief | None = None
+    structured_task_plan: StructuredTaskPlan | None = None
 
     @property
     def accepted_brief(self) -> PlanningBrief | None:
         """The accepted Planning Brief predecessor, or ``None``."""
 
         return self.planning_brief
+
+    @property
+    def accepted_structured_task_plan(self) -> StructuredTaskPlan | None:
+        """The accepted Structured Task Plan predecessor, or ``None``."""
+
+        return self.structured_task_plan
+
+    @property
+    def accepted_task_plan(self) -> StructuredTaskPlan | None:
+        """Short compatibility alias for future stage consumers."""
+
+        return self.structured_task_plan
+
+    @property
+    def task_plan(self) -> StructuredTaskPlan | None:
+        """Compatibility name for the accepted structured plan projection."""
+
+        return self.structured_task_plan
 
 
 @dataclass
@@ -574,6 +594,7 @@ class StageExecutor:
             logger=self.logger,
             predecessor_checkpoints=predecessors,
             planning_brief=self._load_accepted_planning_brief(session_id),
+            structured_task_plan=self._load_accepted_structured_task_plan(session_id),
         )
         key = (session_id, stage_identifier)
         self._running.add(key)
@@ -999,6 +1020,14 @@ class StageExecutor:
     def _load_accepted_planning_brief(self, session_id: int) -> PlanningBrief | None:
         try:
             return self.persistence.load_accepted_planning_brief(session_id)
+        except Exception as exc:
+            raise StageEngineError(str(exc)) from exc
+
+    def _load_accepted_structured_task_plan(
+        self, session_id: int
+    ) -> StructuredTaskPlan | None:
+        try:
+            return self.persistence.load_accepted_structured_task_plan(session_id)
         except Exception as exc:
             raise StageEngineError(str(exc)) from exc
 

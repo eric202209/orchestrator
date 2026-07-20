@@ -72,6 +72,38 @@ _EXPORTS = {
         "app.services.planning.planning_brief",
         "project_compatibility",
     ),
+    "StructuredTaskPlan": (
+        "app.services.planning.structured_task_plan",
+        "StructuredTaskPlan",
+    ),
+    "TaskPlan": ("app.services.planning.structured_task_plan", "TaskPlan"),
+    "Task": ("app.services.planning.structured_task_plan", "Task"),
+    "Dependency": ("app.services.planning.structured_task_plan", "Dependency"),
+    "ExecutionGroup": (
+        "app.services.planning.structured_task_plan",
+        "ExecutionGroup",
+    ),
+    "WorkItem": ("app.services.planning.structured_task_plan", "WorkItem"),
+    "Traceability": (
+        "app.services.planning.structured_task_plan",
+        "Traceability",
+    ),
+    "validate_structured_task_plan": (
+        "app.services.planning.structured_task_plan",
+        "validate_structured_task_plan",
+    ),
+    "render_structured_task_plan": (
+        "app.services.planning.structured_task_plan",
+        "render_structured_task_plan",
+    ),
+    "project_structured_task_plan": (
+        "app.services.planning.structured_task_plan",
+        "project_structured_task_plan",
+    ),
+    "diff_structured_task_plans": (
+        "app.services.planning.structured_task_plan",
+        "diff_structured_task_plans",
+    ),
     "ProtocolPersistenceService": (
         "app.services.planning.protocol_persistence",
         "ProtocolPersistenceService",
