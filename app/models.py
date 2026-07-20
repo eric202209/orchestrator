@@ -15,6 +15,7 @@ from sqlalchemy import (
     JSON,
     UniqueConstraint,
     Index,
+    CheckConstraint,
     text,
 )
 from sqlalchemy.orm import relationship, declarative_base
@@ -210,6 +211,11 @@ class PlanningSession(Base):
     prompt = Column(Text, nullable=False)
     status = Column(String(50), nullable=False, default="active", index=True)
     source_brain = Column(String(50), nullable=False, default="local")
+    # Protocol identity is explicit so legacy rows can remain v1 while future
+    # sessions opt into a newer protocol without changing the legacy fields.
+    protocol_version = Column(
+        String(16), nullable=False, default="v1", server_default="v1"
+    )
     # Immutable logical identity.  Integer IDs are deliberately reusable on
     # SQLite, so asynchronous planning work must never use ``id`` alone.
     generation_id = Column(
@@ -256,6 +262,28 @@ class PlanningSession(Base):
         back_populates="planning_session",
         cascade="all, delete-orphan",
     )
+    protocol_input = relationship(
+        "PlanningProtocolInput",
+        back_populates="planning_session",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+    protocol_checkpoints = relationship(
+        "PlanningCheckpoint",
+        back_populates="planning_session",
+        cascade="all, delete-orphan",
+    )
+    completion_manifest = relationship(
+        "PlanningCompletionManifest",
+        back_populates="planning_session",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+    commit_manifests = relationship(
+        "PlanningCommitManifest",
+        back_populates="planning_session",
+        cascade="all, delete-orphan",
+    )
 
 
 class PlanningMessage(Base):
@@ -289,6 +317,173 @@ class PlanningArtifact(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     planning_session = relationship("PlanningSession", back_populates="artifacts")
+
+
+class PlanningProtocolInput(Base):
+    """Immutable, non-secret identity snapshot for a planning input."""
+
+    __tablename__ = "planning_protocol_inputs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    planning_session_id = Column(
+        Integer,
+        ForeignKey("planning_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    protocol_version = Column(String(16), nullable=False)
+    session_generation_id = Column(String(36), nullable=False)
+    input_hash = Column(String(64), nullable=False, index=True)
+    engineering_context_identity = Column(String(512), nullable=False)
+    provider_identity = Column(String(255), nullable=False)
+    model_configuration = Column(JSON, nullable=False)
+    repository_identity = Column(String(512), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    planning_session = relationship("PlanningSession", back_populates="protocol_input")
+
+
+class PlanningCheckpoint(Base):
+    """Append-only stage checkpoint carrying its dependency and owner identity."""
+
+    __tablename__ = "planning_checkpoints"
+
+    id = Column(Integer, primary_key=True, index=True)
+    planning_session_id = Column(
+        Integer,
+        ForeignKey("planning_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    stage_name = Column(String(100), nullable=False)
+    checkpoint_version = Column(Integer, nullable=False, default=1)
+    protocol_version = Column(String(16), nullable=False)
+    session_generation_id = Column(String(36), nullable=False)
+    stage_generation_id = Column(String(36), nullable=False)
+    attempt_id = Column(String(36), nullable=False)
+    fencing_token = Column(String(128), nullable=False)
+    status = Column(String(20), nullable=False)
+    content_hash = Column(String(64), nullable=False)
+    content = Column(Text, nullable=False)
+    accepted_at = Column(DateTime(timezone=True), nullable=True)
+    failure_reason = Column(Text, nullable=True)
+    invalidated_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint(
+            "planning_session_id",
+            "stage_name",
+            "checkpoint_version",
+            "attempt_id",
+            name="uq_planning_checkpoint_attempt",
+        ),
+        CheckConstraint(
+            "status IN ('accepted', 'failed', 'invalidated')",
+            name="ck_planning_checkpoint_status",
+        ),
+    )
+
+    planning_session = relationship(
+        "PlanningSession", back_populates="protocol_checkpoints"
+    )
+    dependencies = relationship(
+        "PlanningCheckpointDependency",
+        foreign_keys="PlanningCheckpointDependency.checkpoint_id",
+        back_populates="checkpoint",
+        cascade="all, delete-orphan",
+    )
+
+
+class PlanningCheckpointDependency(Base):
+    """Many-to-many parent edges for immutable checkpoint dependencies."""
+
+    __tablename__ = "planning_checkpoint_dependencies"
+
+    checkpoint_id = Column(
+        Integer,
+        ForeignKey("planning_checkpoints.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    parent_checkpoint_id = Column(
+        Integer,
+        ForeignKey("planning_checkpoints.id"),
+        primary_key=True,
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "checkpoint_id <> parent_checkpoint_id",
+            name="ck_planning_checkpoint_dependency_not_self",
+        ),
+    )
+
+    checkpoint = relationship(
+        "PlanningCheckpoint",
+        foreign_keys=[checkpoint_id],
+        back_populates="dependencies",
+    )
+    parent_checkpoint = relationship(
+        "PlanningCheckpoint", foreign_keys=[parent_checkpoint_id]
+    )
+
+
+class PlanningCompletionManifest(Base):
+    """Immutable final attestation of accepted checkpoints and dependencies."""
+
+    __tablename__ = "planning_completion_manifests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    planning_session_id = Column(
+        Integer,
+        ForeignKey("planning_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    protocol_version = Column(String(16), nullable=False)
+    session_generation_id = Column(String(36), nullable=False)
+    accepted_checkpoint_versions = Column(JSON, nullable=False)
+    dependency_hashes = Column(JSON, nullable=False)
+    manifest_hash = Column(String(64), nullable=False, unique=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    planning_session = relationship(
+        "PlanningSession", back_populates="completion_manifest"
+    )
+
+
+class PlanningCommitManifest(Base):
+    """Immutable future-facing commit identity and Task provenance record."""
+
+    __tablename__ = "planning_commit_manifests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    planning_session_id = Column(
+        Integer,
+        ForeignKey("planning_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    completion_manifest_id = Column(
+        Integer,
+        ForeignKey("planning_completion_manifests.id"),
+        nullable=True,
+        index=True,
+    )
+    plan_id = Column(Integer, ForeignKey("plans.id"), nullable=True, index=True)
+    protocol_version = Column(String(16), nullable=False)
+    session_generation_id = Column(String(36), nullable=False)
+    commit_identity = Column(String(128), nullable=False, unique=True)
+    task_provenance = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    planning_session = relationship(
+        "PlanningSession", back_populates="commit_manifests"
+    )
+    completion_manifest = relationship("PlanningCompletionManifest")
+    plan = relationship("Plan")
 
 
 class SessionState(Base):

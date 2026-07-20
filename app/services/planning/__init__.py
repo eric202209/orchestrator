@@ -24,6 +24,14 @@ _EXPORTS = {
         "app.services.planning.planning_session_service",
         "PlanningSessionService",
     ),
+    "PlanningProtocolPersistenceService": (
+        "app.services.planning.protocol_persistence",
+        "PlanningProtocolPersistenceService",
+    ),
+    "ProtocolPersistenceService": (
+        "app.services.planning.protocol_persistence",
+        "ProtocolPersistenceService",
+    ),
     "select_candidate": (
         "app.services.planning.candidate_selection_policy",
         "select_candidate",

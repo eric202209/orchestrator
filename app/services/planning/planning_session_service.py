@@ -130,6 +130,9 @@ class PlanningSessionService:
             prompt=prompt.strip(),
             status="active",
             source_brain=source_brain,
+            # Current Planning remains on the legacy protocol until a later
+            # phase opts a session into Protocol v2 explicitly.
+            protocol_version="v1",
             **identity,
         )
         self.db.add(session)

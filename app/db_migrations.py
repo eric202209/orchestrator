@@ -807,6 +807,155 @@ def _migration_026_planning_generation_fence(engine: Engine) -> None:
             )
 
 
+def _migration_027_protocol_v2_persistence(engine: Engine) -> None:
+    """Add protocol identity, append-only stage state, and future manifests."""
+
+    table_names = _table_names(engine)
+    if "planning_sessions" in table_names and not _has_column(
+        engine, "planning_sessions", "protocol_version"
+    ):
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE planning_sessions ADD COLUMN protocol_version "
+                    "VARCHAR(16) NOT NULL DEFAULT 'v1'"
+                )
+            )
+    if "planning_sessions" in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE planning_sessions SET protocol_version = 'v1' "
+                    "WHERE protocol_version IS NULL OR protocol_version = ''"
+                )
+            )
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS planning_protocol_inputs (
+                    id INTEGER PRIMARY KEY,
+                    planning_session_id INTEGER NOT NULL UNIQUE,
+                    protocol_version VARCHAR(16) NOT NULL,
+                    session_generation_id VARCHAR(36) NOT NULL,
+                    input_hash VARCHAR(64) NOT NULL,
+                    engineering_context_identity VARCHAR(512) NOT NULL,
+                    provider_identity VARCHAR(255) NOT NULL,
+                    model_configuration JSON NOT NULL,
+                    repository_identity VARCHAR(512) NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(planning_session_id)
+                        REFERENCES planning_sessions (id) ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS planning_checkpoints (
+                    id INTEGER PRIMARY KEY,
+                    planning_session_id INTEGER NOT NULL,
+                    stage_name VARCHAR(100) NOT NULL,
+                    checkpoint_version INTEGER NOT NULL DEFAULT 1,
+                    protocol_version VARCHAR(16) NOT NULL,
+                    session_generation_id VARCHAR(36) NOT NULL,
+                    stage_generation_id VARCHAR(36) NOT NULL,
+                    attempt_id VARCHAR(36) NOT NULL,
+                    fencing_token VARCHAR(128) NOT NULL,
+                    status VARCHAR(20) NOT NULL,
+                    content_hash VARCHAR(64) NOT NULL,
+                    content TEXT NOT NULL,
+                    accepted_at DATETIME,
+                    failure_reason TEXT,
+                    invalidated_at DATETIME,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_planning_checkpoint_attempt UNIQUE (
+                        planning_session_id, stage_name, checkpoint_version, attempt_id
+                    ),
+                    CONSTRAINT ck_planning_checkpoint_status CHECK (
+                        status IN ('accepted', 'failed', 'invalidated')
+                    ),
+                    FOREIGN KEY(planning_session_id)
+                        REFERENCES planning_sessions (id) ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS planning_checkpoint_dependencies (
+                    checkpoint_id INTEGER NOT NULL,
+                    parent_checkpoint_id INTEGER NOT NULL,
+                    PRIMARY KEY (checkpoint_id, parent_checkpoint_id),
+                    CHECK (checkpoint_id <> parent_checkpoint_id),
+                    FOREIGN KEY(checkpoint_id)
+                        REFERENCES planning_checkpoints (id) ON DELETE CASCADE,
+                    FOREIGN KEY(parent_checkpoint_id)
+                        REFERENCES planning_checkpoints (id)
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS planning_completion_manifests (
+                    id INTEGER PRIMARY KEY,
+                    planning_session_id INTEGER NOT NULL UNIQUE,
+                    protocol_version VARCHAR(16) NOT NULL,
+                    session_generation_id VARCHAR(36) NOT NULL,
+                    accepted_checkpoint_versions JSON NOT NULL,
+                    dependency_hashes JSON NOT NULL,
+                    manifest_hash VARCHAR(64) NOT NULL UNIQUE,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(planning_session_id)
+                        REFERENCES planning_sessions (id) ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS planning_commit_manifests (
+                    id INTEGER PRIMARY KEY,
+                    planning_session_id INTEGER NOT NULL,
+                    completion_manifest_id INTEGER,
+                    plan_id INTEGER,
+                    protocol_version VARCHAR(16) NOT NULL,
+                    session_generation_id VARCHAR(36) NOT NULL,
+                    commit_identity VARCHAR(128) NOT NULL UNIQUE,
+                    task_provenance JSON NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(planning_session_id)
+                        REFERENCES planning_sessions (id) ON DELETE CASCADE,
+                    FOREIGN KEY(completion_manifest_id)
+                        REFERENCES planning_completion_manifests (id),
+                    FOREIGN KEY(plan_id) REFERENCES plans (id)
+                )
+                """
+            )
+        )
+
+        indexes = {
+            "ix_planning_protocol_inputs_input_hash": "CREATE INDEX IF NOT EXISTS ix_planning_protocol_inputs_input_hash "
+            "ON planning_protocol_inputs (input_hash)",
+            "ix_planning_checkpoints_session_stage": "CREATE INDEX IF NOT EXISTS ix_planning_checkpoints_session_stage "
+            "ON planning_checkpoints (planning_session_id, stage_name, checkpoint_version)",
+            "ix_planning_checkpoint_dependencies_parent": "CREATE INDEX IF NOT EXISTS ix_planning_checkpoint_dependencies_parent "
+            "ON planning_checkpoint_dependencies (parent_checkpoint_id)",
+            "ix_planning_commit_manifests_completion": "CREATE INDEX IF NOT EXISTS ix_planning_commit_manifests_completion "
+            "ON planning_commit_manifests (completion_manifest_id)",
+            "ix_planning_commit_manifests_plan": "CREATE INDEX IF NOT EXISTS ix_planning_commit_manifests_plan "
+            "ON planning_commit_manifests (plan_id)",
+        }
+        for statement in indexes.values():
+            connection.execute(text(statement))
+
+
 def _migration_014_task_workflow_stage(engine: Engine) -> None:
     if "tasks" not in _table_names(engine):
         return
@@ -1219,6 +1368,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="026_planning_generation_fence",
         description="Add immutable Planning Session generations and task observations",
         upgrade=_migration_026_planning_generation_fence,
+    ),
+    Migration(
+        version="027_protocol_v2_persistence",
+        description="Add Protocol v2 input, checkpoint, ownership, and manifest persistence",
+        upgrade=_migration_027_protocol_v2_persistence,
     ),
 )
 
