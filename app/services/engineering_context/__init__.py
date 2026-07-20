@@ -9,6 +9,7 @@ from app.services.engineering_context.service import (
     RegistrationError,
     SubsystemRegistration,
 )
+from app.services.engineering_context.structural import StructuralInformation
 
 __all__ = [
     "DEFAULT_SUBSYSTEM_ID",
@@ -18,4 +19,5 @@ __all__ = [
     "EngineeringContextService",
     "RegistrationError",
     "SubsystemRegistration",
+    "StructuralInformation",
 ]

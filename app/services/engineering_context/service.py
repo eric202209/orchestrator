@@ -23,6 +23,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
+from app.services.engineering_context.structural import (
+    StructuralInformation,
+    StructuralInformationError,
+    build_structural_information,
+)
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_SUBSYSTEM_ID = "project-log-authorization"
@@ -264,6 +270,7 @@ class EngineeringContextSelection:
     reason: str
     matched_trigger: str | None
     diagnostics: Mapping[str, Any]
+    structural_information: StructuralInformation | None = None
 
     @property
     def supplied(self) -> bool:
@@ -507,6 +514,24 @@ class _ContextFileStore:
             objects.append(EngineeringContextObject.from_dict(self._read(path)))
         return objects
 
+    def save_structural(self, information: StructuralInformation) -> None:
+        path = self.directory / f"{information.object_id}.structural.json"
+        with self.locked():
+            if path.exists():
+                try:
+                    existing = StructuralInformation.from_dict(self._read(path))
+                except (OSError, ValueError):
+                    existing = None
+                if existing is not None and existing.to_dict() == information.to_dict():
+                    return
+            self._atomic_write(path, information.to_dict())
+
+    def read_structural(self, object_id: str) -> StructuralInformation:
+        with self.locked():
+            return StructuralInformation.from_dict(
+                self._read(self.directory / f"{object_id}.structural.json")
+            )
+
 
 def _immutable_object_identity(context: EngineeringContextObject) -> tuple[Any, ...]:
     return (
@@ -707,6 +732,31 @@ class EngineeringContextService:
                 self._emit("generation_failed", **result)
                 return result
             published = store.publish(store.read_candidate(object_id))
+            structural_status = "unavailable"
+            structural_reason = None
+            try:
+                structural = build_structural_information(
+                    object_id=published.object_id,
+                    repository_identity=published.repository_identity,
+                    subsystem_id=published.subsystem_id,
+                    subsystem_version=published.subsystem_version,
+                    source_fingerprint=published.commit_fingerprint,
+                    scope=published.scope,
+                    source_bytes={
+                        path: base64.b64decode(value)
+                        for path, value in published.raw_source_content.items()
+                    },
+                    per_file_hash=published.per_file_hash,
+                )
+                store.save_structural(structural)
+                structural_status = "published"
+            except StructuralInformationError as exc:
+                structural_reason = str(exc)[:240]
+                self._emit(
+                    "structural_information_unavailable",
+                    object_id=published.object_id,
+                    reason=structural_reason,
+                )
             result = {
                 "status": "published",
                 "reason": "verified_and_published",
@@ -714,6 +764,8 @@ class EngineeringContextService:
                 "commit_fingerprint": published.commit_fingerprint,
                 "files_supplied": len(published.scope),
                 "source_bytes": published.total_source_bytes,
+                "structural_information_status": structural_status,
+                "structural_information_reason": structural_reason,
             }
             self._emit("publication_result", **result)
             self._emit("generation_completed", **result)
@@ -886,6 +938,29 @@ class EngineeringContextService:
             return self._fallback("stale_object", matched_trigger, None)
 
         selected = sorted(fresh, key=lambda obj: obj.object_id)[0]
+        structural_information = None
+        structural_reason = "missing_structural_information"
+        try:
+            candidate_structural = _ContextFileStore(root).read_structural(
+                selected.object_id
+            )
+            if candidate_structural.is_fresh(
+                object_id=selected.object_id,
+                repository_identity=selected.repository_identity,
+                subsystem_id=selected.subsystem_id,
+                subsystem_version=selected.subsystem_version,
+                source_fingerprint=current.commit_fingerprint,
+                scope=current.scope,
+                per_file_hash=current.per_file_hash,
+            ):
+                structural_information = candidate_structural
+                structural_reason = "fresh_structural_information"
+            else:
+                structural_reason = "stale_structural_information"
+        except FileNotFoundError:
+            pass
+        except (OSError, StructuralInformationError, ValueError):
+            structural_reason = "malformed_structural_information"
         diagnostics = {
             "reason": "fresh_published_object",
             "matched_trigger": matched_trigger,
@@ -898,6 +973,8 @@ class EngineeringContextService:
             "fresh": True,
             "files_supplied": len(selected.scope),
             "source_bytes": selected.total_source_bytes,
+            "structural_information_supplied": structural_information is not None,
+            "structural_information_reason": structural_reason,
             "fallback_reason": None,
             "lifecycle_mutation_origin": "planning",
             "lifecycle_mutation": False,
@@ -908,6 +985,7 @@ class EngineeringContextService:
             reason="fresh_published_object",
             matched_trigger=matched_trigger,
             diagnostics=diagnostics,
+            structural_information=structural_information,
         )
 
     def render_prompt_block(self, selection: EngineeringContextSelection) -> str | None:
@@ -937,6 +1015,19 @@ class EngineeringContextService:
                     "RAW SOURCE CONTENT BEGIN",
                     content,
                     "RAW SOURCE CONTENT END",
+                ]
+            )
+        if selection.structural_information is not None:
+            lines.extend(
+                [
+                    "STRUCTURAL INFORMATION (deterministic, additive; raw source remains authoritative)",
+                    "STRUCTURAL INFORMATION JSON BEGIN",
+                    json.dumps(
+                        selection.structural_information.to_dict(),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    "STRUCTURAL INFORMATION JSON END",
                 ]
             )
         return "\n".join(lines)
