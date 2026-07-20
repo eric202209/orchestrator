@@ -1040,6 +1040,49 @@ def _migration_028_protocol_v2_input_manifest(engine: Engine) -> None:
             )
 
 
+def _migration_029_planning_brief_checkpoint_metadata(engine: Engine) -> None:
+    """Add canonical Planning Brief metadata beside immutable checkpoints."""
+
+    if "planning_checkpoints" not in _table_names(engine):
+        return
+    statements: list[str] = []
+    for column_name, ddl in (
+        (
+            "schema_version",
+            "ALTER TABLE planning_checkpoints ADD COLUMN schema_version VARCHAR(64)",
+        ),
+        (
+            "brief_hash",
+            "ALTER TABLE planning_checkpoints ADD COLUMN brief_hash VARCHAR(64)",
+        ),
+        (
+            "renderer_version",
+            "ALTER TABLE planning_checkpoints ADD COLUMN renderer_version VARCHAR(64)",
+        ),
+        (
+            "validator_version",
+            "ALTER TABLE planning_checkpoints ADD COLUMN validator_version VARCHAR(64)",
+        ),
+        (
+            "validation_json",
+            "ALTER TABLE planning_checkpoints ADD COLUMN validation_json JSON",
+        ),
+    ):
+        if not _has_column(engine, "planning_checkpoints", column_name):
+            statements.append(ddl)
+    if statements:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_planning_checkpoints_brief_hash "
+                "ON planning_checkpoints (brief_hash)"
+            )
+        )
+
+
 def _migration_014_task_workflow_stage(engine: Engine) -> None:
     if "tasks" not in _table_names(engine):
         return
@@ -1462,6 +1505,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="028_protocol_v2_input_manifest",
         description="Persist canonical Protocol v2 Input Manifest provenance",
         upgrade=_migration_028_protocol_v2_input_manifest,
+    ),
+    Migration(
+        version="029_planning_brief_checkpoint_metadata",
+        description="Persist canonical Planning Brief checkpoint metadata",
+        upgrade=_migration_029_planning_brief_checkpoint_metadata,
     ),
 )
 

@@ -373,6 +373,14 @@ class PlanningCheckpoint(Base):
     fencing_token = Column(String(128), nullable=False)
     status = Column(String(20), nullable=False)
     content_hash = Column(String(64), nullable=False)
+    # Planning Brief checkpoints additionally carry canonical-domain metadata.
+    # These fields are nullable so generic Protocol v2 and historical rows keep
+    # their Phase 28B/28C shape.
+    schema_version = Column(String(64), nullable=True)
+    brief_hash = Column(String(64), nullable=True, index=True)
+    renderer_version = Column(String(64), nullable=True)
+    validator_version = Column(String(64), nullable=True)
+    validation_json = Column(JSON, nullable=True)
     content = Column(Text, nullable=False)
     accepted_at = Column(DateTime(timezone=True), nullable=True)
     failure_reason = Column(Text, nullable=True)

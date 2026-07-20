@@ -30,6 +30,19 @@ from app.services.planning.input_manifest import (
     InputManifestBuilder,
     InputManifestValidationError,
 )
+from app.services.planning.planning_brief import (
+    PLANNING_BRIEF_RENDERER_VERSION,
+    PLANNING_BRIEF_SCHEMA_VERSION,
+    PLANNING_BRIEF_STAGE_NAME,
+    PLANNING_BRIEF_STAGE_VERSION,
+    PLANNING_BRIEF_VALIDATOR_VERSION,
+    PlanningBrief,
+    PlanningBriefAcceptance,
+    PlanningBriefCompatibilityProjection,
+    PlanningBriefSchemaError,
+    project_compatibility,
+    validate_planning_brief,
+)
 
 PROTOCOL_V1 = "v1"
 PROTOCOL_V2 = "v2"
@@ -419,6 +432,129 @@ class PlanningProtocolPersistenceService:
             raise ProtocolPersistenceError("persisted input manifest identity mismatch")
         return manifest
 
+    def record_planning_brief(
+        self,
+        session_id: int,
+        *,
+        brief: PlanningBrief,
+        acceptance: PlanningBriefAcceptance | None = None,
+        stage_generation_id: str | None = None,
+        attempt_id: str | None = None,
+        fencing_token: str | None = None,
+        session_generation_id: str | None = None,
+        protocol_version: str | None = None,
+        status: str = "accepted",
+        parent_checkpoint_ids: Sequence[int] = (),
+        failure_reason: str | None = None,
+    ) -> PlanningCheckpoint:
+        """Persist canonical Brief JSON as an append-only stage checkpoint."""
+
+        session = self._assert_owner(
+            session_id,
+            protocol_version=protocol_version,
+            session_generation_id=session_generation_id,
+            fencing_token=fencing_token,
+        )
+        if session.protocol_version != PROTOCOL_V2:
+            raise ProtocolPersistenceError(
+                "Planning Brief checkpoints require Protocol v2"
+            )
+        manifest = self.load_input_manifest(session.id)
+        computed = validate_planning_brief(brief, input_manifest=manifest)
+        if (
+            acceptance is not None
+            and acceptance.validation_hash != computed.validation_hash
+        ):
+            raise ProtocolPersistenceError(
+                "Brief acceptance evidence does not match deterministic validation"
+            )
+        if status == "accepted" and not computed.protocol_acceptable:
+            detail = "; ".join(
+                f"{issue.code}: {issue.path}" for issue in computed.errors[:8]
+            )
+            raise ProtocolPersistenceError(
+                detail or "Planning Brief is not protocol acceptable"
+            )
+        content = brief.canonical_json()
+        return self.record_checkpoint(
+            session.id,
+            stage_name=PLANNING_BRIEF_STAGE_NAME,
+            checkpoint_version=PLANNING_BRIEF_STAGE_VERSION,
+            content=content,
+            stage_generation_id=stage_generation_id,
+            attempt_id=attempt_id,
+            fencing_token=fencing_token,
+            session_generation_id=session_generation_id,
+            protocol_version=protocol_version,
+            status=status,
+            parent_checkpoint_ids=parent_checkpoint_ids,
+            failure_reason=failure_reason,
+            schema_version=PLANNING_BRIEF_SCHEMA_VERSION,
+            brief_hash=brief.content_hash,
+            renderer_version=PLANNING_BRIEF_RENDERER_VERSION,
+            validator_version=computed.validator_version,
+            validation_json=computed.to_dict(),
+        )
+
+    persist_planning_brief = record_planning_brief
+
+    def load_accepted_planning_brief(self, session_id: int) -> PlanningBrief | None:
+        """Load and verify the current accepted Brief checkpoint, if present."""
+
+        session = self._get_session(session_id)
+        if session.protocol_version != PROTOCOL_V2:
+            return None
+        effective = self.effective_checkpoints(
+            session.id,
+            stage_versions={PLANNING_BRIEF_STAGE_NAME: PLANNING_BRIEF_STAGE_VERSION},
+        )
+        checkpoint = effective.get(
+            (PLANNING_BRIEF_STAGE_NAME, PLANNING_BRIEF_STAGE_VERSION)
+        )
+        if checkpoint is None or checkpoint.status != "accepted":
+            return None
+        if checkpoint.schema_version != PLANNING_BRIEF_SCHEMA_VERSION:
+            raise ProtocolPersistenceError(
+                "unsupported persisted Planning Brief schema"
+            )
+        if checkpoint.renderer_version != PLANNING_BRIEF_RENDERER_VERSION:
+            raise ProtocolPersistenceError(
+                "unsupported persisted Planning Brief renderer"
+            )
+        if checkpoint.validator_version != PLANNING_BRIEF_VALIDATOR_VERSION:
+            raise ProtocolPersistenceError(
+                "unsupported persisted Planning Brief validator"
+            )
+        if checkpoint.brief_hash and checkpoint.brief_hash != checkpoint.content_hash:
+            raise ProtocolPersistenceError("persisted Planning Brief hash mismatch")
+        try:
+            brief = PlanningBrief.from_json(checkpoint.content)
+        except (PlanningBriefSchemaError, TypeError, ValueError) as exc:
+            raise ProtocolPersistenceError(
+                f"invalid persisted Planning Brief: {exc}"
+            ) from exc
+        if brief.content_hash != checkpoint.content_hash:
+            raise ProtocolPersistenceError(
+                "persisted Planning Brief content hash mismatch"
+            )
+        manifest = self.load_input_manifest(session.id)
+        acceptance = validate_planning_brief(brief, input_manifest=manifest)
+        if not acceptance.semantically_valid or not acceptance.protocol_acceptable:
+            raise ProtocolPersistenceError(
+                "persisted accepted Planning Brief no longer validates"
+            )
+        return brief
+
+    load_accepted_brief = load_accepted_planning_brief
+
+    def planning_brief_compatibility_projection(
+        self, session_id: int, *, task_plan: str | None = None
+    ) -> PlanningBriefCompatibilityProjection | None:
+        brief = self.load_accepted_planning_brief(session_id)
+        if brief is None:
+            return None
+        return project_compatibility(brief, task_plan=task_plan)
+
     def record_checkpoint(
         self,
         session_id: int,
@@ -436,6 +572,11 @@ class PlanningProtocolPersistenceService:
         failure_reason: str | None = None,
         accepted_at: datetime | None = None,
         invalidated_at: datetime | None = None,
+        schema_version: str | None = None,
+        brief_hash: str | None = None,
+        renderer_version: str | None = None,
+        validator_version: str | None = None,
+        validation_json: Mapping[str, Any] | None = None,
     ) -> PlanningCheckpoint:
         """Append one checkpoint and its parent edges under the current fence."""
 
@@ -466,6 +607,22 @@ class PlanningProtocolPersistenceService:
             attempt_id or str(uuid.uuid4()), "attempt_id", 128
         )
         checkpoint_content = str(content or "")
+        normalized_brief_hash = None
+        if brief_hash is not None:
+            normalized_brief_hash = _normalize_hash(brief_hash, "brief_hash")
+            content_hash = hashlib.sha256(
+                checkpoint_content.encode("utf-8", errors="surrogateescape")
+            ).hexdigest()
+            if content_hash != normalized_brief_hash:
+                raise ProtocolPersistenceError(
+                    "brief_hash does not match canonical checkpoint content"
+                )
+        normalized_validation = None
+        if validation_json is not None:
+            if not isinstance(validation_json, Mapping):
+                raise ProtocolPersistenceError("validation_json must be JSON-shaped")
+            _canonical_json(validation_json)
+            normalized_validation = dict(validation_json)
         now = _now()
         accepted_timestamp = accepted_at or (
             now if checkpoint_status == "accepted" else None
@@ -511,6 +668,23 @@ class PlanningProtocolPersistenceService:
             content_hash=hashlib.sha256(
                 checkpoint_content.encode("utf-8", errors="surrogateescape")
             ).hexdigest(),
+            schema_version=(
+                _normalize_required(schema_version, "schema_version", 64)
+                if schema_version is not None
+                else None
+            ),
+            brief_hash=normalized_brief_hash,
+            renderer_version=(
+                _normalize_required(renderer_version, "renderer_version", 64)
+                if renderer_version is not None
+                else None
+            ),
+            validator_version=(
+                _normalize_required(validator_version, "validator_version", 64)
+                if validator_version is not None
+                else None
+            ),
+            validation_json=normalized_validation,
             content=checkpoint_content,
             accepted_at=accepted_timestamp,
             failure_reason=failure_reason,

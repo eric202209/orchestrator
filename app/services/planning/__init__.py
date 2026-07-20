@@ -40,6 +40,26 @@ _EXPORTS = {
         "app.services.planning.input_manifest",
         "validate_input_manifest",
     ),
+    "PlanningBrief": (
+        "app.services.planning.planning_brief",
+        "PlanningBrief",
+    ),
+    "PlanningBriefAcceptance": (
+        "app.services.planning.planning_brief",
+        "PlanningBriefAcceptance",
+    ),
+    "validate_planning_brief": (
+        "app.services.planning.planning_brief",
+        "validate_planning_brief",
+    ),
+    "render_planning_brief": (
+        "app.services.planning.planning_brief",
+        "render_planning_brief",
+    ),
+    "project_compatibility": (
+        "app.services.planning.planning_brief",
+        "project_compatibility",
+    ),
     "ProtocolPersistenceService": (
         "app.services.planning.protocol_persistence",
         "ProtocolPersistenceService",

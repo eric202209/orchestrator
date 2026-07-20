@@ -29,6 +29,7 @@ from app.services.planning.protocol_persistence import (
     ProtocolOwnershipError,
 )
 from app.services.planning.input_manifest import InputManifest
+from app.services.planning.planning_brief import PlanningBrief
 
 logger = logging.getLogger(__name__)
 
@@ -309,6 +310,13 @@ class StageContext:
     predecessor_checkpoints: Mapping[str, PlanningCheckpoint] = field(
         default_factory=dict
     )
+    planning_brief: PlanningBrief | None = None
+
+    @property
+    def accepted_brief(self) -> PlanningBrief | None:
+        """The accepted Planning Brief predecessor, or ``None``."""
+
+        return self.planning_brief
 
 
 @dataclass
@@ -565,6 +573,7 @@ class StageExecutor:
             configuration=self.configuration,
             logger=self.logger,
             predecessor_checkpoints=predecessors,
+            planning_brief=self._load_accepted_planning_brief(session_id),
         )
         key = (session_id, stage_identifier)
         self._running.add(key)
@@ -954,6 +963,12 @@ class StageExecutor:
                 "Protocol v2 stage execution requires a persisted input manifest"
             )
         return manifest
+
+    def _load_accepted_planning_brief(self, session_id: int) -> PlanningBrief | None:
+        try:
+            return self.persistence.load_accepted_planning_brief(session_id)
+        except Exception as exc:
+            raise StageEngineError(str(exc)) from exc
 
 
 # Names used by callers that describe the component as a service or engine.
