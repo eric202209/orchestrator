@@ -273,6 +273,11 @@ class PlanningSession(Base):
         back_populates="planning_session",
         cascade="all, delete-orphan",
     )
+    review_events = relationship(
+        "PlanningReviewEvent",
+        back_populates="planning_session",
+        cascade="all, delete-orphan",
+    )
     completion_manifest = relationship(
         "PlanningCompletionManifest",
         back_populates="planning_session",
@@ -385,6 +390,10 @@ class PlanningCheckpoint(Base):
     accepted_at = Column(DateTime(timezone=True), nullable=True)
     failure_reason = Column(Text, nullable=True)
     invalidated_at = Column(DateTime(timezone=True), nullable=True)
+    # A promotion is a new accepted checkpoint linked to an immutable review
+    # event.  Automatic accepted checkpoints leave this metadata null.
+    promotion_review_event_id = Column(String(128), nullable=True, index=True)
+    promotion_reason_code = Column(String(128), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
@@ -409,6 +418,11 @@ class PlanningCheckpoint(Base):
         foreign_keys="PlanningCheckpointDependency.checkpoint_id",
         back_populates="checkpoint",
         cascade="all, delete-orphan",
+    )
+    review_events = relationship(
+        "PlanningReviewEvent",
+        foreign_keys="PlanningReviewEvent.candidate_checkpoint_id",
+        back_populates="candidate_checkpoint",
     )
 
 
@@ -442,6 +456,144 @@ class PlanningCheckpointDependency(Base):
     )
     parent_checkpoint = relationship(
         "PlanningCheckpoint", foreign_keys=[parent_checkpoint_id]
+    )
+
+
+class PlanningReviewEvent(Base):
+    """Append-only Protocol v2 operator-review event stream."""
+
+    __tablename__ = "planning_review_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(String(128), nullable=False, unique=True, index=True)
+    review_id = Column(String(128), nullable=False, index=True)
+    event_sequence = Column(Integer, nullable=False)
+    event_type = Column(String(40), nullable=False, index=True)
+    schema_version = Column(String(64), nullable=False)
+
+    planning_session_id = Column(
+        Integer,
+        ForeignKey("planning_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    project_id = Column(
+        Integer,
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    protocol_version = Column(String(16), nullable=False, index=True)
+    stage_name = Column(String(100), nullable=False, index=True)
+    stage_version = Column(Integer, nullable=False)
+    stage_generation_id = Column(String(128), nullable=False)
+    candidate_checkpoint_id = Column(
+        Integer,
+        ForeignKey("planning_checkpoints.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    candidate_checkpoint_version = Column(Integer, nullable=False)
+    candidate_content_hash = Column(String(64), nullable=False, index=True)
+
+    session_generation_id = Column(String(128), nullable=False, index=True)
+    input_manifest_id = Column(String(128), nullable=False, index=True)
+    input_manifest_hash = Column(String(64), nullable=False)
+    brief_checkpoint_id = Column(Integer, nullable=True, index=True)
+    brief_hash = Column(String(64), nullable=True)
+    predecessor_json = Column(JSON, nullable=False)
+    configuration_fingerprint = Column(String(64), nullable=False)
+    candidate_attempt_id = Column(String(128), nullable=True)
+
+    validator_version = Column(String(128), nullable=False)
+    validation_hash = Column(String(64), nullable=False, index=True)
+    validation_json = Column(JSON, nullable=False)
+    review_reason_codes = Column(JSON, nullable=False)
+    candidate_binding_json = Column(JSON, nullable=False)
+
+    operator_subject = Column(String(255), nullable=False, index=True)
+    operator_role = Column(String(128), nullable=False)
+    authority_basis = Column(String(128), nullable=False)
+    actor_kind = Column(String(32), nullable=False)
+
+    decision_type = Column(String(40), nullable=False)
+    decision_text = Column(Text, nullable=True)
+    command_identity = Column(String(128), nullable=True)
+    amendment_id = Column(String(128), nullable=True)
+    amendment_hash = Column(String(64), nullable=True)
+
+    prior_review_head_sequence = Column(Integer, nullable=False)
+    resulting_sequence = Column(Integer, nullable=False)
+    review_concurrency_token = Column(String(128), nullable=False)
+    owner_fence_fingerprint = Column(String(128), nullable=True)
+
+    idempotency_key = Column(String(128), nullable=False)
+    canonical_request_hash = Column(String(64), nullable=False)
+    previous_event_hash = Column(String(64), nullable=True)
+    event_hash = Column(String(64), nullable=False, index=True)
+    promotion_checkpoint_id = Column(Integer, nullable=True, index=True)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "review_id", "event_sequence", name="uq_planning_review_event_sequence"
+        ),
+        UniqueConstraint(
+            "operator_subject",
+            "idempotency_key",
+            name="uq_planning_review_event_idempotency",
+        ),
+        CheckConstraint(
+            "protocol_version = 'v2'",
+            name="ck_planning_review_protocol_v2",
+        ),
+        CheckConstraint(
+            "event_sequence >= 1 AND resulting_sequence = event_sequence",
+            name="ck_planning_review_event_sequence_positive",
+        ),
+        CheckConstraint(
+            "event_type IN ('review_opened','acknowledge_only','approve_unchanged',"
+            "'reject','request_regeneration','request_amendment','cancel_review')",
+            name="ck_planning_review_event_type",
+        ),
+        Index(
+            "ix_planning_review_session_stage_candidate",
+            "planning_session_id",
+            "stage_name",
+            "candidate_checkpoint_id",
+        ),
+        Index(
+            "ix_planning_review_created_event_type",
+            "created_at",
+            "event_type",
+        ),
+        Index(
+            "ux_planning_review_one_terminal",
+            "review_id",
+            unique=True,
+            sqlite_where=text(
+                "event_type IN ('approve_unchanged','reject','request_regeneration',"
+                "'request_amendment','cancel_review')"
+            ),
+            postgresql_where=text(
+                "event_type IN ('approve_unchanged','reject','request_regeneration',"
+                "'request_amendment','cancel_review')"
+            ),
+        ),
+        Index(
+            "ux_planning_review_candidate_open",
+            "candidate_checkpoint_id",
+            unique=True,
+            sqlite_where=text("event_type = 'review_opened'"),
+            postgresql_where=text("event_type = 'review_opened'"),
+        ),
+    )
+
+    planning_session = relationship("PlanningSession", back_populates="review_events")
+    candidate_checkpoint = relationship(
+        "PlanningCheckpoint", foreign_keys=[candidate_checkpoint_id]
     )
 
 

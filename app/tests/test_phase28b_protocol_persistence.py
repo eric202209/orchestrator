@@ -315,6 +315,7 @@ def test_protocol_v2_migration_preserves_legacy_session_and_is_idempotent(
         "planning_checkpoint_dependencies",
         "planning_completion_manifests",
         "planning_commit_manifests",
+        "planning_review_events",
     } <= set(inspector.get_table_names())
     with engine.connect() as connection:
         row = connection.execute(

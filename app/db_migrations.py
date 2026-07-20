@@ -1083,6 +1083,121 @@ def _migration_029_planning_brief_checkpoint_metadata(engine: Engine) -> None:
         )
 
 
+def _migration_030_protocol_v2_operator_review(engine: Engine) -> None:
+    """Add the append-only Protocol v2 operator-review event stream."""
+
+    if "planning_checkpoints" in _table_names(engine):
+        statements = []
+        if not _has_column(engine, "planning_checkpoints", "promotion_review_event_id"):
+            statements.append(
+                "ALTER TABLE planning_checkpoints ADD COLUMN "
+                "promotion_review_event_id VARCHAR(128)"
+            )
+        if not _has_column(engine, "planning_checkpoints", "promotion_reason_code"):
+            statements.append(
+                "ALTER TABLE planning_checkpoints ADD COLUMN promotion_reason_code VARCHAR(128)"
+            )
+        if statements:
+            with engine.begin() as connection:
+                for statement in statements:
+                    connection.execute(text(statement))
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS planning_review_events (
+                    id INTEGER PRIMARY KEY,
+                    event_id VARCHAR(128) NOT NULL UNIQUE,
+                    review_id VARCHAR(128) NOT NULL,
+                    event_sequence INTEGER NOT NULL,
+                    event_type VARCHAR(40) NOT NULL,
+                    schema_version VARCHAR(64) NOT NULL,
+                    planning_session_id INTEGER NOT NULL,
+                    project_id INTEGER NOT NULL,
+                    protocol_version VARCHAR(16) NOT NULL,
+                    stage_name VARCHAR(100) NOT NULL,
+                    stage_version INTEGER NOT NULL,
+                    stage_generation_id VARCHAR(128) NOT NULL,
+                    candidate_checkpoint_id INTEGER NOT NULL,
+                    candidate_checkpoint_version INTEGER NOT NULL,
+                    candidate_content_hash VARCHAR(64) NOT NULL,
+                    session_generation_id VARCHAR(128) NOT NULL,
+                    input_manifest_id VARCHAR(128) NOT NULL,
+                    input_manifest_hash VARCHAR(64) NOT NULL,
+                    brief_checkpoint_id INTEGER,
+                    brief_hash VARCHAR(64),
+                    predecessor_json JSON NOT NULL,
+                    configuration_fingerprint VARCHAR(64) NOT NULL,
+                    candidate_attempt_id VARCHAR(128),
+                    validator_version VARCHAR(128) NOT NULL,
+                    validation_hash VARCHAR(64) NOT NULL,
+                    validation_json JSON NOT NULL,
+                    review_reason_codes JSON NOT NULL,
+                    candidate_binding_json JSON NOT NULL,
+                    operator_subject VARCHAR(255) NOT NULL,
+                    operator_role VARCHAR(128) NOT NULL,
+                    authority_basis VARCHAR(128) NOT NULL,
+                    actor_kind VARCHAR(32) NOT NULL,
+                    decision_type VARCHAR(40) NOT NULL,
+                    decision_text TEXT,
+                    command_identity VARCHAR(128),
+                    amendment_id VARCHAR(128),
+                    amendment_hash VARCHAR(64),
+                    prior_review_head_sequence INTEGER NOT NULL,
+                    resulting_sequence INTEGER NOT NULL,
+                    review_concurrency_token VARCHAR(128) NOT NULL,
+                    owner_fence_fingerprint VARCHAR(128),
+                    idempotency_key VARCHAR(128) NOT NULL,
+                    canonical_request_hash VARCHAR(64) NOT NULL,
+                    previous_event_hash VARCHAR(64),
+                    event_hash VARCHAR(64) NOT NULL,
+                    promotion_checkpoint_id INTEGER,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_planning_review_event_sequence
+                        UNIQUE (review_id, event_sequence),
+                    CONSTRAINT uq_planning_review_event_idempotency
+                        UNIQUE (operator_subject, idempotency_key),
+                    CONSTRAINT ck_planning_review_protocol_v2
+                        CHECK (protocol_version = 'v2'),
+                    CONSTRAINT ck_planning_review_event_sequence_positive
+                        CHECK (event_sequence >= 1 AND resulting_sequence = event_sequence),
+                    CONSTRAINT ck_planning_review_event_type
+                        CHECK (event_type IN ('review_opened','acknowledge_only',
+                            'approve_unchanged','reject','request_regeneration',
+                            'request_amendment','cancel_review')),
+                    FOREIGN KEY(planning_session_id)
+                        REFERENCES planning_sessions (id) ON DELETE CASCADE,
+                    FOREIGN KEY(project_id)
+                        REFERENCES projects (id) ON DELETE CASCADE,
+                    FOREIGN KEY(candidate_checkpoint_id)
+                        REFERENCES planning_checkpoints (id) ON DELETE RESTRICT
+                )
+                """
+            )
+        )
+        for statement in (
+            "CREATE INDEX IF NOT EXISTS ix_planning_review_events_review_id "
+            "ON planning_review_events (review_id)",
+            "CREATE INDEX IF NOT EXISTS ix_planning_review_events_session_stage "
+            "ON planning_review_events (planning_session_id, stage_name, candidate_checkpoint_id)",
+            "CREATE INDEX IF NOT EXISTS ix_planning_review_events_type "
+            "ON planning_review_events (event_type)",
+            "CREATE INDEX IF NOT EXISTS ix_planning_review_events_candidate_hash "
+            "ON planning_review_events (candidate_content_hash)",
+            "CREATE INDEX IF NOT EXISTS ix_planning_review_events_created_type "
+            "ON planning_review_events (created_at, event_type)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_planning_review_one_terminal "
+            "ON planning_review_events (review_id) WHERE event_type IN "
+            "('approve_unchanged','reject','request_regeneration','request_amendment','cancel_review')",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_planning_review_candidate_open "
+            "ON planning_review_events (candidate_checkpoint_id) WHERE event_type = 'review_opened'",
+            "CREATE INDEX IF NOT EXISTS ix_planning_checkpoints_promotion_event "
+            "ON planning_checkpoints (promotion_review_event_id)",
+        ):
+            connection.execute(text(statement))
+
+
 def _migration_014_task_workflow_stage(engine: Engine) -> None:
     if "tasks" not in _table_names(engine):
         return
@@ -1510,6 +1625,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="029_planning_brief_checkpoint_metadata",
         description="Persist canonical Planning Brief checkpoint metadata",
         upgrade=_migration_029_planning_brief_checkpoint_metadata,
+    ),
+    Migration(
+        version="030_protocol_v2_operator_review",
+        description="Persist append-only Protocol v2 operator-review events and promotions",
+        upgrade=_migration_030_protocol_v2_operator_review,
     ),
 )
 

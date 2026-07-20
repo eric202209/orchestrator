@@ -28,6 +28,23 @@ _EXPORTS = {
         "app.services.planning.protocol_persistence",
         "PlanningProtocolPersistenceService",
     ),
+    "OperatorReviewService": (
+        "app.services.planning.operator_review_persistence",
+        "OperatorReviewService",
+    ),
+    "OperatorReviewPersistenceService": (
+        "app.services.planning.operator_review_persistence",
+        "OperatorReviewPersistenceService",
+    ),
+    "ReviewCandidateBinding": (
+        "app.services.planning.operator_review",
+        "ReviewCandidateBinding",
+    ),
+    "ReviewDecisionRequest": (
+        "app.services.planning.operator_review",
+        "ReviewDecisionRequest",
+    ),
+    "ReviewActor": ("app.services.planning.operator_review", "ReviewActor"),
     "InputManifest": (
         "app.services.planning.input_manifest",
         "InputManifest",

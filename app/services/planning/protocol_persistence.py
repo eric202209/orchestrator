@@ -23,6 +23,7 @@ from app.models import (
     PlanningCommitManifest,
     PlanningCompletionManifest,
     PlanningProtocolInput,
+    PlanningReviewEvent,
     PlanningSession,
 )
 from app.services.planning.input_manifest import (
@@ -179,6 +180,116 @@ class PlanningProtocolPersistenceService:
         if session is None:
             raise ProtocolPersistenceError(f"planning session {session_id} not found")
         return session
+
+    def _verify_promotion_checkpoint(self, checkpoint: PlanningCheckpoint) -> None:
+        """Verify review promotion provenance before exposing accepted bytes."""
+
+        event_id = checkpoint.promotion_review_event_id
+        if not event_id:
+            return
+        from app.services.planning.operator_review_persistence import (
+            event_from_model,
+        )
+        from app.services.planning.operator_review import verify_event_hash
+
+        row = (
+            self.db.query(PlanningReviewEvent)
+            .filter(PlanningReviewEvent.event_id == event_id)
+            .one_or_none()
+        )
+        if row is None:
+            raise ProtocolPersistenceError(
+                "accepted promotion is missing its approval event"
+            )
+        try:
+            event = event_from_model(row)
+            verify_event_hash(event)
+        except Exception as exc:
+            raise ProtocolPersistenceError(
+                "accepted promotion approval event integrity failure"
+            ) from exc
+        if event.event_type != "approve_unchanged":
+            raise ProtocolPersistenceError(
+                "promotion link does not reference approve_unchanged"
+            )
+        if (
+            event.candidate_binding.planning_session_id
+            != checkpoint.planning_session_id
+        ):
+            raise ProtocolPersistenceError("promotion approval session mismatch")
+        if (
+            event.candidate_binding.stage_name != checkpoint.stage_name
+            or event.candidate_binding.candidate_checkpoint_version
+            != checkpoint.checkpoint_version
+            or event.candidate_binding.stage_generation_id
+            != checkpoint.stage_generation_id
+            or event.candidate_binding.session_generation_id
+            != checkpoint.session_generation_id
+        ):
+            raise ProtocolPersistenceError("promotion approval lineage mismatch")
+        candidate = self.db.get(
+            PlanningCheckpoint, event.candidate_binding.candidate_checkpoint_id
+        )
+        if candidate is None:
+            raise ProtocolPersistenceError("promotion candidate is missing")
+        if candidate.status != "failed":
+            raise ProtocolPersistenceError("promotion candidate is not failed evidence")
+        if (
+            candidate.stage_name != checkpoint.stage_name
+            or candidate.checkpoint_version != checkpoint.checkpoint_version
+            or candidate.session_generation_id != checkpoint.session_generation_id
+        ):
+            raise ProtocolPersistenceError("promotion stage lineage mismatch")
+        if (
+            candidate.content_hash != checkpoint.content_hash
+            or candidate.content != checkpoint.content
+        ):
+            raise ProtocolPersistenceError("promotion bytes do not match candidate")
+        if event.candidate_binding.candidate_content_hash != checkpoint.content_hash:
+            raise ProtocolPersistenceError("promotion candidate hash mismatch")
+        if not any(
+            edge.parent_checkpoint_id == candidate.id
+            for edge in checkpoint.dependencies
+        ):
+            raise ProtocolPersistenceError("promotion candidate dependency is missing")
+        promotion_parent_ids = {
+            edge.parent_checkpoint_id for edge in checkpoint.dependencies
+        }
+        candidate_parent_ids = {
+            edge.parent_checkpoint_id for edge in candidate.dependencies
+        }
+        if not candidate_parent_ids.issubset(promotion_parent_ids):
+            raise ProtocolPersistenceError(
+                "promotion semantic predecessor dependency is missing"
+            )
+
+    def _approved_review_acceptance(
+        self, checkpoint: PlanningCheckpoint, validation: Any
+    ) -> bool:
+        """Allow only review-approved policy findings through accepted loading."""
+
+        event_id = checkpoint.promotion_review_event_id
+        if not event_id:
+            return False
+        event = (
+            self.db.query(PlanningReviewEvent)
+            .filter(PlanningReviewEvent.event_id == event_id)
+            .one_or_none()
+        )
+        if event is None or event.event_type != "approve_unchanged":
+            return False
+        errors = tuple(getattr(validation, "errors", ()))
+        warnings = tuple(getattr(validation, "warnings", ()))
+        return bool(
+            getattr(validation, "schema_valid", False)
+            and getattr(validation, "semantically_valid", False)
+            and not errors
+            and warnings
+            and all(
+                getattr(item, "severity", "error") == "review_required"
+                for item in warnings
+            )
+        )
 
     def _assert_owner(
         self,
@@ -460,6 +571,7 @@ class PlanningProtocolPersistenceService:
         status: str = "accepted",
         parent_checkpoint_ids: Sequence[int] = (),
         failure_reason: str | None = None,
+        review_reason_codes: Sequence[str] = (),
     ) -> PlanningCheckpoint:
         """Persist canonical Brief JSON as an append-only stage checkpoint."""
 
@@ -490,6 +602,18 @@ class PlanningProtocolPersistenceService:
                 detail or "Planning Brief is not protocol acceptable"
             )
         content = brief.canonical_json()
+        metadata = computed.to_dict()
+        metadata.update(
+            {
+                "input_manifest_id": manifest.manifest_id,
+                "input_manifest_hash": manifest.manifest_hash,
+                "stage_configuration_fingerprint": manifest.configuration_identity.stage_configuration_fingerprint,
+            }
+        )
+        if review_reason_codes:
+            metadata["review_reason_codes"] = sorted(
+                {str(code).strip() for code in review_reason_codes if str(code).strip()}
+            )
         return self.record_checkpoint(
             session.id,
             stage_name=PLANNING_BRIEF_STAGE_NAME,
@@ -507,7 +631,7 @@ class PlanningProtocolPersistenceService:
             brief_hash=brief.content_hash,
             renderer_version=PLANNING_BRIEF_RENDERER_VERSION,
             validator_version=computed.validator_version,
-            validation_json=computed.to_dict(),
+            validation_json=metadata,
         )
 
     persist_planning_brief = record_planning_brief
@@ -527,6 +651,7 @@ class PlanningProtocolPersistenceService:
         )
         if checkpoint is None or checkpoint.status != "accepted":
             return None
+        self._verify_promotion_checkpoint(checkpoint)
         if checkpoint.schema_version != PLANNING_BRIEF_SCHEMA_VERSION:
             raise ProtocolPersistenceError(
                 "unsupported persisted Planning Brief schema"
@@ -581,6 +706,7 @@ class PlanningProtocolPersistenceService:
         failure_reason: str | None = None,
         policy: Mapping[str, Any] | None = None,
         stage_configuration_fingerprint: str | None = None,
+        review_reason_codes: Sequence[str] = (),
     ) -> PlanningCheckpoint:
         """Persist canonical Task Plan JSON through the existing checkpoint API."""
 
@@ -667,6 +793,10 @@ class PlanningProtocolPersistenceService:
                 "stage_configuration_fingerprint": configuration_fingerprint,
             }
         )
+        if review_reason_codes:
+            metadata["review_reason_codes"] = sorted(
+                {str(code).strip() for code in review_reason_codes if str(code).strip()}
+            )
         return self.record_checkpoint(
             session.id,
             stage_name=STRUCTURED_TASK_PLAN_STAGE_NAME,
@@ -707,6 +837,7 @@ class PlanningProtocolPersistenceService:
         )
         if checkpoint is None or checkpoint.status != "accepted":
             return None
+        self._verify_promotion_checkpoint(checkpoint)
         if checkpoint.schema_version != STRUCTURED_TASK_PLAN_SCHEMA_VERSION:
             raise ProtocolPersistenceError(
                 "unsupported persisted Structured Task Plan schema"
@@ -788,7 +919,9 @@ class PlanningProtocolPersistenceService:
             raise ProtocolPersistenceError(
                 "persisted Structured Task Plan validation hash mismatch"
             )
-        if not validation.protocol_acceptable:
+        if not validation.protocol_acceptable and not self._approved_review_acceptance(
+            checkpoint, validation
+        ):
             raise ProtocolPersistenceError(
                 "persisted accepted Structured Task Plan no longer validates"
             )
@@ -834,15 +967,35 @@ class PlanningProtocolPersistenceService:
         renderer_version: str | None = None,
         validator_version: str | None = None,
         validation_json: Mapping[str, Any] | None = None,
+        promotion_review_event_id: str | None = None,
+        promotion_reason_code: str | None = None,
+        review_promotion: bool = False,
     ) -> PlanningCheckpoint:
         """Append one checkpoint and its parent edges under the current fence."""
 
-        session = self._assert_owner(
-            session_id,
-            protocol_version=protocol_version,
-            session_generation_id=session_generation_id,
-            fencing_token=fencing_token,
-        )
+        if review_promotion:
+            if not promotion_review_event_id:
+                raise ProtocolPersistenceError(
+                    "review promotion requires an approval event"
+                )
+            session = self._get_session(session_id)
+            if session.protocol_version != PROTOCOL_V2:
+                raise ProtocolPersistenceError("review promotion requires Protocol v2")
+            if session_generation_id not in {None, session.generation_id}:
+                raise ProtocolOwnershipError(
+                    "session generation does not match current owner"
+                )
+            if protocol_version not in {None, PROTOCOL_V2}:
+                raise ProtocolPersistenceError(
+                    "protocol version does not match session"
+                )
+        else:
+            session = self._assert_owner(
+                session_id,
+                protocol_version=protocol_version,
+                session_generation_id=session_generation_id,
+                fencing_token=fencing_token,
+            )
         stage = _normalize_required(stage_name, "stage_name", 100)
         if checkpoint_version < 1:
             raise ProtocolPersistenceError("checkpoint_version must be positive")
@@ -910,6 +1063,17 @@ class PlanningProtocolPersistenceService:
                     "checkpoint dependency crosses protocols"
                 )
 
+        checkpoint_fence = fencing_token or session.processing_token
+        if review_promotion and not checkpoint_fence:
+            # This is a non-secret transaction fingerprint, not a worker lease.
+            checkpoint_fence = (
+                "review-"
+                + hashlib.sha256(
+                    f"{session.id}:{session.generation_id}:{promotion_review_event_id}".encode(
+                        "utf-8"
+                    )
+                ).hexdigest()[:48]
+            )
         checkpoint = PlanningCheckpoint(
             planning_session_id=session.id,
             stage_name=stage,
@@ -918,9 +1082,7 @@ class PlanningProtocolPersistenceService:
             session_generation_id=session.generation_id,
             stage_generation_id=stage_generation,
             attempt_id=attempt,
-            fencing_token=_normalize_required(
-                fencing_token or session.processing_token, "fencing_token", 128
-            ),
+            fencing_token=_normalize_required(checkpoint_fence, "fencing_token", 128),
             status=checkpoint_status,
             content_hash=hashlib.sha256(
                 checkpoint_content.encode("utf-8", errors="surrogateescape")
@@ -946,6 +1108,18 @@ class PlanningProtocolPersistenceService:
             accepted_at=accepted_timestamp,
             failure_reason=failure_reason,
             invalidated_at=invalidated_timestamp,
+            promotion_review_event_id=(
+                _normalize_required(
+                    promotion_review_event_id, "promotion_review_event_id", 128
+                )
+                if promotion_review_event_id is not None
+                else None
+            ),
+            promotion_reason_code=(
+                _normalize_required(promotion_reason_code, "promotion_reason_code", 128)
+                if promotion_reason_code is not None
+                else None
+            ),
         )
         self.db.add(checkpoint)
         self.db.flush()

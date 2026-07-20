@@ -317,6 +317,11 @@ class StageContext:
     )
     planning_brief: PlanningBrief | None = None
     structured_task_plan: StructuredTaskPlan | None = None
+    # Review projections are deliberately separate from accepted authority.
+    # The Stage Engine does not populate candidate content into these fields.
+    reviewable_candidates: tuple[Any, ...] = field(default_factory=tuple)
+    review_status: Any = None
+    latest_review_decision: Any = None
 
     @property
     def accepted_brief(self) -> PlanningBrief | None:
