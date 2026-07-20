@@ -28,6 +28,7 @@ from app.services.planning.protocol_persistence import (
     PlanningProtocolPersistenceService,
     ProtocolOwnershipError,
 )
+from app.services.planning.input_manifest import InputManifest
 
 logger = logging.getLogger(__name__)
 
@@ -298,7 +299,8 @@ class StageCheckpointAccess:
 class StageContext:
     session: PlanningSession
     protocol_version: str
-    protocol_input: PlanningProtocolInput
+    protocol_input: PlanningProtocolInput | None
+    input_manifest: InputManifest
     checkpoint_access: StageCheckpointAccess
     dependency_graph: StageDependencyGraph
     ownership: StageOwnership
@@ -555,7 +557,8 @@ class StageExecutor:
         context = StageContext(
             session=session,
             protocol_version=session.protocol_version,
-            protocol_input=self._require_protocol_input(session_id),
+            protocol_input=self.persistence.recovery_state(session_id)["input"],
+            input_manifest=self._require_input_manifest(session_id),
             checkpoint_access=checkpoint_access,
             dependency_graph=self.graph,
             ownership=ownership,
@@ -758,6 +761,9 @@ class StageExecutor:
             session_generation_id=session_generation_id,
             fencing_token=fencing_token,
         )
+        # Completion is also a recovery boundary: it must attest to the
+        # persisted manifest, never to a live reconstruction of inputs.
+        self._require_input_manifest(session_id)
         required = tuple(
             required_stage_identifiers
             if required_stage_identifiers is not None
@@ -938,13 +944,16 @@ class StageExecutor:
             raise StageEngineError(f"planning session {session_id} not found")
         return session
 
-    def _require_protocol_input(self, session_id: int) -> PlanningProtocolInput:
-        protocol_input = self.persistence.recovery_state(session_id)["input"]
-        if protocol_input is None:
+    def _require_input_manifest(self, session_id: int) -> InputManifest:
+        try:
+            manifest = self.persistence.load_input_manifest(session_id)
+        except Exception as exc:
+            raise StageEngineError(str(exc)) from exc
+        if manifest is None:
             raise StageEngineError(
-                "Protocol v2 stage execution requires a persisted input identity"
+                "Protocol v2 stage execution requires a persisted input manifest"
             )
-        return protocol_input
+        return manifest
 
 
 # Names used by callers that describe the component as a service or engine.

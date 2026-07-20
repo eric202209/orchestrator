@@ -320,7 +320,11 @@ class PlanningArtifact(Base):
 
 
 class PlanningProtocolInput(Base):
-    """Immutable, non-secret identity snapshot for a planning input."""
+    """Immutable Protocol v2 manifest envelope plus Phase 28B projections.
+
+    ``manifest_json`` and ``manifest_hash`` are the authority.  The older
+    identity columns remain as compatibility metadata for existing readers.
+    """
 
     __tablename__ = "planning_protocol_inputs"
 
@@ -339,6 +343,10 @@ class PlanningProtocolInput(Base):
     provider_identity = Column(String(255), nullable=False)
     model_configuration = Column(JSON, nullable=False)
     repository_identity = Column(String(512), nullable=False)
+    manifest_id = Column(String(128), nullable=True, index=True)
+    manifest_schema_version = Column(String(64), nullable=True)
+    manifest_hash = Column(String(64), nullable=True, index=True)
+    manifest_json = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     planning_session = relationship("PlanningSession", back_populates="protocol_input")

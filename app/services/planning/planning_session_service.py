@@ -47,6 +47,10 @@ from app.services.planning.protocol_persistence import (
     PlanningProtocolPersistenceService,
     SUPPORTED_PROTOCOL_VERSIONS,
 )
+from app.services.planning.input_manifest import (
+    InputManifestBuilder,
+    collect_repository_snapshot,
+)
 from app.services.orchestration.stage_engine import (
     StageDefinition,
     StageExecutor,
@@ -172,35 +176,148 @@ class PlanningSessionService:
                 detail="This project already has an active planning session",
             ) from exc
 
-        if normalized_protocol_version == PROTOCOL_V2:
-            self.protocol_persistence.record_input_identity(
-                session.id,
-                planning_input=session.prompt,
-                engineering_context_identity=(
-                    f"planning-session:{session.generation_id}:unassembled"
-                ),
-                provider_identity=session.planning_backend or source_brain or "unknown",
-                model_configuration={
-                    "planner_model": session.planner_model or "unknown",
-                    "reasoning_profile": session.reasoning_profile or "default",
-                    "configuration_fingerprint": session.configuration_fingerprint
-                    or "unknown",
-                },
-                repository_identity=(project.workspace_path or f"project:{project.id}"),
-                protocol_version=PROTOCOL_V2,
-                session_generation_id=session.generation_id,
-            )
-
         msg_metadata: dict = {"kind": "prompt"}
         if skip_clarification:
             msg_metadata["skip_clarification"] = True
         if skip_clarification and self._looks_like_replan_prompt(prompt):
             msg_metadata["replan_recovery"] = True
-        self._add_message(session, "user", prompt.strip(), metadata=msg_metadata)
+        initial_message = self._add_message(
+            session, "user", prompt.strip(), metadata=msg_metadata
+        )
+        if normalized_protocol_version == PROTOCOL_V2:
+            self.db.flush()
+            self._persist_protocol_v2_manifest(session, project, initial_message)
         self.db.commit()
         self.schedule_processing(session.id)
         self.db.refresh(session)
         return session
+
+    def _persist_protocol_v2_manifest(
+        self,
+        session: PlanningSession,
+        project: Project,
+        initial_message: PlanningMessage,
+    ) -> None:
+        """Select and persist all v2 inputs before any stage can execute."""
+
+        selection = self._select_engineering_context(session, project)
+        try:
+            project_root = resolve_project_root(project, self.db)
+            repository = collect_repository_snapshot(project_root)
+        except Exception as exc:
+            logger.warning(
+                "[PROTOCOL_V2] repository identity collection unavailable reason=%s",
+                str(exc)[:240],
+            )
+            repository = {
+                "available": False,
+                "identity": project.workspace_path or f"project:{project.id}",
+                "workspace": project.workspace_path,
+                "omission_reason": "repository_identity_unavailable",
+            }
+
+        context = selection.context
+        context_identity = {
+            "freshness": ("fresh" if context is not None else "not_selected"),
+            "selection_reason": selection.reason,
+        }
+        if context is not None:
+            context_identity.update(
+                {
+                    "object_id": context.object_id,
+                    "subsystem_version": context.subsystem_version,
+                    "content_hash": context.commit_fingerprint,
+                    "repository_revision": context.commit_sha,
+                }
+            )
+        structural = selection.structural_information
+        structural_identity = {
+            "freshness": str(
+                selection.diagnostics.get(
+                    "structural_information_reason", "not_selected"
+                )
+            ),
+        }
+        if structural is not None:
+            structural_identity.update(
+                {
+                    "object_id": structural.object_id,
+                    "schema_version": structural.to_dict().get("schema_version"),
+                    "algorithm_version": structural.to_dict().get("algorithm_version"),
+                    "content_hash": structural.content_hash,
+                    "freshness": "fresh",
+                }
+            )
+        stage_configuration = {
+            "stages": [
+                {
+                    "identifier": definition.identifier,
+                    "version": definition.version,
+                    "prerequisites": list(definition.prerequisites),
+                }
+                for definition in self.stage_executor.graph.definitions
+            ]
+        }
+        messages = [
+            {
+                "id": message.id,
+                "role": message.role,
+                "prompt_id": message.prompt_id,
+                "content": message.content,
+                "metadata": message.metadata_json or {},
+                "created_at": (
+                    message.created_at.isoformat() if message.created_at else None
+                ),
+            }
+            for message in session.messages
+            if message.id != initial_message.id
+        ]
+        now = datetime.now(timezone.utc).isoformat()
+        manifest = InputManifestBuilder.build(
+            session_id=session.id,
+            session_generation_id=session.generation_id,
+            planning_request={
+                "message_id": initial_message.id,
+                "role": initial_message.role,
+                "content": initial_message.content,
+                "metadata": initial_message.metadata_json or {},
+            },
+            clarification_messages=messages,
+            project_metadata={
+                "project_id": project.id,
+                "name": project.name,
+                "description": project.description,
+                "github_url": project.github_url,
+                "branch": project.branch,
+            },
+            project_rules=project.project_rules,
+            repository=repository,
+            engineering_context=context_identity,
+            structural_information=structural_identity,
+            runtime_configuration={
+                "provider": session.planning_backend
+                or session.source_brain
+                or "unknown",
+                "backend": session.planning_backend or "unknown",
+                "model": session.planner_model or "unknown",
+                "reasoning_profile": session.reasoning_profile or "default",
+            },
+            stage_configuration=stage_configuration,
+            selection_timestamps={
+                "engineering_context": now,
+                "structural_information": now,
+            },
+        )
+        self.protocol_persistence.record_input_manifest(
+            session.id,
+            manifest=manifest,
+            model_configuration={
+                "planner_model": session.planner_model or "unknown",
+                "reasoning_profile": session.reasoning_profile or "default",
+                "configuration_fingerprint": session.configuration_fingerprint
+                or manifest.configuration_identity.stage_configuration_fingerprint,
+            },
+        )
 
     def respond(self, session_id: int, response: str) -> PlanningSession:
         session = self.get_session(session_id)

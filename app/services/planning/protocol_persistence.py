@@ -25,6 +25,11 @@ from app.models import (
     PlanningProtocolInput,
     PlanningSession,
 )
+from app.services.planning.input_manifest import (
+    InputManifest,
+    InputManifestBuilder,
+    InputManifestValidationError,
+)
 
 PROTOCOL_V1 = "v1"
 PROTOCOL_V2 = "v2"
@@ -197,6 +202,81 @@ class PlanningProtocolPersistenceService:
             fencing_token=fencing_token,
         )
 
+    def record_input_manifest(
+        self,
+        session_id: int,
+        *,
+        manifest: InputManifest,
+        model_configuration: Mapping[str, Any] | None = None,
+    ) -> PlanningProtocolInput:
+        """Persist the complete immutable manifest in the 28B input envelope."""
+
+        session = self._get_session(session_id)
+        if session.protocol_version != PROTOCOL_V2:
+            raise ProtocolPersistenceError(
+                "input manifests participate only in Protocol v2"
+            )
+        try:
+            manifest.validate()
+        except InputManifestValidationError as exc:
+            raise ProtocolPersistenceError(str(exc)) from exc
+        if manifest.protocol_version != session.protocol_version:
+            raise ProtocolPersistenceError(
+                "manifest protocol version does not match session"
+            )
+        if manifest.generation_identity.session_id != session.id:
+            raise ProtocolPersistenceError("manifest ownership does not match session")
+        if manifest.generation_identity.session_generation_id != session.generation_id:
+            raise ProtocolOwnershipError("manifest generation does not match session")
+        configuration = dict(
+            model_configuration
+            or {
+                "model": manifest.configuration_identity.model,
+                "reasoning_profile": manifest.configuration_identity.reasoning_profile,
+                "configuration_fingerprint": manifest.configuration_identity.stage_configuration_fingerprint,
+            }
+        )
+        safe_configuration = _safe_model_configuration(configuration)
+        context_identity = (
+            manifest.engineering_context_identity.object_id
+            or manifest.engineering_context_identity.selection_reason
+        )
+        repository_identity = (
+            manifest.repository_identity.identity
+            or manifest.repository_identity.omission_reason
+            or "repository_unavailable"
+        )
+        existing = (
+            self.db.query(PlanningProtocolInput)
+            .filter(PlanningProtocolInput.planning_session_id == session.id)
+            .one_or_none()
+        )
+        if existing is not None:
+            if (
+                existing.manifest_hash != manifest.manifest_hash
+                or existing.manifest_json != manifest.to_dict()
+            ):
+                raise ProtocolPersistenceError("planning input manifest is immutable")
+            return existing
+
+        record = PlanningProtocolInput(
+            planning_session_id=session.id,
+            protocol_version=manifest.protocol_version,
+            session_generation_id=session.generation_id,
+            input_hash=manifest.manifest_hash,
+            engineering_context_identity=context_identity[:512],
+            provider_identity=manifest.configuration_identity.provider[:255],
+            model_configuration=safe_configuration,
+            repository_identity=repository_identity[:512],
+            manifest_id=manifest.manifest_id,
+            manifest_schema_version=manifest.schema_version,
+            manifest_hash=manifest.manifest_hash,
+            manifest_json=manifest.to_dict(),
+        )
+        self.db.add(record)
+        self.db.flush()
+        return record
+
     def record_input_identity(
         self,
         session_id: int,
@@ -209,7 +289,7 @@ class PlanningProtocolPersistenceService:
         protocol_version: str | None = None,
         session_generation_id: str | None = None,
     ) -> PlanningProtocolInput:
-        """Persist one immutable, non-secret identity snapshot per session."""
+        """Compatibility adapter that creates the canonical v2 manifest."""
 
         session = self._get_session(session_id)
         protocol = _normalize_protocol_version(
@@ -237,41 +317,107 @@ class PlanningProtocolPersistenceService:
             repository_identity, "repository_identity", 512
         )
         model_config = _safe_model_configuration(model_configuration)
-        identity_payload = {
-            "planning_input_hash": hashlib.sha256(
+        if protocol != PROTOCOL_V2:
+            # Preserve the Phase 28B compatibility surface for callers that
+            # explicitly use the old helper outside Protocol v2 execution.
+            identity_payload = {
+                "planning_input_hash": hashlib.sha256(
+                    planning_input.encode("utf-8", errors="surrogateescape")
+                ).hexdigest(),
+                "engineering_context_identity": context_identity,
+                "provider_identity": provider,
+                "model_configuration": model_config,
+                "protocol_version": protocol,
+                "repository_identity": repository,
+            }
+            input_hash = _sha256_json(identity_payload)
+            existing = (
+                self.db.query(PlanningProtocolInput)
+                .filter(PlanningProtocolInput.planning_session_id == session.id)
+                .one_or_none()
+            )
+            if existing is not None:
+                if existing.input_hash != input_hash:
+                    raise ProtocolPersistenceError(
+                        "planning input identity is immutable"
+                    )
+                return existing
+            record = PlanningProtocolInput(
+                planning_session_id=session.id,
+                protocol_version=protocol,
+                session_generation_id=generation,
+                input_hash=input_hash,
+                engineering_context_identity=context_identity,
+                provider_identity=provider,
+                model_configuration=model_config,
+                repository_identity=repository,
+            )
+            self.db.add(record)
+            self.db.flush()
+            return record
+        manifest = InputManifestBuilder.from_compatibility_identity(
+            session_id=session.id,
+            session_generation_id=generation,
+            planning_input_hash=hashlib.sha256(
                 planning_input.encode("utf-8", errors="surrogateescape")
             ).hexdigest(),
-            "engineering_context_identity": context_identity,
-            "provider_identity": provider,
-            "model_configuration": model_config,
-            "protocol_version": protocol,
-            "repository_identity": repository,
-        }
-        input_hash = _sha256_json(identity_payload)
-
-        existing = (
-            self.db.query(PlanningProtocolInput)
-            .filter(PlanningProtocolInput.planning_session_id == session.id)
-            .one_or_none()
-        )
-        if existing is not None:
-            if existing.input_hash != input_hash:
-                raise ProtocolPersistenceError("planning input identity is immutable")
-            return existing
-
-        record = PlanningProtocolInput(
-            planning_session_id=session.id,
-            protocol_version=protocol,
-            session_generation_id=generation,
-            input_hash=input_hash,
             engineering_context_identity=context_identity,
             provider_identity=provider,
             model_configuration=model_config,
             repository_identity=repository,
         )
-        self.db.add(record)
-        self.db.flush()
-        return record
+        return self.record_input_manifest(
+            session.id,
+            manifest=manifest,
+            model_configuration=model_config,
+        )
+
+    def load_input_manifest(self, session_id: int) -> InputManifest | None:
+        """Reload and verify the persisted manifest; never rebuild from live state."""
+
+        session = self._get_session(session_id)
+        if session.protocol_version != PROTOCOL_V2:
+            return None
+        record = (
+            self.db.query(PlanningProtocolInput)
+            .filter(PlanningProtocolInput.planning_session_id == session.id)
+            .one_or_none()
+        )
+        if record is None or not record.manifest_json or not record.manifest_hash:
+            raise ProtocolPersistenceError(
+                "Protocol v2 session has no persisted input manifest"
+            )
+        try:
+            manifest = InputManifest.from_dict(record.manifest_json)
+        except InputManifestValidationError as exc:
+            raise ProtocolPersistenceError(
+                f"invalid persisted input manifest: {exc}"
+            ) from exc
+        if record.protocol_version != session.protocol_version:
+            raise ProtocolPersistenceError("persisted input envelope protocol mismatch")
+        if record.session_generation_id != session.generation_id:
+            raise ProtocolOwnershipError("persisted input envelope owner mismatch")
+        if manifest.manifest_hash != record.manifest_hash:
+            raise ProtocolPersistenceError("persisted input manifest hash mismatch")
+        if record.input_hash != manifest.manifest_hash:
+            raise ProtocolPersistenceError(
+                "compatibility input hash diverges from manifest"
+            )
+        if manifest.schema_version not in {
+            "protocol-v2-input-manifest/1.0",
+        }:
+            raise ProtocolPersistenceError(
+                "unsupported persisted input manifest schema"
+            )
+        if manifest.protocol_version != session.protocol_version:
+            raise ProtocolPersistenceError("persisted input manifest protocol mismatch")
+        if manifest.generation_identity.session_id != session.id:
+            raise ProtocolOwnershipError("persisted input manifest owner mismatch")
+        if manifest.generation_identity.session_generation_id != session.generation_id:
+            raise ProtocolOwnershipError("persisted input manifest generation mismatch")
+        if record.manifest_id != manifest.manifest_id:
+            raise ProtocolPersistenceError("persisted input manifest identity mismatch")
+        return manifest
 
     def record_checkpoint(
         self,
@@ -663,6 +809,7 @@ class PlanningProtocolPersistenceService:
         """Return durable protocol state for a future stage recovery worker."""
 
         session = self._get_session(session_id)
+        input_manifest = self.load_input_manifest(session_id)
         checkpoints = (
             self.db.query(PlanningCheckpoint)
             .filter(PlanningCheckpoint.planning_session_id == session.id)
@@ -674,6 +821,7 @@ class PlanningProtocolPersistenceService:
             "protocol_version": session.protocol_version,
             "session_generation_id": session.generation_id,
             "input": session.protocol_input,
+            "input_manifest": input_manifest,
             "checkpoints": checkpoints,
             "effective_checkpoints": self.effective_checkpoints(session.id),
             "completion_manifest": session.completion_manifest,

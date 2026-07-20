@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Iterable
+import json
 import uuid
 
 from sqlalchemy import inspect, text
@@ -956,6 +957,89 @@ def _migration_027_protocol_v2_persistence(engine: Engine) -> None:
             connection.execute(text(statement))
 
 
+def _migration_028_protocol_v2_input_manifest(engine: Engine) -> None:
+    """Add the complete immutable Input Manifest to the 28B envelope."""
+
+    if "planning_protocol_inputs" not in _table_names(engine):
+        return
+    statements: list[str] = []
+    if not _has_column(engine, "planning_protocol_inputs", "manifest_id"):
+        statements.append(
+            "ALTER TABLE planning_protocol_inputs ADD COLUMN manifest_id VARCHAR(128)"
+        )
+    if not _has_column(engine, "planning_protocol_inputs", "manifest_schema_version"):
+        statements.append(
+            "ALTER TABLE planning_protocol_inputs ADD COLUMN manifest_schema_version VARCHAR(64)"
+        )
+    if not _has_column(engine, "planning_protocol_inputs", "manifest_hash"):
+        statements.append(
+            "ALTER TABLE planning_protocol_inputs ADD COLUMN manifest_hash VARCHAR(64)"
+        )
+    if not _has_column(engine, "planning_protocol_inputs", "manifest_json"):
+        statements.append(
+            "ALTER TABLE planning_protocol_inputs ADD COLUMN manifest_json JSON"
+        )
+    if statements:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_planning_protocol_inputs_manifest_hash "
+                "ON planning_protocol_inputs (manifest_hash)"
+            )
+        )
+
+    # Phase 28B rows contain enough non-secret identity to form an explicit
+    # compatibility manifest without consulting live project state.  This is
+    # a one-time adapter; later recovery reads only manifest_json.
+    from app.services.planning.input_manifest import InputManifestBuilder
+
+    with engine.begin() as connection:
+        rows = (
+            connection.execute(
+                text(
+                    "SELECT id, planning_session_id, session_generation_id, input_hash, "
+                    "engineering_context_identity, provider_identity, model_configuration, "
+                    "repository_identity FROM planning_protocol_inputs "
+                    "WHERE protocol_version = 'v2' AND manifest_json IS NULL"
+                )
+            )
+            .mappings()
+            .all()
+        )
+        for row in rows:
+            raw_configuration = row["model_configuration"]
+            if isinstance(raw_configuration, str):
+                raw_configuration = json.loads(raw_configuration)
+            manifest = InputManifestBuilder.from_compatibility_identity(
+                session_id=int(row["planning_session_id"]),
+                session_generation_id=str(row["session_generation_id"]),
+                planning_input_hash=str(row["input_hash"]),
+                engineering_context_identity=str(row["engineering_context_identity"]),
+                provider_identity=str(row["provider_identity"]),
+                model_configuration=dict(raw_configuration),
+                repository_identity=str(row["repository_identity"]),
+            )
+            connection.execute(
+                text(
+                    "UPDATE planning_protocol_inputs SET input_hash = :input_hash, "
+                    "manifest_id = :manifest_id, manifest_schema_version = :schema_version, "
+                    "manifest_hash = :manifest_hash, manifest_json = :manifest_json "
+                    "WHERE id = :id"
+                ),
+                {
+                    "id": row["id"],
+                    "input_hash": manifest.manifest_hash,
+                    "manifest_id": manifest.manifest_id,
+                    "schema_version": manifest.schema_version,
+                    "manifest_hash": manifest.manifest_hash,
+                    "manifest_json": json.dumps(manifest.to_dict(), ensure_ascii=False),
+                },
+            )
+
+
 def _migration_014_task_workflow_stage(engine: Engine) -> None:
     if "tasks" not in _table_names(engine):
         return
@@ -1373,6 +1457,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="027_protocol_v2_persistence",
         description="Add Protocol v2 input, checkpoint, ownership, and manifest persistence",
         upgrade=_migration_027_protocol_v2_persistence,
+    ),
+    Migration(
+        version="028_protocol_v2_input_manifest",
+        description="Persist canonical Protocol v2 Input Manifest provenance",
+        upgrade=_migration_028_protocol_v2_input_manifest,
     ),
 )
 

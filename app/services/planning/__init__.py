@@ -28,6 +28,18 @@ _EXPORTS = {
         "app.services.planning.protocol_persistence",
         "PlanningProtocolPersistenceService",
     ),
+    "InputManifest": (
+        "app.services.planning.input_manifest",
+        "InputManifest",
+    ),
+    "InputManifestBuilder": (
+        "app.services.planning.input_manifest",
+        "InputManifestBuilder",
+    ),
+    "validate_input_manifest": (
+        "app.services.planning.input_manifest",
+        "validate_input_manifest",
+    ),
     "ProtocolPersistenceService": (
         "app.services.planning.protocol_persistence",
         "ProtocolPersistenceService",
