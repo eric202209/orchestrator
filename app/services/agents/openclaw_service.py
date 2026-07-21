@@ -43,7 +43,9 @@ from app.services.agents.interfaces import (
     UnsupportedCapabilityError,
 )
 from app.services.agents.runtime_adapters.openclaw_adapter import (
+    has_verified_openclaw_provider_result,
     normalize_openclaw_execution_result,
+    parse_openclaw_provider_result,
 )
 from app.services.agents.runtime_configuration import RuntimeConfiguration
 from app.services.agents.runtime_invocation import RuntimeInvocationOptions
@@ -189,6 +191,7 @@ class OpenClawNoOutputTimeoutError(OpenClawSessionError):
     def __init__(self, message: str, diagnostics: Dict[str, Any]):
         super().__init__(message)
         self.runtime_diagnostics = diagnostics
+        self.provider_failure_classification = "provider_timeout"
 
 
 class OpenClawAgentSelectionError(OpenClawSessionError):
@@ -213,8 +216,17 @@ class OpenClawSessionService:
     _summarize_cli_error = staticmethod(_summarize_cli_error)
 
     def _parse_openclaw_response(
-        self, result: Any, *, expected_session_id: str | None = None
+        self,
+        result: Any,
+        *,
+        expected_session_id: str | None = None,
+        strict_provider_result: bool = False,
     ) -> Dict[str, Any]:
+        if strict_provider_result:
+            return parse_openclaw_provider_result(
+                result,
+                expected_session_id=expected_session_id,
+            )
         return _parse_openclaw_cli_response(
             result,
             self._log_entry,
@@ -387,6 +399,7 @@ class OpenClawSessionService:
         source_brain: str = "local",
         timeout_seconds: int = 180,
         session_prefix: str = "planning",
+        strict_provider_result: bool = False,
     ) -> List[str]:
         """Build a one-shot CLI agent command for synchronous planning-style tasks."""
 
@@ -411,6 +424,8 @@ class OpenClawSessionService:
                 str(timeout_seconds),
             ]
         )
+        if strict_provider_result:
+            full_cmd.extend(["--thinking", "off"])
         return full_cmd
 
     def _bind_planning_session_main_key(self, runtime_session_key: str) -> None:
@@ -756,6 +771,7 @@ class OpenClawSessionService:
         invocation_kind: str,
         isolate_workspace_context: bool = False,
         no_output_timeout_seconds: Optional[int] = None,
+        strict_provider_result: bool = False,
         expected_project_root: Optional[str] = None,
         openclaw_version: Optional[str] = None,
         git_containment_active: bool = False,
@@ -817,6 +833,7 @@ class OpenClawSessionService:
                 (prompt or "").encode("utf-8")
             ).hexdigest()[:12],
             "no_output_timeout_seconds": no_output_timeout_seconds,
+            "strict_provider_result": strict_provider_result,
             # Phase 22C-0 diagnostics: make selected agent, resolved project
             # root, OpenClaw version, and git containment status directly
             # readable from run-start identity without reconstructing them
@@ -965,6 +982,7 @@ class OpenClawSessionService:
         invocation_kind: str = "prompt",
         isolate_workspace_context: bool = False,
         no_output_timeout_seconds: Optional[int] = None,
+        strict_provider_result: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], Dict[str, Any]]:
         if cwd is None and (
             self.task_model is not None or self.session_model is not None
@@ -1010,6 +1028,7 @@ class OpenClawSessionService:
                 invocation_kind=invocation_kind,
                 isolate_workspace_context=isolate_workspace_context,
                 no_output_timeout_seconds=no_output_timeout_seconds,
+                strict_provider_result=strict_provider_result,
                 expected_project_root=expected_project_root,
                 git_containment_active=git_guard_shim_dir is not None,
             ),
@@ -1021,6 +1040,7 @@ class OpenClawSessionService:
                 *full_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.DEVNULL,
                 limit=self.STREAM_READ_LIMIT,
                 cwd=cwd,
                 env=subprocess_env,
@@ -1093,11 +1113,16 @@ class OpenClawSessionService:
                 # process-group cleanup instead of waiting for EOF.
                 stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
                 stderr_text = "\n".join(filter(None, stderr_chunks)).strip()
-                response_received = self._text_contains_model_content(stdout_text)
-                if not response_received:
-                    response_received = bool(
-                        self._recover_json_like_output_from_stderr(stderr_text)
+                if strict_provider_result:
+                    response_received = has_verified_openclaw_provider_result(
+                        stdout_text, stderr_text
                     )
+                else:
+                    response_received = self._text_contains_model_content(stdout_text)
+                    if not response_received:
+                        response_received = bool(
+                            self._recover_json_like_output_from_stderr(stderr_text)
+                        )
                 if response_received:
                     response_ready_event.set()
 
@@ -1279,12 +1304,14 @@ class OpenClawSessionService:
         proc: subprocess.CompletedProcess[str],
         *,
         expected_session_id: str | None = None,
+        strict_provider_result: bool = False,
     ) -> Dict[str, Any]:
         """Normalize subprocess output into the same payload shape as streaming execution."""
 
         return self._parse_openclaw_response(
             proc,
             expected_session_id=expected_session_id,
+            strict_provider_result=strict_provider_result,
         )
 
     def reports_context_overflow(self, result: Optional[Dict[str, Any]]) -> bool:
@@ -2483,6 +2510,10 @@ class OpenClawSessionService:
             raise UnsupportedCapabilityError(
                 "The OpenClaw adapter cannot represent provider-specific invocation options."
             )
+        strict_provider_result = session_prefix in {
+            "planning-brief",
+            "structured-task-plan",
+        }
         planning_temp_dir = None
         previous_cwd_override = self.execution_cwd_override
         try:
@@ -2543,6 +2574,7 @@ class OpenClawSessionService:
                 source_brain=source_brain,
                 timeout_seconds=timeout_seconds,
                 session_prefix=session_prefix,
+                strict_provider_result=strict_provider_result,
             )
             isolated_temp_dir = None
             if isolate_workspace_context:
@@ -2561,18 +2593,23 @@ class OpenClawSessionService:
                     invocation_kind=session_prefix,
                     isolate_workspace_context=isolate_workspace_context,
                     no_output_timeout_seconds=no_output_timeout_seconds,
+                    strict_provider_result=strict_provider_result,
                 )
             finally:
                 if isolated_temp_dir is not None:
                     isolated_temp_dir.cleanup()
         except subprocess.TimeoutExpired as exc:
-            raise OpenClawSessionError(
+            error = OpenClawSessionError(
                 f"Prompt invocation timed out after {timeout_seconds}s"
-            ) from exc
+            )
+            error.provider_failure_classification = "provider_timeout"
+            raise error from exc
         except asyncio.TimeoutError as exc:
-            raise OpenClawSessionError(
+            error = OpenClawSessionError(
                 f"Prompt invocation timed out after {timeout_seconds}s"
-            ) from exc
+            )
+            error.provider_failure_classification = "provider_timeout"
+            raise error from exc
         except OpenClawNoOutputTimeoutError:
             raise
         except asyncio.CancelledError:
@@ -2588,8 +2625,12 @@ class OpenClawSessionService:
             expected_session_id=(
                 runtime_session_id if session_prefix.startswith("planning") else None
             ),
+            strict_provider_result=strict_provider_result,
         )
-        result["runtime_diagnostics"] = diagnostics
+        result["runtime_diagnostics"] = {
+            **diagnostics,
+            **dict(result.pop("provider_result_diagnostics", {}) or {}),
+        }
         return result
 
     def _log_entry(

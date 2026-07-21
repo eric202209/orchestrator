@@ -64,7 +64,17 @@ PLANNING_BRIEF_CANDIDATE_FIELDS = (
 )
 DEFAULT_SOURCE_CHAR_LIMIT = 20_000
 DEFAULT_TOTAL_SOURCE_CHAR_LIMIT = 100_000
+DEFAULT_PROVIDER_TIMEOUT_SECONDS = 360
+DEFAULT_PROVIDER_FIRST_OUTPUT_TIMEOUT_SECONDS = 320
 _CANONICAL_RECORD_REF = re.compile(r"^[A-Z]+-[0-9]{3}$")
+_PROVIDER_RUNTIME_FAILURES = frozenset(
+    {
+        "provider_timeout",
+        "provider_process_failure",
+        "provider_result_missing",
+        "provider_result_ambiguous",
+    }
+)
 
 
 class PlanningBriefStageError(RuntimeError):
@@ -91,6 +101,18 @@ class PlanningBriefValidationError(PlanningBriefStageError):
 
 class PlanningBriefApplicationError(PlanningBriefStageError):
     classification = "application_error"
+
+
+class PlanningBriefProviderRuntimeError(PlanningBriefStageError):
+    """A provider-boundary failure with a stable non-semantic class."""
+
+    def __init__(self, classification: str, message: str):
+        self.classification = (
+            classification
+            if classification in _PROVIDER_RUNTIME_FAILURES
+            else "transport_failure"
+        )
+        super().__init__(message)
 
 
 class PlanningBriefProvider(Protocol):
@@ -457,30 +479,63 @@ class RuntimePlanningBriefProvider:
         self.db = db
 
     def generate(self, request: PlanningBriefProviderInput) -> Any:
+        candidate_fields = ", ".join(PLANNING_BRIEF_CANDIDATE_FIELDS)
         prompt = (
-            "Generate a Protocol v2 Planning Brief candidate. Return JSON only. "
+            "Generate a Protocol v2 Planning Brief candidate. Use only INPUT; "
+            "do not call tools, inspect files, or emit reasoning. Return JSON only. "
+            "Top-level keys must be exactly: "
+            f"{candidate_fields}. "
+            "Do not use legacy keys such as title, description, objectives, "
+            "deliverables, timeline, brief_type, or top-level source_refs. "
+            "The objective value is one object with statement and source_refs; "
+            "every other top-level value is an array of semantic records. "
+            "Use only fields defined by the supplied Protocol v2 contract and no IDs. "
             "The object must contain exactly the semantic candidate keys supplied "
             "by the contract; omit every id, schema, hash, lifecycle, and checkpoint "
             "field. Use manifest source_id values in source_refs. Internal record "
             "references use objective or collection[index], for example requirements[0]. "
-            "Do not invent new source IDs.\n\nINPUT:\n"
+            "Do not invent new source IDs. Stop after one JSON object; emit no Markdown, "
+            "fences, commentary, or explanation.\n\nINPUT:\n"
             + request.canonical_bytes().decode("utf-8")
         )
         try:
+            timeout_seconds = int(
+                request.stage_configuration.get(
+                    "provider_timeout_seconds", DEFAULT_PROVIDER_TIMEOUT_SECONDS
+                )
+            )
+            first_output_timeout_seconds = int(
+                request.stage_configuration.get(
+                    "provider_first_output_timeout_seconds",
+                    DEFAULT_PROVIDER_FIRST_OUTPUT_TIMEOUT_SECONDS,
+                )
+            )
             result = invoke_runtime_prompt(
                 self.db,
                 prompt,
                 project_id=None,
                 source_brain="local",
-                timeout_seconds=int(
-                    request.stage_configuration.get("provider_timeout_seconds", 180)
-                ),
+                timeout_seconds=timeout_seconds,
+                no_output_timeout_seconds=first_output_timeout_seconds,
                 session_prefix="planning-brief",
                 role=BackendRole.PLANNING,
             )
         except Exception as exc:
+            classification = getattr(
+                exc, "provider_failure_classification", None
+            ) or getattr(exc, "classification", None)
+            if classification in _PROVIDER_RUNTIME_FAILURES:
+                raise PlanningBriefProviderRuntimeError(
+                    classification, str(exc)
+                ) from exc
             raise PlanningBriefTransportError("provider invocation failed") from exc
         if not isinstance(result, Mapping) or result.get("status") == "failed":
+            classification = (result or {}).get("failure_classification")
+            if classification in _PROVIDER_RUNTIME_FAILURES:
+                raise PlanningBriefProviderRuntimeError(
+                    classification,
+                    str((result or {}).get("error") or classification),
+                )
             raise PlanningBriefTransportError("provider returned a failed result")
         output = result.get("output")
         if not isinstance(output, (str, Mapping)):
@@ -587,12 +642,15 @@ def build_protocol_v2_stage_definitions(
 __all__ = [
     "DEFAULT_SOURCE_CHAR_LIMIT",
     "DEFAULT_TOTAL_SOURCE_CHAR_LIMIT",
+    "DEFAULT_PROVIDER_FIRST_OUTPUT_TIMEOUT_SECONDS",
+    "DEFAULT_PROVIDER_TIMEOUT_SECONDS",
     "PLANNING_BRIEF_CANDIDATE_FIELDS",
     "PlanningBriefApplicationError",
     "PlanningBriefCandidate",
     "PlanningBriefProvider",
     "PlanningBriefProviderInput",
     "PlanningBriefProviderOutputError",
+    "PlanningBriefProviderRuntimeError",
     "PlanningBriefStage",
     "PlanningBriefStageError",
     "PlanningBriefTransportError",
