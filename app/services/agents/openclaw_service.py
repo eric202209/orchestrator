@@ -131,6 +131,9 @@ OPENCLAW_CLI_LOCK_MARKERS = (
     "session file locked",
     "sessions.json.lock",
 )
+STRICT_PROVIDER_SESSION_PREFIXES = frozenset({"planning-brief", "structured-task-plan"})
+PINNED_OPENCLAW_VERSION = "2026.4.10"
+STRICT_PROVIDER_MAX_OUTPUT_TOKENS = 16_384
 
 # Phase 22C-0: process-lifetime cache for `openclaw --version` diagnostics
 # (see OpenClawSessionService._resolve_openclaw_cli_version).
@@ -198,6 +201,10 @@ class OpenClawAgentSelectionError(OpenClawSessionError):
     """Raised when no configured OpenClaw agent matches the resolved project
     workspace and Orchestrator refuses to fall back to OpenClaw's default
     agent/workspace (Phase 22C-0 fail-closed containment)."""
+
+
+class OpenClawProviderControlError(OpenClawSessionError):
+    """Raised when strict Protocol v2 controls cannot be proven/applied."""
 
 
 class OpenClawSessionService:
@@ -277,6 +284,7 @@ class OpenClawSessionService:
         # never the operator's real ~/.openclaw/openclaw.json.
         self._openclaw_config_path_override: Optional[Path] = None
         self._workspace_binding: Optional[ExecutorWorkspaceBinding] = None
+        self._strict_planning_config_dir: tempfile.TemporaryDirectory | None = None
         self.runtime_configuration = runtime_configuration
         self.backend_role: Optional[str] = (
             runtime_configuration.role.value if runtime_configuration else None
@@ -285,6 +293,7 @@ class OpenClawSessionService:
         self.openclaw_session_key: Optional[str] = None
         self._task_session_id: Optional[str] = None
         self._last_selected_openclaw_agent_id: Optional[str] = None
+        self._strict_provider_controls: Optional[Dict[str, Any]] = None
         self.process: Optional[subprocess.Popen] = None
         backend_name = (
             runtime_configuration.backend_name
@@ -408,9 +417,16 @@ class OpenClawSessionService:
         if session_prefix.startswith("planning"):
             runtime_session_key += f"-{uuid.uuid4().hex[:12]}"
             self._bind_planning_session_main_key(runtime_session_key)
-        full_cmd = self._build_openclaw_agent_command(
-            cmd, cwd=self._resolve_execution_cwd()
-        )
+        if strict_provider_result:
+            full_cmd = self._build_openclaw_agent_command(
+                cmd,
+                cwd=self._resolve_execution_cwd(),
+                strict_provider_result=True,
+            )
+        else:
+            full_cmd = self._build_openclaw_agent_command(
+                cmd, cwd=self._resolve_execution_cwd()
+            )
         if source_brain == "local":
             full_cmd.append("--local")
         full_cmd.extend(
@@ -501,7 +517,11 @@ class OpenClawSessionService:
         return None
 
     def _build_openclaw_agent_command(
-        self, base_command: List[str], *, cwd: Optional[str]
+        self,
+        base_command: List[str],
+        *,
+        cwd: Optional[str],
+        strict_provider_result: bool = False,
     ) -> List[str]:
         """Select the OpenClaw agent whose configured workspace matches ``cwd``.
 
@@ -522,6 +542,14 @@ class OpenClawSessionService:
             return full_cmd
 
         self._last_selected_openclaw_agent_id = None
+        if strict_provider_result:
+            error = (
+                "Strict Protocol v2 planning requires an explicitly selected "
+                "project-scoped OpenClaw agent. The resolved cwd is null, so "
+                "refusing OpenClaw's default main agent/workspace."
+            )
+            self._log_entry("ERROR", f"[OPENCLAW] {error}", commit=True)
+            raise OpenClawAgentSelectionError(error)
         if cwd:
             error = (
                 "No OpenClaw agent is configured with a workspace matching the "
@@ -559,6 +587,80 @@ class OpenClawSessionService:
             raise OpenClawAgentSelectionError(str(exc)) from exc
         self._openclaw_config_path_override = self._workspace_binding.config_path
 
+    def _configured_strict_planning_agent_id(self) -> Optional[str]:
+        configured = os.environ.get(
+            "ORCHESTRATOR_OPENCLAW_PROTOCOL_V2_PLANNING_AGENT", ""
+        ).strip()
+        if configured:
+            return configured
+        try:
+            config = json.loads(
+                self._openclaw_config_path().read_text(encoding="utf-8")
+            )
+        except (OSError, TypeError, ValueError):
+            return None
+        defaults = (config.get("agents") or {}).get("defaults") or {}
+        value = defaults.get("protocolV2PlanningAgent")
+        return str(value).strip() if value else None
+
+    def _bind_dedicated_strict_planning_agent(
+        self, runtime_workspace: Path, agent_id: str
+    ) -> None:
+        """Bind an explicitly configured dedicated planning agent.
+
+        This is Option A of the Protocol v2 isolation contract.  The agent
+        identity must already exist in the operator config; this method only
+        copies that config and rewrites its workspace/session store for one
+        invocation.  It never creates an agent identity or changes persistent
+        OpenClaw state.
+        """
+
+        real_config_path = self._openclaw_config_path()
+        try:
+            config = json.loads(real_config_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError) as exc:
+            raise OpenClawAgentSelectionError(
+                "Unable to read configured Protocol v2 planning agent"
+            ) from exc
+        agents = (config.get("agents") or {}).get("list") or []
+        selected = next(
+            (
+                agent
+                for agent in agents
+                if isinstance(agent, dict)
+                and str(agent.get("id") or "").strip() == agent_id
+            ),
+            None,
+        )
+        if selected is None:
+            raise OpenClawAgentSelectionError(
+                f"Configured Protocol v2 planning agent {agent_id!r} does not exist"
+            )
+        config_dir = tempfile.TemporaryDirectory(prefix="protocol-v2-planning-")
+        self._strict_planning_config_dir = config_dir
+        config_path = Path(config_dir.name) / "openclaw.json"
+        selected["workspace"] = str(runtime_workspace)
+        selected["agentDir"] = str(Path(config_dir.name) / "agent")
+        defaults = (config.setdefault("agents", {})).setdefault("defaults", {})
+        defaults["workspace"] = str(runtime_workspace)
+        memory_search = defaults.get("memorySearch")
+        if isinstance(memory_search, dict):
+            defaults["memorySearch"] = {**memory_search, "enabled": False}
+        session_config = config.setdefault("session", {})
+        session_config["store"] = str(Path(config_dir.name) / "sessions.json")
+        config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        self._openclaw_config_path_override = config_path
+        self._last_selected_openclaw_agent_id = agent_id
+
+    def _release_dedicated_strict_planning_agent(self) -> None:
+        config_dir = getattr(self, "_strict_planning_config_dir", None)
+        if config_dir is None:
+            return
+        config_dir.cleanup()
+        self._strict_planning_config_dir = None
+        if self._workspace_binding is None:
+            self._openclaw_config_path_override = None
+
     def release_runtime_workspace_binding(self) -> None:
         """Discard the ephemeral config copy from ``bind_runtime_workspace``.
 
@@ -570,6 +672,124 @@ class OpenClawSessionService:
         self._workspace_binding.release()
         self._workspace_binding = None
         self._openclaw_config_path_override = None
+
+    def _configure_strict_provider_controls(self, agent_id: str) -> Dict[str, Any]:
+        """Apply Protocol v2 controls to the ephemeral OpenClaw config.
+
+        OpenClaw 2026.4.10 has no CLI flags for sampling or Qwen reasoning.
+        Its OpenAI-compatible model adapter does propagate
+        ``chat_template_kwargs.enable_thinking`` when the model compatibility
+        mode is ``qwen-chat-template``.  Strict planning therefore mutates
+        only the per-invocation config copy created by workspace binding.
+        """
+
+        config_path = self._openclaw_config_path()
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError) as exc:
+            raise OpenClawProviderControlError(
+                "Unable to read the ephemeral OpenClaw config for strict planning"
+            ) from exc
+
+        agents = (config.get("agents") or {}).get("list") or []
+        selected = next(
+            (
+                agent
+                for agent in agents
+                if isinstance(agent, dict)
+                and str(agent.get("id") or "").strip() == agent_id
+            ),
+            None,
+        )
+        if selected is None:
+            raise OpenClawAgentSelectionError(
+                f"Selected Protocol v2 planning agent {agent_id!r} is not configured"
+            )
+
+        params = dict(selected.get("params") or {})
+        params["temperature"] = 0
+        params["maxTokens"] = STRICT_PROVIDER_MAX_OUTPUT_TOKENS
+        selected["params"] = params
+
+        defaults = (config.get("agents") or {}).get("defaults") or {}
+        memory_search = defaults.get("memorySearch")
+        if isinstance(memory_search, dict):
+            defaults["memorySearch"] = {**memory_search, "enabled": False}
+        model_ref = selected.get("model") or defaults.get("model")
+        if isinstance(model_ref, dict):
+            model_ref = model_ref.get("primary") or model_ref.get("id")
+        model_ref = str(model_ref or "").strip()
+        provider_name, separator, model_id = model_ref.partition("/")
+        if not separator:
+            provider_name, model_id = "openai", model_ref
+        provider_config = ((config.get("models") or {}).get("providers") or {}).get(
+            provider_name
+        )
+        model_entry = next(
+            (
+                model
+                for model in (provider_config or {}).get("models", [])
+                if isinstance(model, dict)
+                and str(model.get("id") or "").strip() == model_id
+            ),
+            None,
+        )
+        if model_entry is None:
+            raise OpenClawProviderControlError(
+                f"Configured planning model {model_ref!r} has no model compatibility entry"
+            )
+
+        compat = dict(model_entry.get("compat") or {})
+        thinking_format = str(compat.get("thinkingFormat") or "").strip()
+        model_is_qwen = "qwen" in model_id.lower()
+        if model_is_qwen:
+            # This is the pinned pi-ai boundary that emits the provider-level
+            # enable_thinking=false request parameter for --thinking off.
+            compat["thinkingFormat"] = "qwen-chat-template"
+            reasoning_parameter = "chat_template_kwargs.enable_thinking=false"
+        elif thinking_format in {
+            "openai",
+            "openrouter",
+            "zai",
+            "qwen",
+            "qwen-chat-template",
+        }:
+            reasoning_parameter = (
+                "enable_thinking=false"
+                if thinking_format in {"zai", "qwen"}
+                else "chat_template_kwargs.enable_thinking=false"
+            )
+        else:
+            raise OpenClawProviderControlError(
+                "Pinned OpenClaw cannot prove reasoning disablement for the configured "
+                f"model {model_ref!r}; no compatible reasoning request format is configured"
+            )
+        model_entry["compat"] = compat
+        config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        controls = {
+            "openclaw_version": PINNED_OPENCLAW_VERSION,
+            "agent_id": agent_id,
+            "model": model_ref,
+            "reasoning_disabled": True,
+            "reasoning_request_parameter": reasoning_parameter,
+            "memory_search_enabled": False,
+            "temperature": 0,
+            "max_output_tokens": STRICT_PROVIDER_MAX_OUTPUT_TOKENS,
+            "top_p": {
+                "configured": False,
+                "status": "unsupported_by_pinned_openclaw_cli_adapter",
+            },
+            "stop": {
+                "configured": False,
+                "status": "provider_envelope_boundary_only",
+            },
+            "response_format": {
+                "configured": False,
+                "status": "openclaw_json_envelope_is_adapter_boundary",
+            },
+        }
+        self._strict_provider_controls = controls
+        return controls
 
     def _runtime_result_contract(self) -> Dict[str, Any]:
         project_workspace = None
@@ -775,6 +995,7 @@ class OpenClawSessionService:
         expected_project_root: Optional[str] = None,
         openclaw_version: Optional[str] = None,
         git_containment_active: bool = False,
+        provider_controls: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Return comparable OpenClaw subprocess metadata without logging prompt text."""
 
@@ -834,6 +1055,7 @@ class OpenClawSessionService:
             ).hexdigest()[:12],
             "no_output_timeout_seconds": no_output_timeout_seconds,
             "strict_provider_result": strict_provider_result,
+            "provider_controls": provider_controls,
             # Phase 22C-0 diagnostics: make selected agent, resolved project
             # root, OpenClaw version, and git containment status directly
             # readable from run-start identity without reconstructing them
@@ -851,6 +1073,15 @@ class OpenClawSessionService:
         if not text:
             return 0
         return max(1, (len(text) + 3) // 4)
+
+    @staticmethod
+    def _provider_deadline_remaining(
+        started_at: float, timeout_seconds: int, *, now: float | None = None
+    ) -> float:
+        """Return remaining strict-provider time without resetting on output."""
+
+        observed_at = time.monotonic() if now is None else now
+        return max(0.0, started_at + timeout_seconds - observed_at)
 
     @staticmethod
     def _is_bounded_debug_repair_diagnostic_label(
@@ -984,6 +1215,11 @@ class OpenClawSessionService:
         no_output_timeout_seconds: Optional[int] = None,
         strict_provider_result: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], Dict[str, Any]]:
+        if strict_provider_result and cwd is None:
+            raise OpenClawAgentSelectionError(
+                "Strict Protocol v2 planning cannot launch without an explicitly "
+                "resolved project-scoped agent workspace"
+            )
         if cwd is None and (
             self.task_model is not None or self.session_model is not None
         ):
@@ -992,6 +1228,9 @@ class OpenClawSessionService:
             )
 
         started_at = time.monotonic()
+        effective_no_output_timeout_seconds = (
+            None if strict_provider_result else no_output_timeout_seconds
+        )
         first_output_at: Optional[float] = None
         last_output_at: Optional[float] = None
         previous_output_at: Optional[float] = None
@@ -1009,8 +1248,14 @@ class OpenClawSessionService:
 
         diagnostics: Dict[str, Any] = {
             "timeout_seconds": timeout_seconds,
-            "timeout_with_cleanup_seconds": timeout_seconds + 30,
-            "no_output_timeout_seconds": no_output_timeout_seconds,
+            "timeout_with_cleanup_seconds": (
+                timeout_seconds if strict_provider_result else timeout_seconds + 30
+            ),
+            "provider_deadline_seconds": (
+                timeout_seconds if strict_provider_result else None
+            ),
+            "cleanup_grace_seconds": 5 if strict_provider_result else None,
+            "no_output_timeout_seconds": effective_no_output_timeout_seconds,
             "no_output_timeout": False,
             "timed_out": False,
             "cancelled": False,
@@ -1027,10 +1272,11 @@ class OpenClawSessionService:
                 cwd=cwd,
                 invocation_kind=invocation_kind,
                 isolate_workspace_context=isolate_workspace_context,
-                no_output_timeout_seconds=no_output_timeout_seconds,
+                no_output_timeout_seconds=effective_no_output_timeout_seconds,
                 strict_provider_result=strict_provider_result,
                 expected_project_root=expected_project_root,
                 git_containment_active=git_guard_shim_dir is not None,
+                provider_controls=getattr(self, "_strict_provider_controls", None),
             ),
         }
 
@@ -1058,6 +1304,23 @@ class OpenClawSessionService:
         diagnostics["subprocess_started_after_seconds"] = round(
             subprocess_started_at - started_at, 3
         )
+
+        async def cleanup_process() -> None:
+            cleanup_started_at = time.monotonic()
+            kill_process_group(process.pid)
+            cleanup_timed_out = False
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                cleanup_timed_out = True
+                with contextlib.suppress(ProcessLookupError):
+                    getattr(process, "kill")()
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(process.wait(), timeout=5)
+            diagnostics["cleanup_seconds"] = round(
+                time.monotonic() - cleanup_started_at, 3
+            )
+            diagnostics["cleanup_timed_out"] = cleanup_timed_out
 
         async def collect_stream(stream, chunks: List[str], stream_name: str) -> None:
             nonlocal first_output_at, last_output_at, previous_output_at
@@ -1140,12 +1403,12 @@ class OpenClawSessionService:
             )
         )
         try:
-            if no_output_timeout_seconds:
+            if effective_no_output_timeout_seconds:
                 first_output_task = asyncio.create_task(first_output_event.wait())
                 try:
                     done, _ = await asyncio.wait(
                         {first_output_task, stream_task},
-                        timeout=no_output_timeout_seconds,
+                        timeout=effective_no_output_timeout_seconds,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     if first_output_task not in done and stream_task not in done:
@@ -1158,8 +1421,11 @@ class OpenClawSessionService:
                         diagnostics["no_output_timeout_elapsed_seconds"] = round(
                             no_output_elapsed, 3
                         )
-                        kill_process_group(process.pid)
-                        await process.wait()
+                        if strict_provider_result:
+                            await cleanup_process()
+                        else:
+                            kill_process_group(process.pid)
+                            await process.wait()
                         diagnostics["return_code"] = process.returncode
                         stream_task.cancel()
                         with contextlib.suppress(asyncio.CancelledError):
@@ -1167,7 +1433,7 @@ class OpenClawSessionService:
                         raise OpenClawNoOutputTimeoutError(
                             (
                                 "OpenClaw prompt produced no output before "
-                                f"{no_output_timeout_seconds}s"
+                                f"{effective_no_output_timeout_seconds}s"
                             ),
                             diagnostics,
                         )
@@ -1179,7 +1445,11 @@ class OpenClawSessionService:
             try:
                 done, _ = await asyncio.wait(
                     {stream_task, response_ready_task},
-                    timeout=timeout_seconds + 30,
+                    timeout=(
+                        self._provider_deadline_remaining(started_at, timeout_seconds)
+                        if strict_provider_result
+                        else timeout_seconds + 30
+                    ),
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if not done:
@@ -1189,13 +1459,22 @@ class OpenClawSessionService:
                 )
                 if response_boundary_reached and not stream_task.done():
                     diagnostics["response_boundary_reached"] = True
-                    kill_process_group(process.pid)
-                    await process.wait()
+                    await cleanup_process()
                     diagnostics["response_cleanup_return_code"] = process.returncode
-                    await asyncio.wait_for(stream_task, timeout=5)
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(stream_task, timeout=5)
                 else:
                     await stream_task
-                    await asyncio.wait_for(process.wait(), timeout=timeout_seconds + 30)
+                    await asyncio.wait_for(
+                        process.wait(),
+                        timeout=(
+                            self._provider_deadline_remaining(
+                                started_at, timeout_seconds
+                            )
+                            if strict_provider_result
+                            else timeout_seconds + 30
+                        ),
+                    )
                 return_code = process.returncode
             finally:
                 response_ready_task.cancel()
@@ -1210,11 +1489,14 @@ class OpenClawSessionService:
         except asyncio.TimeoutError:
             diagnostics["timed_out"] = True
             diagnostics["diagnostic_category"] = "timeout"
-            diagnostics["timeout_boundary"] = (
-                diagnostics.get("timeout_boundary") or "process_timeout"
+            diagnostics["timeout_boundary"] = diagnostics.get("timeout_boundary") or (
+                "provider_timeout" if strict_provider_result else "process_timeout"
             )
-            kill_process_group(process.pid)
-            await process.wait()
+            if strict_provider_result:
+                await cleanup_process()
+            else:
+                kill_process_group(process.pid)
+                await process.wait()
             diagnostics["return_code"] = process.returncode
             raise
         except asyncio.CancelledError:
@@ -1222,8 +1504,11 @@ class OpenClawSessionService:
             diagnostics["timeout_boundary"] = (
                 diagnostics.get("timeout_boundary") or "caller_cancelled"
             )
-            kill_process_group(process.pid)
-            await process.wait()
+            if strict_provider_result:
+                await cleanup_process()
+            else:
+                kill_process_group(process.pid)
+                await process.wait()
             diagnostics["return_code"] = process.returncode
             raise
         finally:
@@ -2510,14 +2795,14 @@ class OpenClawSessionService:
             raise UnsupportedCapabilityError(
                 "The OpenClaw adapter cannot represent provider-specific invocation options."
             )
-        strict_provider_result = session_prefix in {
-            "planning-brief",
-            "structured-task-plan",
-        }
+        strict_provider_result = session_prefix in STRICT_PROVIDER_SESSION_PREFIXES
         planning_temp_dir = None
         previous_cwd_override = self.execution_cwd_override
         try:
-            if session_prefix == "planning" and self.project_id is not None:
+            if (
+                session_prefix in {"planning", *STRICT_PROVIDER_SESSION_PREFIXES}
+                and self.project_id is not None
+            ):
                 project = (
                     self.db.query(Project).filter(Project.id == self.project_id).first()
                 )
@@ -2567,7 +2852,27 @@ class OpenClawSessionService:
                     is_sandboxed=True,
                 )
                 self.execution_cwd_override = str(runtime_workspace)
-                self.bind_runtime_workspace(context)
+                dedicated_agent_id = (
+                    self._configured_strict_planning_agent_id()
+                    if strict_provider_result
+                    else None
+                )
+                if dedicated_agent_id:
+                    self._bind_dedicated_strict_planning_agent(
+                        runtime_workspace, dedicated_agent_id
+                    )
+                else:
+                    self.bind_runtime_workspace(context)
+                if strict_provider_result:
+                    selected_agent_id = self._find_openclaw_agent_for_workspace(
+                        self.execution_cwd_override
+                    )
+                    if not selected_agent_id:
+                        raise OpenClawAgentSelectionError(
+                            "No isolated Protocol v2 planning agent matches the "
+                            "bound runtime workspace"
+                        )
+                    self._configure_strict_provider_controls(selected_agent_id)
 
             full_cmd = self.build_cli_agent_command(
                 prompt,
@@ -2617,6 +2922,7 @@ class OpenClawSessionService:
         finally:
             if planning_temp_dir is not None:
                 self.release_runtime_workspace_binding()
+                self._release_dedicated_strict_planning_agent()
                 self.execution_cwd_override = previous_cwd_override
                 planning_temp_dir.cleanup()
         runtime_session_id = full_cmd[full_cmd.index("--session-id") + 1]

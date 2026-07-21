@@ -9,7 +9,7 @@ the application.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 import json
 import re
 from typing import Any, Protocol
@@ -44,24 +44,14 @@ from app.services.planning.planning_brief import (
     canonical_json_bytes,
     validate_planning_brief,
 )
-
-
-PLANNING_BRIEF_CANDIDATE_FIELDS = (
-    "objective",
-    "background",
-    "scope",
-    "requirements",
-    "constraints",
-    "acceptance_criteria",
-    "architecture_context",
-    "interface_contracts",
-    "implementation_strategy",
-    "validation_strategy",
-    "assumptions",
-    "risks",
-    "unresolved_questions",
-    "operator_decisions",
+from app.services.planning.provider_contract import (
+    PLANNING_BRIEF_CANDIDATE_FIELDS,
+    PLANNING_BRIEF_CANDIDATE_RECORD_TYPES,
+    build_planning_brief_schema_contract,
+    render_schema_contract,
 )
+
+
 DEFAULT_SOURCE_CHAR_LIMIT = 20_000
 DEFAULT_TOTAL_SOURCE_CHAR_LIMIT = 100_000
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 360
@@ -131,6 +121,17 @@ class PlanningBriefProviderInput:
     manifest_schema_version: str
     sources: tuple[Mapping[str, Any], ...]
     stage_configuration: Mapping[str, Any]
+    schema_instructions: Mapping[str, Any] = field(
+        default_factory=build_planning_brief_schema_contract
+    )
+    # Routing metadata is runtime-only and is deliberately not serialized.
+    project_id: int | None = None
+
+    def __post_init__(self) -> None:
+        if not self.schema_instructions:
+            object.__setattr__(
+                self, "schema_instructions", build_planning_brief_schema_contract()
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -140,6 +141,7 @@ class PlanningBriefProviderInput:
                 "schema_version": self.manifest_schema_version,
             },
             "sources": [dict(source) for source in self.sources],
+            "schema_instructions": dict(self.schema_instructions),
             "stage_configuration": dict(self.stage_configuration),
         }
 
@@ -167,21 +169,7 @@ class PlanningBriefCandidate:
     operator_decisions: tuple[OperatorDecision, ...]
 
 
-_RECORD_TYPES: dict[str, type[Any]] = {
-    "background": BackgroundFact,
-    "scope": ScopeItem,
-    "requirements": Requirement,
-    "constraints": Constraint,
-    "acceptance_criteria": AcceptanceCriterion,
-    "architecture_context": ArchitectureContext,
-    "interface_contracts": InterfaceContract,
-    "implementation_strategy": ImplementationStrategy,
-    "validation_strategy": ValidationStrategy,
-    "assumptions": Assumption,
-    "risks": Risk,
-    "unresolved_questions": UnresolvedQuestion,
-    "operator_decisions": OperatorDecision,
-}
+_RECORD_TYPES = PLANNING_BRIEF_CANDIDATE_RECORD_TYPES
 _SEQUENCE_FIELDS = {
     "source_refs",
     "applies_to_refs",
@@ -464,6 +452,8 @@ def build_planning_brief_provider_input(
         manifest_schema_version=context.input_manifest.schema_version,
         sources=tuple(sources),
         stage_configuration=configuration,
+        schema_instructions=build_planning_brief_schema_contract(),
+        project_id=getattr(context.session, "project_id", None),
     )
     if len(request.canonical_bytes()) > total_limit + 16_384:
         raise PlanningBriefApplicationError(
@@ -480,22 +470,25 @@ class RuntimePlanningBriefProvider:
 
     def generate(self, request: PlanningBriefProviderInput) -> Any:
         candidate_fields = ", ".join(PLANNING_BRIEF_CANDIDATE_FIELDS)
+        schema = render_schema_contract(
+            request.schema_instructions or build_planning_brief_schema_contract()
+        )
         prompt = (
-            "Generate a Protocol v2 Planning Brief candidate. Use only INPUT; "
-            "do not call tools, inspect files, or emit reasoning. Return JSON only. "
-            "Top-level keys must be exactly: "
-            f"{candidate_fields}. "
-            "Do not use legacy keys such as title, description, objectives, "
-            "deliverables, timeline, brief_type, or top-level source_refs. "
-            "The objective value is one object with statement and source_refs; "
-            "every other top-level value is an array of semantic records. "
-            "Use only fields defined by the supplied Protocol v2 contract and no IDs. "
-            "The object must contain exactly the semantic candidate keys supplied "
-            "by the contract; omit every id, schema, hash, lifecycle, and checkpoint "
-            "field. Use manifest source_id values in source_refs. Internal record "
-            "references use objective or collection[index], for example requirements[0]. "
-            "Do not invent new source IDs. Stop after one JSON object; emit no Markdown, "
-            "fences, commentary, or explanation.\n\nINPUT:\n"
+            "Generate one Protocol v2 Planning Brief semantic candidate from INPUT.\n"
+            "Return exactly one JSON object. Return no Markdown fences, explanation, "
+            "commentary, or reasoning.\n"
+            f"The only allowed top-level fields are: {candidate_fields}.\n"
+            "Use only the specified nested record fields. Do not invent aliases or "
+            "generic planning-document keys. Do not emit title, description, objectives, "
+            "deliverables, timeline, brief_type, top-level source_refs, or any other "
+            "unsupported legacy fields. Do not emit canonical IDs: every id field, "
+            "manifest/checkpoint/hash/schema/lifecycle field is application-owned and "
+            "forbidden in provider output. Use only source_id values present in the "
+            "supplied Input Manifest. Preserve semantic uncertainty rather than inventing "
+            "facts; use unresolved questions and assumptions when appropriate.\n\n"
+            "COMPLETE RECORD-LEVEL SCHEMA CONTRACT:\n"
+            + schema
+            + "\n\nINPUT:\n"
             + request.canonical_bytes().decode("utf-8")
         )
         try:
@@ -504,19 +497,12 @@ class RuntimePlanningBriefProvider:
                     "provider_timeout_seconds", DEFAULT_PROVIDER_TIMEOUT_SECONDS
                 )
             )
-            first_output_timeout_seconds = int(
-                request.stage_configuration.get(
-                    "provider_first_output_timeout_seconds",
-                    DEFAULT_PROVIDER_FIRST_OUTPUT_TIMEOUT_SECONDS,
-                )
-            )
             result = invoke_runtime_prompt(
                 self.db,
                 prompt,
-                project_id=None,
+                project_id=request.project_id,
                 source_brain="local",
                 timeout_seconds=timeout_seconds,
-                no_output_timeout_seconds=first_output_timeout_seconds,
                 session_prefix="planning-brief",
                 role=BackendRole.PLANNING,
             )

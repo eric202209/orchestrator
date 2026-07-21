@@ -58,23 +58,61 @@ def _bounded_channel_text(value: Any, channel: str) -> str:
     return text
 
 
-def _parse_documented_envelope(text: str) -> Mapping[str, Any] | None:
+def _is_documented_envelope(parsed: Any) -> bool:
+    if not isinstance(parsed, Mapping):
+        return False
+    if set(parsed) != _OPENCLAW_RESULT_KEYS:
+        return False
+    if not isinstance(parsed.get("meta"), Mapping):
+        return False
+    if not isinstance(parsed.get("payloads"), list):
+        return False
+    return True
+
+
+def _find_documented_envelopes(
+    text: str,
+) -> list[tuple[int, int, Mapping[str, Any]]]:
+    """Find complete top-level envelopes among bounded diagnostics.
+
+    OpenClaw 2026.4.10 may prefix the stderr channel with runtime diagnostics
+    before emitting its one JSON result.  Only a complete object with the
+    exact pinned envelope keys is eligible; arbitrary JSON/log text remains
+    diagnostics and is never treated as candidate content.
+    """
+
     stripped = text.strip()
     if not stripped:
-        return None
+        return []
     try:
         parsed = json.loads(stripped)
     except (TypeError, ValueError):
-        return None
-    if not isinstance(parsed, Mapping):
-        return None
-    if set(parsed) != _OPENCLAW_RESULT_KEYS:
-        return None
-    if not isinstance(parsed.get("meta"), Mapping):
-        return None
-    if not isinstance(parsed.get("payloads"), list):
-        return None
-    return parsed
+        parsed = None
+    if _is_documented_envelope(parsed):
+        start = text.index("{")
+        end = text.rindex("}") + 1
+        return [(start, end, parsed)]
+
+    decoder = json.JSONDecoder()
+    found: list[tuple[int, int, Mapping[str, Any]]] = []
+    cursor = 0
+    while True:
+        start = text.find("{", cursor)
+        if start < 0:
+            break
+        try:
+            parsed, consumed = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            cursor = start + 1
+            continue
+        end = start + consumed
+        before = text[:start].rstrip()
+        after = text[end:].lstrip()
+        nested = (before and before[-1] in "[{,:") or (after and after[0] in "}],")
+        if _is_documented_envelope(parsed) and not nested:
+            found.append((start, end, parsed))
+        cursor = end
+    return found
 
 
 def has_verified_openclaw_provider_result(stdout: Any, stderr: Any) -> bool:
@@ -86,10 +124,10 @@ def has_verified_openclaw_provider_result(stdout: Any, stderr: Any) -> bool:
     except OpenClawProviderContractError:
         return False
     envelopes = [
-        _parse_documented_envelope(stdout_text),
-        _parse_documented_envelope(stderr_text),
+        _find_documented_envelopes(stdout_text),
+        _find_documented_envelopes(stderr_text),
     ]
-    return sum(envelope is not None for envelope in envelopes) == 1
+    return sum(len(channel_envelopes) for channel_envelopes in envelopes) == 1
 
 
 def parse_openclaw_provider_result(
@@ -107,13 +145,14 @@ def parse_openclaw_provider_result(
 
     stdout_text = _bounded_channel_text(result.stdout, "stdout")
     stderr_text = _bounded_channel_text(result.stderr, "stderr")
-    stdout_envelope = _parse_documented_envelope(stdout_text)
-    stderr_envelope = _parse_documented_envelope(stderr_text)
     envelopes = [
-        ("stdout", stdout_envelope),
-        ("stderr", stderr_envelope),
+        ("stdout", start, end, envelope)
+        for start, end, envelope in _find_documented_envelopes(stdout_text)
+    ] + [
+        ("stderr", start, end, envelope)
+        for start, end, envelope in _find_documented_envelopes(stderr_text)
     ]
-    present = [(channel, envelope) for channel, envelope in envelopes if envelope]
+    present = envelopes
     base_diagnostics = {
         "provider_result_contract": OPENCLAW_PROVIDER_RESULT_CONTRACT,
         "provider_result_channel": None,
@@ -145,13 +184,19 @@ def parse_openclaw_provider_result(
             diagnostics=base_diagnostics,
         )
 
-    channel, envelope = present[0]
+    channel, envelope_start, envelope_end, envelope = present[0]
     assert envelope is not None
     diagnostics = {
         **base_diagnostics,
         "provider_result_channel": channel,
         "stderr_diagnostic_bytes": (
-            len(stderr_text.encode("utf-8")) if channel == "stdout" else 0
+            len(stderr_text.encode("utf-8"))
+            if channel == "stdout"
+            else len(
+                (stderr_text[:envelope_start] + stderr_text[envelope_end:]).encode(
+                    "utf-8"
+                )
+            )
         ),
     }
     payloads = envelope["payloads"]

@@ -66,6 +66,20 @@ def test_valid_stdout_result_preserves_stderr_as_diagnostics():
     assert result["provider_result_diagnostics"]["stderr_diagnostic_bytes"] > 0
 
 
+def test_valid_envelope_after_runtime_stderr_diagnostics_is_extracted():
+    diagnostic_prefix = "runtime diagnostic: provider selected\n"
+    result = parse_openclaw_provider_result(
+        _process(stderr=diagnostic_prefix + json.dumps(_envelope('{"probe":"ok"}'))),
+        expected_session_id="probe-session",
+    )
+
+    assert result["output"] == '{"probe":"ok"}'
+    assert result["output_channel_used"] == "stderr"
+    assert result["provider_result_diagnostics"]["stderr_diagnostic_bytes"] == len(
+        diagnostic_prefix.encode("utf-8")
+    )
+
+
 def test_empty_result_is_provider_result_missing():
     with pytest.raises(OpenClawProviderContractError) as caught:
         parse_openclaw_provider_result(_process())
@@ -167,6 +181,7 @@ def test_planning_brief_adapter_uses_shared_v2_contract(monkeypatch):
     calls = {}
 
     def fake_invoke(_db, _prompt, **kwargs):
+        calls["prompt"] = _prompt
         calls.update(kwargs)
         return {"status": "completed", "output": '{"brief":true}'}
 
@@ -184,14 +199,19 @@ def test_planning_brief_adapter_uses_shared_v2_contract(monkeypatch):
 
     assert RuntimePlanningBriefProvider(None).generate(request) == '{"brief":true}'
     assert calls["session_prefix"] == "planning-brief"
-    assert calls["no_output_timeout_seconds"] == 320
+    assert "no_output_timeout_seconds" not in calls
     assert calls["timeout_seconds"] == 360
+    assert '"verification_method"' in calls["prompt"]
+    assert '"impact_if_false"' in calls["prompt"]
+    assert '"change_permission"' in calls["prompt"]
+    assert "Return exactly one JSON object" in calls["prompt"]
 
 
 def test_task_plan_adapter_uses_shared_v2_contract(monkeypatch):
     calls = {}
 
     def fake_invoke(_db, _prompt, **kwargs):
+        calls["prompt"] = _prompt
         calls.update(kwargs)
         return {"status": "completed", "output": '{"tasks":[]}'}
 
@@ -208,5 +228,9 @@ def test_task_plan_adapter_uses_shared_v2_contract(monkeypatch):
         == '{"tasks":[]}'
     )
     assert calls["session_prefix"] == "structured-task-plan"
-    assert calls["no_output_timeout_seconds"] == 320
+    assert "no_output_timeout_seconds" not in calls
     assert calls["timeout_seconds"] == 360
+    assert '"Task"' in calls["prompt"]
+    assert '"Dependency"' in calls["prompt"]
+    assert '"ExecutionGroup"' in calls["prompt"]
+    assert '"IntentionalOmission"' in calls["prompt"]

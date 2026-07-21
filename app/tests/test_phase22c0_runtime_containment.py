@@ -108,6 +108,160 @@ def test_no_cwd_does_not_fail_closed(monkeypatch, tmp_path):
     assert result == ["openclaw", "agent"]
 
 
+def test_strict_v2_no_cwd_fails_closed_before_default_agent(monkeypatch, tmp_path):
+    config_path = tmp_path / "openclaw.json"
+    config_path.write_text(json.dumps({"agents": {"list": []}}), encoding="utf-8")
+    monkeypatch.setenv("OPENCLAW_CONFIG_PATH", str(config_path))
+
+    service = object.__new__(OpenClawSessionService)
+    service._log_entry = lambda level, message, **kwargs: None
+
+    with pytest.raises(OpenClawAgentSelectionError):
+        service._build_openclaw_agent_command(
+            ["openclaw"], cwd=None, strict_provider_result=True
+        )
+
+
+def test_strict_v2_explicit_agent_is_selected(monkeypatch, tmp_path):
+    project_root = tmp_path / "planning-agent"
+    project_root.mkdir()
+    config_path = tmp_path / "openclaw.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "list": [
+                        {"id": "planning", "workspace": str(project_root)},
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENCLAW_CONFIG_PATH", str(config_path))
+
+    service = object.__new__(OpenClawSessionService)
+    result = service._build_openclaw_agent_command(
+        ["openclaw"], cwd=str(project_root), strict_provider_result=True
+    )
+
+    assert result == ["openclaw", "agent", "--agent", "planning"]
+
+
+def test_strict_v2_no_matching_agent_fails_closed(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config_path = tmp_path / "openclaw.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "list": [
+                        {"id": "other", "workspace": str(tmp_path / "other")},
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENCLAW_CONFIG_PATH", str(config_path))
+    service = object.__new__(OpenClawSessionService)
+    service._log_entry = lambda level, message, **kwargs: None
+
+    with pytest.raises(OpenClawAgentSelectionError):
+        service._build_openclaw_agent_command(
+            ["openclaw"], cwd=str(project_root), strict_provider_result=True
+        )
+
+
+def test_strict_provider_controls_are_written_to_ephemeral_config(
+    monkeypatch, tmp_path
+):
+    config_path = tmp_path / "openclaw.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "defaults": {"model": "openai/qwen-local"},
+                    "list": [
+                        {
+                            "id": "planning",
+                            "workspace": str(tmp_path),
+                            "model": "openai/qwen-local",
+                        }
+                    ],
+                },
+                "models": {
+                    "providers": {
+                        "openai": {"models": [{"id": "qwen-local", "reasoning": True}]}
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENCLAW_CONFIG_PATH", str(config_path))
+    service = object.__new__(OpenClawSessionService)
+
+    controls = service._configure_strict_provider_controls("planning")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    agent = config["agents"]["list"][0]
+    model = config["models"]["providers"]["openai"]["models"][0]
+
+    assert agent["params"] == {"temperature": 0, "maxTokens": 16_384}
+    assert model["compat"]["thinkingFormat"] == "qwen-chat-template"
+    assert controls["reasoning_request_parameter"].endswith("=false")
+    assert controls["temperature"] == 0
+    assert controls["top_p"]["configured"] is False
+
+
+def test_explicit_dedicated_planning_agent_binds_without_project_match(
+    monkeypatch, tmp_path
+):
+    config_path = tmp_path / "openclaw.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "defaults": {"protocolV2PlanningAgent": "planning"},
+                    "list": [
+                        {
+                            "id": "planning",
+                            "workspace": str(tmp_path / "dedicated"),
+                            "model": "openai/qwen-local",
+                        }
+                    ],
+                },
+                "models": {
+                    "providers": {
+                        "openai": {"models": [{"id": "qwen-local", "reasoning": True}]}
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    service = object.__new__(OpenClawSessionService)
+    service._openclaw_config_path_override = None
+    service._strict_planning_config_dir = None
+    service._last_selected_openclaw_agent_id = None
+    service._workspace_binding = None
+    monkeypatch.setenv("OPENCLAW_CONFIG_PATH", str(config_path))
+
+    runtime_workspace = tmp_path / "runtime"
+    runtime_workspace.mkdir()
+    service._bind_dedicated_strict_planning_agent(runtime_workspace, "planning")
+    try:
+        assert (
+            service._find_openclaw_agent_for_workspace(str(runtime_workspace))
+            == "planning"
+        )
+        assert service._last_selected_openclaw_agent_id == "planning"
+        assert service._openclaw_config_path_override != config_path
+    finally:
+        service._release_dedicated_strict_planning_agent()
+
+
 # ---------------------------------------------------------------------------
 # Goal 2: git-mutation containment shim
 # ---------------------------------------------------------------------------

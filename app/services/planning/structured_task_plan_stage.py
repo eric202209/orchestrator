@@ -26,10 +26,14 @@ from app.services.orchestration.stage_engine import (
 from app.services.planning.input_manifest import InputManifest
 from app.services.planning.planning_brief import PlanningBrief
 from app.services.planning.planning_brief_stage import (
-    DEFAULT_PROVIDER_FIRST_OUTPUT_TIMEOUT_SECONDS,
     DEFAULT_PROVIDER_TIMEOUT_SECONDS,
     PlanningBriefProvider,
     RuntimePlanningBriefProvider,
+)
+from app.services.planning.provider_contract import (
+    STRUCTURED_TASK_PLAN_CANDIDATE_FIELDS,
+    build_structured_task_plan_schema_contract,
+    render_schema_contract,
 )
 from app.services.planning.structured_task_plan import (
     BLOCKING_STATES,
@@ -68,12 +72,6 @@ from app.services.planning.structured_task_plan import (
 )
 
 
-STRUCTURED_TASK_PLAN_CANDIDATE_FIELDS = (
-    "tasks",
-    "dependencies",
-    "execution_groups",
-    "intentional_omissions",
-)
 DEFAULT_TASK_PLAN_SOURCE_CHAR_LIMIT = 20_000
 DEFAULT_TASK_PLAN_TOTAL_SOURCE_CHAR_LIMIT = 100_000
 DEFAULT_TASK_PLAN_PROVIDER_INPUT_BYTES = 512 * 1024
@@ -199,6 +197,8 @@ class StructuredTaskPlanProviderInput:
     capacity_limits: Mapping[str, Any]
     rules: Mapping[str, Any]
     formatting_instructions: Mapping[str, Any]
+    # Runtime-only routing metadata; it is not part of the provider contract.
+    project_id: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -774,20 +774,7 @@ def build_structured_task_plan_provider_input(
         manifest_hash=context.input_manifest.manifest_hash,
         manifest_schema_version=context.input_manifest.schema_version,
         sources=tuple(sources),
-        schema_instructions={
-            "candidate_fields": list(STRUCTURED_TASK_PLAN_CANDIDATE_FIELDS),
-            "references": "Use accepted Brief IDs for traceability and tasks[N] or #N for candidate Task references.",
-            "application_owned": [
-                "Task Plan IDs",
-                "TASK-NNN",
-                "DEP-NNN",
-                "GROUP-NNN",
-                "checkpoint IDs",
-                "hashes",
-                "topology",
-                "lifecycle and acceptance metadata",
-            ],
-        },
+        schema_instructions=build_structured_task_plan_schema_contract(),
         stage_configuration=configuration,
         capacity_limits=plan_policy,
         rules={
@@ -800,6 +787,7 @@ def build_structured_task_plan_provider_input(
             "output": "Return one JSON object only; no Markdown fences or commentary.",
             "ordering": "Candidate emission order is non-authoritative.",
         },
+        project_id=getattr(context.session, "project_id", None),
     )
     if len(request.canonical_bytes()) > input_limit:
         raise StructuredTaskPlanApplicationError(
@@ -816,17 +804,26 @@ class RuntimeStructuredTaskPlanProvider:
 
     def generate(self, provider_input: StructuredTaskPlanProviderInput) -> Any:
         candidate_fields = ", ".join(STRUCTURED_TASK_PLAN_CANDIDATE_FIELDS)
+        schema = render_schema_contract(
+            getattr(provider_input, "schema_instructions", None)
+            or build_structured_task_plan_schema_contract()
+        )
         prompt = (
-            "Generate a Protocol v2 Structured Task Plan semantic candidate. Use only INPUT; "
-            "do not call tools, inspect files, or emit reasoning. Return JSON only. "
-            "Top-level keys must be exactly: "
-            f"{candidate_fields}; do not use legacy plan keys. "
-            "Emit exactly the candidate fields in schema_instructions. Do not emit IDs, hashes, "
+            "Generate one Protocol v2 Structured Task Plan semantic candidate from INPUT.\n"
+            "Return exactly one JSON object. Return no Markdown fences, explanation, "
+            "commentary, or reasoning.\n"
+            f"The only allowed top-level fields are: {candidate_fields}.\n"
+            "Use only the specified Task, Dependency, ExecutionGroup, IntentionalOmission, "
+            "and nested record fields. Do not invent aliases or legacy title, description, "
+            "objectives, deliverables, or timeline keys. Do not emit canonical IDs, hashes, "
             "topology, schema versions, lifecycle, acceptance, checkpoint, session, lease, "
-            "timestamp, Commit Manifest, Runtime Task, credential, or new Brief-intent fields. "
-            "Use accepted Brief IDs for traceability and explicit tasks[N] or #N references "
-            "for dependencies and groups. The application owns all canonicalization and acceptance. "
-            "Stop after one JSON object; emit no Markdown, fences, commentary, or explanation.\n\n"
+            "timestamp, Commit Manifest, Runtime Task, credential, or new Brief-intent fields; "
+            "all such fields are application-owned or forbidden. Represent graph and coverage "
+            "semantics explicitly, use accepted Brief IDs for traceability, and use tasks[N] or #N "
+            "for candidate task references. Preserve uncertainty rather than inventing facts.\n\n"
+            "COMPLETE RECORD-LEVEL SCHEMA CONTRACT:\n"
+            + schema
+            + "\n\nINPUT:\n"
             + provider_input.canonical_bytes().decode("utf-8")
         )
         try:
@@ -835,19 +832,12 @@ class RuntimeStructuredTaskPlanProvider:
                     "provider_timeout_seconds", DEFAULT_PROVIDER_TIMEOUT_SECONDS
                 )
             )
-            first_output_timeout_seconds = int(
-                provider_input.stage_configuration.get(
-                    "provider_first_output_timeout_seconds",
-                    DEFAULT_PROVIDER_FIRST_OUTPUT_TIMEOUT_SECONDS,
-                )
-            )
             result = invoke_runtime_prompt(
                 self.db,
                 prompt,
-                project_id=None,
+                project_id=getattr(provider_input, "project_id", None),
                 source_brain="local",
                 timeout_seconds=timeout_seconds,
-                no_output_timeout_seconds=first_output_timeout_seconds,
                 session_prefix="structured-task-plan",
                 role=BackendRole.PLANNING,
             )
