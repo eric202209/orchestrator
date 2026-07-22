@@ -1198,6 +1198,184 @@ def _migration_030_protocol_v2_operator_review(engine: Engine) -> None:
             connection.execute(text(statement))
 
 
+def _migration_031_execution_plan_persistence(engine: Engine) -> None:
+    """Add the Phase 29B-1 Execution Plan graph tables.
+
+    These tables are additive: they materialize one accepted Structured
+    Task Plan into a durable, hash-bound runtime graph.  Nothing here
+    changes Planning tables or behavior.
+    """
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_plans (
+                    id INTEGER PRIMARY KEY,
+                    project_id INTEGER NOT NULL,
+                    planning_session_id INTEGER NOT NULL,
+                    planning_commit_manifest_id INTEGER NOT NULL UNIQUE,
+                    generation INTEGER NOT NULL DEFAULT 1,
+                    protocol_version VARCHAR(16) NOT NULL,
+                    source_commit_identity VARCHAR(128) NOT NULL,
+                    source_plan_checkpoint_id INTEGER NOT NULL,
+                    source_plan_hash VARCHAR(64) NOT NULL,
+                    status VARCHAR(20) NOT NULL DEFAULT 'active',
+                    superseded_by_execution_plan_id INTEGER,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME,
+                    CONSTRAINT ck_execution_plans_generation_positive
+                        CHECK (generation > 0),
+                    CONSTRAINT ck_execution_plans_protocol_v2
+                        CHECK (protocol_version = 'v2'),
+                    FOREIGN KEY(project_id) REFERENCES projects (id),
+                    FOREIGN KEY(planning_session_id)
+                        REFERENCES planning_sessions (id),
+                    FOREIGN KEY(planning_commit_manifest_id)
+                        REFERENCES planning_commit_manifests (id),
+                    FOREIGN KEY(source_plan_checkpoint_id)
+                        REFERENCES planning_checkpoints (id),
+                    FOREIGN KEY(superseded_by_execution_plan_id)
+                        REFERENCES execution_plans (id)
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_tasks (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    plan_task_id VARCHAR(32) NOT NULL,
+                    title VARCHAR(255) NOT NULL,
+                    blocking_state VARCHAR(32) NOT NULL,
+                    task_spec JSON NOT NULL,
+                    done_when JSON NOT NULL,
+                    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME,
+                    CONSTRAINT uq_execution_tasks_plan_task
+                        UNIQUE (execution_plan_id, plan_task_id),
+                    FOREIGN KEY(execution_plan_id)
+                        REFERENCES execution_plans (id) ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_dependency_edges (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    plan_dependency_id VARCHAR(32) NOT NULL,
+                    prerequisite_execution_task_id INTEGER NOT NULL,
+                    dependent_execution_task_id INTEGER NOT NULL,
+                    source_dependency_type VARCHAR(32) NOT NULL,
+                    runtime_class VARCHAR(32) NOT NULL,
+                    rationale TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_execution_dependency_edges_plan_dep
+                        UNIQUE (execution_plan_id, plan_dependency_id),
+                    CONSTRAINT ck_execution_dependency_edges_not_self
+                        CHECK (prerequisite_execution_task_id <>
+                               dependent_execution_task_id),
+                    FOREIGN KEY(execution_plan_id)
+                        REFERENCES execution_plans (id) ON DELETE CASCADE,
+                    FOREIGN KEY(prerequisite_execution_task_id)
+                        REFERENCES execution_tasks (id),
+                    FOREIGN KEY(dependent_execution_task_id)
+                        REFERENCES execution_tasks (id)
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_groups (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    plan_group_id VARCHAR(32) NOT NULL,
+                    kind VARCHAR(32) NOT NULL,
+                    order_index INTEGER NOT NULL,
+                    parallel_limit INTEGER NOT NULL,
+                    skip_policy VARCHAR(32) NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_execution_groups_plan_group
+                        UNIQUE (execution_plan_id, plan_group_id),
+                    FOREIGN KEY(execution_plan_id)
+                        REFERENCES execution_plans (id) ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_group_members (
+                    id INTEGER PRIMARY KEY,
+                    execution_group_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    member_order INTEGER NOT NULL,
+                    CONSTRAINT uq_execution_group_members_unique_task
+                        UNIQUE (execution_group_id, execution_task_id),
+                    FOREIGN KEY(execution_group_id)
+                        REFERENCES execution_groups (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_id)
+                        REFERENCES execution_tasks (id)
+                )
+                """
+            )
+        )
+
+        indexes = {
+            "ix_execution_plans_project_status": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_plans_project_status "
+                "ON execution_plans (project_id, status)"
+            ),
+            "ix_execution_plans_session": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_plans_session "
+                "ON execution_plans (planning_session_id)"
+            ),
+            "ix_execution_plans_source_plan_hash": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_plans_source_plan_hash "
+                "ON execution_plans (source_plan_hash)"
+            ),
+            "ix_execution_tasks_plan": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_tasks_plan "
+                "ON execution_tasks (execution_plan_id)"
+            ),
+            "ix_execution_dependency_edges_plan": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_dependency_edges_plan "
+                "ON execution_dependency_edges (execution_plan_id)"
+            ),
+            "ix_execution_dependency_edges_prerequisite": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_dependency_edges_prerequisite "
+                "ON execution_dependency_edges (prerequisite_execution_task_id)"
+            ),
+            "ix_execution_dependency_edges_dependent": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_dependency_edges_dependent "
+                "ON execution_dependency_edges (dependent_execution_task_id)"
+            ),
+            "ix_execution_groups_plan": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_groups_plan "
+                "ON execution_groups (execution_plan_id)"
+            ),
+            "ix_execution_group_members_group": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_group_members_group "
+                "ON execution_group_members (execution_group_id)"
+            ),
+            "ix_execution_group_members_task": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_group_members_task "
+                "ON execution_group_members (execution_task_id)"
+            ),
+        }
+        for statement in indexes.values():
+            connection.execute(text(statement))
+
+
 def _migration_014_task_workflow_stage(engine: Engine) -> None:
     if "tasks" not in _table_names(engine):
         return
@@ -1630,6 +1808,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="030_protocol_v2_operator_review",
         description="Persist append-only Protocol v2 operator-review events and promotions",
         upgrade=_migration_030_protocol_v2_operator_review,
+    ),
+    Migration(
+        version="031_execution_plan_persistence",
+        description="Add the Phase 29B-1 Execution Plan graph tables",
+        upgrade=_migration_031_execution_plan_persistence,
     ),
 )
 

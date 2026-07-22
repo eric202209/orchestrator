@@ -654,6 +654,222 @@ class PlanningCommitManifest(Base):
     plan = relationship("Plan")
 
 
+class ExecutionPlan(Base):
+    """Immutable Execution Plan graph materialized from one accepted
+    Structured Task Plan.  Structural fields are write-once; only
+    ``status`` and ``superseded_by_execution_plan_id`` may ever change,
+    and only a future dedicated lifecycle/transition service may do so
+    (Phase 29B-1 only sets the initial ``status`` at creation)."""
+
+    __tablename__ = "execution_plans"
+
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    planning_session_id = Column(
+        Integer, ForeignKey("planning_sessions.id"), nullable=False, index=True
+    )
+    planning_commit_manifest_id = Column(
+        Integer,
+        ForeignKey("planning_commit_manifests.id"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    generation = Column(Integer, nullable=False, default=1)
+    protocol_version = Column(String(16), nullable=False)
+    source_commit_identity = Column(String(128), nullable=False)
+    source_plan_checkpoint_id = Column(
+        Integer, ForeignKey("planning_checkpoints.id"), nullable=False, index=True
+    )
+    source_plan_hash = Column(String(64), nullable=False, index=True)
+    status = Column(String(20), nullable=False, default="active")
+    superseded_by_execution_plan_id = Column(
+        Integer, ForeignKey("execution_plans.id"), nullable=True
+    )
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    __table_args__ = (
+        CheckConstraint(
+            "generation > 0", name="ck_execution_plans_generation_positive"
+        ),
+        CheckConstraint(
+            "protocol_version = 'v2'", name="ck_execution_plans_protocol_v2"
+        ),
+        Index("ix_execution_plans_project_status", "project_id", "status"),
+    )
+
+    project = relationship("Project")
+    planning_session = relationship("PlanningSession")
+    planning_commit_manifest = relationship("PlanningCommitManifest")
+    source_plan_checkpoint = relationship("PlanningCheckpoint")
+    tasks = relationship(
+        "ExecutionTask", back_populates="execution_plan", cascade="all, delete-orphan"
+    )
+    dependency_edges = relationship(
+        "ExecutionDependencyEdge",
+        back_populates="execution_plan",
+        cascade="all, delete-orphan",
+    )
+    groups = relationship(
+        "ExecutionGroup", back_populates="execution_plan", cascade="all, delete-orphan"
+    )
+
+
+class ExecutionTask(Base):
+    """Immutable per-task specification within one Execution Plan.
+
+    ``task_spec`` is the full canonical ``StructuredTaskPlan.Task`` dict
+    (Phase 28I) and ``done_when`` is the ordered list of that task's
+    ``work_items[*].done_when`` strings, both persisted exactly as the
+    accepted plan authored them.  ``status`` is a lifecycle projection, not
+    part of the immutable specification; only a dedicated future
+    transition service may write to it after creation.
+    """
+
+    __tablename__ = "execution_tasks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    plan_task_id = Column(String(32), nullable=False)
+    title = Column(String(255), nullable=False)
+    blocking_state = Column(String(32), nullable=False)
+    task_spec = Column(JSON, nullable=False)
+    done_when = Column(JSON, nullable=False)
+    status = Column(String(20), nullable=False, default="pending")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_plan_id", "plan_task_id", name="uq_execution_tasks_plan_task"
+        ),
+    )
+
+    execution_plan = relationship("ExecutionPlan", back_populates="tasks")
+
+
+class ExecutionDependencyEdge(Base):
+    """Immutable dependency edge materialized from the accepted plan's
+    ``Dependency`` records.  ``source_dependency_type`` preserves the
+    plan-side type; ``runtime_class`` is the Phase 29A conservative
+    mapping used by a future scheduler."""
+
+    __tablename__ = "execution_dependency_edges"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    plan_dependency_id = Column(String(32), nullable=False)
+    prerequisite_execution_task_id = Column(
+        Integer, ForeignKey("execution_tasks.id"), nullable=False, index=True
+    )
+    dependent_execution_task_id = Column(
+        Integer, ForeignKey("execution_tasks.id"), nullable=False, index=True
+    )
+    source_dependency_type = Column(String(32), nullable=False)
+    runtime_class = Column(String(32), nullable=False)
+    rationale = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_plan_id",
+            "plan_dependency_id",
+            name="uq_execution_dependency_edges_plan_dep",
+        ),
+        CheckConstraint(
+            "prerequisite_execution_task_id <> dependent_execution_task_id",
+            name="ck_execution_dependency_edges_not_self",
+        ),
+    )
+
+    execution_plan = relationship("ExecutionPlan", back_populates="dependency_edges")
+    prerequisite_task = relationship(
+        "ExecutionTask", foreign_keys=[prerequisite_execution_task_id]
+    )
+    dependent_task = relationship(
+        "ExecutionTask", foreign_keys=[dependent_execution_task_id]
+    )
+
+
+class ExecutionGroup(Base):
+    """Immutable execution-group metadata materialized from the accepted
+    plan's ``ExecutionGroup`` records.  Preserved as scheduler metadata
+    only; group kind does not itself gate eligibility (Phase 29A §6)."""
+
+    __tablename__ = "execution_groups"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    plan_group_id = Column(String(32), nullable=False)
+    kind = Column(String(32), nullable=False)
+    order_index = Column(Integer, nullable=False)
+    parallel_limit = Column(Integer, nullable=False)
+    skip_policy = Column(String(32), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_plan_id",
+            "plan_group_id",
+            name="uq_execution_groups_plan_group",
+        ),
+    )
+
+    execution_plan = relationship("ExecutionPlan", back_populates="groups")
+    members = relationship(
+        "ExecutionGroupMember",
+        back_populates="execution_group",
+        cascade="all, delete-orphan",
+    )
+
+
+class ExecutionGroupMember(Base):
+    """Normalized group membership row.  Every referenced task must
+    belong to the same Execution Plan as its group (enforced by the
+    commit service, not by a JSON list)."""
+
+    __tablename__ = "execution_group_members"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_group_id = Column(
+        Integer,
+        ForeignKey("execution_groups.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer, ForeignKey("execution_tasks.id"), nullable=False, index=True
+    )
+    member_order = Column(Integer, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_group_id",
+            "execution_task_id",
+            name="uq_execution_group_members_unique_task",
+        ),
+    )
+
+    execution_group = relationship("ExecutionGroup", back_populates="members")
+    execution_task = relationship("ExecutionTask")
+
+
 class SessionState(Base):
     """Session state persistence model"""
 
