@@ -81,6 +81,31 @@ def test_structured_task_plan_contract_covers_all_nested_parser_records():
     assert "cycle" in contract["graph_constraints"]["dependencies"]
 
 
+def test_structured_task_plan_contract_states_coverage_and_group_authority():
+    contract = build_structured_task_plan_schema_contract()
+
+    coverage = contract["semantic_rules"]["coverage"]
+    assert set(coverage["required_target_kinds"]) == {
+        "goal",
+        "requirement",
+        "acceptance_criterion",
+        "constraint",
+    }
+    assert "Silence is not coverage" in coverage["accounting"]
+    assert "narrative" in coverage["accounting"]
+    assert coverage["traceability_roles"]["constraint"] == ["constrained_by"]
+    assert set(coverage["omission_target_kinds"]) == {
+        "requirement",
+        "acceptance_criterion",
+    }
+    assert "required" in coverage["omission_restriction"].lower()
+
+    groups = contract["semantic_rules"]["execution_groups"]
+    assert groups["optional"] is True
+    assert "sequential" in groups["sequential_member_rule"]
+    assert "cross-group" in groups["cross_group_dependencies"].lower()
+
+
 def test_strict_parsers_still_reject_legacy_and_application_owned_fields():
     try:
         parse_planning_brief_candidate({"title": "legacy"})

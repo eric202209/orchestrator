@@ -8,7 +8,7 @@ from pydantic import (
     computed_field,
     field_validator,
 )
-from typing import Optional, Any, Dict, List
+from typing import Optional, Any, Dict, List, Literal
 from datetime import datetime
 from enum import Enum
 
@@ -188,6 +188,10 @@ class PlanningSessionSummaryResponse(BaseModel):
     status: str
     source_brain: str
     protocol_version: str = "v1"
+    target_stage: Optional[
+        Literal["planning_brief", "structured_task_plan", "full_planning"]
+    ] = None
+    planning_completion_state: Optional[str] = None
     planning_backend: Optional[str] = None
     planner_model: Optional[str] = None
     reasoning_profile: Optional[str] = None
@@ -228,10 +232,18 @@ class PlanningSessionCreateRequest(BaseModel):
     source_brain: str = "local"
     skip_clarification: bool = False
     protocol_version: str = "v1"
+    target_stage: Optional[
+        Literal["planning_brief", "structured_task_plan", "full_planning"]
+    ] = None
 
 
 class PlanningSessionRespondRequest(BaseModel):
     response: str = Field(min_length=1)
+
+
+class PlanningStageAdvanceRequest(BaseModel):
+    target_stage: Literal["planning_brief", "structured_task_plan", "full_planning"]
+    accepted_brief_checkpoint_id: Optional[int] = None
 
 
 class PlanningSessionCommitRequest(BaseModel):

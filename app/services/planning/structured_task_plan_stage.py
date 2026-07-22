@@ -780,10 +780,33 @@ def build_structured_task_plan_provider_input(
         stage_configuration=configuration,
         capacity_limits=plan_policy,
         rules={
-            "coverage": "Every required Brief goal, requirement, acceptance criterion, and must constraint must be covered or have a Brief-authorized omission.",
+            "coverage": (
+                "Account for every accepted Brief goal, requirement, acceptance "
+                "criterion, and constraint through one or more valid traceability "
+                "records or a permitted intentional omission. Silence is not "
+                "coverage; narrative mention and similar task-title words are not "
+                "coverage."
+            ),
             "dependencies": "All dependency references must resolve and the application builds the DAG.",
-            "groups": "Sequential group edges are materialized by the application; parallel targets must not conflict.",
-            "traceability": "Do not invent Brief requirements, criteria, constraints, assumptions, decisions, or scope exceptions.",
+            "groups": (
+                "Execution groups are optional. When present, each listed task "
+                "reference must resolve and a task cannot belong to multiple groups. "
+                "Sequential adjacent members require an explicit ordering or "
+                "hard_completion dependency edge; member order must not hide a "
+                "prerequisite. Parallel members cannot depend on one another or "
+                "conflict on a writable target. Cross-group dependencies use the "
+                "same provider-facing task indexes."
+            ),
+            "traceability": (
+                "Use accepted Brief IDs and the role required by each target kind. "
+                "Do not invent Brief requirements, criteria, constraints, "
+                "assumptions, decisions, or scope exceptions."
+            ),
+            "omissions": (
+                "Only a non-required Brief requirement or acceptance criterion may "
+                "use intentional_omissions, with an allowed reason and a valid Brief "
+                "scope or operator-decision ID."
+            ),
         },
         formatting_instructions={
             "output": "Return one JSON object only; no Markdown fences or commentary.",

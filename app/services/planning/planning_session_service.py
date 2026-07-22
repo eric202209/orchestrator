@@ -60,6 +60,7 @@ from app.services.orchestration.stage_engine import (
     StageDefinition,
     StageExecutor,
     StageStatus,
+    normalize_stage_target,
 )
 from app.services.orchestration.prompt_optimization import optimize_prompt
 from app.services.orchestration.policy import PLANNING_REPAIR_NO_OUTPUT_TIMEOUT_SECONDS
@@ -160,6 +161,7 @@ class PlanningSessionService:
         source_brain: str = "local",
         skip_clarification: bool = False,
         protocol_version: str = PROTOCOL_V1,
+        target_stage: str | None = None,
     ) -> PlanningSession:
         normalized_protocol_version = (
             str(protocol_version or PROTOCOL_V1).strip().lower()
@@ -168,6 +170,12 @@ class PlanningSessionService:
             raise HTTPException(
                 status_code=422,
                 detail=f"Unsupported planning protocol version: {protocol_version}",
+            )
+        normalized_target = normalize_stage_target(target_stage)
+        if normalized_target and normalized_protocol_version != PROTOCOL_V2:
+            raise HTTPException(
+                status_code=422,
+                detail="target_stage is supported only for Protocol v2 planning",
             )
         existing = (
             self.db.query(PlanningSession)
@@ -208,6 +216,8 @@ class PlanningSessionService:
         msg_metadata: dict = {"kind": "prompt"}
         if skip_clarification:
             msg_metadata["skip_clarification"] = True
+        if normalized_target:
+            msg_metadata["target_stage"] = normalized_target
         if skip_clarification and self._looks_like_replan_prompt(prompt):
             msg_metadata["replan_recovery"] = True
         initial_message = self._add_message(
@@ -366,6 +376,93 @@ class PlanningSessionService:
         session.processing_token = None
         session.processing_started_at = None
         session.processing_task_id = None
+        session.updated_at = datetime.now(timezone.utc)
+        self.db.commit()
+        self.schedule_processing(session.id)
+        self.db.refresh(session)
+        return session
+
+    def advance_to_stage(
+        self,
+        session_id: int,
+        target_stage: str,
+        *,
+        accepted_brief_checkpoint_id: int | None = None,
+    ) -> PlanningSession:
+        """Persist an explicit Protocol v2 stage command and schedule it."""
+
+        session = self.get_session(session_id)
+        if session.protocol_version != PROTOCOL_V2:
+            raise HTTPException(
+                status_code=422,
+                detail="stage advancement is supported only for Protocol v2 planning",
+            )
+        normalized_target = normalize_stage_target(target_stage)
+        if normalized_target is None:
+            raise HTTPException(status_code=422, detail="target_stage is required")
+        if session.status not in {"paused", "active", "failed"}:
+            raise HTTPException(
+                status_code=409,
+                detail="Only an active, paused, or authorized failed Protocol v2 session can advance stages",
+            )
+
+        accepted_brief = self.protocol_persistence.effective_checkpoints(
+            session.id,
+            stage_versions={"planning_brief": 1},
+        ).get(("planning_brief", 1))
+        if normalized_target == "structured_task_plan":
+            if accepted_brief is None or accepted_brief.status != "accepted":
+                raise HTTPException(
+                    status_code=409,
+                    detail="structured_task_plan requires an accepted Planning Brief",
+                )
+            if (
+                accepted_brief_checkpoint_id is not None
+                and accepted_brief.id != accepted_brief_checkpoint_id
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="accepted Brief checkpoint authority does not match",
+                )
+
+        task_plan_checkpoint = self.protocol_persistence.effective_checkpoints(
+            session.id,
+            stage_versions={"structured_task_plan": 1},
+        ).get(("structured_task_plan", 1))
+        independent_attempt = bool(
+            normalized_target == "structured_task_plan"
+            and task_plan_checkpoint is not None
+            and task_plan_checkpoint.status in {"failed", "invalidated"}
+        )
+        if session.status == "failed" and not independent_attempt:
+            raise HTTPException(
+                status_code=409,
+                detail="Failed planning session has no separately authorized stage attempt",
+            )
+
+        self._add_message(
+            session,
+            "system",
+            f"Advance Protocol v2 planning to {normalized_target}.",
+            metadata={
+                "kind": "stage_control",
+                "target_stage": normalized_target,
+                "accepted_brief_checkpoint_id": (
+                    accepted_brief.id
+                    if normalized_target == "structured_task_plan"
+                    and accepted_brief is not None
+                    else None
+                ),
+                "independent_attempt": independent_attempt,
+            },
+        )
+        session.status = "active"
+        session.last_error = None
+        session.current_prompt_id = None
+        session.processing_token = None
+        session.processing_started_at = None
+        session.processing_task_id = None
+        session.completed_at = None
         session.updated_at = datetime.now(timezone.utc)
         self.db.commit()
         self.schedule_processing(session.id)
@@ -744,6 +841,15 @@ class PlanningSessionService:
         return session, committed_plan, tasks
 
     def build_session_payload(self, session: PlanningSession) -> dict[str, Any]:
+        target_stage = self._requested_stage_target(session)
+        if session.status == "paused" and target_stage:
+            planning_completion_state = "target_reached"
+        elif session.status == "failed":
+            planning_completion_state = "failed"
+        elif session.status == "completed":
+            planning_completion_state = "completed"
+        else:
+            planning_completion_state = None
         payload = {
             "id": session.id,
             "project_id": session.project_id,
@@ -752,6 +858,8 @@ class PlanningSessionService:
             "status": session.status,
             "source_brain": session.source_brain,
             "protocol_version": session.protocol_version,
+            "target_stage": target_stage,
+            "planning_completion_state": planning_completion_state,
             "planning_backend": session.planning_backend,
             "planner_model": session.planner_model,
             "reasoning_profile": session.reasoning_profile,
@@ -791,7 +899,30 @@ class PlanningSessionService:
                     session.id
                 )
             )
+            if session.status == "paused" and target_stage:
+                payload["planning_completion_state"] = "target_reached"
+            elif session.status == "failed":
+                payload["planning_completion_state"] = "failed"
         return payload
+
+    @staticmethod
+    def _requested_stage_command(session: PlanningSession) -> tuple[str | None, bool]:
+        """Read the persisted target and explicit-attempt marker."""
+
+        for message in reversed(session.messages or []):
+            metadata = message.metadata_json
+            if not isinstance(metadata, dict):
+                continue
+            value = metadata.get("target_stage")
+            if value is not None:
+                return normalize_stage_target(value), bool(
+                    metadata.get("independent_attempt")
+                )
+        return None, False
+
+    @classmethod
+    def _requested_stage_target(cls, session: PlanningSession) -> str | None:
+        return cls._requested_stage_command(session)[0]
 
     def _prepare_direct_owner(
         self, session_id: int
@@ -1077,10 +1208,13 @@ class PlanningSessionService:
     ) -> None:
         """Advance Protocol v2 stages without entering legacy synthesis."""
 
+        target_stage, independent_attempt = self._requested_stage_command(session)
         result = self.stage_executor.advance(
             session.id,
             session_generation_id=generation_id,
             fencing_token=owner_token,
+            target_stage=target_stage,
+            independent_attempt=independent_attempt,
         )
         self._assert_owner(session.id, generation_id, owner_token)
         if result.status == StageStatus.COMPLETED:
@@ -1088,6 +1222,13 @@ class PlanningSessionService:
             session.current_prompt_id = None
             session.completed_at = datetime.now(timezone.utc)
             session.last_error = None
+            session.updated_at = datetime.now(timezone.utc)
+            return
+        if result.status == StageStatus.PAUSED and result.target_reached:
+            session.status = "paused"
+            session.current_prompt_id = None
+            session.last_error = None
+            session.completed_at = None
             session.updated_at = datetime.now(timezone.utc)
             return
         if result.status in {StageStatus.FAILED, StageStatus.BLOCKED}:

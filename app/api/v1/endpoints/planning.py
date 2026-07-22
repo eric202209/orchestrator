@@ -16,6 +16,7 @@ from app.schemas import (
     PlanningSessionCommitRequest,
     PlanningSessionCreateRequest,
     PlanningSessionRespondRequest,
+    PlanningStageAdvanceRequest,
     PlanningSessionResponse,
     PlanningSessionSummaryResponse,
     TaskResponse,
@@ -75,6 +76,7 @@ def start_planning_session(
         source_brain=payload.source_brain,
         skip_clarification=payload.skip_clarification,
         protocol_version=payload.protocol_version,
+        target_stage=payload.target_stage,
     )
     return service.build_session_payload(session)
 
@@ -101,6 +103,26 @@ def respond_to_planning_session(
     _authorize_planning_session(db, session_id, current_user)
     service = PlanningSessionService(db)
     session = service.respond(session_id, payload.response)
+    return service.build_session_payload(session)
+
+
+@router.post(
+    "/sessions/{session_id}/advance-stage",
+    response_model=PlanningSessionResponse,
+)
+def advance_planning_stage(
+    session_id: int,
+    payload: PlanningStageAdvanceRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    _authorize_planning_session(db, session_id, current_user)
+    service = PlanningSessionService(db)
+    session = service.advance_to_stage(
+        session_id,
+        payload.target_stage,
+        accepted_brief_checkpoint_id=payload.accepted_brief_checkpoint_id,
+    )
     return service.build_session_payload(session)
 
 

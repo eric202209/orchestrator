@@ -437,6 +437,66 @@ def build_structured_task_plan_schema_contract() -> dict[str, Any]:
             "omissions": "target_id must be an accepted Brief requirement or acceptance criterion and the reason must be explicit",
             "manifest_sources": "Structured Task Plan candidates have no source_refs field; traceability and omission targets use accepted Brief IDs, never manifest source identifiers",
         },
+        "semantic_rules": {
+            "coverage": {
+                "required_target_kinds": [
+                    "goal",
+                    "requirement",
+                    "acceptance_criterion",
+                    "constraint",
+                ],
+                "accounting": (
+                    "Account for every accepted Brief goal, requirement, acceptance "
+                    "criterion, and constraint through one or more valid traceability "
+                    "records or a permitted intentional omission. Silence is not "
+                    "coverage; narrative mention and similar task-title words are "
+                    "not coverage."
+                ),
+                "traceability_roles": {
+                    "goal": ["implements", "enables", "verifies"],
+                    "requirement": ["implements", "enables"],
+                    "acceptance_criterion": ["implements", "verifies"],
+                    "constraint": ["constrained_by"],
+                },
+                "omission_target_kinds": [
+                    "requirement",
+                    "acceptance_criterion",
+                ],
+                "omission_restriction": (
+                    "An omission target must be an accepted Brief requirement or "
+                    "acceptance criterion, use an allowed reason, and name an "
+                    "accepted Brief scope or operator-decision ID. Required "
+                    "requirements and acceptance criteria, goals, and constraints "
+                    "cannot be omitted. Do not invent an omission target."
+                ),
+            },
+            "execution_groups": {
+                "optional": True,
+                "membership": (
+                    "Execution groups are optional; when present, each listed task "
+                    "reference must resolve and a task cannot belong to multiple "
+                    "groups."
+                ),
+                "sequential_member_rule": (
+                    "A sequential group's member order is graph semantics. Adjacent "
+                    "members require an ordering or hard_completion edge; do not "
+                    "hide a prerequisite in narrative text."
+                ),
+                "parallel_member_rule": (
+                    "Parallel members may not depend on one another and may not "
+                    "conflict on a writable target unless the work is read-only."
+                ),
+                "cross_group_dependencies": (
+                    "Cross-group dependency references use the same provider-facing "
+                    "task indexes as all dependencies; group membership does not "
+                    "make a dependency reference visible or valid by itself."
+                ),
+                "ordering": (
+                    "Dependency edges are authoritative for graph ordering; candidate "
+                    "emission order and group order are not substitutes for edges."
+                ),
+            },
+        },
         "application_owned_fields": [
             "all Task, Dependency, and ExecutionGroup id fields",
             "schema_version",

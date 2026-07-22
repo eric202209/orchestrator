@@ -58,6 +58,23 @@ class StageEngineError(RuntimeError):
     """The stage graph or lifecycle cannot be advanced safely."""
 
 
+FULL_PLANNING_TARGET = "full_planning"
+SUPPORTED_STAGE_TARGETS = frozenset(
+    {"planning_brief", "structured_task_plan", FULL_PLANNING_TARGET}
+)
+
+
+def normalize_stage_target(target_stage: str | None) -> str | None:
+    """Normalize an application-owned stage target or fail closed."""
+
+    if target_stage is None or not str(target_stage).strip():
+        return None
+    normalized = str(target_stage).strip().lower()
+    if normalized not in SUPPORTED_STAGE_TARGETS:
+        raise StageEngineError(f"unknown stage target: {target_stage}")
+    return normalized
+
+
 class StageOwnershipError(StageEngineError):
     """The session does not have a usable current owner fence."""
 
@@ -70,6 +87,7 @@ class StageStatus(str, Enum):
     FAILED = "failed"
     INVALIDATED = "invalidated"
     BLOCKED = "blocked"
+    PAUSED = "paused"
     COMPLETED = "completed"
 
 
@@ -427,6 +445,8 @@ class StageRunResult:
     execution: StageExecution | None = None
     completion: StageCompletion | None = None
     reason: str | None = None
+    target_stage: str | None = None
+    target_reached: bool = False
 
 
 class StageExecutor:
@@ -932,12 +952,87 @@ class StageExecutor:
         )
         return StageCompletion(True, "all required stages accepted", manifest)
 
+    def _advance_to_target(
+        self,
+        session_id: int,
+        *,
+        session_generation_id: str,
+        fencing_token: str,
+        target_stage: str,
+        independent_attempt: bool = False,
+    ) -> StageRunResult:
+        """Execute exactly one requested stage and then stop.
+
+        Targeted advancement deliberately does not retry a failed checkpoint
+        and never evaluates full-graph completion.  The normal no-target path
+        below retains the existing resumable graph behavior.
+        """
+
+        if target_stage not in self.graph.identifiers:
+            raise StageEngineError(f"unknown stage target: {target_stage}")
+        definition = self.graph.get(target_stage)
+        predecessors = self.load_accepted_predecessors(session_id, target_stage)
+        missing = sorted(set(definition.prerequisites) - set(predecessors))
+        if missing:
+            return StageRunResult(
+                StageStatus.BLOCKED,
+                reason=("accepted prerequisite(s) missing: " + ", ".join(missing)),
+                target_stage=target_stage,
+            )
+
+        current = self.persistence.effective_checkpoints(
+            session_id,
+            stage_versions={target_stage: definition.version},
+        ).get((target_stage, definition.version))
+        if current is not None and current.status in {"failed", "invalidated"}:
+            if not independent_attempt:
+                execution = self.execute_stage(
+                    session_id,
+                    target_stage,
+                    session_generation_id=session_generation_id,
+                    fencing_token=fencing_token,
+                )
+            else:
+                execution = self.retry_stage(
+                    session_id,
+                    target_stage,
+                    session_generation_id=session_generation_id,
+                    fencing_token=fencing_token,
+                )
+        else:
+            if independent_attempt and current is not None:
+                raise StageEngineError(
+                    f"independent stage attempt requires a failed checkpoint: {target_stage}"
+                )
+            execution = self.execute_stage(
+                session_id,
+                target_stage,
+                session_generation_id=session_generation_id,
+                fencing_token=fencing_token,
+            )
+        if execution.status != StageStatus.ACCEPTED:
+            return StageRunResult(
+                execution.status,
+                execution=execution,
+                reason=execution.error,
+                target_stage=target_stage,
+            )
+        return StageRunResult(
+            StageStatus.PAUSED,
+            execution=execution,
+            reason=f"target stage {target_stage} reached",
+            target_stage=target_stage,
+            target_reached=True,
+        )
+
     def advance(
         self,
         session_id: int,
         *,
         session_generation_id: str,
         fencing_token: str,
+        target_stage: str | None = None,
+        independent_attempt: bool = False,
     ) -> StageRunResult:
         """Run the next resumable stage until failure or completion."""
 
@@ -946,6 +1041,15 @@ class StageExecutor:
             session_generation_id=session_generation_id,
             fencing_token=fencing_token,
         )
+        normalized_target = normalize_stage_target(target_stage)
+        if normalized_target and normalized_target != FULL_PLANNING_TARGET:
+            return self._advance_to_target(
+                session_id,
+                session_generation_id=ownership.session_generation_id,
+                fencing_token=ownership.fencing_token,
+                target_stage=normalized_target,
+                independent_attempt=independent_attempt,
+            )
         if not self.graph.identifiers:
             completion = self.evaluate_completion(
                 session_id,

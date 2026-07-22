@@ -92,7 +92,7 @@ def _manifest(session_id: int, generation: str, stage_config=None):
     )
 
 
-def _brief_candidate(manifest):
+def _brief_candidate(manifest, *, requirement_priority="required"):
     source = manifest.sources[0].source_id
     return {
         "objective": {
@@ -111,7 +111,7 @@ def _brief_candidate(manifest):
             {
                 "type": "functional",
                 "statement": "The accepted Task Plan covers the Brief.",
-                "priority": "required",
+                "priority": requirement_priority,
                 "source_refs": [source],
             }
         ],
@@ -256,14 +256,19 @@ def _plan_candidate(*, reverse=False, group=None):
 
 
 class _BriefProvider:
-    def __init__(self, manifest):
+    def __init__(self, manifest, *, requirement_priority="required"):
         self.manifest = manifest
+        self.requirement_priority = requirement_priority
         self.calls = 0
 
     def generate(self, _request):
         self.calls += 1
         return PlanningResponse(
-            candidate_text=copy.deepcopy(_brief_candidate(self.manifest)),
+            candidate_text=copy.deepcopy(
+                _brief_candidate(
+                    self.manifest, requirement_priority=self.requirement_priority
+                )
+            ),
             provider_name="test",
             provider_version="1",
             diagnostics=ProviderDiagnostics(category="provider_success"),
@@ -280,6 +285,21 @@ class _TaskPlanProvider:
         self.requests.append(request)
         return PlanningResponse(
             candidate_text=copy.deepcopy(self.output),
+            provider_name="test",
+            provider_version="1",
+            diagnostics=ProviderDiagnostics(category="provider_success"),
+            latency_seconds=0,
+        )
+
+
+class _FailingBriefProvider:
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, _request):
+        self.calls += 1
+        return PlanningResponse(
+            candidate_text={"not": "a Brief"},
             provider_name="test",
             provider_version="1",
             diagnostics=ProviderDiagnostics(category="provider_success"),
@@ -325,8 +345,16 @@ def _seed(db_session, *, stage_config=None):
     return session, manifest
 
 
-def _engine(db_session, session, manifest, task_output, *, configuration=None):
-    brief_provider = _BriefProvider(manifest)
+def _engine(
+    db_session,
+    session,
+    manifest,
+    task_output,
+    *,
+    configuration=None,
+    requirement_priority="required",
+):
+    brief_provider = _BriefProvider(manifest, requirement_priority=requirement_priority)
     task_provider = _TaskPlanProvider(task_output)
     engine = StageExecutor(
         db_session,
@@ -396,6 +424,8 @@ def test_candidate_position_references_resolve_and_emission_order_is_not_authori
     assert first_provider.requests[0].protocol_input["accepted_planning_brief"][
         "checkpoint_id"
     ]
+    assert "Silence is not coverage" in first_provider.requests[0].prompt
+    assert "Sequential adjacent members require" in first_provider.requests[0].prompt
 
     session2, manifest2 = _seed(db_session)
     second_engine, _, _ = _engine(
@@ -574,6 +604,125 @@ def test_coverage_failure_and_authorized_omission_boundary(db_session):
     )
     assert failed.status == StageStatus.FAILED
     assert failed.reason.startswith("coverage_validation_failure:")
+
+
+def test_valid_explicit_omission_covers_non_required_brief_item(db_session):
+    session, manifest = _seed(db_session)
+    candidate = _plan_candidate()
+    candidate["tasks"][0]["traceability"] = [
+        item
+        for item in candidate["tasks"][0]["traceability"]
+        if item["target_kind"] != "requirement"
+    ]
+    candidate["intentional_omissions"] = [
+        {
+            "target_kind": "requirement",
+            "target_id": "REQ-001",
+            "reason_code": "optional_scope",
+            "brief_scope_or_decision_id": "SCOPE-001",
+        }
+    ]
+    engine, _, _ = _engine(
+        db_session,
+        session,
+        manifest,
+        candidate,
+        requirement_priority="recommended",
+    )
+
+    result = engine.advance(
+        session.id,
+        session_generation_id=session.generation_id,
+        fencing_token=session.processing_token,
+    )
+
+    assert result.status == StageStatus.COMPLETED, result.reason
+    plan = PlanningProtocolPersistenceService(
+        db_session
+    ).load_accepted_structured_task_plan(session.id)
+    assert plan is not None
+    assert plan.coverage_index().invalid_omissions == ()
+
+
+def test_valid_cross_group_dependency_uses_provider_task_indexes(db_session):
+    session, manifest = _seed(db_session)
+    candidate = _plan_candidate(
+        group={
+            "kind": "sequential",
+            "order": 1,
+            "task_ids": ["tasks[0]"],
+            "parallel_limit": 1,
+            "skip_policy": "not_skippable",
+        }
+    )
+    candidate["execution_groups"].append(
+        {
+            "kind": "sequential",
+            "order": 2,
+            "task_ids": ["tasks[1]"],
+            "parallel_limit": 1,
+            "skip_policy": "not_skippable",
+        }
+    )
+    engine, _, _ = _engine(db_session, session, manifest, candidate)
+
+    result = engine.advance(
+        session.id,
+        session_generation_id=session.generation_id,
+        fencing_token=session.processing_token,
+    )
+
+    assert result.status == StageStatus.COMPLETED, result.reason
+    plan = PlanningProtocolPersistenceService(
+        db_session
+    ).load_accepted_structured_task_plan(session.id)
+    assert plan is not None
+    assert len(plan.execution_groups) == 2
+    assert any(
+        edge.prerequisite_task_id == "TASK-001" and edge.dependent_task_id == "TASK-002"
+        for edge in plan.dependencies
+    )
+
+
+def test_sequential_group_rejects_non_ordering_adjacent_dependency(db_session):
+    session, manifest = _seed(db_session)
+    candidate = _plan_candidate(
+        group={
+            "kind": "sequential",
+            "order": 1,
+            "task_ids": ["tasks[0]", "tasks[1]"],
+            "parallel_limit": 1,
+            "skip_policy": "not_skippable",
+        }
+    )
+    candidate["dependencies"] = [
+        {
+            "prerequisite_task_id": "tasks[0]",
+            "dependent_task_id": "tasks[1]",
+            "type": "artifact_ready",
+            "reason": "the artifact must exist before verification",
+        }
+    ]
+    engine, _, task_provider = _engine(db_session, session, manifest, candidate)
+
+    result = engine.advance(
+        session.id,
+        session_generation_id=session.generation_id,
+        fencing_token=session.processing_token,
+    )
+
+    assert result.status == StageStatus.FAILED
+    assert "hidden_group_dependency" in result.reason
+
+    independent = engine.advance(
+        session.id,
+        session_generation_id=session.generation_id,
+        fencing_token=session.processing_token,
+        target_stage="structured_task_plan",
+        independent_attempt=True,
+    )
+    assert independent.status == StageStatus.FAILED
+    assert len(task_provider.requests) == 2
 
 
 @pytest.mark.parametrize(
@@ -793,3 +942,127 @@ def test_integrity_failure_does_not_regenerate_or_repair_checkpoint(db_session):
     with pytest.raises(StageEngineError, match="integrity_failure"):
         engine.recover(session.id)
     assert provider.requests == []
+
+
+def test_brief_target_accepts_brief_and_stops_before_task_plan(db_session):
+    session, manifest = _seed(db_session)
+    engine, brief_provider, task_provider = _engine(
+        db_session, session, manifest, _plan_candidate()
+    )
+
+    result = engine.advance(
+        session.id,
+        session_generation_id=session.generation_id,
+        fencing_token=session.processing_token,
+        target_stage="planning_brief",
+    )
+
+    assert result.status == StageStatus.PAUSED
+    assert result.target_stage == "planning_brief"
+    assert result.target_reached is True
+    assert brief_provider.calls == 1
+    assert task_provider.requests == []
+    assert (
+        PlanningProtocolPersistenceService(db_session).load_accepted_planning_brief(
+            session.id
+        )
+        is not None
+    )
+    assert (
+        PlanningProtocolPersistenceService(
+            db_session
+        ).load_accepted_structured_task_plan(session.id)
+        is None
+    )
+
+
+def test_failed_brief_target_does_not_call_task_plan_provider(db_session):
+    session, manifest = _seed(db_session)
+    brief_provider = _FailingBriefProvider()
+    task_provider = _TaskPlanProvider(_plan_candidate())
+    engine = StageExecutor(
+        db_session,
+        build_protocol_v2_stage_definitions(
+            db_session,
+            planning_provider=_CombinedProvider(brief_provider, task_provider),
+        ),
+        configuration=_stage_config(),
+    )
+
+    result = engine.advance(
+        session.id,
+        session_generation_id=session.generation_id,
+        fencing_token=session.processing_token,
+        target_stage="planning_brief",
+    )
+
+    assert result.status == StageStatus.FAILED
+    assert brief_provider.calls == 1
+    assert task_provider.requests == []
+
+
+def test_structured_task_plan_target_requires_accepted_brief(db_session):
+    session, manifest = _seed(db_session)
+    engine, brief_provider, task_provider = _engine(
+        db_session, session, manifest, _plan_candidate()
+    )
+
+    result = engine.advance(
+        session.id,
+        session_generation_id=session.generation_id,
+        fencing_token=session.processing_token,
+        target_stage="structured_task_plan",
+    )
+
+    assert result.status == StageStatus.BLOCKED
+    assert "accepted prerequisite" in result.reason
+    assert brief_provider.calls == 0
+    assert task_provider.requests == []
+
+
+def test_structured_task_plan_target_runs_only_task_plan_after_accepted_brief(
+    db_session,
+):
+    session, manifest = _seed(db_session)
+    engine, brief_provider, task_provider = _engine(
+        db_session, session, manifest, _plan_candidate()
+    )
+    brief_result = engine.advance(
+        session.id,
+        session_generation_id=session.generation_id,
+        fencing_token=session.processing_token,
+        target_stage="planning_brief",
+    )
+    assert brief_result.status == StageStatus.PAUSED
+
+    task_result = engine.advance(
+        session.id,
+        session_generation_id=session.generation_id,
+        fencing_token=session.processing_token,
+        target_stage="structured_task_plan",
+    )
+
+    assert task_result.status == StageStatus.PAUSED
+    assert task_result.target_stage == "structured_task_plan"
+    assert task_result.target_reached is True
+    assert brief_provider.calls == 1
+    assert len(task_provider.requests) == 1
+    assert (
+        PlanningProtocolPersistenceService(
+            db_session
+        ).load_accepted_structured_task_plan(session.id)
+        is not None
+    )
+
+
+def test_unknown_target_fails_closed(db_session):
+    session, manifest = _seed(db_session)
+    engine, _, _ = _engine(db_session, session, manifest, _plan_candidate())
+
+    with pytest.raises(StageEngineError, match="unknown stage target"):
+        engine.advance(
+            session.id,
+            session_generation_id=session.generation_id,
+            fencing_token=session.processing_token,
+            target_stage="not-a-stage",
+        )
