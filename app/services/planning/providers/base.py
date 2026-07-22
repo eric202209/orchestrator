@@ -163,6 +163,7 @@ class ProviderRuntimeInformation:
     runtime_name: str | None
     model: str | None
     adaptation_profile: str | None
+    details: Mapping[str, Any] = field(default_factory=dict)
 
 
 class PlanningProviderExecutionError(RuntimeError):
@@ -174,10 +175,12 @@ class PlanningProviderExecutionError(RuntimeError):
         classification: str,
         detail: str,
         origin: ProviderFailureOrigin,
+        diagnostics: ProviderDiagnostics | None = None,
     ) -> None:
         self.classification = classification
         self.detail = str(detail or classification)[:500]
         self.origin = origin
+        self.diagnostics = diagnostics
         super().__init__(self.detail)
 
 

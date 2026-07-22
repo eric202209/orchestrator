@@ -165,6 +165,12 @@ class Settings(BaseSettings):
     )
     AGENT_SECONDARY_BACKEND: Optional[str] = None
     PLANNING_PROVIDER: str = "openclaw"
+    PLANNING_DIRECT_BASE_URL: str = ""
+    PLANNING_DIRECT_MODEL: str = ""
+    PLANNING_DIRECT_API_KEY: str = ""
+    PLANNING_DIRECT_TIMEOUT_SECONDS: int = 360
+    PLANNING_DIRECT_MAX_COMPLETION_TOKENS: int = 16384
+    PLANNING_DIRECT_TEMPERATURE: float = 0.0
     PLANNING_BACKEND: Optional[str] = None
     EXECUTION_BACKEND: Optional[str] = None
     DEBUG_REPAIR_BACKEND: Optional[str] = None

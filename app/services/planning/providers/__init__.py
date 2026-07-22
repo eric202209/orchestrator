@@ -25,8 +25,17 @@ from app.services.planning.providers.selection import (
     create_planning_provider,
     list_planning_provider_names,
 )
+from app.services.planning.providers.direct_openai_compatible import (
+    DIRECT_PROVIDER_VERSION,
+    DirectOpenAICompatiblePlanningProvider,
+    DirectProviderConfigurationError,
+    build_application_owned_messages,
+)
 
 __all__ = [
+    "DIRECT_PROVIDER_VERSION",
+    "DirectOpenAICompatiblePlanningProvider",
+    "DirectProviderConfigurationError",
     "ExecutionMetadata",
     "PlanningArtifactKind",
     "PlanningCandidateText",
@@ -45,6 +54,7 @@ __all__ = [
     "ReasoningControls",
     "SamplingControls",
     "UnsupportedPlanningProviderError",
+    "build_application_owned_messages",
     "configured_planning_provider_name",
     "create_planning_provider",
     "list_planning_provider_names",

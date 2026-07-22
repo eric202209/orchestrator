@@ -60,7 +60,7 @@ def test_provider_interface_request_and_capabilities_are_provider_neutral():
     assert capabilities["supports_top_p"] is False
 
 
-def test_selection_defaults_to_the_only_registered_openclaw_adapter(
+def test_selection_defaults_to_openclaw_and_registers_direct_adapter(
     db_session, monkeypatch
 ):
     monkeypatch.setattr(settings, "PLANNING_PROVIDER", "openclaw")
@@ -69,7 +69,10 @@ def test_selection_defaults_to_the_only_registered_openclaw_adapter(
 
     assert isinstance(provider, OpenClawPlanningProvider)
     assert provider.name == "openclaw"
-    assert list_planning_provider_names() == ("openclaw",)
+    assert list_planning_provider_names() == (
+        "direct_openai_compatible",
+        "openclaw",
+    )
 
 
 def test_selection_rejects_unimplemented_future_provider(db_session, monkeypatch):

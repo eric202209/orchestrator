@@ -6,6 +6,9 @@ from typing import Any, Callable
 
 from app.config import settings
 from app.services.planning.providers.base import PlanningProvider
+from app.services.planning.providers.direct_openai_compatible import (
+    DirectOpenAICompatiblePlanningProvider,
+)
 from app.services.planning.providers.openclaw import OpenClawPlanningProvider
 
 
@@ -14,6 +17,7 @@ class UnsupportedPlanningProviderError(ValueError):
 
 
 _PROVIDER_FACTORIES: dict[str, Callable[[Any], PlanningProvider]] = {
+    "direct_openai_compatible": DirectOpenAICompatiblePlanningProvider,
     "openclaw": OpenClawPlanningProvider,
 }
 
