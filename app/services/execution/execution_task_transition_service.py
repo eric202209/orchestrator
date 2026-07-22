@@ -59,6 +59,9 @@ EXECUTION_TASK_REASON_CODES = frozenset(
     {
         "dependencies_satisfied",
         "dependency_blocked",
+        "dependency_failed",
+        "dependency_cancelled",
+        "dependency_skipped",
         "execution_started",
         "execution_succeeded",
         "execution_failed",
@@ -68,7 +71,10 @@ EXECUTION_TASK_REASON_CODES = frozenset(
         "operator_skipped",
         "resume_authorized",
         "review_gate_pending",
+        "manual_gate_pending",
         "resource_unavailable",
+        "resource_gate_pending",
+        "group_gate_pending",
         "system_reconciliation",
     }
 )
@@ -104,6 +110,17 @@ class ExecutionTaskTransitionCommand:
     idempotency_key: str
     reason_detail: str | None = None
     execution_plan_id: int | None = None
+    guarded_task_fences: tuple["ExecutionTaskLifecycleFence", ...] = ()
+
+
+@dataclass(frozen=True)
+class ExecutionTaskLifecycleFence:
+    """A predecessor lifecycle projection fence for a guarded transition."""
+
+    execution_task_id: int
+    expected_state: str
+    expected_state_version: int
+    lifecycle_head_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -180,6 +197,15 @@ def _command_payload(command: ExecutionTaskTransitionCommand) -> dict[str, objec
         "actor_type": command.actor_type,
         "actor_id": command.actor_id,
         "idempotency_key": command.idempotency_key,
+        "guarded_task_fences": [
+            {
+                "execution_task_id": fence.execution_task_id,
+                "expected_state": fence.expected_state,
+                "expected_state_version": fence.expected_state_version,
+                "lifecycle_head_hash": fence.lifecycle_head_hash,
+            }
+            for fence in command.guarded_task_fences
+        ],
     }
 
 
@@ -287,6 +313,7 @@ class ExecutionTaskTransitionService:
                 "transition_version_stale",
                 "expected state version does not match the persisted version",
             )
+        self._verify_guarded_task_fences(task, command.guarded_task_fences)
         allowed = ALLOWED_EXECUTION_TASK_TRANSITIONS.get(task.status)
         if allowed is None or command.to_state not in allowed:
             raise ExecutionTaskTransitionError(
@@ -523,6 +550,34 @@ class ExecutionTaskTransitionService:
             .all()
         )
 
+    def _verify_guarded_task_fences(
+        self,
+        target: ExecutionTask,
+        fences: tuple[ExecutionTaskLifecycleFence, ...],
+    ) -> None:
+        for fence in fences:
+            predecessor = self.db.get(ExecutionTask, fence.execution_task_id)
+            if (
+                predecessor is None
+                or predecessor.execution_plan_id != target.execution_plan_id
+                or predecessor.status != fence.expected_state
+                or int(predecessor.state_version) != fence.expected_state_version
+            ):
+                raise ExecutionTaskTransitionError(
+                    "transition_dependency_stale",
+                    "a guarded predecessor lifecycle projection changed",
+                )
+            self.verify_task_lifecycle_integrity(predecessor.id)
+            events = self._events(predecessor.id)
+            current_head = (
+                events[-1].event_hash if events else GENESIS_PREVIOUS_EVENT_HASH
+            )
+            if current_head != fence.lifecycle_head_hash:
+                raise ExecutionTaskTransitionError(
+                    "transition_dependency_stale",
+                    "a guarded predecessor lifecycle head changed",
+                )
+
     def _existing_event(
         self,
         execution_task_id: int,
@@ -615,6 +670,47 @@ class ExecutionTaskTransitionService:
         idempotency_key = _bounded_text(
             command.idempotency_key, "idempotency_key", 128, required=True
         )
+        fences: list[ExecutionTaskLifecycleFence] = []
+        for raw_fence in command.guarded_task_fences or ():
+            if isinstance(raw_fence, ExecutionTaskLifecycleFence):
+                fence = raw_fence
+            elif isinstance(raw_fence, Mapping):
+                try:
+                    fence = ExecutionTaskLifecycleFence(
+                        execution_task_id=int(raw_fence["execution_task_id"]),
+                        expected_state=str(raw_fence["expected_state"]),
+                        expected_state_version=int(raw_fence["expected_state_version"]),
+                        lifecycle_head_hash=raw_fence.get("lifecycle_head_hash"),
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ExecutionTaskTransitionError(
+                        "invalid_command", "guarded task fence is malformed"
+                    ) from exc
+            else:
+                raise ExecutionTaskTransitionError(
+                    "invalid_command", "guarded task fence is malformed"
+                )
+            if (
+                fence.execution_task_id < 1
+                or fence.expected_state_version < 0
+                or fence.expected_state not in EXECUTION_TASK_STATES
+                or (
+                    fence.lifecycle_head_hash is not None
+                    and (
+                        not isinstance(fence.lifecycle_head_hash, str)
+                        or len(fence.lifecycle_head_hash) != 64
+                    )
+                )
+            ):
+                raise ExecutionTaskTransitionError(
+                    "invalid_command", "guarded task fence is invalid"
+                )
+            fences.append(fence)
+        if len({fence.execution_task_id for fence in fences}) != len(fences):
+            raise ExecutionTaskTransitionError(
+                "invalid_command", "guarded task fences contain duplicates"
+            )
+        fences.sort(key=lambda item: item.execution_task_id)
         return ExecutionTaskTransitionCommand(
             execution_task_id=task_id,
             execution_plan_id=plan_id,
@@ -626,4 +722,5 @@ class ExecutionTaskTransitionService:
             actor_type=actor_type,
             actor_id=actor_id,
             idempotency_key=idempotency_key,
+            guarded_task_fences=tuple(fences),
         )
