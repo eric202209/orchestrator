@@ -246,6 +246,7 @@ class ExecutionPlanCommitService:
                 task_spec=task.to_dict(),
                 done_when=[item.done_when for item in task.work_items],
                 status="pending",
+                state_version=0,
             )
             self.db.add(row)
             task_rows[task.id] = row

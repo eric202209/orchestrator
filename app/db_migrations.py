@@ -1433,6 +1433,118 @@ def _migration_032_execution_commit_command(engine: Engine) -> None:
             connection.execute(text(statement))
 
 
+def _migration_033_execution_task_lifecycle(engine: Engine) -> None:
+    """Add durable Phase 29C-1 task lifecycle state and transition events.
+
+    Existing Phase 29B tasks are intentionally accepted only when they are
+    still at the materialization state. No historical transition event is
+    fabricated for those rows; their state version starts at zero.
+    """
+
+    with engine.begin() as connection:
+        if not _has_column(engine, "execution_tasks", "state_version"):
+            connection.execute(
+                text(
+                    "ALTER TABLE execution_tasks ADD COLUMN "
+                    "state_version INTEGER NOT NULL DEFAULT 0"
+                )
+            )
+
+        legacy_statuses = {
+            str(value)
+            for value in connection.execute(
+                text(
+                    "SELECT DISTINCT status FROM execution_tasks "
+                    "WHERE status <> 'pending'"
+                )
+            ).scalars()
+        }
+        if legacy_statuses:
+            raise RuntimeError(
+                "Phase 29C-1 migration refuses non-pending existing "
+                f"ExecutionTask statuses: {sorted(legacy_statuses)!r}"
+            )
+        legacy_versions = {
+            int(value)
+            for value in connection.execute(
+                text(
+                    "SELECT DISTINCT state_version FROM execution_tasks "
+                    "WHERE state_version <> 0"
+                )
+            ).scalars()
+        }
+        if legacy_versions:
+            raise RuntimeError(
+                "Phase 29C-1 migration refuses existing ExecutionTask "
+                f"versions without history: {sorted(legacy_versions)!r}"
+            )
+
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_transitions (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    plan_task_id VARCHAR(32) NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    from_state VARCHAR(20) NOT NULL,
+                    to_state VARCHAR(20) NOT NULL,
+                    reason_code VARCHAR(64) NOT NULL,
+                    reason_detail VARCHAR(1024),
+                    actor_type VARCHAR(32) NOT NULL,
+                    actor_id VARCHAR(255) NOT NULL,
+                    command_id VARCHAR(128) NOT NULL,
+                    expected_version INTEGER NOT NULL,
+                    resulting_version INTEGER NOT NULL,
+                    canonical_command_hash VARCHAR(64) NOT NULL,
+                    canonical_payload_hash VARCHAR(64) NOT NULL,
+                    previous_event_hash VARCHAR(64),
+                    event_hash VARCHAR(64) NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                    CONSTRAINT uq_execution_task_transition_sequence
+                        UNIQUE (execution_task_id, sequence),
+                    CONSTRAINT uq_execution_task_transition_idempotency
+                        UNIQUE (execution_task_id, actor_type, actor_id, command_id),
+                    FOREIGN KEY(execution_plan_id)
+                        REFERENCES execution_plans (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_id)
+                        REFERENCES execution_tasks (id) ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        indexes = {
+            "ix_execution_task_transitions_plan": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_task_transitions_plan "
+                "ON execution_task_transitions (execution_plan_id)"
+            ),
+            "ix_execution_task_transitions_task": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_task_transitions_task "
+                "ON execution_task_transitions (execution_task_id)"
+            ),
+            "ix_execution_task_transitions_plan_task": (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_execution_task_transitions_plan_task "
+                "ON execution_task_transitions "
+                "(execution_plan_id, execution_task_id)"
+            ),
+            "ix_execution_task_transitions_command": (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_execution_task_transitions_command "
+                "ON execution_task_transitions "
+                "(actor_type, actor_id, command_id)"
+            ),
+            "ix_execution_task_transitions_event_hash": (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_execution_task_transitions_event_hash "
+                "ON execution_task_transitions (event_hash)"
+            ),
+        }
+        for statement in indexes.values():
+            connection.execute(text(statement))
+
+
 def _migration_014_task_workflow_stage(engine: Engine) -> None:
     if "tasks" not in _table_names(engine):
         return
@@ -1875,6 +1987,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="032_execution_commit_command",
         description="Add the Phase 29B-3 execution-commit idempotency command binding",
         upgrade=_migration_032_execution_commit_command,
+    ),
+    Migration(
+        version="033_execution_task_lifecycle",
+        description="Add Phase 29C-1 Execution Task lifecycle state and transition events",
+        upgrade=_migration_033_execution_task_lifecycle,
     ),
 )
 

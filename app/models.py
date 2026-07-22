@@ -742,6 +742,7 @@ class ExecutionTask(Base):
     task_spec = Column(JSON, nullable=False)
     done_when = Column(JSON, nullable=False)
     status = Column(String(20), nullable=False, default="pending")
+    state_version = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -752,6 +753,79 @@ class ExecutionTask(Base):
     )
 
     execution_plan = relationship("ExecutionPlan", back_populates="tasks")
+    transitions = relationship(
+        "ExecutionTaskTransition",
+        back_populates="execution_task",
+        cascade="all, delete-orphan",
+        order_by="ExecutionTaskTransition.sequence",
+    )
+
+
+class ExecutionTaskTransition(Base):
+    """Immutable lifecycle transition event for one Execution Task."""
+
+    __tablename__ = "execution_task_transitions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    plan_task_id = Column(String(32), nullable=False)
+    sequence = Column(Integer, nullable=False)
+    from_state = Column(String(20), nullable=False)
+    to_state = Column(String(20), nullable=False)
+    reason_code = Column(String(64), nullable=False)
+    reason_detail = Column(String(1024), nullable=True)
+    actor_type = Column(String(32), nullable=False)
+    actor_id = Column(String(255), nullable=False)
+    command_id = Column(String(128), nullable=False)
+    expected_version = Column(Integer, nullable=False)
+    resulting_version = Column(Integer, nullable=False)
+    canonical_command_hash = Column(String(64), nullable=False)
+    canonical_payload_hash = Column(String(64), nullable=False)
+    previous_event_hash = Column(String(64), nullable=True)
+    event_hash = Column(String(64), nullable=False, index=True)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_task_id",
+            "sequence",
+            name="uq_execution_task_transition_sequence",
+        ),
+        UniqueConstraint(
+            "execution_task_id",
+            "actor_type",
+            "actor_id",
+            "command_id",
+            name="uq_execution_task_transition_idempotency",
+        ),
+        Index(
+            "ix_execution_task_transitions_plan_task",
+            "execution_plan_id",
+            "execution_task_id",
+        ),
+        Index(
+            "ix_execution_task_transitions_command",
+            "actor_type",
+            "actor_id",
+            "command_id",
+        ),
+    )
+
+    execution_task = relationship("ExecutionTask", back_populates="transitions")
+    execution_plan = relationship("ExecutionPlan")
 
 
 class ExecutionDependencyEdge(Base):
