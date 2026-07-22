@@ -184,6 +184,56 @@ BRIEF_SOURCE_REFERENCE_INSTRUCTIONS = (
     "structure."
 )
 
+BRIEF_SEMANTIC_AUTHORITY_INSTRUCTIONS = (
+    "SEMANTIC AUTHORITY (STRICT):\n"
+    "Requirements: use type=non_functional only when the bounded Input Manifest "
+    "supports a non-functional statement. A non-functional requirement must set "
+    "quality_attribute to one of the allowed values. Do not manufacture a quality "
+    "attribute or synthetic quality requirement; if a quality choice is explicitly "
+    "unresolved, preserve it as a sourced question or omit the unsupported claim.\n"
+    "Operator decisions: emit an operator_decisions record only for an explicit "
+    "operator instruction or decision. Every source_refs value on that record must "
+    "resolve to a supplied source whose source_type is planning_request or "
+    "clarification_message. Never infer operator authority from project rules, "
+    "repository, runtime, or other source types.\n"
+    "Questions and assumptions: do not silently resolve uncertainty present in the "
+    "bounded input. A non_blocking question must reference an assumptions[index] "
+    "record through temporary_assumption_id; blocking and operator_decision_required "
+    "questions may leave that field null. Assumptions and questions must cite "
+    "supplied sources and must not invent facts. If no unresolved ambiguity is "
+    "present, omit the question and assumption records.\n"
+    "Constraints: a must constraint cannot rely only on model_review. Use "
+    "deterministic or test enforcement only when the supplied input defines a "
+    "testable condition; use operator_review only when the supplied input explicitly "
+    "requires operator judgment. Do not invent a numeric threshold or subjective "
+    "acceptance condition. If the condition is unsupported or not testable, preserve "
+    "uncertainty as a sourced question or omit the constraint."
+)
+
+_FIELD_CONDITIONAL_SEMANTICS = {
+    ("Requirement", "quality_attribute"): (
+        "required when type is non_functional; otherwise omit or set null; "
+        "the value must be one of the listed quality attributes and must be "
+        "supported by bounded input"
+    ),
+    ("Constraint", "enforcement"): (
+        "when severity is must, model_review is not acceptable as the only "
+        "enforcement; do not invent thresholds or acceptance conditions"
+    ),
+    ("UnresolvedQuestion", "temporary_assumption_id"): (
+        "required for classification=non_blocking and must reference "
+        "assumptions[index]; nullable for blocking or operator_decision_required "
+        "questions"
+    ),
+}
+
+_RECORD_AUTHORITY_SEMANTICS = {
+    ("OperatorDecision", "source_authority"): (
+        "source_refs must resolve only to supplied planning_request or "
+        "clarification_message sources; emit only for explicit operator authority"
+    )
+}
+
 
 def _nullable(annotation: Any) -> tuple[Any, bool]:
     args = get_args(annotation)
@@ -244,18 +294,29 @@ def _record_contract(
         reference_semantics = _REFERENCE_FIELD_SEMANTICS.get(item.name)
         if reference_semantics is not None:
             descriptor["reference_semantics"] = reference_semantics
+        conditional_semantics = _FIELD_CONDITIONAL_SEMANTICS.get(
+            (record_type.__name__, item.name)
+        )
+        if conditional_semantics is not None:
+            descriptor["conditional_semantics"] = conditional_semantics
         if descriptor.get("nullable"):
             optional.append(item.name)
         else:
             required.append(item.name)
         result_fields[item.name] = descriptor
-    return {
+    result = {
         "record_type": record_type.__name__,
         "required_fields": required,
         "optional_fields": optional,
         "fields": result_fields,
         "forbidden_fields": ["id"],
     }
+    authority_semantics = _RECORD_AUTHORITY_SEMANTICS.get(
+        (record_type.__name__, "source_authority")
+    )
+    if authority_semantics is not None:
+        result["source_authority"] = authority_semantics
+    return result
 
 
 def _collection_contract(
@@ -297,6 +358,25 @@ def build_planning_brief_schema_contract() -> dict[str, Any]:
             "manifest_authority": BRIEF_SOURCE_REFERENCE_INSTRUCTIONS,
             "semantic_record_refs": "applies_to_refs, source_requirement_ids, requirement_ids, constraint_ids, acceptance_criterion_ids, and temporary_assumption_id use objective or collection[index] references only; they are not manifest source identifiers",
             "record_references": "Use objective or collection[index] only; the application resolves and assigns canonical IDs",
+        },
+        "semantic_authority": {
+            "requirements": {
+                "functional_vs_non_functional": "Use non_functional only for supported non-functional input; non_functional requires quality_attribute",
+                "unsupported_quality": "Do not manufacture quality attributes; preserve explicitly unresolved quality choices as sourced questions or omit unsupported claims",
+            },
+            "operator_decisions": {
+                "authority": "Only explicit operator instruction or decision may create an operator_decisions record",
+                "source_types": ["planning_request", "clarification_message"],
+            },
+            "questions_and_assumptions": {
+                "uncertainty": "Do not silently resolve bounded-input uncertainty",
+                "non_blocking_link": "non_blocking questions require temporary_assumption_id referencing assumptions[index]",
+                "blocking_link": "blocking and operator_decision_required questions may omit temporary_assumption_id",
+            },
+            "constraints": {
+                "must": "must constraints cannot rely only on model_review",
+                "evidence": "Do not invent thresholds or subjective acceptance conditions; preserve unsupported conditions as sourced uncertainty or omit",
+            },
         },
         "application_owned_fields": [
             "all record id fields",
@@ -391,6 +471,8 @@ def render_schema_contract(contract: Mapping[str, Any]) -> str:
 
 
 __all__ = [
+    "BRIEF_SEMANTIC_AUTHORITY_INSTRUCTIONS",
+    "BRIEF_SOURCE_REFERENCE_INSTRUCTIONS",
     "PLANNING_BRIEF_CANDIDATE_FIELDS",
     "PLANNING_BRIEF_CANDIDATE_RECORD_TYPES",
     "STRUCTURED_TASK_PLAN_CANDIDATE_FIELDS",

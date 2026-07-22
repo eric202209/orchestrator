@@ -47,6 +47,7 @@ from app.services.planning.planning_brief import (
     validate_planning_brief,
 )
 from app.services.planning.provider_contract import (
+    BRIEF_SEMANTIC_AUTHORITY_INSTRUCTIONS,
     BRIEF_SOURCE_REFERENCE_INSTRUCTIONS,
     PLANNING_BRIEF_CANDIDATE_FIELDS,
     PLANNING_BRIEF_CANDIDATE_RECORD_TYPES,
@@ -490,6 +491,8 @@ def build_planning_brief_request(
         + "\nManifest source_refs and semantic record-reference fields are distinct: "
         "source_refs use only supplied canonical source_id values; applies_to_refs "
         "and record relationship fields use objective or collection[index] references.\n\n"
+        + BRIEF_SEMANTIC_AUTHORITY_INSTRUCTIONS
+        + "\n\n"
         "COMPLETE RECORD-LEVEL SCHEMA CONTRACT:\n"
         + schema
         + "\n\nINPUT:\n"
