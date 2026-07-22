@@ -26,9 +26,14 @@ from app.services.planning.planning_brief_stage import PlanningBriefStage
 from app.services.planning.protocol_persistence import (
     PlanningProtocolPersistenceService,
 )
+from app.services.planning.providers import (
+    PlanningArtifactKind,
+    PlanningRequest,
+    PlanningResponse,
+    ProviderDiagnostics,
+)
 from app.services.planning.structured_task_plan_stage import (
     DEFAULT_TASK_PLAN_CANDIDATE_BYTES,
-    StructuredTaskPlanProviderInput,
     StructuredTaskPlanProviderOutputError,
     StructuredTaskPlanStage,
     build_protocol_v2_stage_definitions,
@@ -257,17 +262,40 @@ class _BriefProvider:
 
     def generate(self, _request):
         self.calls += 1
-        return copy.deepcopy(_brief_candidate(self.manifest))
+        return PlanningResponse(
+            candidate_text=copy.deepcopy(_brief_candidate(self.manifest)),
+            provider_name="test",
+            provider_version="1",
+            diagnostics=ProviderDiagnostics(category="provider_success"),
+            latency_seconds=0,
+        )
 
 
 class _TaskPlanProvider:
     def __init__(self, output):
         self.output = output
-        self.requests: list[StructuredTaskPlanProviderInput] = []
+        self.requests: list[PlanningRequest] = []
 
     def generate(self, request):
         self.requests.append(request)
-        return copy.deepcopy(self.output)
+        return PlanningResponse(
+            candidate_text=copy.deepcopy(self.output),
+            provider_name="test",
+            provider_version="1",
+            diagnostics=ProviderDiagnostics(category="provider_success"),
+            latency_seconds=0,
+        )
+
+
+class _CombinedProvider:
+    def __init__(self, brief_provider, task_provider):
+        self.brief_provider = brief_provider
+        self.task_provider = task_provider
+
+    def generate(self, request):
+        if request.artifact_kind is PlanningArtifactKind.PLANNING_BRIEF:
+            return self.brief_provider.generate(request)
+        return self.task_provider.generate(request)
 
 
 def _seed(db_session, *, stage_config=None):
@@ -304,8 +332,7 @@ def _engine(db_session, session, manifest, task_output, *, configuration=None):
         db_session,
         build_protocol_v2_stage_definitions(
             db_session,
-            provider=brief_provider,
-            task_plan_provider=task_provider,
+            planning_provider=_CombinedProvider(brief_provider, task_provider),
         ),
         configuration=configuration or _stage_config(),
     )
@@ -366,7 +393,9 @@ def test_candidate_position_references_resolve_and_emission_order_is_not_authori
     assert first_plan is not None
     assert first_plan.tasks[0].id == "TASK-001"
     assert first_plan.dependencies[0].prerequisite_task_id == "TASK-001"
-    assert first_provider.requests[0].brief_checkpoint_id
+    assert first_provider.requests[0].protocol_input["accepted_planning_brief"][
+        "checkpoint_id"
+    ]
 
     session2, manifest2 = _seed(db_session)
     second_engine, _, _ = _engine(

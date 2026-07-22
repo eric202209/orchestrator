@@ -15,7 +15,6 @@ from app.services.orchestration.stage_engine import (
 )
 from app.services.planning.input_manifest import build_input_manifest
 from app.services.planning.planning_brief_stage import (
-    PlanningBriefProviderInput,
     PlanningBriefApplicationError,
     PlanningBriefStage,
     PlanningBriefTransportError,
@@ -23,6 +22,11 @@ from app.services.planning.planning_brief_stage import (
     build_protocol_v2_stage_definitions,
     canonicalize_planning_brief_candidate,
     parse_planning_brief_candidate,
+)
+from app.services.planning.providers import (
+    PlanningRequest,
+    PlanningResponse,
+    ProviderDiagnostics,
 )
 from app.services.planning.protocol_persistence import (
     PlanningProtocolPersistenceService,
@@ -158,11 +162,17 @@ def _seed_session(db_session):
 class _Provider:
     def __init__(self, output):
         self.output = output
-        self.requests: list[PlanningBriefProviderInput] = []
+        self.requests: list[PlanningRequest] = []
 
     def generate(self, request):
         self.requests.append(request)
-        return copy.deepcopy(self.output)
+        return PlanningResponse(
+            candidate_text=copy.deepcopy(self.output),
+            provider_name="test",
+            provider_version="1",
+            diagnostics=ProviderDiagnostics(category="provider_success"),
+            latency_seconds=0,
+        )
 
 
 def test_candidate_contract_rejects_unknown_fields_and_provider_ids():
@@ -211,9 +221,12 @@ def test_stage_accepts_only_valid_canonical_brief_and_persists_metadata(db_sessi
     assert result.status == StageStatus.COMPLETED
     assert len(provider.requests) == 1
     request = provider.requests[0]
-    assert request.manifest_hash == manifest.manifest_hash
-    assert request.sources[0]["source_id"] == manifest.sources[0].source_id
-    assert "project_id" not in request.to_dict()
+    assert request.protocol_input["input_manifest"]["hash"] == manifest.manifest_hash
+    assert (
+        request.protocol_input["sources"][0]["source_id"]
+        == manifest.sources[0].source_id
+    )
+    assert "project_id" not in request.protocol_input
     checkpoint = result.completion.manifest
     assert checkpoint is not None
     stored = PlanningProtocolPersistenceService(
@@ -366,7 +379,7 @@ def test_planning_session_registers_default_v2_graph_but_allows_explicit_empty_g
 
 def test_default_registry_contains_brief_then_task_plan(db_session):
     definitions = build_protocol_v2_stage_definitions(
-        db_session, provider=_Provider({})
+        db_session, planning_provider=_Provider({})
     )
     assert tuple(definition.identifier for definition in definitions) == (
         "planning_brief",

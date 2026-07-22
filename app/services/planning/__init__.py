@@ -74,16 +74,28 @@ _EXPORTS = {
         "PlanningBriefStage",
     ),
     "PlanningBriefProvider": (
-        "app.services.planning.planning_brief_stage",
-        "PlanningBriefProvider",
+        "app.services.planning.providers",
+        "PlanningProvider",
+    ),
+    "PlanningProvider": (
+        "app.services.planning.providers",
+        "PlanningProvider",
+    ),
+    "PlanningRequest": (
+        "app.services.planning.providers",
+        "PlanningRequest",
+    ),
+    "PlanningResponse": (
+        "app.services.planning.providers",
+        "PlanningResponse",
     ),
     "StructuredTaskPlanStage": (
         "app.services.planning.structured_task_plan_stage",
         "StructuredTaskPlanStage",
     ),
     "StructuredTaskPlanProvider": (
-        "app.services.planning.structured_task_plan_stage",
-        "StructuredTaskPlanProvider",
+        "app.services.planning.providers",
+        "PlanningProvider",
     ),
     "build_protocol_v2_stage_configuration": (
         "app.services.planning.structured_task_plan_stage",

@@ -12,9 +12,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields
 import json
 import re
-from typing import Any, Protocol
+from typing import Any
 
-from app.services.agents.agent_runtime import BackendRole, invoke_runtime_prompt
 from app.services.orchestration.stage_engine import (
     StageAcceptance,
     StageContext,
@@ -50,6 +49,18 @@ from app.services.planning.provider_contract import (
     build_planning_brief_schema_contract,
     render_schema_contract,
 )
+from app.services.planning.providers import (
+    PlanningArtifactKind,
+    PlanningProvider,
+    PlanningProviderExecutionError,
+    PlanningRequest,
+    PlanningResponse,
+    PlanningRuntimeOptions,
+    PROVIDER_RUNTIME_FAILURES,
+    ProviderFailureOrigin,
+    ReasoningControls,
+    SamplingControls,
+)
 
 
 DEFAULT_SOURCE_CHAR_LIMIT = 20_000
@@ -57,14 +68,7 @@ DEFAULT_TOTAL_SOURCE_CHAR_LIMIT = 100_000
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 360
 DEFAULT_PROVIDER_FIRST_OUTPUT_TIMEOUT_SECONDS = 320
 _CANONICAL_RECORD_REF = re.compile(r"^[A-Z]+-[0-9]{3}$")
-_PROVIDER_RUNTIME_FAILURES = frozenset(
-    {
-        "provider_timeout",
-        "provider_process_failure",
-        "provider_result_missing",
-        "provider_result_ambiguous",
-    }
-)
+_PROVIDER_RUNTIME_FAILURES = PROVIDER_RUNTIME_FAILURES
 
 
 class PlanningBriefStageError(RuntimeError):
@@ -103,13 +107,6 @@ class PlanningBriefProviderRuntimeError(PlanningBriefStageError):
             else "transport_failure"
         )
         super().__init__(message)
-
-
-class PlanningBriefProvider(Protocol):
-    """Strict provider adapter contract used by the stage."""
-
-    def generate(self, request: "PlanningBriefProviderInput") -> Any:
-        """Return only the semantic candidate JSON object or JSON text."""
 
 
 @dataclass(frozen=True)
@@ -462,79 +459,57 @@ def build_planning_brief_provider_input(
     return request
 
 
-class RuntimePlanningBriefProvider:
-    """Adapter from the existing runtime provider to the strict stage contract."""
+def build_planning_brief_request(
+    provider_input: PlanningBriefProviderInput,
+) -> PlanningRequest:
+    """Render the unchanged Brief prompt into the provider-neutral request."""
 
-    def __init__(self, db: Any):
-        self.db = db
-
-    def generate(self, request: PlanningBriefProviderInput) -> Any:
-        candidate_fields = ", ".join(PLANNING_BRIEF_CANDIDATE_FIELDS)
-        schema = render_schema_contract(
-            request.schema_instructions or build_planning_brief_schema_contract()
+    candidate_fields = ", ".join(PLANNING_BRIEF_CANDIDATE_FIELDS)
+    schema = render_schema_contract(
+        provider_input.schema_instructions or build_planning_brief_schema_contract()
+    )
+    prompt = (
+        "Generate one Protocol v2 Planning Brief semantic candidate from INPUT.\n"
+        "Return exactly one JSON object. Return no Markdown fences, explanation, "
+        "commentary, or reasoning.\n"
+        f"The only allowed top-level fields are: {candidate_fields}.\n"
+        "Use only the specified nested record fields. Do not invent aliases or "
+        "generic planning-document keys. Do not emit title, description, objectives, "
+        "deliverables, timeline, brief_type, top-level source_refs, or any other "
+        "unsupported legacy fields. Do not emit canonical IDs: every id field, "
+        "manifest/checkpoint/hash/schema/lifecycle field is application-owned and "
+        "forbidden in provider output. Use only source_id values present in the "
+        "supplied Input Manifest. Preserve semantic uncertainty rather than inventing "
+        "facts; use unresolved questions and assumptions when appropriate.\n\n"
+        "COMPLETE RECORD-LEVEL SCHEMA CONTRACT:\n"
+        + schema
+        + "\n\nINPUT:\n"
+        + provider_input.canonical_bytes().decode("utf-8")
+    )
+    timeout_seconds = int(
+        provider_input.stage_configuration.get(
+            "provider_timeout_seconds", DEFAULT_PROVIDER_TIMEOUT_SECONDS
         )
-        prompt = (
-            "Generate one Protocol v2 Planning Brief semantic candidate from INPUT.\n"
-            "Return exactly one JSON object. Return no Markdown fences, explanation, "
-            "commentary, or reasoning.\n"
-            f"The only allowed top-level fields are: {candidate_fields}.\n"
-            "Use only the specified nested record fields. Do not invent aliases or "
-            "generic planning-document keys. Do not emit title, description, objectives, "
-            "deliverables, timeline, brief_type, top-level source_refs, or any other "
-            "unsupported legacy fields. Do not emit canonical IDs: every id field, "
-            "manifest/checkpoint/hash/schema/lifecycle field is application-owned and "
-            "forbidden in provider output. Use only source_id values present in the "
-            "supplied Input Manifest. Preserve semantic uncertainty rather than inventing "
-            "facts; use unresolved questions and assumptions when appropriate.\n\n"
-            "COMPLETE RECORD-LEVEL SCHEMA CONTRACT:\n"
-            + schema
-            + "\n\nINPUT:\n"
-            + request.canonical_bytes().decode("utf-8")
-        )
-        try:
-            timeout_seconds = int(
-                request.stage_configuration.get(
-                    "provider_timeout_seconds", DEFAULT_PROVIDER_TIMEOUT_SECONDS
-                )
-            )
-            result = invoke_runtime_prompt(
-                self.db,
-                prompt,
-                project_id=request.project_id,
-                source_brain="local",
-                timeout_seconds=timeout_seconds,
-                session_prefix="planning-brief",
-                role=BackendRole.PLANNING,
-            )
-        except Exception as exc:
-            classification = getattr(
-                exc, "provider_failure_classification", None
-            ) or getattr(exc, "classification", None)
-            if classification in _PROVIDER_RUNTIME_FAILURES:
-                raise PlanningBriefProviderRuntimeError(
-                    classification, str(exc)
-                ) from exc
-            raise PlanningBriefTransportError("provider invocation failed") from exc
-        if not isinstance(result, Mapping) or result.get("status") == "failed":
-            classification = (result or {}).get("failure_classification")
-            if classification in _PROVIDER_RUNTIME_FAILURES:
-                raise PlanningBriefProviderRuntimeError(
-                    classification,
-                    str((result or {}).get("error") or classification),
-                )
-            raise PlanningBriefTransportError("provider returned a failed result")
-        output = result.get("output")
-        if not isinstance(output, (str, Mapping)):
-            raise PlanningBriefProviderOutputError(
-                "provider returned no candidate output"
-            )
-        return output
+    )
+    return PlanningRequest(
+        artifact_kind=PlanningArtifactKind.PLANNING_BRIEF,
+        prompt=prompt,
+        protocol_input=provider_input.to_dict(),
+        runtime_options=PlanningRuntimeOptions(timeout_seconds=timeout_seconds),
+        reasoning=ReasoningControls(enabled=False),
+        sampling=SamplingControls(temperature=0),
+        project_id=provider_input.project_id,
+        metadata={
+            "manifest_id": provider_input.manifest_id,
+            "manifest_hash": provider_input.manifest_hash,
+        },
+    )
 
 
 class PlanningBriefStage(StageDefinition):
     """Registered Protocol v2 stage from Input Manifest to accepted Brief."""
 
-    def __init__(self, provider: PlanningBriefProvider):
+    def __init__(self, provider: PlanningProvider):
         self.provider = provider
         super().__init__(
             "planning_brief",
@@ -545,7 +520,8 @@ class PlanningBriefStage(StageDefinition):
 
     def execute(self, context: StageContext) -> PlanningBrief:
         try:
-            request = build_planning_brief_provider_input(context)
+            provider_input = build_planning_brief_provider_input(context)
+            request = build_planning_brief_request(provider_input)
         except PlanningBriefStageError:
             raise
         except Exception as exc:
@@ -553,11 +529,29 @@ class PlanningBriefStage(StageDefinition):
                 "provider input construction failed"
             ) from exc
         try:
-            raw = self.provider.generate(request)
+            response = self.provider.generate(request)
+        except PlanningProviderExecutionError as exc:
+            if exc.classification in _PROVIDER_RUNTIME_FAILURES:
+                raise PlanningBriefProviderRuntimeError(
+                    exc.classification, exc.detail
+                ) from exc
+            message = (
+                "provider invocation failed"
+                if exc.origin is ProviderFailureOrigin.INVOCATION
+                else "provider returned a failed result"
+            )
+            raise PlanningBriefTransportError(message) from exc
         except PlanningBriefStageError:
             raise
         except Exception as exc:
             raise PlanningBriefTransportError("provider invocation failed") from exc
+        if not isinstance(response, PlanningResponse):
+            raise PlanningBriefTransportError("provider returned a failed result")
+        raw = response.candidate_text
+        if not isinstance(raw, (str, Mapping)):
+            raise PlanningBriefProviderOutputError(
+                "provider returned no candidate output"
+            )
         try:
             candidate = parse_planning_brief_candidate(raw)
             return canonicalize_planning_brief_candidate(
@@ -606,8 +600,7 @@ def _validation_reason(acceptance: Any) -> str:
 def build_protocol_v2_stage_definitions(
     db: Any,
     *,
-    provider: PlanningBriefProvider | None = None,
-    task_plan_provider: Any | None = None,
+    planning_provider: PlanningProvider | None = None,
 ) -> tuple[StageDefinition, ...]:
     """Return the deterministic default v2 registry."""
 
@@ -620,8 +613,7 @@ def build_protocol_v2_stage_definitions(
 
     return build_v2_definitions(
         db,
-        provider=provider,
-        task_plan_provider=task_plan_provider,
+        planning_provider=planning_provider,
     )
 
 
@@ -633,7 +625,6 @@ __all__ = [
     "PLANNING_BRIEF_CANDIDATE_FIELDS",
     "PlanningBriefApplicationError",
     "PlanningBriefCandidate",
-    "PlanningBriefProvider",
     "PlanningBriefProviderInput",
     "PlanningBriefProviderOutputError",
     "PlanningBriefProviderRuntimeError",
@@ -641,7 +632,7 @@ __all__ = [
     "PlanningBriefStageError",
     "PlanningBriefTransportError",
     "PlanningBriefValidationError",
-    "RuntimePlanningBriefProvider",
+    "build_planning_brief_request",
     "build_planning_brief_provider_input",
     "build_protocol_v2_stage_definitions",
     "canonicalize_planning_brief_candidate",

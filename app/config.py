@@ -164,6 +164,7 @@ class Settings(BaseSettings):
         "local_openclaw"  # BACKEND_COUPLING: default names OpenClaw directly; future backends register here
     )
     AGENT_SECONDARY_BACKEND: Optional[str] = None
+    PLANNING_PROVIDER: str = "openclaw"
     PLANNING_BACKEND: Optional[str] = None
     EXECUTION_BACKEND: Optional[str] = None
     DEBUG_REPAIR_BACKEND: Optional[str] = None

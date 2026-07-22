@@ -13,9 +13,8 @@ from dataclasses import dataclass, fields, replace
 import json
 import re
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import Any
 
-from app.services.agents.agent_runtime import BackendRole, invoke_runtime_prompt
 from app.services.orchestration.stage_engine import (
     StageAcceptance,
     StageContext,
@@ -27,13 +26,23 @@ from app.services.planning.input_manifest import InputManifest
 from app.services.planning.planning_brief import PlanningBrief
 from app.services.planning.planning_brief_stage import (
     DEFAULT_PROVIDER_TIMEOUT_SECONDS,
-    PlanningBriefProvider,
-    RuntimePlanningBriefProvider,
 )
 from app.services.planning.provider_contract import (
     STRUCTURED_TASK_PLAN_CANDIDATE_FIELDS,
     build_structured_task_plan_schema_contract,
     render_schema_contract,
+)
+from app.services.planning.providers import (
+    PlanningArtifactKind,
+    PlanningProvider,
+    PlanningProviderExecutionError,
+    PlanningRequest,
+    PlanningResponse,
+    PlanningRuntimeOptions,
+    ProviderFailureOrigin,
+    ReasoningControls,
+    SamplingControls,
+    create_planning_provider,
 )
 from app.services.planning.structured_task_plan import (
     BLOCKING_STATES,
@@ -154,13 +163,6 @@ class StructuredTaskPlanProviderRuntimeError(StructuredTaskPlanStageError):
             else "transport_failure"
         )
         super().__init__(message)
-
-
-class StructuredTaskPlanProvider(Protocol):
-    """Provider-independent semantic candidate contract."""
-
-    def generate(self, provider_input: "StructuredTaskPlanProviderInput") -> Any:
-        """Return semantic candidate JSON, never an authoritative plan."""
 
 
 def _thaw(value: Any) -> Any:
@@ -796,86 +798,54 @@ def build_structured_task_plan_provider_input(
     return request
 
 
-class RuntimeStructuredTaskPlanProvider:
-    """Production adapter over the existing runtime invocation seam."""
+def build_structured_task_plan_request(
+    provider_input: StructuredTaskPlanProviderInput,
+) -> PlanningRequest:
+    """Render the unchanged Task Plan prompt into the neutral request."""
 
-    def __init__(self, db: Any):
-        self.db = db
-
-    def generate(self, provider_input: StructuredTaskPlanProviderInput) -> Any:
-        candidate_fields = ", ".join(STRUCTURED_TASK_PLAN_CANDIDATE_FIELDS)
-        schema = render_schema_contract(
-            getattr(provider_input, "schema_instructions", None)
-            or build_structured_task_plan_schema_contract()
+    candidate_fields = ", ".join(STRUCTURED_TASK_PLAN_CANDIDATE_FIELDS)
+    schema = render_schema_contract(
+        _thaw(provider_input.schema_instructions)
+        or build_structured_task_plan_schema_contract()
+    )
+    prompt = (
+        "Generate one Protocol v2 Structured Task Plan semantic candidate from INPUT.\n"
+        "Return exactly one JSON object. Return no Markdown fences, explanation, "
+        "commentary, or reasoning.\n"
+        f"The only allowed top-level fields are: {candidate_fields}.\n"
+        "Use only the specified Task, Dependency, ExecutionGroup, IntentionalOmission, "
+        "and nested record fields. Do not invent aliases or legacy title, description, "
+        "objectives, deliverables, or timeline keys. Do not emit canonical IDs, hashes, "
+        "topology, schema versions, lifecycle, acceptance, checkpoint, session, lease, "
+        "timestamp, Commit Manifest, Runtime Task, credential, or new Brief-intent fields; "
+        "all such fields are application-owned or forbidden. Represent graph and coverage "
+        "semantics explicitly, use accepted Brief IDs for traceability, and use tasks[N] or #N "
+        "for candidate task references. Preserve uncertainty rather than inventing facts.\n\n"
+        "COMPLETE RECORD-LEVEL SCHEMA CONTRACT:\n"
+        + schema
+        + "\n\nINPUT:\n"
+        + provider_input.canonical_bytes().decode("utf-8")
+    )
+    timeout_seconds = int(
+        provider_input.stage_configuration.get(
+            "provider_timeout_seconds", DEFAULT_PROVIDER_TIMEOUT_SECONDS
         )
-        prompt = (
-            "Generate one Protocol v2 Structured Task Plan semantic candidate from INPUT.\n"
-            "Return exactly one JSON object. Return no Markdown fences, explanation, "
-            "commentary, or reasoning.\n"
-            f"The only allowed top-level fields are: {candidate_fields}.\n"
-            "Use only the specified Task, Dependency, ExecutionGroup, IntentionalOmission, "
-            "and nested record fields. Do not invent aliases or legacy title, description, "
-            "objectives, deliverables, or timeline keys. Do not emit canonical IDs, hashes, "
-            "topology, schema versions, lifecycle, acceptance, checkpoint, session, lease, "
-            "timestamp, Commit Manifest, Runtime Task, credential, or new Brief-intent fields; "
-            "all such fields are application-owned or forbidden. Represent graph and coverage "
-            "semantics explicitly, use accepted Brief IDs for traceability, and use tasks[N] or #N "
-            "for candidate task references. Preserve uncertainty rather than inventing facts.\n\n"
-            "COMPLETE RECORD-LEVEL SCHEMA CONTRACT:\n"
-            + schema
-            + "\n\nINPUT:\n"
-            + provider_input.canonical_bytes().decode("utf-8")
-        )
-        try:
-            timeout_seconds = int(
-                provider_input.stage_configuration.get(
-                    "provider_timeout_seconds", DEFAULT_PROVIDER_TIMEOUT_SECONDS
-                )
-            )
-            result = invoke_runtime_prompt(
-                self.db,
-                prompt,
-                project_id=getattr(provider_input, "project_id", None),
-                source_brain="local",
-                timeout_seconds=timeout_seconds,
-                session_prefix="structured-task-plan",
-                role=BackendRole.PLANNING,
-            )
-        except Exception as exc:
-            classification = getattr(
-                exc, "provider_failure_classification", None
-            ) or getattr(exc, "classification", None)
-            if (
-                classification
-                in StructuredTaskPlanProviderRuntimeError._ALLOWED_CLASSIFICATIONS
-            ):
-                raise StructuredTaskPlanProviderRuntimeError(
-                    classification, str(exc)
-                ) from exc
-            raise StructuredTaskPlanTransportError(
-                "provider invocation failed"
-            ) from exc
-        if not isinstance(result, Mapping) or result.get("status") == "failed":
-            classification = (
-                result.get("failure_classification")
-                if isinstance(result, Mapping)
-                else None
-            )
-            if (
-                classification
-                in StructuredTaskPlanProviderRuntimeError._ALLOWED_CLASSIFICATIONS
-            ):
-                raise StructuredTaskPlanProviderRuntimeError(
-                    classification,
-                    str(result.get("error") or classification),
-                )
-            raise StructuredTaskPlanTransportError("provider returned a failed result")
-        output = result.get("output")
-        if not isinstance(output, (str, bytes, Mapping)):
-            raise StructuredTaskPlanProviderOutputError(
-                "provider returned no candidate output"
-            )
-        return output
+    )
+    return PlanningRequest(
+        artifact_kind=PlanningArtifactKind.STRUCTURED_TASK_PLAN,
+        prompt=prompt,
+        protocol_input=provider_input.to_dict(),
+        runtime_options=PlanningRuntimeOptions(timeout_seconds=timeout_seconds),
+        reasoning=ReasoningControls(enabled=False),
+        sampling=SamplingControls(temperature=0),
+        project_id=provider_input.project_id,
+        metadata={
+            "brief_checkpoint_id": provider_input.brief_checkpoint_id,
+            "brief_hash": provider_input.brief_hash,
+            "manifest_id": provider_input.manifest_id,
+            "manifest_hash": provider_input.manifest_hash,
+        },
+    )
 
 
 def _validation_reason(validation: Any) -> str:
@@ -923,7 +893,7 @@ def _validation_reason(validation: Any) -> str:
 class StructuredTaskPlanStage(StageDefinition):
     """Generate and accept one canonical Task Plan from an accepted Brief."""
 
-    def __init__(self, provider: StructuredTaskPlanProvider):
+    def __init__(self, provider: PlanningProvider):
         self.provider = provider
         super().__init__(
             "structured_task_plan",
@@ -935,6 +905,7 @@ class StructuredTaskPlanStage(StageDefinition):
     def execute(self, context: StageContext) -> StructuredTaskPlan:
         try:
             provider_input = build_structured_task_plan_provider_input(context)
+            request = build_structured_task_plan_request(provider_input)
         except StructuredTaskPlanStageError:
             raise
         except Exception as exc:
@@ -942,13 +913,34 @@ class StructuredTaskPlanStage(StageDefinition):
                 "provider input construction failed"
             ) from exc
         try:
-            raw = self.provider.generate(provider_input)
+            response = self.provider.generate(request)
+        except PlanningProviderExecutionError as exc:
+            if (
+                exc.classification
+                in StructuredTaskPlanProviderRuntimeError._ALLOWED_CLASSIFICATIONS
+            ):
+                raise StructuredTaskPlanProviderRuntimeError(
+                    exc.classification, exc.detail
+                ) from exc
+            message = (
+                "provider invocation failed"
+                if exc.origin is ProviderFailureOrigin.INVOCATION
+                else "provider returned a failed result"
+            )
+            raise StructuredTaskPlanTransportError(message) from exc
         except StructuredTaskPlanStageError:
             raise
         except Exception as exc:
             raise StructuredTaskPlanTransportError(
                 "provider invocation failed"
             ) from exc
+        if not isinstance(response, PlanningResponse):
+            raise StructuredTaskPlanTransportError("provider returned a failed result")
+        raw = response.candidate_text
+        if not isinstance(raw, (str, bytes, Mapping)):
+            raise StructuredTaskPlanProviderOutputError(
+                "provider returned no candidate output"
+            )
         try:
             candidate = parse_structured_task_plan_candidate(
                 raw,
@@ -1026,20 +1018,14 @@ def build_protocol_v2_stage_configuration(
 def build_protocol_v2_stage_definitions(
     db: Any,
     *,
-    provider: PlanningBriefProvider | None = None,
-    task_plan_provider: StructuredTaskPlanProvider | None = None,
+    planning_provider: PlanningProvider | None = None,
 ) -> tuple[StageDefinition, ...]:
     """Return the default v2 graph while preserving explicit custom registries."""
 
-    brief_stage = RuntimePlanningBriefProvider(db) if provider is None else provider
-    plan_stage = (
-        RuntimeStructuredTaskPlanProvider(db)
-        if task_plan_provider is None
-        else task_plan_provider
-    )
+    provider = planning_provider or create_planning_provider(db)
     from app.services.planning.planning_brief_stage import PlanningBriefStage
 
-    return (PlanningBriefStage(brief_stage), StructuredTaskPlanStage(plan_stage))
+    return (PlanningBriefStage(provider), StructuredTaskPlanStage(provider))
 
 
 __all__ = [
@@ -1048,7 +1034,6 @@ __all__ = [
     "DEFAULT_TASK_PLAN_SOURCE_CHAR_LIMIT",
     "DEFAULT_TASK_PLAN_TOTAL_SOURCE_CHAR_LIMIT",
     "STRUCTURED_TASK_PLAN_CANDIDATE_FIELDS",
-    "RuntimeStructuredTaskPlanProvider",
     "StructuredTaskPlanProviderRuntimeError",
     "StructuredTaskPlanAcceptanceError",
     "StructuredTaskPlanApplicationError",
@@ -1056,7 +1041,6 @@ __all__ = [
     "StructuredTaskPlanCoverageValidationError",
     "StructuredTaskPlanGraphValidationError",
     "StructuredTaskPlanIntegrityError",
-    "StructuredTaskPlanProvider",
     "StructuredTaskPlanProviderInput",
     "StructuredTaskPlanProviderOutputError",
     "StructuredTaskPlanReferenceResolutionError",
@@ -1065,6 +1049,7 @@ __all__ = [
     "StructuredTaskPlanTransportError",
     "build_protocol_v2_stage_configuration",
     "build_protocol_v2_stage_definitions",
+    "build_structured_task_plan_request",
     "build_structured_task_plan_provider_input",
     "canonicalize_structured_task_plan_candidate",
     "parse_structured_task_plan_candidate",

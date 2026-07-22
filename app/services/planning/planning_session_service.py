@@ -47,11 +47,8 @@ from app.services.planning.protocol_persistence import (
     PlanningProtocolPersistenceService,
     SUPPORTED_PROTOCOL_VERSIONS,
 )
-from app.services.planning.planning_brief_stage import (
-    PlanningBriefProvider,
-)
+from app.services.planning.providers import PlanningProvider
 from app.services.planning.structured_task_plan_stage import (
-    StructuredTaskPlanProvider,
     build_protocol_v2_stage_configuration,
     build_protocol_v2_stage_definitions,
 )
@@ -101,9 +98,7 @@ class PlanningSessionService:
         engineering_context_service: EngineeringContextService | None = None,
         stage_definitions: Iterable[StageDefinition] | None = None,
         stage_executor: StageExecutor | None = None,
-        brief_provider: PlanningBriefProvider | None = None,
-        task_plan_provider: StructuredTaskPlanProvider | None = None,
-        structured_task_plan_provider: StructuredTaskPlanProvider | None = None,
+        planning_provider: PlanningProvider | None = None,
     ):
         self.db = db
         self.engineering_context_service = (
@@ -127,10 +122,7 @@ class PlanningSessionService:
             else:
                 definitions = build_protocol_v2_stage_definitions(
                     db,
-                    provider=brief_provider,
-                    task_plan_provider=(
-                        structured_task_plan_provider or task_plan_provider
-                    ),
+                    planning_provider=planning_provider,
                 )
                 configuration = build_protocol_v2_stage_configuration(definitions)
             self.stage_executor = StageExecutor(

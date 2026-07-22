@@ -14,10 +14,11 @@ from app.services.agents.runtime_adapters.openclaw_adapter import (
 )
 from app.services.planning.planning_brief_stage import (
     PlanningBriefProviderInput,
-    RuntimePlanningBriefProvider,
+    build_planning_brief_request,
 )
+from app.services.planning.providers.openclaw import OpenClawPlanningProvider
 from app.services.planning.structured_task_plan_stage import (
-    RuntimeStructuredTaskPlanProvider,
+    build_structured_task_plan_request,
 )
 
 
@@ -186,7 +187,7 @@ def test_planning_brief_adapter_uses_shared_v2_contract(monkeypatch):
         return {"status": "completed", "output": '{"brief":true}'}
 
     monkeypatch.setattr(
-        "app.services.planning.planning_brief_stage.invoke_runtime_prompt",
+        "app.services.planning.providers.openclaw.invoke_runtime_prompt",
         fake_invoke,
     )
     request = PlanningBriefProviderInput(
@@ -197,7 +198,11 @@ def test_planning_brief_adapter_uses_shared_v2_contract(monkeypatch):
         stage_configuration={},
     )
 
-    assert RuntimePlanningBriefProvider(None).generate(request) == '{"brief":true}'
+    response = OpenClawPlanningProvider(None).generate(
+        build_planning_brief_request(request)
+    )
+    assert response.candidate_text == '{"brief":true}'
+    assert response.provider_name == "openclaw"
     assert calls["session_prefix"] == "planning-brief"
     assert "no_output_timeout_seconds" not in calls
     assert calls["timeout_seconds"] == 360
@@ -216,17 +221,24 @@ def test_task_plan_adapter_uses_shared_v2_contract(monkeypatch):
         return {"status": "completed", "output": '{"tasks":[]}'}
 
     monkeypatch.setattr(
-        "app.services.planning.structured_task_plan_stage.invoke_runtime_prompt",
+        "app.services.planning.providers.openclaw.invoke_runtime_prompt",
         fake_invoke,
     )
     provider_input = SimpleNamespace(
         stage_configuration={},
+        schema_instructions={},
         canonical_bytes=lambda: b"{}",
+        to_dict=lambda: {},
+        brief_checkpoint_id="checkpoint:probe",
+        brief_hash="brief-hash",
+        manifest_id="manifest:probe",
+        manifest_hash="manifest-hash",
+        project_id=None,
     )
-    assert (
-        RuntimeStructuredTaskPlanProvider(None).generate(provider_input)
-        == '{"tasks":[]}'
+    response = OpenClawPlanningProvider(None).generate(
+        build_structured_task_plan_request(provider_input)
     )
+    assert response.candidate_text == '{"tasks":[]}'
     assert calls["session_prefix"] == "structured-task-plan"
     assert "no_output_timeout_seconds" not in calls
     assert calls["timeout_seconds"] == 360
