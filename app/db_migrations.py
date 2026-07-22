@@ -1545,6 +1545,122 @@ def _migration_033_execution_task_lifecycle(engine: Engine) -> None:
             connection.execute(text(statement))
 
 
+def _migration_034_execution_task_scheduler_claim(engine: Engine) -> None:
+    """Add the durable Phase 29C-3 scheduler claim boundary.
+
+    Claims are audit-preserving control records owned by an Execution Plan.
+    The partial unique index is the database authority for one active claim
+    per task; no Redis or worker-side convention is used for correctness.
+    """
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_scheduler_claims (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    project_id INTEGER NOT NULL,
+                    planning_session_id INTEGER NOT NULL,
+                    scheduler_id VARCHAR(255) NOT NULL,
+                    idempotency_key VARCHAR(128) NOT NULL,
+                    command_payload JSON NOT NULL,
+                    canonical_command_hash VARCHAR(64) NOT NULL,
+                    fencing_token INTEGER NOT NULL,
+                    claimed_task_state VARCHAR(20) NOT NULL,
+                    claimed_task_state_version INTEGER NOT NULL,
+                    claimed_eligibility_decision_hash VARCHAR(64) NOT NULL,
+                    claimed_graph_hash VARCHAR(64) NOT NULL,
+                    predecessor_fence_hash VARCHAR(64) NOT NULL,
+                    predecessor_fences JSON NOT NULL,
+                    claim_status VARCHAR(16) NOT NULL DEFAULT 'active',
+                    lease_duration_seconds INTEGER NOT NULL,
+                    acquired_at DATETIME NOT NULL,
+                    expires_at DATETIME NOT NULL,
+                    released_at DATETIME,
+                    release_reason VARCHAR(64),
+                    released_by_scheduler_id VARCHAR(255),
+                    release_idempotency_key VARCHAR(128),
+                    canonical_release_hash VARCHAR(64),
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME,
+                    CONSTRAINT uq_execution_task_scheduler_claim_idempotency
+                        UNIQUE (idempotency_key),
+                    CONSTRAINT uq_execution_task_scheduler_claim_release_idempotency
+                        UNIQUE (release_idempotency_key),
+                    CONSTRAINT ck_execution_task_scheduler_claim_status
+                        CHECK (claim_status IN ('active', 'released', 'expired', 'consumed')),
+                    CONSTRAINT ck_execution_task_scheduler_claim_ready_state
+                        CHECK (claimed_task_state = 'ready'),
+                    CONSTRAINT ck_execution_task_scheduler_claim_fence_positive
+                        CHECK (fencing_token > 0),
+                    CONSTRAINT ck_execution_task_scheduler_claim_version_nonnegative
+                        CHECK (claimed_task_state_version >= 0),
+                    CONSTRAINT ck_execution_task_scheduler_claim_lease_bounds
+                        CHECK (lease_duration_seconds >= 5 AND lease_duration_seconds <= 300),
+                    CONSTRAINT ck_execution_task_scheduler_claim_expiry_after_acquire
+                        CHECK (expires_at > acquired_at),
+                    FOREIGN KEY(execution_plan_id)
+                        REFERENCES execution_plans (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_id)
+                        REFERENCES execution_tasks (id) ON DELETE CASCADE,
+                    FOREIGN KEY(project_id) REFERENCES projects (id),
+                    FOREIGN KEY(planning_session_id) REFERENCES planning_sessions (id)
+                )
+                """
+            )
+        )
+        indexes = {
+            "uq_execution_task_scheduler_claim_active": (
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "uq_execution_task_scheduler_claim_active "
+                "ON execution_task_scheduler_claims (execution_task_id) "
+                "WHERE claim_status = 'active'"
+            ),
+            "ix_execution_task_scheduler_claim_task_status_expiry": (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_execution_task_scheduler_claim_task_status_expiry "
+                "ON execution_task_scheduler_claims "
+                "(execution_task_id, claim_status, expires_at)"
+            ),
+            "ix_execution_task_scheduler_claim_scheduler_status": (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_execution_task_scheduler_claim_scheduler_status "
+                "ON execution_task_scheduler_claims (scheduler_id, claim_status)"
+            ),
+            "ix_execution_task_scheduler_claim_expiry": (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_execution_task_scheduler_claim_expiry "
+                "ON execution_task_scheduler_claims (claim_status, expires_at)"
+            ),
+            "ix_execution_task_scheduler_claim_plan_status_expiry": (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_execution_task_scheduler_claim_plan_status_expiry "
+                "ON execution_task_scheduler_claims "
+                "(execution_plan_id, claim_status, expires_at)"
+            ),
+            "ix_execution_task_scheduler_claim_project_status_expiry": (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_execution_task_scheduler_claim_project_status_expiry "
+                "ON execution_task_scheduler_claims "
+                "(project_id, claim_status, expires_at)"
+            ),
+            "ix_execution_task_scheduler_claim_idempotency": (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_execution_task_scheduler_claim_idempotency "
+                "ON execution_task_scheduler_claims (idempotency_key)"
+            ),
+            "ix_execution_task_scheduler_claim_release_idempotency": (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_execution_task_scheduler_claim_release_idempotency "
+                "ON execution_task_scheduler_claims (release_idempotency_key)"
+            ),
+        }
+        for statement in indexes.values():
+            connection.execute(text(statement))
+
+
 def _migration_014_task_workflow_stage(engine: Engine) -> None:
     if "tasks" not in _table_names(engine):
         return
@@ -1992,6 +2108,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="033_execution_task_lifecycle",
         description="Add Phase 29C-1 Execution Task lifecycle state and transition events",
         upgrade=_migration_033_execution_task_lifecycle,
+    ),
+    Migration(
+        version="034_execution_task_scheduler_claim",
+        description="Add Phase 29C-3 durable Execution Task scheduler claims",
+        upgrade=_migration_034_execution_task_scheduler_claim,
     ),
 )
 

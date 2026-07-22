@@ -714,6 +714,11 @@ class ExecutionPlan(Base):
     groups = relationship(
         "ExecutionGroup", back_populates="execution_plan", cascade="all, delete-orphan"
     )
+    scheduler_claims = relationship(
+        "ExecutionTaskSchedulerClaim",
+        back_populates="execution_plan",
+        cascade="all, delete-orphan",
+    )
 
 
 class ExecutionTask(Base):
@@ -759,6 +764,115 @@ class ExecutionTask(Base):
         cascade="all, delete-orphan",
         order_by="ExecutionTaskTransition.sequence",
     )
+    scheduler_claims = relationship(
+        "ExecutionTaskSchedulerClaim",
+        back_populates="execution_task",
+        cascade="all, delete-orphan",
+    )
+
+
+class ExecutionTaskSchedulerClaim(Base):
+    """Durable scheduler ownership boundary for one ready Execution Task.
+
+    A claim is permission to attempt a future dispatch.  It is deliberately
+    not a task lifecycle state, runtime attempt, worker lease, or proof that
+    dispatch occurred.
+    """
+
+    __tablename__ = "execution_task_scheduler_claims"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    planning_session_id = Column(
+        Integer, ForeignKey("planning_sessions.id"), nullable=False, index=True
+    )
+    scheduler_id = Column(String(255), nullable=False, index=True)
+    idempotency_key = Column(String(128), nullable=False, unique=True, index=True)
+    command_payload = Column(JSON, nullable=False)
+    canonical_command_hash = Column(String(64), nullable=False)
+    fencing_token = Column(Integer, nullable=False)
+    claimed_task_state = Column(String(20), nullable=False, default="ready")
+    claimed_task_state_version = Column(Integer, nullable=False)
+    claimed_eligibility_decision_hash = Column(String(64), nullable=False)
+    claimed_graph_hash = Column(String(64), nullable=False)
+    predecessor_fence_hash = Column(String(64), nullable=False)
+    predecessor_fences = Column(JSON, nullable=False)
+    claim_status = Column(String(16), nullable=False, default="active", index=True)
+    lease_duration_seconds = Column(Integer, nullable=False)
+    acquired_at = Column(DateTime(timezone=True), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    released_at = Column(DateTime(timezone=True), nullable=True)
+    release_reason = Column(String(64), nullable=True)
+    released_by_scheduler_id = Column(String(255), nullable=True)
+    release_idempotency_key = Column(
+        String(128), nullable=True, unique=True, index=True
+    )
+    canonical_release_hash = Column(String(64), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    __table_args__ = (
+        CheckConstraint(
+            "claim_status IN ('active', 'released', 'expired', 'consumed')",
+            name="ck_execution_task_scheduler_claim_status",
+        ),
+        CheckConstraint(
+            "claimed_task_state = 'ready'",
+            name="ck_execution_task_scheduler_claim_ready_state",
+        ),
+        CheckConstraint(
+            "fencing_token > 0",
+            name="ck_execution_task_scheduler_claim_fence_positive",
+        ),
+        CheckConstraint(
+            "claimed_task_state_version >= 0",
+            name="ck_execution_task_scheduler_claim_version_nonnegative",
+        ),
+        CheckConstraint(
+            "lease_duration_seconds >= 5 AND lease_duration_seconds <= 300",
+            name="ck_execution_task_scheduler_claim_lease_bounds",
+        ),
+        CheckConstraint(
+            "expires_at > acquired_at",
+            name="ck_execution_task_scheduler_claim_expiry_after_acquire",
+        ),
+        Index(
+            "uq_execution_task_scheduler_claim_active",
+            "execution_task_id",
+            unique=True,
+            sqlite_where=text("claim_status = 'active'"),
+            postgresql_where=text("claim_status = 'active'"),
+        ),
+        Index(
+            "ix_execution_task_scheduler_claim_plan_status_expiry",
+            "execution_plan_id",
+            "claim_status",
+            "expires_at",
+        ),
+        Index(
+            "ix_execution_task_scheduler_claim_project_status_expiry",
+            "project_id",
+            "claim_status",
+            "expires_at",
+        ),
+    )
+
+    execution_plan = relationship("ExecutionPlan", back_populates="scheduler_claims")
+    execution_task = relationship("ExecutionTask", back_populates="scheduler_claims")
 
 
 class ExecutionTaskTransition(Base):
