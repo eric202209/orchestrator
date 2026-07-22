@@ -426,6 +426,15 @@ def test_candidate_position_references_resolve_and_emission_order_is_not_authori
     ]
     assert "Silence is not coverage" in first_provider.requests[0].prompt
     assert "Sequential adjacent members require" in first_provider.requests[0].prompt
+    assert "execution_groups: []" in first_provider.requests[0].prompt
+    assert (
+        "Do not create a group merely to list all tasks"
+        in first_provider.requests[0].prompt
+    )
+    assert (
+        "artifact_ready describes artifact availability"
+        in first_provider.requests[0].prompt
+    )
 
     session2, manifest2 = _seed(db_session)
     second_engine, _, _ = _engine(
@@ -723,6 +732,29 @@ def test_sequential_group_rejects_non_ordering_adjacent_dependency(db_session):
     )
     assert independent.status == StageStatus.FAILED
     assert len(task_provider.requests) == 2
+
+
+def test_execution_group_negative_order_is_rejected_without_repair(db_session):
+    session, manifest = _seed(db_session)
+    candidate = _plan_candidate(
+        group={
+            "kind": "sequential",
+            "order": -1,
+            "task_ids": ["tasks[0]", "tasks[1]"],
+            "parallel_limit": 1,
+            "skip_policy": "not_skippable",
+        }
+    )
+    engine, _, _ = _engine(db_session, session, manifest, candidate)
+
+    result = engine.advance(
+        session.id,
+        session_generation_id=session.generation_id,
+        fencing_token=session.processing_token,
+    )
+
+    assert result.status == StageStatus.FAILED
+    assert "invalid_group_limits" in result.reason
 
 
 @pytest.mark.parametrize(

@@ -113,6 +113,26 @@ STRUCTURED_TASK_PLAN_CANDIDATE_FIELDS = (
     "intentional_omissions",
 )
 
+TASK_PLAN_MINIMAL_REPRESENTATION_POLICY = (
+    "Prefer the simplest valid Structured Task Plan representation. Execution-group "
+    "records are optional. When the accepted Brief does not explicitly require "
+    "parallel scheduling, resource isolation, or group-level sequencing, emit the "
+    "required top-level execution_groups collection as an empty array: "
+    "execution_groups: []. Do not create a group merely to list all tasks. When the "
+    "collection is empty, emit no group identifiers, membership, group ordering, or "
+    "group-level dependency semantics. Keep task prerequisites as ordinary valid "
+    "dependency edges."
+)
+
+TASK_PLAN_GROUPED_REPRESENTATION_POLICY = (
+    "When an execution group is necessary, preserve explicit group membership and "
+    "group order. For adjacent sequential members, emit a dependency edge whose "
+    "type is ordering or hard_completion; artifact_ready describes artifact "
+    "availability and is not a sequential group-order edge. Group membership never "
+    "replaces task dependency edges, and every group order must agree with the "
+    "canonical dependency graph."
+)
+
 
 _BRIEF_ENUMS: Mapping[tuple[str, str], Sequence[str]] = {
     ("BackgroundFact", "status"): FACT_STATUSES,
@@ -472,6 +492,7 @@ def build_structured_task_plan_schema_contract() -> dict[str, Any]:
             },
             "execution_groups": {
                 "optional": True,
+                "representation_policy": TASK_PLAN_MINIMAL_REPRESENTATION_POLICY,
                 "membership": (
                     "Execution groups are optional; when present, each listed task "
                     "reference must resolve and a task cannot belong to multiple "
@@ -491,6 +512,7 @@ def build_structured_task_plan_schema_contract() -> dict[str, Any]:
                     "task indexes as all dependencies; group membership does not "
                     "make a dependency reference visible or valid by itself."
                 ),
+                "grouped_representation_policy": TASK_PLAN_GROUPED_REPRESENTATION_POLICY,
                 "ordering": (
                     "Dependency edges are authoritative for graph ordering; candidate "
                     "emission order and group order are not substitutes for edges."
@@ -537,6 +559,8 @@ __all__ = [
     "PLANNING_BRIEF_CANDIDATE_RECORD_TYPES",
     "STRUCTURED_TASK_PLAN_CANDIDATE_FIELDS",
     "STRUCTURED_TASK_PLAN_CANDIDATE_RECORD_TYPES",
+    "TASK_PLAN_GROUPED_REPRESENTATION_POLICY",
+    "TASK_PLAN_MINIMAL_REPRESENTATION_POLICY",
     "build_planning_brief_schema_contract",
     "build_structured_task_plan_schema_contract",
     "render_schema_contract",

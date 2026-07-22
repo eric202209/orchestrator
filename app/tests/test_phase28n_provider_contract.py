@@ -6,6 +6,8 @@ from app.services.planning.planning_brief_stage import (
     parse_planning_brief_candidate,
 )
 from app.services.planning.provider_contract import (
+    TASK_PLAN_GROUPED_REPRESENTATION_POLICY,
+    TASK_PLAN_MINIMAL_REPRESENTATION_POLICY,
     build_planning_brief_schema_contract,
     build_structured_task_plan_schema_contract,
 )
@@ -102,6 +104,13 @@ def test_structured_task_plan_contract_states_coverage_and_group_authority():
 
     groups = contract["semantic_rules"]["execution_groups"]
     assert groups["optional"] is True
+    assert "execution_groups: []" in groups["representation_policy"]
+    assert "artifact_ready" in groups["grouped_representation_policy"]
+    assert groups["representation_policy"] == TASK_PLAN_MINIMAL_REPRESENTATION_POLICY
+    assert (
+        groups["grouped_representation_policy"]
+        == TASK_PLAN_GROUPED_REPRESENTATION_POLICY
+    )
     assert "sequential" in groups["sequential_member_rule"]
     assert "cross-group" in groups["cross_group_dependencies"].lower()
 

@@ -29,6 +29,8 @@ from app.services.planning.planning_brief_stage import (
 )
 from app.services.planning.provider_contract import (
     STRUCTURED_TASK_PLAN_CANDIDATE_FIELDS,
+    TASK_PLAN_GROUPED_REPRESENTATION_POLICY,
+    TASK_PLAN_MINIMAL_REPRESENTATION_POLICY,
     build_structured_task_plan_schema_contract,
     render_schema_contract,
 )
@@ -797,6 +799,10 @@ def build_structured_task_plan_provider_input(
                 "conflict on a writable target. Cross-group dependencies use the "
                 "same provider-facing task indexes."
             ),
+            "representation": {
+                "minimal": TASK_PLAN_MINIMAL_REPRESENTATION_POLICY,
+                "grouped": TASK_PLAN_GROUPED_REPRESENTATION_POLICY,
+            },
             "traceability": (
                 "Use accepted Brief IDs and the role required by each target kind. "
                 "Do not invent Brief requirements, criteria, constraints, "
@@ -844,6 +850,11 @@ def build_structured_task_plan_request(
         "all such fields are application-owned or forbidden. Represent graph and coverage "
         "semantics explicitly, use accepted Brief IDs for traceability, and use tasks[N] or #N "
         "for candidate task references. Preserve uncertainty rather than inventing facts.\n\n"
+        "REPRESENTATION POLICY:\n"
+        + TASK_PLAN_MINIMAL_REPRESENTATION_POLICY
+        + "\n"
+        + TASK_PLAN_GROUPED_REPRESENTATION_POLICY
+        + "\n\n"
         "COMPLETE RECORD-LEVEL SCHEMA CONTRACT:\n"
         + schema
         + "\n\nINPUT:\n"
