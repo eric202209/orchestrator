@@ -8,6 +8,7 @@ from app.api.v1.endpoints import (
     projects,
     planner,
     planning,
+    planning_execution_commit,
     planning_reviews,
     users,
     mobile,
@@ -93,6 +94,12 @@ api_router.include_router(
 api_router.include_router(
     planning_reviews.router,
     tags=["planning-review"],
+    dependencies=[Depends(get_current_active_user)],
+)
+
+api_router.include_router(
+    planning_execution_commit.router,
+    tags=["planning-execution-commit"],
     dependencies=[Depends(get_current_active_user)],
 )
 

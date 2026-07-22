@@ -157,8 +157,15 @@ class ExecutionPlanCommitService:
             )
 
         provenance = manifest.task_provenance
+        # Phase 29B-2 canonical schema (``planning_execution_commit.v1``) names
+        # the plan-hash field ``structured_task_plan_hash``.  A bare
+        # ``task_plan_hash`` fallback is accepted only for the pre-existing
+        # test-only provenance shape documented in the Phase 29B-1 report;
+        # no production caller ever wrote that shape.
         provenance_hash = (
-            provenance.get("task_plan_hash")
+            provenance.get(
+                "structured_task_plan_hash", provenance.get("task_plan_hash")
+            )
             if isinstance(provenance, Mapping)
             else None
         )
