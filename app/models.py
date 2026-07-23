@@ -769,6 +769,18 @@ class ExecutionPlan(Base):
         back_populates="execution_plan",
         cascade="all, delete-orphan",
     )
+    recovery_inputs = relationship(
+        "ExecutionTaskRecoveryInput",
+        back_populates="execution_plan",
+        cascade="all, delete-orphan",
+    )
+    recovery_authorizations = relationship(
+        "ExecutionTaskRecoveryAuthorization",
+        back_populates="execution_plan",
+        cascade="all, delete-orphan",
+    )
+    recovery_policy_id = Column(String(64), nullable=True, index=True)
+    recovery_policy_version = Column(Integer, nullable=True)
     validation_contract_set_hash = Column(String(64), nullable=True, index=True)
 
 
@@ -871,6 +883,16 @@ class ExecutionTask(Base):
     )
     acceptance_decisions = relationship(
         "ExecutionTaskAcceptanceDecision",
+        back_populates="execution_task",
+        cascade="all, delete-orphan",
+    )
+    recovery_inputs = relationship(
+        "ExecutionTaskRecoveryInput",
+        back_populates="execution_task",
+        cascade="all, delete-orphan",
+    )
+    recovery_authorizations = relationship(
+        "ExecutionTaskRecoveryAuthorization",
         back_populates="execution_task",
         cascade="all, delete-orphan",
     )
@@ -1442,6 +1464,252 @@ class ExecutionTaskAcceptanceDecision(Base):
     validation_run = relationship("ExecutionTaskValidationRun")
 
 
+class ExecutionTaskRecoveryInput(Base):
+    """Immutable, source-bound evidence presented to recovery policy."""
+
+    __tablename__ = "execution_task_recovery_inputs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    failed_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    attempt_generation = Column(Integer, nullable=False)
+    runtime_outcome_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempt_outcomes.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    validation_run_id = Column(
+        Integer,
+        ForeignKey("execution_task_validation_runs.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    acceptance_decision_id = Column(
+        Integer,
+        ForeignKey("execution_task_acceptance_decisions.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    recovery_source = Column(String(64), nullable=False)
+    failure_category = Column(String(64), nullable=False)
+    failure_code = Column(String(64), nullable=True)
+    exception_type = Column(String(128), nullable=True)
+    provider_request_id = Column(String(255), nullable=True)
+    failed_predicate_summary = Column(JSON, nullable=True)
+    aggregate_evidence_hash = Column(String(64), nullable=True)
+    aggregate_predicate_result_hash = Column(String(64), nullable=True)
+    lifecycle_transition_id = Column(
+        Integer,
+        ForeignKey("execution_task_transitions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    lifecycle_transition_sequence = Column(Integer, nullable=False)
+    task_state_at_creation = Column(String(20), nullable=False)
+    task_state_version_at_creation = Column(Integer, nullable=False)
+    prior_recovery_authorization_id = Column(
+        Integer,
+        nullable=True,
+    )
+    retry_count = Column(Integer, nullable=False)
+    recovery_generation = Column(Integer, nullable=False)
+    canonical_input_payload = Column(JSON, nullable=False)
+    canonical_input_hash = Column(String(64), nullable=False, index=True)
+    input_idempotency_key = Column(String(128), nullable=False, unique=True)
+    creation_actor_type = Column(String(64), nullable=False)
+    creation_actor_id = Column(String(255), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_task_id",
+            "recovery_generation",
+            name="uq_execution_task_recovery_input_task_generation",
+        ),
+        UniqueConstraint(
+            "lifecycle_transition_id",
+            name="uq_execution_task_recovery_input_transition",
+        ),
+        CheckConstraint(
+            "attempt_generation > 0 AND recovery_generation > 0",
+            name="ck_execution_task_recovery_input_generation_positive",
+        ),
+        CheckConstraint(
+            "retry_count >= 0 AND task_state_version_at_creation >= 0",
+            name="ck_execution_task_recovery_input_counts_nonnegative",
+        ),
+        Index(
+            "ix_execution_task_recovery_inputs_task_source",
+            "execution_task_id",
+            "recovery_source",
+        ),
+    )
+
+    execution_plan = relationship("ExecutionPlan", back_populates="recovery_inputs")
+    execution_task = relationship("ExecutionTask", back_populates="recovery_inputs")
+    failed_attempt = relationship(
+        "ExecutionTaskAttempt", foreign_keys=[failed_attempt_id]
+    )
+    runtime_outcome = relationship("ExecutionTaskAttemptOutcome")
+    validation_run = relationship("ExecutionTaskValidationRun")
+    acceptance_decision = relationship("ExecutionTaskAcceptanceDecision")
+    lifecycle_transition = relationship("ExecutionTaskTransition")
+
+
+class ExecutionTaskRecoveryAuthorization(Base):
+    """Canonical Phase 29 recovery decision and authorization record.
+
+    Policy classification and final action intentionally share one immutable
+    record.  Only ``authorized`` creates a replacement attempt; blocked and
+    operator-required records remain lifecycle-neutral.
+    """
+
+    __tablename__ = "execution_task_recovery_authorizations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    recovery_input_id = Column(
+        Integer,
+        ForeignKey("execution_task_recovery_inputs.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    failed_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    recovery_generation = Column(Integer, nullable=False)
+    policy_id = Column(String(64), nullable=False)
+    policy_version = Column(Integer, nullable=False)
+    strategy_id = Column(String(64), nullable=True)
+    strategy_version = Column(Integer, nullable=True)
+    authorization_status = Column(String(32), nullable=False, index=True)
+    decision_classification = Column(String(64), nullable=False)
+    decision_reason = Column(String(64), nullable=False)
+    retry_budget_before = Column(Integer, nullable=False)
+    retry_budget_after = Column(Integer, nullable=False)
+    next_attempt_generation = Column(Integer, nullable=True)
+    strategy_parameters = Column(JSON, nullable=True)
+    strategy_parameter_hash = Column(String(64), nullable=True)
+    not_before = Column(DateTime(timezone=True), nullable=True)
+    backoff_policy_id = Column(String(64), nullable=True)
+    backoff_policy_version = Column(Integer, nullable=True)
+    operator_required = Column(Boolean, nullable=False, default=False)
+    authorization_idempotency_key = Column(String(128), nullable=False, unique=True)
+    deterministic_authorization_command_id = Column(
+        String(128), nullable=False, unique=True
+    )
+    canonical_authorization_command_payload = Column(JSON, nullable=False)
+    canonical_authorization_command_hash = Column(String(64), nullable=False)
+    canonical_authorization_payload = Column(JSON, nullable=False)
+    canonical_authorization_hash = Column(String(64), nullable=False, index=True)
+    lifecycle_transition_id = Column(
+        Integer,
+        ForeignKey("execution_task_transitions.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    lifecycle_transition_sequence = Column(Integer, nullable=True)
+    replacement_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempts.id", ondelete="CASCADE"),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+    resulting_task_state = Column(String(20), nullable=False)
+    resulting_task_state_version = Column(Integer, nullable=False)
+    decision_actor_type = Column(String(64), nullable=False)
+    decision_actor_id = Column(String(255), nullable=False)
+    authorized_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_task_id",
+            "recovery_generation",
+            name="uq_execution_task_recovery_authorization_task_generation",
+        ),
+        CheckConstraint(
+            "recovery_generation > 0 AND policy_version > 0",
+            name="ck_execution_task_recovery_authorization_generation_positive",
+        ),
+        CheckConstraint(
+            "retry_budget_before >= 0 AND retry_budget_after >= 0",
+            name="ck_execution_task_recovery_authorization_budget_nonnegative",
+        ),
+        CheckConstraint(
+            "next_attempt_generation IS NULL OR next_attempt_generation > 0",
+            name="ck_execution_task_recovery_authorization_next_generation_positive",
+        ),
+        CheckConstraint(
+            "authorization_status IN ('authorized', 'operator_required', 'exhausted', "
+            "'non_retryable', 'blocked', 'error', 'cancelled')",
+            name="ck_execution_task_recovery_authorization_status",
+        ),
+        Index(
+            "ix_execution_task_recovery_authorizations_task_status",
+            "execution_task_id",
+            "authorization_status",
+        ),
+    )
+
+    execution_plan = relationship(
+        "ExecutionPlan", back_populates="recovery_authorizations"
+    )
+    execution_task = relationship(
+        "ExecutionTask", back_populates="recovery_authorizations"
+    )
+    recovery_input = relationship(
+        "ExecutionTaskRecoveryInput",
+        foreign_keys=[recovery_input_id],
+    )
+    failed_attempt = relationship(
+        "ExecutionTaskAttempt", foreign_keys=[failed_attempt_id]
+    )
+    replacement_attempt = relationship(
+        "ExecutionTaskAttempt",
+        foreign_keys=[replacement_attempt_id],
+        uselist=False,
+    )
+    lifecycle_transition = relationship("ExecutionTaskTransition")
+
+
 class ExecutionTaskSchedulerClaim(Base):
     """Durable scheduler ownership boundary for one ready Execution Task.
 
@@ -1705,13 +1973,30 @@ class ExecutionTaskAttempt(Base):
     dispatch_intent_id = Column(
         Integer,
         ForeignKey("execution_task_dispatch_intents.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         unique=True,
         index=True,
     )
     attempt_number = Column(Integer, nullable=False)
     attempt_identity = Column(String(128), nullable=False, unique=True, index=True)
-    broker_task_id = Column(String(255), nullable=False, unique=True, index=True)
+    broker_task_id = Column(String(255), nullable=True, unique=True, index=True)
+    predecessor_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempts.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    recovery_authorization_id = Column(
+        Integer,
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+    recovery_generation = Column(Integer, nullable=True)
+    replacement_reason = Column(String(64), nullable=True)
+    strategy_id = Column(String(64), nullable=True)
+    strategy_version = Column(Integer, nullable=True)
+    strategy_parameter_hash = Column(String(64), nullable=True)
     attempt_status = Column(String(24), nullable=False, default="created", index=True)
     created_at = Column(DateTime(timezone=True), nullable=False)
     submitted_at = Column(DateTime(timezone=True), nullable=True)
@@ -1739,6 +2024,10 @@ class ExecutionTaskAttempt(Base):
             "execution_task_id",
             "attempt_status",
         ),
+        Index(
+            "ix_execution_task_attempts_predecessor",
+            "predecessor_attempt_id",
+        ),
     )
 
     execution_plan = relationship("ExecutionPlan", back_populates="runtime_attempts")
@@ -1747,6 +2036,12 @@ class ExecutionTaskAttempt(Base):
         "ExecutionTaskDispatchIntent",
         back_populates="runtime_attempt",
         foreign_keys=[dispatch_intent_id],
+    )
+    predecessor_attempt = relationship(
+        "ExecutionTaskAttempt",
+        remote_side=[id],
+        foreign_keys=[predecessor_attempt_id],
+        uselist=False,
     )
     runtime_leases = relationship(
         "ExecutionTaskRuntimeLease",
@@ -1765,6 +2060,12 @@ class ExecutionTaskAttempt(Base):
         uselist=False,
         cascade="all, delete-orphan",
     )
+
+    @property
+    def attempt_generation(self) -> int:
+        """Phase 29 terminology for the historical ``attempt_number`` field."""
+
+        return int(self.attempt_number)
 
 
 class ExecutionTaskRuntimeLease(Base):

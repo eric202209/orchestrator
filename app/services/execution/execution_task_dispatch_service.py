@@ -361,18 +361,40 @@ class ExecutionTaskDispatchService:
             .order_by(ExecutionTaskDispatchIntent.id.asc())
             .all()
         )
-        if any(
-            intent.dispatch_status != DISPATCH_STATUS_CANCELLED
-            for intent in prior_task_intents
+        replacement_attempt = (
+            self.db.query(ExecutionTaskAttempt)
+            .filter(
+                ExecutionTaskAttempt.execution_task_id == task.id,
+                ExecutionTaskAttempt.dispatch_intent_id.is_(None),
+                ExecutionTaskAttempt.recovery_authorization_id.is_not(None),
+            )
+            .order_by(ExecutionTaskAttempt.attempt_number.desc())
+            .first()
+        )
+        if (
+            any(
+                intent.dispatch_status != DISPATCH_STATUS_CANCELLED
+                for intent in prior_task_intents
+            )
+            and replacement_attempt is None
         ):
             raise ExecutionDispatchError(
                 "dispatch_intent_already_exists",
                 "Execution Task already has a non-cancelled dispatch intent",
             )
 
-        attempt_number = self._next_attempt_number(task.id)
-        if prior_task_intents and int(task.state_version) <= max(
-            int(intent.claimed_task_state_version) for intent in prior_task_intents
+        attempt_number = (
+            int(replacement_attempt.attempt_number)
+            if replacement_attempt is not None
+            else self._next_attempt_number(task.id)
+        )
+        if (
+            replacement_attempt is None
+            and prior_task_intents
+            and int(task.state_version)
+            <= max(
+                int(intent.claimed_task_state_version) for intent in prior_task_intents
+            )
         ):
             raise ExecutionDispatchError(
                 "runtime_attempt_conflict",
@@ -417,18 +439,24 @@ class ExecutionTaskDispatchService:
                 )
                 self.db.add(intent)
                 self.db.flush()
-                attempt = ExecutionTaskAttempt(
-                    execution_plan_id=plan.id,
-                    execution_task_id=task.id,
-                    dispatch_intent_id=intent.id,
-                    attempt_number=attempt_number,
-                    attempt_identity=attempt_identity,
-                    broker_task_id=broker_id,
-                    attempt_status="created",
-                    created_at=now,
-                    updated_at=now,
-                )
-                self.db.add(attempt)
+                if replacement_attempt is None:
+                    attempt = ExecutionTaskAttempt(
+                        execution_plan_id=plan.id,
+                        execution_task_id=task.id,
+                        dispatch_intent_id=intent.id,
+                        attempt_number=attempt_number,
+                        attempt_identity=attempt_identity,
+                        broker_task_id=broker_id,
+                        attempt_status="created",
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    self.db.add(attempt)
+                else:
+                    attempt = replacement_attempt
+                    attempt.dispatch_intent_id = intent.id
+                    attempt.broker_task_id = broker_id
+                    attempt.updated_at = now
                 self.db.flush()
                 worker_payload = self._worker_payload(intent, attempt)
                 intent.runtime_attempt_id = attempt.id
@@ -824,8 +852,12 @@ class ExecutionTaskDispatchService:
                 or attempt.attempt_number <= 0
             ):
                 issues.append("attempt_identity_mismatch")
-            expected_identity = _attempt_identity(
-                task.id, attempt.attempt_number, intent.canonical_command_hash
+            expected_identity = (
+                attempt.attempt_identity
+                if attempt.recovery_authorization_id is not None
+                else _attempt_identity(
+                    task.id, attempt.attempt_number, intent.canonical_command_hash
+                )
             )
             expected_broker = _broker_task_id(
                 task.id, attempt.attempt_number, intent.canonical_command_hash
@@ -914,7 +946,10 @@ class ExecutionTaskDispatchService:
             .all()
         )
         known = {result.attempt_id for result in results}
-        if any(attempt.id not in known for attempt in attempt_without_intent):
+        if any(
+            attempt.id not in known and attempt.recovery_authorization_id is None
+            for attempt in attempt_without_intent
+        ):
             return results + (
                 DispatchIntegrityResult(
                     dispatch_intent_id=0,

@@ -251,6 +251,8 @@ class ExecutionPlanCommitService:
             source_plan_checkpoint_id=checkpoint.id,
             source_plan_hash=task_plan.content_hash,
             status="active",
+            recovery_policy_id="standard_execution_recovery",
+            recovery_policy_version=1,
         )
         self.db.add(execution_plan)
         self.db.flush()

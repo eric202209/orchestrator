@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from app.models import (
     ExecutionPlan,
     ExecutionTask,
+    ExecutionTaskAttempt,
     ExecutionTaskDispatchIntent,
     ExecutionTaskSchedulerClaim,
     PlanningSession,
@@ -229,6 +230,38 @@ def _valid_hash(value: object) -> bool:
     return bool(_HASH_RE.fullmatch(str(value or "").lower()))
 
 
+def _dispatch_reentry_blocker(db: Session, task: ExecutionTask) -> str | None:
+    """Allow only a recovery-created, newest pre-dispatch generation back in."""
+
+    attempts = (
+        db.query(ExecutionTaskAttempt)
+        .filter(ExecutionTaskAttempt.execution_task_id == task.id)
+        .order_by(ExecutionTaskAttempt.attempt_number.desc())
+        .all()
+    )
+    current = attempts[0] if attempts else None
+    if current is not None and current.dispatch_intent_id is None:
+        if (
+            current.attempt_status == "created"
+            and current.recovery_authorization_id is not None
+        ):
+            return None
+        return "attempt_generation_binding_missing"
+    dispatch_history = (
+        db.query(ExecutionTaskDispatchIntent)
+        .filter(ExecutionTaskDispatchIntent.execution_task_id == task.id)
+        .order_by(ExecutionTaskDispatchIntent.id.asc())
+        .all()
+    )
+    if any(intent.dispatch_status != "cancelled" for intent in dispatch_history):
+        return "dispatch_intent_already_exists"
+    if dispatch_history and int(task.state_version) <= max(
+        int(intent.claimed_task_state_version) for intent in dispatch_history
+    ):
+        return "dispatch_history_requires_reconciliation"
+    return None
+
+
 def _scope(
     scope: ReadyTaskSelectionScope | Mapping[str, object] | None
 ) -> ReadyTaskSelectionScope:
@@ -435,19 +468,7 @@ class ExecutionReadyTaskSelectionService:
             return "claim_integrity_failure"
         if active_claims:
             return "task_already_claimed"
-        dispatch_history = (
-            claim_service.db.query(ExecutionTaskDispatchIntent)
-            .filter(ExecutionTaskDispatchIntent.execution_task_id == task.id)
-            .order_by(ExecutionTaskDispatchIntent.id.asc())
-            .all()
-        )
-        if any(intent.dispatch_status != "cancelled" for intent in dispatch_history):
-            return "dispatch_intent_already_exists"
-        if dispatch_history and int(task.state_version) <= max(
-            int(intent.claimed_task_state_version) for intent in dispatch_history
-        ):
-            return "dispatch_history_requires_reconciliation"
-        return None
+        return _dispatch_reentry_blocker(claim_service.db, task)
 
 
 class ExecutionTaskSchedulerClaimService:
@@ -504,23 +525,11 @@ class ExecutionTaskSchedulerClaimService:
             raise ExecutionSchedulerClaimError(
                 "task_not_ready", "scheduler claims require a ready task"
             )
-        dispatch_history = (
-            self.db.query(ExecutionTaskDispatchIntent)
-            .filter(ExecutionTaskDispatchIntent.execution_task_id == task.id)
-            .order_by(ExecutionTaskDispatchIntent.id.asc())
-            .all()
-        )
-        if any(intent.dispatch_status != "cancelled" for intent in dispatch_history):
+        dispatch_blocker = _dispatch_reentry_blocker(self.db, task)
+        if dispatch_blocker is not None:
             raise ExecutionSchedulerClaimError(
-                "dispatch_intent_already_exists",
-                "Execution Task already has a non-cancelled dispatch intent",
-            )
-        if dispatch_history and int(task.state_version) <= max(
-            int(intent.claimed_task_state_version) for intent in dispatch_history
-        ):
-            raise ExecutionSchedulerClaimError(
-                "dispatch_intent_already_exists",
-                "cancelled dispatch history requires lifecycle reconciliation",
+                dispatch_blocker,
+                "task has no claimable current attempt generation",
             )
         if int(task.state_version) != command.expected_task_state_version:
             raise ExecutionSchedulerClaimError(
@@ -818,6 +827,7 @@ class ExecutionTaskSchedulerClaimService:
                     "eligibility_decision_stale",
                     "dispatch_intent_already_exists",
                     "dispatch_history_requires_reconciliation",
+                    "attempt_generation_binding_missing",
                 }:
                     skipped.append(candidate.execution_task_id)
                     continue

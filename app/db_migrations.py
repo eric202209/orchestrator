@@ -34,6 +34,14 @@ def _has_column(engine: Engine, table_name: str, column_name: str) -> bool:
     }
 
 
+def _column_nullable(engine: Engine, table_name: str, column_name: str) -> bool:
+    inspector = inspect(engine)
+    for column in inspector.get_columns(table_name):
+        if column["name"] == column_name:
+            return bool(column.get("nullable", True))
+    return True
+
+
 def _has_index(engine: Engine, table_name: str, index_name: str) -> bool:
     inspector = inspect(engine)
     return index_name in {index["name"] for index in inspector.get_indexes(table_name)}
@@ -2929,6 +2937,259 @@ def _migration_040_execution_task_validation_runs_acceptance(engine: Engine) -> 
             connection.execute(text(statement))
 
 
+def _migration_041_execution_task_recovery_boundary(engine: Engine) -> None:
+    """Add empty Phase 29C-8 recovery authority and pre-dispatch lineage.
+
+    This migration is additive.  Existing attempts and all prior evidence are
+    copied byte-for-byte into the rebuilt attempt table when SQLite needs a
+    nullable dispatch link; no recovery history or lifecycle projection is
+    inferred.
+    """
+
+    table_names = _table_names(engine)
+    with engine.begin() as connection:
+        if "execution_plans" in table_names:
+            for column_name, ddl in (
+                (
+                    "recovery_policy_id",
+                    "ALTER TABLE execution_plans ADD COLUMN recovery_policy_id VARCHAR(64)",
+                ),
+                (
+                    "recovery_policy_version",
+                    "ALTER TABLE execution_plans ADD COLUMN recovery_policy_version INTEGER",
+                ),
+            ):
+                if not _has_column(engine, "execution_plans", column_name):
+                    connection.execute(text(ddl))
+
+        if "execution_task_attempts" in table_names and not _column_nullable(
+            engine, "execution_task_attempts", "dispatch_intent_id"
+        ):
+            connection.execute(
+                text(
+                    "ALTER TABLE execution_task_attempts "
+                    "RENAME TO execution_task_attempts_phase29c8_old"
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE execution_task_attempts (
+                        id INTEGER PRIMARY KEY,
+                        execution_plan_id INTEGER NOT NULL,
+                        execution_task_id INTEGER NOT NULL,
+                        dispatch_intent_id INTEGER,
+                        attempt_number INTEGER NOT NULL,
+                        attempt_identity VARCHAR(128) NOT NULL,
+                        broker_task_id VARCHAR(255),
+                        predecessor_attempt_id INTEGER,
+                        recovery_authorization_id INTEGER,
+                        recovery_generation INTEGER,
+                        replacement_reason VARCHAR(64),
+                        strategy_id VARCHAR(64),
+                        strategy_version INTEGER,
+                        strategy_parameter_hash VARCHAR(64),
+                        attempt_status VARCHAR(24) NOT NULL DEFAULT 'created',
+                        created_at DATETIME NOT NULL,
+                        submitted_at DATETIME,
+                        started_at DATETIME,
+                        cancelled_at DATETIME,
+                        updated_at DATETIME,
+                        CONSTRAINT uq_execution_task_attempt_dispatch_intent
+                            UNIQUE (dispatch_intent_id),
+                        CONSTRAINT uq_execution_task_attempt_identity
+                            UNIQUE (attempt_identity),
+                        CONSTRAINT uq_execution_task_attempt_broker
+                            UNIQUE (broker_task_id),
+                        CONSTRAINT uq_execution_task_attempt_task_number
+                            UNIQUE (execution_task_id, attempt_number),
+                        CONSTRAINT uq_execution_task_attempt_recovery_authorization
+                            UNIQUE (recovery_authorization_id),
+                        CONSTRAINT ck_execution_task_attempt_number_positive
+                            CHECK (attempt_number > 0),
+                        CONSTRAINT ck_execution_task_attempt_status
+                            CHECK (attempt_status IN (
+                                'created', 'submitted', 'running',
+                                'candidate_completed', 'cancelled', 'failed',
+                                'succeeded'
+                            )),
+                        FOREIGN KEY(execution_plan_id)
+                            REFERENCES execution_plans (id) ON DELETE CASCADE,
+                        FOREIGN KEY(execution_task_id)
+                            REFERENCES execution_tasks (id) ON DELETE CASCADE,
+                        FOREIGN KEY(dispatch_intent_id)
+                            REFERENCES execution_task_dispatch_intents (id)
+                            ON DELETE CASCADE,
+                    FOREIGN KEY(predecessor_attempt_id)
+                        REFERENCES execution_task_attempts (id)
+                            ON DELETE CASCADE
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO execution_task_attempts (
+                        id, execution_plan_id, execution_task_id,
+                        dispatch_intent_id, attempt_number, attempt_identity,
+                        broker_task_id, attempt_status, created_at, submitted_at,
+                        started_at, cancelled_at, updated_at
+                    )
+                    SELECT id, execution_plan_id, execution_task_id,
+                        dispatch_intent_id, attempt_number, attempt_identity,
+                        broker_task_id, attempt_status, created_at, submitted_at,
+                        started_at, cancelled_at, updated_at
+                    FROM execution_task_attempts_phase29c8_old
+                    """
+                )
+            )
+            connection.execute(text("DROP TABLE execution_task_attempts_phase29c8_old"))
+
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_recovery_inputs (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    failed_attempt_id INTEGER NOT NULL,
+                    attempt_generation INTEGER NOT NULL,
+                    runtime_outcome_id INTEGER,
+                    validation_run_id INTEGER,
+                    acceptance_decision_id INTEGER,
+                    recovery_source VARCHAR(64) NOT NULL,
+                    failure_category VARCHAR(64) NOT NULL,
+                    failure_code VARCHAR(64),
+                    exception_type VARCHAR(128),
+                    provider_request_id VARCHAR(255),
+                    failed_predicate_summary JSON,
+                    aggregate_evidence_hash VARCHAR(64),
+                    aggregate_predicate_result_hash VARCHAR(64),
+                    lifecycle_transition_id INTEGER NOT NULL,
+                    lifecycle_transition_sequence INTEGER NOT NULL,
+                    task_state_at_creation VARCHAR(20) NOT NULL,
+                    task_state_version_at_creation INTEGER NOT NULL,
+                    prior_recovery_authorization_id INTEGER,
+                    retry_count INTEGER NOT NULL,
+                    recovery_generation INTEGER NOT NULL,
+                    canonical_input_payload JSON NOT NULL,
+                    canonical_input_hash VARCHAR(64) NOT NULL,
+                    input_idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+                    creation_actor_type VARCHAR(64) NOT NULL,
+                    creation_actor_id VARCHAR(255) NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_execution_task_recovery_input_task_generation
+                        UNIQUE (execution_task_id, recovery_generation),
+                    CONSTRAINT uq_execution_task_recovery_input_transition
+                        UNIQUE (lifecycle_transition_id),
+                    CONSTRAINT ck_execution_task_recovery_input_generation_positive
+                        CHECK (attempt_generation > 0 AND recovery_generation > 0),
+                    CONSTRAINT ck_execution_task_recovery_input_counts_nonnegative
+                        CHECK (retry_count >= 0 AND task_state_version_at_creation >= 0),
+                    FOREIGN KEY(execution_plan_id)
+                        REFERENCES execution_plans (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_id)
+                        REFERENCES execution_tasks (id) ON DELETE CASCADE,
+                    FOREIGN KEY(failed_attempt_id)
+                        REFERENCES execution_task_attempts (id) ON DELETE CASCADE,
+                    FOREIGN KEY(runtime_outcome_id)
+                        REFERENCES execution_task_attempt_outcomes (id) ON DELETE CASCADE,
+                    FOREIGN KEY(validation_run_id)
+                        REFERENCES execution_task_validation_runs (id) ON DELETE CASCADE,
+                    FOREIGN KEY(acceptance_decision_id)
+                        REFERENCES execution_task_acceptance_decisions (id) ON DELETE CASCADE,
+                    FOREIGN KEY(lifecycle_transition_id)
+                        REFERENCES execution_task_transitions (id) ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_recovery_authorizations (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    recovery_input_id INTEGER NOT NULL UNIQUE,
+                    failed_attempt_id INTEGER NOT NULL,
+                    recovery_generation INTEGER NOT NULL,
+                    policy_id VARCHAR(64) NOT NULL,
+                    policy_version INTEGER NOT NULL,
+                    strategy_id VARCHAR(64),
+                    strategy_version INTEGER,
+                    authorization_status VARCHAR(32) NOT NULL,
+                    decision_classification VARCHAR(64) NOT NULL,
+                    decision_reason VARCHAR(64) NOT NULL,
+                    retry_budget_before INTEGER NOT NULL,
+                    retry_budget_after INTEGER NOT NULL,
+                    next_attempt_generation INTEGER,
+                    strategy_parameters JSON,
+                    strategy_parameter_hash VARCHAR(64),
+                    not_before DATETIME,
+                    backoff_policy_id VARCHAR(64),
+                    backoff_policy_version INTEGER,
+                    operator_required BOOLEAN NOT NULL DEFAULT 0,
+                    authorization_idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+                    deterministic_authorization_command_id VARCHAR(128) NOT NULL UNIQUE,
+                    canonical_authorization_command_payload JSON NOT NULL,
+                    canonical_authorization_command_hash VARCHAR(64) NOT NULL,
+                    canonical_authorization_payload JSON NOT NULL,
+                    canonical_authorization_hash VARCHAR(64) NOT NULL,
+                    lifecycle_transition_id INTEGER,
+                    lifecycle_transition_sequence INTEGER,
+                    replacement_attempt_id INTEGER UNIQUE,
+                    resulting_task_state VARCHAR(20) NOT NULL,
+                    resulting_task_state_version INTEGER NOT NULL,
+                    decision_actor_type VARCHAR(64) NOT NULL,
+                    decision_actor_id VARCHAR(255) NOT NULL,
+                    authorized_at DATETIME NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_execution_task_recovery_authorization_task_generation
+                        UNIQUE (execution_task_id, recovery_generation),
+                    CONSTRAINT ck_execution_task_recovery_authorization_generation_positive
+                        CHECK (recovery_generation > 0 AND policy_version > 0),
+                    CONSTRAINT ck_execution_task_recovery_authorization_budget_nonnegative
+                        CHECK (retry_budget_before >= 0 AND retry_budget_after >= 0),
+                    CONSTRAINT ck_execution_task_recovery_authorization_next_generation_positive
+                        CHECK (next_attempt_generation IS NULL OR next_attempt_generation > 0),
+                    CONSTRAINT ck_execution_task_recovery_authorization_status
+                        CHECK (authorization_status IN (
+                            'authorized', 'operator_required', 'exhausted',
+                            'non_retryable', 'blocked', 'error', 'cancelled'
+                        )),
+                    FOREIGN KEY(execution_plan_id)
+                        REFERENCES execution_plans (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_id)
+                        REFERENCES execution_tasks (id) ON DELETE CASCADE,
+                    FOREIGN KEY(recovery_input_id)
+                        REFERENCES execution_task_recovery_inputs (id) ON DELETE CASCADE,
+                    FOREIGN KEY(failed_attempt_id)
+                        REFERENCES execution_task_attempts (id) ON DELETE CASCADE,
+                    FOREIGN KEY(lifecycle_transition_id)
+                        REFERENCES execution_task_transitions (id) ON DELETE CASCADE,
+                    FOREIGN KEY(replacement_attempt_id)
+                        REFERENCES execution_task_attempts (id) ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        for statement in (
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_recovery_inputs_task_source "
+            "ON execution_task_recovery_inputs (execution_task_id, recovery_source)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_recovery_inputs_task_generation "
+            "ON execution_task_recovery_inputs (execution_task_id, recovery_generation)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_recovery_authorizations_task_status "
+            "ON execution_task_recovery_authorizations (execution_task_id, authorization_status)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_recovery_authorizations_policy "
+            "ON execution_task_recovery_authorizations (policy_id, policy_version)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_attempts_predecessor "
+            "ON execution_task_attempts (predecessor_attempt_id)",
+        ):
+            connection.execute(text(statement))
+
+
 def _migration_038_normalize(value):
     if isinstance(value, str):
         return unicodedata.normalize("NFC", value)
@@ -3424,6 +3685,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="040_execution_task_validation_runs_acceptance",
         description="Add canonical validation runs and acceptance decisions",
         upgrade=_migration_040_execution_task_validation_runs_acceptance,
+    ),
+    Migration(
+        version="041_execution_task_recovery_boundary",
+        description="Add Phase 29C-8 recovery authority and replacement-attempt lineage",
+        upgrade=_migration_041_execution_task_recovery_boundary,
     ),
 )
 

@@ -42,7 +42,9 @@ EXECUTION_TASK_STATES = frozenset(
         "skipped",
     }
 )
-TERMINAL_EXECUTION_TASK_STATES = frozenset({"succeeded", "cancelled", "skipped"})
+TERMINAL_EXECUTION_TASK_STATES = frozenset(
+    {"succeeded", "failed", "cancelled", "skipped"}
+)
 READY_EXECUTION_TASK_STATES = frozenset({"ready"})
 RUNNING_EXECUTION_TASK_STATES = frozenset({"running"})
 SUCCESSFUL_EXECUTION_TASK_STATES = frozenset({"succeeded"})
@@ -66,7 +68,7 @@ ALLOWED_EXECUTION_TASK_TRANSITIONS: Mapping[str, frozenset[str]] = {
     "awaiting_recovery": frozenset({"ready", "failed", "paused", "cancelled"}),
     "blocked": frozenset({"ready", "cancelled", "skipped"}),
     "paused": frozenset({"ready", "running", "cancelled"}),
-    "failed": frozenset({"ready", "cancelled"}),
+    "failed": frozenset(),
     "succeeded": frozenset(),
     "cancelled": frozenset(),
     "skipped": frozenset(),
@@ -91,6 +93,7 @@ EXECUTION_TASK_REASON_CODES = frozenset(
         "validation_rejected",
         "recovery_retry_authorized",
         "recovery_exhausted",
+        "recovery_non_retryable",
         "operator_paused",
         "operator_cancelled",
         "operator_skipped",
@@ -214,10 +217,16 @@ def _validate_transition_reason_contract(
         ("awaiting_recovery", "failed"): TERMINAL_FAILURE_AUTHORIZATION_REASON,
     }.get((from_state, to_state))
     if required_reason is not None and reason_code != required_reason:
-        raise ExecutionTaskTransitionError(
-            "transition_reason_not_authorized",
-            f"{from_state!r} -> {to_state!r} requires reason {required_reason!r}",
-        )
+        if (from_state, to_state) == (
+            "awaiting_recovery",
+            "failed",
+        ) and reason_code == "recovery_non_retryable":
+            required_reason = reason_code
+        else:
+            raise ExecutionTaskTransitionError(
+                "transition_reason_not_authorized",
+                f"{from_state!r} -> {to_state!r} requires reason {required_reason!r}",
+            )
 
     if to_state == "succeeded" and actor_type not in (
         TERMINAL_AUTHORITY_ACTOR_TYPES | {"test"}

@@ -23,6 +23,7 @@ from app.models import (
     ExecutionTask,
     ExecutionTaskAttempt,
     ExecutionTaskAttemptOutcome,
+    ExecutionTaskAcceptanceDecision,
     ExecutionTaskDispatchIntent,
     ExecutionTaskRuntimeLease,
     ExecutionTaskRuntimeStart,
@@ -999,12 +1000,40 @@ class ExecutionTaskRuntimeExecutionService:
             )
             if attempt.attempt_status != expected_attempt:
                 issues.append("runtime_outcome_attempt_status_mismatch")
+        rejected_validation = None
+        if outcome.outcome_status == "candidate_completed":
+            rejected_validation = (
+                self.db.query(ExecutionTaskAcceptanceDecision)
+                .filter(
+                    ExecutionTaskAcceptanceDecision.candidate_outcome_id == outcome.id,
+                    ExecutionTaskAcceptanceDecision.decision_status == "rejected",
+                )
+                .one_or_none()
+            )
         expected_state = (
+            "awaiting_recovery"
+            if rejected_validation is not None
+            else (
+                "awaiting_validation"
+                if outcome.outcome_status == "candidate_completed"
+                else "awaiting_recovery"
+            )
+        )
+        expected_reason = (
+            "validation_rejected"
+            if rejected_validation is not None
+            else (
+                "runtime_candidate_completed"
+                if outcome.outcome_status == "candidate_completed"
+                else "runtime_attempt_failed"
+            )
+        )
+        runtime_event_state = (
             "awaiting_validation"
             if outcome.outcome_status == "candidate_completed"
             else "awaiting_recovery"
         )
-        expected_reason = (
+        runtime_event_reason = (
             "runtime_candidate_completed"
             if outcome.outcome_status == "candidate_completed"
             else "runtime_attempt_failed"
@@ -1014,8 +1043,8 @@ class ExecutionTaskRuntimeExecutionService:
         if task is not None and task.status != expected_state:
             issues.append("outcome_lifecycle_mismatch")
         if event is not None and (
-            event.to_state != expected_state
-            or event.reason_code != expected_reason
+            event.to_state != runtime_event_state
+            or event.reason_code != runtime_event_reason
             or event.actor_type != RUNTIME_OUTCOME_ACTOR_TYPE
             or event.runtime_attempt_id != outcome.execution_task_attempt_id
             or event.runtime_lease_id != outcome.runtime_lease_id
