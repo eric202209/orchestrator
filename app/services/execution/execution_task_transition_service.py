@@ -32,6 +32,8 @@ EXECUTION_TASK_STATES = frozenset(
         "pending",
         "ready",
         "running",
+        "awaiting_validation",
+        "awaiting_recovery",
         "succeeded",
         "failed",
         "blocked",
@@ -41,10 +43,27 @@ EXECUTION_TASK_STATES = frozenset(
     }
 )
 TERMINAL_EXECUTION_TASK_STATES = frozenset({"succeeded", "cancelled", "skipped"})
+READY_EXECUTION_TASK_STATES = frozenset({"ready"})
+RUNNING_EXECUTION_TASK_STATES = frozenset({"running"})
+SUCCESSFUL_EXECUTION_TASK_STATES = frozenset({"succeeded"})
+DEPENDENCY_SATISFYING_EXECUTION_TASK_STATES = frozenset({"succeeded"})
 ALLOWED_EXECUTION_TASK_TRANSITIONS: Mapping[str, frozenset[str]] = {
     "pending": frozenset({"ready", "blocked", "cancelled", "skipped"}),
     "ready": frozenset({"running", "blocked", "paused", "cancelled", "skipped"}),
-    "running": frozenset({"succeeded", "failed", "paused", "cancelled"}),
+    "running": frozenset(
+        {
+            "succeeded",
+            "failed",
+            "awaiting_validation",
+            "awaiting_recovery",
+            "paused",
+            "cancelled",
+        }
+    ),
+    "awaiting_validation": frozenset(
+        {"succeeded", "awaiting_recovery", "paused", "cancelled"}
+    ),
+    "awaiting_recovery": frozenset({"ready", "failed", "paused", "cancelled"}),
     "blocked": frozenset({"ready", "cancelled", "skipped"}),
     "paused": frozenset({"ready", "running", "cancelled"}),
     "failed": frozenset({"ready", "cancelled"}),
@@ -66,6 +85,12 @@ EXECUTION_TASK_REASON_CODES = frozenset(
         "execution_succeeded",
         "execution_failed",
         "retry_authorized",
+        "runtime_candidate_completed",
+        "runtime_attempt_failed",
+        "validation_accepted",
+        "validation_rejected",
+        "recovery_retry_authorized",
+        "recovery_exhausted",
         "operator_paused",
         "operator_cancelled",
         "operator_skipped",
@@ -78,6 +103,9 @@ EXECUTION_TASK_REASON_CODES = frozenset(
         "system_reconciliation",
     }
 )
+TERMINAL_SUCCESS_AUTHORIZATION_REASON = "validation_accepted"
+TERMINAL_FAILURE_AUTHORIZATION_REASON = "recovery_exhausted"
+TERMINAL_AUTHORITY_ACTOR_TYPES = frozenset({"system", "recovery"})
 GENESIS_PREVIOUS_EVENT_HASH: str | None = None
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
@@ -156,6 +184,74 @@ class ExecutionPlanLifecycleIntegrityResult:
     execution_plan_id: int
     task_count: int
     verified: bool = True
+
+
+def is_terminal_execution_task_state(state: str) -> bool:
+    return state in TERMINAL_EXECUTION_TASK_STATES
+
+
+def satisfies_execution_task_dependency(state: str) -> bool:
+    return state in DEPENDENCY_SATISFYING_EXECUTION_TASK_STATES
+
+
+def _validate_transition_reason_contract(
+    *, from_state: str, to_state: str, reason_code: str, actor_type: str
+) -> None:
+    """Keep runtime evidence distinct from acceptance/recovery authority.
+
+    The legacy direct terminal edges remain structurally available for
+    compatibility.  Production callers must use the amended authority reason
+    for terminalization; the test actor is retained solely for existing
+    contract fixtures that exercise the structural graph.
+    """
+
+    required_reason = {
+        ("running", "awaiting_validation"): "runtime_candidate_completed",
+        ("running", "awaiting_recovery"): "runtime_attempt_failed",
+        ("awaiting_validation", "succeeded"): TERMINAL_SUCCESS_AUTHORIZATION_REASON,
+        ("awaiting_validation", "awaiting_recovery"): "validation_rejected",
+        ("awaiting_recovery", "ready"): "recovery_retry_authorized",
+        ("awaiting_recovery", "failed"): TERMINAL_FAILURE_AUTHORIZATION_REASON,
+    }.get((from_state, to_state))
+    if required_reason is not None and reason_code != required_reason:
+        raise ExecutionTaskTransitionError(
+            "transition_reason_not_authorized",
+            f"{from_state!r} -> {to_state!r} requires reason {required_reason!r}",
+        )
+
+    if to_state == "succeeded" and actor_type not in (
+        TERMINAL_AUTHORITY_ACTOR_TYPES | {"test"}
+    ):
+        raise ExecutionTaskTransitionError(
+            "terminal_acceptance_actor_required",
+            "succeeded requires validation authority, not a runtime worker",
+        )
+    if to_state == "failed" and actor_type not in (
+        TERMINAL_AUTHORITY_ACTOR_TYPES | {"test"}
+    ):
+        raise ExecutionTaskTransitionError(
+            "terminal_recovery_actor_required",
+            "failed requires recovery authority, not a runtime worker",
+        )
+
+    if from_state == "running" and to_state == "succeeded":
+        if (
+            actor_type != "test"
+            and reason_code != TERMINAL_SUCCESS_AUTHORIZATION_REASON
+        ):
+            raise ExecutionTaskTransitionError(
+                "terminal_acceptance_authority_required",
+                "succeeded requires validation acceptance authority",
+            )
+    elif from_state == "running" and to_state == "failed":
+        if (
+            actor_type != "test"
+            and reason_code != TERMINAL_FAILURE_AUTHORIZATION_REASON
+        ):
+            raise ExecutionTaskTransitionError(
+                "terminal_recovery_authority_required",
+                "failed requires recovery exhaustion authority",
+            )
 
 
 def _bounded_text(
@@ -338,6 +434,12 @@ class ExecutionTaskTransitionService:
                 "transition_not_allowed",
                 f"transition {task.status!r} -> {command.to_state!r} is not allowed",
             )
+        _validate_transition_reason_contract(
+            from_state=task.status,
+            to_state=command.to_state,
+            reason_code=command.reason_code,
+            actor_type=command.actor_type,
+        )
 
         sequence = events[-1].sequence + 1 if events else 1
         previous_event_hash = (
@@ -485,6 +587,24 @@ class ExecutionTaskTransitionService:
                 raise ExecutionTaskTransitionIntegrityError(
                     "lifecycle event contains an unknown reason code"
                 )
+            try:
+                _validate_transition_reason_contract(
+                    from_state=event.from_state,
+                    to_state=event.to_state,
+                    reason_code=event.reason_code,
+                    actor_type=event.actor_type,
+                )
+            except ExecutionTaskTransitionError as exc:
+                # Existing Phase 29C-1 test-scoped structural histories are
+                # valid compatibility fixtures; all amended production edges
+                # still require their bounded authority reason.
+                legacy_structural_terminal = (
+                    event.actor_type == "test"
+                    and event.from_state == "running"
+                    and event.to_state in {"succeeded", "failed"}
+                )
+                if not legacy_structural_terminal:
+                    raise ExecutionTaskTransitionIntegrityError(exc.message) from exc
             command = ExecutionTaskTransitionCommand(
                 execution_task_id=task.id,
                 execution_plan_id=task.execution_plan_id,

@@ -81,10 +81,20 @@ def _command(
     reason_detail: str | None = "focused test",
     plan_id: int | None = None,
 ) -> ExecutionTaskTransitionCommand:
+    source_state = expected_from_state or task.status
+    if reason_code == "system_reconciliation":
+        reason_code = {
+            ("running", "awaiting_validation"): "runtime_candidate_completed",
+            ("running", "awaiting_recovery"): "runtime_attempt_failed",
+            ("awaiting_validation", "succeeded"): "validation_accepted",
+            ("awaiting_validation", "awaiting_recovery"): "validation_rejected",
+            ("awaiting_recovery", "ready"): "recovery_retry_authorized",
+            ("awaiting_recovery", "failed"): "recovery_exhausted",
+        }.get((source_state, to_state), reason_code)
     return ExecutionTaskTransitionCommand(
         execution_task_id=task.id,
         execution_plan_id=plan_id,
-        expected_from_state=(expected_from_state or task.status),
+        expected_from_state=source_state,
         expected_state_version=(
             task.state_version if expected_version is None else expected_version
         ),
@@ -101,6 +111,8 @@ _PATHS_TO_STATE = {
     "pending": (),
     "ready": ("ready",),
     "running": ("ready", "running"),
+    "awaiting_validation": ("ready", "running", "awaiting_validation"),
+    "awaiting_recovery": ("ready", "running", "awaiting_recovery"),
     "succeeded": ("ready", "running", "succeeded"),
     "failed": ("ready", "running", "failed"),
     "blocked": ("blocked",),

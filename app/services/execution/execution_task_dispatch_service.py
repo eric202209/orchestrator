@@ -847,6 +847,13 @@ class ExecutionTaskDispatchService:
                 issues.append("worker_command_binding_mismatch")
         if intent.dispatch_status not in DISPATCH_STATUSES:
             issues.append("invalid_dispatch_status")
+        if (
+            task is not None
+            and task.status in {"awaiting_validation", "awaiting_recovery"}
+            and intent.dispatch_status
+            in {DISPATCH_STATUS_PENDING, DISPATCH_STATUS_SUBMITTING}
+        ):
+            issues.append("active_dispatch_for_non_ready_task")
         if intent.dispatch_status == DISPATCH_STATUS_SUBMITTED:
             if (
                 intent.submitted_at is None
