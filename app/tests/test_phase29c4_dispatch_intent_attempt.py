@@ -562,7 +562,7 @@ def test_migration_replays_and_has_new_fields_without_fabricating_rows(tmp_path)
         with engine.begin() as connection:
             connection.execute(text("DROP TABLE execution_task_attempts"))
             connection.execute(text("DROP TABLE execution_task_dispatch_intents"))
-        run_schema_migrations(engine, MIGRATIONS[:-1])
+        run_schema_migrations(engine, MIGRATIONS[:-2])
         run_schema_migrations(engine)
         run_schema_migrations(engine)
         intent_columns = {
@@ -642,7 +642,7 @@ def test_migration_adds_claim_consumption_columns_to_phase29c3_schema(tmp_path):
                     "DROP COLUMN consumed_at"
                 )
             )
-        run_schema_migrations(engine, MIGRATIONS[:-1])
+        run_schema_migrations(engine, MIGRATIONS[:-2])
         before = {
             column["name"]
             for column in inspect(engine).get_columns("execution_task_scheduler_claims")

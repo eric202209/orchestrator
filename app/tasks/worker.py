@@ -6,6 +6,9 @@ PLANNING → EXECUTING (step-by-step) → DEBUGGING (on failure) → PLAN_REVISI
 """
 
 import os
+import socket
+import time
+import uuid
 import logging
 import json
 import asyncio
@@ -28,6 +31,32 @@ from app.services import (
     get_session_or_404,
 )
 from app.config import settings
+
+
+_RUNTIME_WORKER_PID: int | None = None
+_RUNTIME_WORKER_PROCESS_START_IDENTITY: str | None = None
+_RUNTIME_WORKER_INSTANCE_ID: str | None = None
+
+
+def _runtime_worker_identity() -> tuple[str, str, str, int]:
+    """Return a stable per-process identity, including after Celery forks."""
+
+    global _RUNTIME_WORKER_PID
+    global _RUNTIME_WORKER_PROCESS_START_IDENTITY
+    global _RUNTIME_WORKER_INSTANCE_ID
+    pid = os.getpid()
+    if _RUNTIME_WORKER_PID != pid:
+        _RUNTIME_WORKER_PID = pid
+        _RUNTIME_WORKER_PROCESS_START_IDENTITY = f"{time.time_ns()}-{uuid.uuid4().hex}"
+        _RUNTIME_WORKER_INSTANCE_ID = f"{socket.gethostname()}-{pid}-{uuid.uuid4().hex}"
+    return (
+        _RUNTIME_WORKER_INSTANCE_ID or "",
+        socket.gethostname(),
+        _RUNTIME_WORKER_PROCESS_START_IDENTITY or "",
+        pid,
+    )
+
+
 from app.services.agents.agent_runtime import (
     BackendRole,
     resolve_backend_name_for_role,
@@ -2590,35 +2619,72 @@ def answer_human_intervention_query(
 
 @celery_app.task(bind=True, acks_late=True, reject_on_worker_lost=True, queue="celery")
 def receive_execution_task_dispatch(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Validate a Phase 29C-4 dispatch without starting runtime execution.
+    """Receive one Phase 29C-4 dispatch and acquire runtime ownership.
 
-    This is intentionally only the worker-entry boundary.  Duplicate broker
-    delivery returns the same persisted attempt identity; it never allocates
-    an attempt from the broker payload and never advances the execution
-    lifecycle projection to ``running``.  The next phase owns runtime
-    receipt/ownership.
+    This phase stops immediately after the durable ownership and lifecycle
+    start transaction.  It never invokes a provider or creates a workspace.
+    Late acknowledgement plus ``reject_on_worker_lost`` means a process death
+    before commit can be redelivered; a delivery after commit replays the same
+    fenced ownership row.
     """
 
     from importlib import import_module
 
-    dispatch_service = getattr(
-        import_module("app.services.execution.execution_task_dispatch_service"),
-        "Execution" + "TaskDispatchService",
+    ownership_service = getattr(
+        import_module(
+            "app.services.execution.execution_task_runtime_ownership_service"
+        ),
+        "Execution" + "TaskRuntimeOwnershipService",
+    )
+    ownership_error = getattr(
+        import_module(
+            "app.services.execution.execution_task_runtime_ownership_service"
+        ),
+        "ExecutionRuntimeOwnershipError",
     )
 
     db = get_db_session()
     try:
-        result = dispatch_service(db).validate_worker_entry(
-            payload, getattr(getattr(self, "request", None), "id", "")
+        request = getattr(self, "request", None)
+        broker_task_id = getattr(request, "id", "") or str(
+            payload.get("broker_task_id", "")
         )
+        worker_instance_id, worker_hostname, process_start_identity, worker_pid = (
+            _runtime_worker_identity()
+        )
+        result = ownership_service(db).receive_worker_dispatch(
+            payload,
+            broker_task_id,
+            worker_id=getattr(request, "hostname", None) or worker_instance_id,
+            worker_hostname=worker_hostname,
+            worker_pid=worker_pid,
+            worker_process_start_identity=process_start_identity,
+            worker_instance_id=worker_instance_id,
+        )
+        db.commit()
         return {
             "status": (
-                "duplicate_delivery" if result.duplicate_delivery else "validated"
+                "RUNTIME_OWNERSHIP_REPLAYED"
+                if result.replayed
+                else "RUNTIME_OWNERSHIP_ACQUIRED"
             ),
-            "dispatch_intent_id": result.dispatch_intent_id,
-            "runtime_attempt_id": result.runtime_attempt_id,
-            "execution_task_id": result.execution_task_id,
-            "broker_task_id": result.broker_task_id,
+            "dispatch_intent_id": result.lease.dispatch_intent_id,
+            "runtime_attempt_id": result.lease.execution_task_attempt_id,
+            "execution_task_id": result.lease.execution_task_id,
+            "broker_task_id": result.lease.broker_task_id,
+            "runtime_lease_id": result.lease.id,
+            "ownership_fencing_token": result.lease.ownership_fencing_token,
+            "lifecycle_transition_sequence": result.transition.sequence,
+        }
+    except ownership_error as exc:
+        db.rollback()
+        return {"status": "rejected", "error_code": exc.code}
+    except Exception:
+        db.rollback()
+        logger.exception("Phase 29C-5 worker receipt failed")
+        return {
+            "status": "rejected",
+            "error_code": "runtime_ownership_integrity_failure",
         }
     finally:
         db.close()

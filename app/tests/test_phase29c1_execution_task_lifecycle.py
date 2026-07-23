@@ -712,7 +712,7 @@ def test_migration_adds_lifecycle_column_and_table_to_phase29b_schema(tmp_path):
             connection.execute(
                 text("ALTER TABLE execution_tasks DROP COLUMN state_version")
             )
-            run_schema_migrations(engine, MIGRATIONS[:-3])
+            run_schema_migrations(engine, MIGRATIONS[:-4])
         with engine.begin() as connection:
             connection.execute(
                 text(
@@ -751,7 +751,7 @@ def test_migration_refuses_existing_non_pending_task(tmp_path):
             connection.execute(
                 text("ALTER TABLE execution_tasks DROP COLUMN state_version")
             )
-            run_schema_migrations(engine, MIGRATIONS[:-3])
+            run_schema_migrations(engine, MIGRATIONS[:-4])
         with engine.begin() as connection:
             connection.execute(
                 text(
@@ -807,6 +807,9 @@ def test_fresh_create_all_schema_matches_lifecycle_migration_shape():
             "canonical_payload_hash",
             "previous_event_hash",
             "event_hash",
+            "runtime_attempt_id",
+            "runtime_lease_id",
+            "runtime_ownership_fence",
             "created_at",
         }
     finally:

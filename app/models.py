@@ -729,6 +729,11 @@ class ExecutionPlan(Base):
         back_populates="execution_plan",
         cascade="all, delete-orphan",
     )
+    runtime_leases = relationship(
+        "ExecutionTaskRuntimeLease",
+        back_populates="execution_plan",
+        cascade="all, delete-orphan",
+    )
 
 
 class ExecutionTask(Base):
@@ -786,6 +791,11 @@ class ExecutionTask(Base):
     )
     runtime_attempts = relationship(
         "ExecutionTaskAttempt",
+        back_populates="execution_task",
+        cascade="all, delete-orphan",
+    )
+    runtime_leases = relationship(
+        "ExecutionTaskRuntimeLease",
         back_populates="execution_task",
         cascade="all, delete-orphan",
     )
@@ -1064,6 +1074,7 @@ class ExecutionTaskAttempt(Base):
     attempt_status = Column(String(24), nullable=False, default="created", index=True)
     created_at = Column(DateTime(timezone=True), nullable=False)
     submitted_at = Column(DateTime(timezone=True), nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
     cancelled_at = Column(DateTime(timezone=True), nullable=True)
     updated_at = Column(DateTime(timezone=True), nullable=True)
 
@@ -1078,7 +1089,8 @@ class ExecutionTaskAttempt(Base):
             name="ck_execution_task_attempt_number_positive",
         ),
         CheckConstraint(
-            "attempt_status IN ('created', 'submitted', 'cancelled')",
+            "attempt_status IN ('created', 'submitted', 'running', 'cancelled', "
+            "'failed', 'succeeded')",
             name="ck_execution_task_attempt_status",
         ),
         Index(
@@ -1095,6 +1107,122 @@ class ExecutionTaskAttempt(Base):
         back_populates="runtime_attempt",
         foreign_keys=[dispatch_intent_id],
     )
+    runtime_leases = relationship(
+        "ExecutionTaskRuntimeLease",
+        back_populates="execution_task_attempt",
+        cascade="all, delete-orphan",
+    )
+
+
+class ExecutionTaskRuntimeLease(Base):
+    """Durable, fenced runtime ownership for one canonical attempt.
+
+    A lease is worker ownership, not broker delivery.  Historical rows are
+    retained so a later recovery phase can inspect every owner without
+    overwriting an earlier worker's evidence.
+    """
+
+    __tablename__ = "execution_task_runtime_leases"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    dispatch_intent_id = Column(
+        Integer,
+        ForeignKey("execution_task_dispatch_intents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    broker_task_id = Column(String(255), nullable=False, index=True)
+    worker_id = Column(String(255), nullable=False)
+    worker_hostname = Column(String(255), nullable=False)
+    worker_pid = Column(Integer, nullable=False)
+    worker_process_start_identity = Column(String(255), nullable=False)
+    worker_instance_id = Column(String(255), nullable=False, index=True)
+    ownership_fencing_token = Column(Integer, nullable=False)
+    lease_status = Column(String(16), nullable=False, default="active", index=True)
+    lease_duration_seconds = Column(Integer, nullable=False)
+    acquired_at = Column(DateTime(timezone=True), nullable=False)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    last_heartbeat_at = Column(DateTime(timezone=True), nullable=False)
+    released_at = Column(DateTime(timezone=True), nullable=True)
+    release_reason = Column(String(64), nullable=True)
+    ownership_idempotency_key = Column(String(128), nullable=False, unique=True)
+    canonical_ownership_command_payload = Column(JSON, nullable=False)
+    canonical_ownership_command_hash = Column(String(64), nullable=False)
+    lifecycle_transition_id = Column(Integer, nullable=True, index=True)
+    lifecycle_transition_sequence = Column(Integer, nullable=True)
+    lifecycle_resulting_state_version = Column(Integer, nullable=True)
+    runtime_started_at = Column(DateTime(timezone=True), nullable=False)
+    runtime_start_evidence = Column(JSON, nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    __table_args__ = (
+        CheckConstraint(
+            "lease_status IN ('active', 'released', 'expired', 'completed', 'revoked')",
+            name="ck_execution_task_runtime_lease_status",
+        ),
+        CheckConstraint(
+            "ownership_fencing_token > 0",
+            name="ck_execution_task_runtime_lease_fence_positive",
+        ),
+        CheckConstraint(
+            "lease_duration_seconds >= 10 AND lease_duration_seconds <= 300",
+            name="ck_execution_task_runtime_lease_duration_bounds",
+        ),
+        CheckConstraint(
+            "worker_pid > 0",
+            name="ck_execution_task_runtime_lease_worker_pid_positive",
+        ),
+        CheckConstraint(
+            "lease_expires_at > acquired_at",
+            name="ck_execution_task_runtime_lease_expiry_after_acquire",
+        ),
+        Index(
+            "uq_execution_task_runtime_lease_active",
+            "execution_task_attempt_id",
+            unique=True,
+            sqlite_where=text("lease_status = 'active'"),
+            postgresql_where=text("lease_status = 'active'"),
+        ),
+        Index(
+            "ix_execution_task_runtime_leases_attempt_status_expiry",
+            "execution_task_attempt_id",
+            "lease_status",
+            "lease_expires_at",
+        ),
+        Index(
+            "ix_execution_task_runtime_leases_plan_status",
+            "execution_plan_id",
+            "lease_status",
+        ),
+    )
+
+    execution_plan = relationship("ExecutionPlan", back_populates="runtime_leases")
+    execution_task = relationship("ExecutionTask", back_populates="runtime_leases")
+    execution_task_attempt = relationship(
+        "ExecutionTaskAttempt", back_populates="runtime_leases"
+    )
+    dispatch_intent = relationship("ExecutionTaskDispatchIntent")
 
 
 class ExecutionTaskTransition(Base):
@@ -1130,6 +1258,9 @@ class ExecutionTaskTransition(Base):
     canonical_payload_hash = Column(String(64), nullable=False)
     previous_event_hash = Column(String(64), nullable=True)
     event_hash = Column(String(64), nullable=False, index=True)
+    runtime_attempt_id = Column(Integer, nullable=True, index=True)
+    runtime_lease_id = Column(Integer, nullable=True, index=True)
+    runtime_ownership_fence = Column(Integer, nullable=True)
     created_at = Column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

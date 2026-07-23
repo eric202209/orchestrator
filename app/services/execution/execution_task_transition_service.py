@@ -111,6 +111,9 @@ class ExecutionTaskTransitionCommand:
     reason_detail: str | None = None
     execution_plan_id: int | None = None
     guarded_task_fences: tuple["ExecutionTaskLifecycleFence", ...] = ()
+    runtime_attempt_id: int | None = None
+    runtime_lease_id: int | None = None
+    runtime_ownership_fence: int | None = None
 
 
 @dataclass(frozen=True)
@@ -185,7 +188,7 @@ def _timestamp(value: datetime) -> str:
 
 
 def _command_payload(command: ExecutionTaskTransitionCommand) -> dict[str, object]:
-    return {
+    payload = {
         "schema_version": EXECUTION_TASK_STATE_SCHEMA_VERSION,
         "execution_plan_id": command.execution_plan_id,
         "execution_task_id": command.execution_task_id,
@@ -207,10 +210,17 @@ def _command_payload(command: ExecutionTaskTransitionCommand) -> dict[str, objec
             for fence in command.guarded_task_fences
         ],
     }
+    if command.runtime_attempt_id is not None:
+        payload["runtime_attempt_id"] = command.runtime_attempt_id
+    if command.runtime_lease_id is not None:
+        payload["runtime_lease_id"] = command.runtime_lease_id
+    if command.runtime_ownership_fence is not None:
+        payload["runtime_ownership_fence"] = command.runtime_ownership_fence
+    return payload
 
 
 def _event_payload(event: ExecutionTaskTransition) -> dict[str, object]:
-    return {
+    payload = {
         "schema_version": EXECUTION_TASK_STATE_SCHEMA_VERSION,
         "execution_plan_id": event.execution_plan_id,
         "execution_task_id": event.execution_task_id,
@@ -229,13 +239,21 @@ def _event_payload(event: ExecutionTaskTransition) -> dict[str, object]:
         "previous_event_hash": event.previous_event_hash,
         "created_at": _timestamp(event.created_at),
     }
+    if event.runtime_attempt_id is not None:
+        payload["runtime_attempt_id"] = event.runtime_attempt_id
+    if event.runtime_lease_id is not None:
+        payload["runtime_lease_id"] = event.runtime_lease_id
+    if event.runtime_ownership_fence is not None:
+        payload["runtime_ownership_fence"] = event.runtime_ownership_fence
+    return payload
 
 
 class ExecutionTaskTransitionService:
     """Validate and persist all lifecycle changes for an Execution Task."""
 
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, *, now=None):
         self.db = db
+        self._now = now or (lambda: datetime.now(timezone.utc))
 
     def transition(
         self,
@@ -327,7 +345,7 @@ class ExecutionTaskTransitionService:
         )
         resulting_version = command.expected_state_version + 1
         command_hash = canonical_json_hash(_command_payload(command))
-        created_at = datetime.now(timezone.utc)
+        created_at = self._now()
         event = ExecutionTaskTransition(
             execution_plan_id=plan.id,
             execution_task_id=task.id,
@@ -346,6 +364,9 @@ class ExecutionTaskTransitionService:
             previous_event_hash=previous_event_hash,
             event_hash="",
             canonical_payload_hash="",
+            runtime_attempt_id=command.runtime_attempt_id,
+            runtime_lease_id=command.runtime_lease_id,
+            runtime_ownership_fence=command.runtime_ownership_fence,
             created_at=created_at,
         )
         payload_hash = canonical_json_hash(_event_payload(event))
@@ -475,6 +496,9 @@ class ExecutionTaskTransitionService:
                 actor_type=event.actor_type,
                 actor_id=event.actor_id,
                 idempotency_key=event.command_id,
+                runtime_attempt_id=event.runtime_attempt_id,
+                runtime_lease_id=event.runtime_lease_id,
+                runtime_ownership_fence=event.runtime_ownership_fence,
             )
             if event.canonical_command_hash != canonical_json_hash(
                 _command_payload(command)
@@ -711,6 +735,34 @@ class ExecutionTaskTransitionService:
                 "invalid_command", "guarded task fences contain duplicates"
             )
         fences.sort(key=lambda item: item.execution_task_id)
+        try:
+            runtime_attempt_id = (
+                int(command.runtime_attempt_id)
+                if command.runtime_attempt_id is not None
+                else None
+            )
+            runtime_lease_id = (
+                int(command.runtime_lease_id)
+                if command.runtime_lease_id is not None
+                else None
+            )
+            runtime_ownership_fence = (
+                int(command.runtime_ownership_fence)
+                if command.runtime_ownership_fence is not None
+                else None
+            )
+        except (TypeError, ValueError) as exc:
+            raise ExecutionTaskTransitionError(
+                "invalid_command", "runtime ownership references are invalid"
+            ) from exc
+        if (
+            (runtime_attempt_id is not None and runtime_attempt_id < 1)
+            or (runtime_lease_id is not None and runtime_lease_id < 1)
+            or (runtime_ownership_fence is not None and runtime_ownership_fence < 1)
+        ):
+            raise ExecutionTaskTransitionError(
+                "invalid_command", "runtime ownership references are invalid"
+            )
         return ExecutionTaskTransitionCommand(
             execution_task_id=task_id,
             execution_plan_id=plan_id,
@@ -723,4 +775,7 @@ class ExecutionTaskTransitionService:
             actor_id=actor_id,
             idempotency_key=idempotency_key,
             guarded_task_fences=tuple(fences),
+            runtime_attempt_id=runtime_attempt_id,
+            runtime_lease_id=runtime_lease_id,
+            runtime_ownership_fence=runtime_ownership_fence,
         )

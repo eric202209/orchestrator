@@ -1844,6 +1844,194 @@ def _migration_035_execution_task_dispatch_intent_attempt(engine: Engine) -> Non
             connection.execute(text(statement))
 
 
+def _migration_036_execution_task_runtime_ownership(engine: Engine) -> None:
+    """Add Phase 29C-5 fenced runtime ownership and running evidence."""
+
+    table_names = _table_names(engine)
+    with engine.begin() as connection:
+        if "execution_task_transitions" in table_names:
+            for column_name, ddl in (
+                (
+                    "runtime_attempt_id",
+                    "ALTER TABLE execution_task_transitions "
+                    "ADD COLUMN runtime_attempt_id INTEGER",
+                ),
+                (
+                    "runtime_lease_id",
+                    "ALTER TABLE execution_task_transitions "
+                    "ADD COLUMN runtime_lease_id INTEGER",
+                ),
+                (
+                    "runtime_ownership_fence",
+                    "ALTER TABLE execution_task_transitions "
+                    "ADD COLUMN runtime_ownership_fence INTEGER",
+                ),
+            ):
+                if not _has_column(engine, "execution_task_transitions", column_name):
+                    connection.execute(text(ddl))
+
+        if "execution_task_attempts" in table_names and not _has_column(
+            engine, "execution_task_attempts", "started_at"
+        ):
+            # SQLite cannot alter a CHECK constraint in place.  Rebuild this
+            # additive Phase 29C-4 table while preserving every existing row.
+            connection.execute(
+                text(
+                    "ALTER TABLE execution_task_attempts "
+                    "RENAME TO execution_task_attempts_phase29c4_old"
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE execution_task_attempts (
+                        id INTEGER PRIMARY KEY,
+                        execution_plan_id INTEGER NOT NULL,
+                        execution_task_id INTEGER NOT NULL,
+                        dispatch_intent_id INTEGER NOT NULL,
+                        attempt_number INTEGER NOT NULL,
+                        attempt_identity VARCHAR(128) NOT NULL,
+                        broker_task_id VARCHAR(255) NOT NULL,
+                        attempt_status VARCHAR(24) NOT NULL DEFAULT 'created',
+                        created_at DATETIME NOT NULL,
+                        submitted_at DATETIME,
+                        started_at DATETIME,
+                        cancelled_at DATETIME,
+                        updated_at DATETIME,
+                        CONSTRAINT uq_execution_task_attempt_dispatch_intent
+                            UNIQUE (dispatch_intent_id),
+                        CONSTRAINT uq_execution_task_attempt_identity
+                            UNIQUE (attempt_identity),
+                        CONSTRAINT uq_execution_task_attempt_broker
+                            UNIQUE (broker_task_id),
+                        CONSTRAINT uq_execution_task_attempt_task_number
+                            UNIQUE (execution_task_id, attempt_number),
+                        CONSTRAINT ck_execution_task_attempt_number_positive
+                            CHECK (attempt_number > 0),
+                        CONSTRAINT ck_execution_task_attempt_status
+                            CHECK (attempt_status IN (
+                                'created', 'submitted', 'running', 'cancelled',
+                                'failed', 'succeeded'
+                            )),
+                        FOREIGN KEY(execution_plan_id)
+                            REFERENCES execution_plans (id) ON DELETE CASCADE,
+                        FOREIGN KEY(execution_task_id)
+                            REFERENCES execution_tasks (id) ON DELETE CASCADE,
+                        FOREIGN KEY(dispatch_intent_id)
+                            REFERENCES execution_task_dispatch_intents (id)
+                            ON DELETE CASCADE
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO execution_task_attempts (
+                        id, execution_plan_id, execution_task_id,
+                        dispatch_intent_id, attempt_number, attempt_identity,
+                        broker_task_id, attempt_status, created_at, submitted_at,
+                        started_at, cancelled_at, updated_at
+                    )
+                    SELECT id, execution_plan_id, execution_task_id,
+                        dispatch_intent_id, attempt_number, attempt_identity,
+                        broker_task_id, attempt_status, created_at, submitted_at,
+                        NULL, cancelled_at, updated_at
+                    FROM execution_task_attempts_phase29c4_old
+                    """
+                )
+            )
+            connection.execute(text("DROP TABLE execution_task_attempts_phase29c4_old"))
+
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_runtime_leases (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    execution_task_attempt_id INTEGER NOT NULL,
+                    dispatch_intent_id INTEGER NOT NULL,
+                    broker_task_id VARCHAR(255) NOT NULL,
+                    worker_id VARCHAR(255) NOT NULL,
+                    worker_hostname VARCHAR(255) NOT NULL,
+                    worker_pid INTEGER NOT NULL,
+                    worker_process_start_identity VARCHAR(255) NOT NULL,
+                    worker_instance_id VARCHAR(255) NOT NULL,
+                    ownership_fencing_token INTEGER NOT NULL,
+                    lease_status VARCHAR(16) NOT NULL DEFAULT 'active',
+                    lease_duration_seconds INTEGER NOT NULL,
+                    acquired_at DATETIME NOT NULL,
+                    lease_expires_at DATETIME NOT NULL,
+                    last_heartbeat_at DATETIME NOT NULL,
+                    released_at DATETIME,
+                    release_reason VARCHAR(64),
+                    ownership_idempotency_key VARCHAR(128) NOT NULL,
+                    canonical_ownership_command_payload JSON NOT NULL,
+                    canonical_ownership_command_hash VARCHAR(64) NOT NULL,
+                    lifecycle_transition_id INTEGER,
+                    lifecycle_transition_sequence INTEGER,
+                    lifecycle_resulting_state_version INTEGER,
+                    runtime_started_at DATETIME NOT NULL,
+                    runtime_start_evidence JSON NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME,
+                    CONSTRAINT uq_execution_task_runtime_lease_idempotency
+                        UNIQUE (ownership_idempotency_key),
+                    CONSTRAINT ck_execution_task_runtime_lease_status
+                        CHECK (lease_status IN (
+                            'active', 'released', 'expired', 'completed', 'revoked'
+                        )),
+                    CONSTRAINT ck_execution_task_runtime_lease_fence_positive
+                        CHECK (ownership_fencing_token > 0),
+                    CONSTRAINT ck_execution_task_runtime_lease_duration_bounds
+                        CHECK (lease_duration_seconds >= 10
+                            AND lease_duration_seconds <= 300),
+                    CONSTRAINT ck_execution_task_runtime_lease_worker_pid_positive
+                        CHECK (worker_pid > 0),
+                    CONSTRAINT ck_execution_task_runtime_lease_expiry_after_acquire
+                        CHECK (lease_expires_at > acquired_at),
+                    FOREIGN KEY(execution_plan_id)
+                        REFERENCES execution_plans (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_id)
+                        REFERENCES execution_tasks (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_attempt_id)
+                        REFERENCES execution_task_attempts (id) ON DELETE CASCADE,
+                    FOREIGN KEY(dispatch_intent_id)
+                        REFERENCES execution_task_dispatch_intents (id)
+                        ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        indexes = {
+            "uq_execution_task_runtime_lease_active": (
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "uq_execution_task_runtime_lease_active "
+                "ON execution_task_runtime_leases (execution_task_attempt_id) "
+                "WHERE lease_status = 'active'"
+            ),
+            "ix_execution_task_runtime_leases_attempt_status_expiry": (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_execution_task_runtime_leases_attempt_status_expiry "
+                "ON execution_task_runtime_leases "
+                "(execution_task_attempt_id, lease_status, lease_expires_at)"
+            ),
+            "ix_execution_task_runtime_leases_plan_status": (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_execution_task_runtime_leases_plan_status "
+                "ON execution_task_runtime_leases (execution_plan_id, lease_status)"
+            ),
+            "ix_execution_task_runtime_leases_worker_instance": (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_execution_task_runtime_leases_worker_instance "
+                "ON execution_task_runtime_leases (worker_instance_id)"
+            ),
+        }
+        for statement in indexes.values():
+            connection.execute(text(statement))
+
+
 def _migration_014_task_workflow_stage(engine: Engine) -> None:
     if "tasks" not in _table_names(engine):
         return
@@ -2301,6 +2489,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="035_execution_task_dispatch_intent_attempt",
         description="Add Phase 29C-4 dispatch intents and canonical runtime attempts",
         upgrade=_migration_035_execution_task_dispatch_intent_attempt,
+    ),
+    Migration(
+        version="036_execution_task_runtime_ownership",
+        description="Add Phase 29C-5 fenced runtime ownership and running evidence",
+        upgrade=_migration_036_execution_task_runtime_ownership,
     ),
 )
 
