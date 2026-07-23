@@ -17,6 +17,11 @@ from app.models import (
     ExecutionPlan,
     ExecutionTask,
     ExecutionTaskValidationSpecification,
+    ExecutionValidationSchema,
+)
+from app.services.execution.validation_schema import (
+    ExecutionValidationSchemaService,
+    ValidationSchemaError,
 )
 from app.services.planning.structured_task_plan import Task
 from app.services.planning.validation_contract import (
@@ -59,6 +64,9 @@ class ValidationContractInspection:
     evidence_descriptor_count: int
     review_requirement: str | None
     integrity_verified: bool
+    validation_schema_reference: str | None = None
+    validation_schema_hash: str | None = None
+    validation_schema_dialect: str | None = None
 
 
 def _task_from_snapshot(task: ExecutionTask) -> Task:
@@ -110,7 +118,20 @@ class ValidationContractService:
 
         for task in task_plan.tasks:
             try:
-                build_task_validation_contract(task)
+                projection = build_task_validation_contract(task)
+                if projection.structured_contract is not None:
+                    for predicate in projection.structured_contract.predicates:
+                        if predicate.predicate_id != "json_schema_matches":
+                            continue
+                        if not {
+                            "schema_reference",
+                            "schema_hash",
+                            "schema_dialect",
+                        }.issubset(predicate.parameters):
+                            raise ValidationContractError(
+                                "validation_schema_reference_missing",
+                                "JSON Schema predicate requires an immutable schema binding",
+                            )
             except ValidationContractError:
                 raise
             except (TypeError, ValueError) as exc:
@@ -141,6 +162,37 @@ class ValidationContractService:
             ) from exc
 
         structured_contract = projection.canonical_payload.get("structured_contract")
+        schema_row = None
+        schema_predicates = ()
+        if projection.structured_contract is not None:
+            schema_predicates = tuple(
+                item
+                for item in projection.structured_contract.predicates
+                if item.predicate_id == "json_schema_matches"
+            )
+            if schema_predicates:
+                parameters = schema_predicates[0].parameters
+                if not {
+                    "schema_reference",
+                    "schema_hash",
+                    "schema_dialect",
+                }.issubset(parameters):
+                    raise ExecutionValidationContractError(
+                        "validation_schema_reference_missing",
+                        "JSON Schema predicate has no immutable schema binding",
+                    )
+                try:
+                    schema_row = ExecutionValidationSchemaService(
+                        self.db
+                    ).resolve_reference(
+                        parameters["schema_reference"],
+                        expected_hash=parameters["schema_hash"],
+                        expected_dialect=parameters["schema_dialect"],
+                    )
+                except ValidationSchemaError as exc:
+                    raise ExecutionValidationContractError(
+                        exc.code, exc.message
+                    ) from exc
         source = (
             projection.structured_contract.specification_source
             if projection.structured_contract is not None
@@ -172,6 +224,22 @@ class ValidationContractService:
             validator_set_identity=(
                 structured_contract.get("environment", {}).get("validator_set_id")
                 if isinstance(structured_contract, Mapping)
+                else None
+            ),
+            validation_schema_id=schema_row.id if schema_row is not None else None,
+            validation_schema_reference=(
+                schema_predicates[0].parameters["schema_reference"]
+                if schema_row is not None
+                else None
+            ),
+            validation_schema_hash=(
+                schema_predicates[0].parameters["schema_hash"]
+                if schema_row is not None
+                else None
+            ),
+            validation_schema_dialect=(
+                schema_predicates[0].parameters["schema_dialect"]
+                if schema_row is not None
                 else None
             ),
             canonical_payload=projection.canonical_payload,
@@ -225,6 +293,82 @@ class ValidationContractService:
             issues.append("validation_contract_schema_unsupported")
         if specification.hash_algorithm != "sha256":
             issues.append("validation_contract_hash_mismatch")
+        structured_payload = (
+            specification.canonical_payload.get("structured_contract")
+            if isinstance(specification.canonical_payload, Mapping)
+            else None
+        )
+        schema_predicate = None
+        try:
+            if isinstance(structured_payload, Mapping):
+                schema_predicate = next(
+                    (
+                        item
+                        for item in StructuredValidationContract.from_mapping(
+                            structured_payload
+                        ).predicates
+                        if item.predicate_id == "json_schema_matches"
+                    ),
+                    None,
+                )
+        except (TypeError, ValidationContractError):
+            issues.append("validation_schema_predicate_mismatch")
+        schema_service = ExecutionValidationSchemaService(self.db)
+        if schema_predicate is not None:
+            parameters = schema_predicate.parameters
+            authority_keys = {
+                "schema_reference",
+                "schema_hash",
+                "schema_dialect",
+            }
+            if authority_keys.issubset(parameters):
+                schema = (
+                    self.db.get(
+                        ExecutionValidationSchema,
+                        specification.validation_schema_id,
+                    )
+                    if specification.validation_schema_id is not None
+                    else None
+                )
+                if schema is None:
+                    issues.append("validation_schema_missing")
+                else:
+                    if (
+                        specification.validation_schema_reference
+                        != parameters["schema_reference"]
+                        or specification.validation_schema_hash
+                        != parameters["schema_hash"]
+                        or specification.validation_schema_dialect
+                        != parameters["schema_dialect"]
+                        or schema.schema_id
+                        != parameters["schema_reference"].split(
+                            "validation-schema://", 1
+                        )[1]
+                        or schema.schema_sha256 != parameters["schema_hash"]
+                        or schema.dialect != parameters["schema_dialect"]
+                    ):
+                        issues.append("validation_schema_linkage_mismatch")
+                    issues.extend(schema_service.verify_integrity(schema.id).issues)
+            elif any(
+                value is not None
+                for value in (
+                    specification.validation_schema_id,
+                    specification.validation_schema_reference,
+                    specification.validation_schema_hash,
+                    specification.validation_schema_dialect,
+                )
+            ):
+                issues.append("validation_schema_linkage_mismatch")
+        elif any(
+            value is not None
+            for value in (
+                specification.validation_schema_id,
+                specification.validation_schema_reference,
+                specification.validation_schema_hash,
+                specification.validation_schema_dialect,
+            )
+        ):
+            issues.append("validation_schema_linkage_mismatch")
         try:
             projection = _projection_for_snapshot(task)
         except ValidationContractError:
@@ -379,6 +523,17 @@ class ValidationContractService:
             blocker = "validation_contract_unavailable"
         elif status == "unsupported":
             blocker = "validation_contract_unavailable"
+        elif isinstance(contract, Mapping) and any(
+            item.get("predicate_id") == "json_schema_matches"
+            and not {
+                "schema_reference",
+                "schema_hash",
+                "schema_dialect",
+            }.issubset(item.get("parameters", {}))
+            for item in contract.get("predicates", [])
+            if isinstance(item, Mapping)
+        ):
+            blocker = "validation_schema_unavailable"
         return ValidationContractInspection(
             execution_plan_id=plan.id,
             execution_task_id=task.id,
@@ -402,6 +557,9 @@ class ValidationContractService:
                 else None
             ),
             integrity_verified=integrity.verified,
+            validation_schema_reference=specification.validation_schema_reference,
+            validation_schema_hash=specification.validation_schema_hash,
+            validation_schema_dialect=specification.validation_schema_dialect,
         )
 
 

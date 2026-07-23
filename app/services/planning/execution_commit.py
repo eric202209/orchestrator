@@ -98,6 +98,12 @@ ERROR_CODES = frozenset(
         "validation_contract_release_conflict",
         "validation_contract_idempotency_conflict",
         "validation_contract_integrity_failure",
+        "validation_schema_reference_missing",
+        "validation_schema_missing",
+        "validation_schema_hash_mismatch",
+        "validation_schema_dialect_mismatch",
+        "validation_schema_dialect_unsupported",
+        "validation_schema_integrity_failure",
     }
 )
 

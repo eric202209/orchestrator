@@ -338,9 +338,14 @@ def test_store_collision_and_tamper_are_not_silent(tmp_path, monkeypatch):
         store.put(b"one")
     assert collision.value.code == "candidate_content_hash_collision"
 
+    # CI runs as a non-root user; temporarily make the fixture writable to
+    # model an on-disk tamper, then restore the store's immutable mode.
+    path.chmod(0o644)
     path.write_bytes(b"one")
     path.chmod(0o444)
+    path.chmod(0o644)
     path.write_bytes(b"tampered")
+    path.chmod(0o444)
     with pytest.raises(CandidateContentError) as tamper:
         store.read(key)
     assert tamper.value.code == "candidate_content_storage_tampered"

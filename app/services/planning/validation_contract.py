@@ -81,6 +81,8 @@ _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 _VERSION_RE = re.compile(r"^[a-z][a-z0-9_-]{1,63}(?:/[0-9]+)?$")
 _FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_SCHEMA_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SCHEMA_REFERENCE_RE = re.compile(r"^validation-schema://sha256:[0-9a-f]{64}$")
 _MEDIA_TYPE_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,63}/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,63}$"
 )
@@ -237,13 +239,52 @@ def _validate_predicate_parameters(
     }:
         _validate_exact_keys(canonical, set(), "predicate parameters")
     elif predicate_id == "json_schema_matches":
-        _validate_exact_keys(canonical, {"schema_evidence_key"}, "predicate parameters")
+        _validate_exact_keys(
+            canonical,
+            {
+                "schema_evidence_key",
+                "schema_reference",
+                "schema_hash",
+                "schema_dialect",
+            },
+            "predicate parameters",
+        )
         schema_key = canonical.get("schema_evidence_key")
-        if not isinstance(schema_key, str) or not _FIELD_RE.fullmatch(schema_key):
+        if schema_key is not None and not _FIELD_RE.fullmatch(schema_key):
             raise ValidationContractError(
                 "validation_contract_parameters_invalid",
                 "schema evidence key is invalid",
             )
+        authority_keys = {
+            "schema_reference",
+            "schema_hash",
+            "schema_dialect",
+        }
+        present_authority_keys = authority_keys.intersection(canonical)
+        if present_authority_keys and present_authority_keys != authority_keys:
+            raise ValidationContractError(
+                "validation_contract_parameters_invalid",
+                "schema authority binding must be complete",
+            )
+        if present_authority_keys:
+            if not _SCHEMA_REFERENCE_RE.fullmatch(canonical["schema_reference"]):
+                raise ValidationContractError(
+                    "validation_contract_parameters_invalid",
+                    "schema reference is invalid",
+                )
+            if not _SCHEMA_HASH_RE.fullmatch(canonical["schema_hash"]):
+                raise ValidationContractError(
+                    "validation_contract_parameters_invalid",
+                    "schema hash is invalid",
+                )
+            if (
+                not isinstance(canonical["schema_dialect"], str)
+                or len(canonical["schema_dialect"]) > 255
+            ):
+                raise ValidationContractError(
+                    "validation_contract_parameters_invalid",
+                    "schema dialect is invalid",
+                )
     elif predicate_id == "required_fields_present":
         _validate_exact_keys(canonical, {"fields"}, "predicate parameters")
         fields_value = canonical.get("fields")
@@ -834,6 +875,21 @@ class StructuredValidationContract:
                             "validation_evidence_descriptor_invalid",
                             "media-type predicate requires an expected media type",
                         )
+                if predicate.predicate_id == "json_schema_matches":
+                    if {
+                        "schema_reference",
+                        "schema_hash",
+                        "schema_dialect",
+                    }.issubset(predicate.parameters):
+                        if (
+                            descriptor.evidence_type != "candidate_content"
+                            or descriptor.source != "candidate_content"
+                            or descriptor.expected_media_type != "application/json"
+                        ):
+                            raise ValidationContractError(
+                                "validation_evidence_descriptor_invalid",
+                                "JSON Schema matching requires byte-backed JSON content",
+                            )
                 if predicate.predicate_id in {"artifact_hash_matches"}:
                     if descriptor.evidence_type != "immutable_artifact":
                         raise ValidationContractError(

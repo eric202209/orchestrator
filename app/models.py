@@ -908,6 +908,69 @@ class ExecutionTask(Base):
     )
 
 
+class ExecutionValidationSchema(Base):
+    """Immutable canonical JSON Schema authority.
+
+    ``schema_id`` and ``schema_sha256`` are both the content-derived
+    ``sha256:<64 lowercase hex>`` identity.  Logical names are descriptive
+    metadata only and never release authority.
+    """
+
+    __tablename__ = "execution_validation_schemas"
+
+    id = Column(Integer, primary_key=True, index=True)
+    schema_id = Column(String(71), nullable=False, unique=True, index=True)
+    schema_type = Column(String(32), nullable=False)
+    schema_version = Column(String(96), nullable=False)
+    dialect = Column(String(255), nullable=False)
+    canonical_schema_payload = Column(JSON, nullable=False)
+    schema_sha256 = Column(String(71), nullable=False, unique=True, index=True)
+    schema_size_bytes = Column(Integer, nullable=False)
+    schema_depth = Column(Integer, nullable=False)
+    schema_object_members = Column(Integer, nullable=False)
+    schema_array_length = Column(Integer, nullable=False)
+    schema_max_string_length = Column(Integer, nullable=False)
+    schema_reference_count = Column(Integer, nullable=False)
+    schema_regex_length = Column(Integer, nullable=False)
+    storage_backend_id = Column(String(64), nullable=False)
+    storage_backend_version = Column(String(32), nullable=False)
+    logical_name = Column(String(128), nullable=True)
+    logical_version = Column(String(64), nullable=True)
+    idempotency_key = Column(String(128), nullable=False, unique=True)
+    canonical_command_payload = Column(JSON, nullable=False)
+    canonical_command_hash = Column(String(64), nullable=False)
+    canonical_metadata_payload = Column(JSON, nullable=False)
+    canonical_metadata_hash = Column(String(64), nullable=False)
+    creation_actor_type = Column(String(64), nullable=False)
+    creation_actor_id = Column(String(255), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "schema_type = 'json_schema'",
+            name="ck_execution_validation_schema_type",
+        ),
+        CheckConstraint(
+            "schema_size_bytes >= 0 AND schema_depth >= 0 "
+            "AND schema_object_members >= 0 AND schema_array_length >= 0 "
+            "AND schema_max_string_length >= 0 AND schema_reference_count >= 0 "
+            "AND schema_regex_length >= 0",
+            name="ck_execution_validation_schema_bounds_nonnegative",
+        ),
+        Index(
+            "ix_execution_validation_schemas_dialect",
+            "dialect",
+        ),
+    )
+
+    validation_specifications = relationship(
+        "ExecutionTaskValidationSpecification",
+        back_populates="validation_schema",
+    )
+
+
 class ExecutionTaskValidationSpecification(Base):
     """Immutable validation authority bound to one released Execution Task.
 
@@ -941,6 +1004,15 @@ class ExecutionTaskValidationSpecification(Base):
     review_requirement = Column(JSON, nullable=True)
     environment_identity = Column(JSON, nullable=True)
     validator_set_identity = Column(String(128), nullable=True)
+    validation_schema_id = Column(
+        Integer,
+        ForeignKey("execution_validation_schemas.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    validation_schema_reference = Column(String(96), nullable=True)
+    validation_schema_hash = Column(String(71), nullable=True, index=True)
+    validation_schema_dialect = Column(String(255), nullable=True)
     canonical_payload = Column(JSON, nullable=False)
     canonical_specification_hash = Column(String(64), nullable=False, index=True)
     hash_algorithm = Column(String(16), nullable=False, default="sha256")
@@ -985,6 +1057,10 @@ class ExecutionTaskValidationSpecification(Base):
     execution_task = relationship(
         "ExecutionTask",
         foreign_keys=[execution_task_id],
+    )
+    validation_schema = relationship(
+        "ExecutionValidationSchema",
+        back_populates="validation_specifications",
     )
 
 

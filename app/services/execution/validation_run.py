@@ -79,6 +79,8 @@ BLOCKED_RESULT_CODES = frozenset(
         "validation_contract_unavailable",
         "immutable_candidate_bytes_unavailable",
         "review_authority_missing",
+        "candidate_evidence_validation_schema_missing",
+        "validation_schema_missing",
     }
 )
 
@@ -763,7 +765,8 @@ class ValidationRunService:
             and environment.validator_set_version == "1"
         ):
             return build_default_validator_registry(
-                configuration_hash=environment.configuration_hash
+                configuration_hash=environment.configuration_hash,
+                schema_db=self.db,
             )
         return DeterministicValidatorRegistry(
             validator_set_id=environment.validator_set_id,

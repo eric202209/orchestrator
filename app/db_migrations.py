@@ -3255,6 +3255,99 @@ def _migration_042_execution_task_candidate_content_boundary(engine: Engine) -> 
             connection.execute(text(statement))
 
 
+def _migration_043_execution_validation_schema_authority(engine: Engine) -> None:
+    """Add empty immutable schema authority and nullable release linkage.
+
+    This migration creates no schemas, changes no existing contract, and
+    performs no validation.  Nullable linkage preserves legacy and historical
+    schema-free validation specifications exactly.
+    """
+
+    table_names = _table_names(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_validation_schemas (
+                    id INTEGER PRIMARY KEY,
+                    schema_id VARCHAR(71) NOT NULL UNIQUE,
+                    schema_type VARCHAR(32) NOT NULL,
+                    schema_version VARCHAR(96) NOT NULL,
+                    dialect VARCHAR(255) NOT NULL,
+                    canonical_schema_payload JSON NOT NULL,
+                    schema_sha256 VARCHAR(71) NOT NULL UNIQUE,
+                    schema_size_bytes INTEGER NOT NULL,
+                    schema_depth INTEGER NOT NULL,
+                    schema_object_members INTEGER NOT NULL,
+                    schema_array_length INTEGER NOT NULL,
+                    schema_max_string_length INTEGER NOT NULL,
+                    schema_reference_count INTEGER NOT NULL,
+                    schema_regex_length INTEGER NOT NULL,
+                    storage_backend_id VARCHAR(64) NOT NULL,
+                    storage_backend_version VARCHAR(32) NOT NULL,
+                    logical_name VARCHAR(128),
+                    logical_version VARCHAR(64),
+                    idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+                    canonical_command_payload JSON NOT NULL,
+                    canonical_command_hash VARCHAR(64) NOT NULL,
+                    canonical_metadata_payload JSON NOT NULL,
+                    canonical_metadata_hash VARCHAR(64) NOT NULL,
+                    creation_actor_type VARCHAR(64) NOT NULL,
+                    creation_actor_id VARCHAR(255) NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT ck_execution_validation_schema_type
+                        CHECK (schema_type = 'json_schema'),
+                    CONSTRAINT ck_execution_validation_schema_bounds_nonnegative
+                        CHECK (
+                            schema_size_bytes >= 0 AND schema_depth >= 0
+                            AND schema_object_members >= 0
+                            AND schema_array_length >= 0
+                            AND schema_max_string_length >= 0
+                            AND schema_reference_count >= 0
+                            AND schema_regex_length >= 0
+                        )
+                )
+                """
+            )
+        )
+        if "execution_task_validation_specifications" in table_names:
+            for column_name, ddl in (
+                (
+                    "validation_schema_id",
+                    "ALTER TABLE execution_task_validation_specifications "
+                    "ADD COLUMN validation_schema_id INTEGER",
+                ),
+                (
+                    "validation_schema_reference",
+                    "ALTER TABLE execution_task_validation_specifications "
+                    "ADD COLUMN validation_schema_reference VARCHAR(96)",
+                ),
+                (
+                    "validation_schema_hash",
+                    "ALTER TABLE execution_task_validation_specifications "
+                    "ADD COLUMN validation_schema_hash VARCHAR(71)",
+                ),
+                (
+                    "validation_schema_dialect",
+                    "ALTER TABLE execution_task_validation_specifications "
+                    "ADD COLUMN validation_schema_dialect VARCHAR(255)",
+                ),
+            ):
+                if not _has_column(
+                    engine, "execution_task_validation_specifications", column_name
+                ):
+                    connection.execute(text(ddl))
+        for statement in (
+            "CREATE INDEX IF NOT EXISTS ix_execution_validation_schemas_dialect "
+            "ON execution_validation_schemas (dialect)",
+            "CREATE INDEX IF NOT EXISTS "
+            "ix_execution_task_validation_specifications_schema "
+            "ON execution_task_validation_specifications "
+            "(validation_schema_id, validation_schema_hash)",
+        ):
+            connection.execute(text(statement))
+
+
 def _migration_038_normalize(value):
     if isinstance(value, str):
         return unicodedata.normalize("NFC", value)
@@ -3760,6 +3853,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="042_execution_task_candidate_content_boundary",
         description="Add Phase 29C-9 immutable candidate content authority",
         upgrade=_migration_042_execution_task_candidate_content_boundary,
+    ),
+    Migration(
+        version="043_execution_validation_schema_authority",
+        description="Add Phase 29C-10 immutable JSON Schema authority and release linkage",
+        upgrade=_migration_043_execution_validation_schema_authority,
     ),
 )
 

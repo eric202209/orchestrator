@@ -40,7 +40,10 @@ from app.services.planning.validation_contract import (
     ValidationContractError,
     canonical_validation_hash,
 )
-from app.services.execution.validation_contract import ValidationContractService
+from app.services.execution.validation_contract import (
+    ExecutionValidationContractError,
+    ValidationContractService,
+)
 
 # Phase 29A's conservative dependency-type mapping (data only -- no
 # scheduler eligibility, no review-gate resolution).  ``review_gate`` is
@@ -275,16 +278,23 @@ class ExecutionPlanCommitService:
 
         validation_service = ValidationContractService(self.db)
         specifications = []
-        for task in task_plan.tasks:
-            execution_task = task_rows[task.id]
-            specification = validation_service.create_for_task(
-                execution_plan=execution_plan,
-                execution_task=execution_task,
-                authored_task=task,
-            )
-            execution_task.validation_contract_status = specification.contract_status
-            execution_task.validation_contract_id = specification.id
-            specifications.append(specification)
+        try:
+            for task in task_plan.tasks:
+                execution_task = task_rows[task.id]
+                specification = validation_service.create_for_task(
+                    execution_plan=execution_plan,
+                    execution_task=execution_task,
+                    authored_task=task,
+                )
+                execution_task.validation_contract_status = (
+                    specification.contract_status
+                )
+                execution_task.validation_contract_id = specification.id
+                specifications.append(specification)
+        except ExecutionValidationContractError as exc:
+            raise ExecutionPlanCommitError(
+                f"{exc.code}: validation contract cannot be released"
+            ) from exc
         execution_plan.validation_contract_set_hash = canonical_validation_hash(
             [
                 {

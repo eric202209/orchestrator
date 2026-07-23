@@ -19,6 +19,9 @@ from types import MappingProxyType
 from typing import Any, Callable, Protocol
 import unicodedata
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
+
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -55,6 +58,14 @@ from app.services.planning.validation_contract import (
     ValidationPredicate,
     VALIDATION_HASH_ALGORITHM,
     VALIDATION_RESOLVER_VERSION,
+)
+from app.services.execution.validation_schema import (
+    ExecutionValidationSchemaService,
+    MAX_SCHEMA_STRING_LENGTH,
+    SUPPORTED_SCHEMA_DIALECT,
+    VALIDATOR_IMPLEMENTATION_ID,
+    VALIDATOR_IMPLEMENTATION_VERSION as JSONSCHEMA_IMPLEMENTATION_VERSION,
+    ValidationSchemaError,
 )
 
 
@@ -385,6 +396,7 @@ class CandidateContentAuthority:
     storage_key: str
     content_projection: Mapping[str, Any] | list[Any] | None
     content_projection_hash: str | None
+    content_projection_version: str | None
 
 
 class ImmutableCandidateEvidenceSource(Protocol):
@@ -481,6 +493,7 @@ def _content_authority(row: ExecutionTaskCandidateContent) -> CandidateContentAu
             projection if isinstance(projection, (Mapping, list)) else None
         ),
         content_projection_hash=row.content_projection_hash,
+        content_projection_version=row.content_projection_version,
     )
 
 
@@ -667,6 +680,15 @@ class DeterministicValidatorRegistry:
         if predicate.predicate_id not in PREDICATE_VERSIONS:
             raise ValidatorRegistryError(
                 "validation_predicate_unsupported", "predicate is unsupported"
+            )
+        if predicate.predicate_id == "json_schema_matches" and not {
+            "schema_reference",
+            "schema_hash",
+            "schema_dialect",
+        }.issubset(predicate.parameters):
+            raise ValidatorRegistryError(
+                "validation_validator_not_registered",
+                "JSON Schema predicate has no immutable schema binding",
             )
         if (
             predicate.predicate_version
@@ -922,6 +944,222 @@ class _MediaTypeMatchesValidator:
         )
 
 
+def _json_pointer(path: Any) -> str:
+    values = list(path)
+    rendered: list[str] = []
+    for value in values:
+        if isinstance(value, int) and not isinstance(value, bool):
+            rendered.append(str(value))
+        else:
+            rendered.append(str(value).replace("~", "~0").replace("/", "~1"))
+    result = "/" + "/".join(rendered) if rendered else ""
+    if len(result) <= 512:
+        return result
+    return f"<path-sha256:{hashlib.sha256(result.encode('utf-8')).hexdigest()}>"
+
+
+def _schema_blocked(
+    code: str, *, evidence=None, parameters: Mapping[str, Any] | None = None
+) -> CandidatePredicateResult:
+    return _predicate_result(
+        "unsupported",
+        code,
+        diagnostics={
+            "classification": "blocked",
+            "schema_reference": (
+                parameters.get("schema_reference") if parameters else None
+            ),
+            "schema_hash": parameters.get("schema_hash") if parameters else None,
+            "schema_dialect": (
+                parameters.get("schema_dialect", SUPPORTED_SCHEMA_DIALECT)
+                if parameters
+                else SUPPORTED_SCHEMA_DIALECT
+            ),
+            "candidate_content_hash": evidence.actual_hash if evidence else None,
+        },
+    )
+
+
+class _JsonSchemaMatchesValidator:
+    validator_id = "json_schema_matches_draft202012"
+    validator_version = 1
+
+    def __init__(self, db: Session | None = None):
+        self.db = db
+
+    def validate(self, predicate, evidence, context):
+        parameters = predicate.parameters
+        gate = _evidence_gate(evidence)
+        if gate:
+            return _schema_blocked(
+                f"json_schema_blocked_{gate.result_code}",
+                evidence=evidence,
+                parameters=parameters,
+            )
+        required_binding = {
+            "schema_reference",
+            "schema_hash",
+            "schema_dialect",
+        }
+        if not required_binding.issubset(parameters):
+            return _schema_blocked(
+                "json_schema_schema_authority_missing",
+                evidence=evidence,
+                parameters=parameters,
+            )
+        if self.db is None:
+            return _schema_blocked(
+                "json_schema_schema_authority_unavailable",
+                evidence=evidence,
+                parameters=parameters,
+            )
+        if (
+            evidence.source != "candidate_content"
+            or evidence.evidence_type != "candidate_content"
+        ):
+            return _schema_blocked(
+                "json_schema_candidate_content_required",
+                evidence=evidence,
+                parameters=parameters,
+            )
+        if evidence.media_type != "application/json":
+            return _schema_blocked(
+                "json_schema_application_json_required",
+                evidence=evidence,
+                parameters=parameters,
+            )
+        if evidence.content_projection is None:
+            return _schema_blocked(
+                "json_schema_candidate_projection_unavailable",
+                evidence=evidence,
+                parameters=parameters,
+            )
+        if (
+            evidence.structured_metadata_summary.get("content_projection_version")
+            != "bounded-json/1"
+        ):
+            return _schema_blocked(
+                "json_schema_candidate_projection_unavailable",
+                evidence=evidence,
+                parameters=parameters,
+            )
+        projection_hash = evidence.structured_metadata_summary.get(
+            "content_projection_hash"
+        )
+        recomputed_projection_hash = canonical_json_hash(evidence.content_projection)
+        if (
+            not isinstance(projection_hash, str)
+            or projection_hash != recomputed_projection_hash
+        ):
+            return _predicate_result(
+                "validator_error",
+                "json_schema_candidate_projection_integrity_failure",
+                diagnostics={
+                    "classification": "validation_error",
+                    "schema_id": parameters["schema_reference"],
+                    "schema_hash": parameters["schema_hash"],
+                    "schema_dialect": parameters["schema_dialect"],
+                    "projection_hash": recomputed_projection_hash,
+                    "validator_implementation_id": VALIDATOR_IMPLEMENTATION_ID,
+                    "validator_implementation_version": JSONSCHEMA_IMPLEMENTATION_VERSION,
+                },
+            )
+        try:
+            schema = ExecutionValidationSchemaService(self.db).resolve_reference(
+                parameters["schema_reference"],
+                expected_hash=parameters["schema_hash"],
+                expected_dialect=parameters["schema_dialect"],
+            )
+        except ValidationSchemaError as exc:
+            if exc.code in {
+                "validation_schema_missing",
+                "validation_schema_hash_mismatch",
+                "validation_schema_dialect_mismatch",
+                "validation_schema_dialect_unsupported",
+            }:
+                return _schema_blocked(
+                    f"json_schema_blocked_{exc.code}",
+                    evidence=evidence,
+                    parameters=parameters,
+                )
+            return _predicate_result(
+                "validator_error",
+                "json_schema_schema_authority_integrity_failure",
+                diagnostics={
+                    "classification": "validation_error",
+                    "schema_reference": parameters["schema_reference"],
+                    "schema_hash": parameters["schema_hash"],
+                    "schema_dialect": parameters["schema_dialect"],
+                    "validator_implementation_id": VALIDATOR_IMPLEMENTATION_ID,
+                    "validator_implementation_version": JSONSCHEMA_IMPLEMENTATION_VERSION,
+                },
+            )
+        try:
+            validator = Draft202012Validator(schema.canonical_schema_payload)
+            violations: list[tuple[str, str]] = []
+            keywords: set[str] = set()
+            truncated = False
+            for error in validator.iter_errors(_plain(evidence.content_projection)):
+                if len(violations) >= 32:
+                    truncated = True
+                    break
+                path = _json_pointer(error.absolute_path)
+                keyword = str(error.validator)
+                if len(keyword) > MAX_SCHEMA_STRING_LENGTH:
+                    keyword = "<keyword-truncated>"
+                violations.append((path, keyword))
+                keywords.add(keyword)
+            violations = sorted(set(violations), key=lambda item: (item[0], item[1]))
+            normalized_paths = [item[0] for item in violations]
+            normalized_keywords = sorted(keywords)[:32]
+            shared = {
+                "schema_id": schema.schema_id,
+                "schema_hash": schema.schema_sha256,
+                "schema_dialect": schema.dialect,
+                "candidate_content_hash": evidence.actual_hash,
+                "projection_hash": recomputed_projection_hash,
+                "validator_implementation_id": VALIDATOR_IMPLEMENTATION_ID,
+                "validator_implementation_version": JSONSCHEMA_IMPLEMENTATION_VERSION,
+                "violation_count": len(violations),
+                "violations_truncated": truncated,
+                "violation_paths": normalized_paths,
+                "keyword_names": normalized_keywords,
+            }
+            if violations:
+                return _predicate_result(
+                    "failed", "json_schema_mismatch", diagnostics=shared
+                )
+            return _predicate_result(
+                "passed", "json_schema_matches", diagnostics=shared
+            )
+        except SchemaError:
+            return _predicate_result(
+                "validator_error",
+                "json_schema_validator_schema_error",
+                diagnostics={
+                    "classification": "validation_error",
+                    "schema_id": schema.schema_id,
+                    "schema_hash": schema.schema_sha256,
+                    "schema_dialect": schema.dialect,
+                    "validator_implementation_id": VALIDATOR_IMPLEMENTATION_ID,
+                    "validator_implementation_version": JSONSCHEMA_IMPLEMENTATION_VERSION,
+                },
+            )
+        except Exception:
+            return _predicate_result(
+                "validator_error",
+                "json_schema_validator_internal_failure",
+                diagnostics={
+                    "classification": "validation_error",
+                    "schema_id": schema.schema_id,
+                    "schema_hash": schema.schema_sha256,
+                    "schema_dialect": schema.dialect,
+                    "validator_implementation_id": VALIDATOR_IMPLEMENTATION_ID,
+                    "validator_implementation_version": JSONSCHEMA_IMPLEMENTATION_VERSION,
+                },
+            )
+
+
 def _field_value(value: Any, path: str) -> tuple[bool, Any]:
     current = value
     for segment in path.split("."):
@@ -960,7 +1198,7 @@ class _RequiredFieldsPresentValidator:
 
 
 def build_default_validator_registry(
-    *, configuration_hash: str | None = None
+    *, configuration_hash: str | None = None, schema_db: Session | None = None
 ) -> DeterministicValidatorRegistry:
     registry = DeterministicValidatorRegistry(configuration_hash=configuration_hash)
     registry.register(
@@ -1011,6 +1249,13 @@ def build_default_validator_registry(
         validator_id="media_type_matches",
         validator_version=1,
         validator=_MediaTypeMatchesValidator(),
+    )
+    registry.register(
+        predicate_id="json_schema_matches",
+        predicate_version=1,
+        validator_id="json_schema_matches_draft202012",
+        validator_version=1,
+        validator=_JsonSchemaMatchesValidator(schema_db),
     )
     registry.register(
         predicate_id="required_fields_present",
@@ -1290,6 +1535,14 @@ class CandidateEvidenceResolverService:
                     "content_store_backend_version": (
                         content.storage_backend_version if content is not None else None
                     ),
+                    "content_projection_hash": (
+                        content.content_projection_hash if content is not None else None
+                    ),
+                    "content_projection_version": (
+                        content.content_projection_version
+                        if content is not None
+                        else None
+                    ),
                     "expected_media_type": descriptor.expected_media_type,
                 },
                 field="structured metadata summary",
@@ -1465,6 +1718,11 @@ class CandidateEvidenceResolverService:
             self.db
         ).verify_validation_contract_integrity(specification.id)
         if not contract_integrity.verified:
+            if contract_integrity.issues == ("validation_schema_missing",):
+                raise CandidateEvidenceError(
+                    "candidate_evidence_validation_schema_missing",
+                    "immutable validation schema authority is missing",
+                )
             raise CandidateEvidenceError(
                 "candidate_evidence_integrity_failure",
                 "validation specification integrity failed",
@@ -1699,7 +1957,7 @@ class ValidationPrimitiveService:
         content_store: CandidateContentStore | None = None,
     ):
         self.db = db
-        self.registry = registry or build_default_validator_registry()
+        self.registry = registry or build_default_validator_registry(schema_db=db)
         self.content_store = content_store or LocalContentAddressedStore()
 
     def verify_resolved_validation_evidence_integrity(
@@ -1806,6 +2064,17 @@ class ValidationPrimitiveService:
                     self.db, content.id, store=self.content_store
                 )
                 issues.extend(content_integrity.issues)
+                if row.content_projection != content.content_projection:
+                    issues.append("resolved_evidence_candidate_projection_mismatch")
+                metadata = row.structured_metadata_summary
+                if isinstance(metadata, Mapping):
+                    if (
+                        metadata.get("content_projection_hash")
+                        != content.content_projection_hash
+                        or metadata.get("content_projection_version")
+                        != content.content_projection_version
+                    ):
+                        issues.append("resolved_evidence_candidate_projection_mismatch")
         else:
             issues.append("resolved_evidence_source_unsupported")
         try:
@@ -2011,6 +2280,22 @@ class ValidationPrimitiveService:
             issues.append("validation_predicate_result_status_invalid")
         if bool(row.passed) != (row.result_status == "passed"):
             issues.append("validation_predicate_result_passed_mismatch")
+        if row.predicate_id == "json_schema_matches" and (
+            row.result_status in {"passed", "failed"}
+            or (
+                isinstance(row.diagnostics, Mapping)
+                and "classification" in row.diagnostics
+            )
+        ):
+            if not isinstance(row.diagnostics, Mapping) or (
+                row.diagnostics.get("validator_implementation_id")
+                != VALIDATOR_IMPLEMENTATION_ID
+                or row.diagnostics.get("validator_implementation_version")
+                != JSONSCHEMA_IMPLEMENTATION_VERSION
+            ):
+                issues.append(
+                    "validation_predicate_result_validator_implementation_mismatch"
+                )
         try:
             diagnostics = _bounded_json_bytes(
                 row.diagnostics, field="diagnostics", limit=MAX_DIAGNOSTIC_BYTES
@@ -2495,7 +2780,7 @@ class DeterministicValidatorService:
         now: Callable[[], datetime] | None = None,
     ):
         self.db = db
-        self.registry = registry or build_default_validator_registry()
+        self.registry = registry or build_default_validator_registry(schema_db=db)
         self.content_store = content_store or LocalContentAddressedStore()
         self._now = now or (lambda: datetime.now(timezone.utc))
 
