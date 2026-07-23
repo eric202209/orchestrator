@@ -734,6 +734,16 @@ class ExecutionPlan(Base):
         back_populates="execution_plan",
         cascade="all, delete-orphan",
     )
+    runtime_starts = relationship(
+        "ExecutionTaskRuntimeStart",
+        back_populates="execution_plan",
+        cascade="all, delete-orphan",
+    )
+    runtime_outcomes = relationship(
+        "ExecutionTaskAttemptOutcome",
+        back_populates="execution_plan",
+        cascade="all, delete-orphan",
+    )
 
 
 class ExecutionTask(Base):
@@ -796,6 +806,16 @@ class ExecutionTask(Base):
     )
     runtime_leases = relationship(
         "ExecutionTaskRuntimeLease",
+        back_populates="execution_task",
+        cascade="all, delete-orphan",
+    )
+    runtime_starts = relationship(
+        "ExecutionTaskRuntimeStart",
+        back_populates="execution_task",
+        cascade="all, delete-orphan",
+    )
+    runtime_outcomes = relationship(
+        "ExecutionTaskAttemptOutcome",
         back_populates="execution_task",
         cascade="all, delete-orphan",
     )
@@ -1089,8 +1109,8 @@ class ExecutionTaskAttempt(Base):
             name="ck_execution_task_attempt_number_positive",
         ),
         CheckConstraint(
-            "attempt_status IN ('created', 'submitted', 'running', 'cancelled', "
-            "'failed', 'succeeded')",
+            "attempt_status IN ('created', 'submitted', 'running', "
+            "'candidate_completed', 'cancelled', 'failed', 'succeeded')",
             name="ck_execution_task_attempt_status",
         ),
         Index(
@@ -1110,6 +1130,18 @@ class ExecutionTaskAttempt(Base):
     runtime_leases = relationship(
         "ExecutionTaskRuntimeLease",
         back_populates="execution_task_attempt",
+        cascade="all, delete-orphan",
+    )
+    runtime_start = relationship(
+        "ExecutionTaskRuntimeStart",
+        back_populates="execution_task_attempt",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+    runtime_outcome = relationship(
+        "ExecutionTaskAttemptOutcome",
+        back_populates="execution_task_attempt",
+        uselist=False,
         cascade="all, delete-orphan",
     )
 
@@ -1171,6 +1203,14 @@ class ExecutionTaskRuntimeLease(Base):
     lifecycle_resulting_state_version = Column(Integer, nullable=True)
     runtime_started_at = Column(DateTime(timezone=True), nullable=False)
     runtime_start_evidence = Column(JSON, nullable=False)
+    progress_state = Column(String(32), nullable=True)
+    progress_sequence = Column(Integer, nullable=False, default=0)
+    closed_at = Column(DateTime(timezone=True), nullable=True)
+    closure_reason = Column(String(64), nullable=True)
+    closed_outcome_id = Column(Integer, nullable=True, index=True)
+    closed_worker_instance_id = Column(String(255), nullable=True)
+    closed_ownership_fencing_token = Column(Integer, nullable=True)
+    canonical_closure_hash = Column(String(64), nullable=True)
     created_at = Column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -1196,6 +1236,10 @@ class ExecutionTaskRuntimeLease(Base):
         CheckConstraint(
             "lease_expires_at > acquired_at",
             name="ck_execution_task_runtime_lease_expiry_after_acquire",
+        ),
+        CheckConstraint(
+            "progress_sequence >= 0",
+            name="ck_execution_task_runtime_lease_progress_sequence_nonnegative",
         ),
         Index(
             "uq_execution_task_runtime_lease_active",
@@ -1223,6 +1267,210 @@ class ExecutionTaskRuntimeLease(Base):
         "ExecutionTaskAttempt", back_populates="runtime_leases"
     )
     dispatch_intent = relationship("ExecutionTaskDispatchIntent")
+
+
+class ExecutionTaskRuntimeStart(Base):
+    """Durable handoff from fenced ownership to one runtime invocation.
+
+    This row is deliberately separate from the C5 ownership-acquisition
+    timestamp.  It records the canonical, idempotent start command that is
+    committed immediately before an injected runtime adapter is invoked.
+    """
+
+    __tablename__ = "execution_task_runtime_starts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    dispatch_intent_id = Column(
+        Integer,
+        ForeignKey("execution_task_dispatch_intents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    runtime_lease_id = Column(
+        Integer,
+        ForeignKey("execution_task_runtime_leases.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    broker_task_id = Column(String(255), nullable=False, index=True)
+    worker_instance_id = Column(String(255), nullable=False, index=True)
+    ownership_fencing_token = Column(Integer, nullable=False)
+    execution_start_idempotency_key = Column(String(128), nullable=False, unique=True)
+    deterministic_start_command_id = Column(String(128), nullable=False, unique=True)
+    canonical_start_command_payload = Column(JSON, nullable=False)
+    canonical_start_command_hash = Column(String(64), nullable=False)
+    runtime_adapter_name = Column(String(64), nullable=False)
+    adapter_version = Column(String(64), nullable=True)
+    execution_mode = Column(String(32), nullable=False)
+    configuration_hash = Column(String(64), nullable=False)
+    provider_request_id = Column(String(255), nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    lifecycle_state_at_start = Column(String(20), nullable=False)
+    lifecycle_state_version_at_start = Column(Integer, nullable=False)
+    creation_actor_type = Column(String(32), nullable=False)
+    creation_actor_id = Column(String(255), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "ownership_fencing_token > 0",
+            name="ck_execution_task_runtime_start_fence_positive",
+        ),
+        CheckConstraint(
+            "lifecycle_state_version_at_start >= 0",
+            name="ck_execution_task_runtime_start_state_version_nonnegative",
+        ),
+        Index(
+            "ix_execution_task_runtime_starts_plan_task",
+            "execution_plan_id",
+            "execution_task_id",
+        ),
+        Index(
+            "ix_execution_task_runtime_starts_lease_worker",
+            "runtime_lease_id",
+            "worker_instance_id",
+        ),
+    )
+
+    execution_plan = relationship("ExecutionPlan", back_populates="runtime_starts")
+    execution_task = relationship("ExecutionTask", back_populates="runtime_starts")
+    execution_task_attempt = relationship(
+        "ExecutionTaskAttempt", back_populates="runtime_start"
+    )
+    runtime_lease = relationship("ExecutionTaskRuntimeLease")
+    dispatch_intent = relationship("ExecutionTaskDispatchIntent")
+
+
+class ExecutionTaskAttemptOutcome(Base):
+    """One bounded, canonical interpretation of one Phase 29 attempt."""
+
+    __tablename__ = "execution_task_attempt_outcomes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    dispatch_intent_id = Column(
+        Integer,
+        ForeignKey("execution_task_dispatch_intents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    runtime_lease_id = Column(
+        Integer,
+        ForeignKey("execution_task_runtime_leases.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    runtime_start_id = Column(
+        Integer,
+        ForeignKey("execution_task_runtime_starts.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    worker_instance_id = Column(String(255), nullable=False, index=True)
+    ownership_fencing_token = Column(Integer, nullable=False)
+    outcome_idempotency_key = Column(String(128), nullable=False, unique=True)
+    deterministic_outcome_command_id = Column(String(128), nullable=False, unique=True)
+    canonical_outcome_command_payload = Column(JSON, nullable=False)
+    canonical_outcome_command_hash = Column(String(64), nullable=False)
+    outcome_status = Column(String(32), nullable=False, index=True)
+    completed_at = Column(DateTime(timezone=True), nullable=False)
+    runtime_duration_seconds = Column(Float, nullable=False)
+    provider_request_id = Column(String(255), nullable=True)
+    output_reference = Column(String(512), nullable=True)
+    output_hash = Column(String(64), nullable=True)
+    usage_summary = Column(JSON, nullable=True)
+    failure_category = Column(String(64), nullable=True)
+    failure_code = Column(String(64), nullable=True)
+    sanitized_failure_detail = Column(String(1024), nullable=True)
+    exception_type = Column(String(128), nullable=True)
+    diagnostics = Column(JSON, nullable=True)
+    lifecycle_transition_id = Column(Integer, nullable=True, index=True)
+    lifecycle_transition_sequence = Column(Integer, nullable=True)
+    lifecycle_resulting_state_version = Column(Integer, nullable=True)
+    lease_closed_at = Column(DateTime(timezone=True), nullable=True)
+    lease_closure_reason = Column(String(64), nullable=True)
+    lease_closure_hash = Column(String(64), nullable=True)
+    creation_actor_type = Column(String(32), nullable=False)
+    creation_actor_id = Column(String(255), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "ownership_fencing_token > 0",
+            name="ck_execution_task_attempt_outcome_fence_positive",
+        ),
+        CheckConstraint(
+            "outcome_status IN ('candidate_completed', 'attempt_failed', "
+            "'attempt_cancelled')",
+            name="ck_execution_task_attempt_outcome_status",
+        ),
+        CheckConstraint(
+            "runtime_duration_seconds >= 0",
+            name="ck_execution_task_attempt_outcome_duration_nonnegative",
+        ),
+        Index(
+            "ix_execution_task_attempt_outcomes_plan_status",
+            "execution_plan_id",
+            "outcome_status",
+        ),
+        Index(
+            "ix_execution_task_attempt_outcomes_task_completed",
+            "execution_task_id",
+            "completed_at",
+        ),
+    )
+
+    execution_plan = relationship("ExecutionPlan", back_populates="runtime_outcomes")
+    execution_task = relationship("ExecutionTask", back_populates="runtime_outcomes")
+    execution_task_attempt = relationship(
+        "ExecutionTaskAttempt", back_populates="runtime_outcome"
+    )
+    dispatch_intent = relationship("ExecutionTaskDispatchIntent")
+    runtime_lease = relationship("ExecutionTaskRuntimeLease")
+    runtime_start = relationship("ExecutionTaskRuntimeStart")
 
 
 class ExecutionTaskTransition(Base):

@@ -17,6 +17,8 @@ from app.models import (
     ExecutionTask,
     ExecutionTaskAttempt,
     ExecutionTaskDispatchIntent,
+    ExecutionTaskAttemptOutcome,
+    ExecutionTaskRuntimeStart,
     ExecutionTaskRuntimeLease,
     ExecutionTaskTransition,
 )
@@ -38,6 +40,7 @@ from app.services.execution.execution_task_transition_service import (
     ExecutionTaskTransitionService,
 )
 from app.services.planning.operator_review import canonical_json_hash
+from app.services.execution.runtime_execution_adapter import RUNTIME_PROGRESS_STATES
 
 
 RUNTIME_OWNERSHIP_SCHEMA_VERSION = "execution-task-runtime-ownership/1.0"
@@ -95,6 +98,9 @@ class HeartbeatRuntimeOwnershipCommand:
     worker_instance_id: str
     fencing_token: int
     lease_seconds: int = DEFAULT_LEASE_SECONDS
+    progress_state: str | None = None
+    progress_sequence: int | None = None
+    provider_request_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -473,6 +479,28 @@ class ExecutionTaskRuntimeOwnershipService:
             raise ExecutionRuntimeOwnershipError(
                 "runtime_ownership_integrity_failure", "heartbeat command is invalid"
             )
+        progress_state = command.progress_state
+        if progress_state is not None:
+            progress_state = str(progress_state).strip()
+            if progress_state not in RUNTIME_PROGRESS_STATES:
+                raise ExecutionRuntimeOwnershipError(
+                    "runtime_progress_state_invalid",
+                    "runtime progress state is not recognized",
+                )
+        progress_sequence = command.progress_sequence
+        if progress_sequence is not None:
+            try:
+                progress_sequence = int(progress_sequence)
+            except (TypeError, ValueError) as exc:
+                raise ExecutionRuntimeOwnershipError(
+                    "runtime_progress_sequence_invalid",
+                    "runtime progress sequence is invalid",
+                ) from exc
+            if progress_sequence < 1:
+                raise ExecutionRuntimeOwnershipError(
+                    "runtime_progress_sequence_invalid",
+                    "runtime progress sequence is invalid",
+                )
         worker_instance_id = _text(command.worker_instance_id, "worker_instance_id")
         lease = self.db.get(ExecutionTaskRuntimeLease, lease_id)
         if lease is None:
@@ -509,9 +537,50 @@ class ExecutionTaskRuntimeOwnershipService:
                 "runtime_ownership_integrity_failure",
                 "heartbeat requires a running task and attempt",
             )
+        start = (
+            self.db.query(ExecutionTaskRuntimeStart)
+            .filter(ExecutionTaskRuntimeStart.execution_task_attempt_id == attempt.id)
+            .one_or_none()
+        )
+        outcome = (
+            self.db.query(ExecutionTaskAttemptOutcome)
+            .filter(ExecutionTaskAttemptOutcome.execution_task_attempt_id == attempt.id)
+            .one_or_none()
+        )
+        # C5 ownership heartbeats remain valid before the adapter handoff for
+        # compatibility.  Once a canonical start exists, every heartbeat is
+        # start-bound; progress-bearing heartbeats are never accepted before
+        # that row exists.
+        if progress_state is not None or progress_sequence is not None:
+            if start is None or start.runtime_lease_id != lease.id:
+                raise ExecutionRuntimeOwnershipError(
+                    "runtime_start_not_found",
+                    "progress heartbeat requires canonical runtime start evidence",
+                )
+        if start is not None and start.runtime_lease_id != lease.id:
+            raise ExecutionRuntimeOwnershipError(
+                "runtime_start_integrity_failure",
+                "heartbeat start evidence is bound to another lease",
+            )
+        if outcome is not None:
+            raise ExecutionRuntimeOwnershipError(
+                "runtime_outcome_already_exists",
+                "heartbeat is not allowed after an attempt outcome",
+            )
+        if progress_sequence is not None and progress_sequence <= int(
+            lease.progress_sequence or 0
+        ):
+            raise ExecutionRuntimeOwnershipError(
+                "runtime_progress_sequence_stale",
+                "runtime progress sequence must increase monotonically",
+            )
         lease.last_heartbeat_at = now
         lease.lease_expires_at = now + timedelta(seconds=lease_seconds)
         lease.lease_duration_seconds = lease_seconds
+        if progress_state is not None:
+            lease.progress_state = progress_state
+        if progress_sequence is not None:
+            lease.progress_sequence = progress_sequence
         lease.updated_at = now
         self.db.flush()
         return RuntimeOwnershipHeartbeatResult(
@@ -538,6 +607,10 @@ class ExecutionTaskRuntimeOwnershipService:
         lease.lease_status = RUNTIME_LEASE_STATUS_EXPIRED
         lease.released_at = now
         lease.release_reason = "lease_expired"
+        lease.closed_at = now
+        lease.closure_reason = "lease_expired"
+        lease.closed_worker_instance_id = lease.worker_instance_id
+        lease.closed_ownership_fencing_token = lease.ownership_fencing_token
         lease.updated_at = now
         self.db.flush()
         return self.verify_runtime_ownership_integrity(lease.id)
@@ -878,6 +951,13 @@ class ExecutionTaskRuntimeOwnershipService:
             issues.append("ownership_broker_id_mismatch")
         if lease.lease_status not in RUNTIME_LEASE_STATUSES:
             issues.append("invalid_ownership_status")
+        if (
+            lease.progress_state is not None
+            and lease.progress_state not in RUNTIME_PROGRESS_STATES
+        ):
+            issues.append("progress_state_invalid")
+        if int(lease.progress_sequence or 0) < 0:
+            issues.append("progress_sequence_invalid")
         if lease.ownership_fencing_token < 1:
             issues.append("fencing_token_invalid")
         leases = self._leases_for_attempt(lease.execution_task_attempt_id)
@@ -896,6 +976,7 @@ class ExecutionTaskRuntimeOwnershipService:
         heartbeat = _utc(lease.last_heartbeat_at)
         released = _utc(lease.released_at)
         started = _utc(lease.runtime_started_at)
+        closed = _utc(lease.closed_at)
         if acquired is None or expires is None or heartbeat is None or started is None:
             issues.append("ownership_timestamp_missing")
         else:
@@ -905,6 +986,10 @@ class ExecutionTaskRuntimeOwnershipService:
                 issues.append("ownership_timestamp_order_invalid")
             if released is not None and released < heartbeat:
                 issues.append("ownership_release_timestamp_invalid")
+            if closed is not None and closed < acquired:
+                issues.append("ownership_close_timestamp_invalid")
+            if closed is not None and heartbeat > closed:
+                issues.append("heartbeat_after_ownership_close")
         if lease.lease_status == RUNTIME_LEASE_STATUS_ACTIVE:
             now = _utc(self._now()) or datetime.now(timezone.utc)
             if expires is not None and expires <= now:
@@ -915,6 +1000,13 @@ class ExecutionTaskRuntimeOwnershipService:
                 issues.append("active_owner_on_non_running_task")
         elif released is None or not lease.release_reason:
             issues.append("historical_ownership_release_evidence_missing")
+        if lease.lease_status != RUNTIME_LEASE_STATUS_ACTIVE:
+            if closed is None or not lease.closure_reason:
+                issues.append("ownership_close_evidence_missing")
+            if lease.closed_worker_instance_id != lease.worker_instance_id:
+                issues.append("ownership_close_worker_mismatch")
+            if lease.closed_ownership_fencing_token != lease.ownership_fencing_token:
+                issues.append("ownership_close_fence_mismatch")
         if intent is not None and intent.dispatch_status == "cancelled":
             issues.append("ownership_on_cancelled_intent")
         if not isinstance(

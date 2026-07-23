@@ -647,7 +647,9 @@ def test_runtime_migration_replays_from_phase29c4_and_preserves_old_attempts(tmp
         with engine.begin() as connection:
             connection.execute(text("DROP TABLE execution_task_runtime_leases"))
             connection.execute(text("DROP TABLE execution_task_attempts"))
-        run_schema_migrations(engine, MIGRATIONS[:-1])
+        # C5 starts from the committed C4 schema; C6B is now the final
+        # additive migration and must not be applied before the fixture row.
+        run_schema_migrations(engine, MIGRATIONS[:-2])
         with engine.begin() as connection:
             connection.execute(
                 text(
@@ -675,14 +677,51 @@ def test_runtime_migration_replays_from_phase29c4_and_preserves_old_attempts(tmp
             index["name"]
             for index in inspect(engine).get_indexes("execution_task_runtime_leases")
         }
+        start_columns = {
+            column["name"]
+            for column in inspect(engine).get_columns("execution_task_runtime_starts")
+        }
+        outcome_columns = {
+            column["name"]
+            for column in inspect(engine).get_columns("execution_task_attempt_outcomes")
+        }
+        start_indexes = {
+            index["name"]
+            for index in inspect(engine).get_indexes("execution_task_runtime_starts")
+        }
+        outcome_indexes = {
+            index["name"]
+            for index in inspect(engine).get_indexes("execution_task_attempt_outcomes")
+        }
         assert "started_at" in attempt_columns
+        assert "candidate_completed" in str(
+            inspect(engine).get_check_constraints("execution_task_attempts")
+        )
         assert {
             "worker_instance_id",
             "ownership_fencing_token",
             "lease_expires_at",
             "runtime_start_evidence",
+            "progress_state",
+            "progress_sequence",
+            "closed_outcome_id",
         } <= lease_columns
         assert "uq_execution_task_runtime_lease_active" in lease_indexes
+        assert {
+            "execution_start_idempotency_key",
+            "deterministic_start_command_id",
+            "canonical_start_command_hash",
+            "configuration_hash",
+        } <= start_columns
+        assert {
+            "outcome_idempotency_key",
+            "deterministic_outcome_command_id",
+            "canonical_outcome_command_hash",
+            "lifecycle_transition_id",
+            "lease_closure_hash",
+        } <= outcome_columns
+        assert "ix_execution_task_runtime_starts_plan_task" in start_indexes
+        assert "ix_execution_task_attempt_outcomes_plan_status" in outcome_indexes
         with engine.connect() as connection:
             assert connection.execute(
                 text(
@@ -693,6 +732,18 @@ def test_runtime_migration_replays_from_phase29c4_and_preserves_old_attempts(tmp
             assert (
                 connection.execute(
                     text("SELECT COUNT(*) FROM execution_task_runtime_leases")
+                ).scalar_one()
+                == 0
+            )
+            assert (
+                connection.execute(
+                    text("SELECT COUNT(*) FROM execution_task_runtime_starts")
+                ).scalar_one()
+                == 0
+            )
+            assert (
+                connection.execute(
+                    text("SELECT COUNT(*) FROM execution_task_attempt_outcomes")
                 ).scalar_one()
                 == 0
             )

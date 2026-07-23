@@ -2032,6 +2032,271 @@ def _migration_036_execution_task_runtime_ownership(engine: Engine) -> None:
             connection.execute(text(statement))
 
 
+def _migration_037_execution_task_runtime_evidence(engine: Engine) -> None:
+    """Add Phase 29C-6B start, progress, and canonical outcome evidence."""
+
+    table_names = _table_names(engine)
+    with engine.begin() as connection:
+        if "execution_task_attempts" in table_names:
+            # The Phase 29C-5 table has a status CHECK that predates the
+            # attempt-local candidate_completed state.  Rebuild only this
+            # additive authority table, preserving every existing value.
+            connection.execute(
+                text(
+                    "ALTER TABLE execution_task_attempts "
+                    "RENAME TO execution_task_attempts_phase29c5_old"
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE execution_task_attempts (
+                        id INTEGER PRIMARY KEY,
+                        execution_plan_id INTEGER NOT NULL,
+                        execution_task_id INTEGER NOT NULL,
+                        dispatch_intent_id INTEGER NOT NULL,
+                        attempt_number INTEGER NOT NULL,
+                        attempt_identity VARCHAR(128) NOT NULL,
+                        broker_task_id VARCHAR(255) NOT NULL,
+                        attempt_status VARCHAR(24) NOT NULL DEFAULT 'created',
+                        created_at DATETIME NOT NULL,
+                        submitted_at DATETIME,
+                        started_at DATETIME,
+                        cancelled_at DATETIME,
+                        updated_at DATETIME,
+                        CONSTRAINT uq_execution_task_attempt_dispatch_intent
+                            UNIQUE (dispatch_intent_id),
+                        CONSTRAINT uq_execution_task_attempt_identity
+                            UNIQUE (attempt_identity),
+                        CONSTRAINT uq_execution_task_attempt_broker
+                            UNIQUE (broker_task_id),
+                        CONSTRAINT uq_execution_task_attempt_task_number
+                            UNIQUE (execution_task_id, attempt_number),
+                        CONSTRAINT ck_execution_task_attempt_number_positive
+                            CHECK (attempt_number > 0),
+                        CONSTRAINT ck_execution_task_attempt_status
+                            CHECK (attempt_status IN (
+                                'created', 'submitted', 'running',
+                                'candidate_completed', 'cancelled', 'failed',
+                                'succeeded'
+                            )),
+                        FOREIGN KEY(execution_plan_id)
+                            REFERENCES execution_plans (id) ON DELETE CASCADE,
+                        FOREIGN KEY(execution_task_id)
+                            REFERENCES execution_tasks (id) ON DELETE CASCADE,
+                        FOREIGN KEY(dispatch_intent_id)
+                            REFERENCES execution_task_dispatch_intents (id)
+                            ON DELETE CASCADE
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO execution_task_attempts (
+                        id, execution_plan_id, execution_task_id,
+                        dispatch_intent_id, attempt_number, attempt_identity,
+                        broker_task_id, attempt_status, created_at, submitted_at,
+                        started_at, cancelled_at, updated_at
+                    )
+                    SELECT id, execution_plan_id, execution_task_id,
+                        dispatch_intent_id, attempt_number, attempt_identity,
+                        broker_task_id, attempt_status, created_at, submitted_at,
+                        started_at, cancelled_at, updated_at
+                    FROM execution_task_attempts_phase29c5_old
+                    """
+                )
+            )
+            connection.execute(text("DROP TABLE execution_task_attempts_phase29c5_old"))
+
+        if "execution_task_runtime_leases" in table_names:
+            lease_columns = (
+                (
+                    "progress_state",
+                    "ALTER TABLE execution_task_runtime_leases "
+                    "ADD COLUMN progress_state VARCHAR(32)",
+                ),
+                (
+                    "progress_sequence",
+                    "ALTER TABLE execution_task_runtime_leases "
+                    "ADD COLUMN progress_sequence INTEGER NOT NULL DEFAULT 0",
+                ),
+                (
+                    "closed_at",
+                    "ALTER TABLE execution_task_runtime_leases ADD COLUMN closed_at DATETIME",
+                ),
+                (
+                    "closure_reason",
+                    "ALTER TABLE execution_task_runtime_leases ADD COLUMN closure_reason VARCHAR(64)",
+                ),
+                (
+                    "closed_outcome_id",
+                    "ALTER TABLE execution_task_runtime_leases ADD COLUMN closed_outcome_id INTEGER",
+                ),
+                (
+                    "closed_worker_instance_id",
+                    "ALTER TABLE execution_task_runtime_leases ADD COLUMN closed_worker_instance_id VARCHAR(255)",
+                ),
+                (
+                    "closed_ownership_fencing_token",
+                    "ALTER TABLE execution_task_runtime_leases ADD COLUMN closed_ownership_fencing_token INTEGER",
+                ),
+                (
+                    "canonical_closure_hash",
+                    "ALTER TABLE execution_task_runtime_leases ADD COLUMN canonical_closure_hash VARCHAR(64)",
+                ),
+            )
+            for column_name, ddl in lease_columns:
+                if not _has_column(
+                    engine, "execution_task_runtime_leases", column_name
+                ):
+                    connection.execute(text(ddl))
+
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_runtime_starts (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    execution_task_attempt_id INTEGER NOT NULL UNIQUE,
+                    dispatch_intent_id INTEGER NOT NULL,
+                    runtime_lease_id INTEGER NOT NULL UNIQUE,
+                    broker_task_id VARCHAR(255) NOT NULL,
+                    worker_instance_id VARCHAR(255) NOT NULL,
+                    ownership_fencing_token INTEGER NOT NULL,
+                    execution_start_idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+                    deterministic_start_command_id VARCHAR(128) NOT NULL UNIQUE,
+                    canonical_start_command_payload JSON NOT NULL,
+                    canonical_start_command_hash VARCHAR(64) NOT NULL,
+                    runtime_adapter_name VARCHAR(64) NOT NULL,
+                    adapter_version VARCHAR(64),
+                    execution_mode VARCHAR(32) NOT NULL,
+                    configuration_hash VARCHAR(64) NOT NULL,
+                    provider_request_id VARCHAR(255),
+                    started_at DATETIME NOT NULL,
+                    lifecycle_state_at_start VARCHAR(20) NOT NULL,
+                    lifecycle_state_version_at_start INTEGER NOT NULL,
+                    creation_actor_type VARCHAR(32) NOT NULL,
+                    creation_actor_id VARCHAR(255) NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT ck_execution_task_runtime_start_fence_positive
+                        CHECK (ownership_fencing_token > 0),
+                    CONSTRAINT ck_execution_task_runtime_start_state_version_nonnegative
+                        CHECK (lifecycle_state_version_at_start >= 0),
+                    FOREIGN KEY(execution_plan_id)
+                        REFERENCES execution_plans (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_id)
+                        REFERENCES execution_tasks (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_attempt_id)
+                        REFERENCES execution_task_attempts (id) ON DELETE CASCADE,
+                    FOREIGN KEY(dispatch_intent_id)
+                        REFERENCES execution_task_dispatch_intents (id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(runtime_lease_id)
+                        REFERENCES execution_task_runtime_leases (id)
+                        ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_attempt_outcomes (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    execution_task_attempt_id INTEGER NOT NULL UNIQUE,
+                    dispatch_intent_id INTEGER NOT NULL,
+                    runtime_lease_id INTEGER NOT NULL,
+                    runtime_start_id INTEGER NOT NULL UNIQUE,
+                    worker_instance_id VARCHAR(255) NOT NULL,
+                    ownership_fencing_token INTEGER NOT NULL,
+                    outcome_idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+                    deterministic_outcome_command_id VARCHAR(128) NOT NULL UNIQUE,
+                    canonical_outcome_command_payload JSON NOT NULL,
+                    canonical_outcome_command_hash VARCHAR(64) NOT NULL,
+                    outcome_status VARCHAR(32) NOT NULL,
+                    completed_at DATETIME NOT NULL,
+                    runtime_duration_seconds FLOAT NOT NULL,
+                    provider_request_id VARCHAR(255),
+                    output_reference VARCHAR(512),
+                    output_hash VARCHAR(64),
+                    usage_summary JSON,
+                    failure_category VARCHAR(64),
+                    failure_code VARCHAR(64),
+                    sanitized_failure_detail VARCHAR(1024),
+                    exception_type VARCHAR(128),
+                    diagnostics JSON,
+                    lifecycle_transition_id INTEGER,
+                    lifecycle_transition_sequence INTEGER,
+                    lifecycle_resulting_state_version INTEGER,
+                    lease_closed_at DATETIME,
+                    lease_closure_reason VARCHAR(64),
+                    lease_closure_hash VARCHAR(64),
+                    creation_actor_type VARCHAR(32) NOT NULL,
+                    creation_actor_id VARCHAR(255) NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT ck_execution_task_attempt_outcome_fence_positive
+                        CHECK (ownership_fencing_token > 0),
+                    CONSTRAINT ck_execution_task_attempt_outcome_status
+                        CHECK (outcome_status IN (
+                            'candidate_completed', 'attempt_failed',
+                            'attempt_cancelled'
+                        )),
+                    CONSTRAINT ck_execution_task_attempt_outcome_duration_nonnegative
+                        CHECK (runtime_duration_seconds >= 0),
+                    FOREIGN KEY(execution_plan_id)
+                        REFERENCES execution_plans (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_id)
+                        REFERENCES execution_tasks (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_attempt_id)
+                        REFERENCES execution_task_attempts (id) ON DELETE CASCADE,
+                    FOREIGN KEY(dispatch_intent_id)
+                        REFERENCES execution_task_dispatch_intents (id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(runtime_lease_id)
+                        REFERENCES execution_task_runtime_leases (id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(runtime_start_id)
+                        REFERENCES execution_task_runtime_starts (id)
+                        ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        indexes = {
+            "ix_execution_task_attempts_task_status": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_task_attempts_task_status "
+                "ON execution_task_attempts (execution_task_id, attempt_status)"
+            ),
+            "ix_execution_task_runtime_leases_closed_outcome": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_task_runtime_leases_closed_outcome "
+                "ON execution_task_runtime_leases (closed_outcome_id)"
+            ),
+            "ix_execution_task_runtime_starts_plan_task": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_task_runtime_starts_plan_task "
+                "ON execution_task_runtime_starts (execution_plan_id, execution_task_id)"
+            ),
+            "ix_execution_task_runtime_starts_lease_worker": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_task_runtime_starts_lease_worker "
+                "ON execution_task_runtime_starts (runtime_lease_id, worker_instance_id)"
+            ),
+            "ix_execution_task_attempt_outcomes_plan_status": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_task_attempt_outcomes_plan_status "
+                "ON execution_task_attempt_outcomes (execution_plan_id, outcome_status)"
+            ),
+            "ix_execution_task_attempt_outcomes_task_completed": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_task_attempt_outcomes_task_completed "
+                "ON execution_task_attempt_outcomes (execution_task_id, completed_at)"
+            ),
+        }
+        for statement in indexes.values():
+            connection.execute(text(statement))
+
+
 def _migration_014_task_workflow_stage(engine: Engine) -> None:
     if "tasks" not in _table_names(engine):
         return
@@ -2494,6 +2759,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="036_execution_task_runtime_ownership",
         description="Add Phase 29C-5 fenced runtime ownership and running evidence",
         upgrade=_migration_036_execution_task_runtime_ownership,
+    ),
+    Migration(
+        version="037_execution_task_runtime_evidence",
+        description="Add Phase 29C-6B runtime starts, progress, and attempt outcomes",
+        upgrade=_migration_037_execution_task_runtime_evidence,
     ),
 )
 
