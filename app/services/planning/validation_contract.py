@@ -41,6 +41,7 @@ EVIDENCE_TYPES = frozenset(
     {
         "candidate_output_reference",
         "candidate_output_hash",
+        "candidate_content",
         "immutable_artifact",
         "command_result",
         "test_result",
@@ -49,7 +50,12 @@ EVIDENCE_TYPES = frozenset(
     }
 )
 EVIDENCE_SOURCES = frozenset(
-    {"candidate_outcome", "release_contract", "review_authority"}
+    {
+        "candidate_outcome",
+        "candidate_content",
+        "release_contract",
+        "review_authority",
+    }
 )
 HASH_ALGORITHMS = frozenset({"sha256"})
 PASS_POLICIES = frozenset({"all_required", "all_predicates", "any_required_group"})
@@ -57,6 +63,10 @@ PREDICATE_VERSIONS = {
     "required_output_exists": frozenset({1}),
     "output_reference_exists": frozenset({1}),
     "output_hash_matches": frozenset({1}),
+    "content_exists": frozenset({1}),
+    "content_hash_matches": frozenset({1}),
+    "content_size_within_limit": frozenset({1}),
+    "media_type_matches": frozenset({1}),
     "artifact_exists": frozenset({1}),
     "artifact_hash_matches": frozenset({1}),
     "json_schema_matches": frozenset({1}),
@@ -217,6 +227,10 @@ def _validate_predicate_parameters(
         "required_output_exists",
         "output_reference_exists",
         "output_hash_matches",
+        "content_exists",
+        "content_hash_matches",
+        "content_size_within_limit",
+        "media_type_matches",
         "artifact_exists",
         "artifact_hash_matches",
         "test_suite_result_passed",
@@ -793,6 +807,32 @@ class StructuredValidationContract:
                         raise ValidationContractError(
                             "validation_evidence_descriptor_invalid",
                             "output-hash predicate requires sha256 evidence",
+                        )
+                if predicate.predicate_id in {
+                    "content_exists",
+                    "content_hash_matches",
+                    "content_size_within_limit",
+                    "media_type_matches",
+                }:
+                    if (
+                        descriptor.evidence_type != "candidate_content"
+                        or descriptor.source != "candidate_content"
+                    ):
+                        raise ValidationContractError(
+                            "validation_evidence_descriptor_invalid",
+                            "content predicate requires candidate-content evidence",
+                        )
+                if predicate.predicate_id == "content_hash_matches":
+                    if descriptor.expected_hash_algorithm != VALIDATION_HASH_ALGORITHM:
+                        raise ValidationContractError(
+                            "validation_evidence_descriptor_invalid",
+                            "content-hash predicate requires sha256 evidence",
+                        )
+                if predicate.predicate_id == "media_type_matches":
+                    if descriptor.expected_media_type is None:
+                        raise ValidationContractError(
+                            "validation_evidence_descriptor_invalid",
+                            "media-type predicate requires an expected media type",
                         )
                 if predicate.predicate_id in {"artifact_hash_matches"}:
                     if descriptor.evidence_type != "immutable_artifact":

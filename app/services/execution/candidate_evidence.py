@@ -27,9 +27,17 @@ from app.models import (
     ExecutionTask,
     ExecutionTaskAttempt,
     ExecutionTaskAttemptOutcome,
+    ExecutionTaskCandidateContent,
     ExecutionTaskResolvedValidationEvidence,
     ExecutionTaskValidationPredicateResult as DBValidationPredicateResult,
     ExecutionTaskValidationSpecification,
+)
+from app.services.execution.candidate_content import (
+    CandidateContentError,
+    CandidateContentStore,
+    LocalContentAddressedStore,
+    MAX_CANDIDATE_CONTENT_BYTES,
+    verify_candidate_content_integrity,
 )
 from app.services.execution.execution_task_runtime_execution_service import (
     ExecutionTaskRuntimeExecutionService,
@@ -69,6 +77,8 @@ MAX_IDEMPOTENCY_KEY_LENGTH = 128
 MAX_COMMAND_ID_LENGTH = 128
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _REFERENCE_RE = re.compile(r"^candidate-output://([1-9][0-9]{0,18})$")
+_CONTENT_REFERENCE_RE = re.compile(r"^candidate-content://([1-9][0-9]{0,18})$")
+_CONTENT_HASH_REFERENCE_RE = re.compile(r"^content-sha256://([0-9a-f]{64})$")
 _SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]{0,31}):/{2}.*$")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
@@ -225,7 +235,7 @@ def _utc(value: datetime | None) -> datetime | None:
 class EvidenceReference:
     grammar_version: str
     scheme: str
-    identifier: int
+    identifier: int | str
     normalized: str
 
 
@@ -238,7 +248,10 @@ def parse_evidence_reference(value: str) -> EvidenceReference:
 
     raw = _bounded_text(value, "reference", MAX_REFERENCE_LENGTH).strip()
     if raw != value:
-        raw = unicodedata.normalize("NFC", raw)
+        raise CandidateEvidenceError(
+            "candidate_evidence_reference_invalid", "reference whitespace is invalid"
+        )
+    raw = unicodedata.normalize("NFC", raw)
     if "@" in raw or "?" in raw or "#" in raw or "\\" in raw:
         raise CandidateEvidenceError(
             "candidate_evidence_reference_invalid", "reference syntax is invalid"
@@ -251,6 +264,23 @@ def parse_evidence_reference(value: str) -> EvidenceReference:
             scheme="candidate-output",
             identifier=identifier,
             normalized=f"candidate-output://{identifier}",
+        )
+    match = _CONTENT_REFERENCE_RE.fullmatch(raw.lower())
+    if match is not None:
+        identifier = int(match.group(1))
+        return EvidenceReference(
+            grammar_version=REFERENCE_GRAMMAR_VERSION,
+            scheme="candidate-content",
+            identifier=identifier,
+            normalized=f"candidate-content://{identifier}",
+        )
+    match = _CONTENT_HASH_REFERENCE_RE.fullmatch(raw.lower())
+    if match is not None:
+        return EvidenceReference(
+            grammar_version=REFERENCE_GRAMMAR_VERSION,
+            scheme="content-sha256",
+            identifier=match.group(1),
+            normalized=f"content-sha256://{match.group(1)}",
         )
     if _SCHEME_RE.match(raw):
         raise CandidateEvidenceError(
@@ -313,10 +343,11 @@ class ResolvedCandidateEvidence:
     media_type: str | None
     byte_size: int | None
     structured_metadata_summary: Mapping[str, Any]
-    content_projection: Mapping[str, Any] | None
+    content_projection: Mapping[str, Any] | list[Any] | None
     resolution_status: str
     canonical_evidence_payload_hash: str
     resolved_at: datetime
+    content_addressed_reference: str | None = None
 
 
 @dataclass(frozen=True)
@@ -337,9 +368,38 @@ class CandidateOutcomeAuthority:
     completed_at: datetime
 
 
+@dataclass(frozen=True)
+class CandidateContentAuthority:
+    id: int
+    execution_plan_id: int
+    execution_task_id: int
+    execution_task_attempt_id: int
+    candidate_outcome_id: int
+    attempt_generation: int
+    content_sha256: str
+    declared_sha256: str | None
+    byte_length: int
+    media_type: str
+    storage_backend_id: str
+    storage_backend_version: str
+    storage_key: str
+    content_projection: Mapping[str, Any] | list[Any] | None
+    content_projection_hash: str | None
+
+
 class ImmutableCandidateEvidenceSource(Protocol):
     def read(self, candidate_outcome_id: int) -> CandidateOutcomeAuthority | None:
         """Read one authority row without opening or copying external content."""
+
+    def read_content(
+        self, candidate_content_id: int
+    ) -> CandidateContentAuthority | None:
+        """Read one task-scoped immutable content linkage."""
+
+    def read_content_by_hash(
+        self, content_sha256: str, candidate_outcome_id: int
+    ) -> CandidateContentAuthority | None:
+        """Resolve a global hash only with explicit outcome authority."""
 
 
 class CandidateEvidenceResolver(Protocol):
@@ -377,6 +437,51 @@ class SqlCandidateOutcomeSource:
             output_hash=_optional_hash(outcome.output_hash, "candidate output hash"),
             completed_at=outcome.completed_at,
         )
+
+    def read_content(
+        self, candidate_content_id: int
+    ) -> CandidateContentAuthority | None:
+        row = self.db.get(ExecutionTaskCandidateContent, int(candidate_content_id))
+        if row is None:
+            return None
+        return _content_authority(row)
+
+    def read_content_by_hash(
+        self, content_sha256: str, candidate_outcome_id: int
+    ) -> CandidateContentAuthority | None:
+        row = (
+            self.db.query(ExecutionTaskCandidateContent)
+            .filter(
+                ExecutionTaskCandidateContent.content_sha256 == content_sha256,
+                ExecutionTaskCandidateContent.candidate_outcome_id
+                == int(candidate_outcome_id),
+            )
+            .one_or_none()
+        )
+        return _content_authority(row) if row is not None else None
+
+
+def _content_authority(row: ExecutionTaskCandidateContent) -> CandidateContentAuthority:
+    projection = row.content_projection
+    return CandidateContentAuthority(
+        id=row.id,
+        execution_plan_id=row.execution_plan_id,
+        execution_task_id=row.execution_task_id,
+        execution_task_attempt_id=row.execution_task_attempt_id,
+        candidate_outcome_id=row.candidate_outcome_id,
+        attempt_generation=row.attempt_generation,
+        content_sha256=row.content_sha256,
+        declared_sha256=row.declared_sha256,
+        byte_length=row.byte_length,
+        media_type=row.media_type,
+        storage_backend_id=row.storage_backend_id,
+        storage_backend_version=row.storage_backend_version,
+        storage_key=row.storage_key,
+        content_projection=(
+            projection if isinstance(projection, (Mapping, list)) else None
+        ),
+        content_projection_hash=row.content_projection_hash,
+    )
 
 
 @dataclass(frozen=True)
@@ -727,6 +832,96 @@ class _OutputHashMatchesValidator:
         )
 
 
+class _ContentExistsValidator:
+    validator_id = "content_exists"
+    validator_version = VALIDATOR_IMPLEMENTATION_VERSION
+
+    def validate(self, predicate, evidence, context):
+        gate = _evidence_gate(evidence)
+        if gate:
+            return gate
+        passed = (
+            evidence.source == "candidate_content"
+            and bool(evidence.content_addressed_reference)
+            and evidence.byte_size is not None
+        )
+        return _predicate_result(
+            "passed" if passed else "failed",
+            "content_exists" if passed else "content_missing",
+            diagnostics={"verification_level": "independently_recomputed_bytes"},
+        )
+
+
+class _ContentHashMatchesValidator:
+    validator_id = "content_hash_matches"
+    validator_version = VALIDATOR_IMPLEMENTATION_VERSION
+
+    def validate(self, predicate, evidence, context):
+        gate = _evidence_gate(evidence)
+        if gate:
+            return gate
+        declared = evidence.structured_metadata_summary.get("declared_sha256")
+        expected = evidence.expected_hash or declared
+        if not expected or not evidence.actual_hash:
+            return _predicate_result(
+                "invalid_evidence", "candidate_content_hash_unavailable"
+            )
+        passed = expected == evidence.actual_hash
+        return _predicate_result(
+            "passed" if passed else "failed",
+            "content_hash_matches" if passed else "content_hash_mismatch",
+            diagnostics={
+                "verification_level": "independently_recomputed_bytes",
+                "byte_level_recomputed": True,
+                "authority_claim_consistency": evidence.expected_hash is None,
+            },
+            expected={"hash_algorithm": "sha256", "hash": expected},
+            actual={"hash_algorithm": "sha256", "hash": evidence.actual_hash},
+        )
+
+
+class _ContentSizeWithinLimitValidator:
+    validator_id = "content_size_within_limit"
+    validator_version = VALIDATOR_IMPLEMENTATION_VERSION
+
+    def validate(self, predicate, evidence, context):
+        gate = _evidence_gate(evidence)
+        if gate:
+            return gate
+        passed = (
+            evidence.byte_size is not None
+            and 0 <= evidence.byte_size <= MAX_CANDIDATE_CONTENT_BYTES
+        )
+        return _predicate_result(
+            "passed" if passed else "failed",
+            "content_size_within_limit" if passed else "content_size_exceeded",
+            expected={"max_bytes": MAX_CANDIDATE_CONTENT_BYTES},
+            actual={"byte_size": evidence.byte_size},
+        )
+
+
+class _MediaTypeMatchesValidator:
+    validator_id = "media_type_matches"
+    validator_version = VALIDATOR_IMPLEMENTATION_VERSION
+
+    def validate(self, predicate, evidence, context):
+        gate = _evidence_gate(evidence)
+        if gate:
+            return gate
+        expected = evidence.structured_metadata_summary.get("expected_media_type")
+        if not expected or not evidence.media_type:
+            return _predicate_result(
+                "invalid_evidence", "candidate_content_media_type_unavailable"
+            )
+        passed = expected == evidence.media_type
+        return _predicate_result(
+            "passed" if passed else "failed",
+            "media_type_matches" if passed else "media_type_mismatch",
+            expected={"media_type": expected},
+            actual={"media_type": evidence.media_type},
+        )
+
+
 def _field_value(value: Any, path: str) -> tuple[bool, Any]:
     current = value
     for segment in path.split("."):
@@ -788,6 +983,34 @@ def build_default_validator_registry(
         validator_id="output_hash_matches",
         validator_version=1,
         validator=_OutputHashMatchesValidator(),
+    )
+    registry.register(
+        predicate_id="content_exists",
+        predicate_version=1,
+        validator_id="content_exists",
+        validator_version=1,
+        validator=_ContentExistsValidator(),
+    )
+    registry.register(
+        predicate_id="content_hash_matches",
+        predicate_version=1,
+        validator_id="content_hash_matches",
+        validator_version=1,
+        validator=_ContentHashMatchesValidator(),
+    )
+    registry.register(
+        predicate_id="content_size_within_limit",
+        predicate_version=1,
+        validator_id="content_size_within_limit",
+        validator_version=1,
+        validator=_ContentSizeWithinLimitValidator(),
+    )
+    registry.register(
+        predicate_id="media_type_matches",
+        predicate_version=1,
+        validator_id="media_type_matches",
+        validator_version=1,
+        validator=_MediaTypeMatchesValidator(),
     )
     registry.register(
         predicate_id="required_fields_present",
@@ -924,10 +1147,11 @@ def _snapshot_dto(
         actual_hash=row.actual_hash,
         media_type=row.media_type,
         byte_size=row.byte_size,
+        content_addressed_reference=row.content_addressed_reference,
         structured_metadata_summary=_freeze(row.structured_metadata_summary or {}),
         content_projection=(
             _freeze(row.content_projection)
-            if isinstance(row.content_projection, Mapping)
+            if isinstance(row.content_projection, (Mapping, list))
             else None
         ),
         resolution_status=row.resolution_status,
@@ -944,10 +1168,12 @@ class CandidateEvidenceResolverService:
         db: Session,
         *,
         source: ImmutableCandidateEvidenceSource | None = None,
+        content_store: CandidateContentStore | None = None,
         now: Callable[[], datetime] | None = None,
     ):
         self.db = db
         self.source = source or SqlCandidateOutcomeSource(db)
+        self.content_store = content_store or LocalContentAddressedStore()
         self._now = now or (lambda: datetime.now(timezone.utc))
 
     def resolve(
@@ -989,9 +1215,16 @@ class CandidateEvidenceResolverService:
                 "candidate evidence already has a canonical snapshot",
             )
 
-        plan, task, specification, descriptor, environment, outcome, attempt = (
-            self._authorize(command, payload)
-        )
+        (
+            plan,
+            task,
+            specification,
+            descriptor,
+            environment,
+            outcome,
+            attempt,
+            content,
+        ) = self._authorize(command, payload)
         source_outcome = self.source.read(outcome.id)
         if source_outcome is None:
             raise CandidateEvidenceError(
@@ -1002,17 +1235,62 @@ class CandidateEvidenceResolverService:
                 "candidate_evidence_source_not_immutable", "source identity is invalid"
             )
 
+        content_bytes_verified = False
+        content_storage_status = None
+        if content is not None:
+            try:
+                content_bytes = self.content_store.read(content.storage_key)
+                content_bytes_verified = (
+                    len(content_bytes) == content.byte_length
+                    and hashlib.sha256(content_bytes).hexdigest()
+                    == content.content_sha256
+                )
+                if not content_bytes_verified:
+                    content_storage_status = "candidate_content_hash_mismatch"
+            except CandidateContentError as exc:
+                content_storage_status = exc.code
         status, status_code = self._resolution_status(
-            command, descriptor, source_outcome, payload["expected_reference"]
+            command,
+            descriptor,
+            source_outcome,
+            payload["expected_reference"],
+            content=content,
+            content_bytes_verified=content_bytes_verified,
+            content_storage_status=content_storage_status,
         )
         now = self._now()
+        content_authority_id = (
+            f"execution-task-candidate-content:{content.id}"
+            if content is not None
+            else f"execution-task-attempt-outcome:{source_outcome.id}"
+        )
+        content_reference = (
+            f"candidate-content://{content.id}" if content is not None else None
+        )
         metadata = (
             _bounded_json_bytes(
                 {
                     "outcome_status": source_outcome.outcome_status,
-                    "source_authority_id": f"execution-task-attempt-outcome:{source_outcome.id}",
+                    "source_authority_id": content_authority_id,
                     "has_output_reference": bool(source_outcome.output_reference),
                     "has_output_hash": bool(source_outcome.output_hash),
+                    "has_candidate_content": content is not None,
+                    "declared_sha256": (
+                        content.declared_sha256 if content is not None else None
+                    ),
+                    "content_bytes_verified": content_bytes_verified,
+                    "verification_level": (
+                        "independently_recomputed_bytes"
+                        if content is not None and content_bytes_verified
+                        else "authority_claim_consistency"
+                    ),
+                    "content_store_backend_id": (
+                        content.storage_backend_id if content is not None else None
+                    ),
+                    "content_store_backend_version": (
+                        content.storage_backend_version if content is not None else None
+                    ),
+                    "expected_media_type": descriptor.expected_media_type,
                 },
                 field="structured metadata summary",
                 limit=MAX_METADATA_BYTES,
@@ -1032,19 +1310,25 @@ class CandidateEvidenceResolverService:
             "evidence_type": descriptor.evidence_type,
             "source": descriptor.source,
             "normalized_reference": payload["expected_reference"],
-            "source_authority_id": f"execution-task-attempt-outcome:{outcome.id}",
+            "source_authority_id": content_authority_id,
             "resolver_id": RESOLVER_ID,
             "resolver_version": command.resolver_version,
             "resolver_contract_version": RESOLVER_CONTRACT_VERSION,
             "environment_configuration_hash": environment.configuration_hash,
             "expected_hash_algorithm": descriptor.expected_hash_algorithm,
             "expected_hash": command.expected_content_hash,
-            "actual_hash": source_outcome.output_hash,
-            "media_type": None,
-            "byte_size": None,
+            "actual_hash": (
+                content.content_sha256
+                if content is not None
+                else source_outcome.output_hash
+            ),
+            "media_type": content.media_type if content is not None else None,
+            "byte_size": content.byte_length if content is not None else None,
             "structured_metadata_summary": metadata,
-            "content_addressed_reference": None,
-            "content_projection": None,
+            "content_addressed_reference": content_reference,
+            "content_projection": (
+                content.content_projection if content is not None else None
+            ),
             "expected_output_reference": command.expected_output_reference,
             "resolution_status": status,
             "task_state_at_resolution": task.status,
@@ -1062,19 +1346,25 @@ class CandidateEvidenceResolverService:
             evidence_type=descriptor.evidence_type,
             source=descriptor.source,
             normalized_reference=payload["expected_reference"],
-            source_authority_id=f"execution-task-attempt-outcome:{outcome.id}",
+            source_authority_id=content_authority_id,
             resolver_id=RESOLVER_ID,
             resolver_version=command.resolver_version,
             resolver_contract_version=RESOLVER_CONTRACT_VERSION,
             environment_configuration_hash=environment.configuration_hash,
             expected_hash_algorithm=descriptor.expected_hash_algorithm,
             expected_hash=command.expected_content_hash,
-            actual_hash=source_outcome.output_hash,
-            media_type=None,
-            byte_size=None,
+            actual_hash=(
+                content.content_sha256
+                if content is not None
+                else source_outcome.output_hash
+            ),
+            media_type=content.media_type if content is not None else None,
+            byte_size=content.byte_length if content is not None else None,
             structured_metadata_summary=metadata,
-            content_addressed_reference=None,
-            content_projection=None,
+            content_addressed_reference=content_reference,
+            content_projection=(
+                content.content_projection if content is not None else None
+            ),
             expected_output_reference=command.expected_output_reference,
             resolution_status=status,
             resolution_idempotency_key=payload["resolution_idempotency_key"],
@@ -1257,10 +1547,49 @@ class CandidateEvidenceResolverService:
                 "resolver environment does not match frozen environment",
             )
         reference = parse_evidence_reference(payload["expected_reference"])
-        if reference.identifier != outcome.id:
+        content = None
+        if reference.scheme == "candidate-output":
+            if reference.identifier != outcome.id:
+                raise CandidateEvidenceError(
+                    "candidate_evidence_reference_invalid",
+                    "reference does not identify candidate outcome",
+                )
+        elif reference.scheme == "candidate-content":
+            if (
+                descriptor.source != "candidate_content"
+                or descriptor.evidence_type != "candidate_content"
+            ):
+                raise CandidateEvidenceError(
+                    "candidate_evidence_reference_invalid",
+                    "candidate-content reference has an incompatible descriptor",
+                )
+            content = self.source.read_content(int(reference.identifier))
+            if content is not None and (
+                content.candidate_outcome_id != outcome.id
+                or content.execution_plan_id != plan.id
+                or content.execution_task_id != task.id
+                or content.execution_task_attempt_id != attempt.id
+            ):
+                raise CandidateEvidenceError(
+                    "candidate_evidence_reference_invalid",
+                    "candidate-content reference is linked to another outcome",
+                )
+        elif reference.scheme == "content-sha256":
+            if (
+                descriptor.source != "candidate_content"
+                or descriptor.evidence_type != "candidate_content"
+            ):
+                raise CandidateEvidenceError(
+                    "candidate_evidence_reference_invalid",
+                    "content hash reference has an incompatible descriptor",
+                )
+            content = self.source.read_content_by_hash(
+                str(reference.identifier), outcome.id
+            )
+        else:
             raise CandidateEvidenceError(
-                "candidate_evidence_reference_invalid",
-                "reference does not identify candidate outcome",
+                "candidate_evidence_scheme_unsupported",
+                "reference scheme is unsupported",
             )
         return (
             plan,
@@ -1270,17 +1599,41 @@ class CandidateEvidenceResolverService:
             contract.environment,
             outcome,
             attempt,
+            content,
         )
 
     @staticmethod
-    def _resolution_status(command, descriptor, outcome, normalized_reference):
+    def _resolution_status(
+        command,
+        descriptor,
+        outcome,
+        normalized_reference,
+        *,
+        content=None,
+        content_bytes_verified=False,
+        content_storage_status=None,
+    ):
+        if (
+            descriptor.source == "candidate_content"
+            and descriptor.evidence_type == "candidate_content"
+        ):
+            if content is None:
+                return "missing", "candidate_content_missing"
+            if content_storage_status is not None or not content_bytes_verified:
+                return (
+                    "hash_mismatch",
+                    content_storage_status or "candidate_content_hash_mismatch",
+                )
+            if (
+                command.expected_content_hash is not None
+                and command.expected_content_hash != content.content_sha256
+            ):
+                return "hash_mismatch", "candidate_content_hash_mismatch"
+            return "resolved", "candidate_content_resolved"
         if (
             descriptor.source != "candidate_outcome"
             or descriptor.evidence_type
-            not in {
-                "candidate_output_reference",
-                "candidate_output_hash",
-            }
+            not in {"candidate_output_reference", "candidate_output_hash"}
         ):
             return "unsupported", "candidate_evidence_source_unsupported"
         if descriptor.expected_media_type is not None:
@@ -1339,10 +1692,15 @@ def _issue(
 
 class ValidationPrimitiveService:
     def __init__(
-        self, db: Session, *, registry: DeterministicValidatorRegistry | None = None
+        self,
+        db: Session,
+        *,
+        registry: DeterministicValidatorRegistry | None = None,
+        content_store: CandidateContentStore | None = None,
     ):
         self.db = db
         self.registry = registry or build_default_validator_registry()
+        self.content_store = content_store or LocalContentAddressedStore()
 
     def verify_resolved_validation_evidence_integrity(
         self, evidence_id: int
@@ -1406,17 +1764,76 @@ class ValidationPrimitiveService:
                     issues.append("resolved_evidence_descriptor_mismatch")
             except (KeyError, StopIteration, TypeError, ValidationContractError):
                 issues.append("resolved_evidence_descriptor_missing")
-        if row.source != "candidate_outcome":
+        content = None
+        if row.source == "candidate_outcome":
+            if row.source_authority_id != (
+                f"execution-task-attempt-outcome:{row.candidate_outcome_id}"
+            ):
+                issues.append("resolved_evidence_source_identity_tampered")
+        elif row.source == "candidate_content":
+            content = (
+                self.db.query(ExecutionTaskCandidateContent)
+                .filter(
+                    ExecutionTaskCandidateContent.candidate_outcome_id
+                    == row.candidate_outcome_id
+                )
+                .one_or_none()
+            )
+            if content is None:
+                if row.resolution_status not in {"missing", "unavailable"}:
+                    issues.append("resolved_evidence_candidate_content_missing")
+                if row.source_authority_id != (
+                    f"execution-task-attempt-outcome:{row.candidate_outcome_id}"
+                ):
+                    issues.append("resolved_evidence_source_identity_tampered")
+            else:
+                if (
+                    row.source_authority_id
+                    != f"execution-task-candidate-content:{content.id}"
+                ):
+                    issues.append("resolved_evidence_source_identity_tampered")
+                if (
+                    content.execution_plan_id != row.execution_plan_id
+                    or content.execution_task_id != row.execution_task_id
+                    or content.execution_task_attempt_id
+                    != row.execution_task_attempt_id
+                    or content.content_sha256 != row.actual_hash
+                    or content.media_type != row.media_type
+                    or content.byte_length != row.byte_size
+                ):
+                    issues.append("resolved_evidence_candidate_content_mismatch")
+                content_integrity = verify_candidate_content_integrity(
+                    self.db, content.id, store=self.content_store
+                )
+                issues.extend(content_integrity.issues)
+        else:
             issues.append("resolved_evidence_source_unsupported")
-        if (
-            row.source_authority_id
-            != f"execution-task-attempt-outcome:{row.candidate_outcome_id}"
-        ):
-            issues.append("resolved_evidence_source_identity_tampered")
         try:
             reference = parse_evidence_reference(row.normalized_reference)
-            if reference.identifier != row.candidate_outcome_id:
-                issues.append("resolved_evidence_reference_tampered")
+            if row.source == "candidate_outcome":
+                if (
+                    reference.scheme != "candidate-output"
+                    or reference.identifier != row.candidate_outcome_id
+                ):
+                    issues.append("resolved_evidence_reference_tampered")
+            elif row.source == "candidate_content":
+                if reference.scheme == "candidate-content":
+                    if content is None or reference.identifier != content.id:
+                        issues.append("resolved_evidence_reference_tampered")
+                elif reference.scheme == "content-sha256":
+                    if (
+                        content is None
+                        or reference.identifier != content.content_sha256
+                    ):
+                        issues.append("resolved_evidence_reference_tampered")
+                elif reference.scheme == "candidate-output":
+                    if (
+                        content is not None
+                        or reference.identifier != row.candidate_outcome_id
+                    ):
+                        issues.append("resolved_evidence_reference_tampered")
+                else:
+                    issues.append("resolved_evidence_reference_tampered")
         except CandidateEvidenceError:
             issues.append("resolved_evidence_reference_invalid")
         if row.expected_hash_algorithm not in {None, VALIDATION_HASH_ALGORITHM}:
@@ -2074,10 +2491,12 @@ class DeterministicValidatorService:
         db: Session,
         *,
         registry: DeterministicValidatorRegistry | None = None,
+        content_store: CandidateContentStore | None = None,
         now: Callable[[], datetime] | None = None,
     ):
         self.db = db
         self.registry = registry or build_default_validator_registry()
+        self.content_store = content_store or LocalContentAddressedStore()
         self._now = now or (lambda: datetime.now(timezone.utc))
 
     def validate(
@@ -2148,7 +2567,7 @@ class DeterministicValidatorService:
                 "evidence does not match validator command",
             )
         evidence_integrity = ValidationPrimitiveService(
-            self.db, registry=self.registry
+            self.db, registry=self.registry, content_store=self.content_store
         ).verify_resolved_validation_evidence_integrity(evidence.id)
         if not evidence_integrity.verified:
             raise CandidateEvidenceError(
@@ -2363,6 +2782,7 @@ __all__ = [
     "CandidateEvidenceError",
     "CandidateEvidenceResolver",
     "CandidateEvidenceResolverService",
+    "CandidateContentAuthority",
     "CandidateOutcomeAuthority",
     "CandidatePredicateResult",
     "DeterministicCandidateValidator",

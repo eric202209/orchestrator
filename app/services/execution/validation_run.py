@@ -23,6 +23,7 @@ from app.models import (
     ExecutionTaskAcceptanceDecision,
     ExecutionTaskAttempt,
     ExecutionTaskAttemptOutcome,
+    ExecutionTaskCandidateContent,
     ExecutionTaskResolvedValidationEvidence,
     ExecutionTaskValidationPredicateResult,
     ExecutionTaskValidationRun,
@@ -392,6 +393,16 @@ def _evidence_strength(
         codes.add("test_execution_not_verified")
     if "artifact_exists" in predicate_ids or "artifact_hash_matches" in predicate_ids:
         codes.add("artifact_bytes_not_verified")
+    if predicate_ids.intersection(
+        {
+            "content_exists",
+            "content_hash_matches",
+            "content_size_within_limit",
+            "media_type_matches",
+        }
+    ):
+        codes.discard("byte_level_validation_unavailable")
+        codes.add("independently_recomputed_bytes")
     return EvidenceStrengthProjection(tuple(sorted(codes)))
 
 
@@ -792,6 +803,21 @@ class ValidationRunService:
             )
             evidence_rows: dict[str, Any] = {}
             for descriptor in contract.evidence_descriptors:
+                candidate_content = (
+                    self.db.query(ExecutionTaskCandidateContent)
+                    .filter(
+                        ExecutionTaskCandidateContent.candidate_outcome_id
+                        == run.candidate_outcome_id
+                    )
+                    .one_or_none()
+                    if descriptor.source == "candidate_content"
+                    else None
+                )
+                expected_reference = (
+                    f"candidate-content://{candidate_content.id}"
+                    if candidate_content is not None
+                    else f"candidate-output://{run.candidate_outcome_id}"
+                )
                 resolution = resolver.resolve(
                     ResolveCandidateEvidenceCommand(
                         execution_plan_id=run.execution_plan_id,
@@ -803,7 +829,7 @@ class ValidationRunService:
                         evidence_key=descriptor.evidence_key,
                         evidence_type=descriptor.evidence_type,
                         evidence_source=descriptor.source,
-                        expected_reference=f"candidate-output://{run.candidate_outcome_id}",
+                        expected_reference=expected_reference,
                         expected_hash_algorithm=descriptor.expected_hash_algorithm,
                         resolver_version=descriptor.resolver_version,
                         environment_configuration_hash=run.environment_configuration_hash,

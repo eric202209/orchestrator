@@ -176,6 +176,7 @@ class RuntimeExecutionOrchestrationResult:
     start: RuntimeStartResult
     outcome: RuntimeOutcomeResult | None
     adapter_result: RuntimeExecutionResult | None = None
+    candidate_content: object | None = None
     rejected: bool = False
     error_code: str | None = None
 
@@ -333,9 +334,16 @@ def _outcome_payload(command: RecordRuntimeAttemptOutcomeCommand) -> dict[str, o
 class ExecutionTaskRuntimeExecutionService:
     """Persist and execute one fenced Phase 29 runtime attempt."""
 
-    def __init__(self, db: Session, *, now: Callable[[], datetime] | None = None):
+    def __init__(
+        self,
+        db: Session,
+        *,
+        now: Callable[[], datetime] | None = None,
+        candidate_content_store: object | None = None,
+    ):
         self.db = db
         self._now = now or (lambda: datetime.now(timezone.utc))
+        self._candidate_content_store = candidate_content_store
 
     def mark_runtime_execution_started(
         self, command: MarkRuntimeExecutionStartedCommand
@@ -737,9 +745,58 @@ class ExecutionTaskRuntimeExecutionService:
         outcome_command = self._outcome_command_from_result(start, adapter_result)
         try:
             outcome = self.record_runtime_attempt_outcome(outcome_command)
+            candidate_content = None
+            if (
+                adapter_result is not None
+                and adapter_result.candidate_bytes is not None
+                and outcome.outcome.outcome_status == "candidate_completed"
+            ):
+                from app.services.execution.candidate_content import (
+                    CandidateContentError,
+                    CandidateContentIngestionService,
+                    IngestCandidateContentCommand,
+                )
+
+                try:
+                    candidate_content = CandidateContentIngestionService(
+                        self.db, store=self._candidate_content_store, now=self._now
+                    ).ingest(
+                        IngestCandidateContentCommand(
+                            execution_plan_id=start.execution_plan_id,
+                            execution_task_id=start.execution_task_id,
+                            execution_task_attempt_id=start.execution_task_attempt_id,
+                            attempt_generation=(
+                                self.db.get(
+                                    ExecutionTaskAttempt,
+                                    start.execution_task_attempt_id,
+                                ).attempt_generation
+                            ),
+                            candidate_outcome_id=outcome.outcome.id,
+                            content=adapter_result.candidate_bytes,
+                            declared_sha256=adapter_result.output_hash,
+                            media_type=adapter_result.candidate_media_type,
+                            ingestion_idempotency_key=(
+                                f"candidate-content-{outcome.outcome.id}"
+                            ),
+                            creation_actor_type="runtime_adapter",
+                            creation_actor_id=start.worker_instance_id,
+                        )
+                    )
+                except CandidateContentError as exc:
+                    self.db.rollback()
+                    return RuntimeExecutionOrchestrationResult(
+                        start_result,
+                        None,
+                        adapter_result=adapter_result,
+                        rejected=True,
+                        error_code=exc.code,
+                    )
             self.db.commit()
             return RuntimeExecutionOrchestrationResult(
-                start_result, outcome, adapter_result=adapter_result
+                start_result,
+                outcome,
+                adapter_result=adapter_result,
+                candidate_content=candidate_content,
             )
         except ExecutionRuntimeOwnershipError as exc:
             self.db.rollback()

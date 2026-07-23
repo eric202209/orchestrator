@@ -1,8 +1,9 @@
-"""Small provider-neutral adapter boundary for Phase 29C-6B.
+"""Small provider-neutral adapter boundary for Phase 29C-6B/29C-9.
 
 The adapter is intentionally narrower than the legacy AgentRuntime contract.
-It returns bounded evidence references, never raw provider output, and has no
-authority to mutate Phase 29 lifecycle, attempt, lease, or outcome rows.
+It may return bounded candidate bytes directly at the trusted completion
+boundary for Phase 29C-9; it never returns a path or URL and has no authority
+to mutate Phase 29 lifecycle, attempt, lease, or outcome rows.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ RUNTIME_OUTCOME_STATUSES = frozenset(
 MAX_ADAPTER_TEXT = 1024
 MAX_ADAPTER_REFERENCE = 512
 MAX_ADAPTER_DIAGNOSTICS_BYTES = 4096
+MAX_ADAPTER_CANDIDATE_BYTES = 1_048_576
 
 
 @dataclass(frozen=True)
@@ -61,11 +63,13 @@ class RuntimeExecutionCommand:
 
 @dataclass(frozen=True)
 class RuntimeExecutionResult:
-    """Bounded adapter result; raw output is deliberately not a field."""
+    """Bounded adapter result with optional completion-time candidate bytes."""
 
     completion_kind: str
     output_reference: str | None = None
     output_hash: str | None = None
+    candidate_bytes: bytes | None = None
+    candidate_media_type: str | None = None
     provider_request_id: str | None = None
     usage_summary: Mapping[str, Any] | None = None
     diagnostics: Mapping[str, Any] | None = None
@@ -134,6 +138,7 @@ __all__ = [
     "DeterministicExecutionRuntimeAdapter",
     "ExecutionRuntimeAdapter",
     "MAX_ADAPTER_DIAGNOSTICS_BYTES",
+    "MAX_ADAPTER_CANDIDATE_BYTES",
     "MAX_ADAPTER_REFERENCE",
     "MAX_ADAPTER_TEXT",
     "RUNTIME_OUTCOME_STATUSES",

@@ -3190,6 +3190,71 @@ def _migration_041_execution_task_recovery_boundary(engine: Engine) -> None:
             connection.execute(text(statement))
 
 
+def _migration_042_execution_task_candidate_content_boundary(engine: Engine) -> None:
+    """Add empty Phase 29C-9 candidate-content authority.
+
+    This migration deliberately creates only tables and indexes.  It never
+    reads runtime references, fetches bytes, infers media types, recomputes
+    historical hashes, or creates historical content rows.
+    """
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_candidate_contents (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    execution_task_attempt_id INTEGER NOT NULL,
+                    attempt_generation INTEGER NOT NULL,
+                    candidate_outcome_id INTEGER NOT NULL UNIQUE,
+                    content_sha256 VARCHAR(64) NOT NULL,
+                    declared_sha256 VARCHAR(64),
+                    byte_length INTEGER NOT NULL,
+                    media_type VARCHAR(64) NOT NULL,
+                    storage_backend_id VARCHAR(64) NOT NULL,
+                    storage_backend_version VARCHAR(32) NOT NULL,
+                    storage_key VARCHAR(160) NOT NULL,
+                    ingestion_idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+                    canonical_ingestion_command_payload JSON NOT NULL,
+                    canonical_ingestion_command_hash VARCHAR(64) NOT NULL,
+                    canonical_metadata_payload JSON NOT NULL,
+                    canonical_metadata_hash VARCHAR(64) NOT NULL,
+                    content_projection JSON,
+                    content_projection_hash VARCHAR(64),
+                    content_projection_version VARCHAR(64),
+                    creation_actor_type VARCHAR(64) NOT NULL,
+                    creation_actor_id VARCHAR(255) NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    CONSTRAINT uq_execution_task_candidate_content_outcome
+                        UNIQUE (execution_task_id, candidate_outcome_id),
+                    CONSTRAINT ck_execution_task_candidate_content_generation_positive
+                        CHECK (attempt_generation > 0),
+                    CONSTRAINT ck_execution_task_candidate_content_length_nonnegative
+                        CHECK (byte_length >= 0),
+                    FOREIGN KEY(execution_plan_id)
+                        REFERENCES execution_plans (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_id)
+                        REFERENCES execution_tasks (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_attempt_id)
+                        REFERENCES execution_task_attempts (id) ON DELETE CASCADE,
+                    FOREIGN KEY(candidate_outcome_id)
+                        REFERENCES execution_task_attempt_outcomes (id)
+                        ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        for statement in (
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_candidate_contents_task_hash "
+            "ON execution_task_candidate_contents (execution_task_id, content_sha256)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_candidate_contents_plan_created "
+            "ON execution_task_candidate_contents (execution_plan_id, created_at)",
+        ):
+            connection.execute(text(statement))
+
+
 def _migration_038_normalize(value):
     if isinstance(value, str):
         return unicodedata.normalize("NFC", value)
@@ -3690,6 +3755,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="041_execution_task_recovery_boundary",
         description="Add Phase 29C-8 recovery authority and replacement-attempt lineage",
         upgrade=_migration_041_execution_task_recovery_boundary,
+    ),
+    Migration(
+        version="042_execution_task_candidate_content_boundary",
+        description="Add Phase 29C-9 immutable candidate content authority",
+        upgrade=_migration_042_execution_task_candidate_content_boundary,
     ),
 )
 

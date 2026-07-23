@@ -769,6 +769,11 @@ class ExecutionPlan(Base):
         back_populates="execution_plan",
         cascade="all, delete-orphan",
     )
+    candidate_contents = relationship(
+        "ExecutionTaskCandidateContent",
+        back_populates="execution_plan",
+        cascade="all, delete-orphan",
+    )
     recovery_inputs = relationship(
         "ExecutionTaskRecoveryInput",
         back_populates="execution_plan",
@@ -893,6 +898,11 @@ class ExecutionTask(Base):
     )
     recovery_authorizations = relationship(
         "ExecutionTaskRecoveryAuthorization",
+        back_populates="execution_task",
+        cascade="all, delete-orphan",
+    )
+    candidate_contents = relationship(
+        "ExecutionTaskCandidateContent",
         back_populates="execution_task",
         cascade="all, delete-orphan",
     )
@@ -2393,6 +2403,101 @@ class ExecutionTaskAttemptOutcome(Base):
     dispatch_intent = relationship("ExecutionTaskDispatchIntent")
     runtime_lease = relationship("ExecutionTaskRuntimeLease")
     runtime_start = relationship("ExecutionTaskRuntimeStart")
+    candidate_content = relationship(
+        "ExecutionTaskCandidateContent",
+        back_populates="candidate_outcome",
+        uselist=False,
+    )
+
+
+class ExecutionTaskCandidateContent(Base):
+    """Immutable byte-backed content linked to exactly one candidate outcome.
+
+    The local content store owns the bytes; this row owns the task-scoped
+    linkage and the independently recomputed metadata.  Equal hashes may be
+    reused by the store across rows, but an outcome can never be relinked.
+    """
+
+    __tablename__ = "execution_task_candidate_contents"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    attempt_generation = Column(Integer, nullable=False)
+    candidate_outcome_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempt_outcomes.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    content_sha256 = Column(String(64), nullable=False, index=True)
+    declared_sha256 = Column(String(64), nullable=True)
+    byte_length = Column(Integer, nullable=False)
+    media_type = Column(String(64), nullable=False)
+    storage_backend_id = Column(String(64), nullable=False)
+    storage_backend_version = Column(String(32), nullable=False)
+    storage_key = Column(String(160), nullable=False)
+    ingestion_idempotency_key = Column(String(128), nullable=False, unique=True)
+    canonical_ingestion_command_payload = Column(JSON, nullable=False)
+    canonical_ingestion_command_hash = Column(String(64), nullable=False)
+    canonical_metadata_payload = Column(JSON, nullable=False)
+    canonical_metadata_hash = Column(String(64), nullable=False)
+    content_projection = Column(JSON, nullable=True)
+    content_projection_hash = Column(String(64), nullable=True)
+    content_projection_version = Column(String(64), nullable=True)
+    creation_actor_type = Column(String(64), nullable=False)
+    creation_actor_id = Column(String(255), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_task_id",
+            "candidate_outcome_id",
+            name="uq_execution_task_candidate_content_outcome",
+        ),
+        CheckConstraint(
+            "attempt_generation > 0",
+            name="ck_execution_task_candidate_content_generation_positive",
+        ),
+        CheckConstraint(
+            "byte_length >= 0",
+            name="ck_execution_task_candidate_content_length_nonnegative",
+        ),
+        Index(
+            "ix_execution_task_candidate_contents_task_hash",
+            "execution_task_id",
+            "content_sha256",
+        ),
+        Index(
+            "ix_execution_task_candidate_contents_plan_created",
+            "execution_plan_id",
+            "created_at",
+        ),
+    )
+
+    execution_plan = relationship("ExecutionPlan", back_populates="candidate_contents")
+    execution_task = relationship("ExecutionTask", back_populates="candidate_contents")
+    execution_task_attempt = relationship("ExecutionTaskAttempt")
+    candidate_outcome = relationship(
+        "ExecutionTaskAttemptOutcome", back_populates="candidate_content"
+    )
 
 
 class ExecutionTaskTransition(Base):
