@@ -438,7 +438,7 @@ def test_scheduler_claim_migration_replays_and_matches_fresh_schema(tmp_path):
         with engine.begin() as connection:
             connection.execute(text("DROP TABLE execution_task_scheduler_claims"))
         # Preserve the C3 fixture boundary through C4 while excluding C5/C6B.
-        run_schema_migrations(engine, MIGRATIONS[:-2])
+        run_schema_migrations(engine, MIGRATIONS[:-3])
         run_schema_migrations(engine)
         run_schema_migrations(engine)
         columns = {

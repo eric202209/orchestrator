@@ -744,6 +744,12 @@ class ExecutionPlan(Base):
         back_populates="execution_plan",
         cascade="all, delete-orphan",
     )
+    validation_contracts = relationship(
+        "ExecutionTaskValidationSpecification",
+        back_populates="execution_plan",
+        cascade="all, delete-orphan",
+    )
+    validation_contract_set_hash = Column(String(64), nullable=True, index=True)
 
 
 class ExecutionTask(Base):
@@ -771,6 +777,15 @@ class ExecutionTask(Base):
     blocking_state = Column(String(32), nullable=False)
     task_spec = Column(JSON, nullable=False)
     done_when = Column(JSON, nullable=False)
+    validation_contract_status = Column(
+        String(32), nullable=False, default="legacy_unstructured"
+    )
+    validation_contract_id = Column(
+        Integer,
+        nullable=True,
+        unique=True,
+        index=True,
+    )
     status = Column(String(20), nullable=False, default="pending")
     state_version = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -818,6 +833,86 @@ class ExecutionTask(Base):
         "ExecutionTaskAttemptOutcome",
         back_populates="execution_task",
         cascade="all, delete-orphan",
+    )
+
+
+class ExecutionTaskValidationSpecification(Base):
+    """Immutable validation authority bound to one released Execution Task.
+
+    ``legacy_unstructured`` rows are compatibility records created for
+    pre-contract releases.  They preserve authored ``done_when`` text but
+    contain no executable predicate authority.
+    """
+
+    __tablename__ = "execution_task_validation_specifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    release_generation = Column(Integer, nullable=False)
+    contract_status = Column(String(32), nullable=False)
+    schema_version = Column(String(96), nullable=False)
+    original_done_when = Column(JSON, nullable=False)
+    structured_contract = Column(JSON, nullable=True)
+    pass_policy = Column(JSON, nullable=True)
+    review_requirement = Column(JSON, nullable=True)
+    environment_identity = Column(JSON, nullable=True)
+    validator_set_identity = Column(String(128), nullable=True)
+    canonical_payload = Column(JSON, nullable=False)
+    canonical_specification_hash = Column(String(64), nullable=False, index=True)
+    hash_algorithm = Column(String(16), nullable=False, default="sha256")
+    specification_source = Column(String(64), nullable=False)
+    release_authority_reference = Column(String(128), nullable=False)
+    creation_actor_type = Column(String(64), nullable=False)
+    creation_actor_id = Column(String(255), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_plan_id",
+            "execution_task_id",
+            "release_generation",
+            name="uq_execution_task_validation_release_generation",
+        ),
+        CheckConstraint(
+            "release_generation > 0",
+            name="ck_execution_task_validation_generation_positive",
+        ),
+        CheckConstraint(
+            "contract_status IN ('structured_executable', 'legacy_unstructured', "
+            "'validation_not_required', 'unsupported')",
+            name="ck_execution_task_validation_status",
+        ),
+        CheckConstraint(
+            "hash_algorithm = 'sha256'",
+            name="ck_execution_task_validation_hash_algorithm",
+        ),
+        Index(
+            "ix_execution_task_validation_plan_status",
+            "execution_plan_id",
+            "contract_status",
+        ),
+    )
+
+    execution_plan = relationship(
+        "ExecutionPlan", back_populates="validation_contracts"
+    )
+    execution_task = relationship(
+        "ExecutionTask",
+        foreign_keys=[execution_task_id],
     )
 
 

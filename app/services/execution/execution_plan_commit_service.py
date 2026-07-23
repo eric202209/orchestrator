@@ -36,6 +36,11 @@ from app.services.planning.structured_task_plan import (
     STRUCTURED_TASK_PLAN_STAGE_NAME,
     STRUCTURED_TASK_PLAN_STAGE_VERSION,
 )
+from app.services.planning.validation_contract import (
+    ValidationContractError,
+    canonical_validation_hash,
+)
+from app.services.execution.validation_contract import ValidationContractService
 
 # Phase 29A's conservative dependency-type mapping (data only -- no
 # scheduler eligibility, no review-gate resolution).  ``review_gate`` is
@@ -202,6 +207,12 @@ class ExecutionPlanCommitService:
         session, manifest, task_plan, checkpoint = self._resolve_authority(
             planning_commit_manifest_id
         )
+        try:
+            ValidationContractService.preflight_task_plan(task_plan)
+        except ValidationContractError as exc:
+            raise ExecutionPlanCommitError(
+                f"{exc.code}: validation contract cannot be released"
+            ) from exc
 
         existing = (
             self.db.query(ExecutionPlan)
@@ -219,6 +230,14 @@ class ExecutionPlanCommitService:
                 raise ExecutionPlanCommitError(
                     "an existing Execution Plan for this commit manifest does "
                     "not match the current Planning authority"
+                )
+            integrity = ValidationContractService(
+                self.db
+            ).verify_execution_plan_validation_contract_integrity(existing.id)
+            if not integrity.verified:
+                raise ExecutionPlanCommitError(
+                    "validation contract integrity failure: "
+                    + ",".join(integrity.issues)
                 )
             return existing
 
@@ -250,6 +269,33 @@ class ExecutionPlanCommitService:
             )
             self.db.add(row)
             task_rows[task.id] = row
+        self.db.flush()
+
+        validation_service = ValidationContractService(self.db)
+        specifications = []
+        for task in task_plan.tasks:
+            execution_task = task_rows[task.id]
+            specification = validation_service.create_for_task(
+                execution_plan=execution_plan,
+                execution_task=execution_task,
+                authored_task=task,
+            )
+            execution_task.validation_contract_status = specification.contract_status
+            execution_task.validation_contract_id = specification.id
+            specifications.append(specification)
+        execution_plan.validation_contract_set_hash = canonical_validation_hash(
+            [
+                {
+                    "plan_task_id": task.plan_task_id,
+                    "contract_status": specification.contract_status,
+                    "specification_hash": specification.canonical_specification_hash,
+                }
+                for task, specification in sorted(
+                    zip(task_rows.values(), specifications),
+                    key=lambda item: item[0].plan_task_id,
+                )
+            ]
+        )
         self.db.flush()
 
         seen_edges: set[tuple[int, int]] = set()
@@ -441,3 +487,12 @@ class ExecutionPlanCommitService:
                     f"Execution Group {group.id!r} membership does not match "
                     "its Structured Task Plan specification"
                 )
+
+        validation_integrity = ValidationContractService(
+            self.db
+        ).verify_execution_plan_validation_contract_integrity(execution_plan.id)
+        if not validation_integrity.verified:
+            raise ExecutionPlanCommitError(
+                "validation contract integrity failure: "
+                + ",".join(validation_integrity.issues)
+            )

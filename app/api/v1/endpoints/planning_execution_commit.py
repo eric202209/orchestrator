@@ -47,6 +47,19 @@ _ERROR_STATUS = {
     "commit_manifest_conflict": status.HTTP_409_CONFLICT,
     "idempotency_key_conflict": status.HTTP_409_CONFLICT,
     "integrity_failure": status.HTTP_500_INTERNAL_SERVER_ERROR,
+    "validation_contract_missing": _HTTP_422,
+    "validation_contract_schema_unsupported": _HTTP_422,
+    "validation_predicate_unsupported": _HTTP_422,
+    "validation_predicate_version_unsupported": _HTTP_422,
+    "validation_contract_parameters_invalid": _HTTP_422,
+    "validation_evidence_descriptor_invalid": _HTTP_422,
+    "validation_pass_policy_invalid": _HTTP_422,
+    "validation_review_requirement_invalid": _HTTP_422,
+    "validation_environment_identity_invalid": _HTTP_422,
+    "validation_contract_hash_mismatch": status.HTTP_409_CONFLICT,
+    "validation_contract_release_conflict": status.HTTP_409_CONFLICT,
+    "validation_contract_idempotency_conflict": status.HTTP_409_CONFLICT,
+    "validation_contract_integrity_failure": status.HTTP_500_INTERNAL_SERVER_ERROR,
 }
 
 _SAFE_MESSAGE = {

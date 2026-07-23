@@ -23,6 +23,10 @@ from typing import Any, ClassVar
 import unicodedata
 
 from app.services.planning.planning_brief import PlanningBrief
+from app.services.planning.validation_contract import (
+    StructuredValidationContract,
+    canonical_validation_hash,
+)
 
 
 STRUCTURED_TASK_PLAN_SCHEMA_VERSION = "structured-task-plan/1.0"
@@ -268,15 +272,29 @@ class WorkItem:
     target: str = ""
     deliverable: str = ""
     done_when: str = ""
+    validation_contract: StructuredValidationContract | None = None
 
     def __post_init__(self) -> None:
         for name in fields(self):
-            object.__setattr__(
-                self, name.name, _text(getattr(self, name.name), name.name)
-            )
+            if name.name == "validation_contract":
+                value = getattr(self, name.name)
+                if value is not None and not isinstance(
+                    value, StructuredValidationContract
+                ):
+                    value = StructuredValidationContract.from_mapping(value)
+                object.__setattr__(self, name.name, value)
+            else:
+                object.__setattr__(
+                    self, name.name, _text(getattr(self, name.name), name.name)
+                )
 
-    def to_dict(self) -> dict[str, str]:
-        return _record_dict(self)
+    def to_dict(self) -> dict[str, Any]:
+        result = _record_dict(self)
+        # Keep legacy plan hashes stable when the additive field is absent.
+        # Structured validation is present only when explicitly authored.
+        if self.validation_contract is None:
+            result.pop("validation_contract", None)
+        return result
 
 
 @dataclass(frozen=True)
@@ -979,6 +997,20 @@ def _task_candidate_sort_key(task: Task, original_index: int) -> tuple[Any, ...]
         )
         for item in task.work_items
     )
+    if any(item.validation_contract is not None for item in task.work_items):
+        work = tuple(
+            item_key
+            + (
+                (
+                    canonical_validation_hash(
+                        task.work_items[index].validation_contract.to_dict()
+                    )
+                    if task.work_items[index].validation_contract is not None
+                    else ""
+                ),
+            )
+            for index, item_key in enumerate(work)
+        )
     semantic = canonical_json_hash(
         {
             "objective": task.objective,

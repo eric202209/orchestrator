@@ -348,7 +348,10 @@ def _parse_task(raw: Any, index: int) -> Task:
         WorkItem(
             **dict(
                 _strict_record(
-                    item, record_type=WorkItem, path=f"{path}.work_items[{item_index}]"
+                    item,
+                    record_type=WorkItem,
+                    path=f"{path}.work_items[{item_index}]",
+                    required={"action", "target", "deliverable", "done_when"},
                 )
             )
         )

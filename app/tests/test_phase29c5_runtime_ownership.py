@@ -649,7 +649,7 @@ def test_runtime_migration_replays_from_phase29c4_and_preserves_old_attempts(tmp
             connection.execute(text("DROP TABLE execution_task_attempts"))
         # C5 starts from the committed C4 schema; C6B is now the final
         # additive migration and must not be applied before the fixture row.
-        run_schema_migrations(engine, MIGRATIONS[:-2])
+        run_schema_migrations(engine, MIGRATIONS[:-3])
         with engine.begin() as connection:
             connection.execute(
                 text(

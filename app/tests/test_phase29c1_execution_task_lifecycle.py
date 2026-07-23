@@ -724,7 +724,37 @@ def test_migration_adds_lifecycle_column_and_table_to_phase29b_schema(tmp_path):
             connection.execute(
                 text("ALTER TABLE execution_tasks DROP COLUMN state_version")
             )
-            run_schema_migrations(engine, MIGRATIONS[:-5])
+            connection.execute(
+                text(
+                    "ALTER TABLE execution_tasks DROP COLUMN "
+                    "validation_contract_status"
+                )
+            )
+            connection.execute(
+                text(
+                    "DROP INDEX IF EXISTS " "ix_execution_tasks_validation_contract_id"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE execution_tasks DROP COLUMN " "validation_contract_id"
+                )
+            )
+            connection.execute(
+                text(
+                    "DROP INDEX IF EXISTS "
+                    "ix_execution_plans_validation_contract_set_hash"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE execution_plans DROP COLUMN validation_contract_set_hash"
+                )
+            )
+            connection.execute(
+                text("DROP TABLE execution_task_validation_specifications")
+            )
+            run_schema_migrations(engine, MIGRATIONS[:-6])
         with engine.begin() as connection:
             connection.execute(
                 text(
@@ -763,7 +793,37 @@ def test_migration_refuses_existing_non_pending_task(tmp_path):
             connection.execute(
                 text("ALTER TABLE execution_tasks DROP COLUMN state_version")
             )
-            run_schema_migrations(engine, MIGRATIONS[:-5])
+            connection.execute(
+                text(
+                    "ALTER TABLE execution_tasks DROP COLUMN "
+                    "validation_contract_status"
+                )
+            )
+            connection.execute(
+                text(
+                    "DROP INDEX IF EXISTS " "ix_execution_tasks_validation_contract_id"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE execution_tasks DROP COLUMN " "validation_contract_id"
+                )
+            )
+            connection.execute(
+                text(
+                    "DROP INDEX IF EXISTS "
+                    "ix_execution_plans_validation_contract_set_hash"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE execution_plans DROP COLUMN validation_contract_set_hash"
+                )
+            )
+            connection.execute(
+                text("DROP TABLE execution_task_validation_specifications")
+            )
+            run_schema_migrations(engine, MIGRATIONS[:-6])
         with engine.begin() as connection:
             connection.execute(
                 text(

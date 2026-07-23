@@ -9,7 +9,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Iterable
+import hashlib
 import json
+import unicodedata
 import uuid
 
 from sqlalchemy import inspect, text
@@ -2297,6 +2299,263 @@ def _migration_037_execution_task_runtime_evidence(engine: Engine) -> None:
             connection.execute(text(statement))
 
 
+def _migration_038_execution_task_validation_contract(engine: Engine) -> None:
+    """Add immutable release-bound validation-contract authority.
+
+    Existing tasks receive compatibility rows marked ``legacy_unstructured``.
+    The migration copies only the already-persisted ``done_when`` value; it
+    never creates predicates, validation runs, acceptance decisions, or
+    lifecycle transitions.
+    """
+
+    table_names = _table_names(engine)
+    if "execution_tasks" in table_names:
+        with engine.begin() as connection:
+            if not _has_column(engine, "execution_tasks", "validation_contract_status"):
+                connection.execute(
+                    text(
+                        "ALTER TABLE execution_tasks ADD COLUMN "
+                        "validation_contract_status VARCHAR(32) NOT NULL "
+                        "DEFAULT 'legacy_unstructured'"
+                    )
+                )
+            if not _has_column(engine, "execution_tasks", "validation_contract_id"):
+                connection.execute(
+                    text(
+                        "ALTER TABLE execution_tasks ADD COLUMN "
+                        "validation_contract_id INTEGER"
+                    )
+                )
+
+    if "execution_plans" in table_names:
+        with engine.begin() as connection:
+            if not _has_column(
+                engine, "execution_plans", "validation_contract_set_hash"
+            ):
+                connection.execute(
+                    text(
+                        "ALTER TABLE execution_plans ADD COLUMN "
+                        "validation_contract_set_hash VARCHAR(64)"
+                    )
+                )
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_validation_specifications (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL UNIQUE,
+                    release_generation INTEGER NOT NULL,
+                    contract_status VARCHAR(32) NOT NULL,
+                    schema_version VARCHAR(96) NOT NULL,
+                    original_done_when JSON NOT NULL,
+                    structured_contract JSON,
+                    pass_policy JSON,
+                    review_requirement JSON,
+                    environment_identity JSON,
+                    validator_set_identity VARCHAR(128),
+                    canonical_payload JSON NOT NULL,
+                    canonical_specification_hash VARCHAR(64) NOT NULL,
+                    hash_algorithm VARCHAR(16) NOT NULL DEFAULT 'sha256',
+                    specification_source VARCHAR(64) NOT NULL,
+                    release_authority_reference VARCHAR(128) NOT NULL,
+                    creation_actor_type VARCHAR(64) NOT NULL,
+                    creation_actor_id VARCHAR(255) NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_execution_task_validation_release_generation
+                        UNIQUE (execution_plan_id, execution_task_id, release_generation),
+                    CONSTRAINT ck_execution_task_validation_generation_positive
+                        CHECK (release_generation > 0),
+                    CONSTRAINT ck_execution_task_validation_status
+                        CHECK (contract_status IN (
+                            'structured_executable', 'legacy_unstructured',
+                            'validation_not_required', 'unsupported'
+                        )),
+                    CONSTRAINT ck_execution_task_validation_hash_algorithm
+                        CHECK (hash_algorithm = 'sha256'),
+                    FOREIGN KEY(execution_plan_id)
+                        REFERENCES execution_plans (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_id)
+                        REFERENCES execution_tasks (id) ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        indexes = {
+            "ix_execution_task_validation_plan_status": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_task_validation_plan_status "
+                "ON execution_task_validation_specifications "
+                "(execution_plan_id, contract_status)"
+            ),
+            "ix_execution_task_validation_hash": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_task_validation_hash "
+                "ON execution_task_validation_specifications "
+                "(canonical_specification_hash)"
+            ),
+            "ix_execution_tasks_validation_contract_id": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_tasks_validation_contract_id "
+                "ON execution_tasks (validation_contract_id)"
+            ),
+            "ix_execution_plans_validation_contract_set_hash": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_plans_validation_contract_set_hash "
+                "ON execution_plans (validation_contract_set_hash)"
+            ),
+        }
+        for statement in indexes.values():
+            if (
+                "ON execution_tasks " in statement
+                and "execution_tasks" not in table_names
+            ):
+                continue
+            if (
+                "ON execution_plans " in statement
+                and "execution_plans" not in table_names
+            ):
+                continue
+            connection.execute(text(statement))
+
+        if "execution_tasks" not in table_names:
+            return
+
+        task_rows = connection.execute(
+            text(
+                "SELECT id, execution_plan_id, done_when, "
+                "validation_contract_id FROM execution_tasks ORDER BY id"
+            )
+        ).fetchall()
+        for task_id, plan_id, done_when_raw, existing_spec_id in task_rows:
+            if existing_spec_id is not None:
+                continue
+            try:
+                done_when = (
+                    json.loads(done_when_raw)
+                    if isinstance(done_when_raw, str)
+                    else done_when_raw
+                )
+            except (TypeError, ValueError):
+                done_when = done_when_raw
+            payload = {
+                "canonicalization_version": "execution-task-validation-canonical/1",
+                "schema_version": "execution-task-validation-contract/1.0",
+                "contract_status": "legacy_unstructured",
+                "original_done_when": done_when,
+                "structured_contract": None,
+            }
+            canonical_bytes = json.dumps(
+                _migration_038_normalize(payload),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            specification_hash = hashlib.sha256(canonical_bytes).hexdigest()
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO execution_task_validation_specifications (
+                        execution_plan_id, execution_task_id, release_generation,
+                        contract_status, schema_version, original_done_when,
+                        structured_contract, canonical_payload,
+                        canonical_specification_hash, hash_algorithm,
+                        specification_source, release_authority_reference,
+                        creation_actor_type, creation_actor_id
+                    )
+                    SELECT id, :task_id,
+                        COALESCE(generation, 1), 'legacy_unstructured',
+                        'execution-task-validation-contract/1.0', :done_when,
+                        NULL, :canonical_payload, :specification_hash, 'sha256',
+                        'legacy_compatibility',
+                        source_commit_identity, 'schema_migration', '038'
+                    FROM execution_plans WHERE id = :plan_id
+                    """
+                ),
+                {
+                    "task_id": task_id,
+                    "plan_id": plan_id,
+                    "done_when": json.dumps(done_when, ensure_ascii=False),
+                    "canonical_payload": json.dumps(payload, ensure_ascii=False),
+                    "specification_hash": specification_hash,
+                },
+            )
+            # A pre-authority fixture may contain an orphaned task row.  It
+            # has no legal immutable plan binding, so leave it untouched and
+            # fail closed rather than fabricate a contract authority.
+            specification_id = connection.execute(
+                text(
+                    "SELECT id FROM execution_task_validation_specifications "
+                    "WHERE execution_task_id = :task_id"
+                ),
+                {"task_id": task_id},
+            ).scalar_one_or_none()
+            if specification_id is None:
+                continue
+            connection.execute(
+                text(
+                    "UPDATE execution_tasks SET validation_contract_status = "
+                    "'legacy_unstructured', validation_contract_id = :specification_id "
+                    "WHERE id = :task_id"
+                ),
+                {"specification_id": specification_id, "task_id": task_id},
+            )
+
+        plan_rows = connection.execute(
+            text("SELECT id FROM execution_plans ORDER BY id")
+        ).fetchall()
+        for (plan_id,) in plan_rows:
+            contract_rows = connection.execute(
+                text(
+                    """
+                    SELECT t.plan_task_id, s.contract_status,
+                        s.canonical_specification_hash
+                    FROM execution_tasks t
+                    JOIN execution_task_validation_specifications s
+                        ON s.execution_task_id = t.id
+                    WHERE t.execution_plan_id = :plan_id
+                    ORDER BY t.plan_task_id
+                    """
+                ),
+                {"plan_id": plan_id},
+            ).fetchall()
+            set_payload = [
+                {
+                    "plan_task_id": str(row[0]),
+                    "contract_status": str(row[1]),
+                    "specification_hash": str(row[2]),
+                }
+                for row in contract_rows
+            ]
+            set_bytes = json.dumps(
+                _migration_038_normalize(set_payload),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            connection.execute(
+                text(
+                    "UPDATE execution_plans SET validation_contract_set_hash = "
+                    ":set_hash WHERE id = :plan_id"
+                ),
+                {
+                    "set_hash": hashlib.sha256(set_bytes).hexdigest(),
+                    "plan_id": plan_id,
+                },
+            )
+
+
+def _migration_038_normalize(value):
+    if isinstance(value, str):
+        return unicodedata.normalize("NFC", value)
+    if isinstance(value, dict):
+        return {
+            unicodedata.normalize("NFC", str(key)): _migration_038_normalize(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_migration_038_normalize(item) for item in value]
+    return value
+
+
 def _migration_014_task_workflow_stage(engine: Engine) -> None:
     if "tasks" not in _table_names(engine):
         return
@@ -2764,6 +3023,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="037_execution_task_runtime_evidence",
         description="Add Phase 29C-6B runtime starts, progress, and attempt outcomes",
         upgrade=_migration_037_execution_task_runtime_evidence,
+    ),
+    Migration(
+        version="038_execution_task_validation_contract",
+        description="Add immutable release-bound validation contract authority",
+        upgrade=_migration_038_execution_task_validation_contract,
     ),
 )
 

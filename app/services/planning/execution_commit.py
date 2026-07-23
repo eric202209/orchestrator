@@ -58,6 +58,8 @@ from app.services.planning.structured_task_plan import (
     STRUCTURED_TASK_PLAN_STAGE_NAME,
     STRUCTURED_TASK_PLAN_STAGE_VERSION,
 )
+from app.services.planning.validation_contract import ValidationContractError
+from app.services.execution.validation_contract import ValidationContractService
 
 PROVENANCE_SCHEMA = "planning_execution_commit.v1"
 COMMAND_SCHEMA = "planning_execution_commit_command.v1"
@@ -83,6 +85,19 @@ ERROR_CODES = frozenset(
         "commit_manifest_conflict",
         "idempotency_key_conflict",
         "integrity_failure",
+        "validation_contract_missing",
+        "validation_contract_schema_unsupported",
+        "validation_predicate_unsupported",
+        "validation_predicate_version_unsupported",
+        "validation_contract_parameters_invalid",
+        "validation_evidence_descriptor_invalid",
+        "validation_pass_policy_invalid",
+        "validation_review_requirement_invalid",
+        "validation_environment_identity_invalid",
+        "validation_contract_hash_mismatch",
+        "validation_contract_release_conflict",
+        "validation_contract_idempotency_conflict",
+        "validation_contract_integrity_failure",
     }
 )
 
@@ -573,6 +588,10 @@ class PlanningExecutionCommitService:
                 "integrity_failure",
                 "accepted Structured Task Plan could not be re-derived",
             )
+        try:
+            ValidationContractService.preflight_task_plan(task_plan)
+        except ValidationContractError as exc:
+            raise ExecutionCommitError(exc.code, exc.message) from exc
 
         # Only manifests that claim to release *this exact* accepted
         # checkpoint are compared for conflict.  A manifest bound to a
