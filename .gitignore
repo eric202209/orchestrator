@@ -20,6 +20,7 @@ htmlcov/
 .coverage
 coverage.xml
 .relay-venv/
+/candidate-content/
 
 # Node.js
 node_modules/

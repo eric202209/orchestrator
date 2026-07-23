@@ -47,6 +47,7 @@ EVIDENCE_TYPES = frozenset(
         "test_result",
         "schema_document",
         "review_decision",
+        "execution_evidence",
     }
 )
 EVIDENCE_SOURCES = frozenset(
@@ -55,6 +56,7 @@ EVIDENCE_SOURCES = frozenset(
         "candidate_content",
         "release_contract",
         "review_authority",
+        "execution_evidence",
     }
 )
 HASH_ALGORITHMS = frozenset({"sha256"})
@@ -75,7 +77,34 @@ PREDICATE_VERSIONS = {
     "test_suite_result_passed": frozenset({1}),
     "all_of": frozenset({1}),
     "any_of": frozenset({1}),
+    "execution_evidence_exists": frozenset({1}),
+    "execution_evidence_kind_matches": frozenset({1}),
+    "execution_evidence_media_type_matches": frozenset({1}),
+    "execution_evidence_hash_matches": frozenset({1}),
+    "execution_evidence_producer_matches": frozenset({1}),
 }
+
+# Phase 29C-12: execution evidence kind/producer binding vocabulary.  This is
+# an intentional duplicate of app.services.execution.execution_evidence's
+# EVIDENCE_KIND_PRODUCERS -- this module stays execution-independent (no
+# resolver, filesystem, or lifecycle imports), so the authored-contract
+# vocabulary is declared locally instead of importing the execution module.
+EXECUTION_EVIDENCE_KINDS = frozenset({"candidate", "command", "test", "lint"})
+EXECUTION_EVIDENCE_KIND_PRODUCERS: dict[str, str] = {
+    "candidate": "runtime",
+    "command": "command-runner",
+    "test": "test-runner",
+    "lint": "lint-runner",
+}
+EXECUTION_EVIDENCE_PREDICATE_IDS = frozenset(
+    {
+        "execution_evidence_exists",
+        "execution_evidence_kind_matches",
+        "execution_evidence_media_type_matches",
+        "execution_evidence_hash_matches",
+        "execution_evidence_producer_matches",
+    }
+)
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 _VERSION_RE = re.compile(r"^[a-z][a-z0-9_-]{1,63}(?:/[0-9]+)?$")
@@ -236,6 +265,11 @@ def _validate_predicate_parameters(
         "artifact_exists",
         "artifact_hash_matches",
         "test_suite_result_passed",
+        "execution_evidence_exists",
+        "execution_evidence_kind_matches",
+        "execution_evidence_media_type_matches",
+        "execution_evidence_hash_matches",
+        "execution_evidence_producer_matches",
     }:
         _validate_exact_keys(canonical, set(), "predicate parameters")
     elif predicate_id == "json_schema_matches":
@@ -434,6 +468,8 @@ class ValidationEvidenceDescriptor:
     expected_media_type: str | None = None
     expected_hash_algorithm: str | None = None
     resolver_version: str = VALIDATION_RESOLVER_VERSION
+    expected_evidence_kind: str | None = None
+    expected_producer: str | None = None
 
     def __post_init__(self) -> None:
         key = _identifier(self.evidence_key, "evidence_key")
@@ -446,6 +482,33 @@ class ValidationEvidenceDescriptor:
         if source not in EVIDENCE_SOURCES:
             raise ValidationContractError(
                 "validation_evidence_descriptor_invalid", "evidence source is invalid"
+            )
+        if (source == "execution_evidence") != (evidence_type == "execution_evidence"):
+            raise ValidationContractError(
+                "validation_evidence_descriptor_invalid",
+                "execution evidence source and type must be used together",
+            )
+        if source == "execution_evidence":
+            if self.expected_evidence_kind not in EXECUTION_EVIDENCE_KINDS:
+                raise ValidationContractError(
+                    "validation_evidence_descriptor_invalid",
+                    "expected evidence kind is invalid",
+                )
+            if (
+                self.expected_producer
+                != EXECUTION_EVIDENCE_KIND_PRODUCERS[self.expected_evidence_kind]
+            ):
+                raise ValidationContractError(
+                    "validation_evidence_descriptor_invalid",
+                    "expected producer does not match evidence kind",
+                )
+        elif (
+            self.expected_evidence_kind is not None
+            or self.expected_producer is not None
+        ):
+            raise ValidationContractError(
+                "validation_evidence_descriptor_invalid",
+                "evidence kind/producer binding requires execution_evidence source",
             )
         if not isinstance(self.required, bool):
             raise ValidationContractError(
@@ -494,6 +557,8 @@ class ValidationEvidenceDescriptor:
             "expected_media_type",
             "expected_hash_algorithm",
             "resolver_version",
+            "expected_evidence_kind",
+            "expected_producer",
         }
         _validate_exact_keys(value, allowed, "evidence descriptor")
         if not {"evidence_key", "evidence_type"}.issubset(value):
@@ -518,6 +583,8 @@ class ValidationEvidenceDescriptor:
             "expected_media_type": self.expected_media_type,
             "expected_hash_algorithm": self.expected_hash_algorithm,
             "resolver_version": self.resolver_version,
+            "expected_evidence_kind": self.expected_evidence_kind,
+            "expected_producer": self.expected_producer,
         }
 
 
@@ -890,6 +957,25 @@ class StructuredValidationContract:
                                 "validation_evidence_descriptor_invalid",
                                 "JSON Schema matching requires byte-backed JSON content",
                             )
+                if predicate.predicate_id in EXECUTION_EVIDENCE_PREDICATE_IDS:
+                    if (
+                        descriptor.source != "execution_evidence"
+                        or descriptor.evidence_type != "execution_evidence"
+                    ):
+                        raise ValidationContractError(
+                            "validation_evidence_descriptor_invalid",
+                            "execution evidence predicate requires an execution "
+                            "evidence descriptor",
+                        )
+                    if (
+                        predicate.predicate_id
+                        == "execution_evidence_media_type_matches"
+                        and descriptor.expected_media_type is None
+                    ):
+                        raise ValidationContractError(
+                            "validation_evidence_descriptor_invalid",
+                            "media-type predicate requires an expected media type",
+                        )
                 if predicate.predicate_id in {"artifact_hash_matches"}:
                     if descriptor.evidence_type != "immutable_artifact":
                         raise ValidationContractError(
@@ -1129,6 +1215,10 @@ def legacy_validation_contract_payload(done_when: Any) -> tuple[dict[str, Any], 
 __all__ = [
     "CONTRACT_STATUSES",
     "EVIDENCE_TYPES",
+    "EVIDENCE_SOURCES",
+    "EXECUTION_EVIDENCE_KINDS",
+    "EXECUTION_EVIDENCE_KIND_PRODUCERS",
+    "EXECUTION_EVIDENCE_PREDICATE_IDS",
     "PASS_POLICIES",
     "PREDICATE_VERSIONS",
     "RELEASE_CONTRACT_STATUSES",

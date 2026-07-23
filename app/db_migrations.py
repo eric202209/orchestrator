@@ -3417,6 +3417,33 @@ def _migration_044_execution_evidence_authority(engine: Engine) -> None:
             connection.execute(text(statement))
 
 
+def _migration_045_execution_evidence_validation_boundary(engine: Engine) -> None:
+    """Add Phase 29C-12 supporting indexes only.
+
+    This migration creates no table and no column.  The C7B resolved-evidence
+    and predicate-result tables (Phase 29C-7B/7C) and the execution evidence
+    authority table (Phase 29C-11) already accept the classification values
+    and free-form ``source``/``source_authority_id`` strings this boundary
+    uses, so no schema shape changes.  It only adds an index that makes
+    execution-evidence-sourced resolved-evidence lookups efficient.  It never
+    fabricates evidence, results, or validation contracts, and it never
+    touches C9/C10/C11 tables.
+    """
+
+    table_names = _table_names(engine)
+    if "execution_task_resolved_validation_evidence" not in table_names:
+        return
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_execution_task_resolved_evidence_source_key "
+                "ON execution_task_resolved_validation_evidence "
+                "(source, evidence_key)"
+            )
+        )
+
+
 def _migration_038_normalize(value):
     if isinstance(value, str):
         return unicodedata.normalize("NFC", value)
@@ -3932,6 +3959,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="044_execution_evidence_authority",
         description="Add Phase 29C-11 immutable execution evidence authority",
         upgrade=_migration_044_execution_evidence_authority,
+    ),
+    Migration(
+        version="045_execution_evidence_validation_boundary",
+        description=("Add Phase 29C-12 execution evidence validation boundary index"),
+        upgrade=_migration_045_execution_evidence_validation_boundary,
     ),
 )
 

@@ -13,7 +13,7 @@ env:
 jobs:
   lint-backend:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -22,6 +22,7 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
 
     - name: Install linters
       run: |
@@ -40,7 +41,7 @@ jobs:
 
   lint-frontend:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -49,6 +50,8 @@ jobs:
       uses: actions/setup-node@v4
       with:
         node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        cache-dependency-path: frontend/package-lock.json
 
     - name: Install frontend dependencies
       run: |
@@ -65,9 +68,30 @@ jobs:
         cd frontend
         npm run build
 
-  test-backend:
+  # Phase 29C-12 CI latency fix.
+  #
+  # This used to be one job running pytest three times sequentially:
+  # unit-fast, semantic, then the full "not live" suite again with coverage
+  # (a strict superset of the first two -- ~86% of the suite executed twice
+  # per push). Two changes:
+  #
+  # 1. The three backend test tiers below are now mutually exclusive
+  #    partitions of the full "not live" suite (verified: 4885 + 114 + 699 =
+  #    5698, zero overlap, zero omission) run as independent parallel jobs,
+  #    so every non-live test still runs exactly once per push -- nothing
+  #    dropped, nothing weakened -- but wall time is bounded by the slowest
+  #    partition instead of the sum of three overlapping runs.
+  # 2. Coverage instrumentation (`--cov`) measured ~3.2x slower than a plain
+  #    run on this suite (114 semantic tests: 32.5s -> 104.6s), and applying
+  #    it to any majority partition would dominate wall time on its own. The
+  #    Codecov upload step was already `continue-on-error: true` (best-effort
+  #    telemetry, not a merge gate), so coverage now runs once, over the full
+  #    suite, in its own `test-backend-coverage` job that is NOT in `build`'s
+  #    `needs:` -- it does not block merges or deploys, only the Codecov
+  #    dashboard depends on it finishing.
+  test-backend-fast:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -76,6 +100,7 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
 
     - name: Install dependencies
       run: |
@@ -86,13 +111,79 @@ jobs:
       run: |
         PYTHONPATH=. python -m pytest app/tests/ -m "unit and not semantic and not slow and not live" -v
 
+  test-backend-semantic:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
     - name: Run replay and policy semantic contracts
       run: |
         PYTHONPATH=. python -m pytest app/tests/ -m "semantic and not live" -v
 
-    - name: Run full backend tests
+  # The remainder partition: everything not already covered by
+  # test-backend-fast or test-backend-semantic above (integration-marked
+  # tests, and any slow-marked test regardless of tier), so the three backend
+  # jobs together are an exact, non-overlapping partition of "not live".
+  test-backend-remainder:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+
+    - name: Install dependencies
       run: |
-        PYTHONPATH=. python -m pytest app/tests/ -m "not live" -v --cov=app --cov-report=xml
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run remaining backend tests (integration + slow)
+      run: |
+        PYTHONPATH=. python -m pytest app/tests/ -m "not live and not semantic and (not unit or slow)" -v
+
+  # Telemetry only, not a merge/deploy gate (matches the pre-existing
+  # continue-on-error on the Codecov upload). Deliberately excluded from
+  # build's `needs:` so its coverage-instrumentation overhead never sits on
+  # the critical path.
+  test-backend-coverage:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run full backend tests with coverage
+      run: |
+        PYTHONPATH=. python -m pytest app/tests/ -m "not live" -q --cov=app --cov-report=xml
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v3
@@ -104,7 +195,7 @@ jobs:
 
   test-frontend:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -113,6 +204,8 @@ jobs:
       uses: actions/setup-node@v4
       with:
         node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        cache-dependency-path: frontend/package-lock.json
 
     - name: Install frontend dependencies
       run: |
@@ -136,8 +229,19 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
-    needs: [lint-backend, lint-frontend]
-    
+    # Phase 29C-12: build/deploy previously only depended on the two lint
+    # jobs, so a red test suite (backend or frontend) did not block a build
+    # or a production deploy. Gating on every lint/test job is a correctness
+    # fix, not a latency change -- with the jobs above now running in
+    # parallel this does not reintroduce the old sequential wall-time cost.
+    needs:
+      - lint-backend
+      - lint-frontend
+      - test-backend-fast
+      - test-backend-semantic
+      - test-backend-remainder
+      - test-frontend
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4

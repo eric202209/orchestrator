@@ -26,6 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import (
+    ExecutionEvidence,
     ExecutionPlan,
     ExecutionTask,
     ExecutionTaskAttempt,
@@ -41,6 +42,11 @@ from app.services.execution.candidate_content import (
     LocalContentAddressedStore,
     MAX_CANDIDATE_CONTENT_BYTES,
     verify_candidate_content_integrity,
+)
+from app.services.execution.execution_evidence import (
+    ExecutionEvidenceResolution,
+    resolve_execution_evidence_reference,
+    verify_execution_evidence_integrity,
 )
 from app.services.execution.execution_task_runtime_execution_service import (
     ExecutionTaskRuntimeExecutionService,
@@ -90,6 +96,9 @@ _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _REFERENCE_RE = re.compile(r"^candidate-output://([1-9][0-9]{0,18})$")
 _CONTENT_REFERENCE_RE = re.compile(r"^candidate-content://([1-9][0-9]{0,18})$")
 _CONTENT_HASH_REFERENCE_RE = re.compile(r"^content-sha256://([0-9a-f]{64})$")
+_EXECUTION_EVIDENCE_REFERENCE_RE = re.compile(
+    r"^execution-evidence://([1-9][0-9]{0,18})$"
+)
 _SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]{0,31}):/{2}.*$")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
@@ -292,6 +301,15 @@ def parse_evidence_reference(value: str) -> EvidenceReference:
             scheme="content-sha256",
             identifier=match.group(1),
             normalized=f"content-sha256://{match.group(1)}",
+        )
+    match = _EXECUTION_EVIDENCE_REFERENCE_RE.fullmatch(raw.lower())
+    if match is not None:
+        identifier = int(match.group(1))
+        return EvidenceReference(
+            grammar_version=REFERENCE_GRAMMAR_VERSION,
+            scheme="execution-evidence",
+            identifier=identifier,
+            normalized=f"execution-evidence://{identifier}",
         )
     if _SCHEME_RE.match(raw):
         raise CandidateEvidenceError(
@@ -1197,6 +1215,138 @@ class _RequiredFieldsPresentValidator:
         )
 
 
+class _ExecutionEvidenceExistsValidator:
+    """Phase 29C-12 generic execution-evidence-authority-exists predicate."""
+
+    validator_id = "execution_evidence_exists"
+    validator_version = VALIDATOR_IMPLEMENTATION_VERSION
+
+    def validate(self, predicate, evidence, context):
+        gate = _evidence_gate(evidence)
+        if gate:
+            return gate
+        passed = bool(evidence.source_authority_id and evidence.normalized_reference)
+        return _predicate_result(
+            "passed" if passed else "failed",
+            "execution_evidence_present" if passed else "execution_evidence_missing",
+        )
+
+
+class _ExecutionEvidenceKindMatchesValidator:
+    validator_id = "execution_evidence_kind_matches"
+    validator_version = VALIDATOR_IMPLEMENTATION_VERSION
+
+    def validate(self, predicate, evidence, context):
+        gate = _evidence_gate(evidence)
+        if gate:
+            return gate
+        actual = evidence.structured_metadata_summary.get("evidence_kind")
+        expected = evidence.structured_metadata_summary.get("expected_evidence_kind")
+        if not expected or not actual:
+            return _predicate_result(
+                "invalid_evidence", "execution_evidence_kind_unavailable"
+            )
+        passed = expected == actual
+        return _predicate_result(
+            "passed" if passed else "failed",
+            (
+                "execution_evidence_kind_matches"
+                if passed
+                else "execution_evidence_kind_mismatch"
+            ),
+            expected={"evidence_kind": expected},
+            actual={"evidence_kind": actual},
+        )
+
+
+class _ExecutionEvidenceProducerMatchesValidator:
+    validator_id = "execution_evidence_producer_matches"
+    validator_version = VALIDATOR_IMPLEMENTATION_VERSION
+
+    def validate(self, predicate, evidence, context):
+        gate = _evidence_gate(evidence)
+        if gate:
+            return gate
+        actual = evidence.structured_metadata_summary.get("producer_id")
+        expected = evidence.structured_metadata_summary.get("expected_producer")
+        if not expected or not actual:
+            return _predicate_result(
+                "invalid_evidence", "execution_evidence_producer_unavailable"
+            )
+        passed = expected == actual
+        return _predicate_result(
+            "passed" if passed else "failed",
+            (
+                "execution_evidence_producer_matches"
+                if passed
+                else "execution_evidence_producer_mismatch"
+            ),
+            expected={"producer_id": expected},
+            actual={"producer_id": actual},
+        )
+
+
+class _ExecutionEvidenceMediaTypeMatchesValidator:
+    validator_id = "execution_evidence_media_type_matches"
+    validator_version = VALIDATOR_IMPLEMENTATION_VERSION
+
+    def validate(self, predicate, evidence, context):
+        gate = _evidence_gate(evidence)
+        if gate:
+            return gate
+        expected = evidence.structured_metadata_summary.get("expected_media_type")
+        if not expected or not evidence.media_type:
+            return _predicate_result(
+                "invalid_evidence", "execution_evidence_media_type_unavailable"
+            )
+        passed = expected == evidence.media_type
+        return _predicate_result(
+            "passed" if passed else "failed",
+            (
+                "execution_evidence_media_type_matches"
+                if passed
+                else "execution_evidence_media_type_mismatch"
+            ),
+            expected={"media_type": expected},
+            actual={"media_type": evidence.media_type},
+        )
+
+
+class _ExecutionEvidenceHashMatchesValidator:
+    """Assert the resolver's independently-recomputed byte-level hash.
+
+    The C11 resolver already fails closed into a non-``resolved`` status on
+    any hash mismatch (see ``resolve_execution_evidence_reference``), so by
+    the time this validator runs the evidence gate has already confirmed the
+    stored bytes match the recorded ``content_sha256``.  This predicate turns
+    that guarantee into an explicit, auditable pass_policy term.
+    """
+
+    validator_id = "execution_evidence_hash_matches"
+    validator_version = VALIDATOR_IMPLEMENTATION_VERSION
+
+    def validate(self, predicate, evidence, context):
+        gate = _evidence_gate(evidence)
+        if gate:
+            return gate
+        passed = bool(evidence.actual_hash) and bool(
+            _HASH_RE.fullmatch(evidence.actual_hash)
+        )
+        return _predicate_result(
+            "passed" if passed else "failed",
+            (
+                "execution_evidence_hash_matches"
+                if passed
+                else "execution_evidence_hash_unavailable"
+            ),
+            diagnostics={
+                "verification_level": "independently_recomputed_bytes",
+                "byte_level_recomputed": True,
+            },
+            actual={"hash_algorithm": "sha256", "hash": evidence.actual_hash},
+        )
+
+
 def build_default_validator_registry(
     *, configuration_hash: str | None = None, schema_db: Session | None = None
 ) -> DeterministicValidatorRegistry:
@@ -1263,6 +1413,41 @@ def build_default_validator_registry(
         validator_id="required_fields_present",
         validator_version=1,
         validator=_RequiredFieldsPresentValidator(),
+    )
+    registry.register(
+        predicate_id="execution_evidence_exists",
+        predicate_version=1,
+        validator_id="execution_evidence_exists",
+        validator_version=1,
+        validator=_ExecutionEvidenceExistsValidator(),
+    )
+    registry.register(
+        predicate_id="execution_evidence_kind_matches",
+        predicate_version=1,
+        validator_id="execution_evidence_kind_matches",
+        validator_version=1,
+        validator=_ExecutionEvidenceKindMatchesValidator(),
+    )
+    registry.register(
+        predicate_id="execution_evidence_producer_matches",
+        predicate_version=1,
+        validator_id="execution_evidence_producer_matches",
+        validator_version=1,
+        validator=_ExecutionEvidenceProducerMatchesValidator(),
+    )
+    registry.register(
+        predicate_id="execution_evidence_media_type_matches",
+        predicate_version=1,
+        validator_id="execution_evidence_media_type_matches",
+        validator_version=1,
+        validator=_ExecutionEvidenceMediaTypeMatchesValidator(),
+    )
+    registry.register(
+        predicate_id="execution_evidence_hash_matches",
+        predicate_version=1,
+        validator_id="execution_evidence_hash_matches",
+        validator_version=1,
+        validator=_ExecutionEvidenceHashMatchesValidator(),
     )
     return registry
 
@@ -1470,6 +1655,19 @@ class CandidateEvidenceResolverService:
             attempt,
             content,
         ) = self._authorize(command, payload)
+        if descriptor.source == "execution_evidence":
+            return self._resolve_execution_evidence(
+                command,
+                payload,
+                command_hash,
+                plan,
+                task,
+                specification,
+                descriptor,
+                environment,
+                outcome,
+                attempt,
+            )
         source_outcome = self.source.read(outcome.id)
         if source_outcome is None:
             raise CandidateEvidenceError(
@@ -1844,6 +2042,15 @@ class CandidateEvidenceResolverService:
             content = self.source.read_content_by_hash(
                 str(reference.identifier), outcome.id
             )
+        elif reference.scheme == "execution-evidence":
+            if (
+                descriptor.source != "execution_evidence"
+                or descriptor.evidence_type != "execution_evidence"
+            ):
+                raise CandidateEvidenceError(
+                    "candidate_evidence_reference_invalid",
+                    "execution-evidence reference has an incompatible descriptor",
+                )
         else:
             raise CandidateEvidenceError(
                 "candidate_evidence_scheme_unsupported",
@@ -1859,6 +2066,186 @@ class CandidateEvidenceResolverService:
             attempt,
             content,
         )
+
+    @staticmethod
+    def _execution_evidence_status(
+        resolution: ExecutionEvidenceResolution,
+        row: ExecutionEvidence | None,
+        plan: ExecutionPlan,
+        task: ExecutionTask,
+        attempt: ExecutionTaskAttempt,
+    ) -> tuple[str, str]:
+        if resolution.evidence_id is None:
+            return "missing", "execution_evidence_missing"
+        if not resolution.verified:
+            return "invalid_content", "execution_evidence_integrity_failure"
+        if row is None or (
+            row.execution_plan_id != plan.id
+            or row.execution_task_id != task.id
+            or row.execution_task_attempt_id != attempt.id
+            or row.attempt_generation != attempt.attempt_generation
+        ):
+            return "invalid_reference", "execution_evidence_reference_invalid"
+        return "resolved", "execution_evidence_resolved"
+
+    def _resolve_execution_evidence(
+        self,
+        command: ResolveCandidateEvidenceCommand,
+        payload: dict[str, Any],
+        command_hash: str,
+        plan: ExecutionPlan,
+        task: ExecutionTask,
+        specification: ExecutionTaskValidationSpecification,
+        descriptor: ValidationEvidenceDescriptor,
+        environment,
+        outcome: ExecutionTaskAttemptOutcome,
+        attempt: ExecutionTaskAttempt,
+    ) -> ResolvedEvidenceResult:
+        """Resolve one C11 execution-evidence descriptor read-only.
+
+        This never opens a path, calls a network client, starts a
+        subprocess/provider, or mutates the immutable execution evidence
+        authority.  It reads one ``ExecutionEvidence`` row (or none) through
+        the read-only C11 resolver primitive and persists a bounded snapshot.
+        """
+
+        reference = parse_evidence_reference(payload["expected_reference"])
+        resolution = resolve_execution_evidence_reference(
+            self.db, reference.normalized, store=self.content_store
+        )
+        row = (
+            self.db.get(ExecutionEvidence, resolution.evidence_id)
+            if resolution.evidence_id is not None
+            else None
+        )
+        status, status_code = self._execution_evidence_status(
+            resolution, row, plan, task, attempt
+        )
+        now = self._now()
+        content_authority_id = (
+            f"execution-evidence:{resolution.evidence_id}"
+            if resolution.evidence_id is not None
+            else "execution-evidence:unresolved"
+        )
+        content_addressed_reference = (
+            f"execution-evidence://{resolution.evidence_id}"
+            if resolution.evidence_id is not None
+            else None
+        )
+        metadata = (
+            _bounded_json_bytes(
+                {
+                    "evidence_kind": resolution.evidence_kind,
+                    "producer_id": resolution.producer_id,
+                    "producer_version": resolution.producer_version,
+                    "expected_evidence_kind": descriptor.expected_evidence_kind,
+                    "expected_producer": descriptor.expected_producer,
+                    "expected_media_type": descriptor.expected_media_type,
+                    "verification_level": "independently_recomputed_bytes",
+                    "integrity_verified": resolution.verified,
+                    "integrity_issues": list(resolution.issues),
+                    "resolution_status_code": status_code,
+                },
+                field="structured metadata summary",
+                limit=MAX_METADATA_BYTES,
+            )
+            or {}
+        )
+        evidence_payload = {
+            "schema_version": RESOLVER_CONTRACT_VERSION,
+            "reference_grammar_version": REFERENCE_GRAMMAR_VERSION,
+            "execution_plan_id": plan.id,
+            "execution_task_id": task.id,
+            "execution_task_attempt_id": attempt.id,
+            "candidate_outcome_id": outcome.id,
+            "validation_specification_id": specification.id,
+            "validation_specification_hash": specification.canonical_specification_hash,
+            "evidence_key": descriptor.evidence_key,
+            "evidence_type": descriptor.evidence_type,
+            "source": descriptor.source,
+            "normalized_reference": payload["expected_reference"],
+            "source_authority_id": content_authority_id,
+            "resolver_id": RESOLVER_ID,
+            "resolver_version": command.resolver_version,
+            "resolver_contract_version": RESOLVER_CONTRACT_VERSION,
+            "environment_configuration_hash": environment.configuration_hash,
+            "expected_hash_algorithm": descriptor.expected_hash_algorithm,
+            "expected_hash": command.expected_content_hash,
+            "actual_hash": resolution.content_sha256,
+            "media_type": resolution.media_type,
+            "byte_size": resolution.byte_length,
+            "structured_metadata_summary": metadata,
+            "content_addressed_reference": content_addressed_reference,
+            "content_projection": None,
+            "expected_output_reference": command.expected_output_reference,
+            "resolution_status": status,
+            "task_state_at_resolution": task.status,
+            "task_state_version_at_resolution": task.state_version,
+        }
+        evidence_hash = canonical_json_hash(evidence_payload)
+        row_dto = ExecutionTaskResolvedValidationEvidence(
+            execution_plan_id=plan.id,
+            execution_task_id=task.id,
+            execution_task_attempt_id=attempt.id,
+            candidate_outcome_id=outcome.id,
+            validation_specification_id=specification.id,
+            validation_specification_hash=specification.canonical_specification_hash,
+            evidence_key=descriptor.evidence_key,
+            evidence_type=descriptor.evidence_type,
+            source=descriptor.source,
+            normalized_reference=payload["expected_reference"],
+            source_authority_id=content_authority_id,
+            resolver_id=RESOLVER_ID,
+            resolver_version=command.resolver_version,
+            resolver_contract_version=RESOLVER_CONTRACT_VERSION,
+            environment_configuration_hash=environment.configuration_hash,
+            expected_hash_algorithm=descriptor.expected_hash_algorithm,
+            expected_hash=command.expected_content_hash,
+            actual_hash=resolution.content_sha256,
+            media_type=resolution.media_type,
+            byte_size=resolution.byte_length,
+            structured_metadata_summary=metadata,
+            content_addressed_reference=content_addressed_reference,
+            content_projection=None,
+            expected_output_reference=command.expected_output_reference,
+            resolution_status=status,
+            resolution_idempotency_key=payload["resolution_idempotency_key"],
+            deterministic_resolution_command_id=payload[
+                "deterministic_resolution_command_id"
+            ],
+            canonical_resolution_command_payload=payload,
+            canonical_resolution_command_hash=command_hash,
+            canonical_evidence_payload=evidence_payload,
+            canonical_evidence_payload_hash=evidence_hash,
+            task_state_at_resolution=task.status,
+            task_state_version_at_resolution=task.state_version,
+            resolved_at=now,
+            creation_actor_type=payload["creation_actor_type"],
+            creation_actor_id=payload["creation_actor_id"],
+        )
+        try:
+            with self.db.begin_nested():
+                self.db.add(row_dto)
+                self.db.flush()
+        except IntegrityError as exc:
+            replay = (
+                self.db.query(ExecutionTaskResolvedValidationEvidence)
+                .filter(
+                    ExecutionTaskResolvedValidationEvidence.resolution_idempotency_key
+                    == payload["resolution_idempotency_key"]
+                )
+                .one_or_none()
+            )
+            if (
+                replay is not None
+                and replay.canonical_resolution_command_hash == command_hash
+            ):
+                return ResolvedEvidenceResult(_snapshot_dto(replay), replayed=True)
+            raise CandidateEvidenceError(
+                "candidate_evidence_resolution_conflict",
+                "resolution command conflicts with canonical evidence",
+            ) from exc
+        return ResolvedEvidenceResult(_snapshot_dto(row_dto))
 
     @staticmethod
     def _resolution_status(
@@ -2075,6 +2462,9 @@ class ValidationPrimitiveService:
                         != content.content_projection_version
                     ):
                         issues.append("resolved_evidence_candidate_projection_mismatch")
+        elif row.source == "execution_evidence":
+            if not str(row.source_authority_id or "").startswith("execution-evidence:"):
+                issues.append("resolved_evidence_source_identity_tampered")
         else:
             issues.append("resolved_evidence_source_unsupported")
         try:
@@ -2085,6 +2475,48 @@ class ValidationPrimitiveService:
                     or reference.identifier != row.candidate_outcome_id
                 ):
                     issues.append("resolved_evidence_reference_tampered")
+            elif row.source == "execution_evidence":
+                if reference.scheme != "execution-evidence":
+                    issues.append("resolved_evidence_reference_tampered")
+                else:
+                    execution_evidence_row = self.db.get(
+                        ExecutionEvidence, int(reference.identifier)
+                    )
+                    if execution_evidence_row is None:
+                        if row.resolution_status != "missing":
+                            issues.append(
+                                "resolved_evidence_execution_evidence_missing"
+                            )
+                    else:
+                        if (
+                            execution_evidence_row.execution_plan_id
+                            != row.execution_plan_id
+                            or execution_evidence_row.execution_task_id
+                            != row.execution_task_id
+                            or execution_evidence_row.execution_task_attempt_id
+                            != row.execution_task_attempt_id
+                        ):
+                            issues.append("resolved_evidence_reference_tampered")
+                        if row.resolution_status == "resolved":
+                            execution_evidence_integrity = (
+                                verify_execution_evidence_integrity(
+                                    self.db,
+                                    execution_evidence_row.id,
+                                    store=self.content_store,
+                                )
+                            )
+                            if not execution_evidence_integrity.verified:
+                                issues.append(
+                                    "resolved_evidence_execution_evidence_integrity_failure"
+                                )
+                            if (
+                                execution_evidence_row.content_sha256 != row.actual_hash
+                                or execution_evidence_row.media_type != row.media_type
+                                or execution_evidence_row.byte_length != row.byte_size
+                            ):
+                                issues.append(
+                                    "resolved_evidence_execution_evidence_mismatch"
+                                )
             elif row.source == "candidate_content":
                 if reference.scheme == "candidate-content":
                     if content is None or reference.identifier != content.id:
