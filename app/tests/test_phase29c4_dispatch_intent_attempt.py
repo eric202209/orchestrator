@@ -29,6 +29,18 @@ from app.services.execution.execution_task_dispatch_service import (
     ExecutionDispatchError,
     ExecutionTaskDispatchService,
 )
+
+
+def _migrations_through_29c3():
+    """Keep the historical fixture at the explicit pre-C4 boundary."""
+
+    return tuple(
+        migration
+        for migration in MIGRATIONS
+        if migration.version <= "034_execution_task_scheduler_claim"
+    )
+
+
 from app.services.execution.execution_task_scheduler_claim_service import (
     ExecutionTaskSchedulerClaimService,
 )
@@ -565,7 +577,7 @@ def test_migration_replays_and_has_new_fields_without_fabricating_rows(tmp_path)
         # C4 predates the C5 ownership and C6B runtime-evidence migrations;
         # keep this fixture explicitly at the 29C-3/034 boundary as new
         # additive migrations are appended.
-        run_schema_migrations(engine, MIGRATIONS[:-4])
+        run_schema_migrations(engine, _migrations_through_29c3())
         run_schema_migrations(engine)
         run_schema_migrations(engine)
         intent_columns = {
@@ -645,7 +657,7 @@ def test_migration_adds_claim_consumption_columns_to_phase29c3_schema(tmp_path):
                     "DROP COLUMN consumed_at"
                 )
             )
-        run_schema_migrations(engine, MIGRATIONS[:-4])
+        run_schema_migrations(engine, _migrations_through_29c3())
         before = {
             column["name"]
             for column in inspect(engine).get_columns("execution_task_scheduler_claims")

@@ -749,6 +749,16 @@ class ExecutionPlan(Base):
         back_populates="execution_plan",
         cascade="all, delete-orphan",
     )
+    resolved_validation_evidence = relationship(
+        "ExecutionTaskResolvedValidationEvidence",
+        back_populates="execution_plan",
+        cascade="all, delete-orphan",
+    )
+    validation_predicate_results = relationship(
+        "ExecutionTaskValidationPredicateResult",
+        back_populates="execution_plan",
+        cascade="all, delete-orphan",
+    )
     validation_contract_set_hash = Column(String(64), nullable=True, index=True)
 
 
@@ -834,6 +844,16 @@ class ExecutionTask(Base):
         back_populates="execution_task",
         cascade="all, delete-orphan",
     )
+    resolved_validation_evidence = relationship(
+        "ExecutionTaskResolvedValidationEvidence",
+        back_populates="execution_task",
+        cascade="all, delete-orphan",
+    )
+    validation_predicate_results = relationship(
+        "ExecutionTaskValidationPredicateResult",
+        back_populates="execution_task",
+        cascade="all, delete-orphan",
+    )
 
 
 class ExecutionTaskValidationSpecification(Base):
@@ -914,6 +934,254 @@ class ExecutionTaskValidationSpecification(Base):
         "ExecutionTask",
         foreign_keys=[execution_task_id],
     )
+
+
+class ExecutionTaskResolvedValidationEvidence(Base):
+    """Immutable read-only resolution of one released evidence descriptor.
+
+    The row stores bounded metadata and canonical hashes only.  It never
+    stores unbounded candidate output content and has no lifecycle authority.
+    """
+
+    __tablename__ = "execution_task_resolved_validation_evidence"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    candidate_outcome_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempt_outcomes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    validation_specification_id = Column(
+        Integer,
+        ForeignKey("execution_task_validation_specifications.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    validation_specification_hash = Column(String(64), nullable=False, index=True)
+    evidence_key = Column(String(64), nullable=False)
+    evidence_type = Column(String(64), nullable=False)
+    source = Column(String(64), nullable=False)
+    normalized_reference = Column(String(255), nullable=False)
+    source_authority_id = Column(String(128), nullable=False)
+    resolver_id = Column(String(64), nullable=False)
+    resolver_version = Column(String(64), nullable=False)
+    resolver_contract_version = Column(String(64), nullable=False)
+    environment_configuration_hash = Column(String(64), nullable=False)
+    expected_hash_algorithm = Column(String(16), nullable=True)
+    expected_hash = Column(String(64), nullable=True)
+    actual_hash = Column(String(64), nullable=True)
+    media_type = Column(String(128), nullable=True)
+    byte_size = Column(Integer, nullable=True)
+    structured_metadata_summary = Column(JSON, nullable=False)
+    content_addressed_reference = Column(String(255), nullable=True)
+    content_projection = Column(JSON, nullable=True)
+    expected_output_reference = Column(String(512), nullable=True)
+    resolution_status = Column(String(32), nullable=False, index=True)
+    resolution_idempotency_key = Column(String(128), nullable=False, unique=True)
+    deterministic_resolution_command_id = Column(
+        String(128), nullable=False, unique=True
+    )
+    canonical_resolution_command_payload = Column(JSON, nullable=False)
+    canonical_resolution_command_hash = Column(String(64), nullable=False)
+    canonical_evidence_payload = Column(JSON, nullable=False)
+    canonical_evidence_payload_hash = Column(String(64), nullable=False)
+    task_state_at_resolution = Column(String(20), nullable=False)
+    task_state_version_at_resolution = Column(Integer, nullable=False)
+    resolved_at = Column(DateTime(timezone=True), nullable=False)
+    creation_actor_type = Column(String(64), nullable=False)
+    creation_actor_id = Column(String(255), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "candidate_outcome_id",
+            "validation_specification_id",
+            "evidence_key",
+            name="uq_execution_task_resolved_evidence_candidate_spec_key",
+        ),
+        CheckConstraint(
+            "resolution_status IN ('resolved', 'missing', 'hash_mismatch', "
+            "'unsupported', 'unavailable', 'invalid_reference', 'too_large', "
+            "'invalid_content')",
+            name="ck_execution_task_resolved_evidence_status",
+        ),
+        CheckConstraint(
+            "byte_size IS NULL OR byte_size >= 0",
+            name="ck_execution_task_resolved_evidence_byte_size_nonnegative",
+        ),
+        CheckConstraint(
+            "task_state_version_at_resolution >= 0",
+            name="ck_execution_task_resolved_evidence_state_version_nonnegative",
+        ),
+        Index(
+            "ix_execution_task_resolved_evidence_task_status",
+            "execution_task_id",
+            "resolution_status",
+        ),
+        Index(
+            "ix_execution_task_resolved_evidence_spec_key",
+            "validation_specification_id",
+            "evidence_key",
+        ),
+    )
+
+    execution_plan = relationship(
+        "ExecutionPlan", back_populates="resolved_validation_evidence"
+    )
+    execution_task = relationship(
+        "ExecutionTask", back_populates="resolved_validation_evidence"
+    )
+    execution_task_attempt = relationship("ExecutionTaskAttempt")
+    candidate_outcome = relationship("ExecutionTaskAttemptOutcome")
+    validation_specification = relationship("ExecutionTaskValidationSpecification")
+
+
+class ExecutionTaskValidationPredicateResult(Base):
+    """One deterministic predicate result, never an acceptance decision."""
+
+    __tablename__ = "execution_task_validation_predicate_results"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    candidate_outcome_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempt_outcomes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    validation_specification_id = Column(
+        Integer,
+        ForeignKey("execution_task_validation_specifications.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    validation_specification_hash = Column(String(64), nullable=False, index=True)
+    predicate_id = Column(String(64), nullable=False)
+    predicate_version = Column(Integer, nullable=False)
+    predicate_order = Column(Integer, nullable=False)
+    evidence_snapshot_id = Column(
+        Integer,
+        ForeignKey(
+            "execution_task_resolved_validation_evidence.id", ondelete="CASCADE"
+        ),
+        nullable=False,
+        index=True,
+    )
+    evidence_key = Column(String(64), nullable=False)
+    validator_id = Column(String(64), nullable=False)
+    validator_version = Column(Integer, nullable=False)
+    validator_set_id = Column(String(128), nullable=False)
+    validator_set_version = Column(String(64), nullable=False)
+    environment_configuration_hash = Column(String(64), nullable=False)
+    result_status = Column(String(32), nullable=False, index=True)
+    passed = Column(Boolean, nullable=False)
+    result_code = Column(String(64), nullable=False)
+    diagnostics = Column(JSON, nullable=False)
+    expected_summary = Column(JSON, nullable=True)
+    actual_summary = Column(JSON, nullable=True)
+    canonical_result_payload = Column(JSON, nullable=False)
+    canonical_result_hash = Column(String(64), nullable=False)
+    validator_idempotency_key = Column(String(128), nullable=False, unique=True)
+    deterministic_validator_command_id = Column(
+        String(128), nullable=False, unique=True
+    )
+    canonical_validator_command_payload = Column(JSON, nullable=False)
+    canonical_validator_command_hash = Column(String(64), nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=False)
+    creation_actor_type = Column(String(64), nullable=False)
+    creation_actor_id = Column(String(255), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "candidate_outcome_id",
+            "validation_specification_id",
+            "predicate_id",
+            "predicate_version",
+            name="uq_execution_task_validation_result_candidate_spec_predicate",
+        ),
+        CheckConstraint(
+            "predicate_version > 0",
+            name="ck_execution_task_validation_result_predicate_version_positive",
+        ),
+        CheckConstraint(
+            "validator_version > 0",
+            name="ck_execution_task_validation_result_validator_version_positive",
+        ),
+        CheckConstraint(
+            "result_status IN ('passed', 'failed', 'missing_evidence', "
+            "'validator_error', 'unsupported', 'invalid_evidence')",
+            name="ck_execution_task_validation_result_status",
+        ),
+        CheckConstraint(
+            "((result_status = 'passed' AND passed = 1) OR "
+            "(result_status <> 'passed' AND passed = 0))",
+            name="ck_execution_task_validation_result_passed_consistent",
+        ),
+        Index(
+            "ix_execution_task_validation_result_task_status",
+            "execution_task_id",
+            "result_status",
+        ),
+        Index(
+            "ix_execution_task_validation_result_spec_predicate",
+            "validation_specification_id",
+            "predicate_id",
+            "predicate_version",
+        ),
+    )
+
+    execution_plan = relationship(
+        "ExecutionPlan", back_populates="validation_predicate_results"
+    )
+    execution_task = relationship(
+        "ExecutionTask", back_populates="validation_predicate_results"
+    )
+    execution_task_attempt = relationship("ExecutionTaskAttempt")
+    candidate_outcome = relationship("ExecutionTaskAttemptOutcome")
+    validation_specification = relationship("ExecutionTaskValidationSpecification")
+    evidence_snapshot = relationship("ExecutionTaskResolvedValidationEvidence")
 
 
 class ExecutionTaskSchedulerClaim(Base):

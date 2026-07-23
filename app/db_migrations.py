@@ -2543,6 +2543,203 @@ def _migration_038_execution_task_validation_contract(engine: Engine) -> None:
             )
 
 
+def _migration_039_execution_task_validation_primitives(engine: Engine) -> None:
+    """Add read-only evidence snapshots and deterministic predicate results.
+
+    This migration creates empty authority tables only.  It deliberately does
+    not resolve evidence, invoke validators, synthesize content, or alter task
+    lifecycle state.
+    """
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS
+                    execution_task_resolved_validation_evidence (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    execution_task_attempt_id INTEGER NOT NULL,
+                    candidate_outcome_id INTEGER NOT NULL,
+                    validation_specification_id INTEGER NOT NULL,
+                    validation_specification_hash VARCHAR(64) NOT NULL,
+                    evidence_key VARCHAR(64) NOT NULL,
+                    evidence_type VARCHAR(64) NOT NULL,
+                    source VARCHAR(64) NOT NULL,
+                    normalized_reference VARCHAR(255) NOT NULL,
+                    source_authority_id VARCHAR(128) NOT NULL,
+                    resolver_id VARCHAR(64) NOT NULL,
+                    resolver_version VARCHAR(64) NOT NULL,
+                    resolver_contract_version VARCHAR(64) NOT NULL,
+                    environment_configuration_hash VARCHAR(64) NOT NULL,
+                    expected_hash_algorithm VARCHAR(16),
+                    expected_hash VARCHAR(64),
+                    actual_hash VARCHAR(64),
+                    media_type VARCHAR(128),
+                    byte_size INTEGER,
+                    structured_metadata_summary JSON NOT NULL,
+                    content_addressed_reference VARCHAR(255),
+                    content_projection JSON,
+                    expected_output_reference VARCHAR(512),
+                    resolution_status VARCHAR(32) NOT NULL,
+                    resolution_idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+                    deterministic_resolution_command_id VARCHAR(128) NOT NULL UNIQUE,
+                    canonical_resolution_command_payload JSON NOT NULL,
+                    canonical_resolution_command_hash VARCHAR(64) NOT NULL,
+                    canonical_evidence_payload JSON NOT NULL,
+                    canonical_evidence_payload_hash VARCHAR(64) NOT NULL,
+                    task_state_at_resolution VARCHAR(20) NOT NULL,
+                    task_state_version_at_resolution INTEGER NOT NULL,
+                    resolved_at DATETIME NOT NULL,
+                    creation_actor_type VARCHAR(64) NOT NULL,
+                    creation_actor_id VARCHAR(255) NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT
+                        uq_execution_task_resolved_evidence_candidate_spec_key
+                        UNIQUE (
+                            candidate_outcome_id,
+                            validation_specification_id,
+                            evidence_key
+                        ),
+                    CONSTRAINT ck_execution_task_resolved_evidence_status
+                        CHECK (resolution_status IN (
+                            'resolved', 'missing', 'hash_mismatch', 'unsupported',
+                            'unavailable', 'invalid_reference', 'too_large',
+                            'invalid_content'
+                        )),
+                    CONSTRAINT ck_execution_task_resolved_evidence_byte_size_nonnegative
+                        CHECK (byte_size IS NULL OR byte_size >= 0),
+                    CONSTRAINT ck_execution_task_resolved_evidence_state_version_nonnegative
+                        CHECK (task_state_version_at_resolution >= 0),
+                    FOREIGN KEY(execution_plan_id)
+                        REFERENCES execution_plans (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_id)
+                        REFERENCES execution_tasks (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_attempt_id)
+                        REFERENCES execution_task_attempts (id) ON DELETE CASCADE,
+                    FOREIGN KEY(candidate_outcome_id)
+                        REFERENCES execution_task_attempt_outcomes (id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(validation_specification_id)
+                        REFERENCES execution_task_validation_specifications (id)
+                        ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS
+                    execution_task_validation_predicate_results (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    execution_task_attempt_id INTEGER NOT NULL,
+                    candidate_outcome_id INTEGER NOT NULL,
+                    validation_specification_id INTEGER NOT NULL,
+                    validation_specification_hash VARCHAR(64) NOT NULL,
+                    predicate_id VARCHAR(64) NOT NULL,
+                    predicate_version INTEGER NOT NULL,
+                    predicate_order INTEGER NOT NULL,
+                    evidence_snapshot_id INTEGER NOT NULL,
+                    evidence_key VARCHAR(64) NOT NULL,
+                    validator_id VARCHAR(64) NOT NULL,
+                    validator_version INTEGER NOT NULL,
+                    validator_set_id VARCHAR(128) NOT NULL,
+                    validator_set_version VARCHAR(64) NOT NULL,
+                    environment_configuration_hash VARCHAR(64) NOT NULL,
+                    result_status VARCHAR(32) NOT NULL,
+                    passed BOOLEAN NOT NULL,
+                    result_code VARCHAR(64) NOT NULL,
+                    diagnostics JSON NOT NULL,
+                    expected_summary JSON,
+                    actual_summary JSON,
+                    canonical_result_payload JSON NOT NULL,
+                    canonical_result_hash VARCHAR(64) NOT NULL,
+                    validator_idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+                    deterministic_validator_command_id VARCHAR(128) NOT NULL UNIQUE,
+                    canonical_validator_command_payload JSON NOT NULL,
+                    canonical_validator_command_hash VARCHAR(64) NOT NULL,
+                    started_at DATETIME NOT NULL,
+                    completed_at DATETIME NOT NULL,
+                    creation_actor_type VARCHAR(64) NOT NULL,
+                    creation_actor_id VARCHAR(255) NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT
+                        uq_execution_task_validation_result_candidate_spec_predicate
+                        UNIQUE (
+                            candidate_outcome_id,
+                            validation_specification_id,
+                            predicate_id,
+                            predicate_version
+                        ),
+                    CONSTRAINT
+                        ck_execution_task_validation_result_predicate_version_positive
+                        CHECK (predicate_version > 0),
+                    CONSTRAINT
+                        ck_execution_task_validation_result_validator_version_positive
+                        CHECK (validator_version > 0),
+                    CONSTRAINT ck_execution_task_validation_result_status
+                        CHECK (result_status IN (
+                            'passed', 'failed', 'missing_evidence',
+                            'validator_error', 'unsupported', 'invalid_evidence'
+                        )),
+                    CONSTRAINT ck_execution_task_validation_result_passed_consistent
+                        CHECK (
+                            (result_status = 'passed' AND passed = 1)
+                            OR (result_status <> 'passed' AND passed = 0)
+                        ),
+                    FOREIGN KEY(execution_plan_id)
+                        REFERENCES execution_plans (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_id)
+                        REFERENCES execution_tasks (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_attempt_id)
+                        REFERENCES execution_task_attempts (id) ON DELETE CASCADE,
+                    FOREIGN KEY(candidate_outcome_id)
+                        REFERENCES execution_task_attempt_outcomes (id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(validation_specification_id)
+                        REFERENCES execution_task_validation_specifications (id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(evidence_snapshot_id)
+                        REFERENCES execution_task_resolved_validation_evidence (id)
+                        ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        indexes = {
+            "ix_execution_task_resolved_evidence_task_status": (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_execution_task_resolved_evidence_task_status "
+                "ON execution_task_resolved_validation_evidence "
+                "(execution_task_id, resolution_status)"
+            ),
+            "ix_execution_task_resolved_evidence_spec_key": (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_execution_task_resolved_evidence_spec_key "
+                "ON execution_task_resolved_validation_evidence "
+                "(validation_specification_id, evidence_key)"
+            ),
+            "ix_execution_task_validation_result_task_status": (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_execution_task_validation_result_task_status "
+                "ON execution_task_validation_predicate_results "
+                "(execution_task_id, result_status)"
+            ),
+            "ix_execution_task_validation_result_spec_predicate": (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_execution_task_validation_result_spec_predicate "
+                "ON execution_task_validation_predicate_results "
+                "(validation_specification_id, predicate_id, predicate_version)"
+            ),
+        }
+        for statement in indexes.values():
+            connection.execute(text(statement))
+
+
 def _migration_038_normalize(value):
     if isinstance(value, str):
         return unicodedata.normalize("NFC", value)
@@ -3028,6 +3225,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="038_execution_task_validation_contract",
         description="Add immutable release-bound validation contract authority",
         upgrade=_migration_038_execution_task_validation_contract,
+    ),
+    Migration(
+        version="039_execution_task_validation_primitives",
+        description="Add read-only evidence snapshots and deterministic predicate results",
+        upgrade=_migration_039_execution_task_validation_primitives,
     ),
 )
 

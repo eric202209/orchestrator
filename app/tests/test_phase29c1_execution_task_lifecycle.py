@@ -34,6 +34,18 @@ from app.services.execution.execution_task_transition_service import (
     ExecutionTaskTransitionService,
     _event_payload,
 )
+
+
+def _migrations_through_29b3():
+    """Keep the historical fixture at the explicit pre-C1 boundary."""
+
+    return tuple(
+        migration
+        for migration in MIGRATIONS
+        if migration.version <= "032_execution_commit_command"
+    )
+
+
 from app.services.planning.operator_review import canonical_json_hash
 
 from test_phase29b1_execution_plan_commit_service import (
@@ -754,7 +766,7 @@ def test_migration_adds_lifecycle_column_and_table_to_phase29b_schema(tmp_path):
             connection.execute(
                 text("DROP TABLE execution_task_validation_specifications")
             )
-            run_schema_migrations(engine, MIGRATIONS[:-6])
+            run_schema_migrations(engine, _migrations_through_29b3())
         with engine.begin() as connection:
             connection.execute(
                 text(
@@ -823,7 +835,7 @@ def test_migration_refuses_existing_non_pending_task(tmp_path):
             connection.execute(
                 text("DROP TABLE execution_task_validation_specifications")
             )
-            run_schema_migrations(engine, MIGRATIONS[:-6])
+            run_schema_migrations(engine, _migrations_through_29b3())
         with engine.begin() as connection:
             connection.execute(
                 text(
