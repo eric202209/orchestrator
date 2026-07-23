@@ -881,13 +881,21 @@ def verify_candidate_content_store_integrity(
 def cleanup_unlinked_candidate_content(
     db: Session, *, store: CandidateContentStore | None = None
 ) -> tuple[str, ...]:
-    """Delete only hash objects with no committed authoritative linkage row."""
+    """Delete only hash objects with no committed authoritative linkage row.
+
+    The blob store is shared with the Phase 29C-11 execution evidence
+    authority, so a key already referenced by that authority is never
+    treated as orphaned here.
+    """
 
     reader = store or LocalContentAddressedStore()
     linked = {
         row.storage_key
         for row in db.query(ExecutionTaskCandidateContent.storage_key).all()
     }
+    from app.models import ExecutionEvidence
+
+    linked |= {row.storage_key for row in db.query(ExecutionEvidence.storage_key).all()}
     removed: list[str] = []
     for key in reader.list_storage_keys():
         if key not in linked:

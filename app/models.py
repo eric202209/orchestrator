@@ -774,6 +774,11 @@ class ExecutionPlan(Base):
         back_populates="execution_plan",
         cascade="all, delete-orphan",
     )
+    execution_evidence = relationship(
+        "ExecutionEvidence",
+        back_populates="execution_plan",
+        cascade="all, delete-orphan",
+    )
     recovery_inputs = relationship(
         "ExecutionTaskRecoveryInput",
         back_populates="execution_plan",
@@ -903,6 +908,11 @@ class ExecutionTask(Base):
     )
     candidate_contents = relationship(
         "ExecutionTaskCandidateContent",
+        back_populates="execution_task",
+        cascade="all, delete-orphan",
+    )
+    execution_evidence = relationship(
+        "ExecutionEvidence",
         back_populates="execution_task",
         cascade="all, delete-orphan",
     )
@@ -2574,6 +2584,97 @@ class ExecutionTaskCandidateContent(Base):
     candidate_outcome = relationship(
         "ExecutionTaskAttemptOutcome", back_populates="candidate_content"
     )
+
+
+class ExecutionEvidence(Base):
+    """Immutable, producer-agnostic execution artifact authority (Phase 29C-11).
+
+    One row is metadata only; the byte-identical blob is owned by the shared
+    content-addressed store (the same backend Phase 29C-9 candidate content
+    uses).  A row never mutates: kind, producer, and plan/task/attempt
+    linkage are fixed at insert time.  Unknown evidence kinds and producers
+    fail closed at the service boundary, not here.
+    """
+
+    __tablename__ = "execution_evidence"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    attempt_generation = Column(Integer, nullable=False)
+    evidence_kind = Column(String(32), nullable=False, index=True)
+    producer_id = Column(String(32), nullable=False)
+    producer_version = Column(String(64), nullable=False)
+    content_sha256 = Column(String(64), nullable=False, index=True)
+    declared_sha256 = Column(String(64), nullable=True)
+    byte_length = Column(Integer, nullable=False)
+    media_type = Column(String(64), nullable=False)
+    storage_backend_id = Column(String(64), nullable=False)
+    storage_backend_version = Column(String(32), nullable=False)
+    storage_key = Column(String(160), nullable=False)
+    ingestion_idempotency_key = Column(String(128), nullable=False, unique=True)
+    canonical_ingestion_command_payload = Column(JSON, nullable=False)
+    canonical_ingestion_command_hash = Column(String(64), nullable=False)
+    canonical_metadata_payload = Column(JSON, nullable=False)
+    canonical_metadata_hash = Column(String(64), nullable=False)
+    creation_actor_type = Column(String(64), nullable=False)
+    creation_actor_id = Column(String(255), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "evidence_kind IN ('candidate', 'command', 'test', 'lint')",
+            name="ck_execution_evidence_kind_supported",
+        ),
+        CheckConstraint(
+            "producer_id IN "
+            "('runtime', 'command-runner', 'test-runner', 'lint-runner')",
+            name="ck_execution_evidence_producer_supported",
+        ),
+        CheckConstraint(
+            "attempt_generation > 0",
+            name="ck_execution_evidence_generation_positive",
+        ),
+        CheckConstraint(
+            "byte_length >= 0",
+            name="ck_execution_evidence_length_nonnegative",
+        ),
+        Index(
+            "ix_execution_evidence_task_kind",
+            "execution_task_id",
+            "evidence_kind",
+        ),
+        Index(
+            "ix_execution_evidence_attempt_kind",
+            "execution_task_attempt_id",
+            "evidence_kind",
+        ),
+        Index(
+            "ix_execution_evidence_plan_created",
+            "execution_plan_id",
+            "created_at",
+        ),
+    )
+
+    execution_plan = relationship("ExecutionPlan", back_populates="execution_evidence")
+    execution_task = relationship("ExecutionTask", back_populates="execution_evidence")
+    execution_task_attempt = relationship("ExecutionTaskAttempt")
 
 
 class ExecutionTaskTransition(Base):

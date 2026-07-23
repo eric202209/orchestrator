@@ -3348,6 +3348,75 @@ def _migration_043_execution_validation_schema_authority(engine: Engine) -> None
             connection.execute(text(statement))
 
 
+def _migration_044_execution_evidence_authority(engine: Engine) -> None:
+    """Add empty Phase 29C-11 immutable execution evidence authority.
+
+    This migration creates only the table and indexes.  It never fabricates
+    evidence rows, executes commands or tests, or touches C9/C10 tables.
+    """
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_evidence (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    execution_task_attempt_id INTEGER NOT NULL,
+                    attempt_generation INTEGER NOT NULL,
+                    evidence_kind VARCHAR(32) NOT NULL,
+                    producer_id VARCHAR(32) NOT NULL,
+                    producer_version VARCHAR(64) NOT NULL,
+                    content_sha256 VARCHAR(64) NOT NULL,
+                    declared_sha256 VARCHAR(64),
+                    byte_length INTEGER NOT NULL,
+                    media_type VARCHAR(64) NOT NULL,
+                    storage_backend_id VARCHAR(64) NOT NULL,
+                    storage_backend_version VARCHAR(32) NOT NULL,
+                    storage_key VARCHAR(160) NOT NULL,
+                    ingestion_idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+                    canonical_ingestion_command_payload JSON NOT NULL,
+                    canonical_ingestion_command_hash VARCHAR(64) NOT NULL,
+                    canonical_metadata_payload JSON NOT NULL,
+                    canonical_metadata_hash VARCHAR(64) NOT NULL,
+                    creation_actor_type VARCHAR(64) NOT NULL,
+                    creation_actor_id VARCHAR(255) NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    CONSTRAINT ck_execution_evidence_kind_supported
+                        CHECK (evidence_kind IN
+                            ('candidate', 'command', 'test', 'lint')),
+                    CONSTRAINT ck_execution_evidence_producer_supported
+                        CHECK (producer_id IN
+                            ('runtime', 'command-runner', 'test-runner',
+                             'lint-runner')),
+                    CONSTRAINT ck_execution_evidence_generation_positive
+                        CHECK (attempt_generation > 0),
+                    CONSTRAINT ck_execution_evidence_length_nonnegative
+                        CHECK (byte_length >= 0),
+                    FOREIGN KEY(execution_plan_id)
+                        REFERENCES execution_plans (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_id)
+                        REFERENCES execution_tasks (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_attempt_id)
+                        REFERENCES execution_task_attempts (id) ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        for statement in (
+            "CREATE INDEX IF NOT EXISTS ix_execution_evidence_task_kind "
+            "ON execution_evidence (execution_task_id, evidence_kind)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_evidence_attempt_kind "
+            "ON execution_evidence (execution_task_attempt_id, evidence_kind)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_evidence_plan_created "
+            "ON execution_evidence (execution_plan_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_evidence_content_sha256 "
+            "ON execution_evidence (content_sha256)",
+        ):
+            connection.execute(text(statement))
+
+
 def _migration_038_normalize(value):
     if isinstance(value, str):
         return unicodedata.normalize("NFC", value)
@@ -3858,6 +3927,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="043_execution_validation_schema_authority",
         description="Add Phase 29C-10 immutable JSON Schema authority and release linkage",
         upgrade=_migration_043_execution_validation_schema_authority,
+    ),
+    Migration(
+        version="044_execution_evidence_authority",
+        description="Add Phase 29C-11 immutable execution evidence authority",
+        upgrade=_migration_044_execution_evidence_authority,
     ),
 )
 
