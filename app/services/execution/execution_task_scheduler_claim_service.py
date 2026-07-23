@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from app.models import (
     ExecutionPlan,
     ExecutionTask,
+    ExecutionTaskDispatchIntent,
     ExecutionTaskSchedulerClaim,
     PlanningSession,
     Project,
@@ -434,8 +435,18 @@ class ExecutionReadyTaskSelectionService:
             return "claim_integrity_failure"
         if active_claims:
             return "task_already_claimed"
-        # No dispatch-boundary table exists in Phase 29C-3.  This condition is
-        # therefore vacuously satisfied; Phase 29D must add its own fence.
+        dispatch_history = (
+            claim_service.db.query(ExecutionTaskDispatchIntent)
+            .filter(ExecutionTaskDispatchIntent.execution_task_id == task.id)
+            .order_by(ExecutionTaskDispatchIntent.id.asc())
+            .all()
+        )
+        if any(intent.dispatch_status != "cancelled" for intent in dispatch_history):
+            return "dispatch_intent_already_exists"
+        if dispatch_history and int(task.state_version) <= max(
+            int(intent.claimed_task_state_version) for intent in dispatch_history
+        ):
+            return "dispatch_history_requires_reconciliation"
         return None
 
 
@@ -492,6 +503,24 @@ class ExecutionTaskSchedulerClaimService:
         if task.status != "ready":
             raise ExecutionSchedulerClaimError(
                 "task_not_ready", "scheduler claims require a ready task"
+            )
+        dispatch_history = (
+            self.db.query(ExecutionTaskDispatchIntent)
+            .filter(ExecutionTaskDispatchIntent.execution_task_id == task.id)
+            .order_by(ExecutionTaskDispatchIntent.id.asc())
+            .all()
+        )
+        if any(intent.dispatch_status != "cancelled" for intent in dispatch_history):
+            raise ExecutionSchedulerClaimError(
+                "dispatch_intent_already_exists",
+                "Execution Task already has a non-cancelled dispatch intent",
+            )
+        if dispatch_history and int(task.state_version) <= max(
+            int(intent.claimed_task_state_version) for intent in dispatch_history
+        ):
+            raise ExecutionSchedulerClaimError(
+                "dispatch_intent_already_exists",
+                "cancelled dispatch history requires lifecycle reconciliation",
             )
         if int(task.state_version) != command.expected_task_state_version:
             raise ExecutionSchedulerClaimError(
@@ -787,6 +816,8 @@ class ExecutionTaskSchedulerClaimService:
                     "task_state_stale",
                     "task_version_stale",
                     "eligibility_decision_stale",
+                    "dispatch_intent_already_exists",
+                    "dispatch_history_requires_reconciliation",
                 }:
                     skipped.append(candidate.execution_task_id)
                     continue

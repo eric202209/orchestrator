@@ -719,6 +719,16 @@ class ExecutionPlan(Base):
         back_populates="execution_plan",
         cascade="all, delete-orphan",
     )
+    dispatch_intents = relationship(
+        "ExecutionTaskDispatchIntent",
+        back_populates="execution_plan",
+        cascade="all, delete-orphan",
+    )
+    runtime_attempts = relationship(
+        "ExecutionTaskAttempt",
+        back_populates="execution_plan",
+        cascade="all, delete-orphan",
+    )
 
 
 class ExecutionTask(Base):
@@ -766,6 +776,16 @@ class ExecutionTask(Base):
     )
     scheduler_claims = relationship(
         "ExecutionTaskSchedulerClaim",
+        back_populates="execution_task",
+        cascade="all, delete-orphan",
+    )
+    dispatch_intents = relationship(
+        "ExecutionTaskDispatchIntent",
+        back_populates="execution_task",
+        cascade="all, delete-orphan",
+    )
+    runtime_attempts = relationship(
+        "ExecutionTaskAttempt",
         back_populates="execution_task",
         cascade="all, delete-orphan",
     )
@@ -820,6 +840,10 @@ class ExecutionTaskSchedulerClaim(Base):
         String(128), nullable=True, unique=True, index=True
     )
     canonical_release_hash = Column(String(64), nullable=True)
+    consumed_at = Column(DateTime(timezone=True), nullable=True)
+    consumed_dispatch_intent_id = Column(
+        Integer, nullable=True, unique=True, index=True
+    )
     created_at = Column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -873,6 +897,204 @@ class ExecutionTaskSchedulerClaim(Base):
 
     execution_plan = relationship("ExecutionPlan", back_populates="scheduler_claims")
     execution_task = relationship("ExecutionTask", back_populates="scheduler_claims")
+    dispatch_intent = relationship(
+        "ExecutionTaskDispatchIntent",
+        back_populates="scheduler_claim",
+        uselist=False,
+        foreign_keys="ExecutionTaskDispatchIntent.scheduler_claim_id",
+    )
+
+
+class ExecutionTaskDispatchIntent(Base):
+    """Durable command boundary between a scheduler claim and broker publish.
+
+    This row is the logical dispatch command.  It is deliberately separate
+    from both scheduler ownership and worker/runtime lifecycle state.  A
+    retry of publication keeps this row, its attempt, and its broker task id.
+    """
+
+    __tablename__ = "execution_task_dispatch_intents"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    scheduler_claim_id = Column(
+        Integer,
+        ForeignKey("execution_task_scheduler_claims.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    scheduler_id = Column(String(255), nullable=False, index=True)
+    claim_fencing_token = Column(Integer, nullable=False)
+    claim_eligibility_decision_hash = Column(String(64), nullable=False)
+    claim_graph_hash = Column(String(64), nullable=False)
+    claim_predecessor_fence_hash = Column(String(64), nullable=False)
+    claim_predecessor_fences = Column(JSON, nullable=False)
+    claimed_task_state = Column(String(20), nullable=False)
+    claimed_task_state_version = Column(Integer, nullable=False)
+    dispatch_idempotency_key = Column(String(128), nullable=False, unique=True)
+    dispatch_command_id = Column(String(128), nullable=False, unique=True)
+    canonical_command_payload = Column(JSON, nullable=False)
+    canonical_command_hash = Column(String(64), nullable=False)
+    worker_command_payload = Column(JSON, nullable=False)
+    worker_command_hash = Column(String(64), nullable=False)
+    runtime_attempt_id = Column(Integer, nullable=True, unique=True, index=True)
+    broker_task_id = Column(String(255), nullable=False, unique=True, index=True)
+    dispatch_status = Column(
+        String(24), nullable=False, default="pending_submission", index=True
+    )
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    submission_started_at = Column(DateTime(timezone=True), nullable=True)
+    submitted_at = Column(DateTime(timezone=True), nullable=True)
+    acknowledged_at = Column(DateTime(timezone=True), nullable=True)
+    failed_at = Column(DateTime(timezone=True), nullable=True)
+    cancelled_at = Column(DateTime(timezone=True), nullable=True)
+    cancellation_reason = Column(String(64), nullable=True)
+    last_submission_error_code = Column(String(64), nullable=True)
+    last_submission_detail = Column(String(1024), nullable=True)
+    submission_count = Column(Integer, nullable=False, default=0)
+    submission_attempt_number = Column(Integer, nullable=False, default=0)
+    submission_idempotency_key = Column(String(128), nullable=True)
+    submitter_id = Column(String(255), nullable=True)
+    submission_fencing_token = Column(Integer, nullable=False, default=0)
+    submission_lease_expires_at = Column(DateTime(timezone=True), nullable=True)
+    broker_returned_task_id = Column(String(255), nullable=True)
+    creation_actor_type = Column(String(32), nullable=False)
+    creation_actor_id = Column(String(255), nullable=False)
+    created_by_idempotency_key = Column(String(128), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "dispatch_status IN ('pending_submission', 'submitting', "
+            "'submitted', 'submission_failed', 'cancelled')",
+            name="ck_execution_task_dispatch_intent_status",
+        ),
+        CheckConstraint(
+            "claim_fencing_token > 0",
+            name="ck_execution_task_dispatch_intent_fence_positive",
+        ),
+        CheckConstraint(
+            "claimed_task_state = 'ready' AND claimed_task_state_version >= 0",
+            name="ck_execution_task_dispatch_intent_task_fence",
+        ),
+        CheckConstraint(
+            "submission_count >= 0 AND submission_attempt_number >= 0",
+            name="ck_execution_task_dispatch_intent_submission_counts",
+        ),
+        CheckConstraint(
+            "submission_fencing_token >= 0",
+            name="ck_execution_task_dispatch_intent_submission_fence",
+        ),
+        Index(
+            "ix_execution_task_dispatch_intents_task_status",
+            "execution_task_id",
+            "dispatch_status",
+        ),
+        Index(
+            "ix_execution_task_dispatch_intents_recovery",
+            "dispatch_status",
+            "submission_lease_expires_at",
+        ),
+        Index(
+            "ix_execution_task_dispatch_intents_plan_status",
+            "execution_plan_id",
+            "dispatch_status",
+        ),
+    )
+
+    execution_plan = relationship("ExecutionPlan", back_populates="dispatch_intents")
+    execution_task = relationship("ExecutionTask", back_populates="dispatch_intents")
+    scheduler_claim = relationship(
+        "ExecutionTaskSchedulerClaim",
+        back_populates="dispatch_intent",
+        foreign_keys=[scheduler_claim_id],
+    )
+    runtime_attempt = relationship(
+        "ExecutionTaskAttempt",
+        back_populates="dispatch_intent",
+        uselist=False,
+        foreign_keys="ExecutionTaskAttempt.dispatch_intent_id",
+    )
+
+
+class ExecutionTaskAttempt(Base):
+    """Canonical runtime-attempt identity for the Phase 29 execution path.
+
+    It has no relationship to legacy ``TaskExecution``.  The attempt is
+    created before publication and remains the same across broker retries.
+    """
+
+    __tablename__ = "execution_task_attempts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    dispatch_intent_id = Column(
+        Integer,
+        ForeignKey("execution_task_dispatch_intents.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    attempt_number = Column(Integer, nullable=False)
+    attempt_identity = Column(String(128), nullable=False, unique=True, index=True)
+    broker_task_id = Column(String(255), nullable=False, unique=True, index=True)
+    attempt_status = Column(String(24), nullable=False, default="created", index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    submitted_at = Column(DateTime(timezone=True), nullable=True)
+    cancelled_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_task_id",
+            "attempt_number",
+            name="uq_execution_task_attempt_task_number",
+        ),
+        CheckConstraint(
+            "attempt_number > 0",
+            name="ck_execution_task_attempt_number_positive",
+        ),
+        CheckConstraint(
+            "attempt_status IN ('created', 'submitted', 'cancelled')",
+            name="ck_execution_task_attempt_status",
+        ),
+        Index(
+            "ix_execution_task_attempts_task_status",
+            "execution_task_id",
+            "attempt_status",
+        ),
+    )
+
+    execution_plan = relationship("ExecutionPlan", back_populates="runtime_attempts")
+    execution_task = relationship("ExecutionTask", back_populates="runtime_attempts")
+    dispatch_intent = relationship(
+        "ExecutionTaskDispatchIntent",
+        back_populates="runtime_attempt",
+        foreign_keys=[dispatch_intent_id],
+    )
 
 
 class ExecutionTaskTransition(Base):

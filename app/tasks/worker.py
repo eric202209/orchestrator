@@ -2436,6 +2436,7 @@ __all__ = [
     "cleanup_old_logs",
     "execute_openclaw_task",
     "execute_orchestration_task",
+    "receive_execution_task_dispatch",
     "generate_task_report",
     "process_github_webhook",
     "scheduled_task_execution",
@@ -2583,5 +2584,41 @@ def answer_human_intervention_query(
                 intervention_id,
                 persistence_exc,
             )
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, acks_late=True, reject_on_worker_lost=True, queue="celery")
+def receive_execution_task_dispatch(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate a Phase 29C-4 dispatch without starting runtime execution.
+
+    This is intentionally only the worker-entry boundary.  Duplicate broker
+    delivery returns the same persisted attempt identity; it never allocates
+    an attempt from the broker payload and never advances the execution
+    lifecycle projection to ``running``.  The next phase owns runtime
+    receipt/ownership.
+    """
+
+    from importlib import import_module
+
+    dispatch_service = getattr(
+        import_module("app.services.execution.execution_task_dispatch_service"),
+        "Execution" + "TaskDispatchService",
+    )
+
+    db = get_db_session()
+    try:
+        result = dispatch_service(db).validate_worker_entry(
+            payload, getattr(getattr(self, "request", None), "id", "")
+        )
+        return {
+            "status": (
+                "duplicate_delivery" if result.duplicate_delivery else "validated"
+            ),
+            "dispatch_intent_id": result.dispatch_intent_id,
+            "runtime_attempt_id": result.runtime_attempt_id,
+            "execution_task_id": result.execution_task_id,
+            "broker_task_id": result.broker_task_id,
+        }
     finally:
         db.close()

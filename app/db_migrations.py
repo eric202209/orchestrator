@@ -1661,6 +1661,189 @@ def _migration_034_execution_task_scheduler_claim(engine: Engine) -> None:
             connection.execute(text(statement))
 
 
+def _migration_035_execution_task_dispatch_intent_attempt(engine: Engine) -> None:
+    """Add Phase 29C-4 dispatch intents, canonical attempts, and claim binding."""
+
+    with engine.begin() as connection:
+        for column_name, ddl in (
+            (
+                "consumed_at",
+                "ALTER TABLE execution_task_scheduler_claims "
+                "ADD COLUMN consumed_at DATETIME",
+            ),
+            (
+                "consumed_dispatch_intent_id",
+                "ALTER TABLE execution_task_scheduler_claims "
+                "ADD COLUMN consumed_dispatch_intent_id INTEGER",
+            ),
+        ):
+            if not _has_column(engine, "execution_task_scheduler_claims", column_name):
+                connection.execute(text(ddl))
+
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_dispatch_intents (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    scheduler_claim_id INTEGER NOT NULL,
+                    scheduler_id VARCHAR(255) NOT NULL,
+                    claim_fencing_token INTEGER NOT NULL,
+                    claim_eligibility_decision_hash VARCHAR(64) NOT NULL,
+                    claim_graph_hash VARCHAR(64) NOT NULL,
+                    claim_predecessor_fence_hash VARCHAR(64) NOT NULL,
+                    claim_predecessor_fences JSON NOT NULL,
+                    claimed_task_state VARCHAR(20) NOT NULL,
+                    claimed_task_state_version INTEGER NOT NULL,
+                    dispatch_idempotency_key VARCHAR(128) NOT NULL,
+                    dispatch_command_id VARCHAR(128) NOT NULL,
+                    canonical_command_payload JSON NOT NULL,
+                    canonical_command_hash VARCHAR(64) NOT NULL,
+                    worker_command_payload JSON NOT NULL,
+                    worker_command_hash VARCHAR(64) NOT NULL,
+                    runtime_attempt_id INTEGER,
+                    broker_task_id VARCHAR(255) NOT NULL,
+                    dispatch_status VARCHAR(24) NOT NULL DEFAULT 'pending_submission',
+                    created_at DATETIME NOT NULL,
+                    submission_started_at DATETIME,
+                    submitted_at DATETIME,
+                    acknowledged_at DATETIME,
+                    failed_at DATETIME,
+                    cancelled_at DATETIME,
+                    cancellation_reason VARCHAR(64),
+                    last_submission_error_code VARCHAR(64),
+                    last_submission_detail VARCHAR(1024),
+                    submission_count INTEGER NOT NULL DEFAULT 0,
+                    submission_attempt_number INTEGER NOT NULL DEFAULT 0,
+                    submission_idempotency_key VARCHAR(128),
+                    submitter_id VARCHAR(255),
+                    submission_fencing_token INTEGER NOT NULL DEFAULT 0,
+                    submission_lease_expires_at DATETIME,
+                    broker_returned_task_id VARCHAR(255),
+                    creation_actor_type VARCHAR(32) NOT NULL,
+                    creation_actor_id VARCHAR(255) NOT NULL,
+                    created_by_idempotency_key VARCHAR(128) NOT NULL,
+                    updated_at DATETIME,
+                    CONSTRAINT uq_execution_task_dispatch_intent_claim
+                        UNIQUE (scheduler_claim_id),
+                    CONSTRAINT uq_execution_task_dispatch_intent_key
+                        UNIQUE (dispatch_idempotency_key),
+                    CONSTRAINT uq_execution_task_dispatch_intent_command
+                        UNIQUE (dispatch_command_id),
+                    CONSTRAINT uq_execution_task_dispatch_intent_attempt
+                        UNIQUE (runtime_attempt_id),
+                    CONSTRAINT uq_execution_task_dispatch_intent_broker
+                        UNIQUE (broker_task_id),
+                    CONSTRAINT ck_execution_task_dispatch_intent_status
+                        CHECK (dispatch_status IN (
+                            'pending_submission', 'submitting', 'submitted',
+                            'submission_failed', 'cancelled'
+                        )),
+                    CONSTRAINT ck_execution_task_dispatch_intent_fence_positive
+                        CHECK (claim_fencing_token > 0),
+                    CONSTRAINT ck_execution_task_dispatch_intent_task_fence
+                        CHECK (
+                            claimed_task_state = 'ready'
+                            AND claimed_task_state_version >= 0
+                        ),
+                    CONSTRAINT ck_execution_task_dispatch_intent_submission_counts
+                        CHECK (
+                            submission_count >= 0
+                            AND submission_attempt_number >= 0
+                        ),
+                    CONSTRAINT ck_execution_task_dispatch_intent_submission_fence
+                        CHECK (submission_fencing_token >= 0),
+                    FOREIGN KEY(execution_plan_id)
+                        REFERENCES execution_plans (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_id)
+                        REFERENCES execution_tasks (id) ON DELETE CASCADE,
+                    FOREIGN KEY(scheduler_claim_id)
+                        REFERENCES execution_task_scheduler_claims (id)
+                        ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_attempts (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    dispatch_intent_id INTEGER NOT NULL,
+                    attempt_number INTEGER NOT NULL,
+                    attempt_identity VARCHAR(128) NOT NULL,
+                    broker_task_id VARCHAR(255) NOT NULL,
+                    attempt_status VARCHAR(24) NOT NULL DEFAULT 'created',
+                    created_at DATETIME NOT NULL,
+                    submitted_at DATETIME,
+                    cancelled_at DATETIME,
+                    updated_at DATETIME,
+                    CONSTRAINT uq_execution_task_attempt_dispatch_intent
+                        UNIQUE (dispatch_intent_id),
+                    CONSTRAINT uq_execution_task_attempt_identity
+                        UNIQUE (attempt_identity),
+                    CONSTRAINT uq_execution_task_attempt_broker
+                        UNIQUE (broker_task_id),
+                    CONSTRAINT uq_execution_task_attempt_task_number
+                        UNIQUE (execution_task_id, attempt_number),
+                    CONSTRAINT ck_execution_task_attempt_number_positive
+                        CHECK (attempt_number > 0),
+                    CONSTRAINT ck_execution_task_attempt_status
+                        CHECK (attempt_status IN ('created', 'submitted', 'cancelled')),
+                    FOREIGN KEY(execution_plan_id)
+                        REFERENCES execution_plans (id) ON DELETE CASCADE,
+                    FOREIGN KEY(execution_task_id)
+                        REFERENCES execution_tasks (id) ON DELETE CASCADE,
+                    FOREIGN KEY(dispatch_intent_id)
+                        REFERENCES execution_task_dispatch_intents (id)
+                        ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        indexes = {
+            "uq_execution_task_scheduler_claim_consumed_intent": (
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "uq_execution_task_scheduler_claim_consumed_intent "
+                "ON execution_task_scheduler_claims (consumed_dispatch_intent_id)"
+            ),
+            "ix_execution_task_dispatch_intents_task_status": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_task_dispatch_intents_task_status "
+                "ON execution_task_dispatch_intents (execution_task_id, dispatch_status)"
+            ),
+            "ix_execution_task_dispatch_intents_recovery": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_task_dispatch_intents_recovery "
+                "ON execution_task_dispatch_intents "
+                "(dispatch_status, submission_lease_expires_at)"
+            ),
+            "ix_execution_task_dispatch_intents_plan_status": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_task_dispatch_intents_plan_status "
+                "ON execution_task_dispatch_intents (execution_plan_id, dispatch_status)"
+            ),
+            "ix_execution_task_dispatch_intents_command": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_task_dispatch_intents_command "
+                "ON execution_task_dispatch_intents (dispatch_command_id)"
+            ),
+            "ix_execution_task_attempts_task_status": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_task_attempts_task_status "
+                "ON execution_task_attempts (execution_task_id, attempt_status)"
+            ),
+            "ix_execution_task_attempts_identity": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_task_attempts_identity "
+                "ON execution_task_attempts (attempt_identity)"
+            ),
+            "ix_execution_task_attempts_broker": (
+                "CREATE INDEX IF NOT EXISTS ix_execution_task_attempts_broker "
+                "ON execution_task_attempts (broker_task_id)"
+            ),
+        }
+        for statement in indexes.values():
+            connection.execute(text(statement))
+
+
 def _migration_014_task_workflow_stage(engine: Engine) -> None:
     if "tasks" not in _table_names(engine):
         return
@@ -2113,6 +2296,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="034_execution_task_scheduler_claim",
         description="Add Phase 29C-3 durable Execution Task scheduler claims",
         upgrade=_migration_034_execution_task_scheduler_claim,
+    ),
+    Migration(
+        version="035_execution_task_dispatch_intent_attempt",
+        description="Add Phase 29C-4 dispatch intents and canonical runtime attempts",
+        upgrade=_migration_035_execution_task_dispatch_intent_attempt,
     ),
 )
 
