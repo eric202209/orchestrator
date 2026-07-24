@@ -105,12 +105,14 @@ def test_active_project_workspace_collision_fails_closed(
     root.mkdir()
     (root / ".git").mkdir()
     first = Project(name="first", workspace_path="shared")
-    second = Project(name="second", workspace_path="shared")
-    db_session.add_all([first, second])
+    db_session.add(first)
     db_session.flush()
     WorkspaceTargetService(db_session).register(
         first.id, registration_idempotency_key="target-first"
     )
+    second = Project(name="second", workspace_path="shared")
+    db_session.add(second)
+    db_session.flush()
     with pytest.raises(WorkspaceAuthorityError) as collision:
         WorkspaceTargetService(db_session).register(
             second.id, registration_idempotency_key="target-second"

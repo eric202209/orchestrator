@@ -3982,6 +3982,72 @@ def _migration_047_workspace_base_state_apply_attempt_boundary(engine: Engine) -
             connection.execute(text(statement))
 
 
+def _migration_048_controlled_apply_result_authority(engine: Engine) -> None:
+    """Add the empty immutable Phase 29D-3 Apply Result authority."""
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_apply_results (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    execution_task_attempt_id INTEGER NOT NULL,
+                    attempt_generation INTEGER NOT NULL,
+                    apply_attempt_id INTEGER NOT NULL UNIQUE,
+                    apply_attempt_hash VARCHAR(64) NOT NULL,
+                    change_set_id INTEGER NOT NULL,
+                    change_set_hash VARCHAR(64) NOT NULL,
+                    authorization_id INTEGER NOT NULL,
+                    authorization_hash VARCHAR(64) NOT NULL,
+                    approval_id INTEGER NOT NULL,
+                    approval_hash VARCHAR(64) NOT NULL,
+                    workspace_target_id INTEGER NOT NULL,
+                    workspace_target_hash VARCHAR(64) NOT NULL,
+                    base_state_id INTEGER NOT NULL,
+                    base_state_hash VARCHAR(64) NOT NULL,
+                    status VARCHAR(16) NOT NULL,
+                    failure_reason VARCHAR(64),
+                    failure_detail VARCHAR(1024),
+                    applied_operations JSON NOT NULL,
+                    canonical_payload JSON NOT NULL,
+                    canonical_sha256 VARCHAR(64) NOT NULL,
+                    result_idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+                    started_at DATETIME NOT NULL,
+                    ended_at DATETIME NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT ck_execution_task_apply_result_generation_positive
+                        CHECK (attempt_generation > 0),
+                    CONSTRAINT ck_execution_task_apply_result_status
+                        CHECK (status IN ('applied', 'blocked', 'failed')),
+                    CONSTRAINT ck_execution_task_apply_result_failure_shape
+                        CHECK ((status = 'applied' AND failure_reason IS NULL) OR
+                            (status IN ('blocked', 'failed') AND failure_reason IS NOT NULL)),
+                    FOREIGN KEY(execution_plan_id) REFERENCES execution_plans (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(execution_task_id) REFERENCES execution_tasks (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(execution_task_attempt_id) REFERENCES execution_task_attempts (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(apply_attempt_id) REFERENCES execution_task_apply_attempts (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(change_set_id) REFERENCES execution_task_change_sets (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(authorization_id) REFERENCES execution_task_apply_authorizations (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(approval_id) REFERENCES execution_task_apply_approvals (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(workspace_target_id) REFERENCES execution_workspace_targets (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(base_state_id) REFERENCES execution_workspace_base_states (id) ON DELETE RESTRICT
+                )
+                """
+            )
+        )
+        for statement in (
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_apply_results_task_status "
+            "ON execution_task_apply_results (execution_task_id, status)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_apply_results_attempt "
+            "ON execution_task_apply_results (apply_attempt_id)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_apply_results_hash "
+            "ON execution_task_apply_results (canonical_sha256)",
+        ):
+            connection.execute(text(statement))
+
+
 def _migration_038_normalize(value):
     if isinstance(value, str):
         return unicodedata.normalize("NFC", value)
@@ -4518,6 +4584,11 @@ MIGRATIONS: tuple[Migration, ...] = (
             "and precondition-verification authorities"
         ),
         upgrade=_migration_047_workspace_base_state_apply_attempt_boundary,
+    ),
+    Migration(
+        version="048_controlled_apply_result_authority",
+        description="Add immutable Phase 29D-3 Controlled Apply Result authority",
+        upgrade=_migration_048_controlled_apply_result_authority,
     ),
 )
 

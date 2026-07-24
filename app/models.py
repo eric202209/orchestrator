@@ -13,6 +13,7 @@ from sqlalchemy import (
     Enum,
     Boolean,
     JSON,
+    event,
     UniqueConstraint,
     Index,
     CheckConstraint,
@@ -3375,6 +3376,126 @@ class ExecutionTaskApplyPreconditionVerification(Base):
     apply_attempt = relationship(
         "ExecutionTaskApplyAttempt", back_populates="precondition_verifications"
     )
+
+
+class ExecutionTaskApplyResult(Base):
+    """Immutable authority for one Controlled Apply execution outcome."""
+
+    __tablename__ = "execution_task_apply_results"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    attempt_generation = Column(Integer, nullable=False)
+    apply_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_apply_attempts.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    apply_attempt_hash = Column(String(64), nullable=False)
+    change_set_id = Column(
+        Integer,
+        ForeignKey("execution_task_change_sets.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    change_set_hash = Column(String(64), nullable=False)
+    authorization_id = Column(
+        Integer,
+        ForeignKey("execution_task_apply_authorizations.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    authorization_hash = Column(String(64), nullable=False)
+    approval_id = Column(
+        Integer,
+        ForeignKey("execution_task_apply_approvals.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    approval_hash = Column(String(64), nullable=False)
+    workspace_target_id = Column(
+        Integer,
+        ForeignKey("execution_workspace_targets.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    workspace_target_hash = Column(String(64), nullable=False)
+    base_state_id = Column(
+        Integer,
+        ForeignKey("execution_workspace_base_states.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    base_state_hash = Column(String(64), nullable=False)
+    status = Column(String(16), nullable=False, index=True)
+    failure_reason = Column(String(64), nullable=True)
+    failure_detail = Column(String(1024), nullable=True)
+    applied_operations = Column(JSON, nullable=False)
+    canonical_payload = Column(JSON, nullable=False)
+    canonical_sha256 = Column(String(64), nullable=False, index=True)
+    result_idempotency_key = Column(String(128), nullable=False, unique=True)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    ended_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "attempt_generation > 0",
+            name="ck_execution_task_apply_result_generation_positive",
+        ),
+        CheckConstraint(
+            "status IN ('applied', 'blocked', 'failed')",
+            name="ck_execution_task_apply_result_status",
+        ),
+        CheckConstraint(
+            "(status = 'applied' AND failure_reason IS NULL) OR "
+            "(status IN ('blocked', 'failed') AND failure_reason IS NOT NULL)",
+            name="ck_execution_task_apply_result_failure_shape",
+        ),
+        Index(
+            "ix_execution_task_apply_results_task_status",
+            "execution_task_id",
+            "status",
+        ),
+    )
+
+    apply_attempt = relationship("ExecutionTaskApplyAttempt")
+    change_set = relationship("ExecutionTaskChangeSet")
+    authorization = relationship("ExecutionTaskApplyAuthorization")
+    approval = relationship("ExecutionTaskApplyApproval")
+    workspace_target = relationship("ExecutionWorkspaceTarget")
+    base_state = relationship("ExecutionWorkspaceBaseState")
+
+
+@event.listens_for(ExecutionTaskApplyResult, "before_update")
+def _reject_apply_result_update(mapper, connection, target):
+    raise RuntimeError("ExecutionTaskApplyResult is immutable")
+
+
+@event.listens_for(ExecutionTaskApplyResult, "before_delete")
+def _reject_apply_result_delete(mapper, connection, target):
+    raise RuntimeError("ExecutionTaskApplyResult is immutable")
 
 
 class ExecutionTaskTransition(Base):

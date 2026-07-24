@@ -980,12 +980,12 @@ class ApplyAttemptService:
         self.db.add(verification)
         if outcome == "precondition_verified":
             if attempt.status == "created":
-                attempt.status = "precondition_verified"
+                setattr(attempt, "status", "precondition_verified")
                 attempt.status_reason = reason
                 attempt.precondition_verification_hash = verification_hash
         else:
             if attempt.status in {"created", "precondition_verified"}:
-                attempt.status = "blocked"
+                setattr(attempt, "status", "blocked")
                 attempt.status_reason = outcome
                 if attempt.precondition_verification_hash is None:
                     attempt.precondition_verification_hash = verification_hash
