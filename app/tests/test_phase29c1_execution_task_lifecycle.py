@@ -99,7 +99,10 @@ def _command(
             ("running", "awaiting_validation"): "runtime_candidate_completed",
             ("running", "awaiting_recovery"): "runtime_attempt_failed",
             ("awaiting_validation", "succeeded"): "validation_accepted",
+            ("awaiting_validation", "awaiting_apply"): "validation_accepted",
             ("awaiting_validation", "awaiting_recovery"): "validation_rejected",
+            ("awaiting_apply", "succeeded"): "controlled_apply_verified",
+            ("awaiting_apply", "awaiting_recovery"): "controlled_apply_failed",
             ("awaiting_recovery", "ready"): "recovery_retry_authorized",
             ("awaiting_recovery", "failed"): "recovery_exhausted",
         }.get((source_state, to_state), reason_code)
@@ -124,6 +127,7 @@ _PATHS_TO_STATE = {
     "ready": ("ready",),
     "running": ("ready", "running"),
     "awaiting_validation": ("ready", "running", "awaiting_validation"),
+    "awaiting_apply": ("ready", "running", "awaiting_validation", "awaiting_apply"),
     "awaiting_recovery": ("ready", "running", "awaiting_recovery"),
     "succeeded": ("ready", "running", "succeeded"),
     "failed": ("ready", "running", "failed"),

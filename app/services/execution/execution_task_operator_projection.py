@@ -13,6 +13,7 @@ from app.services.execution.execution_task_transition_service import (
 
 EXECUTION_TASK_ALLOWED_ACTIONS: dict[str, tuple[str, ...]] = {
     "awaiting_validation": ("validate", "pause", "cancel"),
+    "awaiting_apply": ("pause", "cancel"),
     "awaiting_recovery": ("evaluate_recovery", "pause", "cancel"),
 }
 

@@ -40,6 +40,12 @@ from app.services.execution.candidate_evidence import (
     ValidationPrimitiveService,
     build_default_validator_registry,
 )
+from app.services.execution.apply_requirement import (
+    APPLY_REQUIRED,
+    APPLY_REQUIREMENT_BLOCKED,
+    determine_apply_requirement,
+)
+from app.services.execution.candidate_content import CandidateContentStore
 from app.services.execution.execution_task_runtime_execution_service import (
     ExecutionTaskRuntimeExecutionService,
 )
@@ -81,6 +87,7 @@ BLOCKED_RESULT_CODES = frozenset(
         "review_authority_missing",
         "candidate_evidence_validation_schema_missing",
         "validation_schema_missing",
+        "acceptance_apply_requirement_blocked",
     }
 )
 
@@ -453,11 +460,13 @@ class ValidationRunService:
         now: Callable[[], datetime] | None = None,
         resolver: CandidateEvidenceResolverService | None = None,
         validator: DeterministicValidatorService | None = None,
+        content_store: CandidateContentStore | None = None,
     ):
         self.db = db
         self._now = now or _now
         self._resolver = resolver
         self._validator = validator
+        self._content_store = content_store
 
     def _load_run(
         self, run_id: int, *, lock: bool = False
@@ -1135,6 +1144,7 @@ class ValidationRunService:
                 "immutable_candidate_bytes_unavailable",
                 "review_authority_missing",
                 "validation_validator_error",
+                "acceptance_apply_requirement_blocked",
             }
             else "validation_validator_error"
         )
@@ -1261,6 +1271,26 @@ class ValidationRunService:
             )
         self._verify_finalization_authority(run, task, classification)
 
+        # Phase 29D-3B: an accepted candidate whose own immutable content
+        # requires Controlled Apply must not reach the terminal `succeeded`
+        # state at acceptance time. The requirement is derived once, here,
+        # from the canonical policy — never duplicated or re-guessed.
+        accepted_to_state = "succeeded"
+        if classification == "accepted":
+            apply_requirement = determine_apply_requirement(
+                self.db,
+                candidate_outcome_id=run.candidate_outcome_id,
+                store=self._content_store,
+            )
+            if apply_requirement.outcome == APPLY_REQUIREMENT_BLOCKED:
+                raise ValidationRunError(
+                    "acceptance_apply_requirement_blocked",
+                    "accepted candidate content could not be classified for "
+                    "Controlled Apply",
+                )
+            if apply_requirement.outcome == APPLY_REQUIRED:
+                accepted_to_state = "awaiting_apply"
+
         transition = None
         if classification in {"accepted", "rejected"}:
             transition = ExecutionTaskTransitionService(self.db).transition(
@@ -1270,7 +1300,7 @@ class ValidationRunService:
                     expected_from_state="awaiting_validation",
                     expected_state_version=task.state_version,
                     to_state=(
-                        "succeeded"
+                        accepted_to_state
                         if classification == "accepted"
                         else "awaiting_recovery"
                     ),

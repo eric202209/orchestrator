@@ -65,6 +65,7 @@ def _accepted(db_session, *, ingest_real_content: bool = False, tmp_path=None):
 
     task, created, outcome, specification = _structured_runtime(db_session)
     real_content = None
+    store = None
     if ingest_real_content:
         store = LocalContentAddressedStore(tmp_path)
         real_content = (
@@ -87,7 +88,7 @@ def _accepted(db_session, *, ingest_real_content: bool = False, tmp_path=None):
     contract = primitive_contract("output_reference_exists")
     _rebind_contract(db_session, task, specification, contract)
     db_session.commit()
-    service = ValidationRunService(db_session)
+    service = ValidationRunService(db_session, content_store=store)
     service.execute_validation_run(_validation_command(task, outcome, specification))
     db_session.commit()
     decision = db_session.query(ExecutionTaskAcceptanceDecision).one()

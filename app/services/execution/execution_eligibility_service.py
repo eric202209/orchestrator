@@ -570,6 +570,8 @@ class ExecutionEligibilityService:
             result, reason = "waiting", "waiting_on_dependencies"
         elif state == "awaiting_validation":
             result, reason = "waiting", "predecessor_awaiting_validation"
+        elif state == "awaiting_apply":
+            result, reason = "waiting", "predecessor_awaiting_apply"
         elif state == "awaiting_recovery":
             result, reason = "waiting", "predecessor_awaiting_recovery"
         elif state == "failed":
@@ -683,6 +685,7 @@ class ExecutionEligibilityService:
             "dependency_cancelled": 4,
             "dependency_skipped": 4,
             "predecessor_awaiting_validation": 6,
+            "predecessor_awaiting_apply": 6,
             "predecessor_awaiting_recovery": 6,
             "review_gate_pending": 5,
             "manual_gate_pending": 5,
@@ -749,6 +752,7 @@ class ExecutionEligibilityService:
             reason = {
                 "waiting_on_dependencies": "dependency_blocked",
                 "predecessor_awaiting_validation": "dependency_blocked",
+                "predecessor_awaiting_apply": "dependency_blocked",
                 "predecessor_awaiting_recovery": "dependency_blocked",
                 "dependency_failed": "dependency_failed",
                 "dependency_cancelled": "dependency_cancelled",

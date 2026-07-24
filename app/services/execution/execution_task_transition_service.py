@@ -34,6 +34,7 @@ EXECUTION_TASK_STATES = frozenset(
         "running",
         "awaiting_validation",
         "awaiting_recovery",
+        "awaiting_apply",
         "succeeded",
         "failed",
         "blocked",
@@ -63,6 +64,9 @@ ALLOWED_EXECUTION_TASK_TRANSITIONS: Mapping[str, frozenset[str]] = {
         }
     ),
     "awaiting_validation": frozenset(
+        {"succeeded", "awaiting_apply", "awaiting_recovery", "paused", "cancelled"}
+    ),
+    "awaiting_apply": frozenset(
         {"succeeded", "awaiting_recovery", "paused", "cancelled"}
     ),
     "awaiting_recovery": frozenset({"ready", "failed", "paused", "cancelled"}),
@@ -91,6 +95,8 @@ EXECUTION_TASK_REASON_CODES = frozenset(
         "runtime_attempt_failed",
         "validation_accepted",
         "validation_rejected",
+        "controlled_apply_verified",
+        "controlled_apply_failed",
         "recovery_retry_authorized",
         "recovery_exhausted",
         "recovery_non_retryable",
@@ -212,7 +218,15 @@ def _validate_transition_reason_contract(
         ("running", "awaiting_validation"): "runtime_candidate_completed",
         ("running", "awaiting_recovery"): "runtime_attempt_failed",
         ("awaiting_validation", "succeeded"): TERMINAL_SUCCESS_AUTHORIZATION_REASON,
+        (
+            "awaiting_validation",
+            "awaiting_apply",
+        ): TERMINAL_SUCCESS_AUTHORIZATION_REASON,
         ("awaiting_validation", "awaiting_recovery"): "validation_rejected",
+        # Reserved for Phase 29D-4: post-apply verification/failure routing.
+        # Not invoked by Phase 29D-3B.
+        ("awaiting_apply", "succeeded"): "controlled_apply_verified",
+        ("awaiting_apply", "awaiting_recovery"): "controlled_apply_failed",
         ("awaiting_recovery", "ready"): "recovery_retry_authorized",
         ("awaiting_recovery", "failed"): TERMINAL_FAILURE_AUTHORIZATION_REASON,
     }.get((from_state, to_state))
