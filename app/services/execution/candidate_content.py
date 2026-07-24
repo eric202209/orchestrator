@@ -33,6 +33,9 @@ from app.models import (
     ExecutionTaskPreApplySnapshotEntry,
 )
 from app.services.planning.operator_review import canonical_json_hash
+from app.services.execution.runtime_integrity import (
+    verify_attempt_outcome_integrity,
+)
 
 
 CANDIDATE_CONTENT_SCHEMA_VERSION = "execution-task-candidate-content/1.0"
@@ -691,13 +694,7 @@ class CandidateContentIngestionService:
                 "candidate_content_authority_invalid",
                 "candidate content is not bound to the exact completed outcome",
             )
-        from app.services.execution.execution_task_runtime_execution_service import (
-            ExecutionTaskRuntimeExecutionService,
-        )
-
-        runtime_integrity = ExecutionTaskRuntimeExecutionService(
-            self.db
-        ).verify_attempt_outcome_integrity(outcome.id)
+        runtime_integrity = verify_attempt_outcome_integrity(self.db, outcome.id)
         if not runtime_integrity.verified:
             raise CandidateContentError(
                 "candidate_content_integrity_failure",
@@ -795,15 +792,7 @@ def verify_candidate_content_integrity(
     except CandidateContentError as exc:
         issues.append(exc.code)
     if outcome is not None:
-        from app.services.execution.execution_task_runtime_execution_service import (
-            ExecutionTaskRuntimeExecutionService,
-        )
-
-        issues.extend(
-            ExecutionTaskRuntimeExecutionService(db)
-            .verify_attempt_outcome_integrity(outcome.id)
-            .issues
-        )
+        issues.extend(verify_attempt_outcome_integrity(db, outcome.id).issues)
     duplicate_count = (
         db.query(ExecutionTaskCandidateContent)
         .filter(
