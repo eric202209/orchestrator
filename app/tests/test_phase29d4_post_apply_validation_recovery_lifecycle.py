@@ -654,14 +654,20 @@ def test_tampered_apply_result_fails_closed(db_session, tmp_path, monkeypatch):
     result = _apply(context)
     assert result.status == "applied"
 
+    original_hash = result.canonical_sha256
     db_session.execute(
         text(
             "UPDATE execution_task_apply_results SET canonical_sha256 = "
-            "'0' || substr(canonical_sha256, 2) WHERE id = :id"
+            "CASE WHEN substr(canonical_sha256, 1, 1) = '0' THEN '1' "
+            "ELSE '0' END || substr(canonical_sha256, 2) WHERE id = :id"
         ),
         {"id": result.id},
     )
     db_session.commit()
+    assert (
+        db_session.get(ExecutionTaskApplyResult, result.id).canonical_sha256
+        != original_hash
+    )
 
     validation = (
         PostApplyValidationService(db_session, store=context["store"])
