@@ -19,6 +19,12 @@ TARGET_FILES = {
     / "app/services/orchestration/events/__init__.py",
     "app.services.orchestration.phases.planning_candidate_recovery": REPO_ROOT
     / "app/services/orchestration/phases/planning_candidate_recovery.py",
+    "app.services.orchestration.planning.planning_brief_stage": REPO_ROOT
+    / "app/services/orchestration/planning/planning_brief_stage.py",
+    "app.services.orchestration.planning.structured_task_plan_stage": REPO_ROOT
+    / "app/services/orchestration/planning/structured_task_plan_stage.py",
+    "app.services.orchestration.planning.stage_sequence": REPO_ROOT
+    / "app/services/orchestration/planning/stage_sequence.py",
     "app.tasks.planning_tasks": REPO_ROOT / "app/tasks/planning_tasks.py",
     "app.tasks.planning_dispatch": REPO_ROOT / "app/tasks/planning_dispatch.py",
 }
@@ -33,7 +39,6 @@ PROTOCOL_PERSISTENCE = "app.services.planning.protocol_persistence"
 
 EXPECTED_PLANNING_SCCS = frozenset(
     {
-        frozenset({PLANNING_BRIEF_STAGE, STRUCTURED_TASK_STAGE}),
         frozenset({OPERATOR_REVIEW_PERSISTENCE, PROTOCOL_PERSISTENCE}),
     }
 )
@@ -123,8 +128,8 @@ def test_planning_stage_contract_is_engine_independent() -> None:
 def test_planning_domain_modules_do_not_import_orchestration_implementations() -> None:
     domain_modules = (
         "app.services.planning.candidate_recovery",
-        PLANNING_BRIEF_STAGE,
-        STRUCTURED_TASK_STAGE,
+        "app.services.planning.planning_brief_stage_support",
+        "app.services.planning.structured_task_plan_stage_support",
         OPERATOR_REVIEW,
         OPERATOR_REVIEW_PERSISTENCE,
         PROTOCOL_PERSISTENCE,
@@ -156,7 +161,9 @@ def test_prepared_seams_have_one_implementation_and_compatibility_exports() -> N
     assert "PlanningTaskDispatcher" not in _class_names("app.tasks.planning_tasks")
 
 
-def test_planning_sccs_are_unchanged_except_for_removed_worker_cycle() -> None:
+def test_planning_stage_scc_is_removed_and_persistence_is_the_only_tolerated_scc() -> (
+    None
+):
     graph = _module_graph()
     components = _strongly_connected_components(graph)
     assert frozenset({PLANNING_SESSION, PLANNING_TASK}) not in components

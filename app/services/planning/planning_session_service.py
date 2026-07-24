@@ -52,7 +52,7 @@ from app.services.planning.protocol_persistence import (
     SUPPORTED_PROTOCOL_VERSIONS,
 )
 from app.services.planning.providers import PlanningProvider
-from app.services.planning.structured_task_plan_stage import (
+from app.services.orchestration.planning.stage_sequence import (
     build_protocol_v2_stage_configuration,
     build_protocol_v2_stage_definitions,
 )
